@@ -64,6 +64,12 @@ EOF
 COPY rootfs/ /
 COPY --from=build /out/ /
 
-RUN systemctl set-default graphical.target
+# Boot to GDM; let bootc's updater stage new images daily (see the drop-ins
+# in rootfs), and offer a restart from every user's session once one is staged.
+# chmod: checkouts on Windows filesystems carry no exec bits.
+RUN chmod 0755 /usr/libexec/ilex/update-notify && \
+    systemctl set-default graphical.target && \
+    systemctl preset bootc-fetch-apply-updates.timer && \
+    systemctl --global enable ilex-update-notify.path ilex-update-notify.service
 
 RUN bootc container lint --fatal-warnings

@@ -1,0 +1,2 @@
+# Upstream bootc doesn't enable its updater; ilex machines update themselves.
+enable bootc-fetch-apply-updates.timer

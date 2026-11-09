@@ -7,3 +7,7 @@
 [desktop]
 # GNOME on Wayland, the default desktop for now.
 install = ["@gnome-desktop", "gdm", "firefox", "flatpak"]
+
+[updates]
+# notify-send for the update-ready notification.
+install = ["libnotify"]
