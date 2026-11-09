@@ -5,17 +5,42 @@
 FROM quay.io/fedora/fedora:45 AS build
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     dnf -y install --setopt=keepcache=1 cargo gcc
+
+# kache: a compiler cache keyed by the content of each rustc invocation's
+# inputs, so a crate built in any worktree (or on the host) is restored here
+# instead of rebuilt. kache has no official container image, so take the
+# release tarball for x86_64 Linux (static musl, runs on any glibc) and pin it
+# by sha256. v2 is two executables, `kache` and `kache-engine`, which must sit
+# side by side. To bump: change the version in the URL and the sha256
+# (`gh release view vX.Y.Z -R kunobi-ninja/kache --json assets`).
+ADD --checksum=sha256:6c59665faf1b14d0944391e6f2a1b510195e6be92c63060a9d1770ed00676824 \
+    https://github.com/kunobi-ninja/kache/releases/download/v2.0.0/kache-x86_64-unknown-linux-musl.tar.gz \
+    /tmp/kache.tar.gz
+RUN tar -xzf /tmp/kache.tar.gz -C /usr/local/bin kache kache-engine && \
+    rm /tmp/kache.tar.gz && \
+    kache --version
+
 WORKDIR /src
 COPY . .
-# The target cache is shared by every worktree, and cargo trusts mtimes: a
-# checkout with older sources would look fresh and ship another worktree's
-# binaries. Touching our own sources forces our crates to rebuild (deps
-# stay cached).
+# Every compile goes through kache, whose store is a podman cache mount shared
+# by all worktrees. There is no shared target directory any more: each build
+# compiles into a fresh /src/target and kache restores what an earlier build
+# (or the host) already compiled, by content rather than by mtime. `xtask
+# build` also mounts the host's own kache store at /kache-host, read-only; it
+# is used when present, so a plain `podman build` and CI work without it. The
+# daemon is stopped before the step ends so it flushes what it queued.
 RUN --mount=type=cache,id=ilex-cargo,target=/root/.cargo/registry \
-    --mount=type=cache,id=ilex-target,target=/src/target,sharing=locked \
-    find crates -type f -exec touch {} + && \
-    cargo build --release --locked -p ilex-agent && \
-    install -Dm755 target/release/ilex-agent /out/usr/bin/ilex-agent
+    --mount=type=cache,id=ilex-kache,target=/root/.cache/kache,sharing=locked <<'EOF'
+set -euo pipefail
+export RUSTC_WRAPPER=kache
+if [ -f /kache-host/index.db ]; then
+    export KACHE_READONLY_STORE=/kache-host
+fi
+cargo build --release --locked -p ilex-agent
+kache daemon stop || true
+kache stats --last-build --root /src
+install -Dm755 target/release/ilex-agent /out/usr/bin/ilex-agent
+EOF
 
 FROM quay.io/fedora/fedora-bootc:45
 

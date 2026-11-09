@@ -63,7 +63,7 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
             &build::Args {
                 tag,
                 no_pull: args.no_pull,
-                podman_args: Vec::new(),
+                ..build::Args::default()
             },
         )?;
     }

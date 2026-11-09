@@ -35,6 +35,28 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
 - Publishing (`xtask publish`, `xtask iso`) only happens in CI. Never push to
   ghcr from a dev machine.
 
+## Build sharing: kache
+
+Image builds compile through [kache](https://github.com/kunobi-ninja/kache), a
+compiler cache keyed by the content of each rustc invocation's inputs. The
+Containerfile's builder stage installs a pinned release tarball (v2.0.0,
+sha256-checked; v2 needs both `kache` and `kache-engine`) and runs
+`cargo build` with `RUSTC_WRAPPER=kache`. The store is the podman cache mount
+`ilex-kache`, shared by every worktree; the target directory is fresh per
+build, so nothing trusts mtimes and one worktree's binaries can't leak into
+another's image. The step ends with `kache stats --last-build`: crates
+restored vs compiled.
+
+- `xtask build` also mounts the host's own store (`$KACHE_CACHE_DIR`, else
+  `~/.cache/kache`, once it holds an `index.db`) read-only at `/kache-host`,
+  and the builder reads it only when present, so a plain `podman build` and CI
+  work without it (`--no-host-kache` skips it). After a host `cargo build
+  --release -p ilex-agent` with kache set up (`cargo install kache && kache
+  init`, once per machine; inside WSL on Windows), the image build restores
+  those crates instead of compiling them.
+- To bump kache, change the version in the URL and the sha256 in the
+  Containerfile (`gh release view vX.Y.Z -R kunobi-ninja/kache --json assets`).
+
 ## Windows: run everything in WSL2
 
 podman, bcvk and QEMU are Linux-only. On Windows the stack lives in the
