@@ -11,3 +11,6 @@ install = ["@gnome-desktop", "gdm", "firefox", "flatpak"]
 [updates]
 # notify-send for the update-ready notification.
 install = ["libnotify"]
+# bootc owns OS updates. Without these, GNOME Software tries to manage the
+# OS itself and asks for a password to "check available updates" at login.
+exclude = ["PackageKit", "PackageKit-command-not-found", "gnome-software-rpm-ostree"]
