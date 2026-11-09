@@ -7,8 +7,13 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     dnf -y install --setopt=keepcache=1 cargo gcc
 WORKDIR /src
 COPY . .
+# The target cache is shared by every worktree, and cargo trusts mtimes: a
+# checkout with older sources would look fresh and ship another worktree's
+# binaries. Touching our own sources forces our crates to rebuild (deps
+# stay cached).
 RUN --mount=type=cache,id=ilex-cargo,target=/root/.cargo/registry \
     --mount=type=cache,id=ilex-target,target=/src/target,sharing=locked \
+    find crates -type f -exec touch {} + && \
     cargo build --release --locked -p ilex-agent && \
     install -Dm755 target/release/ilex-agent /out/usr/bin/ilex-agent
 
