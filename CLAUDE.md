@@ -186,8 +186,12 @@ podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact e
 - `image-builder` needs root, the `generic-iso` type needs **image-builder
   ≥ 89** (Fedora 45 `updates-testing` for now; 87 only has the unattended,
   disk-wiping `bootc-installer` type) and storage that isn't overlayfs. The CI
-  job runs it in a privileged `fedora:45` container with `/var/lib/containers`,
-  `/var/cache/image-builder` and `TMPDIR` on volumes for that reason.
+  job starts its own rootful, privileged `fedora:45` container with
+  `sudo podman run` on the runner (osbuild's sandbox mounts fail inside a
+  GitHub `container:` job), with `/var/lib/containers`,
+  `/var/cache/image-builder` and `TMPDIR` on volumes under `/mnt`. To rebuild
+  only the ISO from the published `:latest`:
+  `gh workflow run publish.yml --repo Reidond/ilex -f iso=true`.
 - Kickstart's `bootc` command (pykickstart) can't pass
   `--enforce-container-sigpolicy`. After the first ISO install check what
   `bootc status` records for the booted image; if it is not signature-verified,
