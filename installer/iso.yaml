@@ -1,0 +1,8 @@
+# Read by image-builder (`generic-iso`) from the installer container.
+label: "ilex-installer"
+grub2:
+  timeout: 5
+  entries:
+    - name: "Install ilex"
+      linux: ${kernelpath} ${root} inst.graphical
+      initrd: ${initrdpath}

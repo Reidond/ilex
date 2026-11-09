@@ -1,4 +1,4 @@
-# Build, test, publish and sign the ilex image.
+# Build, test, publish and sign the ilex image; then build the installer ISO.
 #
 # Runs on every merge to main, nightly at 03:00 UTC (the base image floats, so
 # the nightly picks up its updates) and on demand. It publishes only when the
@@ -106,3 +106,42 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+
+  # Runs only after a successful publish, from the digest just published. A
+  # failure here never unpublishes the image.
+  iso:
+    needs: publish
+    if: needs.publish.result == 'success' && needs.publish.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: quay.io/fedora/fedora:45
+      options: --privileged
+      # Keep container storage, image-builder's cache and the ISO on the
+      # runner's big temporary disk, and off the container's overlay
+      # filesystem (podman can't nest overlay on overlay).
+      volumes:
+        - /mnt/ilex/containers:/var/lib/containers
+        - /mnt/ilex/image-builder:/var/cache/image-builder
+        - /mnt/ilex/state:/mnt/ilex-state
+    env:
+      ILEX_STATE_DIR: /mnt/ilex-state
+      # buildah stages build contexts under $TMPDIR; on the container's own
+      # overlayfs that fails ("overlay over build context").
+      TMPDIR: /mnt/ilex-state/tmp
+    steps:
+      # The `generic-iso` image type (Anaconda inside the installer container,
+      # kickstart from the container) needs image-builder 89; Fedora 45 only has
+      # 87 in its stable repo until 89 leaves updates-testing.
+      - name: Tooling
+        run: |
+          mkdir -p "$TMPDIR"
+          dnf -y install git cargo gcc podman skopeo
+          dnf -y install --enablerepo=updates-testing image-builder
+          image-builder version
+      - uses: actions/checkout@v7
+      - name: Build and push the installer ISO
+        run: cargo xtask iso "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex@${DIGEST}"
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}

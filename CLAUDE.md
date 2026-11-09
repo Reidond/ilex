@@ -164,6 +164,36 @@ cargo xtask publish <tag>              # CI only
   backup. Losing it means every machine needs a new `ilex.pub` before it can
   upgrade (machines only accept the baked-in key).
 
+### Installer ISO
+
+After a successful publish the `iso` job builds an Anaconda installer ISO
+from the digest just published and pushes it to `ghcr.io/reidond/ilex-iso`
+(`:latest`, `:YYYYMMDD`) as an OCI artifact: an ISO with a ~2 GB image in it
+can exceed GitHub's 2 GiB release asset limit.
+
+```sh
+cargo xtask iso <image@sha256:…> --no-push   # build only; the ISO lands in <state dir>/iso/
+podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact extract` and write it to a USB stick
+```
+
+- `installer/Containerfile` is `fedora-bootc:45` plus Anaconda; its kickstart
+  (`installer/interactive-defaults.ks`) installs the embedded image
+  (`--source-imgref containers-storage:localhost/ilex-payload:<digest prefix>`)
+  and tracks `ghcr.io/reidond/ilex:latest` (`--target-imgref`). Anaconda still
+  asks for the disk and the user. The embedded image is exactly the digest you
+  pass, but it is named by a local tag: image-builder can't embed an image
+  under a `@sha256:` name.
+- `image-builder` needs root, the `generic-iso` type needs **image-builder
+  ≥ 89** (Fedora 45 `updates-testing` for now; 87 only has the unattended,
+  disk-wiping `bootc-installer` type) and storage that isn't overlayfs. The CI
+  job runs it in a privileged `fedora:45` container with `/var/lib/containers`,
+  `/var/cache/image-builder` and `TMPDIR` on volumes for that reason.
+- Kickstart's `bootc` command (pykickstart) can't pass
+  `--enforce-container-sigpolicy`. After the first ISO install check what
+  `bootc status` records for the booted image; if it is not signature-verified,
+  run `sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:latest`
+  once (or have the image do it on first boot).
+
 ### One-time GitHub setup (the user runs this, not an agent)
 
 1. Repository secrets, from Git Bash (the key and password go through the
@@ -178,10 +208,9 @@ cargo xtask publish <tag>              # CI only
 
 2. Make the ghcr packages public so machines need no credentials. Packages
    only exist after the first publish: run the workflow once
-   (`gh workflow run publish.yml --repo Reidond/ilex`), then for the `ilex`
-   package (and later `ilex-iso`) open github.com → your profile → Packages →
-   the package → Package settings → Change visibility → Public. There is no
-   API for this.
+   (`gh workflow run publish.yml --repo Reidond/ilex`), then for both `ilex`
+   and `ilex-iso` open github.com → your profile → Packages → the package →
+   Package settings → Change visibility → Public. There is no API for this.
 3. Check that Actions may publish: Settings → Actions → General → Workflow
    permissions should allow the `packages: write` the workflow requests, and
    a package created by the first run must list this repository under
