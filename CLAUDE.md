@@ -196,8 +196,11 @@ podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact e
   ≥ 89** (Fedora 45 `updates-testing` for now; 87 only has the unattended,
   disk-wiping `bootc-installer` type) and storage that isn't overlayfs. The CI
   job starts its own rootful, privileged `fedora:45` container with
-  `sudo podman run` on the runner (osbuild's sandbox mounts fail inside a
-  GitHub `container:` job), with `/var/lib/containers`,
+  `sudo podman run` on the runner, after setting
+  `kernel.apparmor_restrict_unprivileged_userns=0`: Ubuntu 24.04+ confines
+  user namespaces with AppArmor, and osbuild's sandbox mounts then fail
+  ("permission denied"; WSL has no AppArmor, so local builds never see
+  it), with `/var/lib/containers`,
   `/var/cache/image-builder` and `TMPDIR` on volumes under `/mnt`. To rebuild
   only the ISO from the published `:latest`:
   `gh workflow run publish.yml --repo Reidond/ilex -f iso=true`. `xtask iso`
