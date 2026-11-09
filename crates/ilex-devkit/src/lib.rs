@@ -3,6 +3,7 @@
 //! and VM names derived from it, where per-worktree state lives, and the
 //! machine-wide VM slot cap.
 
+pub mod bcvk;
 pub mod cmd;
 pub mod git;
 pub mod qemu;

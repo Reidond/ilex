@@ -18,6 +18,12 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   `ilex-<name>-*`). Never use another checkout's image or VMs.
 - VM boots take one of N machine-wide slots (`ILEX_VM_SLOTS`, default one per
   8 GiB RAM, max 4) and wait when none is free.
+- `xtask test` only builds the image when it doesn't exist yet: after changing
+  anything that ships in the image, pass `--build`. Filters are substrings and
+  several run their union (`xtask test ephemeral:: upgrade::`); arguments after
+  `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
+- An ephemeral VM has no ostree deployment, so `bootc status` there names no
+  image; `ephemeral::` identifies the image through the container bcvk started.
 - Publishing (`xtask publish`, `xtask iso`) only happens in CI. Never push to
   ghcr from a dev machine.
 
