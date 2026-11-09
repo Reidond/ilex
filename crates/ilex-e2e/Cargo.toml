@@ -1,0 +1,23 @@
+[package]
+name = "ilex-e2e"
+description = "ilex end-to-end tests: boot the image in QEMU via bcvk, assert over SSH"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+autobins = false
+autotests = false
+
+# One libtest-mimic binary; tiers are libtest filters (`ephemeral::`, `disk::`, ...).
+[[test]]
+name = "e2e"
+path = "src/main.rs"
+harness = false
+
+[dependencies]
+ilex-devkit.workspace = true
+anyhow.workspace = true
+libtest-mimic.workspace = true
+serde_json.workspace = true
+toml = "1"
+ilex-vmctl = { path = "../ilex-vmctl" }

@@ -1,0 +1,3 @@
+# Kernel arguments applied on install and carried across upgrades.
+# Graphical boot splash with quiet console, as on Fedora Workstation.
+kargs = ["rhgb", "quiet"]

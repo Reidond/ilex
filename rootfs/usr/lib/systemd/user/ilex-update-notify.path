@@ -1,0 +1,10 @@
+# Fires when bootc stages an update. PathChanged (not PathExists) keeps it
+# from re-firing in a loop while the staged file stays in place.
+[Unit]
+Description=Watch for a staged ilex update
+
+[Path]
+PathChanged=/run/ostree/staged-deployment
+
+[Install]
+WantedBy=default.target

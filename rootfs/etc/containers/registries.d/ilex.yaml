@@ -1,0 +1,6 @@
+# Signatures for ilex images are cosign signatures stored in the registry next
+# to the image (the legacy `sha256-<digest>.sig` tag). Without this file pulls
+# fail with "a signature was required, but no signature exists".
+docker:
+  ghcr.io/reidond/ilex:
+    use-sigstore-attachments: true

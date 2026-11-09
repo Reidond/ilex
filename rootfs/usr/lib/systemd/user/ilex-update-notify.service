@@ -1,0 +1,14 @@
+# Started by the .path unit when an update is staged, and at login when
+# one is already waiting.
+[Unit]
+Description=Notify that an ilex update is ready
+ConditionPathExists=/run/ostree/staged-deployment
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/ilex/update-notify
+
+[Install]
+WantedBy=graphical-session.target

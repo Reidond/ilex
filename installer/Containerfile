@@ -1,0 +1,75 @@
+# Installer for the ilex ISO: fedora-bootc plus Anaconda. `image-builder`
+# turns this container into the ISO and embeds the ilex image to install as
+# the payload (see `cargo xtask iso`). Follows osbuild's example for an
+# Anaconda installer container:
+# https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/
+FROM quay.io/fedora/fedora-bootc:45
+
+# The ilex image the ISO installs, as it is named in the ISO's container
+# storage; and the reference installed machines update from.
+ARG PAYLOAD_REF
+ARG TARGET_IMGREF=ghcr.io/reidond/ilex:latest
+
+RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
+    dnf -y install --setopt=keepcache=1 \
+        anaconda \
+        anaconda-install-img-deps \
+        anaconda-dracut \
+        dracut-config-generic \
+        dracut-network \
+        net-tools \
+        grub2-efi-x64-cdboot \
+        plymouth \
+        default-fonts-core-sans \
+        default-fonts-other-sans \
+        google-noto-sans-cjk-fonts \
+        jq \
+        xorrisofs \
+        squashfs-tools && \
+    mkdir -p /boot/efi && cp -ra /usr/lib/efi/*/*/EFI /boot/efi
+
+# How image-builder lays out the ISO: volume label and boot menu.
+COPY iso.yaml /usr/lib/image-builder/bootc/iso.yaml
+
+# Kickstart defaults: install the embedded ilex image and keep tracking ghcr.
+# Anaconda still asks for the disk, the user and everything else.
+COPY interactive-defaults.ks /tmp/interactive-defaults.ks
+RUN test -n "$PAYLOAD_REF" || { echo "build with --build-arg PAYLOAD_REF=<image@sha256:...>" >&2; exit 1; }; \
+    sed -e "s|@PAYLOAD_REF@|${PAYLOAD_REF}|g" -e "s|@TARGET_IMGREF@|${TARGET_IMGREF}|g" \
+        /tmp/interactive-defaults.ks > /usr/share/anaconda/interactive-defaults.ks && \
+    rm /tmp/interactive-defaults.ks && \
+    cat /usr/share/anaconda/interactive-defaults.ks
+
+# What `lorax` normally does to make `anaconda` run; this is the bare minimum.
+RUN echo "install:x:0:0:root:/root:/usr/libexec/anaconda/run-anaconda" >> /etc/passwd && \
+    echo "install::14438:0:99999:7:::" >> /etc/shadow && \
+    passwd -d root
+RUN mv /usr/share/anaconda/list-harddrives-stub /usr/bin/list-harddrives && \
+    mv /etc/yum.repos.d /etc/anaconda.repos.d && \
+    ln -s /lib/systemd/system/anaconda.target /etc/systemd/system/default.target && \
+    rm -v /usr/lib/systemd/system-generators/systemd-gpt-auto-generator
+RUN ln -s /usr/lib/systemd/system/anaconda-shell@.service /usr/lib/systemd/system/autovt@.service
+RUN mkdir -p /usr/lib/systemd/logind.conf.d
+COPY <<EOT /usr/lib/systemd/logind.conf.d/anaconda-shell.conf
+[Login]
+ReserveVT=2
+EOT
+
+# Rebuild the initramfs with the anaconda dracut module.
+RUN mkdir "$(realpath /root)" && \
+    kernel=$(kernel-install list --json pretty | jq -r '.[] | select(.has_kernel == true) | .version') && \
+    DRACUT_NO_XATTR=1 dracut --force -v --zstd --reproducible --no-hostonly \
+        --add "anaconda" \
+        "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}"
+
+# Anaconda runs as root, which user-level pipewire refuses by default.
+RUN mkdir /etc/systemd/user/pipewire.service.d/
+COPY <<EOT /etc/systemd/user/pipewire.service.d/allowroot.conf
+[Unit]
+ConditionUser=
+EOT
+RUN mkdir /etc/systemd/user/pipewire.socket.d/
+COPY <<EOT /etc/systemd/user/pipewire.socket.d/allowroot.conf
+[Unit]
+ConditionUser=
+EOT

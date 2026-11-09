@@ -1,0 +1,3 @@
+# Defaults for `bootc install` (and `bcvk to-disk`, which runs it).
+[install.filesystem.root]
+type = "btrfs"

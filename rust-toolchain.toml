@@ -1,0 +1,4 @@
+# Same compiler Fedora 45 ships, so host builds and the image's builder stage agree.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
