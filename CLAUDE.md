@@ -39,6 +39,45 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 - Image builds and VM boots take minutes: run them in the background.
 - `cargo check`/`clippy` work natively on Windows too, for quick feedback.
 
+## Driving VMs with ilex-vmctl
+
+`cargo xtask disk` writes the installed qcow2 (`bcvk to-disk`); `cargo xtask
+vm --disk` boots it headless on the graphical test machine (UEFI, 4K
+`virtio-vga`), and `--gui` adds a GTK window for a human (WSLg shows it on the
+Windows desktop). Every disk-booted VM (also the `disk::` and `graphical::`
+tests) publishes `qmp.sock`, `vnc.sock` and `vm.info` in
+`$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; `ilex-vmctl` attaches to them by slug
+(from the checkout you are in, or `--slug`) and never starts or stops VMs.
+
+```sh
+cargo install --path crates/ilex-vmctl   # once per machine (inside WSL on Windows)
+ilex-vmctl list
+ilex-vmctl screenshot -o shot.png        # read the PNG to see the screen
+ilex-vmctl wait-screen --stable 3        # not blank, then unchanged for 3s
+ilex-vmctl click 1920 1080               # framebuffer pixels (3840x2160)
+ilex-vmctl type 'hunter2' --enter        # US layout; ilex-vmctl key ctrl+alt+t
+```
+
+Agents get the same tools (`screenshot`, `click`, `scroll`, `type_text`, `key`,
+`wait_screen`, `vm_list`) as an MCP server; screenshots come back downscaled
+and `click` takes coordinates in that downscaled image:
+
+```sh
+claude mcp add --transport stdio ilex-vm -- ilex-vmctl mcp
+# Windows host (the server must run inside WSL, in the worktree's directory):
+claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e bash -lc 'ilex-vmctl mcp'
+```
+
+- QMP serves one client at a time; vmctl connects per command, so an agent
+  and a running test can share a VM. One VM per purpose and checkout: `vm`
+  (`xtask vm --disk`), `gui` (`--gui`), `disk` and `graphical` (tests); pick
+  with `--vm` when more than one runs.
+- Tests assert over SSH, not pixels. Screenshots are evidence: the
+  `graphical::` tier saves them to `<state dir>/artifacts/graphical/` (or
+  `$ILEX_ARTIFACTS/graphical/`).
+- The SSH test key and the throwaway disk overlays live in the state dir;
+  `cargo xtask vm --disk` prints the exact `ssh` command line.
+
 ## Conventions
 
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one

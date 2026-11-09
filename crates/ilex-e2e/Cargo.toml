@@ -20,3 +20,4 @@ anyhow.workspace = true
 libtest-mimic.workspace = true
 serde_json.workspace = true
 toml = "1"
+ilex-vmctl = { path = "../ilex-vmctl" }

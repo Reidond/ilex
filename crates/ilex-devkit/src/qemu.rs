@@ -421,7 +421,10 @@ impl Vm {
         let vnc_sock = dir.join("vnc.sock");
 
         let mut qemu = Command::new("qemu-system-x86_64");
+        // exit-with-parent: a killed harness or xtask must not leave a
+        // multi-gigabyte VM (and its slot's RAM) running.
         qemu.args(["-name", &name])
+            .args(["-run-with", "exit-with-parent=on"])
             .args(["-accel", "kvm", "-machine", "q35", "-cpu", "host"])
             .args(["-smp", &config.vcpus.to_string(), "-m", &config.memory])
             .arg("-drive")
@@ -566,6 +569,31 @@ impl Vm {
                     self.info.name,
                     self.info.dir.join("serial.log").display()
                 );
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    }
+
+    /// Reboot the guest (QEMU keeps running, so sockets and the disk
+    /// persist) and wait until it accepts SSH again on a new boot.
+    pub fn reboot(&mut self, timeout: Duration) -> Result<()> {
+        const BOOT_ID: &str = "cat /proc/sys/kernel/random/boot_id";
+        let before = self.ssh_ok(BOOT_ID)?;
+        // The connection drops as the guest goes down; that is not an error.
+        let _ = self.ssh("systemctl reboot");
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.exited()? {
+                bail!("qemu exited with {status} while rebooting");
+            }
+            if let Ok(out) = self.ssh(BOOT_ID)
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout).trim() != before
+            {
+                return Ok(());
+            }
+            if started.elapsed() > timeout {
+                bail!("{} did not come back from a reboot within {timeout:?}", self.info.name);
             }
             thread::sleep(Duration::from_secs(2));
         }

@@ -1,0 +1,22 @@
+[package]
+name = "ilex-vmctl"
+description = "Drive an ilex VM over QMP: screenshots, pointer and keyboard input; CLI and MCP server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ilex_vmctl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ilex-vmctl"
+path = "src/main.rs"
+
+[dependencies]
+ilex-devkit.workspace = true
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde_json.workspace = true
+png = "0.18"
