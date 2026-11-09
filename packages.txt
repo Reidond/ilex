@@ -1,7 +1,0 @@
-# dnf package set layered onto fedora-bootc:45, one per line; `#` starts a comment.
-
-# Desktop: GNOME on Wayland, the default for now.
-@gnome-desktop
-gdm
-firefox
-flatpak

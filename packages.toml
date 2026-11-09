@@ -1,0 +1,9 @@
+# Packages layered onto quay.io/fedora/fedora-bootc:45 with `dnf install`.
+#
+# Each table groups related packages:
+#   install = packages and @groups to install
+#   exclude = packages kept out even when a group pulls them in (dnf --exclude)
+
+[desktop]
+# GNOME on Wayland, the default desktop for now.
+install = ["@gnome-desktop", "gdm", "firefox", "flatpak"]
