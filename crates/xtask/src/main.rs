@@ -15,6 +15,7 @@ mod disk;
 mod iso;
 mod publish;
 mod rechunk;
+mod registry;
 mod test;
 mod vm;
 

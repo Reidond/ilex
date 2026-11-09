@@ -135,6 +135,59 @@ size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
   automatic scale is 1.0; the test checks that, that 1.5 is offered, and that
   a stored 150% survives a reboot (`06-scaled-desktop.png`).
 
+## CI publishing
+
+`.github/workflows/publish.yml` runs on every merge to `main`, nightly at
+03:00 UTC and on demand: build → `rechunk` → `changed` → e2e tests →
+`publish` (push by digest, tag `:latest`, `:YYYYMMDD`, `:sha-<short>`, sign).
+Nothing is published when the fingerprint matches the published `:latest`.
+
+```sh
+cargo xtask rechunk <tag>              # reproducible layers + ilex.fingerprint label, in place
+cargo xtask changed <ref> --image <tag> # prints changed=/exists=; $GITHUB_OUTPUT when set
+cargo xtask publish <tag>              # CI only
+```
+
+- `publish` refuses to run unless `CI=true`/`GITHUB_ACTIONS=true`. The one
+  override is a registry on this machine, which can never be ghcr:
+  `podman run -d -p 5000:5000 docker.io/library/registry:2`, then
+  `cargo xtask publish <tag> --allow-local-registry --repository localhost:5000/ilex`
+  (needs `cosign` v2, `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD`).
+- Signatures are cosign **v2** key-pair signatures in the legacy `.sig` tag
+  format, which bootc/containers-image verify (keyless and cosign v3's
+  default format don't work). Machines check them via
+  `rootfs/etc/containers/{policy.json,registries.d/ilex.yaml}` and the public
+  key `rootfs/etc/pki/containers/ilex.pub`. Verify a published image with
+  `cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true ghcr.io/reidond/ilex:latest`.
+- The private key is not in the repo. It was generated on the WSL box into
+  `/root/ilex-secrets/` (`cosign.key`, `cosign.password`, `cosign.pub`); keep a
+  backup. Losing it means every machine needs a new `ilex.pub` before it can
+  upgrade (machines only accept the baked-in key).
+
+### One-time GitHub setup (the user runs this, not an agent)
+
+1. Repository secrets, from Git Bash (the key and password go through the
+   pipe, never to the terminal):
+
+   ```sh
+   MSYS_NO_PATHCONV=1 wsl.exe -d FedoraLinux-45 -u root -e cat /root/ilex-secrets/cosign.key \
+     | gh secret set COSIGN_PRIVATE_KEY --repo Reidond/ilex
+   MSYS_NO_PATHCONV=1 wsl.exe -d FedoraLinux-45 -u root -e cat /root/ilex-secrets/cosign.password \
+     | gh secret set COSIGN_PASSWORD --repo Reidond/ilex
+   ```
+
+2. Make the ghcr packages public so machines need no credentials. Packages
+   only exist after the first publish: run the workflow once
+   (`gh workflow run publish.yml --repo Reidond/ilex`), then for the `ilex`
+   package (and later `ilex-iso`) open github.com → your profile → Packages →
+   the package → Package settings → Change visibility → Public. There is no
+   API for this.
+3. Check that Actions may publish: Settings → Actions → General → Workflow
+   permissions should allow the `packages: write` the workflow requests, and
+   a package created by the first run must list this repository under
+   "Manage Actions access" (it does when the image carries the
+   `org.opencontainers.image.source` label, which `xtask build` sets).
+
 ## Conventions
 
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one
