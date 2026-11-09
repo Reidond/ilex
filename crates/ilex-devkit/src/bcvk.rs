@@ -4,6 +4,8 @@
 //! * [`EphemeralVm`]: `bcvk ephemeral run -d -K` + `bcvk ephemeral ssh`, no
 //!   disk. Holds a machine-wide VM slot for as long as it lives and removes
 //!   its container on drop, so a panicking test cannot leak a VM.
+//! * [`LibvirtVm`]: `bcvk libvirt run` + `bcvk libvirt ssh`, an installed
+//!   system that can reboot. Same slot and cleanup guarantees.
 //!
 //! Commands that run over SSH are not echoed (there are dozens per run) and
 //! show their output only when they fail.
@@ -282,5 +284,176 @@ impl EphemeralVm {
 impl Drop for EphemeralVm {
     fn drop(&mut self) {
         podman_rm(&self.name);
+    }
+}
+
+/// How a libvirt VM is sized and installed.
+#[derive(Debug, Clone)]
+pub struct LibvirtOpts {
+    pub memory: String,
+    pub cpus: u32,
+    pub disk_size: String,
+    /// `--update-from-host`: the guest can see (and update from) the host's
+    /// container storage, so locally built images can be upgraded to.
+    pub update_from_host: bool,
+    /// Firmware: bcvk's default, Secure Boot, needs SMM, which KVM cannot
+    /// provide under nested virtualization (WSL2): the domain is paused with
+    /// "KVM: entry failed". `uefi-insecure` works everywhere.
+    pub firmware: String,
+    /// Extra `bcvk libvirt run` arguments.
+    pub extra_args: Vec<String>,
+    /// How long the first boot may take to accept SSH.
+    pub boot_timeout: Duration,
+}
+
+impl Default for LibvirtOpts {
+    fn default() -> Self {
+        Self {
+            memory: "4G".into(),
+            cpus: 4,
+            disk_size: "30G".into(),
+            update_from_host: true,
+            firmware: "uefi-insecure".into(),
+            extra_args: Vec::new(),
+            boot_timeout: Duration::from_secs(900),
+        }
+    }
+}
+
+/// An installed bootc system as a libvirt domain; it survives reboots.
+///
+/// Dropping it removes the domain and its disk, and frees the VM slot.
+#[derive(Debug)]
+pub struct LibvirtVm {
+    name: String,
+    slot: VmSlot,
+}
+
+impl LibvirtVm {
+    /// Take a VM slot, install `image` to a fresh disk (bcvk caches the
+    /// installed base disk per image, so only the first install is slow),
+    /// boot it and wait for SSH. A leftover domain of the same name is
+    /// replaced.
+    pub fn boot(name: &str, image: &str, opts: &LibvirtOpts) -> Result<Self> {
+        cmd::require("bcvk")?;
+        let slot = slots::acquire(name)?;
+        // Guard first: a failed install or boot below still removes the domain.
+        let vm = Self {
+            name: name.to_string(),
+            slot,
+        };
+        vm.remove();
+
+        let mut run = Command::new("bcvk");
+        run.args(["libvirt", "run", "--detach", "--replace"])
+            .args(["--name", name])
+            .args(["--memory", &opts.memory])
+            .args(["--cpus", &opts.cpus.to_string()])
+            .args(["--disk-size", &opts.disk_size])
+            .args(["--firmware", &opts.firmware]);
+        if opts.update_from_host {
+            run.arg("--update-from-host");
+        }
+        run.args(&opts.extra_args).arg(image);
+        cmd::run(&mut run).with_context(|| format!("installing libvirt VM {name}"))?;
+
+        vm.wait_ssh(opts.boot_timeout)?;
+        Ok(vm)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn slot_index(&self) -> usize {
+        self.slot.index
+    }
+
+    /// Run a shell command line in the guest (as root, over SSH).
+    pub fn ssh(&self, script: &str) -> Result<Output> {
+        self.ssh_timeout(script, Duration::from_secs(300))
+    }
+
+    pub fn ssh_timeout(&self, script: &str, timeout: Duration) -> Result<Output> {
+        let mut c = Command::new("bcvk");
+        c.args([
+            "libvirt",
+            "ssh",
+            &self.name,
+            "--timeout",
+            "20",
+            "--",
+            script,
+        ]);
+        capture(&mut c, timeout)
+    }
+
+    /// Reboot the guest and wait until it is back (a new boot id answers).
+    pub fn reboot(&self, timeout: Duration) -> Result<()> {
+        let before = self.boot_id()?;
+        // The connection drops as the guest goes down, so ignore the result.
+        let _ = self.ssh_timeout("systemctl reboot", Duration::from_secs(60));
+        let deadline = Instant::now() + timeout;
+        loop {
+            if Instant::now() >= deadline {
+                bail!(
+                    "{} did not come back from a reboot within {}s",
+                    self.name,
+                    timeout.as_secs()
+                );
+            }
+            thread::sleep(Duration::from_secs(5));
+            if self.boot_id().is_ok_and(|now| now != before) {
+                return Ok(());
+            }
+        }
+    }
+
+    fn boot_id(&self) -> Result<String> {
+        let out = self.ssh_timeout(
+            "cat /proc/sys/kernel/random/boot_id",
+            Duration::from_secs(60),
+        )?;
+        Ok(out.ok("reading the boot id")?.out().to_string())
+    }
+
+    fn wait_ssh(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut last = String::new();
+        loop {
+            if Instant::now() >= deadline {
+                bail!(
+                    "{} did not accept SSH within {}s; last attempt: {last}",
+                    self.name,
+                    timeout.as_secs()
+                );
+            }
+            match self.ssh_timeout("true", Duration::from_secs(60)) {
+                Ok(o) if o.success() => return Ok(()),
+                Ok(o) => last = format!("exit {:?}: {}", o.code, o.stderr.trim()),
+                Err(e) => last = format!("{e:#}"),
+            }
+            thread::sleep(Duration::from_secs(3));
+        }
+    }
+
+    /// Stop (even a paused domain, which `bcvk libvirt rm --force` refuses to
+    /// delete) and remove the domain with its disk. Quiet, never fails.
+    fn remove(&self) {
+        let quiet = |c: &mut Command| {
+            let _ = c
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        };
+        quiet(Command::new("virsh").args(["destroy", &self.name]));
+        quiet(Command::new("bcvk").args(["libvirt", "rm", "--force", &self.name]));
+    }
+}
+
+impl Drop for LibvirtVm {
+    fn drop(&mut self) {
+        self.remove();
     }
 }

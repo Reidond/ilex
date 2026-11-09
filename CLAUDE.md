@@ -24,6 +24,14 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
 - An ephemeral VM has no ostree deployment, so `bootc status` there names no
   image; `ephemeral::` identifies the image through the container bcvk started.
+- `upgrade::` installs a real libvirt VM (`bcvk libvirt run`, a few minutes,
+  then cached per image under `/var/lib/libvirt/images`), so run it when
+  touching the update path. v1 is the image under test unless
+  `ILEX_UPGRADE_FROM=<ref>` names an older one (CI: the published `:latest`);
+  with `CI` set and no `ILEX_UPGRADE_FROM` the tier is skipped. v2 is the
+  candidate plus a marker layer, tagged `<image tag>-upgrade`, never the
+  checkout's own tag. The VM uses `uefi-insecure` firmware: Secure Boot needs
+  SMM, which KVM can't do under WSL2's nested virtualization.
 - Publishing (`xtask publish`, `xtask iso`) only happens in CI. Never push to
   ghcr from a dev machine.
 
