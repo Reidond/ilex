@@ -1,0 +1,10 @@
+[package]
+name = "ilex-agent"
+description = "On-machine ilex helper shipped in the image; `--self-check` is what the e2e tests call"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No dependencies on purpose: this is what the image's builder stage compiles.
+[dependencies]

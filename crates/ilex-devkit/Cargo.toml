@@ -1,0 +1,10 @@
+[package]
+name = "ilex-devkit"
+description = "Shared host-side plumbing for xtask, the e2e harness and ilex-vmctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true

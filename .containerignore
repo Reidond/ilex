@@ -1,0 +1,5 @@
+# Keep the podman build context small. `.claude` matters most: without it a
+# build from the main checkout sends every Claude worktree along with it.
+target/
+.git
+.claude/
