@@ -18,6 +18,10 @@ on:
         description: Build the installer ISO from the published :latest even if the image is unchanged
         type: boolean
         default: false
+      test:
+        description: Run the e2e tests even if the image is unchanged (to check CI changes from a branch; only main publishes)
+        type: boolean
+        default: false
 
 concurrency:
   group: publish
@@ -70,7 +74,30 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system skopeo
+          sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo
+          # The upgrade tier drives system libvirt as the `runner` user (bcvk
+          # libvirt run). Ubuntu opens the libvirt socket only to the `libvirt`
+          # group (the tests run under `sg libvirt`), and libvirt's AppArmor
+          # driver confines QEMU and virtiofsd, which would keep the guest from
+          # the virtiofs share of runner's container storage. bcvk also writes
+          # its base disks straight into the pool directory, root-only on
+          # Ubuntu. Throwaway VM: join the group, hand runner the pool
+          # directory and turn the driver off.
+          sudo usermod -aG libvirt "$USER"
+          sudo install -d -o "$USER" -g libvirt -m 0775 /var/lib/libvirt/images
+          echo 'security_driver = "none"' | sudo tee -a /etc/libvirt/qemu.conf
+          # libvirt picks UEFI firmware from QEMU's firmware descriptors. For
+          # bcvk's non-Secure-Boot VMs, Ubuntu's AMD SEV build
+          # (OVMF.amdsev.fd: stateless, boots only a GRUB inside the firmware)
+          # wins, so the guest never reads its disk and loops in "Boot Option
+          # Restoration". Mask the confidential-computing builds: an empty file
+          # under /etc/qemu/firmware hides the descriptor of the same name.
+          sudo mkdir -p /etc/qemu/firmware
+          for f in /usr/share/qemu/firmware/*amdsev*.json /usr/share/qemu/firmware/*inteltdx*.json; do
+            if [ -e "$f" ]; then sudo touch "/etc/qemu/firmware/$(basename "$f")"; fi
+          done
+          ls -l /usr/share/qemu/firmware/ /etc/qemu/firmware/
+          for unit in libvirtd virtqemud; do sudo systemctl try-restart "$unit" || true; done
           curl -fsSL -o "$RUNNER_TEMP/bcvk.tar.gz" \
             "https://github.com/bootc-dev/bcvk/releases/download/${BCVK_VERSION}/bcvk-x86_64-unknown-linux-gnu.tar.gz"
           echo "${BCVK_SHA256}  $RUNNER_TEMP/bcvk.tar.gz" | sha256sum --check -
@@ -100,11 +127,33 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # The very first run has no published :latest, so there is nothing to
-      # upgrade from and the upgrade tier is skipped.
+      # upgrade from and the upgrade tier is skipped. `sg libvirt` gives this
+      # shell the group joined above without a new login.
       - name: e2e tests
-        if: steps.changed.outputs.changed == 'true'
+        id: e2e
+        if: steps.changed.outputs.changed == 'true' || inputs.test
+        env:
+          TIERS: "ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}"
+          # The upgrade tier logs its libvirt VM's consoles here (the domain
+          # itself is removed when the test ends); kept as an artifact.
+          ILEX_VM_LOG_DIR: ${{ runner.temp }}/vm-logs
         run: |
-          cargo xtask test ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}
+          mkdir -p "$ILEX_VM_LOG_DIR" && chmod 1777 "$ILEX_VM_LOG_DIR"
+          trap 'if [ $? -ne 0 ]; then
+                  sudo dmesg | grep -iE "apparmor|denied" | tail -40
+                  sudo sh -c "tail -n 40 /var/log/libvirt/qemu/*.log" || true
+                  sudo cp /var/log/libvirt/qemu/*.log "$ILEX_VM_LOG_DIR/" 2>/dev/null || true
+                  sudo chmod -R a+r "$ILEX_VM_LOG_DIR" || true
+                fi' EXIT
+          sg libvirt -c "cargo xtask test $TIERS"
+
+      - name: Keep VM logs
+        if: failure() && steps.e2e.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-logs
+          path: ${{ runner.temp }}/vm-logs
+          if-no-files-found: ignore
 
       # Only main publishes: a manual run dispatched from another branch still
       # builds and tests, but never moves :latest.
