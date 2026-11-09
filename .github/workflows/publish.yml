@@ -79,9 +79,12 @@ jobs:
           # libvirt run). Ubuntu opens the libvirt socket only to the `libvirt`
           # group (the tests run under `sg libvirt`), and libvirt's AppArmor
           # driver confines QEMU and virtiofsd, which would keep the guest from
-          # the virtiofs share of runner's container storage. Throwaway VM:
-          # join the group and turn the driver off.
+          # the virtiofs share of runner's container storage. bcvk also writes
+          # its base disks straight into the pool directory, root-only on
+          # Ubuntu. Throwaway VM: join the group, hand runner the pool
+          # directory and turn the driver off.
           sudo usermod -aG libvirt "$USER"
+          sudo install -d -o "$USER" -g libvirt -m 0775 /var/lib/libvirt/images
           echo 'security_driver = "none"' | sudo tee -a /etc/libvirt/qemu.conf
           for unit in libvirtd virtqemud; do sudo systemctl try-restart "$unit" || true; done
           curl -fsSL -o "$RUNNER_TEMP/bcvk.tar.gz" \
