@@ -18,3 +18,5 @@ harness = false
 ilex-devkit.workspace = true
 anyhow.workspace = true
 libtest-mimic.workspace = true
+serde_json.workspace = true
+toml = "1"

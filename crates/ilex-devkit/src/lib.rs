@@ -5,6 +5,7 @@
 
 pub mod cmd;
 pub mod git;
+pub mod qemu;
 pub mod slots;
 pub mod workspace;
 
