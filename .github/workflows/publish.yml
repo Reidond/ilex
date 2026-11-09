@@ -13,6 +13,11 @@ on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+    inputs:
+      iso:
+        description: Build the installer ISO from the published :latest even if the image is unchanged
+        type: boolean
+        default: false
 
 concurrency:
   group: publish
@@ -101,50 +106,73 @@ jobs:
         run: |
           cargo xtask test ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}
 
+      # Only main publishes: a manual run dispatched from another branch still
+      # builds and tests, but never moves :latest.
       - name: Publish and sign
         id: publish
-        if: steps.changed.outputs.changed == 'true'
+        if: steps.changed.outputs.changed == 'true' && github.ref == 'refs/heads/main'
         run: cargo xtask publish candidate
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
-  # Runs only after a successful publish, from the digest just published. A
-  # failure here never unpublishes the image.
+  # Runs after a successful publish, from the digest just published, or on a
+  # manual run with `iso` checked, from the published :latest. A failure here
+  # never unpublishes the image.
   iso:
     needs: publish
-    if: needs.publish.result == 'success' && needs.publish.outputs.changed == 'true'
+    if: >-
+      needs.publish.result == 'success' && github.ref == 'refs/heads/main' &&
+      (needs.publish.outputs.changed == 'true' || inputs.iso)
     runs-on: ubuntu-26.04
     timeout-minutes: 120
-    container:
-      image: quay.io/fedora/fedora:45
-      options: --privileged
-      # Keep container storage, image-builder's cache and the ISO on the
-      # runner's big temporary disk, and off the container's overlay
-      # filesystem (podman can't nest overlay on overlay).
-      volumes:
-        - /mnt/ilex/containers:/var/lib/containers
-        - /mnt/ilex/image-builder:/var/cache/image-builder
-        - /mnt/ilex/state:/mnt/ilex-state
-    env:
-      ILEX_STATE_DIR: /mnt/ilex-state
-      # buildah stages build contexts under $TMPDIR; on the container's own
-      # overlayfs that fails ("overlay over build context").
-      TMPDIR: /mnt/ilex-state/tmp
     steps:
-      # The `generic-iso` image type (Anaconda inside the installer container,
-      # kickstart from the container) needs image-builder 89; Fedora 45 only has
-      # 87 in its stable repo until 89 leaves updates-testing.
-      - name: Tooling
-        run: |
-          mkdir -p "$TMPDIR"
-          dnf -y install git cargo gcc podman skopeo
-          dnf -y install --enablerepo=updates-testing image-builder
-          image-builder version
       - uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          df -h / /mnt
+
+      # osbuild (inside image-builder) bind-mounts container storage in its
+      # sandbox, which fails in a GitHub `container:` job on this host
+      # ("mount: /run/osbuild/containers/storage: permission denied"). So the
+      # job runs on the host and starts its own rootful, privileged Fedora 45
+      # container with podman, the way osbuild's own tools are run in CI.
+      # Container storage, image-builder's cache, the ISO and TMPDIR live on
+      # the runner's big /mnt disk, off overlayfs (podman can't nest overlay
+      # on overlay). `generic-iso` needs image-builder 89, which Fedora 45 has
+      # only in updates-testing for now.
       - name: Build and push the installer ISO
-        run: cargo xtask iso "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex@${DIGEST}"
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          if [ -z "$DIGEST" ]; then
+            DIGEST=$(skopeo inspect --creds "${GITHUB_ACTOR}:${REGISTRY_TOKEN}" \
+              --format '{{.Digest}}' "docker://${image}:latest")
+          fi
+          export ILEX_ISO_SOURCE="${image}@${DIGEST}"
+          echo "installer payload: ${ILEX_ISO_SOURCE}"
+          sudo mkdir -p /mnt/ilex/containers /mnt/ilex/image-builder /mnt/ilex/state/tmp
+          sudo --preserve-env=ILEX_ISO_SOURCE,REGISTRY_TOKEN,GITHUB_ACTOR,GITHUB_REPOSITORY_OWNER,GITHUB_ACTIONS,CI \
+            podman run --rm --privileged --security-opt label=disable \
+              --security-opt apparmor=unconfined --security-opt seccomp=unconfined \
+              -v "$PWD:/src" -w /src \
+              -v /mnt/ilex/containers:/var/lib/containers \
+              -v /mnt/ilex/image-builder:/var/cache/image-builder \
+              -v /mnt/ilex/state:/mnt/ilex-state \
+              -e ILEX_ISO_SOURCE -e REGISTRY_TOKEN -e GITHUB_ACTOR \
+              -e GITHUB_REPOSITORY_OWNER -e GITHUB_ACTIONS -e CI \
+              -e ILEX_STATE_DIR=/mnt/ilex-state -e TMPDIR=/mnt/ilex-state/tmp \
+              quay.io/fedora/fedora:45 bash -euxc '
+                dnf -y install git cargo gcc podman skopeo
+                dnf -y install --enablerepo=updates-testing image-builder
+                image-builder version
+                git config --global --add safe.directory /src
+                cargo xtask iso "$ILEX_ISO_SOURCE"
+              '
