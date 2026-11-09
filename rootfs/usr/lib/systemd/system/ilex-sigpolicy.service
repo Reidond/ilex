@@ -1,0 +1,18 @@
+[Unit]
+Description=Verify signatures of the ilex image this machine tracks
+Documentation=https://github.com/Reidond/ilex
+# Only on an installed bootc system: ephemeral VMs and containers have no
+# booted ostree deployment (the agent also checks, and does nothing there).
+ConditionPathExists=/run/ostree-booted
+# Fix the origin before the updater pulls anything with it.
+Before=bootc-fetch-apply-updates.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Idempotent: a no-op unless the booted deployment tracks ghcr.io/reidond/ilex
+# without signature verification (an ISO install, a plain `bootc switch`).
+ExecStart=/usr/bin/ilex-agent enforce-sigpolicy
+
+[Install]
+WantedBy=multi-user.target

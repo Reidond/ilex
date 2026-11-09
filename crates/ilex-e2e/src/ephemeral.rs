@@ -52,6 +52,7 @@ pub fn trials() -> Vec<Trial> {
         trial("ephemeral::graphical_default", || {
             GROUP.run(graphical_default)
         }),
+        trial("ephemeral::sigpolicy_noop", || GROUP.run(sigpolicy_noop)),
     ]
 }
 
@@ -175,4 +176,23 @@ fn graphical_default(vm: &EphemeralVm) -> Result<()> {
 fn same_image(a: &str, b: &str) -> bool {
     let norm = |s: &str| s.strip_prefix("localhost/").unwrap_or(s).to_string();
     norm(a) == norm(b)
+}
+
+/// Signature enforcement does nothing here: an ephemeral VM has no booted
+/// deployment, so `ilex-agent enforce-sigpolicy` (which `ilex-sigpolicy.service`
+/// runs at every boot of an installed machine) must neither fail nor try to
+/// switch anything. The unit itself must not be in the failed state, which
+/// `no_failed_units` already requires; the real switch is tested on an
+/// installed system, in `upgrade::sigpolicy_enforced`.
+fn sigpolicy_noop(vm: &EphemeralVm) -> Result<()> {
+    let out = vm
+        .ssh("ilex-agent enforce-sigpolicy")?
+        .ok("ilex-agent enforce-sigpolicy")?;
+    ensure(out.stdout.contains("nothing to do"), || {
+        format!("expected a no-op, got:\n{}{}", out.stdout, out.stderr)
+    })?;
+    let unit = vm.ssh("systemctl is-failed ilex-sigpolicy.service")?;
+    ensure(unit.out() != "failed", || {
+        "ilex-sigpolicy.service failed".to_string()
+    })
 }

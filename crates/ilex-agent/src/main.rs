@@ -8,6 +8,8 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
+mod sigpolicy;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> ExitCode {
@@ -18,8 +20,19 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--self-check") => self_check(),
+        Some("enforce-sigpolicy") => match std::env::args().nth(2).as_deref() {
+            None => sigpolicy::run(false),
+            Some("--dry-run") => sigpolicy::run(true),
+            Some(other) => {
+                eprintln!("ilex-agent: enforce-sigpolicy: unknown argument `{other}`");
+                ExitCode::from(2)
+            }
+        },
         None | Some("--help" | "-h") => {
-            println!("ilex-agent {VERSION}\n\nUsage: ilex-agent [--self-check | --version]");
+            println!(
+                "ilex-agent {VERSION}\n\n\
+                 Usage: ilex-agent [--self-check | --version | enforce-sigpolicy [--dry-run]]"
+            );
             ExitCode::SUCCESS
         }
         Some(other) => {
@@ -45,6 +58,10 @@ const CHECKS: &[Check] = &[
     ("default target is graphical", check_graphical_default),
     ("desktop packages installed", check_desktop_binaries),
     ("bootc is installed", || in_path("bootc")),
+    ("sigpolicy decisions", sigpolicy::check_decisions),
+    ("sigpolicy unit enabled", || {
+        exists("/etc/systemd/system/multi-user.target.wants/ilex-sigpolicy.service")
+    }),
 ];
 
 fn self_check() -> ExitCode {

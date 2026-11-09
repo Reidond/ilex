@@ -32,6 +32,10 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   candidate plus a marker layer, tagged `<image tag>-upgrade`, never the
   checkout's own tag. The VM uses `uefi-insecure` firmware: Secure Boot needs
   SMM, which KVM can't do under WSL2's nested virtualization.
+  `upgrade::sigpolicy_enforced` installs the image under test in its own VM,
+  points the origin at `ghcr.io/reidond/ilex:latest` unverified (the state an
+  ISO install leaves), reboots and asserts the boot-time `ilex-sigpolicy.service`
+  added the signature enforcement, then that a second run is a no-op.
 - `iso::` is opt-in and slow (about 15 minutes for the ISO the first time,
   then 7 for the install and boot), so it only exists when a filter names it:
   `cargo xtask test iso::` builds an installer ISO from the image under test
@@ -228,11 +232,25 @@ podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact e
   itself "Fedora Linux 45" (its os-release) and its hostname is `fedora` until
   one is set.
 - Kickstart's `bootc` command (pykickstart) can't pass
-  `--enforce-container-sigpolicy`, and `bootc status` of an ISO-installed machine
-  shows `spec.image` as just `{image, transport: registry}`, without a
-  `signature` entry: it tracks ghcr but is not pinned to signed images. Run
-  `sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:latest`
-  once after installing (or have the image do it on first boot).
+  `--enforce-container-sigpolicy`, so an ISO-installed machine tracks ghcr
+  *unverified*: `bootc status` shows `spec.image` as just `{image, transport:
+  registry}` with no `signature`, and bootc ignores `policy.json` for it (a
+  plain `bootc switch` leaves the same state). The image fixes this itself:
+  `ilex-sigpolicy.service` (enabled by the preset, `ConditionPathExists=
+  /run/ostree-booted`, ordered before the updater) runs `ilex-agent
+  enforce-sigpolicy` at every boot. When the booted deployment tracks
+  `ghcr.io/reidond/ilex` (any tag or digest) over the registry transport with
+  no verification, it rewrites the origin with `bootc switch --mutate-in-place
+  --enforce-container-sigpolicy <same ref>` (no download, no new deployment, no
+  reboot) and checks that `bootc status` now shows `"signature":
+  "containerPolicy"`. It does nothing on ephemeral VMs (no deployment), other
+  images or transports (test images in containers-storage, other registries,
+  `ghcr.io/reidond/ilex-iso`) and machines that already verify, so there is
+  nothing to run by hand; `ilex-agent enforce-sigpolicy --dry-run` shows what
+  it would do. `/sysroot` is mounted read-only on a running system and bootc
+  doesn't remount it for `--mutate-in-place` ("Writing origin: Read-only file
+  system"), so the agent runs the switch under `unshare --mount` with
+  `/sysroot` remounted writable in that private namespace only.
 
 ### One-time GitHub setup (the user runs this, not an agent)
 
