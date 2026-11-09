@@ -92,6 +92,27 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
 - The SSH test key and the throwaway disk overlays live in the state dir;
   `cargo xtask vm --disk` prints the exact `ssh` command line.
 
+## Display scaling
+
+Scaling is GNOME's own; the image ships no code or schema override for it.
+mutter 51 runs in logical layout mode (fractional scales, no experimental
+switch) and gives each monitor without a stored configuration the scale
+nearest to `diagonal DPI / target`, with a 110 DPI target (135 for panels
+under 20 inches) among the scales offered for the mode, from the panel's EDID
+size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
+1080p → 125%, 14" 2880x1800 → 167%. What the user saved in
+`~/.config/monitors.xml` (Settings) wins. GDM's greeter has its own
+`~gdm/.config/monitors.xml`.
+
+- Inspect with `gdctl show --modes --properties` (current scale, mutter's
+  `Preferred scale` per mode, the scales offered). Wrong scale on one machine
+  usually means a monitor whose EDID has a wrong or aspect-ratio-only size
+  (mutter then falls back to 100%): store a choice in Settings.
+- `graphical::login` pins this down in the VM. QEMU's virtio-gpu always
+  reports ~100 DPI (and ignores DRM debugfs `edid_override`), so the VM's
+  automatic scale is 1.0; the test checks that, that 1.5 is offered, and that
+  a stored 150% survives a reboot (`06-scaled-desktop.png`).
+
 ## Conventions
 
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one
