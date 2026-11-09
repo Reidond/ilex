@@ -198,6 +198,7 @@ impl Server {
                     nonblank: args["nonblank"].as_bool().unwrap_or(false),
                     changed: args["changed"].as_bool().unwrap_or(false),
                     stable: args["stable_secs"].as_f64().map(Duration::from_secs_f64),
+                    size: args["size"].as_str().map(crate::parse_size).transpose()?,
                 };
                 let timeout = Duration::from_secs_f64(args["timeout_secs"].as_f64().unwrap_or(120.0));
                 let started = std::time::Instant::now();
@@ -329,6 +330,7 @@ fn tool_definitions() -> Value {
                 "nonblank": { "type": "boolean" },
                 "changed": { "type": "boolean", "description": "Differs from the first picture seen" },
                 "stable_secs": { "type": "number", "description": "Unchanged for this many seconds" },
+                "size": { "type": "string", "description": "Framebuffer size to wait for, e.g. 3840x2160 (firmware and Plymouth draw at another size during boot)" },
                 "timeout_secs": { "type": "number", "description": "Give up after this long (default 120)" },
                 "vm": vm, "slug": slug
             } }

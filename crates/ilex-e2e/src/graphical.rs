@@ -35,8 +35,11 @@ use crate::disk::vmtest;
 const USER: &str = "ilextest";
 /// The user's stored display configuration (what GNOME Settings writes).
 const MONITORS_XML: &str = "/var/home/ilextest/.config/monitors.xml";
-/// Software-rendered 4K is slow: give each wait generously.
-const SESSION_TIMEOUT: Duration = Duration::from_secs(240);
+/// Software-rendered 4K is slow, and the suite runs with other VMs busy:
+/// give each wait generously.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(300);
+/// The guest's final display mode (`VmConfig::graphical`).
+const FRAMEBUFFER: (u32, u32) = (3840, 2160);
 
 pub fn trials() -> Vec<Trial> {
     vec![Trial::test("graphical::login", || run().map_err(|e| Failed::from(format!("{e:#}"))))]
@@ -73,10 +76,7 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     // Initial Setup, run by GDM because there is no user yet.
     wait_gdm(vm)?;
     let frame = settle(ctl)?;
-    println!("ok   gdm is active and the screen is not blank ({}x{})", frame.width, frame.height);
-    if (frame.width, frame.height) != (3840, 2160) {
-        bail!("expected a 3840x2160 framebuffer, got {}x{}", frame.width, frame.height);
-    }
+    println!("ok   gdm is active and the screen settled at {}x{}", frame.width, frame.height);
     shot(ctl, artifacts, "01-first-boot")?;
 
     // 3. A test user, created over SSH for this boot only; reboot so GDM
@@ -349,14 +349,22 @@ fn wait_gdm(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-/// Wait until the display shows something and has stopped changing.
+/// Wait until the display shows something at the full framebuffer size and
+/// has stopped changing.
+///
+/// Firmware, GRUB and Plymouth draw at their own mode (1280x800), and under
+/// load mutter's modeset to 3840x2160 can come late, so the first non-blank
+/// frame of a boot is not the one to judge: wait for the size too.
 fn settle(ctl: &Vmctl) -> Result<Frame> {
     let cond = WaitCond {
         nonblank: true,
+        size: Some(FRAMEBUFFER),
         stable: Some(Duration::from_secs(5)),
         ..WaitCond::default()
     };
-    let (_, frame) = ctl.wait_screen(&cond, SESSION_TIMEOUT).context("waiting for the screen to settle")?;
+    let (_, frame) = ctl
+        .wait_screen(&cond, SESSION_TIMEOUT)
+        .with_context(|| format!("waiting for a settled {}x{} screen", FRAMEBUFFER.0, FRAMEBUFFER.1))?;
     Ok(frame)
 }
 

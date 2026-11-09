@@ -64,6 +64,16 @@ pub struct WaitCond {
     pub changed: bool,
     /// The picture has not changed for this long.
     pub stable: Option<Duration>,
+    /// The framebuffer has this size. Firmware, GRUB and Plymouth draw at
+    /// their own mode, so the first non-blank frame of a boot is often not
+    /// the guest's final resolution: wait for the size instead of assuming it.
+    pub size: Option<(u32, u32)>,
+}
+
+/// Parse `3840x2160`.
+pub fn parse_size(s: &str) -> Result<(u32, u32)> {
+    let (w, h) = s.split_once(['x', 'X']).with_context(|| format!("size `{s}` is not WIDTHxHEIGHT"))?;
+    Ok((w.trim().parse().context("width")?, h.trim().parse().context("height")?))
 }
 
 impl WaitCond {
@@ -73,7 +83,7 @@ impl WaitCond {
 
     /// With nothing asked for, wait for a non-blank screen.
     fn normalized(&self) -> Self {
-        if !self.nonblank && !self.changed && self.stable.is_none() {
+        if !self.nonblank && !self.changed && self.stable.is_none() && self.size.is_none() {
             Self::nonblank()
         } else {
             self.clone()
@@ -154,6 +164,7 @@ impl Vmctl {
             last = Some((fp, since));
 
             let ok = (!cond.nonblank || !frame.is_blank())
+                && cond.size.is_none_or(|s| s == (frame.width, frame.height))
                 && (!cond.changed || Some(fp) != first)
                 && cond.stable.is_none_or(|s| since.elapsed() >= s);
             if ok {
@@ -161,7 +172,8 @@ impl Vmctl {
             }
             if started.elapsed() > timeout {
                 bail!(
-                    "screen did not reach {cond:?} within {timeout:?} (last frame {}x{}, {:.1}% one colour)",
+                    "screen did not reach {cond:?} within {timeout:?} (last frame {}x{}, {:.1}% one colour; \
+                     a size that never changes means the guest never switched modes)",
                     frame.width,
                     frame.height,
                     frame.dominant_fraction() * 100.0

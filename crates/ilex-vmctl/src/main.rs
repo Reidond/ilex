@@ -83,6 +83,10 @@ enum Cmd {
         /// Require the picture to be unchanged for this many seconds
         #[arg(long)]
         stable: Option<f64>,
+        /// Require the framebuffer to have this size, e.g. 3840x2160 (the
+        /// first frames of a boot are drawn by firmware at another size)
+        #[arg(long)]
+        size: Option<String>,
         /// Also save the final screenshot here
         #[arg(short, long)]
         out: Option<PathBuf>,
@@ -148,8 +152,9 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Key { combo } => vm.key(&combo)?,
-        Cmd::WaitScreen { timeout, nonblank, changed, stable, out } => {
-            let cond = WaitCond { nonblank, changed, stable: stable.map(Duration::from_secs_f64) };
+        Cmd::WaitScreen { timeout, nonblank, changed, stable, size, out } => {
+            let size = size.as_deref().map(ilex_vmctl::parse_size).transpose()?;
+            let cond = WaitCond { nonblank, changed, stable: stable.map(Duration::from_secs_f64), size };
             let started = std::time::Instant::now();
             let (png, frame) = vm.wait_screen(&cond, Duration::from_secs_f64(timeout))?;
             if let Some(out) = out {
