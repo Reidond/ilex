@@ -32,6 +32,15 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   candidate plus a marker layer, tagged `<image tag>-upgrade`, never the
   checkout's own tag. The VM uses `uefi-insecure` firmware: Secure Boot needs
   SMM, which KVM can't do under WSL2's nested virtualization.
+- `iso::` is opt-in and slow (about 15 minutes for the ISO the first time,
+  then 7 for the install and boot), so it only exists when a filter names it:
+  `cargo xtask test iso::` builds an installer ISO from the image under test
+  (`ILEX_ISO=<path>` reuses one), installs it unattended in QEMU/UEFI onto a
+  blank disk, boots the result and asserts over SSH that `bootc status` shows
+  the booted image tracking `ghcr.io/reidond/ilex:latest` at the digest the ISO
+  embeds, that the system is `running` with no failed units and that GDM is up.
+  The installer VM gets 16 GiB (see "Installer ISO"). Screenshots of Anaconda's
+  welcome screen and of the first boot land in `<state dir>/artifacts/iso/`.
 - Publishing (`xtask publish`, `xtask iso`) only happens in CI. Never push to
   ghcr from a dev machine.
 
@@ -191,12 +200,34 @@ podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact e
   GitHub `container:` job), with `/var/lib/containers`,
   `/var/cache/image-builder` and `TMPDIR` on volumes under `/mnt`. To rebuild
   only the ISO from the published `:latest`:
-  `gh workflow run publish.yml --repo Reidond/ilex -f iso=true`.
+  `gh workflow run publish.yml --repo Reidond/ilex -f iso=true`. `xtask iso`
+  does the same locally: when the `image-builder` on `PATH` is older than 89
+  (or missing) it builds `installer/image-builder/Containerfile` and runs
+  image-builder from that container against this host's container storage.
+- The installer is branded by `/.buildstamp`, the file Anaconda takes its
+  product name, version and "final release" flag from (`Product=ilex`,
+  `Version=<Fedora release of the payload>`, `IsFinal=True`). Without it the
+  installer calls itself "anaconda bluesky" with a red pre-release banner. The
+  Fedora logo in its sidebar is Fedora's own artwork; ilex has none yet.
+- Anaconda reads `interactive-defaults.ks` only when it has no kickstart: an
+  unattended install has to `%include /usr/share/anaconda/interactive-defaults.ks`
+  (without it Anaconda falls back to an RPM install from a mirror). The defaults
+  also set `xconfig --startxonboot` (Anaconda otherwise picks `multi-user.target`
+  for a bootc deployment, so no GDM) and drop the `/` line Anaconda writes into
+  `/etc/fstab` (with it `systemd-remount-fs.service` fails on the ostree root and
+  the machine boots `degraded`).
+- The installer keeps everything it writes in RAM and unpacks the payload's
+  layers into its `/var/tmp` before they reach the new root: with 6 GiB the
+  install of the ~5 GB image fails with "no space left on device", with 16 GiB
+  it works (nothing in between was measured). The installed system still calls
+  itself "Fedora Linux 45" (its os-release) and its hostname is `fedora` until
+  one is set.
 - Kickstart's `bootc` command (pykickstart) can't pass
-  `--enforce-container-sigpolicy`. After the first ISO install check what
-  `bootc status` records for the booted image; if it is not signature-verified,
-  run `sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:latest`
-  once (or have the image do it on first boot).
+  `--enforce-container-sigpolicy`, and `bootc status` of an ISO-installed machine
+  shows `spec.image` as just `{image, transport: registry}`, without a
+  `signature` entry: it tracks ghcr but is not pinned to signed images. Run
+  `sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:latest`
+  once after installing (or have the image do it on first boot).
 
 ### One-time GitHub setup (the user runs this, not an agent)
 

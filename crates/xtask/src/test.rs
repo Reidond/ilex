@@ -49,7 +49,33 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         .args(&args.test_args)
         .env("ILEX_IMAGE", &image)
         .env("ILEX_ROOT", &ws.root);
+    // `iso::` installs from an installer ISO built from the image under test.
+    if args.filters.iter().any(|f| f.contains("iso")) {
+        prepare_iso(ws, &image, &mut test)?;
+    }
     cmd::run(&mut test)
+}
+
+/// Build the installer ISO for `image` (unless `ILEX_ISO` names one already)
+/// and tell the harness what it is, what it embeds and what it tracks.
+fn prepare_iso(ws: &Workspace, image: &str, test: &mut Command) -> Result<()> {
+    if std::env::var_os("ILEX_ISO").is_some_and(|p| !p.is_empty()) {
+        return Ok(());
+    }
+    let digest = cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Digest}}", image]))?;
+    let iso = crate::iso::build(
+        ws,
+        &crate::iso::Build {
+            source: image,
+            digest: &digest,
+            target: crate::iso::DEFAULT_TARGET,
+            output_dir: None,
+        },
+    )?;
+    test.env("ILEX_ISO", iso)
+        .env("ILEX_ISO_DIGEST", digest)
+        .env("ILEX_ISO_TARGET", crate::iso::DEFAULT_TARGET);
+    Ok(())
 }
 
 /// The image to test, building it first when needed.

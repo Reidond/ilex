@@ -14,6 +14,7 @@ mod common;
 mod disk;
 mod ephemeral;
 mod graphical;
+mod iso;
 mod upgrade;
 
 fn main() {
@@ -25,6 +26,11 @@ fn main() {
     trials.extend(disk::trials());
     trials.extend(upgrade::trials());
     trials.extend(graphical::trials());
+    // Opt-in: builds an installer ISO and runs an install (tens of minutes),
+    // so it only exists when a filter asks for it (`cargo xtask test iso::`).
+    if filters.iter().any(|f| f.contains("iso")) {
+        trials.extend(iso::trials());
+    }
 
     // libtest-mimic takes a single filter; accept several and run the union.
     trials.retain(|t| filters.is_empty() || filters.iter().any(|f| matches(&args, t, f)));

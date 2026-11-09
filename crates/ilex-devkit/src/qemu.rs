@@ -307,6 +307,17 @@ pub struct VmConfig {
     pub width: u32,
     pub height: u32,
     pub display: Display,
+    /// An install ISO attached as a CD-ROM. Firmware tries the disk first and
+    /// falls through to the CD when the disk is empty.
+    pub cdrom: Option<PathBuf>,
+    /// Extra raw disks, attached read-write after the main one (an installer
+    /// finds its kickstart on one labelled `OEMDRV`).
+    pub extra_disks: Vec<PathBuf>,
+    /// Keep the UEFI variable store here, copying the firmware's template when
+    /// it doesn't exist yet. Boot entries an installer writes survive into
+    /// later boots that name the same file; by default every boot starts from
+    /// a fresh store in the VM's runtime directory.
+    pub efi_vars: Option<PathBuf>,
 }
 
 impl VmConfig {
@@ -321,6 +332,9 @@ impl VmConfig {
             width: 1280,
             height: 800,
             display: Display::None,
+            cdrom: None,
+            extra_disks: Vec::new(),
+            efi_vars: None,
         }
     }
 
@@ -363,8 +377,17 @@ impl Vm {
 
         let key = test_key(ws)?;
         let (ovmf_code, ovmf_vars) = find_ovmf()?;
-        let vars = dir.join("OVMF_VARS.fd");
-        fs::copy(&ovmf_vars, &vars).with_context(|| format!("copying {}", ovmf_vars.display()))?;
+        let vars = match &config.efi_vars {
+            Some(persistent) => std::path::absolute(persistent)?,
+            None => dir.join("OVMF_VARS.fd"),
+        };
+        if config.efi_vars.is_none() || !vars.exists() {
+            if let Some(parent) = vars.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&ovmf_vars, &vars)
+                .with_context(|| format!("copying {}", ovmf_vars.display()))?;
+        }
 
         let base_disk = std::path::absolute(&config.disk)
             .with_context(|| format!("resolving {}", config.disk.display()))?;
@@ -405,7 +428,16 @@ impl Vm {
             .arg("-drive")
             .arg(format!("if=pflash,format=raw,unit=1,file={}", vars.display()))
             .arg("-drive")
-            .arg(format!("if=virtio,format={drive_format},file={}", drive_file.display()))
+            .arg(format!("if=virtio,format={drive_format},file={}", drive_file.display()));
+        if let Some(iso) = &config.cdrom {
+            qemu.arg("-drive")
+                .arg(format!("media=cdrom,readonly=on,file={}", std::path::absolute(iso)?.display()));
+        }
+        for extra in &config.extra_disks {
+            qemu.arg("-drive")
+                .arg(format!("if=virtio,format=raw,file={}", std::path::absolute(extra)?.display()));
+        }
+        qemu
             .arg("-device")
             .arg(format!("virtio-vga,xres={},yres={}", config.width, config.height))
             .args(["-device", "virtio-tablet-pci", "-device", "virtio-keyboard-pci"])

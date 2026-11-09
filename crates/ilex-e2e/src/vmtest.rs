@@ -57,6 +57,11 @@ impl Report {
         }
     }
 
+    /// Has any check failed so far?
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
+    }
+
     pub fn finish(self) -> Result<()> {
         if self.failures.is_empty() {
             Ok(())
