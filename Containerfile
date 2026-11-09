@@ -19,7 +19,8 @@ FROM quay.io/fedora/fedora-bootc:45
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     --mount=type=bind,source=packages.txt,target=/tmp/packages.txt \
     sed 's/#.*//' /tmp/packages.txt | xargs dnf -y install --setopt=keepcache=1 && \
-    rm -rf /var/log/* /var/tmp/* /var/lib/dnf/repos /tmp/*
+    rm -rf /var/log/* /var/lib/dnf/repos && \
+    find /tmp /var/tmp -mindepth 1 -maxdepth 1 ! -path /tmp/packages.txt -exec rm -rf {} +
 
 COPY rootfs/ /
 COPY --from=build /out/ /
