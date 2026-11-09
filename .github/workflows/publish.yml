@@ -18,6 +18,10 @@ on:
         description: Build the installer ISO from the published :latest even if the image is unchanged
         type: boolean
         default: false
+      test:
+        description: Run the e2e tests even if the image is unchanged (to check CI changes from a branch; only main publishes)
+        type: boolean
+        default: false
 
 concurrency:
   group: publish
@@ -71,6 +75,15 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system skopeo
+          # The upgrade tier drives system libvirt as the `runner` user (bcvk
+          # libvirt run). Ubuntu opens the libvirt socket only to the `libvirt`
+          # group (the tests run under `sg libvirt`), and libvirt's AppArmor
+          # driver confines QEMU and virtiofsd, which would keep the guest from
+          # the virtiofs share of runner's container storage. Throwaway VM:
+          # join the group and turn the driver off.
+          sudo usermod -aG libvirt "$USER"
+          echo 'security_driver = "none"' | sudo tee -a /etc/libvirt/qemu.conf
+          for unit in libvirtd virtqemud; do sudo systemctl try-restart "$unit" || true; done
           curl -fsSL -o "$RUNNER_TEMP/bcvk.tar.gz" \
             "https://github.com/bootc-dev/bcvk/releases/download/${BCVK_VERSION}/bcvk-x86_64-unknown-linux-gnu.tar.gz"
           echo "${BCVK_SHA256}  $RUNNER_TEMP/bcvk.tar.gz" | sha256sum --check -
@@ -100,11 +113,15 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # The very first run has no published :latest, so there is nothing to
-      # upgrade from and the upgrade tier is skipped.
+      # upgrade from and the upgrade tier is skipped. `sg libvirt` gives this
+      # shell the group joined above without a new login.
       - name: e2e tests
-        if: steps.changed.outputs.changed == 'true'
+        if: steps.changed.outputs.changed == 'true' || inputs.test
+        env:
+          TIERS: "ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}"
         run: |
-          cargo xtask test ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}
+          trap 'if [ $? -ne 0 ]; then sudo dmesg | grep -iE "apparmor|denied" | tail -40; fi' EXIT
+          sg libvirt -c "cargo xtask test $TIERS"
 
       # Only main publishes: a manual run dispatched from another branch still
       # builds and tests, but never moves :latest.
