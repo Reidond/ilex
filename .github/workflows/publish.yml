@@ -166,14 +166,15 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
-  # Runs after a successful publish, from the digest just published, or on a
-  # manual run with `iso` checked, from the published :latest. A failure here
-  # never unpublishes the image.
+  # Runs after a successful publish on main, from the digest just published.
+  # A manual run with `iso` checked builds from the published :latest; from a
+  # branch it builds with --no-push, to check ISO changes without touching
+  # ilex-iso. A failure here never unpublishes the image.
   iso:
     needs: publish
     if: >-
-      needs.publish.result == 'success' && github.ref == 'refs/heads/main' &&
-      (needs.publish.outputs.changed == 'true' || inputs.iso)
+      needs.publish.result == 'success' &&
+      ((github.ref == 'refs/heads/main' && needs.publish.outputs.changed == 'true') || inputs.iso)
     runs-on: ubuntu-26.04
     timeout-minutes: 120
     steps:
@@ -186,15 +187,16 @@ jobs:
           sudo docker image prune --all --force || true
           df -h / /mnt
 
-      # osbuild (inside image-builder) bind-mounts container storage in its
-      # sandbox. On Ubuntu 24.04+ hosts AppArmor confines unprivileged user
-      # namespaces (kernel.apparmor_restrict_unprivileged_userns=1), and that
-      # mount fails ("mount: /run/osbuild/containers/storage: permission
-      # denied") whether the container comes from a `container:` job or from
-      # podman. The runner is a throwaway VM, so lift the restriction, the
-      # usual fix for bubblewrap-based tools there; if the build still fails,
-      # print the kernel's AppArmor denials. The job runs on the host and
-      # starts its own rootful, privileged Fedora 45 container with podman.
+      # osbuild (inside image-builder) runs its stages in a bubblewrap sandbox
+      # and bind-mounts container storage there. Ubuntu 24.04+ confines
+      # bubblewrap with AppArmor: the `bwrap-userns-restrict` profile attaches
+      # to any /usr/bin/bwrap by path, even inside our unconfined container,
+      # and its `unpriv_bwrap` child denies setuid, chown and the sys_admin
+      # the mount needs ("mount: /run/osbuild/containers/storage: permission
+      # denied"). On the throwaway runner, unload that profile and lift the
+      # user-namespace restriction; if the build still fails, print the
+      # kernel's AppArmor denials. The job runs on the host and starts its
+      # own rootful, privileged Fedora 45 container with podman.
       # Container storage, image-builder's cache, the ISO and TMPDIR live on
       # the runner's big /mnt disk, off overlayfs (podman can't nest overlay
       # on overlay). `generic-iso` needs image-builder 89, which Fedora 45 has
@@ -211,20 +213,26 @@ jobs:
           fi
           export ILEX_ISO_SOURCE="${image}@${DIGEST}"
           echo "installer payload: ${ILEX_ISO_SOURCE}"
+          if [ -e /etc/apparmor.d/bwrap-userns-restrict ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
+          fi
           for knob in kernel.apparmor_restrict_unprivileged_userns \
                       kernel.apparmor_restrict_unprivileged_unconfined; do
             if sudo sysctl -n "$knob" >/dev/null 2>&1; then sudo sysctl -w "$knob=0"; fi
           done
+          sudo aa-status 2>/dev/null | grep -i bwrap || echo "no bwrap AppArmor profile loaded"
           trap 'if [ $? -ne 0 ]; then sudo dmesg | grep -iE "apparmor|denied" | tail -40; fi' EXIT
+          # Only main pushes the ISO; a manual run from a branch builds it and stops.
+          if [ "$GITHUB_REF" = refs/heads/main ]; then export ILEX_ISO_PUSH=""; else export ILEX_ISO_PUSH=--no-push; fi
           sudo mkdir -p /mnt/ilex/containers /mnt/ilex/image-builder /mnt/ilex/state/tmp
-          sudo --preserve-env=ILEX_ISO_SOURCE,REGISTRY_TOKEN,GITHUB_ACTOR,GITHUB_REPOSITORY_OWNER,GITHUB_ACTIONS,CI \
+          sudo --preserve-env=ILEX_ISO_SOURCE,ILEX_ISO_PUSH,REGISTRY_TOKEN,GITHUB_ACTOR,GITHUB_REPOSITORY_OWNER,GITHUB_ACTIONS,CI \
             podman run --rm --privileged --security-opt label=disable \
               --security-opt apparmor=unconfined --security-opt seccomp=unconfined \
               -v "$PWD:/src" -w /src \
               -v /mnt/ilex/containers:/var/lib/containers \
               -v /mnt/ilex/image-builder:/var/cache/image-builder \
               -v /mnt/ilex/state:/mnt/ilex-state \
-              -e ILEX_ISO_SOURCE -e REGISTRY_TOKEN -e GITHUB_ACTOR \
+              -e ILEX_ISO_SOURCE -e ILEX_ISO_PUSH -e REGISTRY_TOKEN -e GITHUB_ACTOR \
               -e GITHUB_REPOSITORY_OWNER -e GITHUB_ACTIONS -e CI \
               -e ILEX_STATE_DIR=/mnt/ilex-state -e TMPDIR=/mnt/ilex-state/tmp \
               quay.io/fedora/fedora:45 bash -euxc '
@@ -232,5 +240,5 @@ jobs:
                 dnf -y install --enablerepo=updates-testing image-builder
                 image-builder version
                 git config --global --add safe.directory /src
-                cargo xtask iso "$ILEX_ISO_SOURCE"
+                cargo xtask iso $ILEX_ISO_PUSH "$ILEX_ISO_SOURCE"
               '
