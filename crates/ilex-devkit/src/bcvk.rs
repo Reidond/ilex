@@ -11,6 +11,7 @@
 //! show their output only when they fail.
 
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -354,10 +355,28 @@ impl LibvirtVm {
         if opts.update_from_host {
             run.arg("--update-from-host");
         }
+        let logs = console_logs(name)?;
+        if let Some((console, platform)) = &logs {
+            run.arg("--console-log").arg(console);
+            run.arg("--platform-console-log").arg(platform);
+        }
         run.args(&opts.extra_args).arg(image);
         cmd::run(&mut run).with_context(|| format!("installing libvirt VM {name}"))?;
 
-        vm.wait_ssh(opts.boot_timeout)?;
+        if let Err(err) = vm.wait_ssh(opts.boot_timeout) {
+            // The domain is removed on drop: keep what its consoles said.
+            let Some((console, platform)) = &logs else {
+                return Err(err);
+            };
+            return Err(err.context(format!(
+                "platform console (UEFI/bootloader), last lines of {}:\n{}\n\
+                 OS console (hvc0), last lines of {}:\n{}",
+                platform.display(),
+                tail(platform, 30),
+                console.display(),
+                tail(console, 60),
+            )));
+        }
         Ok(vm)
     }
 
@@ -455,5 +474,33 @@ impl LibvirtVm {
 impl Drop for LibvirtVm {
     fn drop(&mut self) {
         self.remove();
+    }
+}
+
+/// With `ILEX_VM_LOG_DIR` set, where a libvirt VM's OS console (hvc0) and
+/// platform console (UEFI/bootloader on ttyS0) are logged:
+/// `<dir>/<name>-console.log`, `<dir>/<name>-platform.log`. CI sets it and
+/// keeps the files as artifacts, since the domain itself is removed on drop.
+fn console_logs(name: &str) -> Result<Option<(PathBuf, PathBuf)>> {
+    let Some(dir) = std::env::var_os("ILEX_VM_LOG_DIR").filter(|d| !d.is_empty()) else {
+        return Ok(None);
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(Some((
+        dir.join(format!("{name}-console.log")),
+        dir.join(format!("{name}-platform.log")),
+    )))
+}
+
+/// The last `lines` lines of a log file, or why it can't be read.
+fn tail(path: &Path, lines: usize) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes);
+            let all: Vec<&str> = text.lines().collect();
+            all[all.len().saturating_sub(lines)..].join("\n")
+        }
+        Err(e) => format!("(unreadable: {e})"),
     }
 }

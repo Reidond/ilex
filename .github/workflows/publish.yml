@@ -74,7 +74,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system skopeo
+          sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo
           # The upgrade tier drives system libvirt as the `runner` user (bcvk
           # libvirt run). Ubuntu opens the libvirt socket only to the `libvirt`
           # group (the tests run under `sg libvirt`), and libvirt's AppArmor
@@ -119,12 +119,30 @@ jobs:
       # upgrade from and the upgrade tier is skipped. `sg libvirt` gives this
       # shell the group joined above without a new login.
       - name: e2e tests
+        id: e2e
         if: steps.changed.outputs.changed == 'true' || inputs.test
         env:
           TIERS: "ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}"
+          # The upgrade tier logs its libvirt VM's consoles here (the domain
+          # itself is removed when the test ends); kept as an artifact.
+          ILEX_VM_LOG_DIR: ${{ runner.temp }}/vm-logs
         run: |
-          trap 'if [ $? -ne 0 ]; then sudo dmesg | grep -iE "apparmor|denied" | tail -40; fi' EXIT
+          mkdir -p "$ILEX_VM_LOG_DIR" && chmod 1777 "$ILEX_VM_LOG_DIR"
+          trap 'if [ $? -ne 0 ]; then
+                  sudo dmesg | grep -iE "apparmor|denied" | tail -40
+                  sudo sh -c "tail -n 40 /var/log/libvirt/qemu/*.log" || true
+                  sudo cp /var/log/libvirt/qemu/*.log "$ILEX_VM_LOG_DIR/" 2>/dev/null || true
+                  sudo chmod -R a+r "$ILEX_VM_LOG_DIR" || true
+                fi' EXIT
           sg libvirt -c "cargo xtask test $TIERS"
+
+      - name: Keep VM logs
+        if: failure() && steps.e2e.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-logs
+          path: ${{ runner.temp }}/vm-logs
+          if-no-files-found: ignore
 
       # Only main publishes: a manual run dispatched from another branch still
       # builds and tests, but never moves :latest.
