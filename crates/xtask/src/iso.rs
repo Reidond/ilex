@@ -26,6 +26,9 @@ use crate::registry::{self, Auth};
 
 /// Media type of the ISO layer in the OCI artifact.
 const ISO_MEDIA_TYPE: &str = "application/x-iso9660-image";
+/// What installed machines update from when nothing else is asked for; the
+/// installer Containerfile's `TARGET_IMGREF` default matches.
+pub const DEFAULT_TARGET: &str = "ghcr.io/reidond/ilex:latest";
 /// Basename of the ISO that is built and pushed.
 const ISO_NAME: &str = "ilex-installer";
 
@@ -75,7 +78,6 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         Some(repo)
     };
     cmd::require("podman")?;
-    cmd::require("image-builder")?;
     let auth = Auth::login(iso_repo.as_deref().unwrap_or(image_repo))?;
 
     // The payload has to be in the local container storage: image-builder
@@ -91,63 +93,15 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         cmd::run(&mut pull)?;
     }
 
-    // The ISO embeds exactly this digest, but under a local tag: image-builder
-    // copies the payload between container storages, which can't reproduce
-    // the compressed layers a `…@sha256:` destination name would require
-    // ("Destination specifies a digest").
-    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-    let payload_ref = format!("localhost/ilex-payload:{}", &hex[..12.min(hex.len())]);
-    cmd::run(Command::new("podman").args(["tag", payload, &payload_ref]))?;
-
-    // The installer container, with the kickstart pointing at the payload.
-    let installer = format!("localhost/ilex-installer:{}", ws.slug);
-    let context = ws.root.join("installer");
-    cmd::run(
-        Command::new("podman")
-            // Host networking: in CI this runs podman inside a container,
-            // where the nested bridge network has no DNS.
-            .args(["build", "--network=host", "--file"])
-            .arg(context.join("Containerfile"))
-            .args(["--build-arg", &format!("PAYLOAD_REF={payload_ref}")])
-            .args(["--build-arg", &format!("TARGET_IMGREF={target}")])
-            .args(["--tag", &installer])
-            .arg(&context),
+    let iso = build(
+        ws,
+        &Build {
+            source: payload,
+            digest,
+            target: &target,
+            output_dir: args.output_dir.as_deref(),
+        },
     )?;
-
-    // image-builder turns the installer container into the ISO.
-    let out_dir = args
-        .output_dir
-        .unwrap_or_else(|| ws.state_dir().join("iso"));
-    if out_dir.exists() {
-        fs::remove_dir_all(&out_dir).with_context(|| format!("clearing {}", out_dir.display()))?;
-    }
-    fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
-    cmd::run(
-        Command::new("image-builder")
-            .arg("build")
-            .args(["--bootc-ref", &installer])
-            .args(["--bootc-installer-payload-ref", &payload_ref])
-            // image-builder wants a default root filesystem for the installer
-            // container; it isn't used for the machines Anaconda installs.
-            .args(["--bootc-default-fs", "ext4"])
-            .args(["--output-name", ISO_NAME])
-            .arg("--output-dir")
-            .arg(&out_dir)
-            // `generic-iso` needs image-builder >= 89 (Fedora 45 updates-testing
-            // at the time of writing). 87's `bootc-installer` is a different
-            // design: it builds Anaconda itself and ignores the container's
-            // kickstart, installing unattended and wiping all disks.
-            .arg("generic-iso"),
-    )?;
-    // Only a tag; the image stays in storage for the next run.
-    let _ = Command::new("podman").args(["rmi", &payload_ref]).output();
-    let iso = find_iso(&out_dir)?;
-    let size = fs::metadata(&iso)?.len();
-    eprintln!(
-        "built {} ({:.2} GiB)",
-        iso.display(),
-        size as f64 / (1u64 << 30) as f64
-    );
 
     let Some(iso_repo) = iso_repo else {
         println!("{}", iso.display());
@@ -156,6 +110,185 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     push(&iso, &iso_repo, &auth)?;
     registry::github_output("iso", &format!("{iso_repo}:latest"))?;
     Ok(())
+}
+
+/// What to build an ISO from.
+pub struct Build<'a> {
+    /// A reference to the payload podman can tag: it must be in local
+    /// container storage.
+    pub source: &'a str,
+    /// Its manifest digest (`sha256:…`); names the output directory and the
+    /// payload's tag inside the ISO.
+    pub digest: &'a str,
+    /// The image the installed machine updates from (`--target-imgref`).
+    pub target: &'a str,
+    /// Where the ISO goes (default `<state dir>/iso/<digest prefix>`).
+    pub output_dir: Option<&'a Path>,
+}
+
+/// Build the installer container and the ISO for `spec` and return the path
+/// of the ISO. Nothing is pushed.
+pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
+    // The ISO embeds exactly this digest, but under a local tag: image-builder
+    // copies the payload between container storages, which can't reproduce
+    // the compressed layers a `…@sha256:` destination name would require
+    // ("Destination specifies a digest").
+    let hex = spec.digest.strip_prefix("sha256:").unwrap_or(spec.digest);
+    let short = &hex[..12.min(hex.len())];
+    let payload_ref = format!("localhost/ilex-payload:{short}");
+    cmd::run(Command::new("podman").args(["tag", spec.source, &payload_ref]))?;
+
+    // The installer container, with the kickstart pointing at the payload.
+    let installer = format!("localhost/ilex-installer:{}", ws.slug);
+    let context = ws.root.join("installer");
+    let mut podman = Command::new("podman");
+    // Host networking: in CI this runs podman inside a container, where the
+    // nested bridge network has no DNS.
+    podman
+        .args(["build", "--network=host", "--file"])
+        .arg(context.join("Containerfile"))
+        .args(["--build-arg", &format!("PAYLOAD_REF={payload_ref}")])
+        .args(["--build-arg", &format!("TARGET_IMGREF={}", spec.target)]);
+    // The installer reports the Fedora release the payload is built on.
+    if let Some(version) = product_version(spec.source) {
+        podman.args(["--build-arg", &format!("PRODUCT_VERSION={version}")]);
+    }
+    cmd::run(podman.args(["--tag", &installer]).arg(&context))?;
+
+    // image-builder turns the installer container into the ISO.
+    let out_dir = match spec.output_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => ws.state_dir().join("iso").join(short),
+    };
+    if out_dir.exists() {
+        fs::remove_dir_all(&out_dir).with_context(|| format!("clearing {}", out_dir.display()))?;
+    }
+    fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    let out_dir = std::path::absolute(&out_dir)?;
+    run_image_builder(ws, &installer, &payload_ref, &out_dir)?;
+    // Only a tag; the image stays in storage for the next run.
+    let _ = Command::new("podman").args(["rmi", &payload_ref]).output();
+
+    let iso = find_iso(&out_dir)?;
+    let size = fs::metadata(&iso)?.len();
+    eprintln!(
+        "built {} ({:.2} GiB)",
+        iso.display(),
+        size as f64 / (1u64 << 30) as f64
+    );
+    Ok(iso)
+}
+
+/// The Fedora release a payload is built on: the first component of its
+/// `org.opencontainers.image.version` label (`45.20261108.0` → `45`).
+fn product_version(image: &str) -> Option<String> {
+    let version = crate::rechunk::local_label(image, "org.opencontainers.image.version")
+        .ok()
+        .flatten()?;
+    let major = version.split('.').next()?;
+    major
+        .chars()
+        .all(|c| c.is_ascii_digit())
+        .then(|| major.to_string())
+}
+
+/// The `generic-iso` image type (Anaconda inside the installer container,
+/// kickstart from the container) needs image-builder 89; Fedora 45's stable
+/// repository has 87, whose only installer type is the unattended,
+/// disk-wiping `bootc-installer`.
+const MIN_IMAGE_BUILDER: u32 = 89;
+/// Where a too-old or missing host image-builder is replaced by one in a
+/// container (Fedora 45 `updates-testing`).
+const IMAGE_BUILDER_IMAGE: &str = "localhost/ilex-image-builder:latest";
+
+/// Major version of the image-builder on `PATH`, if there is one.
+fn host_image_builder() -> Option<u32> {
+    let out = cmd::probe(Command::new("image-builder").arg("version"))?;
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("version:"))
+        .and_then(|v| v.trim().split('.').next()?.parse().ok())
+}
+
+/// Run `image-builder build … generic-iso`: directly when the one on `PATH`
+/// is new enough (CI), otherwise inside a privileged Fedora 45 container that
+/// shares this host's container storage, so a dev machine with an older
+/// image-builder (or none) works the same.
+fn run_image_builder(
+    ws: &Workspace,
+    installer: &str,
+    payload_ref: &str,
+    out_dir: &Path,
+) -> Result<()> {
+    let build_args = |out: &str| -> Vec<String> {
+        [
+            "build",
+            "--bootc-ref",
+            installer,
+            "--bootc-installer-payload-ref",
+            payload_ref,
+            // image-builder wants a default root filesystem for the installer
+            // container; it isn't used for the machines Anaconda installs.
+            "--bootc-default-fs",
+            "ext4",
+            "--output-name",
+            ISO_NAME,
+            "--output-dir",
+            out,
+            "generic-iso",
+        ]
+        .map(String::from)
+        .to_vec()
+    };
+
+    if host_image_builder().is_some_and(|v| v >= MIN_IMAGE_BUILDER) {
+        return cmd::run(
+            Command::new("image-builder").args(build_args(&out_dir.to_string_lossy())),
+        );
+    }
+    eprintln!(
+        "xtask: image-builder {} on PATH; running version {MIN_IMAGE_BUILDER}+ in a container",
+        host_image_builder().map_or("is not".to_string(), |v| format!("{v} is too old:")),
+    );
+
+    // The image-builder container.
+    let context = ws.root.join("installer").join("image-builder");
+    cmd::run(
+        Command::new("podman")
+            .args(["build", "--network=host", "--file"])
+            .arg(context.join("Containerfile"))
+            .args(["--tag", IMAGE_BUILDER_IMAGE])
+            .arg(&context),
+    )?;
+
+    // It reads the installer and payload from this host's container storage
+    // and keeps osbuild's cache next to it; neither may sit on the
+    // container's own overlayfs (podman can't nest overlay on overlay).
+    let graph_root =
+        cmd::output(Command::new("podman").args(["info", "--format", "{{.Store.GraphRoot}}"]))?;
+    let storage = Path::new(&graph_root)
+        .parent()
+        .unwrap_or(Path::new("/var/lib/containers"));
+    let cache = Path::new("/var/cache/image-builder");
+    fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
+    let mut run = Command::new("podman");
+    run.args(["run", "--rm", "--privileged", "--network=host"])
+        .args(["--security-opt", "label=disable"])
+        .arg("--volume")
+        .arg(format!("{0}:{0}", storage.display()))
+        .arg("--volume")
+        .arg(format!("{0}:{0}", cache.display()))
+        .arg("--volume")
+        .arg(format!("{}:/out", out_dir.display()))
+        .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"])
+        .arg(IMAGE_BUILDER_IMAGE)
+        .args([
+            "sh",
+            "-c",
+            "mkdir -p \"$TMPDIR\" && exec image-builder \"$@\"",
+            "image-builder",
+        ])
+        .args(build_args("/out"));
+    cmd::run(&mut run)
 }
 
 /// The `.iso` image-builder wrote somewhere below `dir`.

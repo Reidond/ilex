@@ -138,10 +138,14 @@ jobs:
           df -h / /mnt
 
       # osbuild (inside image-builder) bind-mounts container storage in its
-      # sandbox, which fails in a GitHub `container:` job on this host
-      # ("mount: /run/osbuild/containers/storage: permission denied"). So the
-      # job runs on the host and starts its own rootful, privileged Fedora 45
-      # container with podman, the way osbuild's own tools are run in CI.
+      # sandbox. On Ubuntu 24.04+ hosts AppArmor confines unprivileged user
+      # namespaces (kernel.apparmor_restrict_unprivileged_userns=1), and that
+      # mount fails ("mount: /run/osbuild/containers/storage: permission
+      # denied") whether the container comes from a `container:` job or from
+      # podman. The runner is a throwaway VM, so lift the restriction, the
+      # usual fix for bubblewrap-based tools there; if the build still fails,
+      # print the kernel's AppArmor denials. The job runs on the host and
+      # starts its own rootful, privileged Fedora 45 container with podman.
       # Container storage, image-builder's cache, the ISO and TMPDIR live on
       # the runner's big /mnt disk, off overlayfs (podman can't nest overlay
       # on overlay). `generic-iso` needs image-builder 89, which Fedora 45 has
@@ -158,6 +162,11 @@ jobs:
           fi
           export ILEX_ISO_SOURCE="${image}@${DIGEST}"
           echo "installer payload: ${ILEX_ISO_SOURCE}"
+          for knob in kernel.apparmor_restrict_unprivileged_userns \
+                      kernel.apparmor_restrict_unprivileged_unconfined; do
+            if sudo sysctl -n "$knob" >/dev/null 2>&1; then sudo sysctl -w "$knob=0"; fi
+          done
+          trap 'if [ $? -ne 0 ]; then sudo dmesg | grep -iE "apparmor|denied" | tail -40; fi' EXIT
           sudo mkdir -p /mnt/ilex/containers /mnt/ilex/image-builder /mnt/ilex/state/tmp
           sudo --preserve-env=ILEX_ISO_SOURCE,REGISTRY_TOKEN,GITHUB_ACTOR,GITHUB_REPOSITORY_OWNER,GITHUB_ACTIONS,CI \
             podman run --rm --privileged --security-opt label=disable \
