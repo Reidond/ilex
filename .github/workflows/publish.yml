@@ -32,7 +32,10 @@ env:
 
 jobs:
   publish:
-    runs-on: ubuntu-24.04
+    # 26.04, not 24.04: its podman 5.7 / buildah 1.42 / skopeo 1.21 are close
+    # to the Fedora 45 dev box; 24.04's podman 4.9 rejects Containerfile
+    # syntax the dev box accepts.
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
@@ -112,7 +115,7 @@ jobs:
   iso:
     needs: publish
     if: needs.publish.result == 'success' && needs.publish.outputs.changed == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     container:
       image: quay.io/fedora/fedora:45

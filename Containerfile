@@ -11,12 +11,16 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
 # instead of rebuilt. kache has no official container image, so take the
 # release tarball for x86_64 Linux (static musl, runs on any glibc) and pin it
 # by sha256. v2 is two executables, `kache` and `kache-engine`, which must sit
-# side by side. To bump: change the version in the URL and the sha256
+# side by side. To bump: change the version and the sha256
 # (`gh release view vX.Y.Z -R kunobi-ninja/kache --json assets`).
-ADD --checksum=sha256:6c59665faf1b14d0944391e6f2a1b510195e6be92c63060a9d1770ed00676824 \
-    https://github.com/kunobi-ninja/kache/releases/download/v2.0.0/kache-x86_64-unknown-linux-musl.tar.gz \
-    /tmp/kache.tar.gz
-RUN tar -xzf /tmp/kache.tar.gz -C /usr/local/bin kache kache-engine && \
+# Checked with sha256sum rather than `ADD --checksum`, which the podman 4.9 on
+# CI's Ubuntu runners rejects.
+ARG KACHE_VERSION=2.0.0
+ARG KACHE_SHA256=6c59665faf1b14d0944391e6f2a1b510195e6be92c63060a9d1770ed00676824
+RUN curl -fsSL -o /tmp/kache.tar.gz \
+      "https://github.com/kunobi-ninja/kache/releases/download/v${KACHE_VERSION}/kache-x86_64-unknown-linux-musl.tar.gz" && \
+    echo "${KACHE_SHA256}  /tmp/kache.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/kache.tar.gz -C /usr/local/bin kache kache-engine && \
     rm /tmp/kache.tar.gz && \
     kache --version
 
