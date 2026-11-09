@@ -1,7 +1,7 @@
 //! `cargo xtask iso <image@digest>`: build the installer ISO for a published
 //! digest and push it to `ghcr.io/<owner>/ilex-iso` (CI only).
 //!
-//! The ISO is built by `image-builder` from `installer/Containerfile` (a
+//! The ISO is built by `image-builder` from the installer container (a
 //! fedora-bootc image with Anaconda in it) with the ilex image embedded as the
 //! payload in the installer's container storage. The kickstart defaults make
 //! Anaconda install that image (`--source-imgref containers-storage:…`) and
@@ -9,10 +9,19 @@
 //! is pinned to the digest you pass: that is the image that gets embedded,
 //! under a local tag derived from the digest.
 //!
+//! The installer container is two layers: `installer/base/` (Anaconda and the
+//! initramfs, which take most of the build) is built once per content hash and
+//! Fedora release and cached as `ghcr.io/<owner>/ilex-installer-base:<tag>`;
+//! `installer/Containerfile` adds the kickstart for one payload on top.
+//!
 //! An ISO carrying a ~2 GB image can exceed GitHub's 2 GiB release asset
 //! limit, so it is pushed to ghcr as an OCI artifact (`podman artifact`) as
 //! `:latest` and `:YYYYMMDD`. Pull it with `podman artifact pull` or `oras
 //! pull`. `--no-push` builds the ISO and stops, which works outside CI.
+//!
+//! `--due` builds nothing: it says whether a new ISO is worth building (and
+//! writes `iso_due=` to `$GITHUB_OUTPUT`). Installed machines update
+//! themselves to `:latest`, so the ISO may lag the image by up to a week.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +29,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use ilex_devkit::{Workspace, cmd};
+use sha2::{Digest, Sha256};
 
 use crate::build::image_exists;
 use crate::registry::{self, Auth};
@@ -31,11 +41,21 @@ const ISO_MEDIA_TYPE: &str = "application/x-iso9660-image";
 pub const DEFAULT_TARGET: &str = "ghcr.io/reidond/ilex:latest";
 /// Basename of the ISO that is built and pushed.
 const ISO_NAME: &str = "ilex-installer";
+/// Repo paths (relative to the checkout) that make one ISO differ from the
+/// next apart from its payload.
+const INSTALLER_INPUTS: &[&str] = &["installer", "crates/xtask/src/iso.rs"];
+/// Annotations on the pushed ISO: what the installer was built from, and
+/// which image it embeds. `--due` compares them with the current ones.
+const FINGERPRINT_ANNOTATION: &str = "ilex.installer-fingerprint";
+const PAYLOAD_ANNOTATION: &str = "ilex.payload-digest";
+/// Repository name (under the owner) of the cached installer base.
+const BASE_REPOSITORY: &str = "ilex-installer-base";
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
     /// ilex image to install, pinned by digest: `ghcr.io/<owner>/ilex@sha256:…`
-    pub image: String,
+    /// (not needed with `--due`)
+    pub image: Option<String>,
     /// Build the ISO but don't push it (allowed outside CI)
     #[arg(long)]
     pub no_push: bool,
@@ -52,19 +72,37 @@ pub struct Args {
     /// Outside CI, allow pushing to a registry on this machine
     #[arg(long)]
     pub allow_local_registry: bool,
+    /// Don't build: say whether a new ISO is due. It is when no ISO is
+    /// published, when `installer/` (or this module) changed since the
+    /// published one, or when `:latest` has moved on from the image the
+    /// published ISO embeds and that ISO is at least `--max-age-days` old.
+    #[arg(long)]
+    pub due: bool,
+    /// With `--due`: how long an ISO may lag the published image
+    #[arg(long, default_value_t = 7)]
+    pub max_age_days: u64,
+    /// With `--due`: repository of the published image (default
+    /// `ghcr.io/<owner>/ilex`)
+    #[arg(long)]
+    pub image_repository: Option<String>,
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
-    let Some((image_repo, digest)) = args.image.split_once('@') else {
+    if args.due {
+        return due(ws, &args);
+    }
+    let Some(image) = args.image.as_deref() else {
         bail!(
-            "expected an image pinned by digest (`ghcr.io/<owner>/ilex@sha256:…`), got {}",
-            args.image
+            "give the image to install, pinned by digest (`ghcr.io/<owner>/ilex@sha256:…`), or --due"
         );
+    };
+    let Some((image_repo, digest)) = image.split_once('@') else {
+        bail!("expected an image pinned by digest (`ghcr.io/<owner>/ilex@sha256:…`), got {image}");
     };
     if !registry::is_digest(digest) {
         bail!("{digest:?} is not a sha256 digest");
     }
-    let payload = args.image.as_str();
+    let payload = image;
     let target = args
         .target_imgref
         .clone()
@@ -93,6 +131,15 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         cmd::run(&mut pull)?;
     }
 
+    // The installer base is cached in the registry's namespace when we know
+    // it (CI); only a run that is allowed to publish writes to the cache.
+    let base_repository = registry::repository(None, BASE_REPOSITORY).ok();
+    let base_cache = base_repository.as_deref().map(|repository| BaseCache {
+        repository,
+        auth: &auth,
+        push: registry::is_ci() && std::env::var("ILEX_INSTALLER_BASE_PUSH").as_deref() == Ok("1"),
+    });
+
     let iso = build(
         ws,
         &Build {
@@ -100,6 +147,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             digest,
             target: &target,
             output_dir: args.output_dir.as_deref(),
+            base_cache,
         },
     )?;
 
@@ -107,9 +155,18 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         println!("{}", iso.display());
         return Ok(());
     };
-    push(&iso, &iso_repo, &auth)?;
+    push(&iso, &iso_repo, &auth, &installer_fingerprint(ws)?, digest)?;
     registry::github_output("iso", &format!("{iso_repo}:latest"))?;
     Ok(())
+}
+
+/// Where the prebuilt installer base is cached.
+pub struct BaseCache<'a> {
+    /// `ghcr.io/<owner>/ilex-installer-base`
+    pub repository: &'a str,
+    pub auth: &'a Option<Auth>,
+    /// Push a base that had to be built.
+    pub push: bool,
 }
 
 /// What to build an ISO from.
@@ -124,10 +181,13 @@ pub struct Build<'a> {
     pub target: &'a str,
     /// Where the ISO goes (default `<state dir>/iso/<digest prefix>`).
     pub output_dir: Option<&'a Path>,
+    /// Where to look for (and put) a prebuilt installer base.
+    pub base_cache: Option<BaseCache<'a>>,
 }
 
 /// Build the installer container and the ISO for `spec` and return the path
-/// of the ISO. Nothing is pushed.
+/// of the ISO. Nothing is pushed (but a freshly built installer base may be
+/// cached, see [`BaseCache`]).
 pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
     // The ISO embeds exactly this digest, but under a local tag: image-builder
     // copies the payload between container storages, which can't reproduce
@@ -138,22 +198,25 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
     let payload_ref = format!("localhost/ilex-payload:{short}");
     cmd::run(Command::new("podman").args(["tag", spec.source, &payload_ref]))?;
 
-    // The installer container, with the kickstart pointing at the payload.
+    // The installer base (Anaconda, the initramfs), then the kickstart for
+    // this payload on top of it. The installer reports the Fedora release
+    // the payload is built on.
+    let version = product_version(spec.source).unwrap_or_else(|| "45".to_string());
+    let base = installer_base(ws, &version, spec.base_cache.as_ref())?;
     let installer = format!("localhost/ilex-installer:{}", ws.slug);
     let context = ws.root.join("installer");
-    let mut podman = Command::new("podman");
-    // Host networking: in CI this runs podman inside a container, where the
-    // nested bridge network has no DNS.
-    podman
-        .args(["build", "--network=host", "--file"])
-        .arg(context.join("Containerfile"))
-        .args(["--build-arg", &format!("PAYLOAD_REF={payload_ref}")])
-        .args(["--build-arg", &format!("TARGET_IMGREF={}", spec.target)]);
-    // The installer reports the Fedora release the payload is built on.
-    if let Some(version) = product_version(spec.source) {
-        podman.args(["--build-arg", &format!("PRODUCT_VERSION={version}")]);
-    }
-    cmd::run(podman.args(["--tag", &installer]).arg(&context))?;
+    cmd::run(
+        Command::new("podman")
+            // Host networking: in CI this runs podman inside a container,
+            // where the nested bridge network has no DNS.
+            .args(["build", "--network=host", "--file"])
+            .arg(context.join("Containerfile"))
+            .args(["--build-arg", &format!("BASE_IMAGE={base}")])
+            .args(["--build-arg", &format!("PAYLOAD_REF={payload_ref}")])
+            .args(["--build-arg", &format!("TARGET_IMGREF={}", spec.target)])
+            .args(["--tag", &installer])
+            .arg(&context),
+    )?;
 
     // image-builder turns the installer container into the ISO.
     let out_dir = match spec.output_dir {
@@ -177,6 +240,191 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         size as f64 / (1u64 << 30) as f64
     );
     Ok(iso)
+}
+
+/// The installer base as a local image: already there, pulled from the cache
+/// repository, or built from `installer/base/`. Its tag is the Fedora release
+/// plus a hash of everything in `installer/base/`, so a change to either is a
+/// miss and nothing stale is ever reused.
+fn installer_base(ws: &Workspace, version: &str, cache: Option<&BaseCache>) -> Result<String> {
+    let context = ws.root.join("installer").join("base");
+    let mut hash = Sha256::new();
+    hash_tree(&context, &context, &mut hash)?;
+    let digest = crate::rechunk::hex(&hash.finalize());
+    let tag = format!("{version}-{}", &digest[..12]);
+    let local = format!("localhost/ilex-installer-base:{tag}");
+    if image_exists(&local) {
+        eprintln!("installer base {tag}: already in local storage");
+        return Ok(local);
+    }
+
+    let remote = cache.map(|c| format!("{}:{tag}", c.repository));
+    if let (Some(cache), Some(remote)) = (cache, &remote) {
+        let mut pull = Command::new("podman");
+        pull.args(["pull", "--quiet"]);
+        if registry::is_local_registry(cache.repository) {
+            pull.arg("--tls-verify=false");
+        }
+        pull.arg(remote);
+        registry::with_auth(cache.auth, &mut pull);
+        let pulled = registry::capture(&mut pull)?;
+        if pulled.ok {
+            cmd::run(Command::new("podman").args(["tag", remote, &local]))?;
+            eprintln!("installer base {tag}: pulled from {}", cache.repository);
+            return Ok(local);
+        }
+        eprintln!(
+            "installer base {tag}: not cached ({}); building it",
+            pulled.stderr.lines().next().unwrap_or("")
+        );
+    }
+
+    cmd::run(
+        Command::new("podman")
+            .args(["build", "--network=host", "--file"])
+            .arg(context.join("Containerfile"))
+            .args(["--build-arg", &format!("PRODUCT_VERSION={version}")])
+            .args(["--tag", &local])
+            .arg(&context),
+    )?;
+    if let (Some(cache), Some(remote)) = (cache, &remote)
+        && cache.push
+    {
+        let mut push = Command::new("podman");
+        push.arg("push");
+        if registry::is_local_registry(cache.repository) {
+            push.arg("--tls-verify=false");
+        }
+        push.arg(&local).arg(format!("docker://{remote}"));
+        registry::with_auth(cache.auth, &mut push);
+        // A cache that can't be written is a slower next run, not a failure.
+        if let Err(e) = cmd::run(&mut push) {
+            eprintln!("xtask: warning: could not cache the installer base: {e:#}");
+        }
+    }
+    Ok(local)
+}
+
+/// Hash the names and contents of everything below `path`, in sorted order.
+fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> Result<()> {
+    if path.is_dir() {
+        let mut entries = fs::read_dir(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .map(|e| e.map(|e| e.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort();
+        for entry in entries {
+            hash_tree(root, &entry, hash)?;
+        }
+    } else {
+        let name = path.strip_prefix(root).unwrap_or(path);
+        hash.update(name.to_string_lossy().replace('\\', "/").as_bytes());
+        hash.update(b"\0");
+        hash.update(fs::read(path).with_context(|| format!("reading {}", path.display()))?);
+        hash.update(b"\0");
+    }
+    Ok(())
+}
+
+/// What the installer is built from, apart from its payload: a hash of
+/// [`INSTALLER_INPUTS`].
+fn installer_fingerprint(ws: &Workspace) -> Result<String> {
+    let mut hash = Sha256::new();
+    for input in INSTALLER_INPUTS {
+        hash.update(input.as_bytes());
+        hash_tree(&ws.root, &ws.root.join(input), &mut hash)?;
+    }
+    Ok(format!("sha256:{}", crate::rechunk::hex(&hash.finalize())))
+}
+
+/// `--due`: is a new ISO worth building? Prints the answer and the reason and
+/// writes `iso_due=true|false`.
+fn due(ws: &Workspace, args: &Args) -> Result<()> {
+    let iso_repo = registry::repository(args.repository.as_deref(), "ilex-iso")?;
+    let image_repo = registry::repository(args.image_repository.as_deref(), "ilex")?;
+    let auth = Auth::login(&iso_repo)?;
+    let (is_due, reason) = iso_due(ws, &iso_repo, &image_repo, args.max_age_days, &auth)?;
+    eprintln!("installer ISO due: {is_due} ({reason})");
+    registry::github_output("iso_due", &is_due.to_string())
+}
+
+fn iso_due(
+    ws: &Workspace,
+    iso_repo: &str,
+    image_repo: &str,
+    max_age_days: u64,
+    auth: &Option<Auth>,
+) -> Result<(bool, String)> {
+    let skopeo = |repo: &str, args: &[&str]| -> Result<registry::Captured> {
+        let mut c = Command::new("skopeo");
+        c.arg("inspect").args(args);
+        if registry::is_local_registry(repo) {
+            c.arg("--tls-verify=false");
+        }
+        c.arg(format!("docker://{repo}:latest"));
+        registry::with_auth(auth, &mut c);
+        registry::capture(&mut c)
+    };
+
+    let published = skopeo(iso_repo, &["--raw"])?;
+    if !published.ok {
+        if registry::looks_missing(&published.stderr) {
+            return Ok((true, "no ISO is published yet".into()));
+        }
+        bail!(
+            "skopeo could not inspect {iso_repo}:latest: {}",
+            published.stderr
+        );
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_str(&published.stdout).context("parsing the ISO's manifest")?;
+    let annotation = |key: &str| manifest["annotations"][key].as_str();
+
+    let current = installer_fingerprint(ws)?;
+    eprintln!(
+        "installer fingerprint: {current} (published ISO: {})",
+        annotation(FINGERPRINT_ANNOTATION).unwrap_or("none")
+    );
+    if annotation(FINGERPRINT_ANNOTATION) != Some(current.as_str()) {
+        return Ok((true, "the installer changed since the published ISO".into()));
+    }
+
+    let latest = skopeo(image_repo, &["--format", "{{.Digest}}"])?;
+    if !latest.ok {
+        if registry::looks_missing(&latest.stderr) {
+            return Ok((
+                false,
+                format!("no image is published at {image_repo}:latest"),
+            ));
+        }
+        bail!(
+            "skopeo could not inspect {image_repo}:latest: {}",
+            latest.stderr
+        );
+    }
+    if annotation(PAYLOAD_ANNOTATION) == Some(latest.stdout.as_str()) {
+        return Ok((false, "the published ISO already embeds :latest".into()));
+    }
+
+    let Some(created) =
+        annotation("org.opencontainers.image.created").and_then(registry::parse_rfc3339_utc)
+    else {
+        return Ok((true, "the published ISO has no creation date".into()));
+    };
+    let age_days = registry::now_secs().saturating_sub(created) / 86_400;
+    Ok(if age_days >= max_age_days {
+        (
+            true,
+            format!("the published ISO is {age_days} days old and :latest has moved on"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "the published ISO is {age_days} days old; :latest has moved on, the weekly rebuild waits"
+            ),
+        )
+    })
 }
 
 /// The Fedora release a payload is built on: the first component of its
@@ -307,8 +555,15 @@ fn find_iso(dir: &Path) -> Result<PathBuf> {
     bail!("image-builder produced no .iso under {}", dir.display())
 }
 
-/// Push the ISO as an OCI artifact tagged `:latest` and `:YYYYMMDD`.
-fn push(iso: &Path, repository: &str, auth: &Option<Auth>) -> Result<()> {
+/// Push the ISO as an OCI artifact tagged `:latest` and `:YYYYMMDD`, with the
+/// annotations `--due` reads back.
+fn push(
+    iso: &Path,
+    repository: &str,
+    auth: &Option<Auth>,
+    installer_fingerprint: &str,
+    payload_digest: &str,
+) -> Result<()> {
     let insecure = registry::is_local_registry(repository);
     let date = registry::utc_date();
     let latest = format!("{repository}:latest");
@@ -326,6 +581,14 @@ fn push(iso: &Path, repository: &str, auth: &Option<Auth>) -> Result<()> {
             .args([
                 "--annotation",
                 "org.opencontainers.image.source=https://github.com/Reidond/ilex",
+            ])
+            .args([
+                "--annotation",
+                &format!("{FINGERPRINT_ANNOTATION}={installer_fingerprint}"),
+            ])
+            .args([
+                "--annotation",
+                &format!("{PAYLOAD_ANNOTATION}={payload_digest}"),
             ])
             .arg(&latest)
             .arg(iso),

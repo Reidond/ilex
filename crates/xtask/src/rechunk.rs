@@ -8,11 +8,14 @@
 //! package, with normalised timestamps: the same content always produces the
 //! same layers. It reads the image through a podman image mount and writes an
 //! OCI archive to stdout, so it needs no root and no access to container
-//! storage. The result replaces the input tag in place.
+//! storage. The result replaces the input tag in place, or goes to its own
+//! tag with `--output` (CI rechunks while it tests the input).
 //!
 //! The fingerprint label is the hash that `xtask changed` compares with the
 //! published image: the sorted `rpm -qa` of the image plus the git tree
-//! hashes of everything in the repo that ends up in the image.
+//! hashes of everything in the repo that ends up in the image. It is the
+//! same before and after the rechunk, so `xtask changed` can decide on the
+//! image as built.
 
 use std::process::{Command, Stdio};
 
@@ -36,9 +39,17 @@ const INPUTS: &[&str] = &[
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
-    /// Image to rechunk in place: tag (e.g. `candidate`) or full reference
-    /// (defaults to this checkout's image)
+    /// Image to rechunk: tag (e.g. `candidate`) or full reference (defaults to
+    /// this checkout's image). Replaced in place unless `--output` is given.
     pub image: Option<String>,
+    /// Write the rechunked image to this tag or reference and leave the input
+    /// as it is, so the input can be tested while this runs
+    #[arg(long)]
+    pub output: Option<String>,
+    /// Write this fingerprint into the label instead of computing it (the
+    /// `fingerprint=` that `xtask changed` printed)
+    #[arg(long)]
+    pub fingerprint: Option<String>,
     /// Maximum number of layers in the result
     #[arg(long)]
     pub max_layers: Option<u32>,
@@ -46,18 +57,30 @@ pub struct Args {
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     cmd::require("podman")?;
-    let image = ws.resolve_image(args.image.as_deref());
-    if !image_exists(&image) {
-        bail!("{image} is not in local container storage; run `cargo xtask build` first");
+    let input = ws.resolve_image(args.image.as_deref());
+    if !image_exists(&input) {
+        bail!("{input} is not in local container storage; run `cargo xtask build` first");
     }
+    // Where the result goes: a tag of its own, or over the input.
+    let image = args
+        .output
+        .as_deref()
+        .map_or_else(|| input.clone(), |o| ws.resolve_image(Some(o)));
+    let in_place = image == input;
 
-    let fingerprint = fingerprint(ws, &image)?;
+    // The same value `xtask changed` computes on the un-rechunked image
+    // (rechunking keeps the RPM database, and the repo trees are the same);
+    // CI hands it over so the label is exactly what `changed` compared.
+    let fingerprint = match args.fingerprint {
+        Some(given) => given,
+        None => fingerprint(ws, &input)?,
+    };
     eprintln!("fingerprint: {fingerprint}");
 
     // chunkah keeps the original image's config (labels, env, cmd) from the
     // `podman inspect` JSON we hand it, so the new label goes in there.
     let mut config: serde_json::Value = serde_json::from_str(&cmd::output(
-        Command::new("podman").args(["image", "inspect", &image]),
+        Command::new("podman").args(["image", "inspect", &input]),
     )?)
     .context("parsing `podman image inspect` output")?;
     let labels = &mut config[0]["Config"]["Labels"];
@@ -65,13 +88,13 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         *labels = serde_json::json!({});
     }
     labels[FINGERPRINT_LABEL] = serde_json::Value::String(fingerprint.clone());
-    let old_id = podman_id(&image)?;
+    let old_id = podman_id(&input)?;
 
     // podman run … rechunk --chunkah | podman load
     let mut chunk = Command::new("podman");
     chunk
         .args(["run", "--rm"])
-        .arg(format!("--mount=type=image,src={image},dest=/chunkah"))
+        .arg(format!("--mount=type=image,src={input},dest=/chunkah"))
         .args(["--env", "CHUNKAH_CONFIG_STR", BASE_IMAGE])
         .args(["/usr/libexec/bootc-base-imagectl", "rechunk", "--chunkah"]);
     if let Some(n) = args.max_layers {
@@ -110,10 +133,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         .context("`podman load` printed no image")?
         .to_string();
 
-    // Replace the input tag with the rechunked image.
+    // Tag the rechunked image: over the input, or as its own image.
     cmd::run(Command::new("podman").args(["tag", &new_ref, &image]))?;
     let new_id = podman_id(&image)?;
-    if new_id != old_id {
+    if in_place && new_id != old_id {
         // The superseded image is now untagged; drop it if nothing uses it.
         let _ = Command::new("podman")
             .args(["rmi", &old_id])
@@ -129,6 +152,17 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     eprintln!("rechunked {image} ({new_id})");
     println!("{image}");
     Ok(())
+}
+
+/// The fingerprint of a candidate image: its `ilex.fingerprint` label when it
+/// has one (a rechunked image), otherwise computed from the image as built.
+/// Both are the same value, so `xtask changed` can decide right after the
+/// build and a run that changed nothing never pays for the rechunk.
+pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
+    match local_label(image, FINGERPRINT_LABEL)? {
+        Some(fingerprint) => Ok(fingerprint),
+        None => fingerprint(ws, image),
+    }
 }
 
 /// Content fingerprint of `image`: `sha256:<hex>` over the sorted `rpm -qa`
@@ -188,6 +222,6 @@ fn podman_id(image: &str) -> Result<String> {
     cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", image]))
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -1,8 +1,22 @@
-# Build, test, publish and sign the ilex image; then build the installer ISO.
+# Build, test, publish and sign the ilex image; and, now and then, build the
+# installer ISO.
 #
 # Runs on every merge to main, nightly at 03:00 UTC (the base image floats, so
 # the nightly picks up its updates) and on demand. It publishes only when the
-# image content changed (`cargo xtask changed`) and the e2e tests pass.
+# image content changed (`cargo xtask changed`) and the e2e tests pass. A run
+# that changed nothing stops right after the build: `changed` fingerprints the
+# image as built, so the rechunk, the tests and the VM stack are skipped.
+#
+# The installer ISO is not rebuilt on every publish (installed machines update
+# themselves to :latest, so the ISO may lag the image by up to a week). It is
+# built, after the image was published, when `cargo xtask iso --due` says so:
+# no ISO is published yet, `installer/` (or the ISO code in xtask) changed since
+# the published one, or :latest has moved on from the image the published ISO
+# embeds and that ISO is at least a week old. A manual run with `iso` checked
+# builds it regardless.
+#
+# Runner: `vars.ILEX_RUNNER` (repository variable) or ubuntu-26.04. One
+# setting moves both jobs to a larger or self-hosted runner.
 #
 # One-time repository setup (secrets, public ghcr packages) is in CLAUDE.md.
 name: publish
@@ -15,11 +29,15 @@ on:
   workflow_dispatch:
     inputs:
       iso:
-        description: Build the installer ISO from the published :latest even if the image is unchanged
+        description: Build the installer ISO from the published :latest even if it isn't due
         type: boolean
         default: false
       test:
         description: Run the e2e tests even if the image is unchanged (to check CI changes from a branch; only main publishes)
+        type: boolean
+        default: false
+      serial:
+        description: Rechunk before the tests instead of alongside them (to time the two)
         type: boolean
         default: false
 
@@ -44,13 +62,16 @@ jobs:
     # 26.04, not 24.04: its podman 5.7 / buildah 1.42 / skopeo 1.21 are close
     # to the Fedora 45 dev box; 24.04's podman 4.9 rejects Containerfile
     # syntax the dev box accepts.
-    runs-on: ubuntu-26.04
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
       digest: ${{ steps.publish.outputs.digest }}
+      iso_due: ${{ steps.isodue.outputs.iso_due }}
     env:
       # `xtask build --tag candidate` tags the image localhost/ilex:candidate.
+      # The tests run on it as built; `xtask rechunk --output rechunked` makes
+      # the image that gets published, at the same time.
       ILEX_IMAGE: localhost/ilex:candidate
     steps:
       - uses: actions/checkout@v7
@@ -59,15 +80,32 @@ jobs:
         run: |
           echo "IMAGE_REPO=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex" >> "$GITHUB_ENV"
           echo "ILEX_UPGRADE_FROM=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex:latest" >> "$GITHUB_ENV"
+          # `changed` needs skopeo before the virt stack is installed below.
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          sudo docker image prune --all --force || true
-          df -h /
+      # The runner's root disk is 145 GB with about 110 GB free: container
+      # storage for the build, the rechunk and the test VMs fits without
+      # deleting the preinstalled toolchains first.
+      - name: Disk
+        run: df -h / /mnt
+
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          github-cache: "true"
+
+      - name: Build the candidate image
+        run: cargo xtask build --tag candidate
+
+      # Fingerprints the image as built (the rechunk keeps it): when it is the
+      # published one, everything below is skipped.
+      - name: Compare with the published image
+        id: changed
+        run: cargo xtask changed "$IMAGE_REPO:latest" --image candidate
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: KVM, virt stack, bcvk
+        if: steps.changed.outputs.changed == 'true' || inputs.test
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -106,34 +144,29 @@ jobs:
           bcvk --version
 
       - name: Install cosign (v2)
+        if: steps.changed.outputs.changed == 'true'
         uses: sigstore/cosign-installer@v4.1.3
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
-      - uses: kunobi-ninja/kache-action@v1
-        with:
-          github-cache: "true"
-
-      - name: Build the candidate image
-        run: cargo xtask build --tag candidate
-
-      - name: Rechunk (reproducible layers) and fingerprint
-        run: cargo xtask rechunk candidate
-
-      - name: Compare with the published image
-        id: changed
-        run: cargo xtask changed "$IMAGE_REPO:latest" --image candidate
-        env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # The very first run has no published :latest, so there is nothing to
-      # upgrade from and the upgrade tier is skipped. `sg libvirt` gives this
-      # shell the group joined above without a new login.
-      - name: e2e tests
+      # The rechunk (reproducible layers, written to the tag `rechunked`) runs
+      # while the tests run on the image as built: same content, so the tests
+      # say the same about both. The very first run has no published :latest,
+      # so there is nothing to upgrade from and the upgrade tier is skipped.
+      # `sg libvirt` gives this shell the group joined above without a new
+      # login.
+      - name: e2e tests (alongside the rechunk)
         id: e2e
         if: steps.changed.outputs.changed == 'true' || inputs.test
         env:
+          CHANGED: ${{ steps.changed.outputs.changed }}
+          FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
+          SERIAL: ${{ inputs.serial }}
           TIERS: "ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}"
+          # The runner has 4 vCPUs and ~16 GiB: two VMs at a time (the default
+          # is one per 8 GiB, so one), so the upgrade tier doesn't wait for the
+          # ephemeral one.
+          ILEX_VM_SLOTS: "2"
           # The upgrade tier logs its libvirt VM's consoles here (the domain
           # itself is removed when the test ends); kept as an artifact.
           ILEX_VM_LOG_DIR: ${{ runner.temp }}/vm-logs
@@ -145,7 +178,29 @@ jobs:
                   sudo cp /var/log/libvirt/qemu/*.log "$ILEX_VM_LOG_DIR/" 2>/dev/null || true
                   sudo chmod -R a+r "$ILEX_VM_LOG_DIR" || true
                 fi' EXIT
-          sg libvirt -c "cargo xtask test $TIERS"
+          start=$SECONDS
+          rechunk_log="$RUNNER_TEMP/rechunk.log"
+          rechunk_pid=
+          if [ "$CHANGED" = true ]; then
+            if [ "$SERIAL" = true ]; then
+              cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT"
+              echo "rechunk done after $((SECONDS - start))s"
+            else
+              cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT" > "$rechunk_log" 2>&1 &
+              rechunk_pid=$!
+            fi
+          fi
+          tests=0
+          sg libvirt -c "cargo xtask test $TIERS" || tests=$?
+          echo "tests done after $((SECONDS - start))s"
+          if [ -n "$rechunk_pid" ]; then
+            rechunk=0
+            wait "$rechunk_pid" || rechunk=$?
+            echo "::group::rechunk log"; cat "$rechunk_log"; echo "::endgroup::"
+            echo "rechunk and tests done after $((SECONDS - start))s"
+            if [ "$rechunk" -ne 0 ]; then echo "rechunk failed with $rechunk"; exit "$rechunk"; fi
+          fi
+          exit "$tests"
 
       - name: Keep VM logs
         if: failure() && steps.e2e.outcome == 'failure'
@@ -160,32 +215,36 @@ jobs:
       - name: Publish and sign
         id: publish
         if: steps.changed.outputs.changed == 'true' && github.ref == 'refs/heads/main'
-        run: cargo xtask publish candidate
+        run: cargo xtask publish rechunked
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
-  # Runs after a successful publish on main, from the digest just published.
-  # A manual run with `iso` checked builds from the published :latest; from a
+      # Runs whether or not the image changed: `installer/` can change alone.
+      - name: Is a new installer ISO due?
+        id: isodue
+        run: cargo xtask iso --due
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Runs after the publish job when the ISO is due (see the top of this file),
+  # on main, from the digest just published (or :latest when nothing was). A
+  # manual run with `iso` checked builds from the published :latest; from a
   # branch it builds with --no-push, to check ISO changes without touching
   # ilex-iso. A failure here never unpublishes the image.
   iso:
     needs: publish
     if: >-
       needs.publish.result == 'success' &&
-      ((github.ref == 'refs/heads/main' && needs.publish.outputs.changed == 'true') || inputs.iso)
-    runs-on: ubuntu-26.04
+      (inputs.iso || (github.ref == 'refs/heads/main' && needs.publish.outputs.iso_due == 'true'))
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          sudo docker image prune --all --force || true
-          df -h / /mnt
+      - name: Disk
+        run: df -h / /mnt
 
       # osbuild (inside image-builder) runs its stages in a bubblewrap sandbox
       # and bind-mounts container storage there. Ubuntu 24.04+ confines
@@ -198,9 +257,15 @@ jobs:
       # kernel's AppArmor denials. The job runs on the host and starts its
       # own rootful, privileged Fedora 45 container with podman.
       # Container storage, image-builder's cache, the ISO and TMPDIR live on
-      # the runner's big /mnt disk, off overlayfs (podman can't nest overlay
-      # on overlay). `generic-iso` needs image-builder 89, which Fedora 45 has
-      # only in updates-testing for now.
+      # the runner's big disk under /mnt, off overlayfs (podman can't nest
+      # overlay on overlay). `generic-iso` needs image-builder 89, which Fedora
+      # 45 has only in updates-testing for now.
+      #
+      # The installer's base layer (Anaconda, the initramfs) is cached in
+      # ghcr.io/<owner>/ilex-installer-base under a hash of its inputs: pulled
+      # when it is there, built and pushed when it is not. Pushing is limited
+      # to main and manual runs; the tag is content-addressed, so a manual run
+      # from a branch can't move anything main uses.
       - name: Build and push the installer ISO
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
@@ -224,15 +289,19 @@ jobs:
           trap 'if [ $? -ne 0 ]; then sudo dmesg | grep -iE "apparmor|denied" | tail -40; fi' EXIT
           # Only main pushes the ISO; a manual run from a branch builds it and stops.
           if [ "$GITHUB_REF" = refs/heads/main ]; then export ILEX_ISO_PUSH=""; else export ILEX_ISO_PUSH=--no-push; fi
+          if [ "$GITHUB_REF" = refs/heads/main ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            export ILEX_INSTALLER_BASE_PUSH=1
+          fi
           sudo mkdir -p /mnt/ilex/containers /mnt/ilex/image-builder /mnt/ilex/state/tmp
-          sudo --preserve-env=ILEX_ISO_SOURCE,ILEX_ISO_PUSH,REGISTRY_TOKEN,GITHUB_ACTOR,GITHUB_REPOSITORY_OWNER,GITHUB_ACTIONS,CI \
+          sudo --preserve-env=ILEX_ISO_SOURCE,ILEX_ISO_PUSH,ILEX_INSTALLER_BASE_PUSH,REGISTRY_TOKEN,GITHUB_ACTOR,GITHUB_REPOSITORY_OWNER,GITHUB_ACTIONS,CI \
             podman run --rm --privileged --security-opt label=disable \
               --security-opt apparmor=unconfined --security-opt seccomp=unconfined \
               -v "$PWD:/src" -w /src \
               -v /mnt/ilex/containers:/var/lib/containers \
               -v /mnt/ilex/image-builder:/var/cache/image-builder \
               -v /mnt/ilex/state:/mnt/ilex-state \
-              -e ILEX_ISO_SOURCE -e ILEX_ISO_PUSH -e REGISTRY_TOKEN -e GITHUB_ACTOR \
+              -e ILEX_ISO_SOURCE -e ILEX_ISO_PUSH -e ILEX_INSTALLER_BASE_PUSH \
+              -e REGISTRY_TOKEN -e GITHUB_ACTOR \
               -e GITHUB_REPOSITORY_OWNER -e GITHUB_ACTIONS -e CI \
               -e ILEX_STATE_DIR=/mnt/ilex-state -e TMPDIR=/mnt/ilex-state/tmp \
               quay.io/fedora/fedora:45 bash -euxc '

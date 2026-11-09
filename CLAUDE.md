@@ -147,16 +147,28 @@ size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
 ## CI publishing
 
 `.github/workflows/publish.yml` runs on every merge to `main`, nightly at
-03:00 UTC and on demand: build → `rechunk` → `changed` → e2e tests →
-`publish` (push by digest, tag `:latest`, `:YYYYMMDD`, `:sha-<short>`, sign).
-Nothing is published when the fingerprint matches the published `:latest`.
+03:00 UTC and on demand: build → `changed` → e2e tests with the `rechunk`
+running alongside → `publish` (push by digest, tag `:latest`, `:YYYYMMDD`,
+`:sha-<short>`, sign). `changed` fingerprints the image as built, so a run
+that changed nothing stops right after the build (no virt stack, no rechunk,
+no tests); the tests run on the image as built and the rechunked image (same
+content, reproducible layers, its own tag `rechunked`) is what gets published.
 
 ```sh
-cargo xtask rechunk <tag>              # reproducible layers + ilex.fingerprint label, in place
-cargo xtask changed <ref> --image <tag> # prints changed=/exists=; $GITHUB_OUTPUT when set
+cargo xtask changed <ref> --image <tag> # prints changed=/exists=/fingerprint=; $GITHUB_OUTPUT when set
+cargo xtask rechunk <tag> [--output <tag>] # reproducible layers + ilex.fingerprint label; in place unless --output
 cargo xtask publish <tag>              # CI only
 ```
 
+- The runner is `vars.ILEX_RUNNER` (a repository variable) or `ubuntu-26.04`,
+  for both jobs: moving to a larger, org-owned or self-hosted runner is one
+  setting (Settings → Secrets and variables → Actions → Variables). The
+  runner's root disk is 145 GB with ~110 GB free, so the workflow doesn't
+  clear the preinstalled toolchains first. CI runs two VMs at a time
+  (`ILEX_VM_SLOTS=2`: the default of one per 8 GiB would be one on 16 GiB).
+- A manual run from another branch (`gh workflow run publish.yml --ref <branch>
+  -f test=true`, and `-f iso=true` for the ISO) builds and tests but never
+  publishes or pushes the ISO.
 - `publish` refuses to run unless `CI=true`/`GITHUB_ACTIONS=true`. The one
   override is a registry on this machine, which can never be ghcr:
   `podman run -d -p 5000:5000 docker.io/library/registry:2`, then
@@ -175,17 +187,32 @@ cargo xtask publish <tag>              # CI only
 
 ### Installer ISO
 
-After a successful publish the `iso` job builds an Anaconda installer ISO
-from the digest just published and pushes it to `ghcr.io/reidond/ilex-iso`
-(`:latest`, `:YYYYMMDD`) as an OCI artifact: an ISO with a ~2 GB image in it
-can exceed GitHub's 2 GiB release asset limit.
+The `iso` job builds an Anaconda installer ISO from the published image and
+pushes it to `ghcr.io/reidond/ilex-iso` (`:latest`, `:YYYYMMDD`) as an OCI
+artifact: an ISO with a ~2 GB image in it can exceed GitHub's 2 GiB release
+asset limit. It does not run on every publish: installed machines update
+themselves to `:latest`, so the ISO may lag the image by up to a week. After
+each run of the publish job, `cargo xtask iso --due` decides (and the job
+reads its `iso_due=`): a new ISO is due when none is published, when
+`installer/` or `crates/xtask/src/iso.rs` changed since the published one
+(the ISO carries `ilex.installer-fingerprint` and `ilex.payload-digest`
+annotations), or when `:latest` has moved on from the image the published ISO
+embeds and that ISO is at least 7 days old. A manual run with `iso` checked
+(`-f iso=true`) builds one regardless.
 
 ```sh
 cargo xtask iso <image@sha256:…> --no-push   # build only; the ISO lands in <state dir>/iso/
+cargo xtask iso --due                        # is a new ISO due? (reads the published one)
 podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact extract` and write it to a USB stick
 ```
 
-- `installer/Containerfile` is `fedora-bootc:45` plus Anaconda; its kickstart
+- The installer is two layers. `installer/base/` (Anaconda, fonts, the
+  initramfs: most of the build time) is built once per Fedora release and
+  content hash and cached as `ghcr.io/reidond/ilex-installer-base:<release>-<hash>`
+  (pulled when it exists; pushed by main and manual runs only, and the tag is
+  content-addressed so a branch run can't move what main uses). `installer/Containerfile`
+  adds the kickstart for one payload on top, which takes seconds.
+- `installer/base/Containerfile` is `fedora-bootc:45` plus Anaconda; the kickstart
   (`installer/interactive-defaults.ks`) installs the embedded image
   (`--source-imgref containers-storage:localhost/ilex-payload:<digest prefix>`)
   and tracks `ghcr.io/reidond/ilex:latest` (`--target-imgref`). Anaconda still

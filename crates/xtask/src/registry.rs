@@ -236,3 +236,57 @@ pub fn is_digest(s: &str) -> bool {
     s.strip_prefix("sha256:")
         .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
+
+/// Does a registry client's error mean "no such image"? A repository that
+/// was never pushed to answers "name unknown"/404; ghcr answers
+/// "denied"/"unauthorized" for a package that doesn't exist (or isn't public
+/// yet). Callers treat all of these as "nothing there": what they do next
+/// (publish, build) fails loudly on a real permission problem.
+pub fn looks_missing(stderr: &str) -> bool {
+    let err = stderr.to_ascii_lowercase();
+    [
+        "manifest unknown",
+        "name unknown",
+        "not found",
+        "404",
+        "denied",
+        "unauthorized",
+    ]
+    .iter()
+    .any(|m| err.contains(m))
+}
+
+/// Seconds since the Unix epoch, now.
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Seconds since the Unix epoch of an RFC 3339 UTC timestamp such as
+/// `2026-11-09T08:39:21.778520136Z`.
+pub fn parse_rfc3339_utc(s: &str) -> Option<u64> {
+    let (date, time) = s.trim().strip_suffix('Z')?.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>());
+    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+    let mut t = time.split(':');
+    let (h, min) = (
+        t.next()?.parse::<i64>().ok()?,
+        t.next()?.parse::<i64>().ok()?,
+    );
+    let sec = t.next()?.split('.').next()?.parse::<i64>().ok()?;
+    let days = days_from_civil(y, m, day);
+    u64::try_from(days * 86_400 + h * 3_600 + min * 60 + sec).ok()
+}
+
+/// (year, month, day) to days since 1970-01-01; the inverse of
+/// [`civil_from_days`].
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}

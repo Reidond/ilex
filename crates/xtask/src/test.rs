@@ -62,7 +62,13 @@ fn prepare_iso(ws: &Workspace, image: &str, test: &mut Command) -> Result<()> {
     if std::env::var_os("ILEX_ISO").is_some_and(|p| !p.is_empty()) {
         return Ok(());
     }
-    let digest = cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Digest}}", image]))?;
+    let digest = cmd::output(Command::new("podman").args([
+        "image",
+        "inspect",
+        "--format",
+        "{{.Digest}}",
+        image,
+    ]))?;
     let iso = crate::iso::build(
         ws,
         &crate::iso::Build {
@@ -70,6 +76,7 @@ fn prepare_iso(ws: &Workspace, image: &str, test: &mut Command) -> Result<()> {
             digest: &digest,
             target: crate::iso::DEFAULT_TARGET,
             output_dir: None,
+            base_cache: None,
         },
     )?;
     test.env("ILEX_ISO", iso)
