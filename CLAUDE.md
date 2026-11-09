@@ -196,14 +196,16 @@ podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact e
   ≥ 89** (Fedora 45 `updates-testing` for now; 87 only has the unattended,
   disk-wiping `bootc-installer` type) and storage that isn't overlayfs. The CI
   job starts its own rootful, privileged `fedora:45` container with
-  `sudo podman run` on the runner, after setting
-  `kernel.apparmor_restrict_unprivileged_userns=0`: Ubuntu 24.04+ confines
-  user namespaces with AppArmor, and osbuild's sandbox mounts then fail
-  ("permission denied"; WSL has no AppArmor, so local builds never see
-  it), with `/var/lib/containers`,
-  `/var/cache/image-builder` and `TMPDIR` on volumes under `/mnt`. To rebuild
-  only the ISO from the published `:latest`:
-  `gh workflow run publish.yml --repo Reidond/ilex -f iso=true`. `xtask iso`
+  `sudo podman run` on the runner, after unloading Ubuntu's
+  `bwrap-userns-restrict` AppArmor profile: it attaches to any
+  `/usr/bin/bwrap` by path, even inside an unconfined container, and its
+  `unpriv_bwrap` child denies the setuid/chown/sys_admin osbuild's sandbox
+  needs ("mount: … permission denied"; WSL has no AppArmor, so local builds
+  never see it). `/var/lib/containers`, `/var/cache/image-builder` and
+  `TMPDIR` live on volumes under `/mnt`. To rebuild only the ISO from the
+  published `:latest`: `gh workflow run publish.yml --repo Reidond/ilex -f
+  iso=true` (add `--ref <branch>` to try ISO changes: off `main` it builds
+  with `--no-push`). `xtask iso`
   does the same locally: when the `image-builder` on `PATH` is older than 89
   (or missing) it builds `installer/image-builder/Containerfile` and runs
   image-builder from that container against this host's container storage.
