@@ -10,7 +10,7 @@
 //! ```text
 //! qmp.sock   QMP control socket (screendump, input-send-event)
 //! vnc.sock   VNC server on a unix socket, for a human watching
-//! vm.info    key=value description of the running VM (see [`VmInfo`])
+//! vm.toml    TOML description of the running VM (see [`VmInfo`])
 //! qemu.log   QEMU's stdout/stderr
 //! serial.log guest serial console
 //! ```
@@ -32,6 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::slots::{self, VmSlot};
 use crate::{Workspace, cmd};
@@ -169,8 +170,8 @@ pub fn test_key(ws: &Workspace) -> Result<TestKey> {
 // What is running
 // ---------------------------------------------------------------------------
 
-/// The published description of a running VM: `<runtime dir>/<purpose>/vm.info`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The published description of a running VM: `<runtime dir>/<purpose>/vm.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmInfo {
     pub name: String,
     pub purpose: String,
@@ -180,7 +181,9 @@ pub struct VmInfo {
     pub ssh_key: PathBuf,
     pub qmp_sock: PathBuf,
     pub vnc_sock: PathBuf,
-    /// Directory holding this VM's sockets and logs.
+    /// Directory holding this VM's sockets and logs (where `vm.toml` lives, so
+    /// not stored in it).
+    #[serde(skip)]
     pub dir: PathBuf,
     /// Configured virtio-vga mode (what the guest reads from EDID).
     pub width: u32,
@@ -189,53 +192,23 @@ pub struct VmInfo {
     pub display: String,
 }
 
-const INFO_FILE: &str = "vm.info";
+const INFO_FILE: &str = "vm.toml";
 
 impl VmInfo {
     fn write(&self) -> Result<()> {
-        let mut text = String::new();
-        let mut kv = |k: &str, v: &str| {
-            text.push_str(k);
-            text.push('=');
-            text.push_str(v);
-            text.push('\n');
-        };
-        kv("name", &self.name);
-        kv("purpose", &self.purpose);
-        kv("pid", &self.pid.to_string());
-        kv("ssh_port", &self.ssh_port.to_string());
-        kv("ssh_key", &self.ssh_key.to_string_lossy());
-        kv("qmp_sock", &self.qmp_sock.to_string_lossy());
-        kv("vnc_sock", &self.vnc_sock.to_string_lossy());
-        kv("width", &self.width.to_string());
-        kv("height", &self.height.to_string());
-        kv("display", &self.display);
         let path = self.dir.join(INFO_FILE);
+        let text = toml::to_string(self).context("serializing vm.toml")?;
         fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
     }
 
-    /// Read `<dir>/vm.info`.
+    /// Read `<dir>/vm.toml`.
     pub fn read(dir: &Path) -> Result<Self> {
         let path = dir.join(INFO_FILE);
         let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let get = |key: &str| -> Result<&str> {
-            text.lines()
-                .find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
-                .with_context(|| format!("{} has no `{key}`", path.display()))
-        };
-        Ok(Self {
-            name: get("name")?.to_string(),
-            purpose: get("purpose")?.to_string(),
-            pid: get("pid")?.parse()?,
-            ssh_port: get("ssh_port")?.parse()?,
-            ssh_key: get("ssh_key")?.into(),
-            qmp_sock: get("qmp_sock")?.into(),
-            vnc_sock: get("vnc_sock")?.into(),
-            dir: dir.to_path_buf(),
-            width: get("width")?.parse()?,
-            height: get("height")?.parse()?,
-            display: get("display")?.to_string(),
-        })
+        let mut info: VmInfo =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        info.dir = dir.to_path_buf();
+        Ok(info)
     }
 
     /// Is the QEMU process still there?

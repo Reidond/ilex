@@ -59,7 +59,7 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 vm --disk` boots it headless on the graphical test machine (UEFI, 4K
 `virtio-vga`), and `--gui` adds a GTK window for a human (WSLg shows it on the
 Windows desktop). Every disk-booted VM (also the `disk::` and `graphical::`
-tests) publishes `qmp.sock`, `vnc.sock` and `vm.info` in
+tests) publishes `qmp.sock`, `vnc.sock` and `vm.toml` in
 `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; `ilex-vmctl` attaches to them by slug
 (from the checkout you are in, or `--slug`) and never starts or stops VMs.
 
