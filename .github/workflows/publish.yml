@@ -36,10 +36,6 @@ on:
         description: Run the e2e tests even if the image is unchanged (to check CI changes from a branch; only main publishes)
         type: boolean
         default: false
-      serial:
-        description: Rechunk before the tests instead of alongside them (to time the two)
-        type: boolean
-        default: false
 
 concurrency:
   group: publish
@@ -70,8 +66,8 @@ jobs:
       iso_due: ${{ steps.isodue.outputs.iso_due }}
     env:
       # `xtask build --tag candidate` tags the image localhost/ilex:candidate.
-      # The tests run on it as built; `xtask rechunk --output rechunked` makes
-      # the image that gets published, at the same time.
+      # The image as built; `xtask rechunk --output rechunked` makes the image
+      # that is tested and published when it changed.
       ILEX_IMAGE: localhost/ilex:candidate
     steps:
       - uses: actions/checkout@v7
@@ -149,19 +145,25 @@ jobs:
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
-      # The rechunk (reproducible layers, written to the tag `rechunked`) runs
-      # while the tests run on the image as built: same content, so the tests
-      # say the same about both. The very first run has no published :latest,
-      # so there is nothing to upgrade from and the upgrade tier is skipped.
-      # `sg libvirt` gives this shell the group joined above without a new
-      # login.
-      - name: e2e tests (alongside the rechunk)
+      # Reproducible layers, into the tag `rechunked`: the image the tests run
+      # on and publish pushes. (Rechunking while the tests run on the image as
+      # built was tried: faster by ~7 minutes, but the upgrade tier then builds
+      # its v2 from layers that share nothing with the published v1 and the VM
+      # boots v1 again after the reboot. See CLAUDE.md.)
+      - name: Rechunk (reproducible layers)
+        if: steps.changed.outputs.changed == 'true'
+        run: cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT"
+        env:
+          FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
+
+      # The very first run has no published :latest, so there is nothing to
+      # upgrade from and the upgrade tier is skipped. `sg libvirt` gives this
+      # shell the group joined above without a new login.
+      - name: e2e tests
         id: e2e
         if: steps.changed.outputs.changed == 'true' || inputs.test
         env:
           CHANGED: ${{ steps.changed.outputs.changed }}
-          FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
-          SERIAL: ${{ inputs.serial }}
           TIERS: "ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}"
           # The runner has 4 vCPUs and ~16 GiB: two VMs at a time (the default
           # is one per 8 GiB, so one), so the upgrade tier doesn't wait for the
@@ -178,29 +180,10 @@ jobs:
                   sudo cp /var/log/libvirt/qemu/*.log "$ILEX_VM_LOG_DIR/" 2>/dev/null || true
                   sudo chmod -R a+r "$ILEX_VM_LOG_DIR" || true
                 fi' EXIT
-          start=$SECONDS
-          rechunk_log="$RUNNER_TEMP/rechunk.log"
-          rechunk_pid=
-          if [ "$CHANGED" = true ]; then
-            if [ "$SERIAL" = true ]; then
-              cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT"
-              echo "rechunk done after $((SECONDS - start))s"
-            else
-              cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT" > "$rechunk_log" 2>&1 &
-              rechunk_pid=$!
-            fi
-          fi
-          tests=0
-          sg libvirt -c "cargo xtask test $TIERS" || tests=$?
-          echo "tests done after $((SECONDS - start))s"
-          if [ -n "$rechunk_pid" ]; then
-            rechunk=0
-            wait "$rechunk_pid" || rechunk=$?
-            echo "::group::rechunk log"; cat "$rechunk_log"; echo "::endgroup::"
-            echo "rechunk and tests done after $((SECONDS - start))s"
-            if [ "$rechunk" -ne 0 ]; then echo "rechunk failed with $rechunk"; exit "$rechunk"; fi
-          fi
-          exit "$tests"
+          # The rechunked image when there is one (an unchanged image that is
+          # tested anyway was never rechunked).
+          if [ "$CHANGED" = true ]; then export ILEX_IMAGE=localhost/ilex:rechunked; fi
+          sg libvirt -c "cargo xtask test $TIERS"
 
       - name: Keep VM logs
         if: failure() && steps.e2e.outcome == 'failure'
