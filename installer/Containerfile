@@ -3,12 +3,17 @@
 # the payload (see `cargo xtask iso`). Follows osbuild's example for an
 # Anaconda installer container:
 # https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/
+#
+# Everything that depends on the payload (the kickstart) comes last, so a new
+# payload doesn't rebuild the initramfs.
 FROM quay.io/fedora/fedora-bootc:45
 
 # The ilex image the ISO installs, as it is named in the ISO's container
-# storage; and the reference installed machines update from.
+# storage; the reference installed machines update from; and the Fedora
+# release the installer reports as its version.
 ARG PAYLOAD_REF
 ARG TARGET_IMGREF=ghcr.io/reidond/ilex:latest
+ARG PRODUCT_VERSION=45
 
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     dnf -y install --setopt=keepcache=1 \
@@ -31,14 +36,18 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
 # How image-builder lays out the ISO: volume label and boot menu.
 COPY iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 
-# Kickstart defaults: install the embedded ilex image and keep tracking ghcr.
-# Anaconda still asks for the disk, the user and everything else.
-COPY interactive-defaults.ks /tmp/interactive-defaults.ks
-RUN test -n "$PAYLOAD_REF" || { echo "build with --build-arg PAYLOAD_REF=<image@sha256:...>" >&2; exit 1; }; \
-    sed -e "s|@PAYLOAD_REF@|${PAYLOAD_REF}|g" -e "s|@TARGET_IMGREF@|${TARGET_IMGREF}|g" \
-        /tmp/interactive-defaults.ks > /usr/share/anaconda/interactive-defaults.ks && \
-    rm /tmp/interactive-defaults.ks && \
-    cat /usr/share/anaconda/interactive-defaults.ks
+# Product identity. Anaconda takes its name, version and "is this a final
+# release" from /.buildstamp (the file lorax writes into an installer image).
+# Without it the installer calls itself "anaconda bluesky" and shows a red
+# pre-release banner.
+RUN printf '%s\n' \
+        '[Main]' \
+        'Product=ilex' \
+        "Version=${PRODUCT_VERSION}" \
+        'BugURL=https://github.com/Reidond/ilex/issues' \
+        'IsFinal=True' \
+        'UUID=ilex-installer.x86_64' \
+        > /.buildstamp
 
 # What `lorax` normally does to make `anaconda` run; this is the bare minimum.
 RUN echo "install:x:0:0:root:/root:/usr/libexec/anaconda/run-anaconda" >> /etc/passwd && \
@@ -55,11 +64,13 @@ COPY <<EOT /usr/lib/systemd/logind.conf.d/anaconda-shell.conf
 ReserveVT=2
 EOT
 
-# Rebuild the initramfs with the anaconda dracut module.
+# Rebuild the initramfs with the anaconda dracut module (and the buildstamp,
+# as lorax does).
 RUN mkdir "$(realpath /root)" && \
     kernel=$(kernel-install list --json pretty | jq -r '.[] | select(.has_kernel == true) | .version') && \
     DRACUT_NO_XATTR=1 dracut --force -v --zstd --reproducible --no-hostonly \
         --add "anaconda" \
+        --install /.buildstamp \
         "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}"
 
 # Anaconda runs as root, which user-level pipewire refuses by default.
@@ -73,3 +84,12 @@ COPY <<EOT /etc/systemd/user/pipewire.socket.d/allowroot.conf
 [Unit]
 ConditionUser=
 EOT
+
+# Kickstart defaults: install the embedded ilex image and keep tracking ghcr.
+# Anaconda still asks for the disk, the user and everything else.
+COPY interactive-defaults.ks /tmp/interactive-defaults.ks
+RUN test -n "$PAYLOAD_REF" || { echo "build with --build-arg PAYLOAD_REF=<image@sha256:...>" >&2; exit 1; }; \
+    sed -e "s|@PAYLOAD_REF@|${PAYLOAD_REF}|g" -e "s|@TARGET_IMGREF@|${TARGET_IMGREF}|g" \
+        /tmp/interactive-defaults.ks > /usr/share/anaconda/interactive-defaults.ks && \
+    rm /tmp/interactive-defaults.ks && \
+    cat /usr/share/anaconda/interactive-defaults.ks
