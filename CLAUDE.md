@@ -182,20 +182,21 @@ after checking it is the one the upgrade tier tested, and moves `:sha-<short>`,
 registry, nothing pushed twice). Runs of the workflow never overlap (one
 concurrency group), so `:candidate` is always the current run's.
 
-Installing v1 to a disk takes ~14 minutes on a runner (bcvk's install VM),
-more than everything else in a run, so it happens ahead of time: after each
-publish the `publish` job starts the workflow again with `v1_disk`, a run of
-just the `v1-disk` job in a concurrency group of its own (nothing waits for
-it; a newer one cancels it). It installs the new `:latest` the way the upgrade
-tier does and saves bcvk's base disk (~5 GB) in the Actions cache under the
+Installing v1 to a disk takes ~14 minutes on a runner (11 of them bcvk's
+install VM importing the image's 64 layers into ostree), more than everything
+else in a run, so it happens ahead of time: after each publish the `publish`
+job starts the workflow again with `v1_disk`, a run of just the `v1-disk` job
+in a concurrency group of its own (nothing waits for it; a newer one cancels
+it). It installs the new `:latest` the way the upgrade tier does and saves
+bcvk's base disk (~5 GB, 1.9 GiB in the cache) in the Actions cache under the
 image digest and the bcvk version (`v1-disk-<bcvk>-<digest>`), with the two
 `user.bootc.*` xattrs bcvk recognizes a base disk by in a file next to it (the
-cache drops xattrs); older disks are deleted. The next run's upgrade job puts
-the disk back into bcvk's pool, and bcvk boots it instead of installing. A run
-that finds no disk (the v1-disk run hasn't finished, or the cache evicted it)
-or one bcvk rejects (other install options) installs v1 itself, ~10 minutes
-slower. `gh workflow run publish.yml --ref <branch> -f v1_disk=true` fills
-the cache for runs on that branch.
+cache drops xattrs); older disks are deleted. The next run's upgrade job
+restores it (~40 s) and puts it back into bcvk's pool, and bcvk boots it
+instead of installing. A run that finds no disk (the v1-disk run hasn't
+finished, or the cache evicted it) or one bcvk rejects (other install options)
+installs v1 itself, ~10 minutes slower. `gh workflow run publish.yml --ref
+<branch> -f v1_disk=true` fills the cache for runs on that branch.
 
 `changed` fingerprints the image as built, so a run that changed nothing stops
 right after the build (no rechunk, no tests, and the upgrade job stops when it
