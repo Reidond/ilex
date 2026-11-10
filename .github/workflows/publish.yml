@@ -148,9 +148,10 @@ jobs:
       # on and publish pushes. (Rechunking while the tests run on the image as
       # built was tried: faster by ~7 minutes, but the upgrade tier then builds
       # its v2 from layers that share nothing with the published v1 and the VM
-      # boots v1 again after the reboot. See CLAUDE.md.)
+      # boots v1 again after the reboot. See CLAUDE.md.) A forced test run
+      # (`test`) of an unchanged image is rechunked too, for the same reason.
       - name: Rechunk (reproducible layers)
-        if: steps.changed.outputs.changed == 'true'
+        if: steps.changed.outputs.changed == 'true' || inputs.test
         run: cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT"
         env:
           FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
@@ -162,7 +163,9 @@ jobs:
         id: e2e
         if: steps.changed.outputs.changed == 'true' || inputs.test
         env:
-          CHANGED: ${{ steps.changed.outputs.changed }}
+          # Always the rechunked image: the rechunk step runs whenever this one
+          # does, and the upgrade tier needs v2 built on rechunked layers.
+          ILEX_IMAGE: localhost/ilex:rechunked
           TIERS: "ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}"
           # The runner has 4 vCPUs and ~16 GiB: two VMs at a time (the default
           # is one per 8 GiB, so one), so the upgrade tier doesn't wait for the
@@ -179,9 +182,6 @@ jobs:
                   sudo cp /var/log/libvirt/qemu/*.log "$ILEX_VM_LOG_DIR/" 2>/dev/null || true
                   sudo chmod -R a+r "$ILEX_VM_LOG_DIR" || true
                 fi' EXIT
-          # The rechunked image when there is one (an unchanged image that is
-          # tested anyway was never rechunked).
-          if [ "$CHANGED" = true ]; then export ILEX_IMAGE=localhost/ilex:rechunked; fi
           sg libvirt -c "cargo xtask test $TIERS"
 
       - name: Keep VM logs

@@ -152,8 +152,9 @@ size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
 03:00 UTC and on demand: build → `changed` → `rechunk` → e2e tests →
 `publish` (push by digest, tag `:latest`, `:YYYYMMDD`, `:sha-<short>`, sign).
 `changed` fingerprints the image as built, so a run that changed nothing stops
-right after the build (no virt stack, no rechunk, no tests). The rechunked
-image (same content, reproducible layers, its own tag `rechunked`) is what is
+right after the build (no virt stack, no rechunk, no tests), unless a manual
+run forces the tests (`test`), which rechunks too. The rechunked image (same
+content, reproducible layers, its own tag `rechunked`) is what is always
 tested and published. Rechunking while the tests ran on the image as built was
 measured: about 7 minutes faster, but the `upgrade::` tier then builds its v2
 from layers that share nothing with the published v1 (71 layers, 4.9 GB to
