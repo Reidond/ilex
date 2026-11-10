@@ -38,8 +38,8 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   and after a reboot the unit must have added the enforcement (a second run
   is a no-op). Then the rollback to v1. One VM, one install: installing is
   most of the tier's time. `ILEX_UPGRADE_PREPARE=1` only installs and boots v1
-  (filling bcvk's base-disk cache) and stops; CI's upgrade job runs that on
-  its own runner while the build job builds.
+  (filling bcvk's base-disk cache) and stops; CI runs that ahead of time and
+  caches the disk (see CI publishing).
 - `iso::` is opt-in and slow (the ISO takes ~8 minutes to build once the
   installer image is cached, the install and boot ~8 more), so it only exists
   when a filter names it: `cargo xtask test iso::` builds the installer ISO
@@ -167,12 +167,13 @@ on separate runners:
   registry's compressed blob for each layer, so staging uploads only the
   layers that changed and machines download only those (`--stage` prints how
   many: "N of M layers are new against :latest").
-- `upgrade`: from its first minute (`vm-prep.sh upgrade`) the VM stack and the
-  upgrade tier's v1 (the published `:latest`) installed to a disk with
-  `ILEX_UPGRADE_PREPARE=1`: ~9 minutes alone on a runner, ~15 on the build
-  runner's busy disk. It polls the jobs API until the build job's "Stage the
-  candidate" step succeeds (or the build job ends without it: nothing to
-  test), pulls `:candidate` by digest and runs `upgrade::`.
+- `upgrade`: the upgrade tier's v1 (the published `:latest`, by digest)
+  already installed to a disk, restored from the Actions cache; from its first
+  minute (`vm-prep.sh upgrade`) the VM stack, a pull of v1 and v1's disk
+  booted once with `ILEX_UPGRADE_PREPARE=1`. It polls the jobs API until the
+  build job's "Stage the candidate" step succeeds (or the build job ends
+  without it: nothing to test), pulls `:candidate` by digest and runs
+  `upgrade::`.
 - `installer-due` → `iso` (see Installer ISO).
 
 Then `publish` (main only, when the image changed) signs the staged digest,
@@ -180,6 +181,21 @@ after checking it is the one the upgrade tier tested, and moves `:sha-<short>`,
 `:YYYYMMDD` and `:latest` to it (`xtask publish --digest`: tags in the
 registry, nothing pushed twice). Runs of the workflow never overlap (one
 concurrency group), so `:candidate` is always the current run's.
+
+Installing v1 to a disk takes ~14 minutes on a runner (bcvk's install VM),
+more than everything else in a run, so it happens ahead of time: after each
+publish the `publish` job starts the workflow again with `v1_disk`, a run of
+just the `v1-disk` job in a concurrency group of its own (nothing waits for
+it; a newer one cancels it). It installs the new `:latest` the way the upgrade
+tier does and saves bcvk's base disk (~5 GB) in the Actions cache under the
+image digest and the bcvk version (`v1-disk-<bcvk>-<digest>`), with the two
+`user.bootc.*` xattrs bcvk recognizes a base disk by in a file next to it (the
+cache drops xattrs); older disks are deleted. The next run's upgrade job puts
+the disk back into bcvk's pool, and bcvk boots it instead of installing. A run
+that finds no disk (the v1-disk run hasn't finished, or the cache evicted it)
+or one bcvk rejects (other install options) installs v1 itself, ~10 minutes
+slower. `gh workflow run publish.yml --ref <branch> -f v1_disk=true` fills
+the cache for runs on that branch.
 
 `changed` fingerprints the image as built, so a run that changed nothing stops
 right after the build (no rechunk, no tests, and the upgrade job stops when it
@@ -201,6 +217,8 @@ cargo xtask publish <tag> --stage      # CI only: push as unsigned :candidate, p
 cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :latest to it
 ```
 
+- The background parts (`vm-prep.sh`) log every line with the time it was
+  printed; the "Wait for" steps print those logs.
 - The runner is `vars.ILEX_RUNNER` (a repository variable) or `ubuntu-26.04`,
   for every job: moving to a larger, org-owned or self-hosted runner is one
   setting (Settings → Secrets and variables → Actions → Variables). The

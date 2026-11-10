@@ -24,9 +24,9 @@
 //!   (the very first run has no `:latest`), the tier is skipped;
 //! * `ILEX_UPGRADE_PREPARE=1`: only install v1 and boot it, then stop. bcvk
 //!   caches the installed base disk per image, so the real run that follows
-//!   boots v1 in seconds. CI does this in the background while it builds the
-//!   candidate, which takes the install (most of this tier's time) off its
-//!   critical path.
+//!   boots v1 in seconds. CI does this ahead of time, after each publish, and
+//!   keeps the disk in the Actions cache, which takes the install (most of
+//!   this tier's time) off its critical path.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
