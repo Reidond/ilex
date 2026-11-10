@@ -1,12 +1,14 @@
 //! `cargo xtask changed <ref>`: has the image's content changed since the
 //! published `<ref>` (usually `ghcr.io/<owner>/ilex:latest`)?
 //!
-//! Compares the candidate's `ilex.fingerprint` label (written by `xtask
-//! rechunk`) with the label on the published image. A published image that
-//! doesn't exist yet counts as changed. Prints `changed=true|false` and
-//! `exists=true|false` and writes both to `$GITHUB_OUTPUT` when it is set.
-//! The nightly run stops here when nothing changed, so machines don't
-//! download an update every night for nothing.
+//! Compares the candidate's fingerprint with the `ilex.fingerprint` label on
+//! the published image. The candidate can be the image as built (the
+//! fingerprint is computed from it) or a rechunked one (its label is read);
+//! both are the same value. A published image that doesn't exist yet counts
+//! as changed. Prints `changed=true|false` and `exists=true|false` and writes
+//! both to `$GITHUB_OUTPUT` when it is set. The nightly run stops here when
+//! nothing changed, so machines don't download an update every night for
+//! nothing, and without paying for the rechunk.
 
 use std::process::Command;
 
@@ -27,9 +29,9 @@ pub struct Args {
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let candidate_ref = ws.resolve_image(args.image.as_deref());
-    let candidate = rechunk::local_label(&candidate_ref, FINGERPRINT_LABEL)?.with_context(|| {
-        format!("{candidate_ref} has no {FINGERPRINT_LABEL} label; run `cargo xtask rechunk` on it first")
-    })?;
+    // The image as built has no label yet; its fingerprint is computed from it
+    // (the same value `xtask rechunk` will write).
+    let candidate = rechunk::candidate_fingerprint(ws, &candidate_ref)?;
 
     let repository = repo_of(&args.reference);
     let auth = Auth::login(repository)?;
@@ -50,6 +52,9 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     }
     registry::github_output("changed", &changed.to_string())?;
     registry::github_output("exists", &exists.to_string())?;
+    // `xtask rechunk --fingerprint` writes exactly this value into the label,
+    // however the working tree looks by then.
+    registry::github_output("fingerprint", &candidate)?;
     Ok(())
 }
 
@@ -86,21 +91,10 @@ fn published_fingerprint(
     let out = registry::capture(&mut skopeo)?;
 
     if !out.ok {
-        let err = out.stderr.to_ascii_lowercase();
-        // A repository that was never pushed to answers "name unknown" or
-        // 404; ghcr answers "denied"/"unauthorized" for a package that
-        // doesn't exist (or isn't public yet). Publishing is idempotent and
-        // fails loudly on a real permission problem, so treat all of these
-        // as "nothing published".
-        let missing = [
-            "manifest unknown",
-            "name unknown",
-            "not found",
-            "404",
-            "denied",
-            "unauthorized",
-        ];
-        if missing.iter().any(|m| err.contains(m)) {
+        // Publishing is idempotent and fails loudly on a real permission
+        // problem, so "not there" and "not allowed to see it" both count as
+        // "nothing published".
+        if registry::looks_missing(&out.stderr) {
             eprintln!(
                 "xtask: {reference} not found ({}); treating as unpublished",
                 first_line(&out.stderr)

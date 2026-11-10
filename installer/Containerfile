@@ -1,19 +1,20 @@
-# Installer for the ilex ISO: fedora-bootc plus Anaconda. `image-builder`
-# turns this container into the ISO and embeds the ilex image to install as
-# the payload (see `cargo xtask iso`). Follows osbuild's example for an
-# Anaconda installer container:
+# The ilex installer: fedora-bootc plus Anaconda, a network installer. It
+# carries no ilex image: its kickstart installs the newest `:latest` from the
+# registry (so one ISO stays current, and fits GitHub's 2 GiB release asset
+# limit). `image-builder` turns this container into the ISO
+# (`cargo xtask iso`). Follows osbuild's example for an Anaconda installer
+# container:
 # https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/
-#
-# Everything that depends on the payload (the kickstart) comes last, so a new
-# payload doesn't rebuild the initramfs.
 FROM quay.io/fedora/fedora-bootc:45
+LABEL org.opencontainers.image.source="https://github.com/Reidond/ilex"
 
-# The ilex image the ISO installs, as it is named in the ISO's container
-# storage; the reference installed machines update from; and the Fedora
-# release the installer reports as its version.
-ARG PAYLOAD_REF
-ARG TARGET_IMGREF=ghcr.io/reidond/ilex:latest
+# The Fedora release the installer reports as its version (keep in step with
+# the FROM above).
 ARG PRODUCT_VERSION=45
+# Where the installer takes the image from (with its transport: pykickstart
+# requires one), and what the installed machine updates from (without).
+ARG SOURCE_IMGREF=registry:ghcr.io/reidond/ilex:latest
+ARG TARGET_IMGREF=ghcr.io/reidond/ilex:latest
 
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     dnf -y install --setopt=keepcache=1 \
@@ -27,11 +28,21 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
         plymouth \
         default-fonts-core-sans \
         default-fonts-other-sans \
-        google-noto-sans-cjk-fonts \
         jq \
         xorrisofs \
         squashfs-tools && \
     mkdir -p /boot/efi && cp -ra /usr/lib/efi/*/*/EFI /boot/efi
+
+# The ISO has to stay under GitHub's 2 GiB limit per release asset (a stock
+# build was 1.98 GiB). An installer doesn't need GPU firmware, Vulkan drivers,
+# video acceleration, user-mode emulators or audio firmware; removing them
+# before the initramfs is built (it is `--no-hostonly` and would carry the
+# firmware, twice: in the squashfs and on the ISO) shrinks both. Wi-Fi and NIC
+# firmware stay.
+RUN rpm -qa 'nvidia-gpu-firmware' 'amd-gpu-firmware' 'intel-gpu-firmware' \
+        'mesa-vulkan-drivers' 'intel-mediasdk' 'qemu-user-static*' \
+        'intel-audio-firmware' 'cirrus-audio-firmware' \
+    | xargs -r rpm -e --nodeps
 
 # How image-builder lays out the ISO: volume label and boot menu.
 COPY iso.yaml /usr/lib/image-builder/bootc/iso.yaml
@@ -85,11 +96,10 @@ COPY <<EOT /etc/systemd/user/pipewire.socket.d/allowroot.conf
 ConditionUser=
 EOT
 
-# Kickstart defaults: install the embedded ilex image and keep tracking ghcr.
+# Kickstart defaults: install the newest ilex image and keep tracking ghcr.
 # Anaconda still asks for the disk, the user and everything else.
 COPY interactive-defaults.ks /tmp/interactive-defaults.ks
-RUN test -n "$PAYLOAD_REF" || { echo "build with --build-arg PAYLOAD_REF=<image@sha256:...>" >&2; exit 1; }; \
-    sed -e "s|@PAYLOAD_REF@|${PAYLOAD_REF}|g" -e "s|@TARGET_IMGREF@|${TARGET_IMGREF}|g" \
+RUN sed -e "s|@SOURCE_IMGREF@|${SOURCE_IMGREF}|g" -e "s|@TARGET_IMGREF@|${TARGET_IMGREF}|g" \
         /tmp/interactive-defaults.ks > /usr/share/anaconda/interactive-defaults.ks && \
     rm /tmp/interactive-defaults.ks && \
     cat /usr/share/anaconda/interactive-defaults.ks
