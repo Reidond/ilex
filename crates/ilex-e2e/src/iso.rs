@@ -11,18 +11,19 @@
 //!    disk labelled `OEMDRV`, which Anaconda picks up on its own. The kickstart
 //!    only answers what the shipped `interactive-defaults.ks` leaves open (the
 //!    language, the disk, the root account); the `bootc` command, and with it
-//!    the payload and the image the machine tracks, are the shipped ones. Its
-//!    `%pre` asks Anaconda itself what product it thinks it is and prints that
-//!    on the serial console.
+//!    the image the machine installs and tracks, is the shipped one. The
+//!    installer carries no image: it pulls `ghcr.io/<owner>/ilex:latest` over
+//!    the network (QEMU user networking). Its `%pre` asks Anaconda itself what
+//!    product it thinks it is and prints that on the serial console.
 //! 3. Boot the installed disk and assert over SSH: `bootc status` names the
 //!    booted image and tracks the target, the system reaches `running` with no
 //!    failed units, and GDM is up (screenshot).
 //!
 //! It only exists when a filter names it (`cargo xtask test iso::`), because
 //! it builds an ISO and runs an install: tens of minutes. `cargo xtask test
-//! iso::` builds the ISO from the image under test first; `ILEX_ISO=<path>`
-//! uses a ready-made one (then `ILEX_ISO_DIGEST` and `ILEX_ISO_TARGET` say what
-//! it embeds and tracks, when known).
+//! iso::` builds the ISO first; `ILEX_ISO=<path>` uses a ready-made one (and
+//! `ILEX_ISO_TARGET` says what it makes the machine track). The image it
+//! installs is the published one, not the image under test.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,15 +41,17 @@ use crate::disk::vmtest::{self, Report};
 
 /// Anaconda's welcome screen has to come up this soon after the ISO boots.
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(300);
-/// Partitioning, copying the payload out of the ISO's container storage and
+/// Partitioning, pulling the image from the registry and
 /// installing the bootloader.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(1800);
 /// The installer's display mode (`VmConfig::new`).
 const INSTALLER_SCREEN: (u32, u32) = (1280, 800);
-/// The installer keeps everything it writes in RAM, and importing the payload
-/// into the new root first unpacks layers into its `/var/tmp`: a ~5 GB image
-/// needs well over 6 GiB of guest memory.
-const INSTALLER_MEMORY: &str = "16G";
+/// The installer keeps everything it writes in RAM. Importing a payload from
+/// the ISO's own container storage unpacked layers into its `/var/tmp` and
+/// needed 16 GiB for the ~5 GB image; pulling from the registry should stream
+/// the layers into the new root, so this is much smaller (see CLAUDE.md for
+/// what was measured).
+const INSTALLER_MEMORY: &str = "6G";
 /// What a bootc root needs: the system disk of the install (sparse).
 const DISK_SIZE: &str = "40G";
 /// What the installed machine tracks when nothing else is asked.
@@ -371,8 +374,8 @@ fn installed_system(
     Ok(())
 }
 
-/// `bootc status` names a booted image that is the target, and (when the
-/// harness knows it) the digest the ISO embedded.
+/// `bootc status` names a booted image that is the target, at the digest the
+/// registry serves for it (when `skopeo` can ask).
 fn bootc_status(vm: &Vm, artifacts: &Path) -> Result<()> {
     let json = vm.ssh_ok("bootc status --json")?;
     let _ = qemu::write_artifact(artifacts, "bootc-status.json", &json);
@@ -398,14 +401,29 @@ fn bootc_status(vm: &Vm, artifacts: &Path) -> Result<()> {
     if name != wanted {
         bail!("the machine tracks {name}, expected {wanted}");
     }
-    if let Some(expected) = std::env::var("ILEX_ISO_DIGEST")
-        .ok()
-        .filter(|d| !d.is_empty())
-        && digest != expected
-    {
-        bail!("the machine booted {digest}, but the ISO embeds {expected}");
+    // The installer carries no image: the machine has what the registry
+    // served at install time. Ask the registry now (a publish in between
+    // would be a rare false alarm); skip the check when we can't.
+    match published_digest(&wanted) {
+        Some(published) if published != digest => {
+            bail!("the machine booted {digest}, but {wanted} is {published}")
+        }
+        Some(_) => println!("     {wanted} is the published digest"),
+        None => println!("     (could not ask the registry for {wanted}; digest not checked)"),
     }
     Ok(())
+}
+
+/// The digest `reference` has in its registry, if `skopeo` can tell.
+fn published_digest(reference: &str) -> Option<String> {
+    cmd::probe(Command::new("skopeo").args([
+        "inspect",
+        "--no-tags",
+        "--format",
+        "{{.Digest}}",
+        &format!("docker://{reference}"),
+    ]))
+    .filter(|d| d.starts_with("sha256:"))
 }
 
 fn system_running(vm: &Vm) -> Result<()> {
