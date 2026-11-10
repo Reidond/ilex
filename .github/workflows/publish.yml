@@ -190,6 +190,8 @@ jobs:
       # The digest the upgrade tier tested; empty when there was nothing to
       # test (no :latest yet, or no candidate).
       tested: ${{ steps.candidate.outputs.digest }}
+      # false: there is no :latest yet (the very first publish).
+      exists: ${{ steps.from.outputs.exists }}
     env:
       # The candidate, pulled from :candidate below and tagged like on the
       # build runner; set before it exists so `xtask test` never builds one.
@@ -199,20 +201,28 @@ jobs:
 
       - name: Registry names (ghcr needs lowercase)
         id: from
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           echo "IMAGE_REPO=$repo" >> "$GITHUB_ENV"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          # Logged in (podman and skopeo share the login), so a package that
+          # is still private is found, and pulled, like a public one. That
+          # makes ghcr's "denied" or "unauthorized" mean what `xtask changed`
+          # reads it as: no such package yet.
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
           # The very first run has no published :latest, so there is nothing
-          # to upgrade from and the tier is skipped. Any other failure to look
-          # is an error: publish refuses a candidate this tier didn't test.
+          # to upgrade from and the tier is skipped (`exists=false`, which
+          # lets publish go ahead without it). Any other failure to look is an
+          # error: publish refuses a candidate this tier didn't test.
           if digest=$(skopeo inspect --retry-times 3 --format '{{.Digest}}' "docker://$repo:latest" 2>"$RUNNER_TEMP/skopeo.err"); then
             # v1 by digest: the one its cached disk is keyed by.
             echo "v1: $repo@$digest"
             echo "ILEX_UPGRADE_FROM=$repo@$digest" >> "$GITHUB_ENV"
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "disk_key=v1-disk-$BCVK_VERSION-${digest#sha256:}" >> "$GITHUB_OUTPUT"
-          elif grep -qiE "manifest unknown|not found" "$RUNNER_TEMP/skopeo.err"; then
+          elif grep -qiE "manifest unknown|name unknown|not found|404|denied|unauthorized" "$RUNNER_TEMP/skopeo.err"; then
             echo "::notice::no $repo:latest yet: nothing to upgrade from"
             echo "exists=false" >> "$GITHUB_OUTPUT"
           else
@@ -335,16 +345,17 @@ jobs:
         env:
           STAGED: ${{ needs.build.outputs.digest }}
           TESTED: ${{ needs.upgrade.outputs.tested }}
+          V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
           # The upgrade tier must have tested this very digest. The one
-          # exception is the very first publish: no :latest to upgrade from.
+          # exception is the very first publish: the upgrade job found no
+          # :latest to upgrade from.
           if [ "$TESTED" != "$STAGED" ]; then
-            latest="docker://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex:latest"
-            if [ -n "$TESTED" ] || skopeo inspect --retry-times 3 --raw "$latest" >/dev/null 2>&1; then
+            if [ -n "$TESTED" ] || [ "$V1_EXISTS" != false ]; then
               echo "::error::the build job staged ${STAGED:-nothing}, but the upgrade tier tested ${TESTED:-nothing}"
               exit 1
             fi

@@ -45,7 +45,9 @@ stamp() {
     done
 }
 
-# A subshell, so its `set -e` stops only this part.
+# A subshell, so its `set -e` stops only this part. Never call it (or `run`
+# with it) as a condition (`if`, `&&`, `||`): bash ignores `set -e` there,
+# inside subshells too, and a failed checksum would go on to install bcvk.
 vm_stack() (
     set -euxo pipefail
     echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -164,11 +166,12 @@ case "${1:-}" in
         ;;
     upgrade)
         run v1-pull podman pull --quiet "$ILEX_UPGRADE_FROM" &
-        if run vm-stack vm_stack; then
-            wait
+        run vm-stack vm_stack
+        stack=$?
+        wait
+        if [ "$stack" = 0 ]; then
             run upgrade-prepare prepare
         else
-            wait
             skip upgrade-prepare "the VM stack failed"
         fi
         ;;
