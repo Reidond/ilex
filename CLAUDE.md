@@ -38,8 +38,8 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   and after a reboot the unit must have added the enforcement (a second run
   is a no-op). Then the rollback to v1. One VM, one install: installing is
   most of the tier's time. `ILEX_UPGRADE_PREPARE=1` only installs and boots v1
-  (filling bcvk's base-disk cache) and stops; CI runs that in the background
-  while it builds.
+  (filling bcvk's base-disk cache) and stops; CI runs that ahead of time and
+  caches the disk (see CI publishing).
 - `iso::` is opt-in and slow (the ISO takes ~8 minutes to build once the
   installer image is cached, the install and boot ~8 more), so it only exists
   when a filter names it: `cargo xtask test iso::` builds the installer ISO
@@ -157,41 +157,78 @@ size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
 ## CI publishing
 
 `.github/workflows/publish.yml` runs on every merge to `main`, nightly at
-03:00 UTC and on demand: build → `changed` → `rechunk` → e2e tests →
-`publish` (push by digest, tag `:latest`, `:YYYYMMDD`, `:sha-<short>`, sign).
+03:00 UTC and on demand. Three jobs start together, so the slow parts overlap
+on separate runners:
+
+- `build`: build → `changed` → `rechunk` → stage the candidate in ghcr as
+  `:candidate` (`xtask publish --stage`: unsigned, never `:latest`) →
+  `ephemeral::`. In the background from its first minute (`.github/vm-prep.sh
+  ephemeral`): the VM stack, and a pull of `:latest`, which records the
+  registry's compressed blob for each layer, so staging uploads only the
+  layers that changed and machines download only those (`--stage` prints how
+  many: "N of M layers are new against :latest").
+- `upgrade`: the upgrade tier's v1 (the published `:latest`, by digest)
+  already installed to a disk, restored from the Actions cache; from its first
+  minute (`vm-prep.sh upgrade`) the VM stack, a pull of v1 and v1's disk
+  booted once with `ILEX_UPGRADE_PREPARE=1`. It polls the jobs API until the
+  build job's "Stage the candidate" step succeeds (or the build job ends
+  without it: nothing to test), pulls `:candidate` by digest and runs
+  `upgrade::`.
+- `installer-due` → `iso` (see Installer ISO).
+
+Then `publish` (main only, when the image changed) signs the staged digest,
+after checking it is the one the upgrade tier tested, and moves `:sha-<short>`,
+`:YYYYMMDD` and `:latest` to it (`xtask publish --digest`: tags in the
+registry, nothing pushed twice). Runs of the workflow never overlap (one
+concurrency group), so `:candidate` is always the current run's.
+
+Installing v1 to a disk takes ~14 minutes on a runner (11 of them bcvk's
+install VM importing the image's 64 layers into ostree), more than everything
+else in a run, so it happens ahead of time: after each publish the `publish`
+job starts the workflow again with `v1_disk`, a run of just the `v1-disk` job
+in a concurrency group of its own (nothing waits for it; a newer one cancels
+it). It installs the new `:latest` the way the upgrade tier does and saves
+bcvk's base disk (~5 GB, 1.9 GiB in the cache) in the Actions cache under the
+image digest and the bcvk version (`v1-disk-<bcvk>-<digest>`), with the two
+`user.bootc.*` xattrs bcvk recognizes a base disk by in a file next to it (the
+cache drops xattrs); older disks are deleted. The next run's upgrade job
+restores it (~40 s) and puts it back into bcvk's pool, and bcvk boots it
+instead of installing. A run that finds no disk (the v1-disk run hasn't
+finished, or the cache evicted it) or one bcvk rejects (other install options)
+installs v1 itself, ~10 minutes slower. `gh workflow run publish.yml --ref
+<branch> -f v1_disk=true` fills the cache for runs on that branch.
+
 `changed` fingerprints the image as built, so a run that changed nothing stops
-right after the build (no rechunk, no tests), unless a manual run forces the
-tests (`test`), which rechunks too. From the job's first minute,
-`.github/vm-prep.sh` runs in the background: the VM stack, then the upgrade
-tier's v1 (the published `:latest`) installed to a disk with
-`ILEX_UPGRADE_PREPARE=1`, so the ~9-minute install overlaps the build, the
-rechunk and the ephemeral tier instead of following them. A due installer ISO
-builds in its own job next to the publish job. The rechunked image (same
-content, reproducible layers, its own tag `rechunked`) is what is always
-tested and published. Rechunking while the tests ran on the image as built was
-measured: about 7 minutes faster, but the `upgrade::` tier then builds its v2
-from layers that share nothing with the published v1 (71 layers, 4.9 GB to
-stage instead of a few) and the VM boots v1 again after the reboot, so the
-tests run after the rechunk. The rechunk streams chunkah's OCI archive
-straight into `podman load` (`--log-driver=passthrough`): through conmon,
-which also logs everything a container prints, the 4.7 GB stream took 7.5 of
-its 9.5 minutes.
+right after the build (no rechunk, no tests, and the upgrade job stops when it
+sees that), unless a manual run forces the tests (`test`), which rechunks too.
+The rechunked image (same content, reproducible layers, its own tag
+`rechunked`) is what is always tested and published. Rechunking while the
+tests ran on the image as built was measured: about 7 minutes faster, but the
+`upgrade::` tier then builds its v2 from layers that share nothing with the
+published v1 (71 layers, 4.9 GB to stage instead of a few) and the VM boots v1
+again after the reboot, so the tests run after the rechunk. The rechunk
+streams chunkah's OCI archive straight into `podman load`
+(`--log-driver=passthrough`): through conmon, which also logs everything a
+container prints, the 4.7 GB stream took 7.5 of its 9.5 minutes.
 
 ```sh
 cargo xtask changed <ref> --image <tag> # prints changed=/exists=/fingerprint=; $GITHUB_OUTPUT when set
 cargo xtask rechunk <tag> [--output <tag>] # reproducible layers + ilex.fingerprint label; in place unless --output
-cargo xtask publish <tag>              # CI only
+cargo xtask publish <tag> --stage      # CI only: push as unsigned :candidate, print digest=
+cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :latest to it
 ```
 
+- The background parts (`vm-prep.sh`) log every line with the time it was
+  printed; the "Wait for" steps print those logs.
 - The runner is `vars.ILEX_RUNNER` (a repository variable) or `ubuntu-26.04`,
-  for both jobs: moving to a larger, org-owned or self-hosted runner is one
+  for every job: moving to a larger, org-owned or self-hosted runner is one
   setting (Settings → Secrets and variables → Actions → Variables). The
   runner's root disk is 145 GB with ~110 GB free, so the workflow doesn't
-  clear the preinstalled toolchains first. CI runs two VMs at a time
-  (`ILEX_VM_SLOTS=2`: the default of one per 8 GiB would be one on 16 GiB).
+  clear the preinstalled toolchains first. Each runner boots one VM at a
+  time (the default `ILEX_VM_SLOTS` on 16 GiB).
 - A manual run from another branch (`gh workflow run publish.yml --ref <branch>
-  -f test=true`, and `-f iso=true` for the ISO) builds and tests but never
-  publishes or pushes the ISO.
+  -f test=true`, and `-f iso=true` for the ISO) builds, stages `:candidate`
+  and tests, but never signs, moves `:latest` or releases the ISO.
 - `publish` refuses to run unless `CI=true`/`GITHUB_ACTIONS=true`. The one
   override is a registry on this machine, which can never be ghcr:
   `podman run -d -p 5000:5000 docker.io/library/registry:2`, then

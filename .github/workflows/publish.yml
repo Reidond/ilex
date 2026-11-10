@@ -7,9 +7,25 @@
 # that changed nothing stops right after the build: `changed` fingerprints the
 # image as built, so the rechunk and the tests are skipped.
 #
-# Wall time: the VM stack and the upgrade tier's v1 disk are prepared in the
-# background from the first minute (.github/vm-prep.sh), and a due ISO builds
-# in its own job, next to the publish job.
+# Three jobs start together, so the slow parts overlap on separate machines:
+#
+# * build: build → changed → rechunk → stage the candidate in ghcr as
+#   `:candidate` (unsigned; machines only accept signed images) → the
+#   ephemeral tier;
+# * upgrade: restores the upgrade tier's v1 (the published :latest), already
+#   installed to a disk, from the Actions cache (or installs it, ~14 minutes),
+#   waits for the build job to stage the candidate, pulls it by digest and
+#   runs the upgrade tier;
+# * installer-due → iso: see below.
+#
+# Then publish signs the staged digest, the one both tiers tested, and moves
+# :latest to it; nothing is pushed twice. Runs of this workflow never overlap
+# (the concurrency group), so `:candidate` is always this run's.
+#
+# After a publish, the publish job starts this workflow again with `v1_disk`:
+# that run (the v1-disk job alone, in a concurrency group of its own, so
+# nothing waits for it) installs the new :latest to a disk and puts it in the
+# Actions cache for the next run's upgrade tier.
 #
 # The installer ISO is a network installer: it carries no ilex image and installs
 # the newest :latest from ghcr, so it needn't follow every publish. It is built
@@ -19,7 +35,7 @@
 # fixes). A manual run with `iso` checked builds it regardless.
 #
 # Runner: `vars.ILEX_RUNNER` (repository variable) or ubuntu-26.04. One
-# setting moves both jobs to a larger or self-hosted runner.
+# setting moves every job to a larger or self-hosted runner.
 #
 # One-time repository setup (secrets, the public ghcr package) is in CLAUDE.md.
 name: publish
@@ -39,14 +55,23 @@ on:
         description: Run the e2e tests even if the image is unchanged (to check CI changes from a branch; only main publishes)
         type: boolean
         default: false
+      v1_disk:
+        description: Only install the published :latest to a disk for the upgrade tier's cache (the publish job starts this after each publish)
+        type: boolean
+        default: false
 
+# A v1-disk run has a group of its own (per branch: each has its cache scope):
+# publish runs never wait for it, and a newer :latest supersedes the disk it
+# is making.
 concurrency:
-  group: publish
-  cancel-in-progress: false
+  group: ${{ inputs.v1_disk && format('v1-disk-{0}', github.ref) || 'publish' }}
+  cancel-in-progress: ${{ inputs.v1_disk == true }}
 
 permissions:
   contents: read
   packages: write
+  # The upgrade job reads the build job's progress from the jobs API.
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,15 +82,17 @@ env:
   BCVK_SHA256: eb72198c0d36fab75bfcadbb6794a87afa6f496a4da6b1b34d27728243fa6474
 
 jobs:
-  publish:
+  build:
     # 26.04, not 24.04: its podman 5.7 / buildah 1.42 / skopeo 1.21 are close
     # to the Fedora 45 dev box; 24.04's podman 4.9 rejects Containerfile
     # syntax the dev box accepts.
+    if: ${{ !inputs.v1_disk }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
-      digest: ${{ steps.publish.outputs.digest }}
+      # What `xtask publish --stage` pushed as :candidate.
+      digest: ${{ steps.stage.outputs.digest }}
     env:
       # `xtask build --tag candidate` tags the image localhost/ilex:candidate.
       # The image as built; `xtask rechunk --output rechunked` makes the image
@@ -78,11 +105,11 @@ jobs:
         run: |
           echo "IMAGE_REPO=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex" >> "$GITHUB_ENV"
           echo "ILEX_UPGRADE_FROM=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex:latest" >> "$GITHUB_ENV"
-          # `changed` needs skopeo before the virt stack is installed below.
+          # `changed` needs skopeo before the VM stack is installed.
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
 
       # The runner's root disk is 145 GB with about 110 GB free: container
-      # storage for the build, the rechunk and the test VMs fits without
+      # storage for the build, the rechunk and the test VM fits without
       # deleting the preinstalled toolchains first.
       - name: Disk
         run: df -h / /mnt
@@ -91,19 +118,14 @@ jobs:
         with:
           github-cache: "true"
 
-      # In the background while the image builds and rechunks: the VM stack,
-      # then the upgrade tier's v1 (the published :latest) installed to a disk,
-      # which is most of that tier's time and doesn't depend on the candidate.
-      # bcvk keeps the installed disk, so the upgrade test boots v1 in seconds.
-      # Collected by the "Wait for" steps below. A run that changed nothing
-      # never waits; the end of the job stops it.
-      - name: VM stack and the upgrade tier's v1 disk (background)
-        env:
-          ILEX_VM_SLOTS: "2"
-          ILEX_VM_LOG_DIR: ${{ runner.temp }}/vm-logs
-        run: |
-          mkdir -p "$ILEX_VM_LOG_DIR" && chmod 1777 "$ILEX_VM_LOG_DIR"
-          nohup bash .github/vm-prep.sh > /dev/null 2>&1 &
+      # In the background while the image builds: the VM stack for the
+      # ephemeral tier, and a pull of :latest. The pull records which
+      # compressed blob in the registry holds each of its layers, so staging
+      # the candidate (reproducible layers, mostly the same) uploads only what
+      # changed and machines download only that. A run that changed nothing
+      # never waits for either; the end of the job stops them.
+      - name: VM stack and :latest (background)
+        run: nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
 
       - name: Build the candidate image
         run: cargo xtask build --tag candidate
@@ -116,68 +138,165 @@ jobs:
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install cosign (v2)
-        if: steps.changed.outputs.changed == 'true'
-        uses: sigstore/cosign-installer@v4.1.3
-        with:
-          cosign-release: ${{ env.COSIGN_VERSION }}
-
       # Reproducible layers, into the tag `rechunked`: the image the tests run
-      # on and publish pushes. (Rechunking while the tests run on the image as
-      # built was tried: faster by ~7 minutes, but the upgrade tier then builds
-      # its v2 from layers that share nothing with the published v1 and the VM
-      # boots v1 again after the reboot. See CLAUDE.md.) A forced test run
-      # (`test`) of an unchanged image is rechunked too, for the same reason.
+      # on and publish signs. (Rechunking while the tests run on the image as
+      # built was tried: the upgrade tier then builds its v2 from layers that
+      # share nothing with the published v1 and the VM boots v1 again after the
+      # reboot. See CLAUDE.md.) A forced test run (`test`) of an unchanged
+      # image is rechunked too, for the same reason.
       - name: Rechunk (reproducible layers)
         if: steps.changed.outputs.changed == 'true' || inputs.test
         run: cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT"
         env:
           FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
 
-      # The VM stack from the background step. `sg libvirt` (below) gives a
-      # shell the libvirt group it joined, without a new login.
+      - name: Wait for :latest
+        if: steps.changed.outputs.changed == 'true' || inputs.test
+        timeout-minutes: 15
+        run: .github/vm-prep.sh wait latest-pull
+
+      # The upgrade job waits for this step (by name) and pulls the digest.
+      # Unsigned, never :latest: a branch run stages too, so its upgrade tier
+      # can run, but only main publishes.
+      - name: Stage the candidate
+        id: stage
+        if: steps.changed.outputs.changed == 'true' || inputs.test
+        run: cargo xtask publish rechunked --stage
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Wait for the VM stack
         if: steps.changed.outputs.changed == 'true' || inputs.test
         timeout-minutes: 15
-        run: |
-          until [ -e "$RUNNER_TEMP/vm-stack.status" ]; do sleep 2; done
-          echo "::group::VM stack"; cat "$RUNNER_TEMP/vm-stack.log"; echo "::endgroup::"
-          exit "$(cat "$RUNNER_TEMP/vm-stack.status")"
+        run: .github/vm-prep.sh wait vm-stack
 
-      # While v1's disk may still be installing in the other VM slot.
       - name: e2e tests (ephemeral)
-        id: e2e
         if: steps.changed.outputs.changed == 'true' || inputs.test
         env:
-          # Always the rechunked image: the rechunk step runs whenever this one
-          # does, and the upgrade tier needs v2 built on rechunked layers.
+          # Always the rechunked image: the one staged above.
           ILEX_IMAGE: localhost/ilex:rechunked
-          # The runner has 4 vCPUs and ~16 GiB: two VMs at a time (the default
-          # is one per 8 GiB, so one), so this tier doesn't wait for v1's
-          # install.
-          ILEX_VM_SLOTS: "2"
         run: sg libvirt -c "cargo xtask test ephemeral::"
 
-      # The very first run has no published :latest, so there is nothing to
-      # upgrade from and the upgrade tier is skipped. If preparing v1's disk
-      # failed, the test installs it itself (slower, same result).
-      - name: Wait for the upgrade tier's v1 disk
-        if: (steps.changed.outputs.changed == 'true' || inputs.test) && steps.changed.outputs.exists == 'true'
-        timeout-minutes: 30
+  # The upgrade tier on a runner of its own. Installing v1 to a disk takes ~14
+  # minutes on a runner, most of the tier's time, so the v1-disk run installs
+  # each new :latest ahead of time and this job restores that disk from the
+  # Actions cache. Without one (say, a run that starts before the v1-disk run
+  # of the last publish is done) it installs v1 itself, from its first minute.
+  upgrade:
+    if: ${{ !inputs.v1_disk }}
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 120
+    outputs:
+      # The digest the upgrade tier tested; empty when there was nothing to
+      # test (no :latest yet, or no candidate).
+      tested: ${{ steps.candidate.outputs.digest }}
+      # false: there is no :latest yet (the very first publish).
+      exists: ${{ steps.from.outputs.exists }}
+    env:
+      # The candidate, pulled from :candidate below and tagged like on the
+      # build runner; set before it exists so `xtask test` never builds one.
+      ILEX_IMAGE: localhost/ilex:rechunked
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Registry names (ghcr needs lowercase)
+        id: from
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          until [ -e "$RUNNER_TEMP/upgrade-prepare.status" ]; do sleep 2; done
-          echo "::group::Installing v1"; cat "$RUNNER_TEMP/upgrade-prepare.log"; echo "::endgroup::"
-          rc=$(cat "$RUNNER_TEMP/upgrade-prepare.status")
-          if [ "$rc" != 0 ]; then
-            echo "::warning::preparing v1's disk failed (exit $rc); the upgrade test installs it itself"
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          echo "IMAGE_REPO=$repo" >> "$GITHUB_ENV"
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          # Logged in (podman and skopeo share the login), so a package that
+          # is still private is found, and pulled, like a public one. That
+          # makes ghcr's "denied" or "unauthorized" mean what `xtask changed`
+          # reads it as: no such package yet.
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+          # The very first run has no published :latest, so there is nothing
+          # to upgrade from and the tier is skipped (`exists=false`, which
+          # lets publish go ahead without it). Any other failure to look is an
+          # error: publish refuses a candidate this tier didn't test.
+          if digest=$(skopeo inspect --retry-times 3 --format '{{.Digest}}' "docker://$repo:latest" 2>"$RUNNER_TEMP/skopeo.err"); then
+            # v1 by digest: the one its cached disk is keyed by.
+            echo "v1: $repo@$digest"
+            echo "ILEX_UPGRADE_FROM=$repo@$digest" >> "$GITHUB_ENV"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "disk_key=v1-disk-$BCVK_VERSION-${digest#sha256:}" >> "$GITHUB_OUTPUT"
+          elif grep -qiE "manifest unknown|name unknown|not found|404|denied|unauthorized" "$RUNNER_TEMP/skopeo.err"; then
+            echo "::notice::no $repo:latest yet: nothing to upgrade from"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/skopeo.err"; exit 1
           fi
 
-      - name: e2e tests (upgrade)
-        id: upgrade
-        if: (steps.changed.outputs.changed == 'true' || inputs.test) && steps.changed.outputs.exists == 'true'
+      # v1 installed to a disk by the v1-disk run that followed the publish of
+      # v1 (see that job). vm-prep.sh hands it to bcvk; on a miss v1 is
+      # installed here.
+      - name: v1's disk from the cache
+        if: steps.from.outputs.exists == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/v1-disk
+          key: ${{ steps.from.outputs.disk_key }}
+
+      - uses: kunobi-ninja/kache-action@v1
+        if: steps.from.outputs.exists == 'true'
+        with:
+          github-cache: "true"
+
+      # The VM stack and a pull of v1, then v1's disk (from the cache, or
+      # installed) booted once with ILEX_UPGRADE_PREPARE=1, so the test boots
+      # v1 in seconds. Its consoles land in vm-logs.
+      - name: VM stack and v1's disk (background)
+        if: steps.from.outputs.exists == 'true'
         env:
-          ILEX_IMAGE: localhost/ilex:rechunked
-          ILEX_VM_SLOTS: "2"
+          ILEX_VM_LOG_DIR: ${{ runner.temp }}/vm-logs
+          ILEX_V1_DISK: ${{ runner.temp }}/v1-disk
+        run: |
+          mkdir -p "$ILEX_VM_LOG_DIR" && chmod 1777 "$ILEX_VM_LOG_DIR"
+          nohup bash .github/vm-prep.sh upgrade > /dev/null 2>&1 &
+
+      # Until the build job's "Stage the candidate" step succeeds. If the build
+      # job ends without it (nothing changed, or it failed), there is nothing
+      # to test and the publish job won't run either.
+      - name: Wait for the candidate
+        id: candidate
+        if: steps.from.outputs.exists == 'true'
+        timeout-minutes: 60
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jobs="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs"
+          query='.jobs[] | select(.name == "build")
+                 | "\(.status) \(([.steps[] | select(.name == "Stage the candidate") | .conclusion][0]) // "pending")"'
+          while :; do
+            state=$(gh api "$jobs" --jq "$query" 2>/dev/null) || state=""
+            case "$state" in
+              *" success") break ;;
+              "completed "*)
+                echo "::notice::the build job ended without staging a candidate ($state): nothing to test"
+                exit 0 ;;
+            esac
+            sleep 10
+          done
+          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:candidate")
+          echo "candidate: $IMAGE_REPO@$digest"
+          podman pull --quiet "$IMAGE_REPO@$digest"
+          podman tag "$IMAGE_REPO@$digest" "$ILEX_IMAGE"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for v1's disk
+        if: steps.candidate.outputs.digest != ''
+        timeout-minutes: 30
+        run: |
+          .github/vm-prep.sh wait vm-stack
+          .github/vm-prep.sh wait v1-pull
+          .github/vm-prep.sh wait upgrade-prepare
+
+      - name: e2e tests (upgrade)
+        id: e2e
+        if: steps.candidate.outputs.digest != ''
+        env:
           # The libvirt VM's consoles land here (the domain itself is removed
           # when the test ends); kept as an artifact on failure.
           ILEX_VM_LOG_DIR: ${{ runner.temp }}/vm-logs
@@ -191,28 +310,142 @@ jobs:
           sg libvirt -c "cargo xtask test upgrade::"
 
       - name: Keep VM logs
-        if: failure() && (steps.e2e.outcome == 'failure' || steps.upgrade.outcome == 'failure')
+        if: failure() && steps.e2e.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: vm-logs
           path: ${{ runner.temp }}/vm-logs
           if-no-files-found: ignore
 
-      # Only main publishes: a manual run dispatched from another branch still
-      # builds and tests, but never moves :latest.
+  # Main only: a manual run dispatched from another branch builds, stages and
+  # tests, but never moves :latest. Signs the staged digest, the one both tiers
+  # tested, then moves :latest and the date tag to it.
+  publish:
+    needs: [build, upgrade]
+    if: needs.build.outputs.changed == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      # Starts the v1-disk run.
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          github-cache: "true"
+
+      - uses: sigstore/cosign-installer@v4.1.3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
       - name: Publish and sign
-        id: publish
-        if: steps.changed.outputs.changed == 'true' && github.ref == 'refs/heads/main'
-        run: cargo xtask publish rechunked
         env:
+          STAGED: ${{ needs.build.outputs.digest }}
+          TESTED: ${{ needs.upgrade.outputs.tested }}
+          V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          # The upgrade tier must have tested this very digest. The one
+          # exception is the very first publish: the upgrade job found no
+          # :latest to upgrade from.
+          if [ "$TESTED" != "$STAGED" ]; then
+            if [ -n "$TESTED" ] || [ "$V1_EXISTS" != false ]; then
+              echo "::error::the build job staged ${STAGED:-nothing}, but the upgrade tier tested ${TESTED:-nothing}"
+              exit 1
+            fi
+            echo "no :latest yet: the first publish has no upgrade tier"
+          fi
+          cargo xtask publish --digest "$STAGED"
 
-  # Is a new installer ISO due? Its own job, next to `publish`: the ISO carries
+      # The next run's upgrade tier boots what was just published as its v1.
+      # A failure here costs that run the install, nothing else.
+      - name: Start the v1-disk run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f v1_disk=true ||
+            echo "::warning::could not start the v1-disk run; the next upgrade tier installs v1 itself"
+
+  # Only in a run started with `v1_disk` (the publish job starts one after each
+  # publish): the published :latest installed to a disk exactly the way the
+  # upgrade tier installs its v1, and kept in the Actions cache under its
+  # digest, so the next run's upgrade tier restores it instead of spending ~14
+  # minutes installing v1. One disk (~5 GB) at a time: older ones are deleted.
+  v1-disk:
+    if: inputs.v1_disk
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # Deletes the superseded disks from the cache.
+      actions: write
+    env:
+      # Set, so `xtask test` builds nothing: preparing v1 needs no candidate.
+      ILEX_IMAGE: localhost/ilex:rechunked
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Which :latest
+        id: v1
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          digest=$(skopeo inspect --retry-times 3 --format '{{.Digest}}' "docker://$repo:latest")
+          echo "v1: $repo@$digest"
+          echo "ILEX_UPGRADE_FROM=$repo@$digest" >> "$GITHUB_ENV"
+          echo "key=v1-disk-$BCVK_VERSION-${digest#sha256:}" >> "$GITHUB_OUTPUT"
+
+      - name: Already cached?
+        id: cached
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/v1-disk
+          key: ${{ steps.v1.outputs.key }}
+          lookup-only: true
+
+      - uses: kunobi-ninja/kache-action@v1
+        if: steps.cached.outputs.cache-hit != 'true'
+        with:
+          github-cache: "true"
+
+      - name: Install v1 to a disk
+        if: steps.cached.outputs.cache-hit != 'true'
+        run: |
+          bash .github/vm-prep.sh upgrade || true
+          for part in vm-stack v1-pull upgrade-prepare; do .github/vm-prep.sh wait "$part"; done
+          if [ "$(cat "$RUNNER_TEMP/upgrade-prepare.status")" != 0 ]; then
+            echo "::error::installing v1 failed"; exit 1
+          fi
+          .github/vm-prep.sh save-disk "$RUNNER_TEMP/v1-disk"
+
+      - name: Keep it in the cache
+        if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/v1-disk
+          key: ${{ steps.v1.outputs.key }}
+
+      - name: Delete superseded disks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ steps.v1.outputs.key }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --key v1-disk- --limit 100 --json id,key \
+              --jq '.[] | select(.key != env.KEY) | .id' |
+            while read -r id; do gh cache delete --repo "$GITHUB_REPOSITORY" "$id"; done
+          gh cache list --repo "$GITHUB_REPOSITORY" --key v1-disk-
+
+  # Is a new installer ISO due? Its own job, next to the others: the ISO carries
   # no ilex image, so it needn't wait for the publish, and `installer/` can
   # change alone. Reads the latest installer release.
   installer-due:
+    if: ${{ !inputs.v1_disk }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 15
     outputs:
@@ -231,7 +464,7 @@ jobs:
   # it becomes a GitHub Release (`installer-YYYYMMDD`, marked latest, so
   # releases/latest/download/ilex-installer.iso always works); from a branch it
   # is built and uploaded as a workflow artifact to be inspected, and nothing
-  # is released. It runs next to the publish job; neither waits for the other.
+  # is released. It runs next to the image jobs; nothing waits for it.
   iso:
     needs: installer-due
     if: inputs.iso || needs.installer-due.outputs.iso_due == 'true'
