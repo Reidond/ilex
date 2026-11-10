@@ -32,10 +32,14 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   candidate plus a marker layer, tagged `<image tag>-upgrade`, never the
   checkout's own tag. The VM uses `uefi-insecure` firmware: Secure Boot needs
   SMM, which KVM can't do under WSL2's nested virtualization.
-  `upgrade::sigpolicy_enforced` installs the image under test in its own VM,
-  points the origin at `ghcr.io/reidond/ilex:latest` unverified (the state an
-  ISO install leaves), reboots and asserts the boot-time `ilex-sigpolicy.service`
-  added the signature enforcement, then that a second run is a no-op.
+  On v2 the same VM checks signature enforcement: v2's `ilex-sigpolicy.service`
+  left the containers-storage origin alone at boot; the origin is pointed at
+  `ghcr.io/reidond/ilex:latest` unverified (the state an ISO install leaves),
+  and after a reboot the unit must have added the enforcement (a second run
+  is a no-op). Then the rollback to v1. One VM, one install: installing is
+  most of the tier's time. `ILEX_UPGRADE_PREPARE=1` only installs and boots v1
+  (filling bcvk's base-disk cache) and stops; CI runs that in the background
+  while it builds.
 - `iso::` is opt-in and slow (the ISO takes ~8 minutes to build once the
   installer image is cached, the install and boot ~8 more), so it only exists
   when a filter names it: `cargo xtask test iso::` builds the installer ISO
@@ -156,14 +160,22 @@ size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
 03:00 UTC and on demand: build → `changed` → `rechunk` → e2e tests →
 `publish` (push by digest, tag `:latest`, `:YYYYMMDD`, `:sha-<short>`, sign).
 `changed` fingerprints the image as built, so a run that changed nothing stops
-right after the build (no virt stack, no rechunk, no tests), unless a manual
-run forces the tests (`test`), which rechunks too. The rechunked image (same
+right after the build (no rechunk, no tests), unless a manual run forces the
+tests (`test`), which rechunks too. From the job's first minute,
+`.github/vm-prep.sh` runs in the background: the VM stack, then the upgrade
+tier's v1 (the published `:latest`) installed to a disk with
+`ILEX_UPGRADE_PREPARE=1`, so the ~9-minute install overlaps the build, the
+rechunk and the ephemeral tier instead of following them. A due installer ISO
+builds in its own job next to the publish job. The rechunked image (same
 content, reproducible layers, its own tag `rechunked`) is what is always
 tested and published. Rechunking while the tests ran on the image as built was
 measured: about 7 minutes faster, but the `upgrade::` tier then builds its v2
 from layers that share nothing with the published v1 (71 layers, 4.9 GB to
 stage instead of a few) and the VM boots v1 again after the reboot, so the
-tests run after the rechunk.
+tests run after the rechunk. The rechunk streams chunkah's OCI archive
+straight into `podman load` (`--log-driver=passthrough`): through conmon,
+which also logs everything a container prints, the 4.7 GB stream took 7.5 of
+its 9.5 minutes.
 
 ```sh
 cargo xtask changed <ref> --image <tag> # prints changed=/exists=/fingerprint=; $GITHUB_OUTPUT when set
@@ -211,7 +223,7 @@ https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso.sha2
 ```
 
 Because it always installs the newest image it doesn't follow every publish.
-After each run of the publish job, `cargo xtask iso --due` decides (the `iso`
+On every run, `cargo xtask iso --due` decides, in the `installer-due` job (the `iso`
 job reads its `iso_due=`): a new ISO is due when there is no `installer-*`
 release yet, when `installer/` or `crates/xtask/src/iso.rs` changed since the
 latest one (its notes carry an `installer-fingerprint:` line), or when the

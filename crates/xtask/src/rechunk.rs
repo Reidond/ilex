@@ -91,9 +91,13 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let old_id = podman_id(&input)?;
 
     // podman run … rechunk --chunkah | podman load
+    // `--log-driver=passthrough` hands our pipe to the container as its
+    // stdout. By default conmon relays the stream and also writes all of it
+    // (~4.7 GB of tar) to the container log: 188 s locally against 50 s, and
+    // ~7.5 of the 9.5 minutes the rechunk took in CI.
     let mut chunk = Command::new("podman");
     chunk
-        .args(["run", "--rm"])
+        .args(["run", "--rm", "--log-driver=passthrough"])
         .arg(format!("--mount=type=image,src={input},dest=/chunkah"))
         .args(["--env", "CHUNKAH_CONFIG_STR", BASE_IMAGE])
         .args(["/usr/libexec/bootc-base-imagectl", "rechunk", "--chunkah"]);
