@@ -7,18 +7,17 @@
 # that changed nothing stops right after the build: `changed` fingerprints the
 # image as built, so the rechunk, the tests and the VM stack are skipped.
 #
-# The installer ISO is not rebuilt on every publish (installed machines update
-# themselves to :latest, so the ISO may lag the image by up to a week). It is
-# built, after the image was published, when `cargo xtask iso --due` says so:
-# no ISO is published yet, `installer/` (or the ISO code in xtask) changed since
-# the published one, or :latest has moved on from the image the published ISO
-# embeds and that ISO is at least a week old. A manual run with `iso` checked
-# builds it regardless.
+# The installer ISO is a network installer: it carries no ilex image and installs
+# the newest :latest from ghcr, so it needn't follow every publish. It is built
+# (and, on main, released as a GitHub Release) when `cargo xtask iso --due` says
+# so: no installer release yet, `installer/` (or the ISO code in xtask) changed
+# since the latest one, or the latest one is a week old (Fedora and Anaconda
+# fixes). A manual run with `iso` checked builds it regardless.
 #
 # Runner: `vars.ILEX_RUNNER` (repository variable) or ubuntu-26.04. One
 # setting moves both jobs to a larger or self-hosted runner.
 #
-# One-time repository setup (secrets, public ghcr packages) is in CLAUDE.md.
+# One-time repository setup (secrets, the public ghcr package) is in CLAUDE.md.
 name: publish
 
 on:
@@ -29,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       iso:
-        description: Build the installer ISO from the published :latest even if it isn't due
+        description: Build the installer ISO even if it isn't due (on main it is released; from a branch it is kept as an artifact)
         type: boolean
         default: false
       test:
@@ -204,25 +203,30 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
-      # Runs whether or not the image changed: `installer/` can change alone.
+      # Runs whether or not the image changed: `installer/` can change alone, and
+      # the installer is rebuilt weekly. Reads the latest installer release.
       - name: Is a new installer ISO due?
         id: isodue
         run: cargo xtask iso --due
         env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
 
-  # Runs after the publish job when the ISO is due (see the top of this file),
-  # on main, from the digest just published (or :latest when nothing was). A
-  # manual run with `iso` checked builds from the published :latest; from a
-  # branch it builds with --no-push, to check ISO changes without touching
-  # ilex-iso. A failure here never unpublishes the image.
+  # The network installer ISO, built when `cargo xtask iso --due` says so (see
+  # the top of this file) or on a manual run with `iso` checked. It carries no
+  # ilex image, so it doesn't depend on what the publish job published. On main
+  # it becomes a GitHub Release (`installer-YYYYMMDD`, marked latest, so
+  # releases/latest/download/ilex-installer.iso always works); from a branch it
+  # is built and uploaded as a workflow artifact to be inspected, and nothing
+  # is released. A failure here never unpublishes the image.
   iso:
     needs: publish
     if: >-
       needs.publish.result == 'success' &&
-      (inputs.iso || (github.ref == 'refs/heads/main' && needs.publish.outputs.iso_due == 'true'))
+      (inputs.iso || needs.publish.outputs.iso_due == 'true')
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 120
+    timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -244,23 +248,11 @@ jobs:
       # overlay on overlay). `generic-iso` needs image-builder 89, which Fedora
       # 45 has only in updates-testing for now.
       #
-      # The installer's base layer (Anaconda, the initramfs) is cached in
-      # ghcr.io/<owner>/ilex-installer-base under a hash of its inputs: pulled
-      # when it is there, built and pushed when it is not. Pushing is limited
-      # to main and manual runs; the tag is content-addressed, so a manual run
-      # from a branch can't move anything main uses.
-      - name: Build and push the installer ISO
-        env:
-          DIGEST: ${{ needs.publish.outputs.digest }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The installer's base (Anaconda, the initramfs) is rebuilt every time on
+      # purpose: the weekly build exists to pick up Fedora and Anaconda fixes,
+      # which a cached base would pin.
+      - name: Build the installer ISO
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
-          if [ -z "$DIGEST" ]; then
-            DIGEST=$(skopeo inspect --creds "${GITHUB_ACTOR}:${REGISTRY_TOKEN}" \
-              --format '{{.Digest}}' "docker://${image}:latest")
-          fi
-          export ILEX_ISO_SOURCE="${image}@${DIGEST}"
-          echo "installer payload: ${ILEX_ISO_SOURCE}"
           if [ -e /etc/apparmor.d/bwrap-userns-restrict ]; then
             sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
           fi
@@ -270,27 +262,62 @@ jobs:
           done
           sudo aa-status 2>/dev/null | grep -i bwrap || echo "no bwrap AppArmor profile loaded"
           trap 'if [ $? -ne 0 ]; then sudo dmesg | grep -iE "apparmor|denied" | tail -40; fi' EXIT
-          # Only main pushes the ISO; a manual run from a branch builds it and stops.
-          if [ "$GITHUB_REF" = refs/heads/main ]; then export ILEX_ISO_PUSH=""; else export ILEX_ISO_PUSH=--no-push; fi
-          if [ "$GITHUB_REF" = refs/heads/main ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            export ILEX_INSTALLER_BASE_PUSH=1
-          fi
           sudo mkdir -p /mnt/ilex/containers /mnt/ilex/image-builder /mnt/ilex/state/tmp
-          sudo --preserve-env=ILEX_ISO_SOURCE,ILEX_ISO_PUSH,ILEX_INSTALLER_BASE_PUSH,REGISTRY_TOKEN,GITHUB_ACTOR,GITHUB_REPOSITORY_OWNER,GITHUB_ACTIONS,CI \
-            podman run --rm --privileged --security-opt label=disable \
+          sudo podman run --rm --privileged --security-opt label=disable \
               --security-opt apparmor=unconfined --security-opt seccomp=unconfined \
               -v "$PWD:/src" -w /src \
               -v /mnt/ilex/containers:/var/lib/containers \
               -v /mnt/ilex/image-builder:/var/cache/image-builder \
               -v /mnt/ilex/state:/mnt/ilex-state \
-              -e ILEX_ISO_SOURCE -e ILEX_ISO_PUSH -e ILEX_INSTALLER_BASE_PUSH \
-              -e REGISTRY_TOKEN -e GITHUB_ACTOR \
-              -e GITHUB_REPOSITORY_OWNER -e GITHUB_ACTIONS -e CI \
               -e ILEX_STATE_DIR=/mnt/ilex-state -e TMPDIR=/mnt/ilex-state/tmp \
               quay.io/fedora/fedora:45 bash -euxc '
                 dnf -y install git cargo gcc podman skopeo
                 dnf -y install --enablerepo=updates-testing image-builder
                 image-builder version
                 git config --global --add safe.directory /src
-                cargo xtask iso $ILEX_ISO_PUSH "$ILEX_ISO_SOURCE"
+                cargo xtask iso --output-dir /mnt/ilex-state/iso
               '
+          ls -l /mnt/ilex/state/iso/
+
+      # A branch run stops here: the ISO to inspect, no release.
+      - name: What main would release
+        if: github.ref != 'refs/heads/main'
+        run: |
+          size=$(stat -c %s /mnt/ilex/state/iso/ilex-installer.iso)
+          echo "ISO: $size bytes ($((size / 1048576)) MiB; a release asset has to be under 2048 MiB)"
+          cat /mnt/ilex/state/iso/ilex-installer.iso.sha256
+          tag="installer-$(date -u +%Y%m%d)"
+          echo "A run on main would create the release $tag:"
+          echo "  https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/ilex-installer.iso"
+          echo "and make this link point at it:"
+          echo "  https://github.com/$GITHUB_REPOSITORY/releases/latest/download/ilex-installer.iso"
+          echo "--- release notes:"; cat /mnt/ilex/state/iso/release-notes.md
+
+      - name: Keep the ISO (not a release)
+        if: github.ref != 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-iso
+          path: |
+            /mnt/ilex/state/iso/ilex-installer.iso
+            /mnt/ilex/state/iso/ilex-installer.iso.sha256
+            /mnt/ilex/state/iso/release-notes.md
+          compression-level: 0
+          retention-days: 3
+
+      # Main only. Each asset has to be under 2 GiB (`xtask iso` checks).
+      - name: Publish the release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir=/mnt/ilex/state/iso
+          base="installer-$(date -u +%Y%m%d)"
+          tag="$base"
+          n=2
+          while gh release view "$tag" >/dev/null 2>&1; do tag="$base-$n"; n=$((n + 1)); done
+          gh release create "$tag" "$dir/ilex-installer.iso" "$dir/ilex-installer.iso.sha256" \
+            --target "$GITHUB_SHA" --title "ilex installer ${base#installer-}" \
+            --notes-file "$dir/release-notes.md" --latest
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/ilex-installer.iso"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/ilex-installer.iso"

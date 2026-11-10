@@ -32,17 +32,19 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   candidate plus a marker layer, tagged `<image tag>-upgrade`, never the
   checkout's own tag. The VM uses `uefi-insecure` firmware: Secure Boot needs
   SMM, which KVM can't do under WSL2's nested virtualization.
-- `iso::` is opt-in and slow (about 15 minutes for the ISO the first time,
-  then 7 for the install and boot), so it only exists when a filter names it:
-  `cargo xtask test iso::` builds an installer ISO from the image under test
+- `iso::` is opt-in and slow (the ISO takes ~8 minutes to build once the
+  installer image is cached, the install and boot ~8 more), so it only exists
+  when a filter names it: `cargo xtask test iso::` builds the installer ISO
   (`ILEX_ISO=<path>` reuses one), installs it unattended in QEMU/UEFI onto a
-  blank disk, boots the result and asserts over SSH that `bootc status` shows
-  the booted image tracking `ghcr.io/reidond/ilex:latest` at the digest the ISO
-  embeds, that the system is `running` with no failed units and that GDM is up.
-  The installer VM gets 16 GiB (see "Installer ISO"). Screenshots of Anaconda's
-  welcome screen and of the first boot land in `<state dir>/artifacts/iso/`.
-- Publishing (`xtask publish`, `xtask iso`) only happens in CI. Never push to
-  ghcr from a dev machine.
+  blank disk over QEMU's user networking, boots the result and asserts over SSH
+  that `bootc status` shows the booted image tracking
+  `ghcr.io/reidond/ilex:latest` at the digest the registry serves, that the
+  system is `running` with no failed units and that GDM is up. The installer
+  is a network installer: what it installs is the *published* image, not the
+  image under test. Screenshots of Anaconda's welcome screen and of the first
+  boot land in `<state dir>/artifacts/iso/`.
+- Publishing (`xtask publish`) and the installer release only happen in CI.
+  Never push to ghcr or create releases from a dev machine.
 
 ## Build sharing: kache
 
@@ -191,38 +193,47 @@ cargo xtask publish <tag>              # CI only
 
 ### Installer ISO
 
-The `iso` job builds an Anaconda installer ISO from the published image and
-pushes it to `ghcr.io/reidond/ilex-iso` (`:latest`, `:YYYYMMDD`) as an OCI
-artifact: an ISO with a ~2 GB image in it can exceed GitHub's 2 GiB release
-asset limit. It does not run on every publish: installed machines update
-themselves to `:latest`, so the ISO may lag the image by up to a week. After
-each run of the publish job, `cargo xtask iso --due` decides (and the job
-reads its `iso_due=`): a new ISO is due when none is published, when
-`installer/` or `crates/xtask/src/iso.rs` changed since the published one
-(the ISO carries `ilex.installer-fingerprint` and `ilex.payload-digest`
-annotations), or when `:latest` has moved on from the image the published ISO
-embeds and that ISO is at least 7 days old. A manual run with `iso` checked
-(`-f iso=true`) builds one regardless.
+The installer is a **network installer** published as a GitHub Release: it
+carries no ilex image, so one small ISO stays current by itself and fits
+GitHub's limit of 2 GiB per release asset (an ISO with the ~5 GB image in it
+was 2.6 GiB). Download it, write it to a USB stick and boot it; Anaconda asks
+for the disk and the user, then installs the newest `ghcr.io/reidond/ilex:latest`
+over a (wired) network connection and the machine updates itself from there:
 
-```sh
-cargo xtask iso <image@sha256:…> --no-push   # build only; the ISO lands in <state dir>/iso/
-cargo xtask iso --due                        # is a new ISO due? (reads the published one)
-podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact extract` and write it to a USB stick
+```
+https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso
+https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso.sha256
 ```
 
-- The installer is two layers. `installer/base/` (Anaconda, fonts, the
-  initramfs: most of the build time) is built once per Fedora release and
-  content hash and cached as `ghcr.io/reidond/ilex-installer-base:<release>-<hash>`
-  (pulled when it exists; pushed by main and manual runs only, and the tag is
-  content-addressed so a branch run can't move what main uses). `installer/Containerfile`
-  adds the kickstart for one payload on top, which takes seconds.
-- `installer/base/Containerfile` is `fedora-bootc:45` plus Anaconda; the kickstart
-  (`installer/interactive-defaults.ks`) installs the embedded image
-  (`--source-imgref containers-storage:localhost/ilex-payload:<digest prefix>`)
-  and tracks `ghcr.io/reidond/ilex:latest` (`--target-imgref`). Anaconda still
-  asks for the disk and the user. The embedded image is exactly the digest you
-  pass, but it is named by a local tag: image-builder can't embed an image
-  under a `@sha256:` name.
+Because it always installs the newest image it doesn't follow every publish.
+After each run of the publish job, `cargo xtask iso --due` decides (the `iso`
+job reads its `iso_due=`): a new ISO is due when there is no `installer-*`
+release yet, when `installer/` or `crates/xtask/src/iso.rs` changed since the
+latest one (its notes carry an `installer-fingerprint:` line), or when the
+latest one is 7 days old (Fedora and Anaconda fixes). A manual run with `iso`
+checked (`-f iso=true`) builds one regardless. On `main` the `iso` job creates
+the release `installer-YYYYMMDD` (`-N` suffix if one exists that day) with
+`ilex-installer.iso`, its `.sha256` and notes, marked latest, using
+`GITHUB_TOKEN` (the job has `contents: write`). From any other branch it builds
+the ISO and uploads it as the workflow artifact `installer-iso` instead, so it
+can be inspected; nothing is released.
+
+```sh
+cargo xtask iso                # build; the ISO, its .sha256 and release-notes.md land in <state dir>/iso/
+cargo xtask iso --due          # is a new ISO due? (reads the latest installer release; needs gh)
+```
+
+- `installer/Containerfile` is `fedora-bootc:45` plus Anaconda; its kickstart
+  (`installer/interactive-defaults.ks`) installs `registry:ghcr.io/reidond/ilex:latest`
+  (`--source-imgref`; pykickstart requires the transport) and tracks
+  `ghcr.io/reidond/ilex:latest` (`--target-imgref`). The installer drops GPU
+  firmware, Vulkan drivers and CJK fonts before it builds its initramfs: a stock
+  build was 1.98 GiB, 16 MiB under the limit. `xtask iso` fails if the ISO
+  reaches 2 GiB.
+- The installer base is not cached between runs (an `ilex-installer-base`
+  package was tried, and saved ~11 of 22 minutes per build): the weekly rebuild
+  exists to pick up Fedora and Anaconda fixes, which a cached base would pin,
+  and the build is now rare.
 - `image-builder` needs root, the `generic-iso` type needs **image-builder
   ≥ 89** (Fedora 45 `updates-testing` for now; 87 only has the unattended,
   disk-wiping `bootc-installer` type) and storage that isn't overlayfs. The CI
@@ -233,18 +244,15 @@ podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact e
   `unpriv_bwrap` child denies the setuid/chown/sys_admin osbuild's sandbox
   needs ("mount: … permission denied"; WSL has no AppArmor, so local builds
   never see it). `/var/lib/containers`, `/var/cache/image-builder` and
-  `TMPDIR` live on volumes under `/mnt`. To rebuild only the ISO from the
-  published `:latest`: `gh workflow run publish.yml --repo Reidond/ilex -f
-  iso=true` (add `--ref <branch>` to try ISO changes: off `main` it builds
-  with `--no-push`). `xtask iso`
-  does the same locally: when the `image-builder` on `PATH` is older than 89
-  (or missing) it builds `installer/image-builder/Containerfile` and runs
-  image-builder from that container against this host's container storage.
+  `TMPDIR` live on volumes under `/mnt`. `xtask iso` does the same locally: when
+  the `image-builder` on `PATH` is older than 89 (or missing) it builds
+  `installer/image-builder/Containerfile` and runs image-builder from that
+  container against this host's container storage.
 - The installer is branded by `/.buildstamp`, the file Anaconda takes its
   product name, version and "final release" flag from (`Product=ilex`,
-  `Version=<Fedora release of the payload>`, `IsFinal=True`). Without it the
-  installer calls itself "anaconda bluesky" with a red pre-release banner. The
-  Fedora logo in its sidebar is Fedora's own artwork; ilex has none yet.
+  `Version=45`, `IsFinal=True`). Without it the installer calls itself
+  "anaconda bluesky" with a red pre-release banner. The Fedora logo in its
+  sidebar is Fedora's own artwork; ilex has none yet.
 - Anaconda reads `interactive-defaults.ks` only when it has no kickstart: an
   unattended install has to `%include /usr/share/anaconda/interactive-defaults.ks`
   (without it Anaconda falls back to an RPM install from a mirror). The defaults
@@ -252,12 +260,12 @@ podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact e
   for a bootc deployment, so no GDM) and drop the `/` line Anaconda writes into
   `/etc/fstab` (with it `systemd-remount-fs.service` fails on the ostree root and
   the machine boots `degraded`).
-- The installer keeps everything it writes in RAM and unpacks the payload's
-  layers into its `/var/tmp` before they reach the new root: with 6 GiB the
-  install of the ~5 GB image fails with "no space left on device", with 16 GiB
-  it works (nothing in between was measured). The installed system still calls
-  itself "Fedora Linux 45" (its os-release) and its hostname is `fedora` until
-  one is set.
+- The installer VM of the `iso::` tier gets 6 GiB: pulling from the registry
+  streams the layers into the new root. (With the image embedded in the ISO,
+  importing it from the installer's container storage unpacked layers into
+  its RAM-backed `/var/tmp` and needed 16 GiB; 6 GiB failed with "no space
+  left on device".) The installed system still calls itself "Fedora Linux 45"
+  (its os-release) and its hostname is `fedora` until one is set.
 - Kickstart's `bootc` command (pykickstart) can't pass
   `--enforce-container-sigpolicy`, and `bootc status` of an ISO-installed machine
   shows `spec.image` as just `{image, transport: registry}`, without a
@@ -277,16 +285,21 @@ podman artifact pull ghcr.io/reidond/ilex-iso:latest   # then `podman artifact e
      | gh secret set COSIGN_PASSWORD --repo Reidond/ilex
    ```
 
-2. Make the ghcr packages public so machines need no credentials. Packages
-   only exist after the first publish: run the workflow once
-   (`gh workflow run publish.yml --repo Reidond/ilex`), then for both `ilex`
-   and `ilex-iso` open github.com → your profile → Packages → the package →
-   Package settings → Change visibility → Public. There is no API for this.
+2. Make the `ilex` ghcr package public so machines and the installer need no
+   credentials. The package only exists after the first publish: run the
+   workflow once (`gh workflow run publish.yml --repo Reidond/ilex`), then open
+   github.com → your profile → Packages → `ilex` → Package settings → Change
+   visibility → Public. There is no API for this.
 3. Check that Actions may publish: Settings → Actions → General → Workflow
    permissions should allow the `packages: write` the workflow requests, and
    a package created by the first run must list this repository under
    "Manage Actions access" (it does when the image carries the
    `org.opencontainers.image.source` label, which `xtask build` sets).
+4. Nothing to set up for the installer: its releases use `GITHUB_TOKEN` (the
+   `iso` job asks for `contents: write`; if Settings → Actions → General →
+   Workflow permissions is read-only by default, a job-level `permissions:`
+   still raises it). The old `ilex-iso` package, if it exists, is unused and can
+   be deleted, and so can `ilex-installer-base`.
 
 ## Conventions
 

@@ -4,14 +4,15 @@
 # Anaconda reads this file only when there is no kickstart of its own (a
 # kickstart that wants these defaults has to `%include` it).
 #
-# --source-imgref: the ilex image embedded in the ISO's container storage.
-#   `cargo xtask iso <image@digest>` embeds exactly that digest, under a local
-#   tag, so a later push of :latest can't change what this ISO installs.
+# --source-imgref: the image to install, pulled from the registry (the
+#   `registry:` transport is required here). The installer carries no image:
+#   it always installs the newest one, and needs a network connection (Anaconda
+#   brings up the first wired link by itself).
 # --target-imgref: where the installed machine pulls updates from, so no
-#   `bootc switch` is needed after an ISO install.
+#   `bootc switch` is needed after an ISO install (no transport here).
 #
 # The installer Containerfile fills in both placeholders.
-bootc --source-imgref containers-storage:@PAYLOAD_REF@ --target-imgref @TARGET_IMGREF@
+bootc --source-imgref @SOURCE_IMGREF@ --target-imgref @TARGET_IMGREF@
 
 # ilex is a GNOME desktop: boot the installed system to the login screen.
 # Without this Anaconda picks multi-user.target, because it looks for a
