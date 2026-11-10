@@ -17,6 +17,8 @@
 #                          Actions cache (see save-disk), it goes into bcvk's
 #                          pool first and bcvk boots it instead of installing
 #                          (if it is stale, bcvk installs as usual).
+#                          Both install Ubuntu's packages from
+#                          $RUNNER_TEMP/apt-debs (see vm_stack).
 #   vm-prep.sh save-disk DIR
 #                          the v1-disk run: bcvk's base disk into DIR for the
 #                          Actions cache, with the xattrs bcvk recognizes it by
@@ -54,8 +56,25 @@ vm_stack() (
         | sudo tee /etc/udev/rules.d/99-kvm4all.rules
     sudo udevadm control --reload-rules
     sudo udevadm trigger --name-match=kvm
+    # apt keeps the packages in $debs, which the workflow restores from the
+    # Actions cache, and downloads only those it lacks: Ubuntu's mirror
+    # stalls at times (the same 62.9 MB took 9 s in one job and 14 minutes
+    # in the other). Downloads run as root: `_apt` can't reach the runner's
+    # home.
+    local debs=$out/apt-debs
+    local apt=(-o "Dir::Cache::Archives=$debs/" -o APT::Keep-Downloaded-Packages=true
+        -o APT::Sandbox::User=root)
+    sudo mkdir -p "$debs/partial"
+    echo "apt-debs: $(find "$debs" -maxdepth 1 -name '*.deb' | wc -l) packages from the cache"
     sudo apt-get update
-    sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo
+    sudo apt-get install -y "${apt[@]}" qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo
+    # What the lists no longer have (superseded versions) leaves the cache.
+    sudo apt-get "${apt[@]}" autoclean
+    sudo rm -rf "$debs/partial" "$debs/lock"
+    sudo chown -R "$(id -u):$(id -g)" "$debs"
+    # The workflow saves $debs under this when it isn't what it restored.
+    find "$debs" -maxdepth 1 -name '*.deb' -printf '%f\n' | sort | sha256sum | cut -c1-16 > "$out/apt-debs.sum"
+    echo "apt-debs: $(find "$debs" -maxdepth 1 -name '*.deb' | wc -l) packages, $(du -sh "$debs" | cut -f1), key $(cat "$out/apt-debs.sum")"
     # The upgrade tier drives system libvirt as the `runner` user (bcvk
     # libvirt run). Ubuntu opens the libvirt socket only to the `libvirt`
     # group (the tests run under `sg libvirt`), and libvirt's AppArmor driver

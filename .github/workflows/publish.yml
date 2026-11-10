@@ -80,6 +80,10 @@ env:
   COSIGN_VERSION: v2.6.5
   BCVK_VERSION: v0.22.0
   BCVK_SHA256: eb72198c0d36fab75bfcadbb6794a87afa6f496a4da6b1b34d27728243fa6474
+  # Ubuntu's packages for the VM stack in the Actions cache (vm-prep.sh): the
+  # newest entry with this prefix is restored; a job that downloaded packages
+  # it lacked saves the set under this prefix and a hash of their names.
+  APT_DEBS: apt-debs-${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}-
 
 jobs:
   build:
@@ -124,6 +128,14 @@ jobs:
       # the candidate (reproducible layers, mostly the same) uploads only what
       # changed and machines download only that. A run that changed nothing
       # never waits for either; the end of the job stops them.
+      - name: apt's packages from the cache
+        id: debs
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ env.APT_DEBS }}
+          restore-keys: ${{ env.APT_DEBS }}
+
       - name: VM stack and :latest (background)
         run: nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
 
@@ -166,9 +178,21 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for the VM stack
+        id: stack
         if: steps.changed.outputs.changed == 'true' || inputs.test
         timeout-minutes: 15
-        run: .github/vm-prep.sh wait vm-stack
+        run: |
+          .github/vm-prep.sh wait vm-stack
+          echo "debs=$APT_DEBS$(cat "$RUNNER_TEMP/apt-debs.sum")" >> "$GITHUB_OUTPUT"
+
+      # Only when apt downloaded packages the cache lacked. (The upgrade job
+      # installs the same set and leaves saving it to this job.)
+      - name: Keep apt's packages in the cache
+        if: steps.stack.outputs.debs != '' && steps.stack.outputs.debs != steps.debs.outputs.cache-matched-key
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ steps.stack.outputs.debs }}
 
       - name: e2e tests (ephemeral)
         if: steps.changed.outputs.changed == 'true' || inputs.test
@@ -238,6 +262,14 @@ jobs:
         with:
           path: ${{ runner.temp }}/v1-disk
           key: ${{ steps.from.outputs.disk_key }}
+
+      - name: apt's packages from the cache
+        if: steps.from.outputs.exists == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ env.APT_DEBS }}
+          restore-keys: ${{ env.APT_DEBS }}
 
       - uses: kunobi-ninja/kache-action@v1
         if: steps.from.outputs.exists == 'true'
@@ -414,15 +446,33 @@ jobs:
         with:
           github-cache: "true"
 
+      - name: apt's packages from the cache
+        id: debs
+        if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ env.APT_DEBS }}
+          restore-keys: ${{ env.APT_DEBS }}
+
       - name: Install v1 to a disk
+        id: install
         if: steps.cached.outputs.cache-hit != 'true'
         run: |
           bash .github/vm-prep.sh upgrade || true
           for part in vm-stack v1-pull upgrade-prepare; do .github/vm-prep.sh wait "$part"; done
+          echo "debs=$APT_DEBS$(cat "$RUNNER_TEMP/apt-debs.sum")" >> "$GITHUB_OUTPUT"
           if [ "$(cat "$RUNNER_TEMP/upgrade-prepare.status")" != 0 ]; then
             echo "::error::installing v1 failed"; exit 1
           fi
           .github/vm-prep.sh save-disk "$RUNNER_TEMP/v1-disk"
+
+      - name: Keep apt's packages in the cache
+        if: steps.install.outputs.debs != '' && steps.install.outputs.debs != steps.debs.outputs.cache-matched-key
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ steps.install.outputs.debs }}
 
       - name: Keep it in the cache
         if: steps.cached.outputs.cache-hit != 'true'

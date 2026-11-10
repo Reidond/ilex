@@ -220,6 +220,13 @@ cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :lat
 
 - The background parts (`vm-prep.sh`) log every line with the time it was
   printed; the "Wait for" steps print those logs.
+- The VM stack's Ubuntu packages (qemu, libvirt, virtiofsd, passt: 62.9 MB)
+  come from the Actions cache (`apt-debs-<runner>-<hash of their names>`, the
+  newest one restored by prefix): apt downloads only what it lacks. Ubuntu's
+  Azure mirror stalls on single requests at times; the same download took 9 s
+  in one job and 14 minutes in the other. The build and v1-disk jobs save a
+  new entry when apt downloaded something; `autoclean` drops superseded
+  versions first.
 - The runner is `vars.ILEX_RUNNER` (a repository variable) or `ubuntu-26.04`,
   for every job: moving to a larger, org-owned or self-hosted runner is one
   setting (Settings → Secrets and variables → Actions → Variables). The
