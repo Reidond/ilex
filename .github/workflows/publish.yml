@@ -5,7 +5,11 @@
 # the nightly picks up its updates) and on demand. It publishes only when the
 # image content changed (`cargo xtask changed`) and the e2e tests pass. A run
 # that changed nothing stops right after the build: `changed` fingerprints the
-# image as built, so the rechunk, the tests and the VM stack are skipped.
+# image as built, so the rechunk and the tests are skipped.
+#
+# Wall time: the VM stack and the upgrade tier's v1 disk are prepared in the
+# background from the first minute (.github/vm-prep.sh), and a due ISO builds
+# in its own job, next to the publish job.
 #
 # The installer ISO is a network installer: it carries no ilex image and installs
 # the newest :latest from ghcr, so it needn't follow every publish. It is built
@@ -62,7 +66,6 @@ jobs:
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
       digest: ${{ steps.publish.outputs.digest }}
-      iso_due: ${{ steps.isodue.outputs.iso_due }}
     env:
       # `xtask build --tag candidate` tags the image localhost/ilex:candidate.
       # The image as built; `xtask rechunk --output rechunked` makes the image
@@ -88,6 +91,20 @@ jobs:
         with:
           github-cache: "true"
 
+      # In the background while the image builds and rechunks: the VM stack,
+      # then the upgrade tier's v1 (the published :latest) installed to a disk,
+      # which is most of that tier's time and doesn't depend on the candidate.
+      # bcvk keeps the installed disk, so the upgrade test boots v1 in seconds.
+      # Collected by the "Wait for" steps below. A run that changed nothing
+      # never waits; the end of the job stops it.
+      - name: VM stack and the upgrade tier's v1 disk (background)
+        env:
+          ILEX_VM_SLOTS: "2"
+          ILEX_VM_LOG_DIR: ${{ runner.temp }}/vm-logs
+        run: |
+          mkdir -p "$ILEX_VM_LOG_DIR" && chmod 1777 "$ILEX_VM_LOG_DIR"
+          nohup bash .github/vm-prep.sh > /dev/null 2>&1 &
+
       - name: Build the candidate image
         run: cargo xtask build --tag candidate
 
@@ -98,45 +115,6 @@ jobs:
         run: cargo xtask changed "$IMAGE_REPO:latest" --image candidate
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: KVM, virt stack, bcvk
-        if: steps.changed.outputs.changed == 'true' || inputs.test
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo
-          # The upgrade tier drives system libvirt as the `runner` user (bcvk
-          # libvirt run). Ubuntu opens the libvirt socket only to the `libvirt`
-          # group (the tests run under `sg libvirt`), and libvirt's AppArmor
-          # driver confines QEMU and virtiofsd, which would keep the guest from
-          # the virtiofs share of runner's container storage. bcvk also writes
-          # its base disks straight into the pool directory, root-only on
-          # Ubuntu. Throwaway VM: join the group, hand runner the pool
-          # directory and turn the driver off.
-          sudo usermod -aG libvirt "$USER"
-          sudo install -d -o "$USER" -g libvirt -m 0775 /var/lib/libvirt/images
-          echo 'security_driver = "none"' | sudo tee -a /etc/libvirt/qemu.conf
-          # libvirt picks UEFI firmware from QEMU's firmware descriptors. For
-          # bcvk's non-Secure-Boot VMs, Ubuntu's AMD SEV build
-          # (OVMF.amdsev.fd: stateless, boots only a GRUB inside the firmware)
-          # wins, so the guest never reads its disk and loops in "Boot Option
-          # Restoration". Mask the confidential-computing builds: an empty file
-          # under /etc/qemu/firmware hides the descriptor of the same name.
-          sudo mkdir -p /etc/qemu/firmware
-          for f in /usr/share/qemu/firmware/*amdsev*.json /usr/share/qemu/firmware/*inteltdx*.json; do
-            if [ -e "$f" ]; then sudo touch "/etc/qemu/firmware/$(basename "$f")"; fi
-          done
-          ls -l /usr/share/qemu/firmware/ /etc/qemu/firmware/
-          for unit in libvirtd virtqemud; do sudo systemctl try-restart "$unit" || true; done
-          curl -fsSL -o "$RUNNER_TEMP/bcvk.tar.gz" \
-            "https://github.com/bootc-dev/bcvk/releases/download/${BCVK_VERSION}/bcvk-x86_64-unknown-linux-gnu.tar.gz"
-          echo "${BCVK_SHA256}  $RUNNER_TEMP/bcvk.tar.gz" | sha256sum --check -
-          tar -xzf "$RUNNER_TEMP/bcvk.tar.gz" -C "$RUNNER_TEMP"
-          sudo install -m 0755 "$RUNNER_TEMP/bcvk-x86_64-unknown-linux-gnu" /usr/local/bin/bcvk
-          bcvk --version
 
       - name: Install cosign (v2)
         if: steps.changed.outputs.changed == 'true'
@@ -156,36 +134,64 @@ jobs:
         env:
           FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
 
-      # The very first run has no published :latest, so there is nothing to
-      # upgrade from and the upgrade tier is skipped. `sg libvirt` gives this
-      # shell the group joined above without a new login.
-      - name: e2e tests
+      # The VM stack from the background step. `sg libvirt` (below) gives a
+      # shell the libvirt group it joined, without a new login.
+      - name: Wait for the VM stack
+        if: steps.changed.outputs.changed == 'true' || inputs.test
+        timeout-minutes: 15
+        run: |
+          until [ -e "$RUNNER_TEMP/vm-stack.status" ]; do sleep 2; done
+          echo "::group::VM stack"; cat "$RUNNER_TEMP/vm-stack.log"; echo "::endgroup::"
+          exit "$(cat "$RUNNER_TEMP/vm-stack.status")"
+
+      # While v1's disk may still be installing in the other VM slot.
+      - name: e2e tests (ephemeral)
         id: e2e
         if: steps.changed.outputs.changed == 'true' || inputs.test
         env:
           # Always the rechunked image: the rechunk step runs whenever this one
           # does, and the upgrade tier needs v2 built on rechunked layers.
           ILEX_IMAGE: localhost/ilex:rechunked
-          TIERS: "ephemeral:: ${{ steps.changed.outputs.exists == 'true' && 'upgrade::' || '' }}"
           # The runner has 4 vCPUs and ~16 GiB: two VMs at a time (the default
-          # is one per 8 GiB, so one), so the upgrade tier doesn't wait for the
-          # ephemeral one.
+          # is one per 8 GiB, so one), so this tier doesn't wait for v1's
+          # install.
           ILEX_VM_SLOTS: "2"
-          # The upgrade tier logs its libvirt VM's consoles here (the domain
-          # itself is removed when the test ends); kept as an artifact.
+        run: sg libvirt -c "cargo xtask test ephemeral::"
+
+      # The very first run has no published :latest, so there is nothing to
+      # upgrade from and the upgrade tier is skipped. If preparing v1's disk
+      # failed, the test installs it itself (slower, same result).
+      - name: Wait for the upgrade tier's v1 disk
+        if: (steps.changed.outputs.changed == 'true' || inputs.test) && steps.changed.outputs.exists == 'true'
+        timeout-minutes: 30
+        run: |
+          until [ -e "$RUNNER_TEMP/upgrade-prepare.status" ]; do sleep 2; done
+          echo "::group::Installing v1"; cat "$RUNNER_TEMP/upgrade-prepare.log"; echo "::endgroup::"
+          rc=$(cat "$RUNNER_TEMP/upgrade-prepare.status")
+          if [ "$rc" != 0 ]; then
+            echo "::warning::preparing v1's disk failed (exit $rc); the upgrade test installs it itself"
+          fi
+
+      - name: e2e tests (upgrade)
+        id: upgrade
+        if: (steps.changed.outputs.changed == 'true' || inputs.test) && steps.changed.outputs.exists == 'true'
+        env:
+          ILEX_IMAGE: localhost/ilex:rechunked
+          ILEX_VM_SLOTS: "2"
+          # The libvirt VM's consoles land here (the domain itself is removed
+          # when the test ends); kept as an artifact on failure.
           ILEX_VM_LOG_DIR: ${{ runner.temp }}/vm-logs
         run: |
-          mkdir -p "$ILEX_VM_LOG_DIR" && chmod 1777 "$ILEX_VM_LOG_DIR"
           trap 'if [ $? -ne 0 ]; then
                   sudo dmesg | grep -iE "apparmor|denied" | tail -40
                   sudo sh -c "tail -n 40 /var/log/libvirt/qemu/*.log" || true
                   sudo cp /var/log/libvirt/qemu/*.log "$ILEX_VM_LOG_DIR/" 2>/dev/null || true
                   sudo chmod -R a+r "$ILEX_VM_LOG_DIR" || true
                 fi' EXIT
-          sg libvirt -c "cargo xtask test $TIERS"
+          sg libvirt -c "cargo xtask test upgrade::"
 
       - name: Keep VM logs
-        if: failure() && steps.e2e.outcome == 'failure'
+        if: failure() && (steps.e2e.outcome == 'failure' || steps.upgrade.outcome == 'failure')
         uses: actions/upload-artifact@v4
         with:
           name: vm-logs
@@ -203,8 +209,16 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
-      # Runs whether or not the image changed: `installer/` can change alone, and
-      # the installer is rebuilt weekly. Reads the latest installer release.
+  # Is a new installer ISO due? Its own job, next to `publish`: the ISO carries
+  # no ilex image, so it needn't wait for the publish, and `installer/` can
+  # change alone. Reads the latest installer release.
+  installer-due:
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 15
+    outputs:
+      iso_due: ${{ steps.isodue.outputs.iso_due }}
+    steps:
+      - uses: actions/checkout@v7
       - name: Is a new installer ISO due?
         id: isodue
         run: cargo xtask iso --due
@@ -217,12 +231,10 @@ jobs:
   # it becomes a GitHub Release (`installer-YYYYMMDD`, marked latest, so
   # releases/latest/download/ilex-installer.iso always works); from a branch it
   # is built and uploaded as a workflow artifact to be inspected, and nothing
-  # is released. A failure here never unpublishes the image.
+  # is released. It runs next to the publish job; neither waits for the other.
   iso:
-    needs: publish
-    if: >-
-      needs.publish.result == 'success' &&
-      (inputs.iso || needs.publish.outputs.iso_due == 'true')
+    needs: installer-due
+    if: inputs.iso || needs.installer-due.outputs.iso_due == 'true'
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60
     permissions:

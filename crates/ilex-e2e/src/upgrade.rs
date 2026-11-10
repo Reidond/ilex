@@ -1,13 +1,19 @@
-//! `upgrade::` tier: v1 installed, then upgraded to v2; rollback returns to v1.
+//! `upgrade::` tier: v1 installed, then upgraded to v2; signature enforcement
+//! on v2; rollback returns to v1.
 //!
-//! One scenario on one libvirt VM (a real installed system that can reboot):
+//! One scenario on one libvirt VM (a real installed system that can reboot),
+//! so the slow part, installing v1 to a disk, happens once:
 //!
 //! 1. install v1 and boot it; leave a file in `/var` and edit a file in `/etc`;
 //! 2. build v2 (the image under test plus a marker layer) under the tag v1 was
 //!    installed from, and `bootc upgrade` in the guest (stages, no reboot);
 //! 3. reboot: v2 is booted, its marker is present, the `/var` file survived,
 //!    the `/etc` edit was kept and the `/etc` file v2 added was merged in;
-//! 4. `bootc rollback` and reboot: v1 is booted again, the marker is gone.
+//! 4. signature enforcement, by v2's own `ilex-sigpolicy.service`: it left
+//!    the containers-storage origin alone at boot; the origin is then pointed
+//!    at ghcr unverified, the way an ISO install leaves it, and after a reboot
+//!    the unit must have added the verification (a second run is a no-op);
+//! 5. `bootc rollback` and reboot: v1 is booted again, the marker is gone.
 //!
 //! Inputs, all optional:
 //!
@@ -15,7 +21,12 @@
 //! * `ILEX_UPGRADE_FROM`: v1, e.g. the published `ghcr.io/<owner>/ilex:latest`
 //!   in CI. Without it v1 is the candidate itself, so the test covers
 //!   "upgrade from what you just built". When `CI` is set and this is empty
-//!   (the very first run has no `:latest`), the tier is skipped.
+//!   (the very first run has no `:latest`), the tier is skipped;
+//! * `ILEX_UPGRADE_PREPARE=1`: only install v1 and boot it, then stop. bcvk
+//!   caches the installed base disk per image, so the real run that follows
+//!   boots v1 in seconds. CI does this in the background while it builds the
+//!   candidate, which takes the install (most of this tier's time) off its
+//!   critical path.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -43,15 +54,18 @@ const REBOOT_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub fn trials() -> Vec<Trial> {
     const NAME: &str = "upgrade::upgrade_and_rollback";
-    let sigpolicy = trial("upgrade::sigpolicy_enforced", sigpolicy_enforced);
     if std::env::var_os("CI").is_some_and(|v| !v.is_empty()) && upgrade_from().is_none() {
         let why = "no ILEX_UPGRADE_FROM (nothing published to upgrade from yet)";
-        return vec![
-            Trial::ignorable_test(NAME, move || Ok(Completion::ignored_with(why))),
-            sigpolicy,
-        ];
+        return vec![Trial::ignorable_test(NAME, move || {
+            Ok(Completion::ignored_with(why))
+        })];
     }
-    vec![trial(NAME, upgrade_and_rollback), sigpolicy]
+    vec![trial(NAME, upgrade_and_rollback)]
+}
+
+/// `ILEX_UPGRADE_PREPARE=1`: install v1 (filling bcvk's base-disk cache) and stop.
+fn prepare_only() -> bool {
+    std::env::var("ILEX_UPGRADE_PREPARE").is_ok_and(|v| v == "1")
 }
 
 fn upgrade_from() -> Option<String> {
@@ -107,6 +121,15 @@ fn upgrade_and_rollback() -> Result<()> {
     let name = ws.vm_name("upgrade");
     let vm = LibvirtVm::boot(&name, &installed, &LibvirtOpts::default())?;
     step(&format!("{name} is up (VM slot {})", vm.slot_index()));
+    if prepare_only() {
+        step("v1 is installed and its base disk cached (ILEX_UPGRADE_PREPARE); stopping here");
+        return Ok(());
+    }
+    // Nothing here may reach for the network or stage an update of its own,
+    // least of all once the origin points at ghcr (step 4). Masked in /etc,
+    // so it stays masked across the upgrade.
+    vm.ssh("systemctl mask --now bootc-fetch-apply-updates.timer")?
+        .ok("masking the update timer")?;
 
     // --- v1 ---------------------------------------------------------------
     let v1 = status(&vm)?;
@@ -166,6 +189,9 @@ fn upgrade_and_rollback() -> Result<()> {
         )
     })?;
     check_v2(&vm, &token)?;
+
+    // --- signature enforcement, on v2 -----------------------------------
+    check_sigpolicy(&vm, &installed)?;
 
     // --- rollback ---------------------------------------------------------
     step("bootc rollback");
@@ -288,31 +314,20 @@ fn build_v2(candidate: &str, installed: &str, token: &str) -> Result<()> {
 /// `ilex-sigpolicy.service` at its next boot, and the unit is a no-op on
 /// anything else and on machines that already verify.
 ///
-/// The image is installed from containers-storage as for the upgrade
-/// scenario, which already is "some other image": the unit must leave that
-/// origin alone. Then the origin is rewritten to the ghcr reference the way an
-/// ISO install leaves it (`bootc switch --mutate-in-place`, which changes the
-/// origin only and downloads nothing), the VM reboots, and the boot-time run
-/// must have added the verification.
-fn sigpolicy_enforced() -> Result<()> {
+/// Runs on the freshly booted v2, the image under test. Its origin is the
+/// containers-storage tag it was upgraded from, which already is "some other
+/// image": the unit must have left it alone at boot. Then the origin is
+/// rewritten to the ghcr reference the way an ISO install leaves it (`bootc
+/// switch --mutate-in-place`, which changes the origin only and downloads
+/// nothing), the VM reboots, and the boot-time run must have added the
+/// verification. The deployment itself never changes, so the rollback that
+/// follows is unaffected.
+fn check_sigpolicy(vm: &LibvirtVm, installed: &str) -> Result<()> {
     const GHCR: &str = "ghcr.io/reidond/ilex:latest";
     const UNIT: &str = "ilex-sigpolicy.service";
-    let ws = common::workspace()?;
-    let candidate = common::image()?;
-    let installed = format!("{}-sigpolicy", ws.image_ref());
-    cmd::run(Command::new("podman").args(["tag", &candidate, &installed]))?;
-
-    let name = ws.vm_name("sigpolicy");
-    sig_step(&format!("installing {candidate} as {installed}"));
-    let vm = LibvirtVm::boot(&name, &installed, &LibvirtOpts::default())?;
-    sig_step(&format!("{name} is up (VM slot {})", vm.slot_index()));
-
-    // Nothing here may reach for the network or stage an update.
-    vm.ssh("systemctl disable --now bootc-fetch-apply-updates.timer")?
-        .ok("disabling the update timer")?;
 
     // --- another image: untouched ---------------------------------------
-    let before = booted(&vm)?;
+    let before = booted(vm)?;
     ensure(
         before.image == installed && before.transport == "containers-storage",
         || format!("unexpected starting point: {before:?}"),
@@ -320,14 +335,14 @@ fn sigpolicy_enforced() -> Result<()> {
     ensure(before.signature.is_none(), || {
         format!("a locally installed image already has a signature: {before:?}")
     })?;
-    let ran = unit_log(&vm, UNIT)?;
+    let ran = unit_log(vm, UNIT)?;
     ensure(ran.contains("nothing to do"), || {
         format!("{UNIT} should have been a no-op at boot, journal:\n{ran}")
     })?;
 
     // --- tracking ghcr, unverified, as after an ISO install ---------------
-    sig_step(&format!(
-        "pointing the origin at {GHCR} without verification"
+    step(&format!(
+        "sigpolicy: pointing the origin at {GHCR} without verification"
     ));
     // /sysroot is read-only on a running system; remount it in a private
     // mount namespace, as the unit does.
@@ -337,7 +352,7 @@ fn sigpolicy_enforced() -> Result<()> {
          bootc switch --mutate-in-place --transport registry {GHCR}'"
     ))?
     .ok("bootc switch --mutate-in-place")?;
-    let unverified = booted(&vm)?;
+    let unverified = booted(vm)?;
     ensure(
         unverified.image == GHCR
             && unverified.transport == "registry"
@@ -348,9 +363,9 @@ fn sigpolicy_enforced() -> Result<()> {
         "the in-place switch changed the booted digest".to_string()
     })?;
 
-    sig_step("rebooting: the unit must enforce at boot");
+    step("sigpolicy: rebooting, the unit must enforce at boot");
     vm.reboot(REBOOT_TIMEOUT)?;
-    let enforced = booted(&vm)?;
+    let enforced = booted(vm)?;
     ensure(
         enforced.image == GHCR
             && enforced.transport == "registry"
@@ -360,30 +375,26 @@ fn sigpolicy_enforced() -> Result<()> {
     ensure(enforced.digest == before.digest && !enforced.staged, || {
         format!("enforcement changed the deployment: {enforced:?}")
     })?;
-    let ran = unit_log(&vm, UNIT)?;
+    let ran = unit_log(vm, UNIT)?;
     ensure(
         ran.contains("enforcing") && ran.contains("now verifies"),
         || format!("{UNIT} did not report enforcing at boot, journal:\n{ran}"),
     )?;
 
     // --- again: nothing left to do ---------------------------------------
-    sig_step("running the unit again: it must be a no-op");
+    step("sigpolicy: running the unit again, it must be a no-op");
     vm.ssh(&format!("systemctl restart {UNIT}"))?
         .ok("restarting the unit")?;
-    let again = booted(&vm)?;
+    let again = booted(vm)?;
     ensure(again == enforced, || {
         format!("a second run changed {enforced:?} into {again:?}")
     })?;
-    let ran = unit_log(&vm, UNIT)?;
+    let ran = unit_log(vm, UNIT)?;
     ensure(ran.contains("already verified"), || {
         format!("expected `already verified` after the restart, journal:\n{ran}")
     })?;
-    sig_step("signature enforcement verified");
+    step("signature enforcement verified");
     Ok(())
-}
-
-fn sig_step(what: &str) {
-    eprintln!("ilex: sigpolicy: {what}");
 }
 
 /// The booted deployment's image reference, from `bootc status --json`.
