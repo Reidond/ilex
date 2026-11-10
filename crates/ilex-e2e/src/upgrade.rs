@@ -43,13 +43,15 @@ const REBOOT_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub fn trials() -> Vec<Trial> {
     const NAME: &str = "upgrade::upgrade_and_rollback";
+    let sigpolicy = trial("upgrade::sigpolicy_enforced", sigpolicy_enforced);
     if std::env::var_os("CI").is_some_and(|v| !v.is_empty()) && upgrade_from().is_none() {
         let why = "no ILEX_UPGRADE_FROM (nothing published to upgrade from yet)";
-        return vec![Trial::ignorable_test(NAME, move || {
-            Ok(Completion::ignored_with(why))
-        })];
+        return vec![
+            Trial::ignorable_test(NAME, move || Ok(Completion::ignored_with(why))),
+            sigpolicy,
+        ];
     }
-    vec![trial(NAME, upgrade_and_rollback)]
+    vec![trial(NAME, upgrade_and_rollback), sigpolicy]
 }
 
 fn upgrade_from() -> Option<String> {
@@ -277,4 +279,151 @@ fn build_v2(candidate: &str, installed: &str, token: &str) -> Result<()> {
         bail!("building v2 failed with {status}");
     }
     Ok(())
+}
+
+// --- signature enforcement ------------------------------------------------
+
+/// A machine tracking `ghcr.io/reidond/ilex` without signature verification
+/// (an ISO install, a plain `bootc switch`) is pinned to signed images by
+/// `ilex-sigpolicy.service` at its next boot, and the unit is a no-op on
+/// anything else and on machines that already verify.
+///
+/// The image is installed from containers-storage as for the upgrade
+/// scenario, which already is "some other image": the unit must leave that
+/// origin alone. Then the origin is rewritten to the ghcr reference the way an
+/// ISO install leaves it (`bootc switch --mutate-in-place`, which changes the
+/// origin only and downloads nothing), the VM reboots, and the boot-time run
+/// must have added the verification.
+fn sigpolicy_enforced() -> Result<()> {
+    const GHCR: &str = "ghcr.io/reidond/ilex:latest";
+    const UNIT: &str = "ilex-sigpolicy.service";
+    let ws = common::workspace()?;
+    let candidate = common::image()?;
+    let installed = format!("{}-sigpolicy", ws.image_ref());
+    cmd::run(Command::new("podman").args(["tag", &candidate, &installed]))?;
+
+    let name = ws.vm_name("sigpolicy");
+    sig_step(&format!("installing {candidate} as {installed}"));
+    let vm = LibvirtVm::boot(&name, &installed, &LibvirtOpts::default())?;
+    sig_step(&format!("{name} is up (VM slot {})", vm.slot_index()));
+
+    // Nothing here may reach for the network or stage an update.
+    vm.ssh("systemctl disable --now bootc-fetch-apply-updates.timer")?
+        .ok("disabling the update timer")?;
+
+    // --- another image: untouched ---------------------------------------
+    let before = booted(&vm)?;
+    ensure(
+        before.image == installed && before.transport == "containers-storage",
+        || format!("unexpected starting point: {before:?}"),
+    )?;
+    ensure(before.signature.is_none(), || {
+        format!("a locally installed image already has a signature: {before:?}")
+    })?;
+    let ran = unit_log(&vm, UNIT)?;
+    ensure(ran.contains("nothing to do"), || {
+        format!("{UNIT} should have been a no-op at boot, journal:\n{ran}")
+    })?;
+
+    // --- tracking ghcr, unverified, as after an ISO install ---------------
+    sig_step(&format!(
+        "pointing the origin at {GHCR} without verification"
+    ));
+    // /sysroot is read-only on a running system; remount it in a private
+    // mount namespace, as the unit does.
+    vm.ssh(&format!(
+        "unshare --mount --propagation private sh -c \
+         'mount -o remount,rw /sysroot && \
+         bootc switch --mutate-in-place --transport registry {GHCR}'"
+    ))?
+    .ok("bootc switch --mutate-in-place")?;
+    let unverified = booted(&vm)?;
+    ensure(
+        unverified.image == GHCR
+            && unverified.transport == "registry"
+            && unverified.signature.is_none(),
+        || format!("expected {GHCR} tracked unverified, got {unverified:?}"),
+    )?;
+    ensure(unverified.digest == before.digest, || {
+        "the in-place switch changed the booted digest".to_string()
+    })?;
+
+    sig_step("rebooting: the unit must enforce at boot");
+    vm.reboot(REBOOT_TIMEOUT)?;
+    let enforced = booted(&vm)?;
+    ensure(
+        enforced.image == GHCR
+            && enforced.transport == "registry"
+            && enforced.signature.as_deref() == Some("containerPolicy"),
+        || format!("expected {GHCR} with container policy enforcement, got {enforced:?}"),
+    )?;
+    ensure(enforced.digest == before.digest && !enforced.staged, || {
+        format!("enforcement changed the deployment: {enforced:?}")
+    })?;
+    let ran = unit_log(&vm, UNIT)?;
+    ensure(
+        ran.contains("enforcing") && ran.contains("now verifies"),
+        || format!("{UNIT} did not report enforcing at boot, journal:\n{ran}"),
+    )?;
+
+    // --- again: nothing left to do ---------------------------------------
+    sig_step("running the unit again: it must be a no-op");
+    vm.ssh(&format!("systemctl restart {UNIT}"))?
+        .ok("restarting the unit")?;
+    let again = booted(&vm)?;
+    ensure(again == enforced, || {
+        format!("a second run changed {enforced:?} into {again:?}")
+    })?;
+    let ran = unit_log(&vm, UNIT)?;
+    ensure(ran.contains("already verified"), || {
+        format!("expected `already verified` after the restart, journal:\n{ran}")
+    })?;
+    sig_step("signature enforcement verified");
+    Ok(())
+}
+
+fn sig_step(what: &str) {
+    eprintln!("ilex: sigpolicy: {what}");
+}
+
+/// The booted deployment's image reference, from `bootc status --json`.
+#[derive(Debug, PartialEq, Eq)]
+struct BootedRef {
+    image: String,
+    transport: String,
+    /// `containerPolicy`, `insecure`, ...; `None` when bootc records none.
+    signature: Option<String>,
+    digest: String,
+    staged: bool,
+}
+
+fn booted(vm: &LibvirtVm) -> Result<BootedRef> {
+    let out = vm.ssh("bootc status --json")?.ok("bootc status --json")?;
+    let v: Value = serde_json::from_str(&out.stdout).context("parsing `bootc status --json`")?;
+    let booted = &v["status"]["booted"];
+    let reference = &booted["image"]["image"];
+    let field = |name: &str| {
+        reference[name]
+            .as_str()
+            .map(str::to_string)
+            .with_context(|| format!("no `{name}` in the booted image:\n{}", out.stdout))
+    };
+    Ok(BootedRef {
+        image: field("image")?,
+        transport: field("transport")?,
+        signature: reference["signature"].as_str().map(str::to_string),
+        digest: booted["image"]["imageDigest"]
+            .as_str()
+            .with_context(|| format!("no digest in:\n{}", out.stdout))?
+            .to_string(),
+        staged: !v["status"]["staged"].is_null(),
+    })
+}
+
+/// What `unit` printed since the current boot, plus any restart in it.
+fn unit_log(vm: &LibvirtVm, unit: &str) -> Result<String> {
+    Ok(vm
+        .ssh(&format!("journalctl -u {unit} -b -o cat --no-pager"))?
+        .ok("reading the unit's journal")?
+        .stdout)
 }
