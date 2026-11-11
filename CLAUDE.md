@@ -191,11 +191,26 @@ in `viewer.rs`):
   comes over XFixes and becomes the window's own cursor.
 - Keyboard: a `WH_KEYBOARD_LL` hook takes every key while the window has
   focus and swallows it, so the Windows key, Alt+Tab, Ctrl+Esc reach GNOME
-  instead of Windows (Ctrl+Alt+Del can't be hooked). Keys travel as QEMU
-  qnums, which are Windows' set-1 `scanCode` plus `0x80` for extended keys,
-  so there is no keymap: the guest's layout decides. Losing focus releases
-  every held key. Pointer and keys go to QEMU on a QMP socket of the
-  bridge's own (`input.sock`), so `ilex-vmctl` keeps `qmp.sock`.
+  instead of Windows (Ctrl+Alt+Del can't be hooked). The hook lives in a
+  helper process (`ilex-viewer --keyboard-hook <hwnd>`, started by the
+  viewer, ends with the window) that writes keys to the viewer over a pipe:
+  Windows didn't call a hook in the process that owns the foreground window
+  (only while another process had a hook too), and a hook on a busy UI
+  thread would hit `LowLevelHooksTimeout`, after which Windows drops it for
+  good. Keys that reach the window anyway are forwarded from winit's key
+  events by scan code, so typing never depends on the hook. Keys travel as
+  QEMU qnums, which are Windows' set-1 `scanCode` plus `0x80` for extended
+  keys, so there is no keymap: the guest's layout decides. Losing focus
+  releases every held key. Pointer and keys go to QEMU on a QMP socket of
+  the bridge's own (`input.sock`), so `ilex-vmctl` keeps `qmp.sock`. To
+  test the hook from a script, send keys with `keybd_event`/`SendInput`
+  (the input stream hooks see); a tool that posts window messages bypasses
+  it and only exercises the fallback.
+- After a while on GNOME's lock screen the guest turns the display off and
+  the window shows QEMU's "Display output is not active"; moving the
+  pointer over the window or pressing a key wakes it. While the guest
+  catches up with a resized window, the viewer stretches its last frame
+  (and scales the pointer) instead of showing it in a corner.
 - Clipboard (text, both ways): `--gui` installs the checkout's image plus
   `vm/Containerfile` (`spice-vdagent`; tagged `<image tag>-vm`, never
   published, rebuilt only when the base image or the Containerfile changes,

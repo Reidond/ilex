@@ -24,19 +24,27 @@ use clap::Parser;
 #[command(name = "ilex-viewer", about = "Native Windows window for an ilex VM")]
 pub struct Args {
     /// The bridge's address, as `xtask vm --gui` prints it
-    #[arg(long)]
-    pub connect: String,
+    #[arg(long, required_unless_present = "keyboard_hook")]
+    pub connect: Option<String>,
     /// The bridge's token, as `xtask vm --gui` prints it
-    #[arg(long)]
-    pub token: String,
+    #[arg(long, required_unless_present = "keyboard_hook")]
+    pub token: Option<String>,
     /// Window title
     #[arg(long, default_value = "ilex VM")]
     pub title: String,
+    /// Internal: be the keyboard hook process for the viewer window with
+    /// this handle (see keyboard.rs)
+    #[arg(long, hide = true)]
+    pub keyboard_hook: Option<usize>,
 }
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
+    if let Some(hwnd) = args.keyboard_hook {
+        keyboard::hook_process(hwnd);
+        return std::process::ExitCode::SUCCESS;
+    }
     match app::run(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {

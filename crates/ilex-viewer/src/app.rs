@@ -17,6 +17,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::scancode::PhysicalKeyExtScancode;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{CustomCursor, Window, WindowId};
 
@@ -64,16 +65,15 @@ struct App {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let stream = TcpStream::connect(&args.connect)
-        .with_context(|| format!("connecting to {}", args.connect))?;
+    let addr = args.connect.clone().context("--connect is required")?;
+    let token = args.token.clone().context("--token is required")?;
+    let stream = TcpStream::connect(&addr).with_context(|| format!("connecting to {addr}"))?;
     stream.set_nodelay(true)?;
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
     let (to_bridge, outbox) = mpsc::channel::<ToBridge>();
-    to_bridge.send(ToBridge::Hello {
-        token: args.token.clone(),
-    })?;
+    to_bridge.send(ToBridge::Hello { token })?;
     let mut writer = BufWriter::new(stream.try_clone()?);
     thread::Builder::new()
         .name("to-bridge".into())
@@ -113,7 +113,9 @@ pub fn run(args: Args) -> Result<()> {
         scroll: (0.0, 0.0),
         error: None,
     };
-    event_loop.run_app(&mut app)?;
+    let result = event_loop.run_app(&mut app);
+    keyboard::shutdown();
+    result?;
     match app.error {
         Some(e) if e != "the VM stopped" => anyhow::bail!(e),
         _ => Ok(()),
@@ -233,14 +235,20 @@ impl App {
         };
         let (bw, bh) = (size.width as usize, size.height as usize);
         let fb = self.framebuffer.lock().unwrap();
-        let cw = bw.min(fb.width);
-        for y in 0..bh {
-            let row = &mut buffer[y * bw..(y + 1) * bw];
-            if y < fb.height {
-                row[..cw].copy_from_slice(&fb.pixels[y * fb.width..y * fb.width + cw]);
-                row[cw..].fill(0);
-            } else {
-                row.fill(0);
+        if fb.width == 0 || fb.height == 0 {
+            buffer.fill(0);
+        } else if (fb.width, fb.height) == (bw, bh) {
+            buffer.copy_from_slice(&fb.pixels);
+        } else {
+            // The window was resized and the guest hasn't followed yet:
+            // stretch its last frame (nearest neighbour) instead of showing
+            // it in a corner.
+            let xs: Vec<usize> = (0..bw).map(|x| x * fb.width / bw).collect();
+            for y in 0..bh {
+                let src = &fb.pixels[(y * fb.height / bh) * fb.width..][..fb.width];
+                for (d, &sx) in buffer[y * bw..(y + 1) * bw].iter_mut().zip(&xs) {
+                    *d = src[sx];
+                }
             }
         }
         drop(fb);
@@ -252,12 +260,17 @@ impl App {
     /// Window pixels to guest pixels (1:1, clamped to the guest's screen).
     fn guest_point(&self, x: f64, y: f64) -> Option<(u32, u32)> {
         let fb = self.framebuffer.lock().unwrap();
-        if fb.width == 0 || x < 0.0 || y < 0.0 {
+        let window = self.window.as_ref()?.inner_size();
+        if fb.width == 0 || window.width == 0 || window.height == 0 || x < 0.0 || y < 0.0 {
             return None;
         }
+        // 1:1 once the guest has the window's size; scaled while it catches
+        // up (the frame is stretched then, see `redraw`).
+        let gx = x * fb.width as f64 / window.width as f64;
+        let gy = y * fb.height as f64 / window.height as f64;
         Some((
-            (x as usize).min(fb.width - 1) as u32,
-            (y as usize).min(fb.height - 1) as u32,
+            (gx as usize).min(fb.width - 1) as u32,
+            (gy as usize).min(fb.height - 1) as u32,
         ))
     }
 
@@ -324,6 +337,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Focused(false) => keyboard::release_all(),
+            // Only keys the hook didn't take get here (see keyboard.rs).
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(scancode) = event.physical_key.to_scancode() {
+                    keyboard::from_window(scancode, event.state == ElementState::Pressed);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some((x, y)) = self.guest_point(position.x, position.y) {
                     self.send(ToBridge::Pointer { x, y });
