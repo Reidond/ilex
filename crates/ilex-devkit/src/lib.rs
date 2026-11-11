@@ -7,8 +7,12 @@ pub mod bcvk;
 pub mod cmd;
 pub mod git;
 pub mod qemu;
+#[cfg(unix)]
+pub mod display;
 pub mod slots;
+#[cfg(unix)]
+pub mod vdagent;
+pub mod viewer;
 pub mod workspace;
-pub mod wslg;
 
 pub use workspace::{IMAGE_REPO, Workspace};

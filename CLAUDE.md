@@ -9,6 +9,7 @@ Personal Fedora bootc image: one `Containerfile` on `quay.io/fedora/fedora-bootc
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
+                               # on Windows: run `cargo xtask vm` in PowerShell, not in WSL
 cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slots
 ```
 
@@ -96,27 +97,27 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 - `cargo xtask vm` is the exception: run it on Windows itself (PowerShell or
   Git Bash, in the checkout). It hands itself to the distro (`wsl.exe -d
   FedoraLinux-45 -u root --cd <checkout> -e bash -lc 'cargo xtask vm …'`;
-  `ILEX_WSL_DISTRO` names another), and with `--gui` it first gets WSLg
-  working. WSLg draws the window, and on most starts of WSL 2.7 here it fails
-  to open its shared memory with Windows (`/mnt/wslg/weston.log`:
-  `rdp_allocate_shared_memory: Failed to open … Input/output error`,
-  `use_gfxredir = 0`; microsoft/WSL#40618). Every Linux window then only gets
-  a taskbar button titled `[WARN:COPY MODE] …` and is never drawn, and only
-  a new start of WSL helps. So xtask holds WSL up with a `sleep infinity`
-  (WSL stops an idle instance, and the next start rolls the dice again),
-  reads Weston's log, and runs `wsl --shutdown` until a start comes up with
-  `use_gfxredir = 1` (up to 6 tries). It won't restart a WSL that is busy
-  (other running distros, or podman, qemu, bcvk, cargo in this one) unless
-  `--restart-wsl`. Run inside WSL, `xtask vm --gui` refuses to open a window
-  into a broken WSLg and says so.
+  `ILEX_WSL_DISTRO` names another). With `--gui` it first builds
+  `ilex-viewer.exe` (the VM's window, see "The VM window on Windows") and
+  starts it when the WSL side prints its `ilex-viewer: --connect …` line.
+  WSL can't start it itself: `/mnt/c` is mounted with `fmask=133`, so no
+  `.exe` there has the execute bit interop needs.
+- Nothing here uses WSLg any more. It is unreliable on this machine: on most
+  starts of WSL 2.7 it fails to open its shared memory with Windows
+  (`/mnt/wslg/weston.log`: `rdp_allocate_shared_memory: Failed to open …`,
+  `use_gfxredir = 0`; microsoft/WSL#40618), and then every Linux window only
+  gets a `[WARN:COPY MODE] …` taskbar button and is never drawn, until WSL
+  starts again (`wsl --shutdown`). It also mounts `/tmp/.X11-unix`
+  read-only, so an Xvfb in WSL is only reachable on its abstract socket.
 
 ## Driving VMs with ilex-vmctl
 
 `cargo xtask disk` writes the installed qcow2 (`bcvk to-disk`); `cargo xtask
 vm --disk` boots it headless on the graphical test machine (UEFI, 4K
-`virtio-vga`), and `--gui` adds a GTK window for a human (WSLg shows it on the
-Windows desktop). Every disk-booted VM (also the `disk::` and `graphical::`
-tests) publishes `qmp.sock`, `vnc.sock` and `vm.toml` in
+`virtio-vga`), and `--gui` adds a window for a human (in WSL the native
+Windows viewer below, elsewhere a GTK window). Every disk-booted VM (also the
+`disk::` and `graphical::` tests) publishes `qmp.sock`, `vnc.sock` and
+`vm.toml` in
 `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; `ilex-vmctl` attaches to them by slug
 (from the checkout you are in, or `--slug`) and never starts or stops VMs.
 
@@ -152,26 +153,77 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
   DRM render node elsewhere; `--no-gl` opts out): `virtio-vga-gl` with
   `-display gtk,gl=on`, so virglrenderer renders the guest's OpenGL on the
   host (in WSL through Mesa's D3D12 driver on the Windows GPU), and half the
-  host's threads as vCPUs (4 to 8). Measured on a 4K desktop: GNOME presents
-  a steady 60 fps in the guest; the Windows screen shows about 40 (p50 23.6
-  ms between changed frames), because Mesa reads every frame back into a
-  shared-memory Wayland buffer for WSLg. The window is a Wayland client of
-  WSLg: through XWayland, Mesa's D3D12 driver keeps presenting the window's
-  first 480 rows after it grows and the rest stays garbage (GTK and SDL
-  alike). QEMU allows no VNC server next to a GL display, and QMP
-  `screendump` fails on virgl output ("no surface"), so a `--gui` VM takes
-  vmctl input but no screenshots (`vm.toml` says `display = "gtk-gl"`);
-  agents use `--disk`.
-- Windows keeps the Windows key and Alt+Tab for itself in a WSLg window, and
-  GNOME 51 binds nothing else to the overview (Alt+F1 is unbound): use the
-  top-left hot corner, or `ilex-vmctl key super`.
-- Clipboard sharing doesn't work yet. Tried: `spice-vdagent` in the guest
-  plus `-chardev qemu-vdagent,clipboard=on` on the SPICE agent port. The
-  guest half works (the X11 agent sees GNOME's clipboard through XWayland
-  and sends a grab), but `spice-vdagentd` reads EOF from QEMU's agent port
-  ("lost spice client connection"), treats the client as gone and drops it,
-  and QEMU's GTK clipboard on a Wayland host is known broken
-  (qemu-project/qemu#1455).
+  host's threads as vCPUs (4 to 8). QEMU allows no VNC server next to a GL
+  display, and QMP `screendump` fails on virgl output ("no surface"): in WSL
+  `ilex-vmctl screenshot` takes the display bridge's frames instead
+  (`screen.sock`, `vm.toml` says `display = "viewer"`); a GL GTK window on a
+  Linux desktop (`display = "gtk-gl"`) takes vmctl input but no screenshots.
+
+## The VM window on Windows
+
+`cargo xtask vm --gui` in WSL doesn't open a Linux window; the VM's window is
+`ilex-viewer.exe` (`crates/ilex-viewer`), a native Windows program, fed by a
+display bridge in `xtask vm` (`crates/ilex-devkit/src/display.rs`, protocol
+in `viewer.rs`):
+
+- QEMU draws into a private Xvfb (`-display gtk,gl=on,show-menubar=off`;
+  Mesa's D3D12 driver renders there too, and nothing tears on resize). The
+  bridge watches the Xvfb root with XDamage and reads damaged rectangles
+  straight from Xvfb's framebuffer, which `-fbdir` keeps as a memory-mapped
+  XWD file on `/dev/shm` (`GetImage` took 11 ms for a 2800x1750 frame and
+  stalled the single-threaded Xvfb meanwhile). It compares them in 64x64
+  tiles with what the viewer has and sends only changed tiles, raw BGRX, on
+  a thread of their own, over TCP to WSL's own address (Windows reaches it at
+  ~2.4 GiB/s; the `localhost` relay manages ~550 MiB/s). A token printed with
+  the address keeps others out.
+- Measured with GNOME's overview toggled every 0.35 s through QMP, 2800x1750:
+  the guest presents 75 fps, the viewer receives and draws 37-41 frames/s
+  (the overview rests part of each cycle; about 55 during the motion), the
+  bridge spends ~7 ms per frame; the WSLg window managed 32.5 the same way.
+  The limit now is QEMU getting frames onto the Xvfb (a GPU readback and a
+  20 MB `XPutImage` each). Typing and pointer work: ~50 frames/s, a few
+  MiB/s. `cargo xtask` is a dev build, so the workspace's `profile.dev`
+  optimizes ilex-devkit, ilex-viewer and all dependencies (unoptimized, the
+  same path managed 6 frames/s).
+- The viewer (winit + softbuffer) draws them 1:1: its window's size becomes
+  the QEMU window's size on the Xvfb, which QEMU hands to the guest (EDID),
+  so the guest's resolution follows the window. The guest's pointer image
+  comes over XFixes and becomes the window's own cursor.
+- Keyboard: a `WH_KEYBOARD_LL` hook takes every key while the window has
+  focus and swallows it, so the Windows key, Alt+Tab, Ctrl+Esc reach GNOME
+  instead of Windows (Ctrl+Alt+Del can't be hooked). Keys travel as QEMU
+  qnums, which are Windows' set-1 `scanCode` plus `0x80` for extended keys,
+  so there is no keymap: the guest's layout decides. Losing focus releases
+  every held key. Pointer and keys go to QEMU on a QMP socket of the
+  bridge's own (`input.sock`), so `ilex-vmctl` keeps `qmp.sock`.
+- Clipboard (text, both ways): `--gui` installs the checkout's image plus
+  `vm/Containerfile` (`spice-vdagent`; tagged `<image tag>-vm`, never
+  published, rebuilt only when the base image or the Containerfile changes,
+  per its `ilex.vm-key` label, because every rebuild's new digest makes bcvk
+  install the disk again), QEMU puts the guest's SPICE agent port on
+  `vdagent.sock`, and the bridge speaks the agent protocol itself
+  (`vdagent.rs`). QEMU's own `qemu-vdagent` chardev doesn't work here:
+  `spice-vdagentd` reads EOF from it ("lost spice client connection") and
+  drops everything, and QEMU's GTK clipboard is broken on Wayland hosts
+  (qemu-project/qemu#1455). Two guest quirks the bridge works around:
+  `spice-vdagentd` closes and reopens the port whenever the session agent
+  changes (GDM to the user's session) and needs our capabilities again, so
+  the bridge announces until it answers and re-offers on every guest
+  announcement; and mutter's first fetch of a new X11 clipboard owner's
+  text comes back empty, so each Windows copy is offered twice, 500 ms
+  apart (else the first paste in GNOME pastes nothing).
+- Closing the window quits QEMU; QEMU exiting closes the window.
+  `ILEX_VIEWER_STATS=1 cargo xtask vm --gui` makes the viewer print frames
+  received and drawn per second, the bridge its frames per second and
+  milliseconds per step (`WSLENV` carries the variable over), and logs the
+  guest agent's messages.
+- GPU paravirtualization is virgl (OpenGL). Vulkan in the guest (Venus over
+  the same virtio-gpu) is untried: WSL has a host Vulkan, Mesa's Dozen on
+  D3D12 (`Microsoft Direct3D12 (<GPU>)`, Vulkan 1.2, external memory fds),
+  and Fedora's virglrenderer includes Venus, but it needs blob resources
+  (`blob=true,hostmem=…` and memfd-backed guest RAM), and Dozen isn't a
+  conformant driver. VA-API video through Mesa's D3D12 driver doesn't
+  initialize in WSL (no `/dev/dri`).
 
 ## Display scaling
 

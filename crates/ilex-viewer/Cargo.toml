@@ -1,0 +1,24 @@
+[package]
+name = "ilex-viewer"
+description = "Native Windows window for an ilex VM: its screen, keyboard (Windows key included), pointer and clipboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ilex-devkit.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+] }

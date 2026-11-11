@@ -283,6 +283,10 @@ pub enum Display {
     None,
     /// A GTK window for a human. The guest follows the window's size.
     Gtk,
+    /// A GTK window on a private X server ([`VmConfig::x_display`]) that
+    /// [`crate::display::Bridge`] serves to `ilex-viewer.exe`, plus a second
+    /// QMP socket (`input.sock`) for the bridge's input.
+    Viewer,
 }
 
 /// Can this host render a guest's OpenGL (virgl) on a GPU? WSL2 has Mesa's
@@ -308,11 +312,14 @@ pub struct VmConfig {
     pub width: u32,
     pub height: u32,
     pub display: Display,
-    /// With [`Display::Gtk`]: give the guest a 3D-capable `virtio-vga-gl`
-    /// whose OpenGL the host renders (virgl), instead of llvmpipe in the
-    /// guest. QEMU then has no VNC server and QMP `screendump` can't capture
-    /// the screen. See [`host_gl`].
+    /// With [`Display::Gtk`] or [`Display::Viewer`]: give the guest a
+    /// 3D-capable `virtio-vga-gl` whose OpenGL the host renders (virgl),
+    /// instead of llvmpipe in the guest. QEMU then has no VNC server and QMP
+    /// `screendump` can't capture the screen (the viewer's bridge can). See
+    /// [`host_gl`].
     pub gl: bool,
+    /// With [`Display::Viewer`]: the X display (`:N`) QEMU's window goes to.
+    pub x_display: Option<String>,
     /// An install ISO attached as a CD-ROM. Firmware tries the disk first and
     /// falls through to the CD when the disk is empty.
     pub cdrom: Option<PathBuf>,
@@ -339,6 +346,7 @@ impl VmConfig {
             height: 800,
             display: Display::None,
             gl: false,
+            x_display: None,
             cdrom: None,
             extra_disks: Vec::new(),
             efi_vars: None,
@@ -444,8 +452,7 @@ impl Vm {
             qemu.arg("-drive")
                 .arg(format!("if=virtio,format=raw,file={}", std::path::absolute(extra)?.display()));
         }
-        let gui = config.display == Display::Gtk;
-        let gl = gui && config.gl;
+        let gl = config.gl && config.display != Display::None;
         let vga = if gl { "virtio-vga-gl" } else { "virtio-vga" };
         qemu
             .arg("-device")
@@ -477,6 +484,20 @@ impl Vm {
             Display::Gtk => {
                 qemu.args(["-display", if gl { "gtk,gl=on" } else { "gtk" }]);
                 gui_env(&mut qemu, gl);
+            }
+            Display::Viewer => {
+                let x = config.x_display.as_deref().context("Display::Viewer needs VmConfig::x_display")?;
+                qemu.args(["-display", if gl { "gtk,gl=on,show-menubar=off" } else { "gtk,show-menubar=off" }])
+                    .arg("-qmp")
+                    .arg(format!("unix:{},server=on,wait=off", dir.join("input.sock").display()))
+                    // The guest's SPICE agent port, for the bridge's clipboard
+                    // sharing (crate::vdagent).
+                    .args(["-device", "virtio-serial-pci", "-chardev"])
+                    .arg(format!("socket,id=vdagent,path={},server=on,wait=off", dir.join("vdagent.sock").display()))
+                    .args(["-device", "virtserialport,chardev=vdagent,name=com.redhat.spice.0"])
+                    .env("DISPLAY", x)
+                    .env("GDK_BACKEND", "x11")
+                    .env_remove("WAYLAND_DISPLAY");
             }
         }
 
@@ -520,6 +541,7 @@ impl Vm {
                 Display::None => "none",
                 Display::Gtk if gl => "gtk-gl",
                 Display::Gtk => "gtk",
+                Display::Viewer => "viewer",
             }
             .to_string(),
         };

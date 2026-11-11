@@ -1,0 +1,12 @@
+# A layer only `cargo xtask vm --gui` puts on the checkout's image before
+# installing it to a disk: never published, never on real machines.
+#
+# spice-vdagent is the guest side of the viewer's clipboard sharing: QEMU
+# puts the SPICE agent port (com.redhat.spice.0) on a socket that the display
+# bridge serves (crates/ilex-devkit/src/vdagent.rs); spice-vdagentd starts
+# when udev sees the port, and the per-session agent with GNOME.
+ARG BASE
+FROM ${BASE}
+RUN dnf -y install spice-vdagent \
+    && dnf clean all \
+    && rm -rf /var/cache/* /var/lib/dnf /var/log/dnf*
