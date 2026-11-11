@@ -9,5 +9,6 @@ pub mod git;
 pub mod qemu;
 pub mod slots;
 pub mod workspace;
+pub mod wslg;
 
 pub use workspace::{IMAGE_REPO, Workspace};

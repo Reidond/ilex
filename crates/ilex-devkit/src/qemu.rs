@@ -188,7 +188,8 @@ pub struct VmInfo {
     /// Configured virtio-vga mode (what the guest reads from EDID).
     pub width: u32,
     pub height: u32,
-    /// `none` (headless) or `gtk`.
+    /// `none` (headless), `gtk`, or `gtk-gl` (a GTK window and virgl: QMP
+    /// `screendump` can't capture it and there is no VNC server).
     pub display: String,
 }
 
@@ -284,13 +285,13 @@ pub enum Display {
     Gtk,
 }
 
-impl Display {
-    fn name(self) -> &'static str {
-        match self {
-            Display::None => "none",
-            Display::Gtk => "gtk",
-        }
-    }
+/// Can this host render a guest's OpenGL (virgl) on a GPU? WSL2 has Mesa's
+/// D3D12 driver on `/dev/dxg`; elsewhere a DRM render node is needed.
+pub fn host_gl() -> bool {
+    Path::new("/dev/dxg").exists()
+        || fs::read_dir("/dev/dri")
+            .map(|dir| dir.flatten().any(|e| e.file_name().to_string_lossy().starts_with("renderD")))
+            .unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +308,11 @@ pub struct VmConfig {
     pub width: u32,
     pub height: u32,
     pub display: Display,
+    /// With [`Display::Gtk`]: give the guest a 3D-capable `virtio-vga-gl`
+    /// whose OpenGL the host renders (virgl), instead of llvmpipe in the
+    /// guest. QEMU then has no VNC server and QMP `screendump` can't capture
+    /// the screen. See [`host_gl`].
+    pub gl: bool,
     /// An install ISO attached as a CD-ROM. Firmware tries the disk first and
     /// falls through to the CD when the disk is empty.
     pub cdrom: Option<PathBuf>,
@@ -332,6 +338,7 @@ impl VmConfig {
             width: 1280,
             height: 800,
             display: Display::None,
+            gl: false,
             cdrom: None,
             extra_disks: Vec::new(),
             efi_vars: None,
@@ -437,9 +444,12 @@ impl Vm {
             qemu.arg("-drive")
                 .arg(format!("if=virtio,format=raw,file={}", std::path::absolute(extra)?.display()));
         }
+        let gui = config.display == Display::Gtk;
+        let gl = gui && config.gl;
+        let vga = if gl { "virtio-vga-gl" } else { "virtio-vga" };
         qemu
             .arg("-device")
-            .arg(format!("virtio-vga,xres={},yres={}", config.width, config.height))
+            .arg(format!("{vga},xres={},yres={}", config.width, config.height))
             .args(["-device", "virtio-tablet-pci", "-device", "virtio-keyboard-pci"])
             .args(["-object", "rng-random,id=rng0,filename=/dev/urandom"])
             .args(["-device", "virtio-rng-pci,rng=rng0"])
@@ -453,17 +463,20 @@ impl Vm {
             ))
             .arg("-serial")
             .arg(format!("file:{}", dir.join("serial.log").display()))
-            .arg("-vnc")
-            .arg(format!("unix:{}", vnc_sock.display()))
             .arg("-qmp")
             .arg(format!("unix:{},server=on,wait=off", qmp_sock.display()));
+        // QEMU refuses a VNC server next to a GL display ("Display vnc is
+        // incompatible with the GL context").
+        if !gl {
+            qemu.arg("-vnc").arg(format!("unix:{}", vnc_sock.display()));
+        }
         match config.display {
             Display::None => {
                 qemu.args(["-display", "none"]);
             }
             Display::Gtk => {
-                qemu.args(["-display", "gtk"]);
-                gui_env(&mut qemu);
+                qemu.args(["-display", if gl { "gtk,gl=on" } else { "gtk" }]);
+                gui_env(&mut qemu, gl);
             }
         }
 
@@ -503,7 +516,12 @@ impl Vm {
             dir,
             width: config.width,
             height: config.height,
-            display: config.display.name().to_string(),
+            display: match config.display {
+                Display::None => "none",
+                Display::Gtk if gl => "gtk-gl",
+                Display::Gtk => "gtk",
+            }
+            .to_string(),
         };
         if let Err(e) = info.write() {
             let _ = child.kill();
@@ -638,16 +656,26 @@ impl Drop for Vm {
     }
 }
 
-/// Point a GTK window at WSLg's X server when nothing else is configured.
-fn gui_env(qemu: &mut Command) {
+/// Point the GTK window at WSLg when this is WSL.
+///
+/// With GL the window is a Wayland client of WSLg. Through XWayland, Mesa's
+/// D3D12 driver (no DRI3 there) keeps presenting the window's first height
+/// after it grows, and everything below stays garbage; GTK's own GL widget
+/// on Wayland doesn't. Without GL, GTK on XWayland is the long-tested path.
+fn gui_env(qemu: &mut Command, gl: bool) {
+    const WSLG_WAYLAND: &str = "/mnt/wslg/runtime-dir/wayland-0";
+    const WSLG_X11: &str = "/mnt/wslg/.X11-unix/X0";
+    if gl && Path::new(WSLG_WAYLAND).exists() {
+        // libwayland takes an absolute WAYLAND_DISPLAY as the socket path.
+        qemu.env("GDK_BACKEND", "wayland").env("WAYLAND_DISPLAY", WSLG_WAYLAND).env_remove("DISPLAY");
+        return;
+    }
     let have_display = std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
         || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty());
-    if !have_display && Path::new("/mnt/wslg/.X11-unix/X0").exists() {
-        qemu.env("DISPLAY", ":0").env("GDK_BACKEND", "x11");
+    if !have_display && Path::new(WSLG_X11).exists() {
+        qemu.env("DISPLAY", ":0");
     }
-    // WSLg's Wayland socket lives in /mnt/wslg/runtime-dir, not in the user's
-    // XDG_RUNTIME_DIR; GTK on X11 (XWayland) is the dependable path there.
-    if Path::new("/mnt/wslg/.X11-unix/X0").exists() {
+    if Path::new(WSLG_X11).exists() {
         qemu.env("GDK_BACKEND", "x11");
     }
 }

@@ -115,6 +115,14 @@ impl Vmctl {
 
     /// The framebuffer as PNG bytes, exactly as QEMU wrote it.
     pub fn screenshot_png(&self) -> Result<Vec<u8>> {
+        if self.info.display == "gtk-gl" {
+            bail!(
+                "{} renders with virgl (`xtask vm --gui`), and QEMU can't take screenshots of GL output \
+                 (QMP screendump: \"no surface\"); input still works. Boot `cargo xtask vm --disk`, or \
+                 `--gui --no-gl`, for screenshots",
+                self.info.name
+            );
+        }
         let file = self.info.dir.join(format!("screendump-{}.png", std::process::id()));
         let result = (|| {
             self.qmp()?.execute("screendump", json!({ "filename": file, "format": "png" }))?;

@@ -8,7 +8,7 @@ Personal Fedora bootc image: one `Containerfile` on `quay.io/fedora/fedora-bootc
 ```sh
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
-cargo xtask vm                 # interactive ephemeral VM of this checkout's image
+cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
 cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slots
 ```
 
@@ -93,11 +93,22 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 - In Git Bash, prefix with `MSYS_NO_PATHCONV=1` when passing Linux paths.
 - Image builds and VM boots take minutes: run them in the background.
 - `cargo check`/`clippy` work natively on Windows too, for quick feedback.
-- WSLg draws the `--gui` window. When a Linux window only gets a taskbar
-  button titled `[WARN:COPY MODE] …` and never shows (and so does any other,
-  even `xeyes`), WSLg failed to open its shared memory when WSL started
-  (`/mnt/wslg/weston.log`: `rdp_allocate_shared_memory: Failed to open`):
-  `wsl --shutdown` (it stops every distro) and the next start fixes it.
+- `cargo xtask vm` is the exception: run it on Windows itself (PowerShell or
+  Git Bash, in the checkout). It hands itself to the distro (`wsl.exe -d
+  FedoraLinux-45 -u root --cd <checkout> -e bash -lc 'cargo xtask vm …'`;
+  `ILEX_WSL_DISTRO` names another), and with `--gui` it first gets WSLg
+  working. WSLg draws the window, and on most starts of WSL 2.7 here it fails
+  to open its shared memory with Windows (`/mnt/wslg/weston.log`:
+  `rdp_allocate_shared_memory: Failed to open … Input/output error`,
+  `use_gfxredir = 0`; microsoft/WSL#40618). Every Linux window then only gets
+  a taskbar button titled `[WARN:COPY MODE] …` and is never drawn, and only
+  a new start of WSL helps. So xtask holds WSL up with a `sleep infinity`
+  (WSL stops an idle instance, and the next start rolls the dice again),
+  reads Weston's log, and runs `wsl --shutdown` until a start comes up with
+  `use_gfxredir = 1` (up to 6 tries). It won't restart a WSL that is busy
+  (other running distros, or podman, qemu, bcvk, cargo in this one) unless
+  `--restart-wsl`. Run inside WSL, `xtask vm --gui` refuses to open a window
+  into a broken WSLg and says so.
 
 ## Driving VMs with ilex-vmctl
 
@@ -137,6 +148,30 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
   `$ILEX_ARTIFACTS/graphical/`).
 - The SSH test key and the throwaway disk overlays live in the state dir;
   `cargo xtask vm --disk` prints the exact `ssh` command line.
+- `--gui` gives the guest a GPU when the host has one (`/dev/dxg` in WSL, a
+  DRM render node elsewhere; `--no-gl` opts out): `virtio-vga-gl` with
+  `-display gtk,gl=on`, so virglrenderer renders the guest's OpenGL on the
+  host (in WSL through Mesa's D3D12 driver on the Windows GPU), and half the
+  host's threads as vCPUs (4 to 8). Measured on a 4K desktop: GNOME presents
+  a steady 60 fps in the guest; the Windows screen shows about 40 (p50 23.6
+  ms between changed frames), because Mesa reads every frame back into a
+  shared-memory Wayland buffer for WSLg. The window is a Wayland client of
+  WSLg: through XWayland, Mesa's D3D12 driver keeps presenting the window's
+  first 480 rows after it grows and the rest stays garbage (GTK and SDL
+  alike). QEMU allows no VNC server next to a GL display, and QMP
+  `screendump` fails on virgl output ("no surface"), so a `--gui` VM takes
+  vmctl input but no screenshots (`vm.toml` says `display = "gtk-gl"`);
+  agents use `--disk`.
+- Windows keeps the Windows key and Alt+Tab for itself in a WSLg window, and
+  GNOME 51 binds nothing else to the overview (Alt+F1 is unbound): use the
+  top-left hot corner, or `ilex-vmctl key super`.
+- Clipboard sharing doesn't work yet. Tried: `spice-vdagent` in the guest
+  plus `-chardev qemu-vdagent,clipboard=on` on the SPICE agent port. The
+  guest half works (the X11 agent sees GNOME's clipboard through XWayland
+  and sends a grab), but `spice-vdagentd` reads EOF from QEMU's agent port
+  ("lost spice client connection"), treats the client as gone and drops it,
+  and QEMU's GTK clipboard on a Wayland host is known broken
+  (qemu-project/qemu#1455).
 
 ## Display scaling
 
