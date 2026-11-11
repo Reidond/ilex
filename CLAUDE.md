@@ -93,6 +93,11 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 - In Git Bash, prefix with `MSYS_NO_PATHCONV=1` when passing Linux paths.
 - Image builds and VM boots take minutes: run them in the background.
 - `cargo check`/`clippy` work natively on Windows too, for quick feedback.
+- WSLg draws the `--gui` window. When a Linux window only gets a taskbar
+  button titled `[WARN:COPY MODE] …` and never shows (and so does any other,
+  even `xeyes`), WSLg failed to open its shared memory when WSL started
+  (`/mnt/wslg/weston.log`: `rdp_allocate_shared_memory: Failed to open`):
+  `wsl --shutdown` (it stops every distro) and the next start fixes it.
 
 ## Driving VMs with ilex-vmctl
 

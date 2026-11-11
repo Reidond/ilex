@@ -28,7 +28,10 @@ impl From<Format> for DiskFormat {
     }
 }
 
-#[derive(clap::Args, Debug, Default)]
+/// The virtual disk size when `--size` isn't given.
+const DEFAULT_SIZE: &str = "30G";
+
+#[derive(clap::Args, Debug)]
 pub struct Args {
     /// Disk image format
     #[arg(long, value_enum, default_value_t = Format::Qcow2)]
@@ -40,8 +43,22 @@ pub struct Args {
     #[arg(long)]
     pub out: Option<PathBuf>,
     /// Virtual disk size
-    #[arg(long, default_value = "30G")]
+    #[arg(long, default_value = DEFAULT_SIZE)]
     pub size: String,
+}
+
+/// The command line's defaults, for `xtask vm --disk`, which writes its disk
+/// without parsing one. (A derived `Default` left `size` empty, and bcvk
+/// rejects `--disk-size ''`.)
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            format: Format::default(),
+            image: None,
+            out: None,
+            size: DEFAULT_SIZE.into(),
+        }
+    }
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
