@@ -113,8 +113,20 @@ impl Vmctl {
 
     // ----- screen -----
 
-    /// The framebuffer as PNG bytes, exactly as QEMU wrote it.
+    /// The framebuffer as PNG bytes: as QEMU wrote it, or, for a VM behind
+    /// the display bridge (`xtask vm --gui` in WSL), from the bridge.
     pub fn screenshot_png(&self) -> Result<Vec<u8>> {
+        if self.info.display == "viewer" {
+            return self.bridge_screenshot()?.encode_png();
+        }
+        if self.info.display == "gtk-gl" {
+            bail!(
+                "{} renders with virgl in a GTK window, and QEMU can't take screenshots of GL output \
+                 (QMP screendump: \"no surface\"); input still works. Use `cargo xtask vm --disk`, or \
+                 `--gui --no-gl`, for screenshots",
+                self.info.name
+            );
+        }
         let file = self.info.dir.join(format!("screendump-{}.png", std::process::id()));
         let result = (|| {
             self.qmp()?.execute("screendump", json!({ "filename": file, "format": "png" }))?;
@@ -122,6 +134,29 @@ impl Vmctl {
         })();
         let _ = std::fs::remove_file(&file);
         result
+    }
+
+    /// The display bridge's current frame (`screen.sock`: `u32` width, `u32`
+    /// height, BGRX pixels).
+    #[cfg(unix)]
+    fn bridge_screenshot(&self) -> Result<Frame> {
+        use std::io::Read;
+        let path = self.info.dir.join("screen.sock");
+        let mut stream = std::os::unix::net::UnixStream::connect(&path)
+            .with_context(|| format!("connecting to {} (is the display bridge running?)", path.display()))?;
+        let mut head = [0u8; 8];
+        stream.read_exact(&mut head)?;
+        let width = u32::from_le_bytes(head[..4].try_into().unwrap());
+        let height = u32::from_le_bytes(head[4..].try_into().unwrap());
+        let mut bgrx = vec![0u8; width as usize * height as usize * 4];
+        stream.read_exact(&mut bgrx).context("reading the frame")?;
+        let rgb = bgrx.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
+        Ok(Frame { width, height, rgb })
+    }
+
+    #[cfg(not(unix))]
+    fn bridge_screenshot(&self) -> Result<Frame> {
+        bail!("the display bridge's socket is a unix socket: run ilex-vmctl inside WSL")
     }
 
     /// The framebuffer, decoded.

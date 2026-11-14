@@ -19,6 +19,7 @@ mod registry;
 mod test;
 mod tool;
 mod vm;
+mod wsl;
 
 #[derive(Parser)]
 #[command(name = "cargo xtask", about = "Build, boot, test and release the ilex image")]
@@ -67,6 +68,8 @@ fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Build(args) => build::run(&ws, args),
         Cmd::Rechunk(args) => rechunk::run(&ws, args),
+        // The VM stack lives in WSL2; --gui's window is ilex-viewer.exe.
+        Cmd::Vm(args) if cfg!(windows) => wsl::forward(&ws.root, args.gui),
         Cmd::Vm(args) => vm::run(&ws, args),
         Cmd::Disk(args) => disk::run(&ws, args),
         Cmd::Test(args) => test::run(&ws, args),
