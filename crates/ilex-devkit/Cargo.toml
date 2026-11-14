@@ -9,4 +9,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml = "1"
+
+[target.'cfg(unix)'.dependencies]
+memmap2 = "0.9"
+x11rb = { version = "0.13", features = ["damage", "xfixes"] }

@@ -19,3 +19,15 @@ libtest-mimic = "0.8"
 [profile.release]
 lto = "thin"
 strip = true
+
+# `cargo xtask` runs a dev build, and `xtask vm --gui` moves a 4K screen per
+# frame through the display bridge (ilex-devkit) and ilex-viewer: unoptimized,
+# that managed 6 frames/s. Dependencies compile once, so optimize them too.
+[profile.dev.package.ilex-devkit]
+opt-level = 3
+
+[profile.dev.package.ilex-viewer]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
