@@ -40,10 +40,12 @@ export RUSTC_WRAPPER=kache
 if [ -f /kache-host/index.db ]; then
     export KACHE_READONLY_STORE=/kache-host
 fi
-cargo build --release --locked -p ilex-agent
+cargo build --release --locked -p ilex-agent -p drupe
 kache daemon stop || true
 kache stats --last-build --root /src
 install -Dm755 target/release/ilex-agent /out/usr/bin/ilex-agent
+install -Dm755 target/release/drupe /out/usr/bin/drupe
+install -Dm755 target/release/drupe-enter /out/usr/libexec/drupe/drupe-enter
 EOF
 
 FROM quay.io/fedora/fedora-bootc:45
@@ -98,9 +100,16 @@ COPY --from=build /out/ /
 # ilex-sigpolicy pins a machine that tracks ghcr.io/reidond/ilex to signed
 # images at boot, however it was installed (ilex-agent enforce-sigpolicy).
 # chmod: checkouts on Windows filesystems carry no exec bits.
+# drupe (developer tools from signed disk images): /app is where a tool's
+# image appears in the mount namespace of its own processes, an empty
+# directory everywhere else; drupe-enter is setuid root because it makes that
+# namespace and mount (and nothing else: see crates/drupe/src/enter.rs);
+# drupe.service mounts the installed images at boot.
 RUN chmod 0755 /usr/libexec/ilex/update-notify && \
+    mkdir /app && \
+    chmod 4755 /usr/libexec/drupe/drupe-enter && \
     systemctl set-default graphical.target && \
-    systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service && \
+    systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service && \
     systemctl --global enable ilex-update-notify.path ilex-update-notify.service
 
 RUN bootc container lint --fatal-warnings

@@ -138,6 +138,75 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
 - The SSH test key and the throwaway disk overlays live in the state dir;
   `cargo xtask vm --disk` prints the exact `ssh` command line.
 
+## Developer tools: drupe
+
+A prototype of GNOME OS's [Toolpak](https://blogs.gnome.org/alatiera/2026/09/26/introducing-toolpak/)
+idea under ilex's own name and format (Toolpak has published neither code nor
+a format yet): tools like `strace` that can't run in a container and have no
+place in an image-based `/usr`. A tool is one signed disk image holding its
+commands and every library they load; running a command mounts that image at
+`/app` for that process tree only and executes it as the calling user with
+the rest of the machine untouched (`crates/drupe`).
+
+```sh
+cargo xtask tool strace                  # dev machine: <state dir>/tools/images/strace.raw + drupe.crt
+cargo xtask tool net nmap tcpdump        # one tool `net` with the commands of two packages
+drupe install strace.raw                 # on the machine, as root; then just `strace …`
+drupe list; drupe remove strace; drupe run strace -V
+```
+
+- The image is a discoverable disk image (erofs root + dm-verity hash +
+  signature partitions, `systemd-repart`), built in a Fedora container from
+  the packages' commands in `/usr/bin` and `/usr/sbin`, the shared libraries
+  the loader resolves for them, and glibc's loader itself. `drupe.json` at its
+  root names the commands. An ELF command is started as `/app/lib64/ld-linux-…
+  --library-path /app/lib64 --argv0 <cmd> /app/bin/<cmd>`: its libraries come
+  from the image, and since nothing goes through the environment the programs
+  it starts are the host's with the host's libraries.
+- Trust: `drupe` only mounts through `systemd-dissect --image-policy
+  root=signed:=absent+unused`, so the root hash must be signed by a
+  certificate in `/etc/verity.d/` (or `/run/verity.d`, `/usr/lib/verity.d`,
+  the kernel keyring). The image ships none: `cargo xtask tool` signs with a
+  per-checkout development key (`<state dir>/tools/keys/`, created on first
+  use) and prints the certificate to copy to `/etc/verity.d/`. A real key and
+  where tools are published are open. `install` also reads every file once, so
+  a damaged image fails there and not with an I/O error later.
+- Privilege: `/usr/libexec/drupe/drupe-enter` is setuid root. It unshares the
+  mount namespace, binds `/run/drupe/priv/<tool>` (root-only) onto `/app`
+  read-only, nosuid, nodev, drops to the caller in every id, and only then
+  reads the caller's environment and executes. A user namespace would need no
+  privilege but defeats the purpose: `strace -p` on a process outside it and
+  `sudo` inside it both fail. The environment travels in a memfd because
+  glibc strips `LD_LIBRARY_PATH`, `TMPDIR` and others from a setuid program.
+- State: images in `/var/lib/drupe/images/`; `drupe.service` (`drupe
+  activate`) mounts them at boot and rebuilds `/run/drupe/{cmd,bin,tools}`.
+  `/etc/profile.d/drupe.sh` puts `/run/drupe/bin` first in `PATH` (symlinks
+  to `drupe`, which runs the command it was called as). `sudo` resets `PATH`:
+  `sudo drupe run strace …`.
+- A user can't trace a drupe command (`strace rg …` with both from drupe, or
+  `gdb` on one): the kernel ignores the setuid bit of a traced program, so
+  `drupe-enter` can't make its namespace and says so. Root can. The image
+  also sets `kernel.yama.ptrace_scope=1`, so `strace -p` on a process that is
+  not a descendant needs root with any strace.
+- `/app` is an empty directory in the image (`mkdir` in the Containerfile:
+  the root filesystem is read-only on a machine).
+- Limits of building from RPMs: a program that looks for its data under
+  `/usr/share` or `/usr/libexec` (qemu's firmware, git's helpers) finds the
+  host's or nothing; such tools need a build with `--prefix=/app`, which is
+  what the fixed mount point is for. Libraries a tool `dlopen`s (NSS modules)
+  are not collected. No tool depends on another tool.
+- `tool::` tier (`cargo xtask test tool::`, not run in CI): builds the strace
+  tool once (`ILEX_TOOL_REBUILD=1` rebuilds), refuses it while its certificate
+  is untrusted, then runs it as `nobody`: ids and capabilities, tracing a host
+  program that loads the host's libc, attaching to a running process, the
+  environment, `/app` private to the namespace, `PATH`, a damaged image,
+  remove and reinstall. An ephemeral VM has SELinux disabled, a virtiofs root
+  and no reboot, so `tool::installed_system` boots the `disk::` tier's
+  installed disk as its own VM (`tool-disk`, the tool image attached as a
+  second drive): install and run under SELinux enforcing on the composefs
+  root, then a reboot after which `drupe.service` must have brought the tool
+  back.
+
 ## Display scaling
 
 Scaling is GNOME's own; the image ships no code or schema override for it.
@@ -385,7 +454,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one
   libtest-mimic binary, tiers `ephemeral::`, `disk::`, `upgrade::`,
-  `graphical::`). Anything worth testing in a shipped binary must be
+  `graphical::`, `tool::`). Anything worth testing in a shipped binary must be
   observable from inside the VM: give it a `--self-check` mode.
 - **bootc rules for `rootfs/`** (copied to `/`): defaults go in `/usr`; keep
   `/etc` to files that must live there (it is 3-way merged on upgrade); never

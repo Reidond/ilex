@@ -8,6 +8,7 @@ pub mod cmd;
 pub mod git;
 pub mod qemu;
 pub mod slots;
+pub mod tool;
 pub mod workspace;
 
 pub use workspace::{IMAGE_REPO, Workspace};

@@ -17,6 +17,7 @@ mod publish;
 mod rechunk;
 mod registry;
 mod test;
+mod tool;
 mod vm;
 
 #[derive(Parser)]
@@ -44,6 +45,8 @@ enum Cmd {
     Publish(publish::Args),
     /// Build the installer ISO for a published digest and push it (CI only)
     Iso(iso::Args),
+    /// Build a drupe tool image from Fedora packages (`cargo xtask tool strace`)
+    Tool(tool::Args),
     /// Show this checkout's slug, image, VM names and state directories
     Info,
 }
@@ -70,6 +73,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Changed(args) => changed::run(&ws, args),
         Cmd::Publish(args) => publish::run(&ws, args),
         Cmd::Iso(args) => iso::run(&ws, args),
+        Cmd::Tool(args) => tool::run(&ws, args),
         Cmd::Info => {
             println!("root:        {}", ws.root.display());
             println!("slug:        {}", ws.slug);

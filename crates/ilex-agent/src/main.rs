@@ -62,6 +62,11 @@ const CHECKS: &[Check] = &[
     ("sigpolicy unit enabled", || {
         exists("/etc/systemd/system/multi-user.target.wants/ilex-sigpolicy.service")
     }),
+    ("drupe helper is setuid root", check_drupe_helper),
+    ("drupe mount point /app present", || exists("/app")),
+    ("drupe unit enabled", || {
+        exists("/etc/systemd/system/multi-user.target.wants/drupe.service")
+    }),
 ];
 
 fn self_check() -> ExitCode {
@@ -124,6 +129,27 @@ fn check_desktop_binaries() -> Result<(), String> {
     } else {
         Err(format!("missing: {}", missing.join(", ")))
     }
+}
+
+/// `drupe-enter` makes the mount namespace a tool runs in, which takes root:
+/// without the setuid bit no tool command starts. That the tools then run
+/// is the `tool::` tier's business.
+fn check_drupe_helper() -> Result<(), String> {
+    const HELPER: &str = "/usr/libexec/drupe/drupe-enter";
+    let meta = fs::metadata(HELPER).map_err(|e| format!("{HELPER}: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != 0 || meta.mode() & 0o4000 == 0 {
+            return Err(format!(
+                "{HELPER} is not setuid root (uid {}, mode {:o})",
+                meta.uid(),
+                meta.mode() & 0o7777
+            ));
+        }
+    }
+    let _ = meta;
+    Ok(())
 }
 
 fn exists(path: &str) -> Result<(), String> {

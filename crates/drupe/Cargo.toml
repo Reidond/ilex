@@ -1,0 +1,26 @@
+[package]
+name = "drupe"
+description = "Developer tools from signed disk images, run on the host with the tool mounted at /app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+autobins = false
+
+# `drupe`: the command line, and the wrapper every tool command in
+# /run/drupe/bin points at. Never privileged.
+[[bin]]
+name = "drupe"
+path = "src/main.rs"
+
+# `drupe-enter`: the setuid-root helper. It only depends on libc.
+[[bin]]
+name = "drupe-enter"
+path = "src/enter.rs"
+
+# Few dependencies on purpose: the image's builder stage compiles this. It is
+# Linux-only code; elsewhere both binaries are stubs so `cargo check` of the
+# workspace still works on a Windows host.
+[target.'cfg(target_os = "linux")'.dependencies]
+serde_json.workspace = true
+libc = "0.2"
