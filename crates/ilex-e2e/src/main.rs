@@ -15,6 +15,7 @@ mod disk;
 mod ephemeral;
 mod graphical;
 mod iso;
+mod tool;
 mod upgrade;
 
 fn main() {
@@ -26,6 +27,7 @@ fn main() {
     trials.extend(disk::trials());
     trials.extend(upgrade::trials());
     trials.extend(graphical::trials());
+    trials.extend(tool::trials());
     // Opt-in: builds an installer ISO and runs an install (tens of minutes),
     // so it only exists when a filter asks for it (`cargo xtask test iso::`).
     if filters.iter().any(|f| f.contains("iso")) {
@@ -46,10 +48,13 @@ fn main() {
             .count()
     };
     ephemeral::expect(will_run("ephemeral::"));
+    // `tool::installed_system` boots a disk of its own, not the tier's VM.
+    tool::expect(will_run("tool::") - will_run("tool::installed_system"));
 
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| libtest_mimic::run(&args, trials)));
     // Safety net: nothing may outlive the run.
     ephemeral::shutdown();
+    tool::shutdown();
     match outcome {
         Ok(conclusion) => conclusion.exit(),
         Err(panic) => panic::resume_unwind(panic),

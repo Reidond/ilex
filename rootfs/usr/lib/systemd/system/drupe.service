@@ -1,0 +1,17 @@
+[Unit]
+Description=Activate installed drupe tool images
+Documentation=https://github.com/Reidond/ilex
+# Nothing to do until a tool is installed; `drupe install` activates what it
+# installs itself.
+ConditionDirectoryNotEmpty=/var/lib/drupe/images
+RequiresMountsFor=/var/lib/drupe/images
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Mounts each image under /run/drupe/priv (dm-verity, signature required) and
+# publishes its commands in /run/drupe/bin. Idempotent.
+ExecStart=/usr/bin/drupe activate
+
+[Install]
+WantedBy=multi-user.target

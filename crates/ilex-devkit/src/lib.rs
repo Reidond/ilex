@@ -10,6 +10,7 @@ pub mod qemu;
 #[cfg(unix)]
 pub mod display;
 pub mod slots;
+pub mod tool;
 #[cfg(unix)]
 pub mod vdagent;
 pub mod viewer;

@@ -496,6 +496,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "drupe"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "dtor"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
