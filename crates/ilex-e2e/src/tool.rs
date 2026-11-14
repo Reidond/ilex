@@ -8,7 +8,7 @@
 //! tool as an unprivileged user and look at what it can see.
 //!
 //! The tests share the VM and run in parallel; the one that removes the tool
-//! takes [`STATE`] exclusively.
+//! and the one that inspects the whole store take [`STATE`] exclusively.
 //!
 //! An ephemeral VM has SELinux disabled, no composefs root and no reboot, so
 //! `tool::installed_system` boots the installed disk of the `disk::` tier
@@ -106,6 +106,15 @@ pub fn trials() -> Vec<Trial> {
             })
         })
     };
+    // Tests that change the store, or look at all of it, run alone.
+    let exclusive = |name: &'static str, body: fn(&ToolVm) -> Result<()>| {
+        trial(name, move || {
+            GROUP.run(|t| {
+                let _alone = STATE.write().unwrap_or_else(PoisonError::into_inner);
+                body(t)
+            })
+        })
+    };
     vec![
         shared("tool::untrusted_image_refused", untrusted_image_refused),
         shared("tool::listed", listed),
@@ -117,12 +126,8 @@ pub fn trials() -> Vec<Trial> {
         shared("tool::path_prefers_tools", path_prefers_tools),
         shared("tool::bad_requests_refused", bad_requests_refused),
         shared("tool::damaged_image_refused", damaged_image_refused),
-        trial("tool::remove_and_reinstall", || {
-            GROUP.run(|t| {
-                let _exclusive = STATE.write().unwrap_or_else(PoisonError::into_inner);
-                remove_and_reinstall(t)
-            })
-        }),
+        exclusive("tool::setuid_source_leaves_nothing", setuid_source_leaves_nothing),
+        exclusive("tool::remove_and_reinstall", remove_and_reinstall),
         trial("tool::installed_system", installed_system),
     ]
 }
@@ -193,6 +198,33 @@ fn listed(t: &ToolVm) -> Result<()> {
     let (rc, _) = sh(&t.vm, &as_user("ls /run/drupe/priv/strace"))?;
     ensure(rc != 0, || {
         "a user can read the mounted image outside a tool's namespace".to_string()
+    })?;
+    // The stored image is root's alone, whatever mode its source had.
+    let stored = sh_ok(&t.vm, "stat -c '%a %U' /var/lib/drupe/images/strace.raw")?;
+    ensure(stored.trim() == "600 root", || {
+        format!("the stored image is `{}`", stored.trim())
+    })
+}
+
+/// A file that is not an image is refused, and neither the mode nor a byte
+/// of it stays in the store: a setuid program handed to `drupe install`
+/// must never exist there as root's setuid program. (That the staged copy is
+/// 0600 from its first byte is `copy_contents` creating it so; a test can't
+/// catch that window, only what is left afterwards.)
+fn setuid_source_leaves_nothing(t: &ToolVm) -> Result<()> {
+    let (rc, text) = sh(
+        &t.vm,
+        "cp /usr/bin/true /var/tmp/not-an-image && chmod 4755 /var/tmp/not-an-image && \
+         drupe install /var/tmp/not-an-image; rc=$?; rm -f /var/tmp/not-an-image; (exit $rc)",
+    )?;
+    ensure(rc != 0, || format!("drupe installed a program as an image:\n{text}"))?;
+    let (_, left) = sh(
+        &t.vm,
+        "find /var/lib/drupe/images -mindepth 1 ! -name strace.raw; \
+         find /var/lib/drupe /run/drupe -perm /6000",
+    )?;
+    ensure(left.trim().is_empty(), || {
+        format!("left in the store after a refused install:\n{left}")
     })
 }
 

@@ -280,8 +280,11 @@ drupe list; drupe remove strace; drupe run strace -V
   privilege but defeats the purpose: `strace -p` on a process outside it and
   `sudo` inside it both fail. The environment travels in a memfd because
   glibc strips `LD_LIBRARY_PATH`, `TMPDIR` and others from a setuid program.
-- State: images in `/var/lib/drupe/images/`; `drupe.service` (`drupe
-  activate`) mounts them at boot and rebuilds `/run/drupe/{cmd,bin,tools}`.
+- State: images in `/var/lib/drupe/images/`, mode 0600 from the first byte
+  (`install` writes its own copy and never takes over the source's mode: a
+  setuid file handed to root must not become root's setuid file there);
+  `drupe.service` (`drupe activate`) mounts them at boot and rebuilds
+  `/run/drupe/{cmd,bin,tools}`.
   `/etc/profile.d/drupe.sh` puts `/run/drupe/bin` first in `PATH` (symlinks
   to `drupe`, which runs the command it was called as). `sudo` resets `PATH`:
   `sudo drupe run strace …`.

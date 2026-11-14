@@ -9,7 +9,7 @@
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -29,16 +29,37 @@ pub fn install(source: &Path) -> Result<(), String> {
 
     // Take a copy first: what gets inspected is what gets installed.
     let incoming = Path::new(STORE).join(format!(".incoming-{}", std::process::id()));
-    fs::copy(source, &incoming).map_err(|e| format!("copying {}: {e}", source.display()))?;
-    let result = install_copy(&incoming);
+    let result = copy_contents(source, &incoming)
+        .map_err(|e| format!("copying {}: {e}", source.display()))
+        .and_then(|()| install_copy(&incoming));
     if result.is_err() {
         let _ = fs::remove_file(&incoming);
     }
     result
 }
 
+/// Copy the bytes of `source` into a new file only root can open.
+///
+/// Not `fs::copy`: that gives the copy the source's mode, and the source is
+/// whatever a user handed to root. A setuid program instead of an image would
+/// sit in the store as a setuid *root* program, in a directory everyone can
+/// reach, until the install got around to rejecting it. The copy is created
+/// here (never an existing file or a symlink) with mode 0600 and keeps it:
+/// only root mounts images.
+fn copy_contents(source: &Path, to: &Path) -> io::Result<()> {
+    let _ = fs::remove_file(to);
+    let mut from = fs::File::open(source)?;
+    let mut to = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(to)?;
+    io::copy(&mut from, &mut to)?;
+    // Whatever the umask was: exactly 0600.
+    to.set_permissions(Permissions::from_mode(0o600))
+}
+
 fn install_copy(incoming: &Path) -> Result<(), String> {
-    fs::set_permissions(incoming, Permissions::from_mode(0o644)).map_err(|e| e.to_string())?;
     let probe = Path::new(PRIV).join(format!(".incoming-{}", std::process::id()));
     mount(incoming, &probe)?;
     // dm-verity checks a block when it is read, so reading every file now
