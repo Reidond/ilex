@@ -114,7 +114,8 @@ installation of a base package. The machine remains the last, squashed layer.
 
 `cargo xtask build` checks every root built without shells against the local
 fedora-bootc image: growth must be at most **128 MiB** (uncompressed `.Size`).
-The error includes both sizes. Packages that exceed the budget belong in a
+The error includes both sizes and removes only the rejected build's tag, so a
+later test cannot reuse it. Packages that exceed the budget belong in a
 shell or machine, or need a justified budget change in a commit. The base adds
 ilex-agent, signature policy, the updater and drupe, plus the latter's
 `systemd-container` runtime dependency. A package-free base boots, but cannot

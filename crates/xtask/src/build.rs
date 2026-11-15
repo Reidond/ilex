@@ -133,6 +133,10 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
         let size = image_size(&image)?;
         let growth = size.saturating_sub(base_size);
         if growth > BASE_BUDGET {
+            // Name the tag twice: `podman untag image` alone removes all its
+            // tags. A rejected build must not be reused by the next test run.
+            cmd::run(Command::new("podman").args(["untag", &image, &image]))
+                .with_context(|| format!("removing over-budget base tag {image}"))?;
             bail!(
                 "base size budget exceeded: {image} is {size} bytes ({:.2} MiB), \
                  fedora-bootc is {base_size} bytes ({:.2} MiB); \
