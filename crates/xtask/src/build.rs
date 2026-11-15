@@ -54,29 +54,52 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
 /// Build the image and return its full reference.
 pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
-    let resolved = args.selection.resolve(ws, args.on.as_deref(), args.tag.as_deref())?;
+    let resolved = args
+        .selection
+        .resolve(ws, args.on.as_deref(), args.tag.as_deref())?;
     build_resolved(ws, args, resolved)
 }
 
 /// `test` already resolved the selection while deciding whether to rebuild.
-pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Resolved) -> Result<String> {
+pub fn build_resolved(
+    ws: &Workspace,
+    args: &Args,
+    resolved: crate::select::Resolved,
+) -> Result<String> {
     cmd::require("podman")?;
     if resolved.machine != "generic" {
         let base = &resolved.base_image;
         if args.on.is_none() {
-            build(ws, &Args {
-                selection: crate::select::Args { shells: args.selection.shells.clone(), machine: Some("generic".into()) },
-                tag: Some(base.clone()),
-                no_pull: args.no_pull,
-                no_host_kache: args.no_host_kache,
-                ..Args::default()
-            })?;
+            build(
+                ws,
+                &Args {
+                    selection: crate::select::Args {
+                        shells: args.selection.shells.clone(),
+                        machine: Some("generic".into()),
+                    },
+                    tag: Some(base.clone()),
+                    no_pull: args.no_pull,
+                    no_host_kache: args.no_host_kache,
+                    ..Args::default()
+                },
+            )?;
         }
         resolved.require_base_match()?;
-        return ilex_devkit::machine::build(ws, base, &ws.root.join("machines").join(&resolved.machine), args.tag.as_deref(), &args.podman_args);
+        return ilex_devkit::machine::build(
+            ws,
+            base,
+            &ws.root.join("machines").join(&resolved.machine),
+            args.tag.as_deref(),
+            &args.podman_args,
+        );
     }
-    if args.on.is_some() { bail!("--on requires a machine other than generic"); }
-    let image = args.tag.as_deref().map_or(resolved.image, |tag| ws.resolve_image(Some(tag)));
+    if args.on.is_some() {
+        bail!("--on requires a machine other than generic");
+    }
+    let image = args
+        .tag
+        .as_deref()
+        .map_or(resolved.image, |tag| ws.resolve_image(Some(tag)));
     ilex_devkit::workspace::check_tag_length(&image)?;
     // Let the compose stage report malformed manifests too. This loose read
     // supplies arguments and labels; Python remains the schema authority.
@@ -85,22 +108,50 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
 
     if !args.no_pull {
         for base in [BASE_IMAGE, BUILDER_IMAGE] {
-            cmd::run(Command::new("podman").args(["pull", "--quiet", base]).stdout(std::io::stderr()))?;
+            cmd::run(
+                Command::new("podman")
+                    .args(["pull", "--quiet", base])
+                    .stdout(std::io::stderr()),
+            )?;
         }
     }
     let base_digest = image_digest(BASE_IMAGE)
         .with_context(|| format!("resolving the digest of {BASE_IMAGE}"))?;
-    let base_size = if bare_base { Some(image_size(BASE_IMAGE)?) } else { None };
+    let base_size = if bare_base {
+        Some(image_size(BASE_IMAGE)?)
+    } else {
+        None
+    };
     let revision = git::revision(&ws.root)?;
+    let root_inputs = selection
+        .as_ref()
+        .map(|s| crate::rechunk::root_inputs(ws, s))
+        .transpose()?;
 
     let mut build = Command::new("podman");
     build
         .current_dir(&ws.root)
-        .args(["build", "--layers", "--file", "Containerfile", "--tag", &image])
+        .args([
+            "build",
+            "--layers",
+            "--file",
+            "Containerfile",
+            "--tag",
+            &image,
+        ])
         .args(["--label", &format!("ilex.base-digest={base_digest}")])
-        .args(["--label", &format!("org.opencontainers.image.revision={revision}")])
+        .args([
+            "--label",
+            &format!("org.opencontainers.image.revision={revision}"),
+        ])
         .args(["--label", "org.opencontainers.image.title=ilex"])
-        .args(["--label", "org.opencontainers.image.source=https://github.com/Reidond/ilex"]);
+        .args([
+            "--label",
+            "org.opencontainers.image.source=https://github.com/Reidond/ilex",
+        ]);
+    if let Some(inputs) = root_inputs {
+        build.args(["--label", &format!("ilex.root-inputs={inputs}")]);
+    }
     if let Some(selection) = selection {
         build.args([
             "--build-arg",
@@ -125,7 +176,10 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
         }
     }
     if let Some(store) = host_kache_store().filter(|_| !args.no_host_kache) {
-        build.args(["--volume", &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display())]);
+        build.args([
+            "--volume",
+            &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display()),
+        ]);
     }
     build.args(&args.podman_args).arg(".");
     cmd::run(build.stdout(std::io::stderr()))?;
@@ -142,11 +196,17 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
                  fedora-bootc is {base_size} bytes ({:.2} MiB); \
                  growth {:.2} MiB exceeds the 128 MiB budget. \
                  Move packages to a shell or machine, or justify a budget change in a commit",
-                size as f64 / 1048576.0, base_size as f64 / 1048576.0, growth as f64 / 1048576.0
+                size as f64 / 1048576.0,
+                base_size as f64 / 1048576.0,
+                growth as f64 / 1048576.0
             );
         }
-        eprintln!("base size: {:.2} MiB, fedora-bootc {:.2} MiB, growth {:.2} MiB (budget 128 MiB)",
-            size as f64 / 1048576.0, base_size as f64 / 1048576.0, growth as f64 / 1048576.0);
+        eprintln!(
+            "base size: {:.2} MiB, fedora-bootc {:.2} MiB, growth {:.2} MiB (budget 128 MiB)",
+            size as f64 / 1048576.0,
+            base_size as f64 / 1048576.0,
+            growth as f64 / 1048576.0
+        );
     }
     eprintln!("built {image} (base {base_digest}, revision {revision})");
     Ok(image)
@@ -154,7 +214,8 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
 
 fn image_size(image: &str) -> Result<u64> {
     cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Size}}", image]))?
-        .parse().with_context(|| format!("reading the size of {image}"))
+        .parse()
+        .with_context(|| format!("reading the size of {image}"))
 }
 
 /// This machine's kache store, if it has one a build can read: the directory

@@ -181,9 +181,8 @@ field resolves all five expected labels from the same manifest snapshot,
 including both design fields (cleared without shells).
 `cargo xtask info --installer` prints the validated installer tag.
 
-CI currently builds and publishes the installer root and its listed machine
-layers. PR 12 extends the same jobs to every root, including `base`; the
-publication schema and the publisher already support it. Removing a publication
+CI builds and publishes every root, including `base`, and its listed machine
+layers. Removing a publication
 stops that tag updating. No machine tracks a published tag yet, so names can
 change freely for now. Once the first machine is installed, switch it before
 removing or renaming its tag (including reordering shells). A tracked tag must
@@ -762,21 +761,28 @@ size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
 and on demand. `image.toml` supplies the installer composition (currently
 `generic.gnome`) and `info --publications` supplies the validated tag, kind,
 parent, machine and ordered shells of every publication. This workflow builds
-one root, the installer's, until PR 12 adds the other roots, including `base`.
+the installer root first, then every other root, including `base`.
 The existing legacy tags (`latest`, `candidate`, bare date and `sha-` tags)
 stay in the registry: CI neither moves nor deletes them.
 
 Three paths start together on separate runners:
 
-- `build`: snapshot the installer tag's digest (explicit `-` for absence),
-  build its shell selection → `changed` against that tag → rechunk → unsigned
+- `build`: snapshot each root tag's own digest (explicit `-` for absence),
+  check selected inputs → build its shell selection → `changed` against that
+  immutable snapshot → rechunk → unsigned
   `candidate.generic.gnome` through `publish --stage --as` → `ephemeral::`.
   From its first minute, `vm-prep.sh ephemeral` prepares the VM stack and pulls
-  the root's current digest for compressed-blob reuse. Only while its tag is
+  each root's current digest for compressed-blob reuse, installer first. Only while its tag is
   absent does the reuse pull fall back to legacy `latest`. Staging freezes the
   local ID and checks the pushed manifest's config digest before reporting a
-  staged digest. Tests boot that same rechunked config. The stage log compares
-  layers with the composition's own published tag.
+  staged digest and fingerprint. Capability checks and tests boot that same
+  immutable rechunked image ID. The installer stages before other roots build,
+  so upgrade starts without waiting for `base`. A validated JSON job output
+  records each root's tag, own snapshot, changed flag, staged digest,
+  fingerprint and tested image ID, only after all ephemeral tests succeed.
+  Every root runs `ephemeral::` and capability checks; only the installer runs
+  `upgrade::`. The base shares its update implementation, has no installed v1
+  yet, and gets no legacy-desktop upgrade. `tool::` remains a local tier.
 - `upgrade`: `.github/upgrade-from.sh` resolves the installer's tag as v1;
   only explicit absence permits legacy `latest` as the first-run fallback.
   Registry/authentication errors are fatal. It records `own` (the installer
@@ -795,6 +801,7 @@ job cannot reach signing. It first builds the publisher without the signing
 key, then invokes that executable directly. `.github/publish-root.sh` checks
 that upgrade tested exactly the staged digest (unless neither v1 exists),
 validates all explicit outputs, including the fingerprint recorded by staging,
+checks the staged registry config against the recorded ephemeral image ID,
 applies ancestry to the composition's own
 revision, then swaps against **build's own-tag snapshot**. Legacy v1 is never
 used as the swap value. `publish --digest <staged> --as generic.gnome` signs
@@ -822,8 +829,20 @@ Only a real publication sets `published=true`; v1-disk dispatch and machines
 on a changed root require it. Failed dependencies and green stale-root skips
 start neither. Forced tests do not republish an unchanged fingerprint.
 
-`machines` reads the five-column publications table, considering layers on the
-installer root in this PR (other parents are deferred until PR 12). Each row
+`publish-roots.sh` processes every changed root independently, installer first.
+`base` uses its ephemeral evidence without borrowing upgrade outputs. Results
+record `published=true|false` per root; v1-disk dispatch depends only on the
+installer's result. A stale-root skip continues to later roots. A hard failure
+stops publication red; any earlier successful publication stays signed. Build
+or test failures block all signing, and publication failures block machines.
+A fresh run catches up. Different revisions on `base` and `generic.gnome` are
+not an inconsistent dependency pair: both are independent root builds, and
+nothing builds `FROM` the published base. A mismatched machine/parent pair
+would be a layer built on a digest other than its published parent; the
+per-parent result and parent-current guards forbid that.
+
+`machines` reads the five-column publications table and each parent's row in
+the tested-root inventory. Each row
 retains its composition tag, parent tag, machine and shell list. The parent is
 the exact staged/tested digest when changed in this run; main requires it to
 have published. An unchanged main root resolves its current signed tag once,
@@ -839,7 +858,7 @@ missed machine publication catches up through the parent ID in the machine
 key. Neither unchanged inputs nor a full unchanged fingerprint republish;
 `test=true` still tests. An unchanged nightly does not query DNF for
 machine-only package updates: those arrive on the next parent change or forced
-build. Registry reads are authenticated with the job token; only explicit
+build. Registry reads (including root `changed`) are authenticated with the job token; only explicit
 manifest/name unknown is absence. Denied/unauthorized and transport errors fail.
 
 A machine preserves every parent layer and adds one squashed layer; no rechunk.
@@ -935,8 +954,13 @@ after this run creates the signed composition, before any new latest release.
 An unchanged root permits the intentionally skipped publish job; a publication
 guard skip, failure or failed image test prevents installer release. An absent
 target warns green; a missing/invalid signature or failed installation fails
-red. The ISO remains an artifact and the previous release stays latest. PR 12
-adds the independently guarded `base` root; it is deliberately not built here.
+red. The ISO remains an artifact and the previous release stays latest.
+CI also publishes `base`: its own absent snapshot, capability check and ephemeral
+boot permit `base_sha-…`, signature/verification, then `base` and
+`base_YYYYMMDD`. It has no upgrade tier or v1-disk dispatch. Healthy lines are
+`root build duration: base … seconds`, `publish ancestry guard: …:base
+published=- … first-publish … allow`, `publish digest swap: …:base expected=-
+current=-; allow` and `root publication result: base published=true`.
 
 The second full run resolves v1 from `generic.gnome`, with no legacy read. It
 snapshots that root and each layer independently. Unchanged content skips
@@ -947,8 +971,9 @@ catches up. Healthy logs include `publish ancestry guard: …:<tag> … allow`,
 config/tested ID, exact CI revision, signature verification, `root publication
 result: generic.gnome published=true` and `machine publication summary: 1
 published, 0 skipped`. Real-key/ghcr signing, production ancestry/swap outputs,
-unchanged-main skips/recovery, v1-disk follow-up, production installer-target
-verification, `iso::` installation and guarded ISO release await
+unchanged-main skips/recovery (including the pre-build root-input skips),
+v1-disk follow-up, production installer-target verification, `iso::`
+installation and guarded ISO release await
 the first main execution. Branch tests cannot establish those paths.
 
 After publication, the independent v1-disk run installs the installer composition
@@ -960,9 +985,29 @@ has enough space without clearing toolchains. VM packages use the apt-debs
 Actions cache; background logs have timestamps. Rechunk runs before both tiers:
 testing the unrechunked image breaks layer sharing in the upgrade test.
 
+The extra base shares the Rust build and package layer locally, then adds its
+own small final build, rechunk, stage and ephemeral boot. Budget: about 3–4
+minutes when changed, less than a minute when unchanged. It does not delay
+installer staging or the start of upgrade. Each published root records
+`ilex.root-inputs`: selected source trees/selection plus both Fedora build
+image digests. `changed --root <tag> --inputs-only` compares that key against
+the root's own immutable snapshot before building. Missing keys force a build.
+After a miss the existing v3 RPM/content fingerprint still decides publication;
+a forced test never republishes unchanged content. Shell packages/manifests,
+overlays and design tokens affect only roots selecting them. Base packages,
+`rootfs`, shipped crate trees and common build helpers affect both roots. A
+base-only input change cannot leave the desktop unchanged when that input is
+shared; independent RPM/content outcomes and snapshots can still let either
+root skip while the other publishes. Neither changing `[[publish]]` alone nor
+an unrelated shell changes an existing root's inputs. Fedora images are pulled
+once before these checks, so nightly upstream changes invalidate both keys.
+
 ```sh
 cargo xtask info --publications
 cargo xtask info --installer
+cargo xtask changed ghcr.io/reidond/ilex:base --root base --inputs-only
+cargo xtask build --shell none
+cargo xtask changed ghcr.io/reidond/ilex:base --image <base-image>
 cargo xtask changed ghcr.io/reidond/ilex:generic.gnome --image <image>
 cargo xtask rechunk <image> --output <rechunked>
 cargo xtask publish <rechunked> --stage --as generic.gnome
@@ -974,7 +1019,8 @@ cargo xtask publish <machine-image> --as ms-7c35.gnome --tested-image-id <tested
 ```
 
 Publishing and releases only happen in CI. A branch dispatch with `test=true`
-builds, stages `candidate.<installer>`, upgrades (including legacy fallback) and
+builds, stages every `candidate.<root>` including `candidate.base`, runs their
+ephemeral tests, upgrades the installer (including legacy fallback) and
 tests machine layers; it signs nothing and moves no published tag. Add `iso=true`
 to build the ISO as an artifact on a branch; the installation/release job is
 main-only because its network install exercises the published target, not the

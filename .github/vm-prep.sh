@@ -162,6 +162,24 @@ prepare() {
     ILEX_UPGRADE_PREPARE=1 sg libvirt -c "cargo xtask test upgrade::"
 }
 
+pull_root() {
+    local reuse
+    reuse=$(bash .github/publish-head.sh digest "$IMAGE_REPO:$1") || return
+    if [ "$reuse" = - ]; then
+        reuse=$(bash .github/publish-head.sh digest "$IMAGE_REPO:latest") || return
+    fi
+    if [ "$reuse" != - ]; then podman pull --quiet "$IMAGE_REPO@$reuse"; fi
+}
+
+root_pulls() {
+    local tag kind
+    while IFS=$'\t' read -r tag kind _ _ _; do
+        bash .github/publication-tag.sh "$tag" || return
+        [ "$kind" = root ] || continue
+        run "root-pull.$tag" pull_root "$tag"
+    done < "$ILEX_ROOT_PULLS"
+}
+
 # run NAME COMMAND...: log to NAME.log, then write NAME.status.
 run() {
     local name=$1
@@ -181,7 +199,9 @@ skip() {
 case "${1:-}" in
     ephemeral)
         # The pull needs nothing from the VM stack: both at once.
-        if [ -n "${ILEX_REUSE_FROM:-}" ]; then
+        if [ -n "${ILEX_ROOT_PULLS:-}" ]; then
+            root_pulls &
+        elif [ -n "${ILEX_REUSE_FROM:-}" ]; then
             run root-pull podman pull --quiet "$ILEX_REUSE_FROM" &
         else
             skip root-pull "no published root or legacy image for blob reuse"
@@ -213,7 +233,7 @@ case "${1:-}" in
         if [ "$rc" != 0 ]; then
             case "$name" in
                 vm-stack) exit "$rc" ;;
-                root-pull) echo "::warning::pulling the published root failed (exit $rc); staging uploads every layer" ;;
+                root-pull|root-pull.*) echo "::warning::pulling the published root failed (exit $rc); staging uploads every layer" ;;
                 v1-pull) echo "::warning::pulling v1 failed (exit $rc); the test pulls it itself" ;;
                 upgrade-prepare) echo "::warning::preparing v1's disk failed (exit $rc); the upgrade test installs it itself" ;;
             esac

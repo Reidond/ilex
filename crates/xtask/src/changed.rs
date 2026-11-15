@@ -28,8 +28,12 @@ pub struct Args {
     /// Compare this machine (validated against machines/<name>/machine.toml)
     #[arg(long)]
     pub machine: Option<String>,
+    /// Compare this published root's selected source and freshly pulled upstream
+    /// images before building; a missing input key forces a full build
+    #[arg(long, requires = "inputs_only", conflicts_with_all = ["machine", "image", "base", "base_id"])]
+    pub root: Option<String>,
     /// Compare only machine inputs; no local image or base is needed
-    #[arg(long, requires = "machine", conflicts_with = "image")]
+    #[arg(long, conflicts_with = "image")]
     pub inputs_only: bool,
     /// Also compare the published machine's base identity with this local
     /// generic base; prints base_changed= (recovers a missed machine publish)
@@ -41,21 +45,43 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    if args.inputs_only && args.machine.is_none() && args.root.is_none() {
+        bail!("--inputs-only requires --machine or --root");
+    }
     if let Some(name) = &args.machine {
         config::machine_manifest(&ws.root, name)?;
         if name == "generic" {
             bail!("generic uses the base image's change detection, without --machine");
         }
     }
-    let label = if args.inputs_only { "ilex.machine-inputs" } else { FINGERPRINT_LABEL };
+    let label = if args.root.is_some() {
+        "ilex.root-inputs"
+    } else if args.inputs_only {
+        "ilex.machine-inputs"
+    } else {
+        FINGERPRINT_LABEL
+    };
     let candidate_ref = ws.resolve_image(args.image.as_deref());
     // The image as built has no label yet; its fingerprint is computed from it
     // (the same value `xtask rechunk` will write).
-    let candidate = if args.inputs_only {
-        machine::inputs(ws, &ws.root.join("machines").join(args.machine.as_ref().unwrap()), &[])?
+    let candidate = if let Some(tag) = &args.root {
+        let publication = config::publications(&ws.root)?
+            .into_iter()
+            .find(|p| p.tag == *tag && p.machine == "generic")
+            .with_context(|| format!("{tag} is not a declared root publication"))?;
+        rechunk::root_inputs(ws, &publication.selection)?
+    } else if args.inputs_only {
+        machine::inputs(
+            ws,
+            &ws.root
+                .join("machines")
+                .join(args.machine.as_ref().unwrap()),
+            &[],
+        )?
     } else {
         if let Some(name) = &args.machine
-            && machine::image_machine(&candidate_ref)? != *name {
+            && machine::image_machine(&candidate_ref)? != *name
+        {
             bail!("{candidate_ref} is not machine {name}");
         }
         rechunk::candidate_fingerprint(ws, &candidate_ref)?
@@ -97,7 +123,14 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         }
         Published::Fingerprint(f) => eprintln!("published fingerprint: {f}"),
     }
-    registry::github_output(if args.inputs_only { "inputs_changed" } else { "changed" }, &changed.to_string())?;
+    registry::github_output(
+        if args.inputs_only {
+            "inputs_changed"
+        } else {
+            "changed"
+        },
+        &changed.to_string(),
+    )?;
     registry::github_output("exists", &exists.to_string())?;
     // `xtask rechunk --fingerprint` writes exactly this value into the label,
     // however the working tree looks by then.
@@ -155,12 +188,10 @@ fn published_fingerprint(
 
     let config: serde_json::Value =
         serde_json::from_str(&out.stdout).context("parsing `skopeo inspect --config` output")?;
-    Ok(
-        match config["config"]["Labels"][label].as_str() {
-            Some(f) => Published::Fingerprint(f.to_string()),
-            None => Published::Unlabelled,
-        },
-    )
+    Ok(match config["config"]["Labels"][label].as_str() {
+        Some(f) => Published::Fingerprint(f.to_string()),
+        None => Published::Unlabelled,
+    })
 }
 
 fn first_line(s: &str) -> &str {

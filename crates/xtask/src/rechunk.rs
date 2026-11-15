@@ -177,20 +177,7 @@ pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
 /// output of the image and the git tree hashes of [`INPUTS`] at `HEAD`.
 pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     let selection = image_selection(image)?;
-    let mut inputs: Vec<String> = INPUTS.iter().map(|s| s.to_string()).collect();
-    if !selection.shells.is_empty() {
-        inputs.push("shells/packages.toml".into());
-    }
-    if selection.machine != "generic" {
-        inputs.extend([format!("machines/{}", selection.machine), "machines/Containerfile".into()]);
-    }
-    inputs.extend(selection.shells.iter().map(|name| format!("shells/{name}")));
-    inputs.extend(
-        selection
-            .design_systems
-            .iter()
-            .map(|name| format!("design-systems/{name}")),
-    );
+    let inputs = selection_inputs(&selection);
     let rpm = cmd::output(Command::new("podman").args([
         "run",
         "--rm",
@@ -206,35 +193,86 @@ pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
         .filter(|l| !l.is_empty())
         .collect();
     packages.sort_unstable();
-
     let mut hash = Sha256::new();
     hash.update(b"ilex-fingerprint v3\n");
     if selection.machine != "generic" {
-        // Cover the actual generic --on base, including its shell overlays,
-        // as well as the selected machine inputs recorded by the layer key.
         let key = local_label(image, "ilex.machine-key")?
             .context("machine image has no ilex.machine-key; rebuild its machine layer")?;
         hash.update(format!("machine-layer {key}\n"));
     }
-    for (key, value) in selection.labels() {
-        hash.update(format!("selection {key}={value}\n"));
-    }
+    hash_selection(&mut hash, &selection);
     for p in &packages {
         hash.update(format!("rpm {p}\n"));
     }
+    hash_inputs(ws, &mut hash, inputs)?;
+    eprintln!("  {} rpm packages", packages.len());
+    Ok(format!("sha256:{}", hex(&hash.finalize())))
+}
+
+/// Early root cache key: selected source trees plus both freshly pulled build
+/// images. The full RPM/content fingerprint still decides publication after a
+/// cache miss. Missing keys on older publications deliberately force a build.
+pub fn root_inputs(ws: &Workspace, selection: &Selection) -> Result<String> {
+    let mut hash = Sha256::new();
+    hash.update(b"ilex-root-inputs v1\n");
+    hash_selection(&mut hash, selection);
+    for image in [crate::build::BASE_IMAGE, crate::build::BUILDER_IMAGE] {
+        let digest = cmd::output(Command::new("podman").args([
+            "image",
+            "inspect",
+            "--format",
+            "{{.Digest}}",
+            image,
+        ]))?;
+        if !crate::registry::is_digest(&digest) {
+            bail!("invalid upstream digest for {image}: {digest}");
+        }
+        hash.update(format!("upstream {image} {digest}\n"));
+    }
+    hash_inputs(ws, &mut hash, selection_inputs(selection))?;
+    Ok(format!("sha256:{}", hex(&hash.finalize())))
+}
+
+fn selection_inputs(selection: &Selection) -> Vec<String> {
+    let mut inputs: Vec<String> = INPUTS.iter().map(|s| s.to_string()).collect();
+    if !selection.shells.is_empty() {
+        inputs.push("shells/packages.toml".into());
+    }
+    if selection.machine != "generic" {
+        inputs.extend([
+            format!("machines/{}", selection.machine),
+            "machines/Containerfile".into(),
+        ]);
+    }
+    inputs.extend(selection.shells.iter().map(|name| format!("shells/{name}")));
+    inputs.extend(
+        selection
+            .design_systems
+            .iter()
+            .map(|name| format!("design-systems/{name}")),
+    );
+    inputs
+}
+
+fn hash_selection(hash: &mut Sha256, selection: &Selection) {
+    for (key, value) in selection.labels() {
+        hash.update(format!("selection {key}={value}\n"));
+    }
+}
+
+fn hash_inputs(ws: &Workspace, hash: &mut Sha256, inputs: Vec<String>) -> Result<()> {
     for path in inputs {
         let tree = git::tree_hash(&ws.root, &path).with_context(|| format!("hashing {path}"))?;
         eprintln!("  {path}: {tree}");
         hash.update(format!("tree {path} {tree}\n"));
     }
-    eprintln!("  {} rpm packages", packages.len());
     if git::is_dirty(&ws.root)? {
         // Only HEAD's trees are hashed; make a dirty build's fingerprint
         // differ from the clean one so it can never match a published image.
         eprintln!("xtask: warning: working tree is dirty; the fingerprint covers HEAD only");
         hash.update(b"dirty\n");
     }
-    Ok(format!("sha256:{}", hex(&hash.finalize())))
+    Ok(())
 }
 
 /// Require configuration labels even when reusing an existing fingerprint.

@@ -1,21 +1,25 @@
 #!/bin/bash
-# PR 11 produces the installer root only. PR 12 supplies a table of all roots;
-# keep each layer's explicit parent and selection in the inventory for it.
+# Each layer resolves only its own parent's successful test/publication row.
 set -euo pipefail
-bash .github/publication-tag.sh "$ROOT_TAG"
+python3 -I .github/root-table.py <<<"$ROOTS" > "$RUNNER_TEMP/root-rows"
 : > "$RUNNER_TEMP/pending-machines"
 while IFS=$'\t' read -r tag kind parent machine shells; do
     bash .github/publication-tag.sh "$tag"
     [ "$kind" = layer ] || continue
     bash .github/publication-tag.sh "$parent"
-    if [ "$parent" != "$ROOT_TAG" ]; then
-        echo "::notice::$tag deferred: this workflow currently builds only root $ROOT_TAG"
-        continue
-    fi
-    if [ -n "$STAGED" ] && { [ "$BASE_CHANGED" = true ] || [ "$GITHUB_REF" != refs/heads/main ]; }; then
-        if [ "$TESTED" != "$STAGED" ] && { [ -n "$TESTED" ] || [ "$V1_EXISTS" != false ]; }; then
-            echo "::error::the upgrade tier did not test the staged parent $STAGED"; exit 2
+    row=$(awk -F '\t' -v parent="$parent" '$1 == parent' "$RUNNER_TEMP/root-rows")
+    [ -n "$row" ] || { echo "::error::no tested root row for $parent"; exit 2; }
+    IFS=$'\t' read -r _ _ BASE_CHANGED STAGED _ _ <<<"$row"
+    if [ "$GITHUB_REF" = refs/heads/main ] && [ "$BASE_CHANGED" = true ]; then
+        published=$(jq -er --arg tag "$parent" \
+            '[.[] | select(.tag == $tag) | .published] | if length == 1 then .[0] | tostring else error("missing/duplicate publication") end' <<<"$PUBLISHED_ROOTS")
+        if [ "$published" = false ]; then
+            echo "::notice::$tag skipped: changed parent $parent was not published"
+            continue
         fi
+        [ "$published" = true ] || exit 2
+    fi
+    if [ "$STAGED" != - ] && { [ "$BASE_CHANGED" = true ] || [ "$GITHUB_REF" != refs/heads/main ]; }; then
         digest=$STAGED
     else
         # A forced unchanged main run must use its signed parent, not staging.

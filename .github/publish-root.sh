@@ -3,7 +3,10 @@
 set -euo pipefail
 without_key() { env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD "$@"; }
 without_key bash .github/publication-tag.sh "$TAG"
+without_key bash .github/publication-tag.sh "$INSTALLER_TAG"
 [[ "$STAGED" =~ ^sha256:[0-9a-f]{64}$ && "$FINGERPRINT" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
+[[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
+if [ "$TAG" = "$INSTALLER_TAG" ]; then
 if { [ "$V1_EXISTS" = true ] && [[ "$V1_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; } ||
    { [ "$V1_EXISTS" = false ] && [ "$V1_DIGEST" = - ]; }; then :; else
     echo '::error::upgrade did not record an explicit v1 digest or first-publish absence'; exit 2
@@ -19,6 +22,14 @@ if [ "$TESTED" != "$STAGED" ]; then
     fi
     echo "no published v1 yet: the first publish has no upgrade tier"
 fi
+fi
+# Staging checked the pushed config before tests; check it again against the
+# immutable ID that ephemeral actually booted, before any signature or copy.
+config=$(without_key skopeo inspect --raw "docker://$IMAGE_REPO@$STAGED" |
+    without_key jq -er '.config.digest')
+[ "$config" = "$IMAGE_ID" ] || {
+    echo "::error::$TAG staged config $config differs from tested image ID $IMAGE_ID"; exit 2;
+}
 if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$TAG" &&
    without_key bash .github/publish-head.sh swap "$IMAGE_REPO:$TAG" "$SNAPSHOT"; then
     "$XTASK_PUBLISHER" publish --digest "$STAGED" --as "$TAG" --tested-fingerprint "$FINGERPRINT"

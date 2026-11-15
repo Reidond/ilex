@@ -96,7 +96,9 @@ jobs:
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     outputs:
-      changed: ${{ steps.changed.outputs.changed }}
+      changed: ${{ steps.roots.outputs.changed }}
+      installer_changed: ${{ steps.changed.outputs.changed || 'false' }}
+      roots: ${{ steps.roots.outputs.roots }}
       # What `xtask publish --stage --as` pushed as candidate.<tag>.
       digest: ${{ steps.stage.outputs.digest }}
       tag: ${{ steps.composition.outputs.tag }}
@@ -122,6 +124,9 @@ jobs:
           echo "INSTALLER_TAG=$tag" >> "$GITHUB_ENV"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           cargo xtask info --publications > "$RUNNER_TEMP/publications"
+          awk -F '\t' -v tag="$tag" '$1 == tag' "$RUNNER_TEMP/publications" > "$RUNNER_TEMP/ordered-publications"
+          awk -F '\t' -v tag="$tag" '$1 != tag' "$RUNNER_TEMP/publications" >> "$RUNNER_TEMP/ordered-publications"
+          mv "$RUNNER_TEMP/ordered-publications" "$RUNNER_TEMP/publications"
           shells=$(awk -F '\t' -v tag="$tag" '$1 == tag && $2 == "root" {print $5}' "$RUNNER_TEMP/publications")
           test -n "$shells"
           echo "ILEX_SHELLS=$shells" >> "$GITHUB_ENV"
@@ -130,9 +135,14 @@ jobs:
           podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
           snapshot=$(bash .github/publish-head.sh digest "$IMAGE_REPO:$tag")
           echo "snapshot=$snapshot" >> "$GITHUB_OUTPUT"
-          reuse=$snapshot
-          if [ "$reuse" = - ]; then reuse=$(bash .github/publish-head.sh digest "$IMAGE_REPO:latest"); fi
-          if [ "$reuse" != - ]; then echo "ILEX_REUSE_FROM=$IMAGE_REPO@$reuse" >> "$GITHUB_ENV"; fi
+          echo "ILEX_ROOT_PULLS=$RUNNER_TEMP/publications" >> "$GITHUB_ENV"
+          # Resolve both floating inputs once for every root in this run. Their
+          # digests plus the selected source trees permit an early no-build skip.
+          podman pull --quiet quay.io/fedora/fedora-bootc:45
+          podman pull --quiet quay.io/fedora/fedora:45
+          reference="$IMAGE_REPO:$tag"
+          if [ "$snapshot" != - ]; then reference="$IMAGE_REPO@$snapshot"; fi
+          cargo xtask changed "$reference" --root "$tag" --inputs-only
 
 
       # The runner's root disk is 145 GB with about 110 GB free: container
@@ -163,14 +173,20 @@ jobs:
         run: nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
 
       - name: Build the candidate image
-        run: cargo xtask build --tag candidate
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test
+        run: cargo xtask build --tag candidate --no-pull
 
       # Fingerprints the image as built (the rechunk keeps it): when it is the
       # published one, everything below is skipped.
       - name: Compare with the published image
         id: changed
-        run: cargo xtask changed "$IMAGE_REPO:$INSTALLER_TAG" --image candidate
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test
+        run: |
+          reference="$IMAGE_REPO:$INSTALLER_TAG"
+          if [ "$SNAPSHOT" != - ]; then reference="$IMAGE_REPO@$SNAPSHOT"; fi
+          cargo xtask changed "$reference" --image candidate
         env:
+          SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Reproducible layers, into the tag `rechunked`: the image the tests run
@@ -188,7 +204,7 @@ jobs:
       - name: Wait for :generic.gnome
         if: steps.changed.outputs.changed == 'true' || inputs.test
         timeout-minutes: 15
-        run: .github/vm-prep.sh wait root-pull
+        run: .github/vm-prep.sh wait "root-pull.$INSTALLER_TAG"
 
       # The upgrade job waits for this step (by name) and pulls the digest.
       # Unsigned, never :generic.gnome: a branch run stages too, so its upgrade tier
@@ -196,7 +212,11 @@ jobs:
       - name: Stage the candidate
         id: stage
         if: steps.changed.outputs.changed == 'true' || inputs.test
-        run: cargo xtask publish rechunked --stage --as "$INSTALLER_TAG"
+        run: |
+          image_id=$(podman image inspect --format '{{.Id}}' localhost/ilex:rechunked)
+          image_id="sha256:${image_id#sha256:}"
+          cargo xtask publish "$image_id" --stage --as "$INSTALLER_TAG"
+          echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -221,8 +241,24 @@ jobs:
         if: steps.changed.outputs.changed == 'true' || inputs.test
         env:
           # Always the rechunked image: the one staged above.
-          ILEX_IMAGE: localhost/ilex:rechunked
-        run: sg libvirt -c "cargo xtask test ephemeral::"
+          ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
+        run: |
+          podman run --rm -i --network=none --entrypoint python3 "$ILEX_IMAGE" -I -S - < .github/check-filecaps.py
+          sg libvirt -c 'cargo xtask test ephemeral::'
+
+      # Keep the installer staging step early: upgrade starts while other roots
+      # build/rechunk/boot. A job output is committed only after all tests pass.
+      - name: Build and test the other roots
+        id: roots
+        env:
+          INSTALLER_SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
+          INSTALLER_CHANGED: ${{ steps.changed.outputs.changed || 'false' }}
+          INSTALLER_DIGEST: ${{ steps.stage.outputs.digest }}
+          INSTALLER_FINGERPRINT: ${{ steps.stage.outputs.fingerprint }}
+          INSTALLER_IMAGE_ID: ${{ steps.stage.outputs.image_id }}
+          FORCE_TEST: ${{ inputs.test == true }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/build-roots.sh
 
   # The upgrade tier on a runner of its own. Installing v1 to a disk takes ~14
   # minutes on a runner, most of the tier's time, so the v1-disk run installs
@@ -378,6 +414,7 @@ jobs:
       # A green overtaken run did not publish. Dependants need this signal,
       # not just needs.publish.result == success.
       published: ${{ steps.publication.outputs.published }}
+      roots: ${{ steps.publication.outputs.roots }}
     permissions:
       contents: read
       packages: write
@@ -408,11 +445,9 @@ jobs:
       - name: Publish and sign
         id: publication
         env:
-          FINGERPRINT: ${{ needs.build.outputs.fingerprint }}
-          TAG: ${{ needs.build.outputs.tag }}
-          SNAPSHOT: ${{ needs.build.outputs.snapshot }}
+          ROOTS: ${{ needs.build.outputs.roots }}
+          INSTALLER_TAG: ${{ needs.build.outputs.tag }}
           OWN: ${{ needs.upgrade.outputs.own }}
-          STAGED: ${{ needs.build.outputs.digest }}
           TESTED: ${{ needs.upgrade.outputs.tested }}
           V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
           V1_DIGEST: ${{ needs.upgrade.outputs.v1 }}
@@ -422,7 +457,7 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
-          bash .github/publish-root.sh
+          bash .github/publish-roots.sh
 
       # The next run's upgrade tier boots what was just published as its v1.
       # A failure here costs that run the install, nothing else.
@@ -445,9 +480,7 @@ jobs:
       !cancelled() && !inputs.v1_disk && github.repository == 'Reidond/ilex' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
       needs.build.result == 'success' && needs.upgrade.result == 'success' &&
-      ((needs.publish.result == 'success' && needs.publish.outputs.published == 'true') ||
-       (needs.publish.result == 'skipped' &&
-        (github.ref != 'refs/heads/main' || needs.build.outputs.changed == 'false')))
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     permissions:
@@ -474,11 +507,8 @@ jobs:
       - name: Plan changed machine compositions (registry metadata only)
         id: plan
         env:
-          ROOT_TAG: ${{ needs.build.outputs.tag }}
-          STAGED: ${{ needs.build.outputs.digest }}
-          TESTED: ${{ needs.upgrade.outputs.tested }}
-          V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
-          BASE_CHANGED: ${{ needs.build.outputs.changed }}
+          ROOTS: ${{ needs.build.outputs.roots }}
+          PUBLISHED_ROOTS: ${{ needs.publish.outputs.roots }}
           FORCE_TEST: ${{ inputs.test == true }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -510,8 +540,7 @@ jobs:
 
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         if: >-
-          success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true' &&
-          (needs.publish.outputs.published == 'true' || needs.build.outputs.changed == 'false')
+          success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true'
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
@@ -519,8 +548,7 @@ jobs:
       # is the job's packages:write token; action inputs are not a sandbox.
       - name: Publish and sign tested machines (main only)
         if: >-
-          success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true' &&
-          (needs.publish.outputs.published == 'true' || needs.build.outputs.changed == 'false')
+          success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -748,8 +776,9 @@ jobs:
       !cancelled() && github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
       needs.iso.result == 'success' && needs.build.result == 'success' && needs.upgrade.result == 'success' &&
-      ((needs.publish.result == 'success' && needs.publish.outputs.published == 'true') ||
-       (needs.publish.result == 'skipped' && needs.build.outputs.changed == 'false'))
+      ((needs.publish.result == 'success' &&
+        (needs.publish.outputs.published == 'true' || needs.build.outputs.installer_changed == 'false')) ||
+       (needs.publish.result == 'skipped' && needs.build.outputs.installer_changed == 'false'))
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60
     permissions:
