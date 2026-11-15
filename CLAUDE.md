@@ -714,6 +714,10 @@ comments; an explicit version and no comments avoid both. GitHub cache
 restore/save uses the separate Actions cache runtime authorization, including
 the post step. Other actions still execute within the job's permissions; this
 does not turn the job into a credential sandbox.
+Both signing jobs pin cosign-installer's v4.1.3 action to
+`756fe2d284c7292c4e9b62c8a28f1e5629c59532`; base `publish` also pins kache's
+v1 action to the same commit as machines. The base publish job retains kache's
+default job token input and existing permissions; pinning does not narrow them.
 
 The machine base is the exact staged/tested digest, or current `:latest`
 resolved once by digest when the base is unchanged on main (even when `test`
