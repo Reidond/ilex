@@ -50,6 +50,11 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 /// Build the image and return its full reference.
 pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
     let resolved = args.selection.resolve(ws, args.tag.as_deref())?;
+    build_resolved(ws, args, resolved)
+}
+
+/// `test` already resolved the selection while deciding whether to rebuild.
+pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Resolved) -> Result<String> {
     cmd::require("podman")?;
     let image = resolved.image;
     // Let the compose stage report malformed manifests too. This loose read

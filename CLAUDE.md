@@ -43,10 +43,17 @@ cargo xtask info               # resource identity, selection and available conf
   directories keep the slug alone; installed disks are separate per image.
 - VM boots take one of N machine-wide slots (`ILEX_VM_SLOTS`, default one per
   8 GiB RAM, max 4) and wait when none is free.
-- `xtask test` only builds the image when it doesn't exist yet: after changing
-  anything that ships in the image, pass `--build`. Filters are substrings and
+- `xtask test` builds an implicit image when missing or its selection is stale;
+  after changing other content that ships in the image, pass `--build`.
+  Filters are substrings and
   several run their union (`xtask test ephemeral:: upgrade::`); arguments after
   `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
+- Reusing an implicit image compares all five selection labels with the current
+  manifests and flags. `test` rebuilds a stale selection; `vm` and `disk` refuse
+  it and print the selection it was built for and the build command to run.
+  Explicit image references are compared only when `--shell` or `ILEX_SHELLS`
+  requests a selection; a mismatch is refused unless `test --build` was given.
+  An explicit reference without selection keeps CI's existing behaviour.
 - An ephemeral VM has no ostree deployment, so `bootc status` there names no
   image; `ephemeral::` identifies the image through the container bcvk started.
 - `upgrade::` installs a real libvirt VM (`bcvk libvirt run`, a few minutes,

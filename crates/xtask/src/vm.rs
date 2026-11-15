@@ -93,6 +93,7 @@ pub fn run(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Res
         #[cfg(not(unix))]
         bail!("--disk/--gui run in WSL2 (see CLAUDE.md)");
     }
+    resolved.require_match()?;
     run_ephemeral(ws, args, resolved.image)
 }
 
@@ -122,17 +123,14 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
     let disk = match std::env::var_os("ILEX_DISK").filter(|p| !p.is_empty()) {
         Some(path) => path.into(),
         None => {
+            resolved.require_match()?;
             // The viewer's clipboard needs the guest agent: the VM-only layer.
             let image = if viewer {
                 vm_image(ws, &resolved.image, &resolved.viewer_image()?)?
             } else {
                 resolved.image
             };
-            disk::ensure(ws, &disk::Args {
-                selection: args.selection.clone(),
-                image: Some(image),
-                ..disk::Args::default()
-            })?
+            disk::ensure_image(ws, &disk::Args::default(), &image)?
         }
     };
 

@@ -8,6 +8,8 @@
 //! unless `--build` is passed.
 //! Repeat `--shell` to choose the installed shells (first is default), or use
 //! `--shell none` for the headless variant; ILEX_SHELLS is the environment default.
+//! A stale implicit selection is rebuilt. Explicit references are checked only
+//! when --shell or ILEX_SHELLS requests a selection; a mismatch is refused.
 //!
 //! Filters select tests by substring, so `ephemeral::` runs one tier and
 //! several filters (`ephemeral:: upgrade::`) run the union. Everything after
@@ -15,7 +17,7 @@
 
 use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use ilex_devkit::{Workspace, bcvk, cmd};
 
 use crate::build;
@@ -84,9 +86,22 @@ fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
 /// The image to test, building it first when needed.
 fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
     let requested = std::env::var("ILEX_IMAGE").ok().filter(|s| !s.is_empty());
-    let image = args.selection.resolve(ws, requested.as_deref())?.image;
-    if args.build || (requested.is_none() && !bcvk::image_exists(&image)) {
-        build::build(
+    let resolved = args.selection.resolve(ws, requested.as_deref())?;
+    let image = resolved.image.clone();
+    let mut rebuild = args.build;
+    if !rebuild {
+        if requested.is_none() && !bcvk::image_exists(&image) {
+            rebuild = true;
+        } else if let Some(message) = resolved.mismatch()? {
+            if requested.is_some() {
+                bail!("{message}");
+            }
+            eprintln!("ilex: {message}; rebuilding the implicit image");
+            rebuild = true;
+        }
+    }
+    if rebuild {
+        build::build_resolved(
             ws,
             &build::Args {
                 selection: args.selection.clone(),
@@ -94,6 +109,7 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
                 no_pull: args.no_pull,
                 ..build::Args::default()
             },
+            resolved,
         )?;
     }
     Ok(image)

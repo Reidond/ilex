@@ -73,11 +73,18 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 /// Write the disk for `args` (or reuse an up-to-date one) and return its path.
 /// The image must already be built (`cargo xtask build`).
 pub fn ensure(ws: &Workspace, args: &Args) -> Result<PathBuf> {
-    let image = args.selection.resolve(ws, args.image.as_deref())?.image;
-    if !build::image_exists(&image) {
+    let resolved = args.selection.resolve(ws, args.image.as_deref())?;
+    resolved.require_match()?;
+    ensure_image(ws, args, &resolved.image)
+}
+
+/// `vm` checked its resolved base already; do not read selection again for
+/// that reference or for the viewer layer derived from it.
+pub fn ensure_image(ws: &Workspace, args: &Args, image: &str) -> Result<PathBuf> {
+    if !build::image_exists(image) {
         bail!("image {image} not found in local container storage; run `cargo xtask build` first");
     }
-    let mut spec = DiskSpec::new(&image);
+    let mut spec = DiskSpec::new(image);
     spec.format = args.format.into();
     spec.size = args.size.clone();
     spec.out = args.out.clone();
