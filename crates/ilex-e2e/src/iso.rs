@@ -140,7 +140,10 @@ fn target() -> Result<String> {
         return Ok(target);
     }
     let ws = common::workspace()?;
-    Ok(format!("ghcr.io/reidond/ilex:{}", ilex_devkit::config::installer(&ws.root)?))
+    Ok(format!(
+        "ghcr.io/reidond/ilex:{}",
+        ilex_devkit::config::installer(&ws.root)?
+    ))
 }
 
 // ---------------------------------------------------------------------------

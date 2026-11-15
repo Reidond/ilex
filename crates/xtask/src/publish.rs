@@ -130,7 +130,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         }
         None => {
             let image = ws.resolve_image(args.image.as_deref());
-            let tested = args.tested_image_id.as_ref().context("layer requires --tested-image-id")?;
+            let tested = args
+                .tested_image_id
+                .as_ref()
+                .context("layer requires --tested-image-id")?;
             let expected = tested.strip_prefix("sha256:").unwrap_or(tested);
             if !registry::is_digest(&format!("sha256:{expected}")) {
                 bail!("--tested-image-id {tested:?} is not a sha256 image ID");
@@ -142,23 +145,18 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 );
             }
             let pinned = format!("sha256:{actual}");
-            {
-                let row = &publication;
-                let inspect = require_local_composition(&pinned, row)?;
-                require_ci_revision(
-                    &pinned,
-                    inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
-                )?;
-                let parent = require_layer_parent(ws, &pinned, &inspect, row, &repository, &auth)?;
-                verify(ws, &parent, &auth, args.verification_key.as_deref()).context(
-                    "verifying the declared published parent before signing its layer",
-                )?;
-            }
+            let inspect = require_local_composition(&pinned, &publication)?;
+            require_ci_revision(
+                &pinned,
+                inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
+            )?;
+            let parent = require_layer_parent(ws, &pinned, &inspect, &publication, &repository, &auth)?;
+            verify(ws, &parent, &auth, args.verification_key.as_deref()).context(
+                "verifying the declared published parent before signing its layer",
+            )?;
             let computed = rechunk::fingerprint(ws, &pinned)?;
             let label = local_fingerprint(&pinned)?;
-            {
-                require_fingerprint(&pinned, &label)?;
-            }
+            require_fingerprint(&pinned, &label)?;
             if label != computed {
                 bail!(
                     "{image} fingerprint label {label} differs from recomputed {computed}; run prepare-publish and test that image ID first"
@@ -166,12 +164,6 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             }
             eprintln!("publishing tested machine image ID {actual} (no build)");
             let (source, fingerprint) = (pinned, computed);
-            if registry::is_ci() {
-                require_ci_revision(
-                    &source,
-                    rechunk::local_label(&source, REVISION_LABEL)?.as_deref(),
-                )?;
-            }
             let digest = push(&source, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
             check_pushed_image(&format!("{repository}@{digest}"), &source, insecure, &auth)?;
             (digest, fingerprint)
@@ -238,7 +230,10 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
     let image_id = format!("sha256:{}", bcvk::image_id(&image)?);
     let publication = publication(ws, args)?;
     let inspect = require_local_composition(&image_id, &publication)?;
-    require_ci_revision(&image_id, inspect["Config"]["Labels"][REVISION_LABEL].as_str())?;
+    require_ci_revision(
+        &image_id,
+        inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
+    )?;
     let stage_tag = format!("candidate.{}", args.as_tag);
     check_tag_length(&format!("{repository}:{stage_tag}"))?;
     let fingerprint = local_fingerprint(&image_id)?;
@@ -295,9 +290,7 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
         }
         None => eprintln!("no :{comparison} to compare with"),
     }
-    {
-        registry::github_output("fingerprint", &fingerprint)?;
-    }
+    registry::github_output("fingerprint", &fingerprint)?;
     registry::github_output("digest", &digest)
 }
 
@@ -565,4 +558,3 @@ fn verify(
     );
     Ok(())
 }
-
