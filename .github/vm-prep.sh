@@ -129,6 +129,8 @@ save_disk() { # dir
     for f in "$pool"/bootc-base-*.qcow2; do
         [ -e "$f" ] || continue
         sudo cp "$f" "$dir/"
+        # dir belongs to the caller; only the source xattr read needs root.
+        # shellcheck disable=SC2024
         sudo python3 -I -c "$xattrs_dump" "$f" > "$dir/${f##*/}.xattrs"
         n=$((n + 1))
     done

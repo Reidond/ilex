@@ -10,7 +10,9 @@ while IFS=$'\t' read -r tag parent machine shells base base_id previous; do
     podman run --rm -i --network=none --entrypoint python3 "$base" -I -S - < .github/check-filecaps.py
     # No composition name enters sg's constant shell command. Build inherits
     # the pinned parent's full selection; the publisher checks it independently.
-    image=$(cargo xtask build --machine "$machine" --on "$base")
+    selection_shells=$shells
+    if [ "$selection_shells" = - ]; then selection_shells=none; fi
+    image=$(ILEX_SHELLS="$selection_shells" cargo xtask build --machine "$machine" --on "$base")
     reference="$IMAGE_REPO:$tag"
     if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
     cargo xtask changed "$reference" --machine "$machine" --image "$image" > "$RUNNER_TEMP/machine-change"
