@@ -67,7 +67,9 @@ impl Selection {
             self.design_systems.join(","),
             self.default_design_system.as_deref().unwrap_or("none"),
             self.machine
-        ).escape_debug().to_string()
+        )
+        .escape_debug()
+        .to_string()
     }
 
     /// Check selection names before invoking podman. Manifest contents remain
@@ -79,7 +81,8 @@ impl Selection {
             if name == "none" || !available.contains(name) {
                 bail!(
                     "unknown shell `{name}`; available shells: {} (use `none` for no shell)",
-                    available.iter()
+                    available
+                        .iter()
                         .map(|s| format!("{s:?}"))
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -197,8 +200,18 @@ pub fn validate_name(name: &str) -> Result<()> {
 
 pub fn validate_machine_name(name: &str) -> Result<()> {
     validate_name(name)?;
-    if ["latest", "candidate", "main", "rechunked", "upgrade", "base"].contains(&name)
-        || name.starts_with("sha") || name.starts_with("wt-")
+    if [
+        "latest",
+        "candidate",
+        "main",
+        "rechunked",
+        "upgrade",
+        "base",
+    ]
+    .contains(&name)
+        || name.starts_with("candidate")
+        || name.starts_with("sha")
+        || name.starts_with("wt-")
     {
         bail!("machine name `{name}` is reserved");
     }
@@ -213,25 +226,187 @@ pub fn machine_manifest(root: &Path, name: &str) -> Result<toml::Table> {
     if table.get("name").and_then(|v| v.as_str()) != Some(name) {
         bail!("machines/{name}/machine.toml: name must equal directory name {name:?}");
     }
-    if table.get("publish").is_some_and(|v| !v.is_bool()) {
-        bail!("machines/{name}/machine.toml: publish must be a boolean");
-    }
-    if name == "generic" && table.contains_key("publish") {
-        bail!("generic is the base image and cannot have a publishing setting");
+    for key in table.keys() {
+        if !["name", "description", "packages"].contains(&key.as_str()) {
+            bail!("machines/{name}/machine.toml: `{key}` is an unknown key");
+        }
     }
     Ok(table)
 }
 
 pub fn published_machines(root: &Path) -> Result<Vec<String>> {
-    // Collect before printing: a later invalid manifest must never leave a
-    // partially validated list on stdout for a shell loop to consume.
-    available(root, "machines")?.into_iter().filter_map(|name| {
-        match machine_manifest(root, &name) {
-            Ok(table) if table.get("publish").and_then(|v| v.as_bool()) == Some(true) => Some(Ok(name)),
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
+    let defaults = Selection::read(root)?;
+    Ok(publications(root)?
+        .into_iter()
+        .filter(|row| row.kind == "layer" && row.shells == defaults.shells)
+        .map(|row| row.machine)
+        .collect())
+}
+
+/// One image CI can publish. Shell order also determines the default shell.
+#[derive(Clone, Debug)]
+pub struct Publication {
+    pub tag: String,
+    pub kind: &'static str,
+    pub parent: Option<String>,
+    pub machine: String,
+    pub shells: Vec<String>,
+}
+
+/// A composition has a published name only when its labels are consistent.
+pub fn published_tag(selection: &Selection) -> Option<String> {
+    validate_machine_name(&selection.machine).ok()?;
+    if selection.default_shell.as_ref() != selection.shells.first() {
+        return None;
+    }
+    for names in [&selection.shells, &selection.design_systems] {
+        for (index, name) in names.iter().enumerate() {
+            validate_name(name).ok()?;
+            if names[..index].contains(name) {
+                return None;
+            }
         }
-    }).collect()
+    }
+    if selection.shells.iter().any(|name| name == "none")
+        || (selection.shells.is_empty() && !selection.design_systems.is_empty())
+        || !match &selection.default_design_system {
+            Some(name) => selection.design_systems.contains(name),
+            None => selection.design_systems.is_empty(),
+        }
+    {
+        return None;
+    }
+    let tag = if selection.shells.is_empty() && selection.machine == "generic" {
+        "base".into()
+    } else {
+        std::iter::once(selection.machine.as_str())
+            .chain(selection.shells.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    (tag.len() + "_sha-1234567".len() <= 128).then_some(tag)
+}
+
+/// Validate everything before returning rows to a shell loop. The base is
+/// implicit; all roots precede their layers, regardless of machine list order.
+pub fn publications(root: &Path) -> Result<Vec<Publication>> {
+    let image = manifest(&root.join("image.toml"))?;
+    for key in image.keys() {
+        if ![
+            "shells",
+            "default-shell",
+            "design-systems",
+            "default-design-system",
+            "installer",
+            "publish",
+        ]
+        .contains(&key.as_str())
+        {
+            bail!("image.toml: `{key}` is an unknown key");
+        }
+    }
+    // Also reject obsolete keys in an unselected machine manifest.
+    for name in available(root, "machines")? {
+        machine_manifest(root, &name)?;
+    }
+    let defaults = Selection::read(root)?;
+    defaults.validate_shells(root)?;
+    let mut rows = vec![Publication {
+        tag: "base".into(),
+        kind: "root",
+        parent: None,
+        machine: "generic".into(),
+        shells: vec![],
+    }];
+    let mut layers = Vec::new();
+    let mut shell_lists = Vec::new();
+    let entries = match image.get("publish") {
+        None => &[][..],
+        Some(value) => value
+            .as_array()
+            .context("image.toml: `publish` must be a list of tables")?
+            .as_slice(),
+    };
+    for entry in entries {
+        let entry = entry
+            .as_table()
+            .context("image.toml: `publish` entries must be tables")?;
+        for key in entry.keys() {
+            if !["shells", "machines"].contains(&key.as_str()) {
+                bail!("image.toml: publish.{key} is an unknown key");
+            }
+        }
+        let shells = string_list(entry, "shells")?;
+        let machines = string_list(entry, "machines")?;
+        if shell_lists.contains(&shells) {
+            bail!("image.toml: publish duplicates an ordered shell list");
+        }
+        shell_lists.push(shells.clone());
+        if machines.is_empty() {
+            bail!("image.toml: publish.machines must not be empty");
+        }
+        let has_generic = machines.iter().any(|name| name == "generic");
+        if shells.is_empty() == has_generic {
+            bail!(
+                "image.toml: publish.machines must contain generic with shells, and must not contain generic without shells (that image is base)"
+            );
+        }
+        let mut selected = defaults.clone();
+        selected.shells = shells.clone();
+        selected.default_shell = shells.first().cloned();
+        selected.without_shell_designs();
+        selected.validate_shells(root)?;
+        let parent = if shells.is_empty() {
+            "base".into()
+        } else {
+            format!("generic.{}", shells.join("."))
+        };
+        for (index, name) in machines.iter().enumerate() {
+            machine_manifest(root, name)?;
+            if machines[..index].contains(name) {
+                bail!("image.toml: publish.machines contains duplicate `{name}`");
+            }
+            selected.machine = name.clone();
+            let tag = published_tag(&selected).context("image.toml: derived publication tag is invalid or exceeds 128 bytes with its suffix")?;
+            if rows
+                .iter()
+                .chain(layers.iter())
+                .any(|row: &Publication| row.tag == tag)
+            {
+                bail!("image.toml: duplicate derived tag `{tag}`");
+            }
+            let row = Publication {
+                tag,
+                kind: if name == "generic" { "root" } else { "layer" },
+                parent: (name != "generic").then(|| parent.clone()),
+                machine: name.clone(),
+                shells: shells.clone(),
+            };
+            if row.kind == "root" {
+                rows.push(row);
+            } else {
+                layers.push(row);
+            }
+        }
+    }
+    rows.extend(layers);
+    let installer =
+        optional_string(&image, "installer")?.context("image.toml: `installer` is required")?;
+    if !rows
+        .iter()
+        .any(|row| row.tag == installer && row.machine == "generic" && !row.shells.is_empty())
+    {
+        bail!(
+            "image.toml: installer must name a published generic composition with at least one shell"
+        );
+    }
+    Ok(rows)
+}
+
+pub fn installer(root: &Path) -> Result<String> {
+    publications(root)?;
+    optional_string(&manifest(&root.join("image.toml"))?, "installer")?
+        .context("image.toml: `installer` is required")
 }
 
 pub fn string_list(table: &toml::Table, key: &str) -> Result<Vec<String>> {

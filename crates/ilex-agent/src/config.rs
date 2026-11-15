@@ -69,6 +69,9 @@ fn image() -> Result<Value> {
 
 fn machine() -> Result<Value> {
     let value = read(MACHINE)?;
+    if value.get("publish").is_some() {
+        return Err(format!("{MACHINE}: `publish` belongs in image.toml, not machine.json"));
+    }
     string(&value, "name").map_err(|e| format!("{MACHINE}: {e}"))?;
     string(&value, "description").map_err(|e| format!("{MACHINE}: {e}"))?;
     if !value["packages"].is_object() {

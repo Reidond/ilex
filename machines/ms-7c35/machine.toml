@@ -10,7 +10,6 @@
 name = "ms-7c35"
 description = "MSI MEG X570 UNIFY (MS-7C35): Radeon graphics, games, Steam from Flathub"
 # Published by CI as ghcr.io/reidond/ilex:ms-7c35.
-publish = true
 
 [packages]
 # Steam itself is a Flatpak the person installs; it is not in the image.

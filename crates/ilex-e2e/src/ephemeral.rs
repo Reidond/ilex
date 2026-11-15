@@ -358,6 +358,9 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         )?;
         check_file(vm, &path, &destination)?;
     }
+    ensure(guest["machine"].get("publish").is_none(), || {
+        "machine.json must not contain publish; publications belong in image.toml".into()
+    })?;
     let machine = common::manifest("machines", &selection.machine, "machine.toml")?;
     let declared = serde_json::to_value(&machine)?;
     for (key, value) in declared

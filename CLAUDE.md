@@ -138,7 +138,50 @@ enabled globally without a shell: no session means no notification is attempted.
 | Base | every image: fedora-bootc, ilex plumbing, `packages.toml` | always present | not selectable independently of ilex |
 | Shell | per image, in `image.toml` | per image, `default-shell` | at sign-in, from the greeter's sessions |
 | Design system | per image, in `image.toml` | per image, `default-design-system` | planned (M1): state in their home, read by a shell; not built |
-| Machine configuration | per image tag (`:latest` is `generic`) | `generic` | per machine, with `bootc switch` |
+| Machine configuration | per composition tag (`generic.gnome`, `ms-7c35.gnome`) | `generic` | per machine, with `bootc switch` |
+
+### Compositions
+
+`image.toml` separately declares the local default composition, the installer's
+composition (`installer`) and the published shell lists (`[[publish]]`). Each
+entry has `shells` (ordered, first is default) and a non-empty `machines` list.
+With shells, `generic` is required: it is the root of every machine layer in
+that entry. Without shells, `generic` is forbidden because that root is already
+the implicit `base`. Shell lists and machine names cannot repeat within their
+respective lists; ordered shell lists cannot repeat across entries. `installer`
+must name a published `generic` composition with at least one shell.
+
+Published tags describe their contents: `base` for generic without shells,
+`<machine>` for another machine without shells, otherwise
+`<machine>.<shell>[.<shell>...]`. Every tag `X` has `X_YYYYMMDD` and
+`X_sha-<7 hex>` companions; roots stage unsigned as `candidate.X`. All derived
+tags, including the longest suffix, must fit 128 bytes. The default shell must
+be first for an image to have a published tag. The five selection labels are
+the authority for the image's name. Publications add no image label or file.
+
+| Composition | Local tag (`T` is this checkout's tag) | Publication tag | Build | Rechunk |
+| --- | --- | --- | --- | --- |
+| Base | `T.s-none` | `base` (always listed) | root | yes |
+| Base + GNOME | `T` | `generic.gnome` | root | yes |
+| Base + GNOME + ms-7c35 | `T.m-ms-7c35` | `ms-7c35.gnome` | layer on `generic.gnome` | no |
+| Base + GNOME + vm | `T.m-vm` | none (unlisted) | layer | no |
+| Base + ms-7c35 | `T.s-none.m-ms-7c35` | `ms-7c35`, only if listed with `shells = []` | layer on `base` | no |
+| Base + GNOME + ilex (future) | `T.s-gnome.s-ilex` | `generic.gnome.ilex`, once listed | root | yes |
+
+`cargo xtask info --publications` validates the complete list before printing
+TSV without a header: tag, kind (`root` or `layer`), parent tag (`-` for roots),
+machine name, comma-separated shells (`-` for none). All roots precede layers.
+`ilex_devkit::config::publications` exposes these five fields, including machine
+and shells, for CI and the later installer's machine table.
+`cargo xtask info --installer` prints the validated installer tag.
+
+This PR adds the new publisher beside the existing one. CI and the ISO still
+use their existing `latest`/machine names until PR 11 switches them together;
+PR 12 makes CI publish every root, including `base`. `--published-machines`
+remains for the current workflow: it derives non-generic machines from the
+publication entry matching the manifest's default shell list. No machine
+manifest controls publication. Removing a publication stops that tag updating;
+once a machine tracks it, switch the machine before removing or renaming it.
 
 A shell is `shells/<name>/shell.toml`: its name and description, packages,
 Wayland session file (without `.desktop`), compositor command, optional greeter
@@ -226,11 +269,13 @@ defines them, and nothing renders these tokens today. Fonts and wallpapers
 are not part of a design system directory yet.
 
 Machines live in `machines/<name>/machine.toml`; `generic` is the base image
-with no packages, overlay or publishing setting. Add a machine by creating one
-directory: `name` must equal its basename, `description` is required, `publish`
-defaults to false, and optional `[packages] install` and `exclude` use the same
+with no packages or overlay. Add a machine by creating one
+directory: `name` must equal its basename, `description` is required,
+and optional `[packages] install` and `exclude` use the same
 grammar as shell packages. Machine names cannot be `latest`, `candidate`, `main`,
-`rechunked`, `upgrade`, `base`, or start with `sha`, `wt-` or a digit.
+`rechunked`, `upgrade`, `base`, or start with `candidate`, `sha`, `wt-` or a digit.
+These are the only machine manifest keys; `publish` and other unknown keys are
+errors. Generated schema-1 `machine.json` has no `publish` field.
 An optional `rootfs/` only adds paths against the **whole base image**, including
 existing package/configuration files and shell overlay files. Those files cannot
 be replaced; new drop-ins, masks and units remain additions a reviewer must read.
@@ -799,7 +844,7 @@ work against its own tag's revision, which may be newer than the base's.
 Never re-run a publish run from before these guards existed: re-runs use the
 original commit's workflow file and remain unguarded.
 
-Then `machines` discovers `publish = true` manifests with `xtask info
+Then `machines` discovers default-shell-list publications with `xtask info
 --published-machines` (currently `ms-7c35`). It runs only after successful base
 jobs and a successful or intentionally skipped publish, never in a `v1_disk`
 run or a pull request. Every name is validated against the manifest's name
@@ -975,7 +1020,12 @@ cargo xtask changed <ref> --image <tag> # prints changed=/exists=/fingerprint=; 
 cargo xtask rechunk <tag> [--output <tag>] # reproducible layers + ilex.fingerprint label; in place unless --output
 cargo xtask publish <tag> --stage      # CI only: push as unsigned :candidate, print digest=
 cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :latest to it
-cargo xtask info --published-machines  # validated publish=true names, one per line
+cargo xtask info --published-machines  # compatibility: default-shell-list machines, one per line
+cargo xtask info --publications       # validated TSV: tag, kind, parent, machine, shells
+cargo xtask info --installer          # installer tag; PR 11 switches CI/ISO to it
+cargo xtask publish <root-image> --stage --as generic.gnome # unsigned :candidate.generic.gnome
+cargo xtask publish --digest <staged-digest> --as generic.gnome # sign, verify, move composition tags
+cargo xtask publish <machine-image> --as ms-7c35.gnome --tested-image-id <image_id> # no build
 cargo xtask changed <ref> --machine ms-7c35 --inputs-only # inputs_changed=; no local image
 cargo xtask changed <ref> --machine ms-7c35 --image <machine-image> # full fingerprint
 cargo xtask prepare-publish <machine-image> --machine ms-7c35 # before tests; prints image_id=
@@ -1017,6 +1067,18 @@ cargo xtask publish <machine-image> --machine ms-7c35 --tested-image-id <image_i
   uses the same local path; `--stage` and `--digest` cannot be combined with
   `--machine`, and image labels must match the requested machine (base
   publishing and staging require `generic`).
+- `publish --as <tag>` first requires a validated publication from `image.toml`.
+  Roots require `--stage` or `--digest`; layers require `--tested-image-id` and
+  refuse staging/digest mode. It derives the tag again from all five labels of
+  the pinned local image ID or staged digest, refusing a different composition,
+  missing/inconsistent labels or a default shell that is not first. It builds
+  nothing. The layer checks the tested ID and independently recomputed
+  fingerprint; both paths retain CI's exact revision check. A local push checks
+  the registry manifest's config digest against the pinned ID before signing;
+  digest publication copies with `--preserve-digests`. Signatures verify before
+  moving the composition and date tags. `--as` uses the same committed key in
+  production and the same explicit local-registry throwaway-key override.
+  `--allow-local-registry` cannot target ghcr, including when `CI=true`.
 - Signatures are cosign **v2** key-pair signatures in the legacy `.sig` tag
   format, which bootc/containers-image verify (keyless and cosign v3's
   default format don't work). Machines check them via

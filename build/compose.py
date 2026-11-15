@@ -145,26 +145,23 @@ def design_system(path):
 
 
 def generic(path):
-    data = table(path, "", load(path), {"name", "description", "publish", "packages"})
+    data = table(path, "", load(path), {"name", "description", "packages"})
     identity(path, data)
-    # generic is the base, so even an explicit publish=false is not allowed.
-    for key in ("publish", "packages"):
+    for key in ("packages",):
         if key in data:
             fail(path, key, "is not allowed for generic")
     if (path.parent / "rootfs").exists() or (path.parent / "rootfs").is_symlink():
         fail(path, "rootfs", "is not allowed for generic")
-    return {"schema": 1, **data, "publish": False, "packages": {}}
+    return {"schema": 1, **data, "packages": {}}
 
 
 def machine(args):
     path, out = args.dir / "machine.toml", args.out
-    data = table(path, "", load(path), {"name", "description", "publish", "packages"})
+    data = table(path, "", load(path), {"name", "description", "packages"})
     identity(path, data)
     value = data["name"]
-    if value in {"generic", "latest", "candidate", "main", "rechunked", "upgrade", "base"} or value.startswith(("sha", "wt-")):
+    if value in {"generic", "latest", "main", "rechunked", "upgrade", "base"} or value.startswith(("candidate", "sha", "wt-")):
         fail(path, "name", f"'{value}' is reserved and cannot name a machine layer")
-    if not isinstance(data.setdefault("publish", False), bool):
-        fail(path, "publish", "must be a boolean")
     package_set = packages(path, "packages", data.setdefault("packages", {}))
     overlays = []
     overlay = args.dir / "rootfs"
@@ -184,10 +181,45 @@ def machine(args):
         build.write("install-packages.sh", Path(__file__).with_name("install-packages.sh").read_bytes())
 
 
+def publications(path, data):
+    """Validate publication syntax before composing any selected image."""
+    entries = data.get("publish", [])
+    if not isinstance(entries, list):
+        fail(path, "publish", "must be a list of tables")
+    seen, tags, installer_tags = set(), {"base"}, set()
+    for index, entry in enumerate(entries):
+        key = f"publish[{index}]"
+        table(path, key, entry, {"shells", "machines"})
+        shells = selected(path, f"{key}.shells", entry.get("shells"))
+        machines = selected(path, f"{key}.machines", entry.get("machines"))
+        if "none" in shells:
+            fail(path, f"{key}.shells", "use [] for no shell, not 'none'")
+        if tuple(shells) in seen:
+            fail(path, key, "duplicates an ordered shell list")
+        seen.add(tuple(shells))
+        if not machines:
+            fail(path, f"{key}.machines", "must not be empty")
+        if bool(shells) != ("generic" in machines):
+            fail(path, f"{key}.machines", "must contain generic with shells, and must not contain generic without shells (that image is base)")
+        for machine in machines:
+            if machine in {"latest", "main", "rechunked", "upgrade", "base"} or machine.startswith(("candidate", "sha", "wt-")):
+                fail(path, f"{key}.machines", f"'{machine}' is reserved")
+            tag = ".".join([machine, *shells])
+            if tag in tags or len(tag) + len("_sha-1234567") > 128:
+                fail(path, key, f"derived tag '{tag}' is duplicated or exceeds 128 bytes with its suffix")
+            tags.add(tag)
+            if machine == "generic" and shells:
+                installer_tags.add(tag)
+    installer = string(path, "installer", data.get("installer"))
+    if installer not in installer_tags:
+        fail(path, "installer", "must name a published generic composition with at least one shell")
+
+
 def image(args):
     ctx, out = args.context, args.out
     path = ctx / "image.toml"
-    data = table(path, "", load(path), {"shells", "default-shell", "design-systems", "default-design-system"})
+    data = table(path, "", load(path), {"shells", "default-shell", "design-systems", "default-design-system", "installer", "publish"})
+    publications(path, data)
     shells = selected(path, "shells", data.get("shells"))
     shell_default = default(path, "default-shell", data.get("default-shell"), shells)
     designs = selected(path, "design-systems", data.get("design-systems"))

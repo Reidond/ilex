@@ -13,8 +13,8 @@ mod build;
 mod changed;
 mod disk;
 mod iso;
-mod publish;
 mod prepare_publish;
+mod publish;
 mod rechunk;
 mod registry;
 mod select;
@@ -24,7 +24,10 @@ mod vm;
 mod wsl;
 
 #[derive(Parser)]
-#[command(name = "cargo xtask", about = "Build, boot, test and release the ilex image")]
+#[command(
+    name = "cargo xtask",
+    about = "Build, boot, test and release the ilex image"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -54,9 +57,15 @@ enum Cmd {
     Tool(tool::Args),
     /// Show this checkout's slug, image, VM names and state directories
     Info {
-        /// Print only validated names of machines with publish = true
-        #[arg(long)]
+        /// Compatibility list: published machines with the default shell list
+        #[arg(long, conflicts_with_all = ["publications", "installer"])]
         published_machines: bool,
+        /// Validated TSV: tag, kind, parent (- for roots), machine, shells (comma-separated, - for none)
+        #[arg(long, conflicts_with = "installer")]
+        publications: bool,
+        /// Print the installer's published composition tag
+        #[arg(long)]
+        installer: bool,
     },
 }
 
@@ -94,13 +103,43 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::PreparePublish(args) => prepare_publish::run(&ws, args),
         Cmd::Iso(args) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
-        Cmd::Info { published_machines: true } => {
+        Cmd::Info {
+            published_machines: true,
+            ..
+        } => {
             for name in config::published_machines(&ws.root)? {
                 println!("{name}");
             }
             Ok(())
         }
-        Cmd::Info { published_machines: false } => {
+        Cmd::Info {
+            publications: true, ..
+        } => {
+            for row in config::publications(&ws.root)? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    row.tag,
+                    row.kind,
+                    row.parent.as_deref().unwrap_or("-"),
+                    row.machine,
+                    if row.shells.is_empty() {
+                        "-".into()
+                    } else {
+                        row.shells.join(",")
+                    }
+                );
+            }
+            Ok(())
+        }
+        Cmd::Info {
+            installer: true, ..
+        } => {
+            println!("{}", config::installer(&ws.root)?);
+            Ok(())
+        }
+        Cmd::Info { .. } => {
+            let publications = config::publications(&ws.root)?;
+            let installer = config::installer(&ws.root)?;
             let resolved = select::Args::default().resolve(&ws, None, None)?;
             println!("root:        {}", ws.root.display());
             println!("slug:        {}", ws.slug);
@@ -109,9 +148,27 @@ fn run(cmd: Cmd) -> Result<()> {
             println!("runtime dir: {}", ws.runtime_dir().display());
             println!("state dir:   {}", ws.state_dir().display());
             println!("vm slots:    {}", slots::max_slots());
-            let selection = resolved.selection.context("reading image.toml for info; run `cargo xtask build` for manifest diagnostics")?;
+            let selection = resolved.selection.context(
+                "reading image.toml for info; run `cargo xtask build` for manifest diagnostics",
+            )?;
             let summary = format!("selection:   {}", selection.summary());
             println!("{}", terminal_text(&summary));
+            println!("installer:   {installer}");
+            println!("publications (tag, kind, parent, machine, shells):");
+            for row in publications {
+                println!(
+                    "  {}\t{}\t{}\t{}\t{}",
+                    row.tag,
+                    row.kind,
+                    row.parent.as_deref().unwrap_or("-"),
+                    row.machine,
+                    if row.shells.is_empty() {
+                        "-".into()
+                    } else {
+                        row.shells.join(",")
+                    }
+                );
+            }
             for (directory, file) in [
                 ("shells", "shell.toml"),
                 ("design-systems", "design-system.toml"),
@@ -121,10 +178,15 @@ fn run(cmd: Cmd) -> Result<()> {
                 for name in config::available(&ws.root, directory)? {
                     match config::manifest(&ws.root.join(directory).join(&name).join(file)) {
                         Ok(manifest) => {
-                            let description = manifest.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            let description = manifest
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             println!("  {}: {}", terminal_text(&name), terminal_text(description));
                         }
-                        Err(error) => eprintln!("{}", terminal_text(&format!("  {name}: {error:#}"))),
+                        Err(error) => {
+                            eprintln!("{}", terminal_text(&format!("  {name}: {error:#}")))
+                        }
                     }
                 }
             }
@@ -135,7 +197,13 @@ fn run(cmd: Cmd) -> Result<()> {
 
 /// `info` can inspect an unbuilt manifest, before compose has validated it.
 fn terminal_text(text: &str) -> String {
-    text.chars().map(|ch| {
-        if ch.is_control() { format!("\\u{{{:x}}}", ch as u32) } else { ch.to_string() }
-    }).collect()
+    text.chars()
+        .map(|ch| {
+            if ch.is_control() {
+                format!("\\u{{{:x}}}", ch as u32)
+            } else {
+                ch.to_string()
+            }
+        })
+        .collect()
 }
