@@ -173,7 +173,10 @@ replace `tokens.json` with the whole new export; never edit it by hand.
 A hand-written design system's values are edited in its token file. Nothing
 else in the repository repeats a token value. The image ships unchanged bytes
 at `/usr/share/ilex/design-systems/<name>/tokens.json`, as recorded in
-`image.json`. The first and default design system is `ilex`: Breeze frames,
+`image.json`. Token files are stored exactly as exported: `.gitattributes`
+disables text conversion for `design-systems/*/tokens.json`, preserving their
+original line endings on commit and checkout.
+The first and default design system is `ilex`: Breeze frames,
 Adwaita interiors and holly green, with light and dark tokens.
 
 `default-design-system` is recorded in `image.json` and the
@@ -896,6 +899,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   `crates/ilex-devkit`; each `xtask` subcommand is its own module with its
   own `clap::Args`.
 - Shell out to the packaged `bcvk` CLI, not the `bcvk-qemu` library.
-- Files are LF everywhere (`.gitattributes`); scripts shipped in `rootfs/`
+- Text files use LF (`.gitattributes`), except token exports, whose bytes are
+  preserved exactly; scripts shipped in `rootfs/`
   need the exec bit in git (`git update-index --chmod=+x`).
   Scripts in `build/` run through their interpreter and need no exec bit.

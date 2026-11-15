@@ -1,5 +1,7 @@
 # Everything in this repo ends up in a Linux image or runs on Linux:
-# always check out with LF, even under core.autocrlf=true on Windows.
+# text defaults to LF, even under core.autocrlf=true on Windows.
 * text=auto eol=lf
+# Token exports keep their exact bytes, including original line endings.
+design-systems/*/tokens.json -text
 *.png binary
 *.qcow2 binary
