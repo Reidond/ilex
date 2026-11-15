@@ -311,6 +311,30 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
     }
     let defaults = Selection::read(root)?;
     defaults.validate_shells(root)?;
+    for (index, name) in defaults.design_systems.iter().enumerate() {
+        validate_name(name)?;
+        if defaults.design_systems[..index].contains(name) {
+            bail!("image.toml: design-systems contains duplicate `{name}`");
+        }
+        if !root.join("design-systems").join(name).is_dir() {
+            bail!("image.toml: design system `{name}` has no directory");
+        }
+    }
+    for (key, default, names) in [
+        ("default-shell", &defaults.default_shell, &defaults.shells),
+        (
+            "default-design-system",
+            &defaults.default_design_system,
+            &defaults.design_systems,
+        ),
+    ] {
+        if !match default {
+            Some(name) => names.contains(name),
+            None => names.is_empty(),
+        } {
+            bail!("image.toml: {key} must name a member of its non-empty list");
+        }
+    }
     let mut rows = vec![Publication {
         tag: "base".into(),
         kind: "root",
