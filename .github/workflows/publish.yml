@@ -545,7 +545,7 @@ jobs:
                grep -qx 'inputs_changed=false' "$RUNNER_TEMP/machine-inputs" &&
                grep -qx 'base_changed=false' "$RUNNER_TEMP/machine-inputs"; then
               echo "$machine: published base and machine inputs unchanged; skipping without pulling the base"
-              printf -- '- `%s`: skipped before build, inputs/base unchanged at `%s`\n' "$machine" "$previous" >> "$GITHUB_STEP_SUMMARY"
+              printf -- '- %s: skipped before build, inputs/base unchanged at %s\n' "$machine" "$previous" >> "$GITHUB_STEP_SUMMARY"
               continue
             fi
             printf '%s\t%s\n' "$machine" "$previous" >> "$RUNNER_TEMP/pending-machines"
@@ -600,7 +600,7 @@ jobs:
             publish=false
             if grep -qx 'changed=true' "$RUNNER_TEMP/machine-change"; then publish=true; fi
             printf '%s\t%s\t%s\t%s\t%s\n' "$machine" "$image" "$image_id" "$previous" "$publish" >> "$RUNNER_TEMP/tested-machines"
-            printf -- '- `%s`: tests passed on `%s`, planned tag `%s`, changed=%s; publication requires main\n' \
+            printf -- '- %s: tests passed on %s, planned tag %s, changed=%s; publication requires main\n' \
               "$machine" "$image_id" "$previous" "$publish" >> "$GITHUB_STEP_SUMMARY"
           done < "$RUNNER_TEMP/pending-machines"
           if grep -q $'\ttrue$' "$RUNNER_TEMP/tested-machines"; then echo 'changed=true' >> "$GITHUB_OUTPUT"; fi

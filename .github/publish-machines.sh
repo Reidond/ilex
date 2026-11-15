@@ -10,7 +10,7 @@ published_count=0; skipped_count=0
 record() {
     printf '%s\t%s\t%s\t%s\n' "$machine" "$image_id" "$1" "$2" >> "$RUNNER_TEMP/machine-publications"
     printf '%s: %s (%s), tested ID %s\n' "$machine" "$1" "$2" "$image_id"
-    printf -- '- `%s`: **%s** (%s), tested ID `%s`, planned tag `%s`\n' \
+    printf -- '- %s: **%s** (%s), tested ID %s, planned tag %s\n' \
         "$machine" "$1" "$2" "$image_id" "$expected" >> "$GITHUB_STEP_SUMMARY"
 }
 while IFS=$'\t' read -r machine image image_id expected changed; do
