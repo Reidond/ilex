@@ -13,7 +13,7 @@
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use ilex_devkit::Workspace;
+use ilex_devkit::{Workspace, config, machine};
 
 use crate::rechunk;
 use crate::registry::{self, Auth, FINGERPRINT_LABEL};
@@ -25,17 +25,38 @@ pub struct Args {
     /// Candidate image: tag or reference (defaults to this checkout's image)
     #[arg(long)]
     pub image: Option<String>,
+    /// Compare this machine (validated against machines/<name>/machine.toml)
+    #[arg(long)]
+    pub machine: Option<String>,
+    /// Compare only machine inputs; no local image or base is needed
+    #[arg(long, requires = "machine", conflicts_with = "image")]
+    pub inputs_only: bool,
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    if let Some(name) = &args.machine {
+        config::machine_manifest(&ws.root, name)?;
+        if name == "generic" {
+            bail!("generic uses the base image's change detection, without --machine");
+        }
+    }
+    let label = if args.inputs_only { "ilex.machine-inputs" } else { FINGERPRINT_LABEL };
     let candidate_ref = ws.resolve_image(args.image.as_deref());
     // The image as built has no label yet; its fingerprint is computed from it
     // (the same value `xtask rechunk` will write).
-    let candidate = rechunk::candidate_fingerprint(ws, &candidate_ref)?;
+    let candidate = if args.inputs_only {
+        machine::inputs(ws, &ws.root.join("machines").join(args.machine.as_ref().unwrap()), &[])?
+    } else {
+        if let Some(name) = &args.machine
+            && machine::image_machine(&candidate_ref)? != *name {
+            bail!("{candidate_ref} is not machine {name}");
+        }
+        rechunk::candidate_fingerprint(ws, &candidate_ref)?
+    };
 
     let repository = repo_of(&args.reference);
     let auth = Auth::login(repository)?;
-    let published = published_fingerprint(&args.reference, repository, &auth)?;
+    let published = published_fingerprint(&args.reference, repository, &auth, label)?;
 
     let (exists, changed) = match &published {
         Published::Missing => (false, true),
@@ -46,11 +67,11 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     match &published {
         Published::Missing => eprintln!("published fingerprint: (no image at {})", args.reference),
         Published::Unlabelled => {
-            eprintln!("published fingerprint: (image has no {FINGERPRINT_LABEL} label)")
+            eprintln!("published fingerprint: (image has no {label} label)")
         }
         Published::Fingerprint(f) => eprintln!("published fingerprint: {f}"),
     }
-    registry::github_output("changed", &changed.to_string())?;
+    registry::github_output(if args.inputs_only { "inputs_changed" } else { "changed" }, &changed.to_string())?;
     registry::github_output("exists", &exists.to_string())?;
     // `xtask rechunk --fingerprint` writes exactly this value into the label,
     // however the working tree looks by then.
@@ -80,6 +101,7 @@ fn published_fingerprint(
     reference: &str,
     repository: &str,
     auth: &Option<Auth>,
+    label: &str,
 ) -> Result<Published> {
     let mut skopeo = Command::new("skopeo");
     skopeo.args(["inspect", "--config"]);
@@ -107,7 +129,7 @@ fn published_fingerprint(
     let config: serde_json::Value =
         serde_json::from_str(&out.stdout).context("parsing `skopeo inspect --config` output")?;
     Ok(
-        match config["config"]["Labels"][FINGERPRINT_LABEL].as_str() {
+        match config["config"]["Labels"][label].as_str() {
             Some(f) => Published::Fingerprint(f.to_string()),
             None => Published::Unlabelled,
         },

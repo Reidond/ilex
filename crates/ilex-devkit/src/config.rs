@@ -194,6 +194,35 @@ pub fn validate_machine_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate names before using a manifest basename in a shell loop or tag.
+/// Full composition validation remains in compose.py at build time.
+pub fn machine_manifest(root: &Path, name: &str) -> Result<toml::Table> {
+    validate_machine_name(name)?;
+    let table = manifest(&root.join("machines").join(name).join("machine.toml"))?;
+    if table.get("name").and_then(|v| v.as_str()) != Some(name) {
+        bail!("machines/{name}/machine.toml: name must equal directory name {name:?}");
+    }
+    if table.get("publish").is_some_and(|v| !v.is_bool()) {
+        bail!("machines/{name}/machine.toml: publish must be a boolean");
+    }
+    if name == "generic" && table.contains_key("publish") {
+        bail!("generic is the base image and cannot have a publishing setting");
+    }
+    Ok(table)
+}
+
+pub fn published_machines(root: &Path) -> Result<Vec<String>> {
+    // Collect before printing: a later invalid manifest must never leave a
+    // partially validated list on stdout for a shell loop to consume.
+    available(root, "machines")?.into_iter().filter_map(|name| {
+        match machine_manifest(root, &name) {
+            Ok(table) if table.get("publish").and_then(|v| v.as_bool()) == Some(true) => Some(Ok(name)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }).collect()
+}
+
 pub fn string_list(table: &toml::Table, key: &str) -> Result<Vec<String>> {
     table
         .get(key)

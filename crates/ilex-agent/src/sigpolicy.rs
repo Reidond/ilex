@@ -153,8 +153,13 @@ pub fn check_decisions() -> Result<(), String> {
     use Decision::*;
     // (image, transport, signature as raw JSON) of the booted deployment.
     type Booted<'a> = (&'a str, &'a str, Option<&'a str>);
-    let cases: [(&str, Option<Booted>, Decision); 11] = [
+    let cases: [(&str, Option<Booted>, Decision); 12] = [
         ("ephemeral VM (no deployment)", None, NoDeployment),
+        (
+            "gaming machine, unverified",
+            Some(("ghcr.io/reidond/ilex:gaming", "registry", None)),
+            Enforce("ghcr.io/reidond/ilex:gaming".into()),
+        ),
         (
             "ghcr unverified",
             Some(("ghcr.io/reidond/ilex:latest", "registry", None)),

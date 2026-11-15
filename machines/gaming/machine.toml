@@ -6,7 +6,7 @@
 # (radeonsi, RADV) are in every ilex image. No kernel argument is needed.
 name = "gaming"
 description = "Desktop PC for games: Radeon graphics, Steam from Flathub"
-# Published as ghcr.io/reidond/ilex:gaming once CI builds machine images.
+# Published by CI as ghcr.io/reidond/ilex:gaming.
 publish = true
 
 [packages]

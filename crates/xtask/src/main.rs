@@ -50,7 +50,11 @@ enum Cmd {
     /// Build a drupe tool image from Fedora packages (`cargo xtask tool strace`)
     Tool(tool::Args),
     /// Show this checkout's slug, image, VM names and state directories
-    Info,
+    Info {
+        /// Print only validated names of machines with publish = true
+        #[arg(long)]
+        published_machines: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -86,7 +90,13 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Publish(args) => publish::run(&ws, args),
         Cmd::Iso(args) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
-        Cmd::Info => {
+        Cmd::Info { published_machines: true } => {
+            for name in config::published_machines(&ws.root)? {
+                println!("{name}");
+            }
+            Ok(())
+        }
+        Cmd::Info { published_machines: false } => {
             let resolved = select::Args::default().resolve(&ws, None, None)?;
             println!("root:        {}", ws.root.display());
             println!("slug:        {}", ws.slug);

@@ -353,8 +353,7 @@ the kernel's amdgpu driver, `amd-gpu-firmware` and Mesa's radeonsi and RADV
 drivers. This configuration has no overlay or kernel arguments. GNOME chooses
 150% scaling for this display unless the person has saved another choice.
 
-Once CI publishes the signed `:gaming` image (it does not build machine images
-yet), install ilex with the ISO, then run:
+CI publishes the signed `:gaming` image. Install ilex with the ISO, then run:
 
 ```sh
 sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:gaming
@@ -677,6 +676,46 @@ after checking it is the one the upgrade tier tested, and moves `:sha-<short>`,
 registry, nothing pushed twice). Runs of the workflow never overlap (one
 concurrency group), so `:candidate` is always the current run's.
 
+Then `machines` discovers `publish = true` manifests with `xtask info
+--published-machines` (currently `gaming`). It runs only after successful base
+jobs and a successful or intentionally skipped publish, never in a `v1_disk`
+run or a pull request. Every name is validated against the manifest's name
+rules before entering a loop or tag. If the base changed, main requires its
+publish to have succeeded. A branch run builds and tests against the staged
+digest, with no signing keys or registry token in those steps.
+
+The machine base is the exact staged/tested digest, or current `:latest`
+resolved once by digest when the base is unchanged. An old `:latest` without
+generic's labels or generated-file/overlay registry is skipped with a notice:
+it cannot accept machine layers and needs a phase-0 base published first.
+Otherwise a machine is skipped when neither base nor machine inputs changed,
+unless `test` forces testing. `changed --machine --inputs-only` compares the
+same content/mode/link hash the builder writes as `ilex.machine-inputs`, without
+needing a local image. A built layer's fingerprint includes `ilex.machine-key`,
+covering the actual base image ID; the inherited base fingerprint is cleared.
+The complete fingerprint is compared again before testing/publishing.
+
+Machine images preserve every base layer and add one squashed layer; they are
+not rechunked. Before testing, the job compares RPM-recorded file capabilities
+with `getcap` on the actual base and machine filesystems using
+`.github/check-filecaps.py`; missing capabilities fail the job. Each changed
+machine runs `ephemeral::` only, so installed-system-only behaviour (SELinux,
+kernel arguments) still needs local `disk::` evidence. All machine tests must
+pass before the single publishing step receives credentials. On main only,
+after checking `:latest` still has the tested base digest, it signs and publishes
+`:<machine>`, `:<machine>-YYYYMMDD` and `:<machine>-sha-<short>` in the same
+repository. It never stages or touches `:candidate`, `:latest` or base date/SHA
+tags. Forced tests do not republish an unchanged fingerprint. The fingerprint
+is recorded by a config-only build that preserves the tested filesystem.
+
+The first main run builds, rechunks, stages and tests the generic phase-0 base,
+publishes it, then builds/tests/signs `:gaming` on precisely that digest. If the
+base is already current, it skips base publication, pins current `:latest` and
+builds the missing/changed machine instead. An incompatible pre-phase-0
+`:latest` is the explicit successful skip above; a later base publication
+enables machines. A failed machines job leaves its existing tags on their old
+base; it does not undo a successful base publish.
+
 Installing v1 to a disk takes ~14 minutes on a runner (11 of them bcvk's
 install VM importing the image's 64 layers into ostree), more than everything
 else in a run, so it happens ahead of time: after each publish the `publish`
@@ -711,6 +750,10 @@ cargo xtask changed <ref> --image <tag> # prints changed=/exists=/fingerprint=; 
 cargo xtask rechunk <tag> [--output <tag>] # reproducible layers + ilex.fingerprint label; in place unless --output
 cargo xtask publish <tag> --stage      # CI only: push as unsigned :candidate, print digest=
 cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :latest to it
+cargo xtask info --published-machines  # validated publish=true names, one per line
+cargo xtask changed <ref> --machine gaming --inputs-only # inputs_changed=; no local image
+cargo xtask changed <ref> --machine gaming --image <machine-image> # full fingerprint
+cargo xtask publish <machine-image> --machine gaming # CI only: machine tags, never :latest
 ```
 
 - The background parts (`vm-prep.sh`) log every line with the time it was
@@ -730,12 +773,23 @@ cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :lat
   time (the default `ILEX_VM_SLOTS` on 16 GiB).
 - A manual run from another branch (`gh workflow run publish.yml --ref <branch>
   -f test=true`, and `-f iso=true` for the ISO) builds, stages `:candidate`
-  and tests, but never signs, moves `:latest` or releases the ISO.
+  and tests (including published machines), but never signs, moves tags other
+  than `:candidate` or releases the ISO. Publishing jobs/steps require main,
+  this repository and a push, schedule or workflow_dispatch event; PR/fork
+  events cannot reach them. Signing secrets exist only on publishing steps.
 - `publish` refuses to run unless `CI=true`/`GITHUB_ACTIONS=true`. The one
   override is a registry on this machine, which can never be ghcr:
   `podman run -d -p 5000:5000 docker.io/library/registry:2`, then
   `cargo xtask publish <tag> --allow-local-registry --repository localhost:5000/ilex`
   (needs `cosign` v2, `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD`).
+  Generate a throwaway key pair in a scratch directory for this check and pass
+  `--verification-key <scratch>/cosign.pub` too. This override requires
+  `--allow-local-registry` and a local repository even in CI; real publishes
+  always verify against the committed public key. Stop/remove the registry
+  container and remove scratch keys afterwards. `publish --machine gaming`
+  uses the same local path; `--stage` and `--digest` cannot be combined with
+  `--machine`, and image labels must match the requested machine (base
+  publishing and staging require `generic`).
 - Signatures are cosign **v2** key-pair signatures in the legacy `.sig` tag
   format, which bootc/containers-image verify (keyless and cosign v3's
   default format don't work). Machines check them via

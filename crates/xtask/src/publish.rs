@@ -17,10 +17,12 @@
 //! signature format).
 
 use std::fs;
-use std::process::Command;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use ilex_devkit::{Workspace, cmd, git};
+use ilex_devkit::{Workspace, cmd, config, git, machine, workspace::check_tag_length};
 
 use crate::rechunk;
 use crate::registry::{self, Auth, FINGERPRINT_LABEL};
@@ -48,6 +50,12 @@ pub struct Args {
     /// `--stage` pushed) instead of pushing a local one
     #[arg(long, value_name = "sha256:…")]
     pub digest: Option<String>,
+    /// Publish a machine as :<name>, :<name>-YYYYMMDD and :<name>-sha-<short>
+    #[arg(long, conflicts_with_all = ["stage", "digest"])]
+    pub machine: Option<String>,
+    /// Throwaway public key for local-registry verification only
+    #[arg(long, requires = "allow_local_registry")]
+    pub verification_key: Option<PathBuf>,
 }
 
 /// The unsigned tag `--stage` pushes.
@@ -56,6 +64,15 @@ const STAGE_TAG: &str = "candidate";
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let repository = registry::repository(args.repository.as_deref(), "ilex")?;
     registry::require_ci("xtask publish", &repository, args.allow_local_registry)?;
+    if args.verification_key.is_some() && !registry::is_local_registry(&repository) {
+        bail!("--verification-key is only allowed with a registry on this machine");
+    }
+    if let Some(name) = &args.machine {
+        config::machine_manifest(&ws.root, name)?;
+        if name == "generic" {
+            bail!("generic is published as :latest, without --machine");
+        }
+    }
     cmd::require("podman")?;
     cmd::require("skopeo")?;
     if args.stage {
@@ -75,7 +92,13 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
     // 1. The digest everything else uses, tagged `sha-<short>`: pushed now,
     //    or already in the repository (`--digest`, staged by the build job).
-    let sha_tag = format!("sha-{short}");
+    let (moving_tag, date_tag, sha_tag) = match &args.machine {
+        Some(name) => (name.clone(), format!("{name}-{date}"), format!("{name}-sha-{short}")),
+        None => ("latest".into(), date.clone(), format!("sha-{short}")),
+    };
+    for tag in [&moving_tag, &date_tag, &sha_tag] {
+        check_tag_length(&format!("{repository}:{tag}"))?;
+    }
     let (digest, fingerprint) = match &args.digest {
         Some(digest) => {
             if !registry::is_digest(digest) {
@@ -84,6 +107,9 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             let pinned = format!("{repository}@{digest}");
             let config = skopeo_json(&["inspect", "--config"], &pinned, insecure, &auth)?
                 .with_context(|| format!("{pinned} is not in the registry"))?;
+            if config["config"]["Labels"]["ilex.machine"].as_str() != Some("generic") {
+                bail!("{pinned} is not a generic base image; refusing to move :latest");
+            }
             let fingerprint = config["config"]["Labels"][FINGERPRINT_LABEL]
                 .as_str()
                 .map(str::to_string)
@@ -93,7 +119,16 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         }
         None => {
             let image = ws.resolve_image(args.image.as_deref());
-            let fingerprint = local_fingerprint(&image)?;
+            require_machine(&image, args.machine.as_deref().unwrap_or("generic"))?;
+            let fingerprint = if args.machine.is_some() {
+                // Machine layers clear the inherited fingerprint. Use the
+                // same calculation as `changed`, including actual base identity.
+                let fingerprint = rechunk::candidate_fingerprint(ws, &image)?;
+                label_fingerprint(&image, &fingerprint)?;
+                fingerprint
+            } else {
+                local_fingerprint(&image)?
+            };
             let digest = push(&image, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
             (digest, fingerprint)
         }
@@ -115,17 +150,17 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     sign.arg(&pinned);
     registry::with_auth(&auth, &mut sign);
     cmd::run(&mut sign)?;
-    verify(ws, &pinned, &auth)?;
+    verify(ws, &pinned, &auth, args.verification_key.as_deref())?;
 
     // 3. Move the tags now that the digest is signed.
-    for tag in ["latest", date.as_str()] {
+    for tag in [&moving_tag, &date_tag] {
         copy(&pinned, &format!("{repository}:{tag}"), insecure, &auth)?;
     }
 
-    eprintln!("published {pinned} as :{sha_tag}, :{date}, :latest");
+    eprintln!("published {pinned} as :{sha_tag}, :{date_tag}, :{moving_tag}");
     registry::github_output("digest", &digest)?;
     registry::github_output("image", &pinned)?;
-    registry::github_output("tags", &format!("latest,{date},{sha_tag}"))?;
+    registry::github_output("tags", &format!("{moving_tag},{date_tag},{sha_tag}"))?;
     Ok(())
 }
 
@@ -133,6 +168,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 /// much of it machines on `:latest` would have to download.
 fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
     let image = ws.resolve_image(args.image.as_deref());
+    require_machine(&image, "generic")?;
     let fingerprint = local_fingerprint(&image)?;
     let insecure = registry::is_local_registry(repository);
     let auth = Auth::login(repository)?;
@@ -248,8 +284,8 @@ fn skopeo_json(
 }
 
 /// `cosign verify` against the public key committed in `rootfs/`.
-fn verify(ws: &Workspace, pinned: &str, auth: &Option<Auth>) -> Result<()> {
-    let pubkey = ws.root.join(PUBKEY);
+fn verify(ws: &Workspace, pinned: &str, auth: &Option<Auth>, local_key: Option<&std::path::Path>) -> Result<()> {
+    let pubkey = local_key.map(PathBuf::from).unwrap_or_else(|| ws.root.join(PUBKEY));
     let mut verify = Command::new("cosign");
     verify
         .arg("verify")
@@ -266,6 +302,33 @@ fn verify(ws: &Workspace, pinned: &str, auth: &Option<Auth>) -> Result<()> {
             out.stderr
         );
     }
-    eprintln!("signature on {pinned} verifies against {PUBKEY}");
+    eprintln!("signature on {pinned} verifies against {}", pubkey.display());
+    Ok(())
+}
+
+fn require_machine(image: &str, expected: &str) -> Result<()> {
+    let actual = machine::image_machine(image)?;
+    if actual != expected {
+        bail!("{image} is machine {actual}, expected {expected}; refusing to publish under another machine's tags");
+    }
+    Ok(())
+}
+
+/// Config-only build: preserve the filesystem and every base/layer capability.
+/// FROM uses an inspected immutable ID, never interpolated caller input.
+fn label_fingerprint(image: &str, fingerprint: &str) -> Result<()> {
+    if !registry::is_digest(fingerprint) {
+        bail!("invalid machine fingerprint {fingerprint:?}");
+    }
+    let id = cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", image]))?;
+    let mut build = Command::new("podman");
+    build.args(["build", "--pull=never", "--file", "-", "--tag", image, "--label", &format!("{FINGERPRINT_LABEL}={fingerprint}")]);
+    eprintln!("$ {}", cmd::display(&build));
+    let mut child = build.stdin(Stdio::piped()).stdout(std::io::stderr()).spawn()?;
+    writeln!(child.stdin.take().context("label build stdin")?, "FROM {id}")?;
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("machine fingerprint label build failed with {status}");
+    }
     Ok(())
 }

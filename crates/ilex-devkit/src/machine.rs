@@ -103,6 +103,28 @@ fn hash_tree(hash: &mut Sha256, root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The same input hash used by the layer cache and registry change detection.
+/// It deliberately excludes the base, which is covered by `ilex.machine-key`.
+pub fn inputs(ws: &Workspace, directory: &Path, podman_args: &[String]) -> Result<String> {
+    let mut inputs = Sha256::new();
+    inputs.update(b"ilex-machine-inputs v1\n");
+    hash_tree(&mut inputs, directory, directory)?;
+    for relative in [
+        "machines/Containerfile",
+        "build/compose.py",
+        "build/image_tree.py",
+        "build/install-packages.sh",
+        "crates/ilex-devkit/src/machine.rs",
+    ] {
+        hash_tree(&mut inputs, &ws.root, &ws.root.join(relative))?;
+    }
+    for argument in podman_args {
+        inputs.update((argument.len() as u64).to_le_bytes());
+        inputs.update(argument.as_bytes());
+    }
+    Ok(format!("sha256:{:x}", inputs.finalize()))
+}
+
 pub fn build(
     ws: &Workspace,
     base: &str,
@@ -132,23 +154,7 @@ pub fn build(
         );
     }
     let base_id = bcvk::image_id(base).with_context(|| format!("resolving machine base {base}"))?;
-    let mut inputs = Sha256::new();
-    inputs.update(b"ilex-machine-inputs v1\n");
-    hash_tree(&mut inputs, directory, directory)?;
-    for relative in [
-        "machines/Containerfile",
-        "build/compose.py",
-        "build/image_tree.py",
-        "build/install-packages.sh",
-        "crates/ilex-devkit/src/machine.rs",
-    ] {
-        hash_tree(&mut inputs, &ws.root, &ws.root.join(relative))?;
-    }
-    for argument in podman_args {
-        inputs.update((argument.len() as u64).to_le_bytes());
-        inputs.update(argument.as_bytes());
-    }
-    let inputs = format!("sha256:{:x}", inputs.finalize());
+    let inputs = inputs(ws, directory, podman_args)?;
     let key = format!("{base_id}-{inputs}");
     let current = cmd::probe(Command::new("podman").args([
         "image",
