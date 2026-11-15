@@ -209,6 +209,25 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
     ensure(names("design-systems")? == selection.design_systems, || {
         "design systems differ from image labels".into()
     })?;
+    let out = vm
+        .ssh(
+            "if test -d /usr/share/ilex/design-systems; then \
+             find /usr/share/ilex/design-systems -mindepth 1 -maxdepth 1 \
+             -type d -printf '%f\\0'; \
+             else test ! -e /usr/share/ilex/design-systems; fi",
+        )?
+        .ok("listing installed design system directories")?;
+    let mut directories: Vec<_> = out.stdout.split_terminator('\0').collect();
+    directories.sort_unstable();
+    let mut expected: Vec<_> = selection.design_systems.iter().map(String::as_str).collect();
+    expected.sort_unstable();
+    ensure(directories == expected, || {
+        format!(
+            "design system directories differ from image selection: \
+             found {directories:?}, expected {expected:?}"
+        )
+    })?;
+    println!("     design system directories match selection: {directories:?}");
     for (key, expected) in [
         ("default-shell", &selection.default_shell),
         ("default-design-system", &selection.default_design_system),
