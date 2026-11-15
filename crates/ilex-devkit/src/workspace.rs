@@ -6,10 +6,11 @@
 //! sessions never overwrite each other's images or VMs.
 
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+
+use crate::git;
 
 /// Local repository every build is tagged into.
 pub const IMAGE_REPO: &str = "localhost/ilex";
@@ -20,8 +21,7 @@ pub struct Workspace {
     pub root: PathBuf,
     /// `main` for the main checkout, the sanitised worktree name otherwise.
     pub slug: String,
-    /// Checkout directory name for a linked git worktree, or the legacy
-    /// `.claude/worktrees/<name>/` name.
+    /// Git's unique, unsanitised name for a linked worktree.
     pub worktree: Option<String>,
 }
 
@@ -46,6 +46,7 @@ impl Workspace {
     }
 
     pub fn from_root(root: PathBuf) -> Self {
+        let root = std::path::absolute(&root).unwrap_or(root);
         let worktree = worktree_name(&root);
         let slug = match &worktree {
             Some(name) => sanitize(name),
@@ -136,25 +137,14 @@ fn state_root() -> PathBuf {
     env::temp_dir().join("ilex-state")
 }
 
-/// Preserve Claude Code's path-based names; recognise other linked worktrees
-/// by their `.git` file, without asking git to resolve its `gitdir:` path
-/// (which can be a Windows path even when we run in WSL).
+/// Git keeps linked worktree names unique under `.git/worktrees/<name>`.
+/// Split both path separators: a Windows-created `.git` file is also read
+/// in WSL. Other gitfiles (submodules, separate git dirs) are not worktrees.
 fn worktree_name(root: &Path) -> Option<String> {
-    let parts: Vec<String> = root
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    let claude_name = parts.windows(3).rev().find_map(|w| {
-        (w[0] == ".claude" && w[1] == "worktrees").then(|| w[2].clone())
-    });
-    claude_name.or_else(|| {
-        let dotgit = fs::read_to_string(root.join(".git")).ok()?;
-        let gitdir = dotgit.strip_prefix("gitdir:")?.trim();
-        if gitdir.is_empty() {
-            return None;
-        }
-        Some(root.file_name()?.to_string_lossy().into_owned())
-    })
+    let target = git::dotgit_target(root)?;
+    let mut parts = target.trim_end_matches(['/', '\\']).rsplit(['/', '\\']);
+    let name = parts.next()?;
+    (parts.next()? == "worktrees").then(|| name.to_string())
 }
 
 /// Lowercase, `[a-z0-9-]` only, no leading/trailing/double dashes — safe in

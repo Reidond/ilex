@@ -56,8 +56,15 @@ fn wsl_gitdir(root: &Path) -> Option<PathBuf> {
     if !cfg!(target_os = "linux") {
         return None;
     }
+    translate_windows_path(&dotgit_target(root)?)
+}
+
+/// Read a `.git` file's target without resolving it: Windows paths must also
+/// be readable when the checkout is accessed from WSL.
+pub(crate) fn dotgit_target(root: &Path) -> Option<String> {
     let dotgit = std::fs::read_to_string(root.join(".git")).ok()?;
-    translate_windows_path(dotgit.strip_prefix("gitdir:")?.trim())
+    let target = dotgit.strip_prefix("gitdir:")?.trim();
+    (!target.is_empty()).then(|| target.to_string())
 }
 
 /// `C:/Users/x` or `C:\Users\x` → `/mnt/c/Users/x`.
