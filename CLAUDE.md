@@ -768,6 +768,9 @@ ephemeral checks. Tests use the immutable image ID; the tested list records
 name, reference and ID. `publish --machine --tested-image-id` builds nothing:
 it refuses a replaced tag or a label that differs from the independently
 recomputed fingerprint, then pushes that exact tested ID, signs and verifies.
+Before signing, it reads the pushed manifest by digest with `skopeo inspect
+--raw` and requires its config digest to equal that tested image ID. A push
+that rewrites the config is refused before signing or moving the machine tags.
 
 The first main run builds, rechunks, stages and tests the generic phase-0 base,
 publishes it, then builds/tests/signs `:gaming` on precisely that digest. If the

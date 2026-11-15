@@ -143,6 +143,9 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 (image.clone(), local_fingerprint(&image)?)
             };
             let digest = push(&source, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
+            if args.machine.is_some() {
+                check_pushed_image(&format!("{repository}@{digest}"), &source, insecure, &auth)?;
+            }
             (digest, fingerprint)
         }
     };
@@ -254,6 +257,20 @@ fn push(image: &str, dest: &str, insecure: bool, auth: &Option<Auth>) -> Result<
         bail!("podman push wrote an unexpected digest: {digest:?}");
     }
     Ok(digest)
+}
+
+/// Prove against the registry that pushing preserved the tested local config.
+/// This check happens before any signing or moving tag can expose the image.
+fn check_pushed_image(pinned: &str, image_id: &str, insecure: bool, auth: &Option<Auth>) -> Result<()> {
+    let manifest = skopeo_json(&["inspect", "--raw"], pinned, insecure, auth)?
+        .with_context(|| format!("pushed image {pinned} is missing from the registry"))?;
+    let config = manifest["config"]["digest"].as_str()
+        .with_context(|| format!("{pinned} has no manifest config digest; refusing to sign"))?;
+    if config != image_id {
+        bail!("{pinned} config digest {config} differs from local/tested image ID {image_id}; refusing to sign");
+    }
+    eprintln!("pushed manifest config {config} matches local/tested image ID {image_id}; safe to sign");
+    Ok(())
 }
 
 /// Point `dest` at `pinned` inside the registry: same manifest, same digest,
