@@ -22,10 +22,7 @@ mod vm;
 mod wsl;
 
 #[derive(Parser)]
-#[command(
-    name = "cargo xtask",
-    about = "Build, boot, test and release the ilex image"
-)]
+#[command(name = "cargo xtask", about = "Build, boot, test and release the ilex image")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -89,7 +86,7 @@ fn run(cmd: Cmd) -> Result<()> {
             println!("state dir:   {}", ws.state_dir().display());
             println!("vm slots:    {}", slots::max_slots());
             let selection = config::Selection::read(&ws.root)?;
-            println!(
+            let summary = format!(
                 "selection:   shells={} default-shell={} design-systems={} default-design-system={} machine={}",
                 selection.shells.join(","),
                 selection.default_shell.as_deref().unwrap_or("none"),
@@ -97,6 +94,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 selection.default_design_system.as_deref().unwrap_or("none"),
                 selection.machine
             );
+            println!("{}", terminal_text(&summary));
             for (directory, file) in [
                 ("shells", "shell.toml"),
                 ("design-systems", "design-system.toml"),
@@ -104,18 +102,23 @@ fn run(cmd: Cmd) -> Result<()> {
             ] {
                 println!("{directory} available:");
                 for name in config::available(&ws.root, directory)? {
-                    let manifest =
-                        config::manifest(&ws.root.join(directory).join(&name).join(file))?;
-                    println!(
-                        "  {name}: {}",
-                        manifest
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                    );
+                    match config::manifest(&ws.root.join(directory).join(&name).join(file)) {
+                        Ok(manifest) => {
+                            let description = manifest.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            println!("  {}: {}", terminal_text(&name), terminal_text(description));
+                        }
+                        Err(error) => eprintln!("{}", terminal_text(&format!("  {name}: {error:#}"))),
+                    }
                 }
             }
             Ok(())
         }
     }
+}
+
+/// `info` can inspect an unbuilt manifest, before compose has validated it.
+fn terminal_text(text: &str) -> String {
+    text.chars().map(|ch| {
+        if ch.is_control() { format!("\\u{{{:x}}}", ch as u32) } else { ch.to_string() }
+    }).collect()
 }

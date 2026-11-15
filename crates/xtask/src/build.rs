@@ -65,24 +65,11 @@ pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
     let mut build = Command::new("podman");
     build
         .current_dir(&ws.root)
-        .args([
-            "build",
-            "--layers",
-            "--file",
-            "Containerfile",
-            "--tag",
-            &image,
-        ])
+        .args(["build", "--layers", "--file", "Containerfile", "--tag", &image])
         .args(["--label", &format!("ilex.base-digest={base_digest}")])
-        .args([
-            "--label",
-            &format!("org.opencontainers.image.revision={revision}"),
-        ])
+        .args(["--label", &format!("org.opencontainers.image.revision={revision}")])
         .args(["--label", "org.opencontainers.image.title=ilex"])
-        .args([
-            "--label",
-            "org.opencontainers.image.source=https://github.com/Reidond/ilex",
-        ]);
+        .args(["--label", "org.opencontainers.image.source=https://github.com/Reidond/ilex"]);
     if let Ok(selection) = selection {
         build.args([
             "--build-arg",
@@ -107,10 +94,7 @@ pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
         }
     }
     if let Some(store) = host_kache_store().filter(|_| !args.no_host_kache) {
-        build.args([
-            "--volume",
-            &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display()),
-        ]);
+        build.args(["--volume", &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display())]);
     }
     build.args(&args.podman_args).arg(".");
     cmd::run(&mut build)?;

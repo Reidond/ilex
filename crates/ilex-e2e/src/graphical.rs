@@ -339,9 +339,7 @@ fn wait_session(vm: &mut Vm) -> Result<()> {
     let compositor = common::shell_property(&shell, "session", "compositor")?;
     vm.wait_for(
         "a graphical session for the test user",
-        &format!(
-            "loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep ."
-        ),
+        &format!("loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep ."),
         SESSION_TIMEOUT,
     )?;
     vm.wait_for(

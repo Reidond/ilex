@@ -121,11 +121,7 @@ fn first_boot_units(vm: &Vm) -> Result<()> {
             problems.push(format!("{unit} is `{state}`"));
         }
     }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        bail!("{}", problems.join("\n"))
-    }
+    if problems.is_empty() { Ok(()) } else { bail!("{}", problems.join("\n")) }
 }
 
 fn bootc_status(vm: &Vm) -> Result<()> {

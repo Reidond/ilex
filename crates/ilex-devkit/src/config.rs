@@ -53,7 +53,7 @@ impl Selection {
     pub fn from_labels(labels: &BTreeMap<String, String>) -> Result<Self> {
         let get = |key: &str| {
             labels.get(key).with_context(|| format!(
-            "image was built before configurations existed (missing {key}); rebuild it with `cargo xtask build`"
+            "image has no ilex.* configuration labels (missing {key}; built before configurations existed, or without `cargo xtask build`); rebuild it with `cargo xtask build`"
         ))
         };
         let list = |key| -> Result<Vec<String>> {
