@@ -165,9 +165,23 @@ first). URLs, paths, `.rpm` filenames, options and xargs quoting are rejected.
 transaction enables `localpkg_gpgcheck=1`. Human-facing manifest strings reject
 all C0, C1 and DEL control characters.
 
-Design systems live in `design-systems/<name>/design-system.toml` with a JSON
-object token file (default `tokens.json`). None ships yet. A shell's
-`[theme] targets` must be empty until the theme generator defines outputs.
+Design systems are data in `design-systems/<name>/`: `design-system.toml`
+names the directory, describes it and names a JSON object token file (default
+`tokens.json`). The token file is the design system's own exported file and
+the only place a token value is edited. The image ships its unchanged bytes
+at `/usr/share/ilex/design-systems/<name>/tokens.json`, as recorded in
+`image.json`. The first and default design system is `ilex`: Breeze frames,
+Adwaita interiors and holly green, with light and dark tokens.
+
+To add another design system, drop in a directory with `design-system.toml`
+(`name` equal to the directory name, `description`, optional `tokens`) and its
+token file, then add the name to `design-systems` in `image.toml`. Set
+`default-design-system` there to choose the image's default, and rebuild the
+image; no code changes are needed. A shell asks for generated outputs with
+`[theme] targets`. None does yet: targets must be empty until the M1 generator
+defines them, and nothing renders these tokens today. Fonts and wallpapers
+are not part of a design system directory yet.
+
 Machines live in `machines/<name>/machine.toml`; `generic` is the base image
 with no packages, overlay or publishing setting. Add a machine by creating one
 directory: `name` must equal its basename, `description` is required, `publish`

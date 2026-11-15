@@ -2,4 +2,5 @@
 shells = ["gnome"]
 default-shell = "gnome"
 
-design-systems = []
+design-systems = ["ilex"]
+default-design-system = "ilex"

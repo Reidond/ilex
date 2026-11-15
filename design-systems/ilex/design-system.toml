@@ -1,0 +1,5 @@
+name = "ilex"
+description = "Breeze frames, Adwaita interiors, holly green. Design 1.0, 14 November 2026"
+# The design system's token file, as its Claude design-system artifact
+# exports it. The only place a value is edited.
+tokens = "tokens.json"
