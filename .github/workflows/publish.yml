@@ -378,7 +378,15 @@ jobs:
 
       - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
         with:
+          version: v2.1.1
+          token: ""
+          pr-comment: "false"
           github-cache: "true"
+
+      - name: Build publisher without signing credentials
+        run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          bash .github/build-publisher.sh
 
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
@@ -396,7 +404,6 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
           # The upgrade tier must have tested this very digest. The one
           # exception is the very first publish: the upgrade job found no
           # :latest to upgrade from.
@@ -413,9 +420,10 @@ jobs:
              { [ "$V1_EXISTS" = false ] && [ "$V1_DIGEST" = - ]; }; then :; else
             echo '::error::upgrade did not record an explicit v1 digest or first-publish absence'; exit 1
           fi
-          if bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$repo:latest" &&
-             bash .github/publish-head.sh swap "$repo:latest" "$V1_DIGEST"; then
-            cargo xtask publish --digest "$STAGED"
+          without_key() { env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD "$@"; }
+          if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$repo:latest" &&
+             without_key bash .github/publish-head.sh swap "$repo:latest" "$V1_DIGEST"; then
+            "$XTASK_PUBLISHER" publish --digest "$STAGED"
             echo 'published=true' >> "$GITHUB_OUTPUT"
           else
             rc=$?
@@ -588,6 +596,10 @@ jobs:
               "$machine" "$image_id" "$previous" "$publish" >> "$GITHUB_STEP_SUMMARY"
           done < "$RUNNER_TEMP/pending-machines"
           if grep -q $'\ttrue$' "$RUNNER_TEMP/tested-machines"; then echo 'changed=true' >> "$GITHUB_OUTPUT"; fi
+
+      - name: Build publisher without signing credentials
+        if: steps.tested.outputs.changed == 'true'
+        run: bash .github/build-publisher.sh
 
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         if: >-

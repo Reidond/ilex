@@ -729,8 +729,19 @@ the post step. Other actions still execute within the job's permissions; this
 does not turn the job into a credential sandbox.
 Both signing jobs pin cosign-installer's v4.1.3 action to
 `756fe2d284c7292c4e9b62c8a28f1e5629c59532`; base `publish` also pins kache's
-v1 action to the same commit as machines. The base publish job retains kache's
-default job token input and existing permissions; pinning does not narrow them.
+v1 action to the same commit as machines. Both select binary v2.1.1, pass an
+empty token and disable PR comments; job token permissions remain unchanged.
+Both jobs run `cargo build --locked -p xtask` before the signing step and record
+the executable path from Cargo metadata. The key-bearing step invokes that
+prebuilt binary directly, never Cargo, rustc, kache or a dependency build script.
+The machines prebuild also runs on a changed branch-test image, with no key.
+The cosign installer's own steps and cache post steps receive no signing key:
+the key/password are step environment values, not job environment values.
+Guard/API/registry probes outside the publisher explicitly remove both key
+variables. What retains the key environment is the trusted signing shell,
+the prebuilt publisher and its required child tools (git, podman, skopeo and
+cosign; podman does not forward it into the image's RPM query). This is not
+process isolation or a guarantee against malicious trusted publisher/tool code.
 
 The machine base is the exact staged/tested digest, or current `:latest`
 resolved once by digest when the base is unchanged on main (even when `test`
