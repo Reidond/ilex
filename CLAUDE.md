@@ -108,7 +108,7 @@ packages are installed in one dnf transaction with all their excludes.
 | Thing | Installed | Default | Chosen by a person |
 | --- | --- | --- | --- |
 | Shell | per image, in `image.toml` | per image, `default-shell` | at sign-in, from the greeter's sessions |
-| Design system | per image, in `image.toml` | per image, `default-design-system` | in their home, by a shell that reads design systems |
+| Design system | per image, in `image.toml` | per image, `default-design-system` | planned (M1): state in their home, read by a shell; not built |
 | Machine configuration | per image tag (`:latest` is `generic`) | `generic` | per machine, with `bootc switch` |
 
 A shell is `shells/<name>/shell.toml`: its name and description, packages,
@@ -172,6 +172,12 @@ the only place a token value is edited. The image ships its unchanged bytes
 at `/usr/share/ilex/design-systems/<name>/tokens.json`, as recorded in
 `image.json`. The first and default design system is `ilex`: Breeze frames,
 Adwaita interiors and holly green, with light and dark tokens.
+
+`default-design-system` is recorded in `image.json` and the
+`ilex.default-design-system` image label; nothing reads it yet. A shell will
+use it when the person has chosen nothing, or their chosen design system is
+no longer installed in the image. Per-user selection is planned for M1;
+neither its state format nor its reader is built.
 
 To add another design system, drop in a directory with `design-system.toml`
 (`name` equal to the directory name, `description`, optional `tokens`) and its
