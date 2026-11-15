@@ -256,6 +256,8 @@ mode, link target and byte of the machine directory and shared build helpers;
 an unchanged key skips the build, preserving its image ID and installed disk.
 Machine fingerprints include that key too, covering the actual supplied generic
 base's content even when its manifests are outside this checkout.
+Machine layers set `org.opencontainers.image.revision` to the commit that built
+the layer, including when the generic base was published by an older commit.
 
 The local opt-in `config::machine_fixture` tier builds and boots a throwaway
 machine outside the repository with a fresh marker and a kargs file. An internal
@@ -682,23 +684,48 @@ jobs and a successful or intentionally skipped publish, never in a `v1_disk`
 run or a pull request. Every name is validated against the manifest's name
 rules before entering a loop or tag. If the base changed, main requires its
 publish to have succeeded. A branch run builds and tests against the staged
-digest, with no signing keys or registry token in those steps.
+digest. The cosign key/password reach only the publishing step. Registry
+authorization is the job's `packages: write` GitHub token, not a per-step
+permission boundary. Checkout does not persist credentials. The machines job
+pins kache-action's v1 code to `ad7317540dcdd71c904f7a60a87b620a0c0e67ed`,
+sets kache `v2.1.1`, supplies an empty token input and disables PR comments.
+At that commit the input token is used only for release discovery and PR
+comments; an explicit version and no comments avoid both. GitHub cache
+restore/save uses the separate Actions cache runtime authorization, including
+the post step. Other actions still execute within the job's permissions; this
+does not turn the job into a credential sandbox.
 
 The machine base is the exact staged/tested digest, or current `:latest`
 resolved once by digest when the base is unchanged on main (even when `test`
 staged an unsigned equivalent without publishing it). Branches test the staged
-digest. An old `:latest` without
-generic's labels or generated-file/overlay registry is skipped with a notice:
-it cannot accept machine layers and needs a phase-0 base published first.
+digest. The only legacy skip is an unchanged base with **no `ilex.machine`
+label at all**, before any opted-in machine tag exists. It prints a notice and
+needs a phase-0 base published first. A newly built unlabelled base, a labelled
+base with incompatible configuration, missing generated-file/overlay metadata,
+or any registry/podman probe failure fails the job. After a machine tag exists,
+an unlabelled base is a regression and fails too. Only the explicit legacy
+status 10 from `.github/machine-base.sh registry` is treated as a successful
+skip; failures checking machine-tag existence are never evidence of absence.
 Otherwise a machine is skipped when neither base nor machine inputs changed,
 unless `test` forces testing. `changed --machine --inputs-only` compares the
 same content/mode/link hash the builder writes as `ilex.machine-inputs`, without
 needing a local image. A built layer's fingerprint includes `ilex.machine-key`,
 covering the actual base image ID; the inherited base fingerprint is cleared.
-CI also passes `--base <pinned-local-base>` to the inputs check and requires
+CI passes the registry manifest's config digest as `--base-id` to the inputs
+check and requires
 `base_changed=false` before skipping: an earlier failed/cancelled machines job
 must catch up even when generic `:latest` and the manifests are now unchanged.
-The complete fingerprint is compared again before testing/publishing.
+The config digest is the image ID (with `sha256:` removed); the job verifies
+that equality again after pulling. Registry config/manifest reads decide the
+inputs-only question, so an unchanged nightly does not pull the 5 GB base or
+install the VM stack. The base is pulled only when at least one machine needs
+a build. The complete fingerprint is compared again before testing/publishing.
+
+The early skip does not query Fedora repositories. An update to a package
+installed only by a machine layer, such as Gamescope, reaches `:<machine>` on
+the next generic base change or a forced CI run (`test=true`), when that runner
+builds a fresh layer and its RPM versions enter the full fingerprint. A nightly
+with unchanged base and manifest inputs deliberately skips that package lookup.
 
 Machine images preserve every base layer and add one squashed layer; they are
 not rechunked. Before testing, the job compares RPM-recorded file capabilities
@@ -706,12 +733,21 @@ with `getcap` on the actual base and machine filesystems using
 `.github/check-filecaps.py`; missing capabilities fail the job. Each changed
 machine runs `ephemeral::` only, so installed-system-only behaviour (SELinux,
 kernel arguments) still needs local `disk::` evidence. All machine tests must
-pass before the single publishing step receives credentials. On main only,
+pass before the single publishing step receives the signing key/password. On main only,
 after checking `:latest` still has the tested base digest, it signs and publishes
 `:<machine>`, `:<machine>-YYYYMMDD` and `:<machine>-sha-<short>` in the same
 repository. It never stages or touches `:candidate`, `:latest` or base date/SHA
-tags. Forced tests do not republish an unchanged fingerprint. The fingerprint
-is recorded by a config-only build that preserves the tested filesystem.
+tags. A mismatch prints `::error::` with both base references. Immediately before
+each publisher invocation, it reads the current head of main and compares it
+with `GITHUB_SHA`. An overtaken/re-run commit prints `::warning::` with both
+commits and finishes green without publishing; the newer run publishes instead.
+
+Forced tests do not republish an unchanged fingerprint. `xtask prepare-publish`
+records the fingerprint through a config-only build **before** capability and
+ephemeral checks. Tests use the immutable image ID; the tested list records
+name, reference and ID. `publish --machine --tested-image-id` builds nothing:
+it refuses a replaced tag or a label that differs from the independently
+recomputed fingerprint, then pushes that exact tested ID, signs and verifies.
 
 The first main run builds, rechunks, stages and tests the generic phase-0 base,
 publishes it, then builds/tests/signs `:gaming` on precisely that digest. If the
@@ -759,7 +795,9 @@ cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :lat
 cargo xtask info --published-machines  # validated publish=true names, one per line
 cargo xtask changed <ref> --machine gaming --inputs-only # inputs_changed=; no local image
 cargo xtask changed <ref> --machine gaming --image <machine-image> # full fingerprint
-cargo xtask publish <machine-image> --machine gaming # CI only: machine tags, never :latest
+cargo xtask prepare-publish <machine-image> --machine gaming # before tests; prints image_id=
+ILEX_IMAGE=sha256:<image_id> cargo xtask test ephemeral::
+cargo xtask publish <machine-image> --machine gaming --tested-image-id <image_id> # CI only; no build
 ```
 
 - The background parts (`vm-prep.sh`) log every line with the time it was

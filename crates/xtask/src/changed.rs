@@ -33,8 +33,11 @@ pub struct Args {
     pub inputs_only: bool,
     /// Also compare the published machine's base identity with this local
     /// generic base; prints base_changed= (recovers a missed machine publish)
-    #[arg(long, requires = "inputs_only")]
+    #[arg(long, requires = "inputs_only", conflicts_with = "base_id")]
     pub base: Option<String>,
+    /// Registry manifest's config digest (image ID), without pulling the base
+    #[arg(long, requires = "inputs_only")]
+    pub base_id: Option<String>,
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
@@ -61,11 +64,21 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let repository = repo_of(&args.reference);
     let auth = Auth::login(repository)?;
     let published = published_fingerprint(&args.reference, repository, &auth, label)?;
-    if let Some(base) = &args.base {
+    let base_id = if let Some(base) = &args.base {
         if machine::image_machine(base)? != "generic" {
             bail!("machine base must be generic: {base}");
         }
-        let prefix = format!("{}-", bcvk::image_id(base)?);
+        Some(bcvk::image_id(base)?)
+    } else if let Some(id) = &args.base_id {
+        if !registry::is_digest(id) {
+            bail!("--base-id must be a sha256 config digest, got {id:?}");
+        }
+        Some(id.strip_prefix("sha256:").unwrap().to_string())
+    } else {
+        None
+    };
+    if let Some(id) = base_id {
+        let prefix = format!("{id}-");
         let key = published_fingerprint(&args.reference, repository, &auth, "ilex.machine-key")?;
         let same_base = matches!(key, Published::Fingerprint(key) if key.starts_with(&prefix));
         registry::github_output("base_changed", &(!same_base).to_string())?;

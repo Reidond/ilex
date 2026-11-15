@@ -433,11 +433,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: kunobi-ninja/kache-action@v1
+      # v1: token is used for release discovery/PR comments, not the cache API.
+      # Pin both action code and binary version so neither needs a token input.
+      # The job token still has packages:write; this is not a per-step sandbox.
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
         with:
+          version: v2.1.1
+          token: ""
+          pr-comment: "false"
           github-cache: "true"
 
-      - name: Select the immutable machine base
+      - name: Published machines (validated manifest names only)
+        run: cargo xtask info --published-machines > "$RUNNER_TEMP/published-machines"
+
+      - name: Select the immutable machine base (registry metadata only)
         id: base
         env:
           STAGED: ${{ needs.build.outputs.digest }}
@@ -464,26 +473,41 @@ jobs:
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           base="$repo@$digest"
           echo "machine base: $base"
-          podman pull --quiet "$base"
-          # The pre-phase-0 :latest cannot accept a machine layer. This is a
-          # successful, explicit skip, including a machine-only first run.
-          labels=$(podman image inspect --format '{{json .Config.Labels}}' "$base")
-          if ! jq -e '.["ilex.machine"] == "generic" and
-              has("ilex.shells") and has("ilex.default-shell") and
-              has("ilex.design-systems") and has("ilex.default-design-system")' <<<"$labels" >/dev/null ||
-             ! podman run --rm --network=none --entrypoint /usr/bin/test "$base" -s /usr/share/ilex/.generated.json ||
-             ! podman run --rm --network=none --entrypoint /usr/bin/test "$base" -f /usr/share/ilex/.overlays.json; then
-            echo "::notice::Skipping machines: $base lacks generic configuration labels or registered generated-file/overlay metadata; a phase-0 base must be published first."
+          if bash .github/machine-base.sh registry "$base" "$BASE_CHANGED" "$RUNNER_TEMP/published-machines" "$repo" > "$RUNNER_TEMP/base-info"; then
+            cat "$RUNNER_TEMP/base-info" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            # Only the deliberate unlabelled/unchanged/unpublished case is
+            # green. Probe, metadata, registry and newly built base errors fail.
+            if [ "$rc" != 10 ]; then exit "$rc"; fi
             exit 0
           fi
           echo "base=$base" >> "$GITHUB_OUTPUT"
 
-      - name: Published machines (validated manifest names only)
+      - name: Plan changed machine layers without pulling the base
+        id: plan
         if: steps.base.outputs.base != ''
-        run: cargo xtask info --published-machines > "$RUNNER_TEMP/published-machines"
+        env:
+          BASE_ID: ${{ steps.base.outputs.base_id }}
+          BASE_CHANGED: ${{ needs.build.outputs.changed }}
+          FORCE_TEST: ${{ inputs.test == true }}
+        run: |
+          : > "$RUNNER_TEMP/pending-machines"
+          while IFS= read -r machine; do
+            cargo xtask changed "$IMAGE_REPO:$machine" --machine "$machine" --inputs-only --base-id "$BASE_ID" > "$RUNNER_TEMP/machine-inputs"
+            cat "$RUNNER_TEMP/machine-inputs"
+            if [ "$BASE_CHANGED" != true ] && [ "$FORCE_TEST" != true ] &&
+               grep -qx 'inputs_changed=false' "$RUNNER_TEMP/machine-inputs" &&
+               grep -qx 'base_changed=false' "$RUNNER_TEMP/machine-inputs"; then
+              echo "$machine: published base and machine inputs unchanged; skipping without pulling the base"
+              continue
+            fi
+            printf '%s\n' "$machine" >> "$RUNNER_TEMP/pending-machines"
+          done < "$RUNNER_TEMP/published-machines"
+          if [ -s "$RUNNER_TEMP/pending-machines" ]; then echo 'build=true' >> "$GITHUB_OUTPUT"; fi
 
       - name: apt's packages from the cache
-        if: steps.base.outputs.base != ''
+        if: steps.plan.outputs.build == 'true'
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/apt-debs
@@ -492,33 +516,22 @@ jobs:
 
       - name: Build and test changed machine layers
         id: tested
-        if: steps.base.outputs.base != ''
+        if: steps.plan.outputs.build == 'true'
         env:
           BASE: ${{ steps.base.outputs.base }}
-          BASE_CHANGED: ${{ needs.build.outputs.changed }}
+          BASE_ID: ${{ steps.base.outputs.base_id }}
           FORCE_TEST: ${{ inputs.test == true }}
         run: |
           : > "$RUNNER_TEMP/tested-machines"
-          stack_started=false
+          podman pull --quiet "$BASE"
+          bash .github/machine-base.sh files "$BASE" "$BASE_ID"
+          podman run --rm -i --network=none --entrypoint python3 "$BASE" -I -S - < .github/check-filecaps.py
+          export ILEX_UPGRADE_FROM="$BASE"
+          nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
           while IFS= read -r machine; do
             # info validated the basename, the manifest's equal name and its
             # publish boolean before printing ANY names. No eval/source, and
             # no machine name is interpolated into sg's shell command.
-            cargo xtask changed "$IMAGE_REPO:$machine" --machine "$machine" --inputs-only --base "$BASE" > "$RUNNER_TEMP/machine-inputs"
-            cat "$RUNNER_TEMP/machine-inputs"
-            if [ "$BASE_CHANGED" != true ] && [ "$FORCE_TEST" != true ] &&
-               grep -qx 'inputs_changed=false' "$RUNNER_TEMP/machine-inputs" &&
-               grep -qx 'base_changed=false' "$RUNNER_TEMP/machine-inputs"; then
-              echo "$machine: published base and machine inputs unchanged; skipping"
-              continue
-            fi
-            if [ "$stack_started" = false ]; then
-              # Also checks the rechunked BASE, so inherited losses fail here.
-              podman run --rm -i --network=none --entrypoint python3 "$BASE" -I -S - < .github/check-filecaps.py
-              export ILEX_UPGRADE_FROM="$BASE"
-              nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
-              stack_started=true
-            fi
             image=$(cargo xtask build --machine "$machine" --on "$BASE")
             cargo xtask changed "$IMAGE_REPO:$machine" --machine "$machine" --image "$image" > "$RUNNER_TEMP/machine-change"
             cat "$RUNNER_TEMP/machine-change"
@@ -526,16 +539,19 @@ jobs:
               echo "$machine: image unchanged; skipping"
               continue
             fi
-            # Read the actual image xattrs, not the VM's virtiofs view of them.
-            podman run --rm -i --network=none --entrypoint python3 "$image" -I -S - < .github/check-filecaps.py
+            # All image mutation happens BEFORE tests and before signing keys
+            # are exposed. Test the ID, then publication must use that same ID.
+            cargo xtask prepare-publish "$image" --machine "$machine"
+            image_id=$(podman image inspect --format '{{.Id}}' "$image")
+            podman run --rm -i --network=none --entrypoint python3 "$image_id" -I -S - < .github/check-filecaps.py
             .github/vm-prep.sh wait vm-stack
-            export ILEX_IMAGE="$image"
+            export ILEX_IMAGE="sha256:$image_id"
             sg libvirt -c 'cargo xtask test ephemeral::'
             # Forced tests do not force an unchanged image to be republished.
             if grep -qx 'changed=true' "$RUNNER_TEMP/machine-change"; then
-              printf '%s\t%s\n' "$machine" "$image" >> "$RUNNER_TEMP/tested-machines"
+              printf '%s\t%s\t%s\n' "$machine" "$image" "$image_id" >> "$RUNNER_TEMP/tested-machines"
             fi
-          done < "$RUNNER_TEMP/published-machines"
+          done < "$RUNNER_TEMP/pending-machines"
           if [ -s "$RUNNER_TEMP/tested-machines" ]; then echo 'changed=true' >> "$GITHUB_OUTPUT"; fi
 
       - uses: sigstore/cosign-installer@v4.1.3
@@ -545,14 +561,15 @@ jobs:
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
-      # The ONLY step in this job with credentials. All machine tests and
-      # capability checks completed successfully before these are exposed.
+      # Only this step receives the cosign key/password. Registry authorization
+      # is the job's packages:write token; action inputs are not a sandbox.
       - name: Publish and sign tested machines (main only)
         if: >-
           success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true' &&
           (needs.publish.result == 'success' || needs.build.outputs.changed == 'false')
         env:
           BASE: ${{ steps.base.outputs.base }}
+          GH_TOKEN: ${{ github.token }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
@@ -560,9 +577,19 @@ jobs:
           # Main must still point to the exact base these layers were tested
           # on. No fallback to a different/latest image is allowed.
           latest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:latest")
-          test "$BASE" = "$IMAGE_REPO@$latest"
-          while IFS=$'\t' read -r machine image; do
-            cargo xtask publish "$image" --machine "$machine"
+          if [ "$BASE" != "$IMAGE_REPO@$latest" ]; then
+            echo "::error::machine tested base $BASE differs from current :latest $IMAGE_REPO@$latest"
+            exit 1
+          fi
+          while IFS=$'\t' read -r machine image image_id; do
+            main_head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+            if bash .github/publish-head.sh "$GITHUB_SHA" "$main_head"; then
+              cargo xtask publish "$image" --machine "$machine" --tested-image-id "$image_id"
+            else
+              rc=$?
+              if [ "$rc" = 3 ]; then exit 0; fi
+              exit "$rc"
+            fi
           done < "$RUNNER_TEMP/tested-machines"
 
   # Only in a run started with `v1_disk` (the publish job starts one after each

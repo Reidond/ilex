@@ -14,6 +14,7 @@ mod changed;
 mod disk;
 mod iso;
 mod publish;
+mod prepare_publish;
 mod rechunk;
 mod registry;
 mod select;
@@ -45,6 +46,8 @@ enum Cmd {
     Changed(changed::Args),
     /// Push by digest, tag and sign (CI only)
     Publish(publish::Args),
+    /// Record a machine fingerprint before testing its immutable image ID
+    PreparePublish(prepare_publish::Args),
     /// Build the installer ISO for a published digest and push it (CI only)
     Iso(iso::Args),
     /// Build a drupe tool image from Fedora packages (`cargo xtask tool strace`)
@@ -88,6 +91,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Test(args) => test::run(&ws, args),
         Cmd::Changed(args) => changed::run(&ws, args),
         Cmd::Publish(args) => publish::run(&ws, args),
+        Cmd::PreparePublish(args) => prepare_publish::run(&ws, args),
         Cmd::Iso(args) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
         Cmd::Info { published_machines: true } => {

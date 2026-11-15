@@ -17,12 +17,11 @@
 //! signature format).
 
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use ilex_devkit::{Workspace, cmd, config, git, machine, workspace::check_tag_length};
+use ilex_devkit::{Workspace, bcvk, cmd, config, git, machine, workspace::check_tag_length};
 
 use crate::rechunk;
 use crate::registry::{self, Auth, FINGERPRINT_LABEL};
@@ -51,8 +50,11 @@ pub struct Args {
     #[arg(long, value_name = "sha256:…")]
     pub digest: Option<String>,
     /// Publish a machine as :<name>, :<name>-YYYYMMDD and :<name>-sha-<short>
-    #[arg(long, conflicts_with_all = ["stage", "digest"])]
+    #[arg(long, requires = "tested_image_id", conflicts_with_all = ["stage", "digest"])]
     pub machine: Option<String>,
+    /// Immutable ID recorded before this machine's capability and VM tests
+    #[arg(long, requires = "machine")]
+    pub tested_image_id: Option<String>,
     /// Throwaway public key for local-registry verification only
     #[arg(long, requires = "allow_local_registry")]
     pub verification_key: Option<PathBuf>,
@@ -120,16 +122,27 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         None => {
             let image = ws.resolve_image(args.image.as_deref());
             require_machine(&image, args.machine.as_deref().unwrap_or("generic"))?;
-            let fingerprint = if args.machine.is_some() {
-                // Machine layers clear the inherited fingerprint. Use the
-                // same calculation as `changed`, including actual base identity.
-                let fingerprint = rechunk::candidate_fingerprint(ws, &image)?;
-                label_fingerprint(&image, &fingerprint)?;
-                fingerprint
+            let (source, fingerprint) = if let Some(tested) = &args.tested_image_id {
+                let expected = tested.strip_prefix("sha256:").unwrap_or(tested);
+                if !registry::is_digest(&format!("sha256:{expected}")) {
+                    bail!("--tested-image-id {tested:?} is not a sha256 image ID");
+                }
+                let actual = bcvk::image_id(&image)?;
+                if actual != expected {
+                    bail!("{image} is image {actual}, but tests recorded {expected}; refusing to publish a replacement image");
+                }
+                let pinned = format!("sha256:{actual}");
+                let computed = rechunk::fingerprint(ws, &pinned)?;
+                let label = local_fingerprint(&pinned)?;
+                if label != computed {
+                    bail!("{image} fingerprint label {label} differs from recomputed {computed}; run prepare-publish and test that image ID first");
+                }
+                eprintln!("publishing tested machine image ID {actual} (no build)");
+                (pinned, computed)
             } else {
-                local_fingerprint(&image)?
+                (image.clone(), local_fingerprint(&image)?)
             };
-            let digest = push(&image, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
+            let digest = push(&source, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
             (digest, fingerprint)
         }
     };
@@ -217,7 +230,7 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
 
 fn local_fingerprint(image: &str) -> Result<String> {
     rechunk::local_label(image, FINGERPRINT_LABEL)?.with_context(|| {
-        format!("{image} has no {FINGERPRINT_LABEL} label; run `cargo xtask rechunk` on it first")
+        format!("{image} has no {FINGERPRINT_LABEL} label; run `cargo xtask rechunk` for a generic image or `cargo xtask prepare-publish` for a machine, then test it first")
     })
 }
 
@@ -314,21 +327,3 @@ fn require_machine(image: &str, expected: &str) -> Result<()> {
     Ok(())
 }
 
-/// Config-only build: preserve the filesystem and every base/layer capability.
-/// FROM uses an inspected immutable ID, never interpolated caller input.
-fn label_fingerprint(image: &str, fingerprint: &str) -> Result<()> {
-    if !registry::is_digest(fingerprint) {
-        bail!("invalid machine fingerprint {fingerprint:?}");
-    }
-    let id = cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", image]))?;
-    let mut build = Command::new("podman");
-    build.args(["build", "--pull=never", "--file", "-", "--tag", image, "--label", &format!("{FINGERPRINT_LABEL}={fingerprint}")]);
-    eprintln!("$ {}", cmd::display(&build));
-    let mut child = build.stdin(Stdio::piped()).stdout(std::io::stderr()).spawn()?;
-    writeln!(child.stdin.take().context("label build stdin")?, "FROM {id}")?;
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("machine fingerprint label build failed with {status}");
-    }
-    Ok(())
-}

@@ -7,7 +7,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::{Workspace, bcvk, cmd, config, workspace::check_tag_length};
+use crate::{Workspace, bcvk, cmd, config, git, workspace::check_tag_length};
 
 /// Automatically created layers always belong to this checkout. Explicit bases
 /// get a stable reference hash, including digest refs and other checkouts' tags.
@@ -154,6 +154,7 @@ pub fn build(
         );
     }
     let base_id = bcvk::image_id(base).with_context(|| format!("resolving machine base {base}"))?;
+    let revision = git::revision(&ws.root)?;
     let inputs = inputs(ws, directory, podman_args)?;
     let key = format!("{base_id}-{inputs}");
     let current = cmd::probe(Command::new("podman").args([
@@ -198,6 +199,7 @@ pub fn build(
             &format!("ilex.machine-key={key}"),
         ])
         .args(["--label", &format!("ilex.machine-inputs={inputs}")])
+        .args(["--label", &format!("org.opencontainers.image.revision={revision}")])
         .args(["--unsetlabel", "ilex.fingerprint"])
         .args(podman_args)
         .arg("build");
