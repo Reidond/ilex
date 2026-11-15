@@ -27,11 +27,15 @@ pub const LABELS: [&str; 5] = [
 impl Selection {
     pub fn read(root: &Path) -> Result<Self> {
         let image = manifest(&root.join("image.toml"))?;
+        Self::from_manifest(&image)
+    }
+
+    fn from_manifest(image: &toml::Table) -> Result<Self> {
         Ok(Self {
-            shells: string_list(&image, "shells")?,
-            default_shell: optional_string(&image, "default-shell")?,
-            design_systems: string_list(&image, "design-systems")?,
-            default_design_system: optional_string(&image, "default-design-system")?,
+            shells: string_list(image, "shells")?,
+            default_shell: optional_string(image, "default-shell")?,
+            design_systems: string_list(image, "design-systems")?,
+            default_design_system: optional_string(image, "default-design-system")?,
             machine: "generic".into(),
         })
     }
@@ -311,7 +315,7 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
     for name in available(root, "machines")? {
         machine_manifest(root, &name)?;
     }
-    let defaults = Selection::read(root)?;
+    let defaults = Selection::from_manifest(&image)?;
     defaults.validate_shells(root)?;
     for (index, name) in defaults.design_systems.iter().enumerate() {
         validate_name(name)?;
