@@ -38,6 +38,9 @@ fn checked_output(image: String) -> Result<String> {
 
 /// Read the actual image's machine, also for explicit references from CI.
 pub fn image_machine(image: &str) -> Result<String> {
+    if !bcvk::image_exists(image) {
+        bail!("image {image} not found in local container storage; build or pull it first");
+    }
     let name = cmd::output(Command::new("podman").args([
         "image",
         "inspect",

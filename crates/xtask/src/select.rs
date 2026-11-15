@@ -152,10 +152,10 @@ impl Resolved {
         if !(if base { self.check_base_selection } else { self.check_selection }) {
             return Ok(None);
         }
-        if !crate::build::image_exists(&self.image) {
+        if !crate::build::image_exists(image) {
             return Ok(Some(format!(
                 "image {} not found in local container storage; run `{}` first",
-                self.image, self.build_command,
+                image, self.build_command,
             )));
         }
         let requested = self.selection.as_ref().context(

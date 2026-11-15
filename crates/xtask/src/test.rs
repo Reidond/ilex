@@ -87,6 +87,7 @@ fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
 fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
     let requested = std::env::var("ILEX_IMAGE").ok().filter(|s| !s.is_empty());
     let resolved = args.selection.resolve(ws, requested.as_deref(), None)?;
+    let machine_layer = args.selection.requested_machine()?.as_deref().is_some_and(|m| m != "generic");
     let image = resolved.image.clone();
     let mut rebuild = args.build;
     if !rebuild {
@@ -94,8 +95,13 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
             rebuild = true;
         } else if let Some(message) = resolved.mismatch()? {
             if requested.is_some() {
+                let action = if machine_layer {
+                    "pass --build to derive a local machine layer from a generic ILEX_IMAGE base"
+                } else {
+                    "pass --build to rebuild ILEX_IMAGE with this selection"
+                };
                 bail!(
-                    "{message}; ILEX_IMAGE overrides the variant; unset ILEX_IMAGE to test it, or pass --build to rebuild ILEX_IMAGE with this selection"
+                    "{message}; ILEX_IMAGE overrides the variant; unset ILEX_IMAGE to test it, or {action}"
                 );
             }
             eprintln!("ilex: {message}; rebuilding the implicit image");
@@ -103,7 +109,6 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
         }
     }
     if rebuild {
-        let machine_layer = args.selection.requested_machine()?.as_deref().is_some_and(|m| m != "generic");
         return build::build_resolved(
             ws,
             &build::Args {
