@@ -81,7 +81,8 @@ impl Args {
         ilex_devkit::config::validate_machine_name(&machine)?;
         let available = ilex_devkit::config::available(&ws.root, "machines")?;
         if !available.contains(&machine) {
-            bail!("unknown machine `{machine}`; available machines: {}", available.join(", "));
+            bail!("unknown machine `{machine}`; available machines: {}",
+                available.iter().map(|name| format!("{name:?}")).collect::<Vec<_>>().join(", "));
         }
         let selection = selection.map(|mut selection| {
             selection.machine = machine.clone();
