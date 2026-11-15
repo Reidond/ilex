@@ -22,8 +22,10 @@
 //! It only exists when a filter names it (`cargo xtask test iso::`), because
 //! it builds an ISO and runs an install: tens of minutes. `cargo xtask test
 //! iso::` builds the ISO first; `ILEX_ISO=<path>` uses a ready-made one (and
-//! `ILEX_ISO_TARGET` says what it makes the machine track). The image it
-//! installs is the published one, not the image under test.
+//! `ILEX_ISO_TARGET` says what it makes the machine track). `ILEX_ISO_DIGEST`
+//! supplies the digest verified before CI's installation gate. The image it
+//! installs is the published one, not the image under test. Registry lookup
+//! and the installed digest comparison are mandatory, never best effort.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -100,6 +102,17 @@ pub fn trials() -> Vec<Trial> {
 fn run() -> Result<()> {
     let ws = common::workspace()?;
     let iso = iso_path()?;
+    let target = target()?;
+    let digest = published_digest(&target)?;
+    if let Ok(verified) = std::env::var("ILEX_ISO_DIGEST") {
+        require_digest(&verified)?;
+        if verified != digest {
+            bail!(
+                "installer target {target} is {digest}, but signature verification recorded {verified}"
+            );
+        }
+    }
+    println!("installer target: {target} at {digest}");
     let artifacts = qemu::artifact_dir(&ws, "iso")?;
     clear_artifacts(&artifacts);
     let work = ws.state_dir().join("iso-test");
@@ -116,7 +129,7 @@ fn run() -> Result<()> {
     let vars = work.join("OVMF_VARS.fd");
     let installed = unattended_install(&ws, &iso, &disk, &vars, &work, &artifacts, &mut report);
     if installed {
-        installed_system(&ws, &disk, &vars, &artifacts, &mut report)?;
+        installed_system(&ws, &disk, &vars, &artifacts, &target, &digest, &mut report)?;
     }
     println!("artifacts: {}", artifacts.display());
     report.finish()
@@ -342,6 +355,8 @@ fn installed_system(
     disk: &Path,
     vars: &Path,
     artifacts: &Path,
+    target: &str,
+    digest: &str,
     report: &mut Report,
 ) -> Result<()> {
     // Same firmware variables as the installer: the boot entry it wrote is
@@ -360,7 +375,7 @@ fn installed_system(
 
     report.check(
         "bootc tracks the target image",
-        bootc_status(&vm, artifacts),
+        bootc_status(&vm, artifacts, target, digest),
     );
     report.check("system reaches `running`", system_running(&vm));
     report.check("no failed units", no_failed_units(&vm));
@@ -378,9 +393,9 @@ fn installed_system(
     Ok(())
 }
 
-/// `bootc status` names a booted image that is the target, at the digest the
-/// registry serves for it (when `skopeo` can ask).
-fn bootc_status(vm: &Vm, artifacts: &Path) -> Result<()> {
+/// Both the booted deployment and its tracked origin must match the verified
+/// composition; the booted digest must be exactly the one resolved before install.
+fn bootc_status(vm: &Vm, artifacts: &Path, wanted: &str, expected_digest: &str) -> Result<()> {
     let json = vm.ssh_ok("bootc status --json")?;
     let _ = qemu::write_artifact(artifacts, "bootc-status.json", &json);
     let _ = vm.ssh("bootc status").map(|o| {
@@ -401,33 +416,46 @@ fn bootc_status(vm: &Vm, artifacts: &Path) -> Result<()> {
     let digest = image["imageDigest"].as_str().unwrap_or("?");
     println!("     booted image: {transport}:{name} ({digest})");
     println!("     spec.image: {}", status["spec"]["image"]);
-    let wanted = target()?;
-    if name != wanted {
+    if name != wanted || transport != "registry" {
         bail!("the machine tracks {name}, expected {wanted}");
     }
-    // The installer carries no image: the machine has what the registry
-    // served at install time. Ask the registry now (a publish in between
-    // would be a rare false alarm); skip the check when we can't.
-    match published_digest(&wanted) {
-        Some(published) if published != digest => {
-            bail!("the machine booted {digest}, but {wanted} is {published}")
-        }
-        Some(_) => println!("     {wanted} is the published digest"),
-        None => println!("     (could not ask the registry for {wanted}; digest not checked)"),
+    let origin = &status["spec"]["image"];
+    if origin["image"].as_str() != Some(wanted) || origin["transport"].as_str() != Some("registry")
+    {
+        bail!("the tracked origin is {origin}, expected registry:{wanted}");
+    }
+    if digest != expected_digest {
+        bail!("the machine booted {digest}, but verified {wanted} was {expected_digest}");
+    }
+    println!("     {wanted} is the verified published digest {expected_digest}");
+    Ok(())
+}
+
+fn require_digest(digest: &str) -> Result<()> {
+    let hash = digest.strip_prefix("sha256:").unwrap_or_default();
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        bail!("invalid installer digest {digest:?}: expected sha256 and 64 lowercase hex digits");
     }
     Ok(())
 }
 
-/// The digest `reference` has in its registry, if `skopeo` can tell.
-fn published_digest(reference: &str) -> Option<String> {
-    cmd::probe(Command::new("skopeo").args([
+/// Resolve before booting any VM. Missing/denied/unreadable targets cannot
+/// provide installation evidence, and must never silently disable the assertion.
+fn published_digest(reference: &str) -> Result<String> {
+    let digest = cmd::output(Command::new("skopeo").args([
         "inspect",
         "--no-tags",
         "--format",
         "{{.Digest}}",
         &format!("docker://{reference}"),
     ]))
-    .filter(|d| d.starts_with("sha256:"))
+    .with_context(|| format!("resolving installer target {reference} before installation"))?;
+    require_digest(&digest)?;
+    Ok(digest)
 }
 
 fn system_running(vm: &Vm) -> Result<()> {
