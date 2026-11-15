@@ -86,7 +86,8 @@ COPY --from=build /out/ /
 # files exist. COPY keys the staged data by content; no context bind mount.
 # Generated files have their own tree and no-follow replacement registry.
 COPY --link --from=compose /out/install/ /tmp/ilex-compose/
-RUN python3 /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose && \
+# Isolated Python also prevents a new overlay module from shadowing stdlib.
+RUN python3 -I /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose && \
     rm -rf /tmp/ilex-compose
 
 # Boot to a graphical target when a shell is installed; let bootc's updater
@@ -103,7 +104,7 @@ RUN python3 /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose && \
 RUN chmod 0755 /usr/libexec/ilex/update-notify && \
     mkdir /app && \
     chmod 4755 /usr/libexec/drupe/drupe-enter && \
-    systemctl set-default "$(python3 -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
+    systemctl set-default "$(python3 -I -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
     systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service && \
     systemctl --global enable ilex-update-notify.path ilex-update-notify.service
 

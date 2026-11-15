@@ -94,6 +94,8 @@ JSON and tokens have separate staging and use directory descriptors with
 generated file hashes: a later layer may replace only an unchanged, registered
 generated file. The same installer accepts machine overlay payloads and permits
 replacing a registered `machine.json` without granting overlays replacement rights.
+Final-stage Python runs in isolated mode so overlay files cannot shadow its
+standard-library imports.
 An explicit replacement list in a shell or machine manifest is the extension
 point for a future need such as greetd's packaged `/etc/greetd/config.toml` at
 M5. No replacement list or escape hatch exists today.
