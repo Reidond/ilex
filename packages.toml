@@ -4,3 +4,10 @@
 # Tables as in shells/packages.toml:
 #   install = packages and @groups to install
 #   exclude = packages kept out even when a group pulls them in (dnf --exclude)
+
+[tools]
+# drupe mounts signed tool images with systemd-dissect, also without a shell.
+install = ["systemd-container"]
+# Its VM helpers recommend QEMU; drupe only needs the signed-image tools.
+# Shells and machines may still install QEMU in their own transactions.
+exclude = ["qemu-*"]

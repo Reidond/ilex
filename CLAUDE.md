@@ -104,7 +104,8 @@ cargo xtask info               # resource identity, selection and available conf
 
 `image.toml` names the installed shells and design systems and one default of
 each when its list is non-empty. `packages.toml` is the base's package list,
-installed first in every root image; it is empty today. `shells/packages.toml`
+installed first in every root image; `systemd-container` supplies the
+`systemd-dissect` command Drupe needs even without a shell. `shells/packages.toml`
 contains Firefox, Flatpak, libnotify and the PackageKit excludes, installed only
 with a shell. These and all selected shells' packages share a second transaction
 and image layer, with their combined excludes. A shell's excludes cannot prevent
@@ -114,7 +115,11 @@ installation of a base package. The machine remains the last, squashed layer.
 fedora-bootc image: growth must be at most **128 MiB** (uncompressed `.Size`).
 The error includes both sizes. Packages that exceed the budget belong in a
 shell or machine, or need a justified budget change in a commit. The base adds
-ilex-agent, signature policy, the updater and drupe, with no added RPM today.
+ilex-agent, signature policy, the updater and drupe, plus the latter's
+`systemd-container` runtime dependency. A package-free base boots, but cannot
+install or run drupe tools: `tool::` checks this on both kinds of root.
+The base excludes `qemu-*`, optional recommendations of systemd's VM helpers;
+shells and machines may install them in their own transactions.
 The notifier's three small files remain in `rootfs/`, but neither user unit is
 enabled globally without a shell: no session means no notification is attempted.
 
@@ -313,7 +318,7 @@ the selection; `ilex-agent config --json` returns both documents. The agent's
 self-check validates the configuration, sessions, greeter, target, tokens and
 machine packages, plus the literal non-group entries of `packages.install` and
 `shell-packages.install` recorded in `image.json`. With no shell, the empty
-package/session/token checks pass and the target must be `multi-user.target`;
+shell-package/session/token checks pass and the target must be `multi-user.target`;
 the OS, bootc, install config, signature policy and drupe checks still run.
 `ephemeral::configuration` compares both package lists with the checkout,
 alongside labels, overlays and token hashes, and checks that a shell-free image
