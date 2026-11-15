@@ -172,7 +172,10 @@ the authority for the image's name. Publications add no image label or file.
 TSV without a header: tag, kind (`root` or `layer`), parent tag (`-` for roots),
 machine name, comma-separated shells (`-` for none). All roots precede layers.
 `ilex_devkit::config::publications` exposes these five fields, including machine
-and shells, for CI and the later installer's machine table.
+and shells, for CI and the later installer's machine table. Its `selection`
+field resolves all five expected labels from the same manifest snapshot:
+the row's machine and ordered shells, the first shell as default, and the
+manifest's design systems and default (both cleared without shells).
 `cargo xtask info --installer` prints the validated installer tag.
 
 This PR adds the new publisher beside the existing one. CI and the ISO still
@@ -1069,16 +1072,37 @@ cargo xtask publish <machine-image> --machine ms-7c35 --tested-image-id <image_i
   publishing and staging require `generic`).
 - `publish --as <tag>` first requires a validated publication from `image.toml`.
   Roots require `--stage` or `--digest`; layers require `--tested-image-id` and
-  refuse staging/digest mode. It derives the tag again from all five labels of
-  the pinned local image ID or staged digest, refusing a different composition,
-  missing/inconsistent labels or a default shell that is not first. It builds
+  refuse staging/digest mode. Before staging or signing it compares **all five
+  labels** of the pinned local image ID or staged digest with the row's resolved
+  `selection`, including both design fields; deriving the same tag alone is
+  insufficient. The design fields do not enter the tag spelling. It builds
   nothing. The layer checks the tested ID and independently recomputed
-  fingerprint; both paths retain CI's exact revision check. A local push checks
+  fingerprint; staging now independently recomputes the root fingerprint too.
+  Fingerprint labels must be SHA-256 digests. Every new path, including unsigned
+  staging, checks CI's exact revision. A local push checks
   the registry manifest's config digest against the pinned ID before signing;
   digest publication copies with `--preserve-digests`. Signatures verify before
   moving the composition and date tags. `--as` uses the same committed key in
   production and the same explicit local-registry throwaway-key override.
   `--allow-local-registry` cannot target ghcr, including when `CI=true`.
+- A layer's `--as` parent comes from its publication row, in the same registry
+  repository. Before pushing, the publisher resolves that published root by
+  digest and checks its complete selection, config digest, and filesystem diff
+  IDs. The layer must have the expected `ilex.machine-key` (root config ID plus
+  independently hashed current machine inputs), matching `ilex.machine-inputs`,
+  and exactly the parent's filesystem layers plus one layer. Relabelling an
+  unrelated or stale parent is refused. For a local check, build the layer on
+  the exact root that was published, including rechunking and fingerprint labels.
+  CI's ancestry, tag-snapshot and parent-still-current guards remain necessary;
+  the registry tag can change after the publisher resolves it.
+- `image.toml` declares selection and parent names, not revision or fingerprint
+  values. Revision is compared with CI's `GITHUB_SHA`; a root's `--digest`
+  fingerprint is syntax-checked, while its RPM/source recomputation happens at
+  staging. The signing job must still pass the exact staged/tested digest:
+  neither a fingerprint label nor five correct labels prove that an arbitrary
+  hand-pushed image was built or VM-tested. The legacy paths only enforce their
+  old machine-name contract, not the manifest's five-field composition; they
+  stay for the unchanged workflow until PR 11 removes them.
 - Signatures are cosign **v2** key-pair signatures in the legacy `.sig` tag
   format, which bootc/containers-image verify (keyless and cosign v3's
   default format don't work). Machines check them via

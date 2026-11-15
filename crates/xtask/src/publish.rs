@@ -144,6 +144,9 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 .as_str()
                 .map(str::to_string)
                 .with_context(|| format!("{pinned} has no {FINGERPRINT_LABEL} label"))?;
+            if publication.is_some() {
+                require_fingerprint(&pinned, &fingerprint)?;
+            }
             copy(&pinned, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
             (digest.clone(), fingerprint)
         }
@@ -161,8 +164,19 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                     );
                 }
                 let pinned = format!("sha256:{actual}");
+                if let Some(row) = &publication {
+                    let inspect = require_local_composition(&pinned, row)?;
+                    require_ci_revision(
+                        &pinned,
+                        inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
+                    )?;
+                    require_layer_parent(ws, &pinned, &inspect, row, &repository, &auth)?;
+                }
                 let computed = rechunk::fingerprint(ws, &pinned)?;
                 let label = local_fingerprint(&pinned)?;
+                if publication.is_some() {
+                    require_fingerprint(&pinned, &label)?;
+                }
                 if label != computed {
                     bail!(
                         "{image} fingerprint label {label} differs from recomputed {computed}; run prepare-publish and test that image ID first"
@@ -175,9 +189,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 let fingerprint = local_fingerprint(&pinned)?;
                 (pinned, fingerprint)
             };
-            if let Some(row) = &publication {
-                require_local_composition(&source, row)?;
-            } else {
+            if publication.is_none() {
                 require_machine(&source, args.machine.as_deref().unwrap_or("generic"))?;
             }
             if registry::is_ci() {
@@ -251,8 +263,13 @@ fn require_ci_revision(image: &str, revision: Option<&str>) -> Result<()> {
 fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
     let image = ws.resolve_image(args.image.as_deref());
     let image_id = format!("sha256:{}", bcvk::image_id(&image)?);
-    if let Some(row) = publication(ws, args)? {
-        require_local_composition(&image_id, &row)?;
+    let publication = publication(ws, args)?;
+    if let Some(row) = &publication {
+        let inspect = require_local_composition(&image_id, row)?;
+        require_ci_revision(
+            &image_id,
+            inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
+        )?;
     } else {
         require_machine(&image_id, "generic")?;
     }
@@ -263,6 +280,15 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
         .unwrap_or_else(|| STAGE_TAG.into());
     check_tag_length(&format!("{repository}:{stage_tag}"))?;
     let fingerprint = local_fingerprint(&image_id)?;
+    if publication.is_some() {
+        require_fingerprint(&image_id, &fingerprint)?;
+        let computed = rechunk::fingerprint(ws, &image_id)?;
+        if fingerprint != computed {
+            bail!(
+                "{image_id} fingerprint label {fingerprint} differs from recomputed {computed}; rechunk and test that image first"
+            );
+        }
+    }
     let insecure = registry::is_local_registry(repository);
     let auth = Auth::login(repository)?;
     let digest = push(
@@ -332,11 +358,12 @@ fn publication(ws: &Workspace, args: &Args) -> Result<Option<config::Publication
     Ok(Some(row))
 }
 
-fn require_local_composition(image: &str, row: &config::Publication) -> Result<()> {
+fn require_local_composition(image: &str, row: &config::Publication) -> Result<serde_json::Value> {
     let inspect = cmd::output(Command::new("podman").args(["image", "inspect", image]))?;
     let inspect: serde_json::Value = serde_json::from_str(&inspect)?;
     let labels = serde_json::from_value(inspect[0]["Config"]["Labels"].clone())?;
-    require_composition(image, &labels, row)
+    require_composition(image, &labels, row)?;
+    Ok(inspect[0].clone())
 }
 
 fn require_composition(
@@ -344,6 +371,17 @@ fn require_composition(
     labels: &std::collections::BTreeMap<String, String>,
     row: &config::Publication,
 ) -> Result<()> {
+    let expected = row.selection.labels();
+    for key in config::LABELS {
+        let actual = labels.get(key).map(String::as_str).unwrap_or("(missing)");
+        if labels.get(key) != expected.get(key) {
+            bail!(
+                "{image} cannot be published as {}: {key}={actual:?}, expected {:?} from image.toml",
+                row.tag,
+                expected[key]
+            );
+        }
+    }
     let selection = config::Selection::from_labels(labels)?;
     let actual = config::published_tag(&selection).with_context(|| {
         format!("{image} has no valid published composition (default shell must be first)")
@@ -354,6 +392,83 @@ fn require_composition(
             row.tag
         );
     }
+    Ok(())
+}
+
+fn require_fingerprint(image: &str, fingerprint: &str) -> Result<()> {
+    if !registry::is_digest(fingerprint) {
+        bail!("{image}: {FINGERPRINT_LABEL} must be a sha256 digest, got {fingerprint:?}");
+    }
+    Ok(())
+}
+
+/// Bind a layer to the current root named by its publication, independently of
+/// its own fingerprint and self-reported parent/input labels. Root config and
+/// diff IDs come from the registry by immutable digest; no pull or build runs.
+fn require_layer_parent(
+    ws: &Workspace,
+    image: &str,
+    inspect: &serde_json::Value,
+    row: &config::Publication,
+    repository: &str,
+    auth: &Option<Auth>,
+) -> Result<()> {
+    let insecure = registry::is_local_registry(repository);
+    let parent = row
+        .parent
+        .as_ref()
+        .context("layer publication has no parent")?;
+    let tag = format!("{repository}:{parent}");
+    let metadata = skopeo_json(&["inspect"], &tag, insecure, auth)?
+        .with_context(|| format!("declared parent {tag} is not published"))?;
+    let digest = metadata["Digest"]
+        .as_str()
+        .filter(|digest| registry::is_digest(digest))
+        .with_context(|| format!("{tag} has no valid manifest digest"))?;
+    let pinned = format!("{repository}@{digest}");
+    let manifest = skopeo_json(&["inspect", "--raw"], &pinned, insecure, auth)?
+        .with_context(|| format!("published parent {pinned} is missing"))?;
+    let config_id = manifest["config"]["digest"]
+        .as_str()
+        .filter(|id| registry::is_digest(id))
+        .with_context(|| format!("{pinned} has no valid config digest"))?;
+    let config = skopeo_json(&["inspect", "--config"], &pinned, insecure, auth)?
+        .with_context(|| format!("published parent {pinned} has no config"))?;
+    let mut expected_parent = row.clone();
+    expected_parent.tag = parent.clone();
+    expected_parent.machine = "generic".into();
+    expected_parent.selection.machine = "generic".into();
+    let labels = serde_json::from_value(config["config"]["Labels"].clone())?;
+    require_composition(&pinned, &labels, &expected_parent)?;
+
+    let inputs = machine::inputs(ws, &ws.root.join("machines").join(&row.machine), &[])?;
+    let expected_key = format!("{}-{inputs}", config_id.strip_prefix("sha256:").unwrap());
+    for (label, expected) in [
+        ("ilex.machine-key", expected_key),
+        ("ilex.machine-inputs", inputs),
+    ] {
+        let actual = inspect["Config"]["Labels"][label]
+            .as_str()
+            .unwrap_or("(missing)");
+        if actual != expected {
+            bail!(
+                "{image}: {label}={actual:?}, expected {expected:?} for declared parent {tag} ({config_id}) and current machine inputs"
+            );
+        }
+    }
+    let parent_layers: Vec<String> =
+        serde_json::from_value(config["rootfs"]["diff_ids"].clone())
+            .with_context(|| format!("{pinned} has no root filesystem diff IDs"))?;
+    let layers: Vec<String> = serde_json::from_value(inspect["RootFS"]["Layers"].clone())
+        .with_context(|| format!("{image} has no root filesystem diff IDs"))?;
+    if layers.len() != parent_layers.len() + 1 || !layers.starts_with(&parent_layers) {
+        bail!(
+            "{image} filesystem layers are not exactly one layer on declared parent {tag} ({config_id}); refusing a forged parent label"
+        );
+    }
+    eprintln!(
+        "{image} preserves every filesystem layer of {tag} ({config_id}) and adds one machine layer"
+    );
     Ok(())
 }
 

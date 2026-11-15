@@ -251,6 +251,8 @@ pub struct Publication {
     pub parent: Option<String>,
     pub machine: String,
     pub shells: Vec<String>,
+    /// Complete expected labels, resolved from this row and image.toml together.
+    pub selection: Selection,
 }
 
 /// A composition has a published name only when its labels are consistent.
@@ -341,6 +343,13 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
         parent: None,
         machine: "generic".into(),
         shells: vec![],
+        selection: Selection {
+            shells: vec![],
+            default_shell: None,
+            design_systems: vec![],
+            default_design_system: None,
+            machine: "generic".into(),
+        },
     }];
     let mut layers = Vec::new();
     let mut shell_lists = Vec::new();
@@ -405,6 +414,7 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
                 parent: (name != "generic").then(|| parent.clone()),
                 machine: name.clone(),
                 shells: shells.clone(),
+                selection: selected.clone(),
             };
             if row.kind == "root" {
                 rows.push(row);
