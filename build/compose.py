@@ -1,4 +1,4 @@
-"""Validate image manifests and compose build arguments and the /usr overlay.
+"""Validate manifests and stage generated files and add-only overlays.
 
 This is the schema authority. Host tooling reads only the keys it needs.
 Python's standard library is enough, including in a plain podman build.
@@ -8,13 +8,15 @@ import argparse
 import json
 from pathlib import Path
 import re
-import shutil
 import sys
 import tomllib
 
+from image_tree import Tree, json_bytes
+
 
 def fail(path, key, message):
-    raise ValueError(f"{path}: `{key}` {message}")
+    text = f"{path}: `{key}` {message}"
+    raise ValueError("".join(f"\\u{ord(c):04x}" if ord(c) < 32 or 127 <= ord(c) <= 159 else c for c in text))
 
 
 def table(path, key, value, allowed):
@@ -34,8 +36,8 @@ def load(path):
 
 
 def string(path, key, value):
-    if not isinstance(value, str) or not value or any(c in value for c in "\r\n\0"):
-        fail(path, key, "must be a non-empty, single-line string")
+    if not isinstance(value, str) or not value or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value):
+        fail(path, key, "must be a non-empty string without control characters (C0, C1 or DEL)")
     return value
 
 
@@ -68,6 +70,18 @@ def packages(path, key, data):
             # and quoting/whitespace which would change argument boundaries.
             if value.startswith("-") or re.search(r"[\s'\"\\]", value):
                 fail(path, f"{key}.{kind}[{index}]", "must be a single package or @group argument")
+            # Fedora's package-name alphabet is ASCII letters/digits and -._+.
+            # Use stable comps IDs after @, rather than translated group names.
+            # https://docs.fedoraproject.org/en-US/packaging-guidelines/Naming/
+            literal = r"@?[A-Za-z0-9_][A-Za-z0-9._+-]*"
+            # DNF supports *, ?, ranges and !/^ negation in bracket globs.
+            # https://dnf5.readthedocs.io/en/latest/misc/specs.7.html#globs
+            glob = r"@?(?:[A-Za-z0-9._+-]|[?*]|\[[!^]?[A-Za-z0-9._+-]+\])+"
+            pattern = literal if kind == "install" else glob
+            if not re.fullmatch(pattern, value) or (kind == "install" and value.lower().endswith(".rpm")):
+                fail(path, f"{key}.{kind}[{index}]", "must be a package name or @group ID" +
+                     (" (DNF exclude globs are allowed)" if kind == "exclude" else "") +
+                     "; URLs, paths and RPM file specifications are forbidden")
     return data
 
 
@@ -101,6 +115,8 @@ def shell(path, is_default):
         if not re.fullmatch(r"[A-Za-z0-9_+.-]+", value) or value in (".", ".."):
             fail(path, f"session.{key}", "must be a file name without a directory")
     if "greeter" in data or is_default:
+        if "greeter" not in data:
+            fail(path, "greeter", "is required for the default shell")
         greeter = table(path, "greeter", data.get("greeter"), {"unit"})
         unit = string(path, "greeter.unit", greeter.get("unit"))
         if not re.fullmatch(r"[A-Za-z0-9_@.-]+\.service", unit):
@@ -135,40 +151,9 @@ def generic(path):
     for key in ("publish", "packages"):
         if key in data:
             fail(path, key, "is not allowed for generic")
-    if (path.parent / "rootfs").exists():
+    if (path.parent / "rootfs").exists() or (path.parent / "rootfs").is_symlink():
         fail(path, "rootfs", "is not allowed for generic")
     return {"schema": 1, **data, "publish": False, "packages": {}}
-
-
-def write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
-def remove_entry(path):
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    else:
-        path.unlink(missing_ok=True)
-
-
-def merge_overlay(source, destination):
-    """Later entries replace earlier files/links; real directories merge."""
-    if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
-        remove_entry(destination)
-    destination.mkdir(parents=True, exist_ok=True)
-    for entry in source.iterdir():
-        target = destination / entry.name
-        if entry.is_symlink():
-            remove_entry(target)
-            shutil.copy2(entry, target, follow_symlinks=False)
-        elif entry.is_dir():
-            merge_overlay(entry, target)
-        else:
-            if target.is_symlink() or target.is_dir():
-                remove_entry(target)
-            shutil.copy2(entry, target)
-    shutil.copystat(source, destination)
 
 
 def image(args):
@@ -180,11 +165,12 @@ def image(args):
     designs = selected(path, "design-systems", data.get("design-systems"))
     design_default = default(path, "default-design-system", data.get("default-design-system"), designs)
     if args.shells:
-        shells = [] if args.shells == "none" else selected(path, "--shells", args.shells.split(","))
+        shells = [] if args.shells == "none" else selected("--shells", "value", args.shells.split(","))
         shell_default = args.default_shell or (shells[0] if shells else None)
     elif args.default_shell:
         shell_default = args.default_shell
-    default(path, "default-shell", shell_default, shells)
+    default("--default-shell" if args.default_shell else "--shells" if args.shells else path,
+            "value" if args.default_shell or args.shells else "default-shell", shell_default, shells)
 
     package_path = ctx / "packages.toml"
     common = load(package_path)
@@ -205,29 +191,35 @@ def image(args):
         token_files.append((manifest["tokens"], source))
     machine = generic(ctx / "machines/generic/machine.toml")
 
-    # Validate everything before creating output. Common rootfs is copied by
-    # the Containerfile first; shell overlays follow in the declared order.
-    for selected_name in shells:
+    # Stage each overlay separately. The final-stage installer can see package
+    # and common-rootfs paths and rejects every collision, including symlinks.
+    overlays = []
+    for index, selected_name in enumerate(shells):
         overlay = ctx / "shells" / selected_name / "rootfs"
-        if overlay.exists():
-            if not overlay.is_dir():
+        if overlay.exists() or overlay.is_symlink():
+            if not overlay.is_dir() or overlay.is_symlink():
                 fail(ctx / "shells" / selected_name / "shell.toml", "rootfs", "must be a directory")
-            merge_overlay(overlay, out / "rootfs")
-    for destination, source in token_files:
-        target = out / "rootfs" / destination.lstrip("/")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-    write_json(out / "rootfs/usr/share/ilex/image.json", {
-        "schema": 1, "shells": manifests, "default-shell": shell_default,
-        "design-systems": design_manifests, "default-design-system": design_default,
-    })
-    write_json(out / "rootfs/usr/share/ilex/machine.json", machine)
-    build = out / "build"
-    build.mkdir(parents=True, exist_ok=True)
+            directory = f"overlays/{index:03d}"
+            label = f"shells/{selected_name}/rootfs"
+            with Tree(out / "install" / directory, label, create=True) as staged:
+                staged.add_overlay(overlay, label)
+            overlays.append({"name": label, "directory": directory})
+    with Tree(out / "install/generated", "generated files", create=True) as generated:
+        for destination, source in token_files:
+            generated.write(destination.lstrip("/"), source.read_bytes())
+        generated.write("usr/share/ilex/image.json", json_bytes({
+            "schema": 1, "shells": manifests, "default-shell": shell_default,
+            "design-systems": design_manifests, "default-design-system": design_default,
+        }))
+        generated.write("usr/share/ilex/machine.json", json_bytes(machine))
+    with Tree(out / "install", "installation staging", create=True) as staging:
+        staging.write("overlays.json", json_bytes(overlays))
+        staging.write("install-files.py", Path(__file__).with_name("image_tree.py").read_bytes())
     install = [p for group in package_sets for p in group.get("install", [])]
     exclude = [f"--exclude={p}" for group in package_sets for p in group.get("exclude", [])]
-    (build / "packages.args").write_text("".join(p + "\n" for p in install + exclude), encoding="utf-8")
-    shutil.copyfile(ctx / "build/install-packages.sh", build / "install-packages.sh")
+    with Tree(out / "build", "package staging", create=True) as build:
+        build.write("packages.args", "".join(p + "\n" for p in install + exclude).encode("utf-8"))
+        build.write("install-packages.sh", (ctx / "build/install-packages.sh").read_bytes())
 
 
 def main():

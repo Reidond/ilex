@@ -1,7 +1,7 @@
 # ilex
 
 Personal Fedora bootc image: one `Containerfile` on `quay.io/fedora/fedora-bootc:45`
-composes packages, shells and design systems from manifests (GNOME desktop by
+that composes packages, shells and design systems from manifests (GNOME desktop by
 default), a Rust workspace for all tooling, e2e-only tests on QEMU via bcvk.
 
 ## Build and test
@@ -11,7 +11,7 @@ cargo xtask build              # podman build → localhost/ilex:<slug>, runs bo
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
                                # on Windows: run `cargo xtask vm` in PowerShell, not in WSL
-cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slots
+cargo xtask info               # resource identity, selection and available configurations
 ```
 
 - The main checkout reserves the slug `main` (`localhost/ilex:main`, VMs
@@ -79,20 +79,44 @@ A shell is `shells/<name>/shell.toml`: its name and description, packages,
 Wayland session file (without `.desktop`), compositor command, optional greeter
 unit and theme targets. The default shell owns the greeter; GNOME uses GDM.
 To add a shell, create its directory and manifest, optionally add a `rootfs/`
-overlay, then name it in `image.toml`. Overlays follow the common `rootfs/` in
-shell list order. A shell must provide a real session and compositor.
+overlay, then name it in `image.toml`. Overlays are add-only: they follow the
+packages and common `rootfs/` in shell list order, and may share real directories
+but never replace a file, symlink or other entry, even with identical content.
+Directory/non-directory conflicts and paths through any symlink (including
+`/bin` and `/lib`) are errors. Leaf symlinks may be added at new paths.
+`/usr/share/ilex` is reserved for generated files and forbidden to overlays.
+A shell must provide a real session and compositor.
+
+The final stage copies each overlay to temporary staging by content and runs
+`build/image_tree.py` against the real image, then removes the staging. Generated
+JSON and tokens have separate staging and use directory descriptors with
+`O_NOFOLLOW`, including at the leaf. `/usr/share/ilex/.generated.json` records
+generated file hashes: a later layer may replace only an unchanged, registered
+generated file. The same installer accepts machine overlay payloads and permits
+replacing a registered `machine.json` without granting overlays replacement rights.
+An explicit replacement list in a shell or machine manifest is the extension
+point for a future need such as greetd's packaged `/etc/greetd/config.toml` at
+M5. No replacement list or escape hatch exists today.
+
+Package `install` entries are literal Fedora package names or `@` plus a stable
+comps group ID: ASCII letters, digits and `-._+` (an alphanumeric or underscore
+first). URLs, paths, `.rpm` filenames, options and xargs quoting are rejected.
+`exclude` also permits DNF's `*`, `?` and bracket/range/negation globs. The dnf
+transaction enables `localpkg_gpgcheck=1`. Human-facing manifest strings reject
+all C0, C1 and DEL control characters.
 
 Design systems live in `design-systems/<name>/design-system.toml` with a JSON
 object token file (default `tokens.json`). None ships yet. A shell's
 `[theme] targets` must be empty until the theme generator defines outputs.
 Machines live in `machines/<name>/machine.toml`; `generic` is the base image
-with no packages, overlay or publishing setting. Derived machine layers and
-command-line selection arrive in later changes; `vm/Containerfile` still
-supplies the development viewer's clipboard agent.
+with no packages, overlay or publishing setting. `vm/Containerfile` supplies
+the development viewer's clipboard agent.
 
 `build/compose.py` is the schema authority (Python standard library only).
 Unknown keys and invalid defaults fail in the first `compose` stage, before
-compilation. Plain `podman build .` composes the default image too.
+compilation. Plain `podman build .` composes the default image too, but does not
+set the configuration labels: build with `cargo xtask build` to test or rechunk
+the result.
 `cargo xtask info` lists the selection and available configurations; builds
 record them in the five `ilex.shells`, `ilex.default-shell`,
 `ilex.design-systems`, `ilex.default-design-system` and `ilex.machine` labels.
@@ -617,8 +641,12 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   `/etc` to files that must live there (it is 3-way merged on upgrade); never
   ship content in `/var` (use tmpfiles.d); create users with sysusers.d.
 - Overlays under `shells/` and `machines/` follow the same bootc rules as
-  `rootfs/`. Manifest inputs enter the build with `COPY`, because buildah's
-  cache does not reliably notice changes to `RUN` bind mounts.
+  `rootfs/` and only add new files or leaf symlinks. Real directories may be
+  shared; replacements, paths through symlinks and `/usr/share/ilex` are
+  forbidden. Replacements need a future explicit manifest list, not a build
+  escape hatch. Manifest inputs enter the build with `COPY`, because buildah's
+  cache does not reliably notice changes to `RUN` bind mounts. Package entries
+  name Fedora packages or comps IDs; only excludes accept DNF globs.
 - `bootc container lint --fatal-warnings` runs last in the build: clean up
   what it flags in the same `RUN` step that created it.
 - Shared host-side plumbing (slug, paths, VM slots, git) lives in

@@ -37,7 +37,12 @@ RUN curl -fsSL -o /tmp/kache.tar.gz \
     kache --version
 
 WORKDIR /src
-COPY . .
+# Fedora's cargo is used directly; rust-toolchain.toml configures rustup on
+# the host, and .cargo/config.toml contains only the xtask alias. All embedded
+# source files (including tool-build.sh) live below crates/; there are no Cargo
+# build scripts.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 # Every compile goes through kache, whose store is a podman cache mount shared
 # by all worktrees. There is no shared target directory any more: each build
 # compiles into a fresh /src/target and kache restores what an earlier build
@@ -76,8 +81,13 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     bash /tmp/ilex-build/install-packages.sh ilex-var.conf
 
 COPY rootfs/ /
-COPY --from=compose /out/rootfs/ /
 COPY --from=build /out/ /
+# Apply only additions against the actual image, after packages and common
+# files exist. COPY keys the staged data by content; no context bind mount.
+# Generated files have their own tree and no-follow replacement registry.
+COPY --link --from=compose /out/install/ /tmp/ilex-compose/
+RUN python3 /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose && \
+    rm -rf /tmp/ilex-compose
 
 # Boot to a graphical target when a shell is installed; let bootc's updater
 # stage new images daily (see the drop-ins in rootfs), and offer a restart
