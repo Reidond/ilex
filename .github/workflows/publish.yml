@@ -4,8 +4,8 @@
 # Runs on every merge to main, nightly at 03:00 UTC (the base image floats, so
 # the nightly picks up its updates) and on demand. It publishes only when the
 # image content changed (`cargo xtask changed`) and the e2e tests pass. A run
-# that changed nothing stops right after the build: `changed` fingerprints the
-# image as built, so the rechunk and the tests are skipped.
+# with an unchanged generic image skips its rechunk and base tests; machines
+# still check their inputs and published base identity below.
 #
 # Three jobs start together, so the slow parts overlap on separate machines:
 #
@@ -21,6 +21,8 @@
 # Then publish signs the staged digest, the one both tiers tested, and moves
 # :latest to it; nothing is pushed twice. Runs of this workflow never overlap
 # (the concurrency group), so `:candidate` is always this run's.
+# Then machines builds/tests opted-in layers on that digest (or current
+# :latest by digest when unchanged); only main signs/publishes machine tags.
 #
 # After a publish, the publish job starts this workflow again with `v1_disk`:
 # that run (the v1-disk job alone, in a concurrency group of its own, so

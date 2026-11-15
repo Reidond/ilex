@@ -737,9 +737,10 @@ finished, or the cache evicted it) or one bcvk rejects (other install options)
 installs v1 itself, ~10 minutes slower. `gh workflow run publish.yml --ref
 <branch> -f v1_disk=true` fills the cache for runs on that branch.
 
-`changed` fingerprints the image as built, so a run that changed nothing stops
-right after the build (no rechunk, no tests, and the upgrade job stops when it
-sees that), unless a manual run forces the tests (`test`), which rechunks too.
+`changed` fingerprints the image as built, so an unchanged generic base stops
+its path right after the build (no rechunk or base tests, and upgrade stops when
+it sees that), unless a manual run forces the tests (`test`), which rechunks
+too. The machines job still checks machine inputs and published base identity.
 The rechunked image (same content, reproducible layers, its own tag
 `rechunked`) is what is always tested and published. Rechunking while the
 tests ran on the image as built was measured: about 7 minutes faster, but the
