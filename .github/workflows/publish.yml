@@ -654,6 +654,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Resolve installer composition before the rootful build
+        id: composition
+        run: |
+          # The container builds as root with /src bind-mounted. Keep host
+          # Cargo artifacts separate and never run host Cargo after that build.
+          tag=$(CARGO_TARGET_DIR="$RUNNER_TEMP/installer-info-target" cargo xtask info --installer)
+          bash .github/publication-tag.sh "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Disk
         run: df -h / /mnt
 
@@ -736,8 +745,9 @@ jobs:
           contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
         env:
           GH_TOKEN: ${{ github.token }}
+          INSTALLER_TAG: ${{ steps.composition.outputs.tag }}
         run: |
-          tag=$(cargo xtask info --installer)
+          tag=$INSTALLER_TAG
           bash .github/publication-tag.sh "$tag"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
