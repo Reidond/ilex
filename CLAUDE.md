@@ -195,8 +195,13 @@ chooses another output name. Both suffixes count towards the 128-byte tag limit.
 `xtask build --machine <name> --on <image>` builds only the layer and prints its
 resulting full reference on stdout; scripts must use that result rather than
 append a suffix to their input. Build subprocesses (including base builds and
-pulls) send stdout to stderr, so `image=$(cargo xtask build --machine "$machine"
---on "$base")` captures only the reference. No image is pushed by building.
+pulls) send stdout to stderr, so command substitution captures only the reference:
+
+```sh
+image=$(cargo xtask build --machine "$machine" --on "$base")
+```
+
+No image is pushed by building.
 
 Machines do not stack. The host builder requires the base's `ilex.machine` label
 to be `generic`, and preparation independently requires its unchanged registered

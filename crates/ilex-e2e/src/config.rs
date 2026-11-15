@@ -157,7 +157,7 @@ fn parent_overlay(ws: &ilex_devkit::Workspace, base: &str, token: &str) -> Resul
         r#"ARG BASE
 FROM ${BASE}
 COPY image_tree.py /tmp/ilex-fixture-prepare.py
-RUN python3 -I -S /tmp/ilex-fixture-prepare.py --prepare --payload /usr/share/ilex/.machine-replay
+RUN python3 -I -S /tmp/ilex-fixture-prepare.py --prepare --payload /usr/share/ilex/.machine-replay && rm /tmp/ilex-fixture-prepare.py
 COPY payload/ /tmp/ilex-compose/
 RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose --phase overlays --inherited /usr/share/ilex/.machine-replay --remove-payload
 RUN bootc container lint --fatal-warnings
