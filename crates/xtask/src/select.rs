@@ -34,6 +34,15 @@ pub struct Resolved {
 
 impl Args {
     pub fn resolve(&self, ws: &Workspace, image: Option<&str>) -> Result<Resolved> {
+        self.resolve_output(ws, image, None)
+    }
+
+    /// A build's explicit output tag can shorten an otherwise overlong variant.
+    pub fn resolve_build(&self, ws: &Workspace, base: Option<&str>, output: Option<&str>) -> Result<Resolved> {
+        self.resolve_output(ws, base, output)
+    }
+
+    fn resolve_output(&self, ws: &Workspace, image: Option<&str>, output: Option<&str>) -> Result<Resolved> {
         let requested = self.requested_shells()?;
         let requested_machine = self.requested_machine()?;
         // Explicit image references without selection retain the CI contract:
@@ -91,13 +100,13 @@ impl Args {
                 .map(|s| s.shells.as_slice()),
         );
         let implicit_image = if machine == "generic" { implicit_base.clone() } else {
-            ilex_devkit::machine::image_ref(ws, &implicit_base, &machine)?
+            format!("{implicit_base}.m-{machine}")
         };
         let base_image = image.map(|image| ws.resolve_image(Some(image))).unwrap_or(implicit_base);
         let image = image
             .map(|image| ws.resolve_image(Some(image)))
             .unwrap_or_else(|| implicit_image.clone());
-        check_tag_length(&image)?;
+        check_tag_length(&output.map(|tag| ws.resolve_image(Some(tag))).unwrap_or_else(|| image.clone()))?;
         Ok(Resolved {
             image,
             implicit_image,

@@ -52,7 +52,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
 /// Build the image and return its full reference.
 pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
-    let resolved = args.selection.resolve(ws, args.on.as_deref())?;
+    let resolved = args.selection.resolve_build(ws, args.on.as_deref(), args.tag.as_deref())?;
     build_resolved(ws, args, resolved)
 }
 
