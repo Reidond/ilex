@@ -96,7 +96,13 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
         } else if let Some(message) = resolved.mismatch()? {
             if requested.is_some() {
                 let action = if machine_layer {
-                    "pass --build to derive a local machine layer from a generic ILEX_IMAGE base"
+                    if ilex_devkit::machine::image_machine_label(&image)
+                        .is_ok_and(|name| name.as_deref() == Some("generic"))
+                    {
+                        "pass --build to derive a local machine layer from a generic ILEX_IMAGE base"
+                    } else {
+                        "choose a generic base to build the requested machine"
+                    }
                 } else {
                     "pass --build to rebuild ILEX_IMAGE with this selection"
                 };

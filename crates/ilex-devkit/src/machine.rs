@@ -38,8 +38,15 @@ fn checked_output(image: String) -> Result<String> {
 
 /// Read the actual image's machine, also for explicit references from CI.
 pub fn image_machine(image: &str) -> Result<String> {
+    image_machine_label(image)?.with_context(|| {
+        format!("image {image} has no ilex.machine label; build or pull {image} with machine generic before using it as a machine base")
+    })
+}
+
+/// Older images may be booted unchanged, but cannot be machine-layer bases.
+pub fn image_machine_label(image: &str) -> Result<Option<String>> {
     if !bcvk::image_exists(image) {
-        bail!("image {image} not found in local container storage; build or pull it first");
+        bail!("image {image} not found in local container storage; build or pull {image} first");
     }
     let name = cmd::output(Command::new("podman").args([
         "image",
@@ -49,10 +56,10 @@ pub fn image_machine(image: &str) -> Result<String> {
         image,
     ]))?;
     if name.is_empty() || name == "<no value>" {
-        bail!("image {image} has no ilex.machine label; rebuild it with cargo xtask build");
+        return Ok(None);
     }
     config::validate_machine_name(&name)?;
-    Ok(name)
+    Ok(Some(name))
 }
 
 /// Hash paths, entry types, modes, link targets and bytes, without following links.

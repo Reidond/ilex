@@ -101,7 +101,21 @@ fn fixture() -> Result<()> {
     ensure(link.out() == "entry", || {
         "inherited relative symlink differs".into()
     })?;
-    vm.ssh("test -f /usr/lib/tmpfiles.d/ilex-var-machine.conf && systemd-tmpfiles --cat-config > /dev/null")?.ok("machine tmpfiles exist and parse")?;
+    vm.ssh("test -f /usr/lib/tmpfiles.d/ilex-var-machine.conf && systemd-tmpfiles --dry-run --create /usr/lib/tmpfiles.d/ilex-var-machine.conf")?
+        .ok("machine tmpfiles exist and validate")?;
+    println!("machine tmpfiles dry-run: real file exit=0");
+    vm.ssh("printf '%s\\n' 'd /tmp/ilex-config-invalid-mode not-a-mode - - -' > /tmp/ilex-config-bad-tmpfiles.conf")?
+        .ok("write broken tmpfiles control")?;
+    let broken =
+        vm.ssh("systemd-tmpfiles --dry-run --create /tmp/ilex-config-bad-tmpfiles.conf")?;
+    ensure(broken.code.is_some_and(|code| code != 0), || {
+        "tmpfiles dry-run accepted a deliberately invalid mode".into()
+    })?;
+    println!(
+        "machine tmpfiles dry-run: broken line exit={}; {}",
+        broken.code.unwrap(),
+        broken.stderr.trim()
+    );
     println!(
         "parent replay: new directory and file retain 0750 root:root, content, relative link and existing-directory file"
     );

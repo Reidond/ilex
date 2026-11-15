@@ -29,12 +29,14 @@ pub struct Resolved {
     pub selection: Option<Selection>,
     check_selection: bool,
     check_base_selection: bool,
+    explicit_image: bool,
     build_command: String,
 }
 
 impl Args {
     /// An explicit build output can shorten an otherwise overlong variant.
     pub fn resolve(&self, ws: &Workspace, image: Option<&str>, output: Option<&str>) -> Result<Resolved> {
+        let image_is_explicit = image.is_some();
         let requested = self.requested_shells()?;
         let requested_machine = self.requested_machine()?;
         // Explicit image references without selection retain the CI contract:
@@ -108,6 +110,7 @@ impl Args {
             selection,
             check_selection,
             check_base_selection,
+            explicit_image: image_is_explicit,
             build_command,
         })
     }
@@ -153,9 +156,13 @@ impl Resolved {
             return Ok(None);
         }
         if !crate::build::image_exists(image) {
+            let hint = if self.explicit_image {
+                format!("build or pull {image} first")
+            } else {
+                format!("run `{}` first", self.build_command)
+            };
             return Ok(Some(format!(
-                "image {} not found in local container storage; run `{}` first",
-                image, self.build_command,
+                "image {image} not found in local container storage; {hint}",
             )));
         }
         let requested = self.selection.as_ref().context(
@@ -182,12 +189,14 @@ impl Resolved {
             Ok(actual) => actual.summary(),
             Err(error) => format!("an unknown configuration ({error:#})"),
         };
+        let hint = if self.explicit_image {
+            format!("build or pull {image} for the requested configuration")
+        } else {
+            format!("run `{}` and use {}", self.build_command, self.implicit_image)
+        };
         Ok(Some(format!(
-            "image {} was built for {built_for}; requested {}; run `{}` and use {}",
-            image,
+            "image {image} was built for {built_for}; requested {}; {hint}",
             requested.summary(),
-            self.build_command,
-            self.implicit_image,
         )))
     }
 

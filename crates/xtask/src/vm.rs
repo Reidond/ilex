@@ -88,16 +88,17 @@ impl Args {
 /// is used unchanged; composing machines requires an explicit future schema.
 fn viewer_image(ws: &Workspace, resolved: &crate::select::Resolved, build: bool) -> Result<String> {
     resolved.require_match()?;
-    let machine = ilex_devkit::machine::image_machine(&resolved.image)?;
-    if machine == "generic" {
+    let machine = ilex_devkit::machine::image_machine_label(&resolved.image)?;
+    if machine.as_deref() == Some("generic") {
         if build {
             ilex_devkit::machine::build(ws, &resolved.image, &ws.root.join("machines/vm"), None, &[])
         } else {
             ilex_devkit::machine::image_ref(ws, &resolved.image, "vm")
         }
     } else {
-        if machine != "vm" {
-            eprintln!("viewer clipboard needs machine `vm`; booting machine `{machine}` image {} as it is", resolved.image);
+        if machine.as_deref() != Some("vm") {
+            let description = machine.map_or_else(|| "unlabelled".into(), |name| format!("machine `{name}`"));
+            eprintln!("viewer clipboard needs machine `vm`; booting {description} image {} as it is", resolved.image);
         }
         Ok(resolved.image.clone())
     }

@@ -52,6 +52,8 @@ cargo xtask info               # resource identity, selection and available conf
   always build the generic base first, then build or reuse the machine layer.
   A fully cached base keeps its ID, so an unchanged machine layer is still skipped.
   `--on` deliberately uses the supplied existing base without rebuilding it.
+  A missing or mismatched explicit reference must be built or pulled at that
+  reference; building this checkout's implicit tag does not repair it.
   Filters are substrings and
   several run their union (`xtask test ephemeral:: upgrade::`); arguments after
   `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
@@ -62,6 +64,8 @@ cargo xtask info               # resource identity, selection and available conf
   `ILEX_SHELLS` or `ILEX_MACHINE`
   requests a selection; a mismatch is refused unless `test --build` was given.
   An explicit reference without selection keeps CI's existing behaviour.
+  For a mismatched `ILEX_IMAGE`, the machine-layer hint offers `--build` only
+  when that image names machine `generic`; machines cannot be stacked.
 - An ephemeral VM has no ostree deployment, so `bootc status` there names no
   image; `ephemeral::` identifies the image through the container bcvk started.
 - `upgrade::` installs a real libvirt VM (`bcvk libvirt run`, a few minutes,
@@ -183,6 +187,8 @@ upgrade and switch. Other machine defaults (udev, sysctl, unit drop-ins) go in
 clipboard) only when the selected image is generic. An already selected machine
 image is booted unchanged: `--machine vm` and `--image <own .m-vm>` reuse it;
 another machine prints that the viewer's clipboard needs machine `vm`.
+An explicit older image without an `ilex.machine` label also boots unchanged
+with that clipboard message. It is still refused as a machine-layer base.
 `--print-image` inspects labels to apply this same decision without building or
 booting. On Windows it forwards that inspection to WSL without starting a viewer.
 The implicit tag is `<checkout tag>[.s-<shell>...].m-<machine>`. A layer built
@@ -232,7 +238,10 @@ while retaining generic's labels and registered `machine.json`; it does not
 relax machine admission. The guest checks the parent's new directory, file mode,
 content, relative symlink and file in an existing directory after verify/remove/
 replay. A colliding machine overlay must fail the build. The tier also checks
-configuration, self-check, and the existence and parsing of machine tmpfiles.
+configuration, self-check, and that the machine tmpfiles file exists and passes
+`systemd-tmpfiles --dry-run --create /usr/lib/tmpfiles.d/ilex-var-machine.conf`
+in the guest without making filesystem changes. A deliberately invalid mode
+in a separate guest tmpfiles file must make the same dry-run command fail.
 Its marker lives under
 `/usr/share/ilex-config-fixture`, outside the generated-file namespace. CI does
 not register this tier.
