@@ -3,7 +3,7 @@
 set -euo pipefail
 without_key() { env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD "$@"; }
 without_key bash .github/publication-tag.sh "$TAG"
-[[ "$STAGED" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
+[[ "$STAGED" =~ ^sha256:[0-9a-f]{64}$ && "$FINGERPRINT" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
 if { [ "$V1_EXISTS" = true ] && [[ "$V1_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; } ||
    { [ "$V1_EXISTS" = false ] && [ "$V1_DIGEST" = - ]; }; then :; else
     echo '::error::upgrade did not record an explicit v1 digest or first-publish absence'; exit 2
@@ -21,7 +21,7 @@ if [ "$TESTED" != "$STAGED" ]; then
 fi
 if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$TAG" &&
    without_key bash .github/publish-head.sh swap "$IMAGE_REPO:$TAG" "$SNAPSHOT"; then
-    "$XTASK_PUBLISHER" publish --digest "$STAGED" --as "$TAG"
+    "$XTASK_PUBLISHER" publish --digest "$STAGED" --as "$TAG" --tested-fingerprint "$FINGERPRINT"
     echo 'published=true' >> "$GITHUB_OUTPUT"
     echo "root publication result: $TAG published=true"
 else

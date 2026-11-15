@@ -101,6 +101,7 @@ jobs:
       digest: ${{ steps.stage.outputs.digest }}
       tag: ${{ steps.composition.outputs.tag }}
       snapshot: ${{ steps.composition.outputs.snapshot }}
+      fingerprint: ${{ steps.stage.outputs.fingerprint }}
     env:
       # `xtask build --tag candidate` tags the image localhost/ilex:candidate.
       # The image as built; `xtask rechunk --output rechunked` makes the image
@@ -407,6 +408,7 @@ jobs:
       - name: Publish and sign
         id: publication
         env:
+          FINGERPRINT: ${{ needs.build.outputs.fingerprint }}
           TAG: ${{ needs.build.outputs.tag }}
           SNAPSHOT: ${{ needs.build.outputs.snapshot }}
           OWN: ${{ needs.upgrade.outputs.own }}
