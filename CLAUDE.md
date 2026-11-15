@@ -1,6 +1,7 @@
 # ilex
 
-Personal Fedora bootc image: a small base (fedora-bootc plus ilex's own files),
+Personal Fedora bootc image: a small base (fedora-bootc, ilex's own files and
+drupe's signed-image runtime),
 an ordered list of shells (GNOME by default, with desktop apps and design
 systems), then one machine configuration. One `Containerfile` builds each root
 image: base packages, shells' packages in their own transaction and image layer,
@@ -120,6 +121,10 @@ ilex-agent, signature policy, the updater and drupe, plus the latter's
 install or run drupe tools: `tool::` checks this on both kinds of root.
 The base excludes `qemu-*`, optional recommendations of systemd's VM helpers;
 shells and machines may install them in their own transactions.
+Measured on 2026-11-15: the base is 1,957.11 MiB against fedora-bootc's
+1,917.59 MiB (39.52 MiB growth), with 543 `rpm -qa` entries against 540:
+`systemd-container`, its recommended `systemd-import-keys`, and Fedora's
+imported signing key. No desktop package is requested by the base.
 The notifier's three small files remain in `rootfs/`, but neither user unit is
 enabled globally without a shell: no session means no notification is attempted.
 
