@@ -638,10 +638,10 @@ jobs:
   # The network installer ISO, built when `cargo xtask iso --due` says so (see
   # the top of this file) or on a manual run with `iso` checked. It carries no
   # ilex image, so it doesn't depend on what the publish job published. On main
-  # it becomes a GitHub Release (`installer-YYYYMMDD`, marked latest, so
-  # releases/latest/download/ilex-installer.iso always works); from a branch it
-  # is built and uploaded as a workflow artifact to be inspected, and nothing
-  # is released. It runs next to the image jobs; nothing waits for it.
+  # it becomes an artifact first. installer-release waits for publication,
+  # verifies the signed target and installs this exact ISO before releasing.
+  # Branch runs build the artifact only: iso:: would install the published
+  # target, not the branch's image. Construction stays parallel with image CI.
   iso:
     needs: installer-due
     if: >-
@@ -649,8 +649,10 @@ jobs:
       (github.ref == 'refs/heads/main' && needs.installer-due.outputs.iso_due == 'true'))
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60
+    outputs:
+      tag: ${{ steps.composition.outputs.tag }}
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -712,7 +714,7 @@ jobs:
               '
           ls -l /mnt/ilex/state/iso/
 
-      # A branch run stops here: the ISO to inspect, no release.
+      # A branch run stops here: the ISO to inspect, no installation/release.
       - name: What main would release
         if: github.ref != 'refs/heads/main'
         run: |
@@ -727,7 +729,6 @@ jobs:
           echo "--- release notes:"; cat /mnt/ilex/state/iso/release-notes.md
 
       - name: Keep the ISO (not a release)
-        if: github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: installer-iso
@@ -738,39 +739,108 @@ jobs:
           compression-level: 0
           retention-days: 3
 
-      # Main only. Each asset has to be under 2 GiB (`xtask iso` checks).
+  # Only due/forced ISOs incur this ~15 minute KVM installation. !cancelled()
+  # permits publish's intentional unchanged skip, but not a failed dependency
+  # or a green guard skip (published=false). First main waits for its new tag.
+  installer-release:
+    needs: [iso, build, upgrade, publish]
+    if: >-
+      !cancelled() && github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
+      contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
+      needs.iso.result == 'success' && needs.build.result == 'success' && needs.upgrade.result == 'success' &&
+      ((needs.publish.result == 'success' && needs.publish.outputs.published == 'true') ||
+       (needs.publish.result == 'skipped' && needs.build.outputs.changed == 'false'))
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Installer test paths
+        run: |
+          {
+            echo "ISO_DIR=$RUNNER_TEMP/installer-iso"
+            echo "ILEX_STATE_DIR=$RUNNER_TEMP/installer-test-state"
+            echo "ILEX_ARTIFACTS=$RUNNER_TEMP/installer-test-artifacts"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-iso
+          path: ${{ env.ISO_DIR }}
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Authenticate installer registry reads
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          # Same private auth file for podman/skopeo and cosign's Docker keychain.
+          export DOCKER_CONFIG="$RUNNER_TEMP/installer-auth"
+          export REGISTRY_AUTH_FILE="$DOCKER_CONFIG/config.json"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          podman login --authfile "$REGISTRY_AUTH_FILE" --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+          {
+            echo "DOCKER_CONFIG=$DOCKER_CONFIG"
+            echo "REGISTRY_AUTH_FILE=$REGISTRY_AUTH_FILE"
+            echo "IMAGE_REPO=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify the installer's published target
+        id: target
+        env:
+          INSTALLER_TAG: ${{ needs.iso.outputs.tag }}
+        run: bash .github/installer-target.sh
+
+      - name: apt's packages from the cache
+        if: steps.target.outputs.available == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ env.APT_DEBS }}
+          restore-keys: ${{ env.APT_DEBS }}
+
+      - name: Prepare the installer test's VM stack
+        if: steps.target.outputs.available == 'true'
+        run: |
+          df -h / /mnt
+          test -c /dev/kvm
+          nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
+
+      - name: Install and boot this ISO
+        id: install
+        if: steps.target.outputs.available == 'true'
+        env:
+          ILEX_ISO: ${{ env.ISO_DIR }}/ilex-installer.iso
+          ILEX_ISO_TARGET: ${{ steps.target.outputs.target }}
+          ILEX_ISO_DIGEST: ${{ steps.target.outputs.digest }}
+          # iso:: needs no locally built ilex container. This explicit reference
+          # stops xtask from building its default image before the ISO tier.
+          ILEX_IMAGE: ${{ steps.target.outputs.target }}
+        run: |
+          (cd "$ISO_DIR" && sha256sum --check ilex-installer.iso.sha256)
+          bash .github/vm-prep.sh wait vm-stack
+          sg libvirt -c 'cargo xtask test iso::'
+
+      - name: Keep installer test evidence
+        if: ${{ !cancelled() && steps.install.outcome != 'skipped' && steps.install.outcome != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-test-evidence
+          path: ${{ env.ILEX_ARTIFACTS }}
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Publish the release
-        if: >-
-          success() && github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
-          contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
+        if: success() && steps.target.outputs.available == 'true' && steps.install.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          INSTALLER_TAG: ${{ steps.composition.outputs.tag }}
-        run: |
-          tag=$INSTALLER_TAG
-          bash .github/publication-tag.sh "$tag"
-          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
-          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
-          digest=$(bash .github/publish-head.sh digest "$repo:$tag")
-          if [ "$digest" = - ]; then
-            echo "::warning::Not releasing installer: $repo:$tag does not exist yet; the next full run retries"
-            exit 0
-          fi
-          published=$(bash .github/installer-revision.sh "$GITHUB_REPOSITORY")
-          if bash .github/publish-head.sh revision "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$published"; then
-            : # Forward installer release; the tag records this run's commit.
-          else
-            rc=$?
-            if [ "$rc" = 3 ]; then exit 0; fi
-            exit "$rc"
-          fi
-          dir=/mnt/ilex/state/iso
-          base="installer-$(date -u +%Y%m%d)"
-          tag="$base"
-          n=2
-          while gh release view "$tag" >/dev/null 2>&1; do tag="$base-$n"; n=$((n + 1)); done
-          gh release create "$tag" "$dir/ilex-installer.iso" "$dir/ilex-installer.iso.sha256" \
-            --target "$GITHUB_SHA" --title "ilex installer ${base#installer-}" \
-            --notes-file "$dir/release-notes.md" --latest
-          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/ilex-installer.iso"
-          echo "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/ilex-installer.iso"
+          INSTALLER_TAG: ${{ needs.iso.outputs.tag }}
+          VERIFIED_DIGEST: ${{ steps.target.outputs.digest }}
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+        run: bash .github/release-installer.sh

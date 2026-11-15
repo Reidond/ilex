@@ -98,6 +98,10 @@ cargo xtask info               # resource identity, selection and available conf
   is a network installer: what it installs is the *published* image, not the
   image under test. Screenshots of Anaconda's welcome screen and of the first
   boot land in `<state dir>/artifacts/iso/`.
+  Registry resolution is mandatory before any VM boots. CI passes
+  `ILEX_ISO_DIGEST` from signature verification; both the booted digest and the
+  tracked registry composition must match. `ILEX_ISO_TARGET` changes the
+  assertion only, never the shipped kickstart's source/target.
 - Publishing (`xtask publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
 
@@ -921,8 +925,17 @@ revision, copies `generic.gnome_sha-…`, signs/verifies, then creates
 starting v1-disk for the new installer tag. Machines tests `ms-7c35.gnome` on
 that exact digest; its own first-publish/absent-swap and parent-current guards
 allow, then tested ID/config/revision checks precede sign/verify and tag moves.
-ISO is due because its fingerprint changed; it may release only after the
-installer tag exists, otherwise it warns green and a later run retries. PR 12
+ISO is due because its fingerprint changed and builds in parallel into the
+`installer-iso` artifact. `installer-release` waits for successful build/upgrade
+and actual publication (`published=true`), then verifies `generic.gnome`'s
+resolved digest with the committed public key, installs that exact ISO with
+`iso::`, and verifies the same tag/digest/signature again before the independent
+installer ancestry guard and release. Thus the first installation test runs
+after this run creates the signed composition, before any new latest release.
+An unchanged root permits the intentionally skipped publish job; a publication
+guard skip, failure or failed image test prevents installer release. An absent
+target warns green; a missing/invalid signature or failed installation fails
+red. The ISO remains an artifact and the previous release stays latest. PR 12
 adds the independently guarded `base` root; it is deliberately not built here.
 
 The second full run resolves v1 from `generic.gnome`, with no legacy read. It
@@ -934,7 +947,8 @@ catches up. Healthy logs include `publish ancestry guard: …:<tag> … allow`,
 config/tested ID, exact CI revision, signature verification, `root publication
 result: generic.gnome published=true` and `machine publication summary: 1
 published, 0 skipped`. Real-key/ghcr signing, production ancestry/swap outputs,
-unchanged-main skips/recovery, v1-disk follow-up and guarded ISO release await
+unchanged-main skips/recovery, v1-disk follow-up, production installer-target
+verification, `iso::` installation and guarded ISO release await
 the first main execution. Branch tests cannot establish those paths.
 
 After publication, the independent v1-disk run installs the installer composition
@@ -962,7 +976,9 @@ cargo xtask publish <machine-image> --as ms-7c35.gnome --tested-image-id <tested
 Publishing and releases only happen in CI. A branch dispatch with `test=true`
 builds, stages `candidate.<installer>`, upgrades (including legacy fallback) and
 tests machine layers; it signs nothing and moves no published tag. Add `iso=true`
-to build the ISO as an artifact on a branch. PR/fork events cannot reach signing.
+to build the ISO as an artifact on a branch; the installation/release job is
+main-only because its network install exercises the published target, not the
+branch candidate. PR/fork events cannot reach signing.
 
 The sole local publishing override is an explicitly allowed loopback registry,
 never ghcr, even with `CI=true`. Run a checkout-specific `registry:2` container
@@ -1002,21 +1018,52 @@ job reads its `iso_due=`): a new ISO is due when there is no `installer-*`
 release yet, when `installer/` or `crates/xtask/src/iso.rs` changed, or the resolved source/target
 from `image.toml`'s `installer` differ from the latest one (its notes carry an `installer-fingerprint:` line), or when the
 latest one is 7 days old (Fedora and Anaconda fixes). A manual run with `iso`
-checked (`-f iso=true`) builds one regardless. On `main` the `iso` job creates
-the release `installer-YYYYMMDD` (`-N` suffix if one exists that day) with
-`ilex-installer.iso`, its `.sha256` and notes, marked latest, using
-`GITHUB_TOKEN` (the job has `contents: write`). From any other branch an
-explicit `iso=true` builds the ISO and uploads it as the workflow artifact `installer-iso` instead, so it
-can be inspected; nothing is released.
+checked (`-f iso=true`) builds one regardless. `iso` constructs it in parallel
+with image CI and uploads `installer-iso` (ISO, checksum and notes) on every
+branch, including main. On main only, `installer-release` downloads that exact
+artifact after successful image tests and either actual publication or an
+unchanged root. It cannot run after a failed dependency, a cancelled run or a
+green publication guard skip (`published=false`). An unchanged root accepts
+only the intentionally skipped publisher with `changed=false`. Branches stop
+at the artifact: no `iso::` tier and no release, since the tier installs the
+published image rather than the branch image.
 
 The installer installs and tracks `generic.gnome` for now. Its source and target
 come from `image.toml`'s `installer`, and both enter the installer fingerprint.
-Before releasing, the ISO job also requires that composition's registry tag to
-exist. Explicit absence warns green and creates no release; registry errors are
-red. The next full main run retries. This avoids releasing a network installer
-whose image has not been published yet.
+The release job has `packages: read`, logs in using the job token and a private
+auth file shared by skopeo and cosign, and installs cosign v2 through the same
+pinned cosign-installer action as publication. It resolves the installer's tag
+and verifies the immutable `<repository>@<digest>` with
+`cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true`.
+Explicit manifest/name absence warns green with no release; denied/transport
+errors and missing, damaged or wrong-key signatures fail red. Anaconda itself
+does not enforce signature policy during the initial install, so this verified
+target is a prerequisite, even when the tag predates this run.
 
-Immediately before creating a release, the ISO job applies the same ancestry
+The job prepares KVM/QEMU/libvirt with `vm-prep.sh`, restores its apt package
+cache, checks disk space and the ISO checksum, then runs
+`ILEX_ISO=<downloaded artifact> cargo xtask test iso::` with the verified tag and
+`ILEX_ISO_DIGEST`. No ilex container is built by that invocation. The tier boots
+Anaconda, installs onto a sparse blank 40 GiB disk, boots it, and asserts the
+booted and tracked `generic.gnome` registry reference, the exact verified
+digest, system `running`, no failed units and GDM up. It requires KVM and 6 GiB
+for the installer VM, on the same runner selection as other tiers; it adds
+about 15 minutes only when an ISO was built. Workflow runs are serialized
+(v1-disk has a separate group but never moves tags), so this workflow cannot
+move the tag between verification and installation. Before release it also
+re-reads that tag, requires the same digest, verifies its signature again and
+rechecks the ISO checksum. A changed/deleted tag cannot release the artifact.
+
+Only a successful `iso::` step can create `installer-YYYYMMDD` (`-N` suffix if
+needed), marked latest, with `GITHUB_TOKEN` and `contents: write`. A failed or
+skipped installation creates no release; the previous release remains latest.
+The ISO stays in `installer-iso`, and available screenshots/serial logs/journals
+are retained as `installer-test-evidence` on success or failure (three days).
+The next fresh full main run retries an installer still due. Before the first
+published `generic.gnome`, a local production-target installation cannot run;
+the tier does not substitute legacy latest or a test payload in the kickstart.
+
+Immediately before creating a release, `installer-release` applies the same ancestry
 guard independently of base publication. `.github/installer-revision.sh` reads
 the newest published, non-prerelease `installer-*` release and resolves its
 actual tag to a commit (the release was created with `--target GITHUB_SHA`).
@@ -1121,7 +1168,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
    "Manage Actions access" (it does when the image carries the
    `org.opencontainers.image.source` label, which `xtask build` sets).
 4. Nothing to set up for the installer: its releases use `GITHUB_TOKEN` (the
-   `iso` job asks for `contents: write`; if Settings → Actions → General →
+   `installer-release` job asks for `contents: write` and `packages: read`; if Settings → Actions → General →
    Workflow permissions is read-only by default, a job-level `permissions:`
    still raises it). The old `ilex-iso` package, if it exists, is unused and can
    be deleted, and so can `ilex-installer-base`.
