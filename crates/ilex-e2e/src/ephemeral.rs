@@ -283,7 +283,77 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         })?;
     }
     check_packages(vm, &machine)?;
+    check_unselected_shells(vm, &selection)?;
     println!("     configuration matches labels and checkout: {selection:?}");
+    Ok(())
+}
+
+/// An omitted shell must not leak in through the common image. Explicitly
+/// shared packages/compositors are allowed when another selected component
+/// declares them. Groups are not RPM names; check their compositor directly.
+fn check_unselected_shells(
+    vm: &EphemeralVm,
+    selection: &ilex_devkit::config::Selection,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+
+    use ilex_devkit::config;
+
+    let ws = common::workspace()?;
+    let installs = |table: &toml::Table| -> Result<Vec<String>> {
+        if table.contains_key("install") {
+            config::string_list(table, "install")
+        } else {
+            Ok(vec![])
+        }
+    };
+    let common_packages = config::manifest(&ws.root.join("packages.toml"))?;
+    let mut retained = BTreeSet::new();
+    for section in common_packages.values().filter_map(|v| v.as_table()) {
+        retained.extend(installs(section)?);
+    }
+    let mut compositors = BTreeSet::new();
+    for name in &selection.shells {
+        let shell = common::manifest("shells", name, "shell.toml")?;
+        compositors.insert(common::shell_property(&shell, "session", "compositor")?);
+        if let Some(packages) = shell.get("packages").and_then(|v| v.as_table()) {
+            retained.extend(installs(packages)?);
+        }
+    }
+    let machine = common::manifest("machines", &selection.machine, "machine.toml")?;
+    if let Some(packages) = machine.get("packages").and_then(|v| v.as_table()) {
+        retained.extend(installs(packages)?);
+    }
+    for name in config::available(&ws.root, "shells")? {
+        if selection.shells.contains(&name) {
+            continue;
+        }
+        let shell = common::manifest("shells", &name, "shell.toml")?;
+        let compositor = common::shell_property(&shell, "session", "compositor")?;
+        if !compositors.contains(&compositor) && !retained.contains(&compositor) {
+            vm.ssh(&format!(
+                "test ! -e {}",
+                common::quote(&format!("/usr/bin/{compositor}"))
+            ))?
+            .ok("unselected shell compositor must be absent")?;
+            // This also detects an installed compositor RPM with a lost binary.
+            let out = vm.ssh(&format!("rpm -q -- {}", common::quote(&compositor)))?;
+            ensure(out.code == Some(1), || {
+                format!("unselected shell {name}: compositor RPM {compositor} must be absent\n{}", out.stdout)
+            })?;
+        }
+        if let Some(packages) = shell.get("packages").and_then(|v| v.as_table()) {
+            for package in installs(packages)? {
+                if !package.starts_with('@') && !retained.contains(&package) {
+                    let out = vm.ssh(&format!("rpm -q -- {}", common::quote(&package)))?;
+                    ensure(out.code == Some(1), || {
+                        format!("unselected shell {name}: package {package} must be absent\n{}", out.stdout)
+                    })?;
+                }
+            }
+        }
+        println!("     unselected shell {name}: compositor and exclusive packages absent");
+    }
     Ok(())
 }
 

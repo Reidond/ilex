@@ -75,6 +75,27 @@ impl Workspace {
         format!("{IMAGE_REPO}:{}", self.image_tag())
     }
 
+    /// A non-default shell list gets one `.s-<name>` per shell, in order;
+    /// an empty list gets `.s-none`. Slugs have no dots (hashed slugs may
+    /// contain `--`), so another checkout cannot own this variant's tag.
+    /// `None` keeps the default image. VM names and state paths stay unchanged.
+    pub fn variant_ref(&self, shells: Option<&[String]>) -> Result<String> {
+        let mut image = self.image_ref();
+        if let Some(shells) = shells {
+            if shells.is_empty() {
+                image.push_str(".s-none");
+            } else {
+                for shell in shells {
+                    crate::config::validate_name(shell)?;
+                    image.push_str(".s-");
+                    image.push_str(shell);
+                }
+            }
+        }
+        check_tag_length(&image)?;
+        Ok(image)
+    }
+
     /// Turn a user-supplied tag or reference into a full image reference:
     /// `candidate` becomes `localhost/ilex:candidate`, anything with a `/` or
     /// `:` is taken as-is.
@@ -109,6 +130,20 @@ impl Workspace {
     pub fn state_dir(&self) -> PathBuf {
         state_root().join(&self.slug)
     }
+}
+
+/// Image tags have a 128-byte limit. A maximum-length worktree tag uses 51
+/// bytes (`wt-` + 48); shell suffixes and later machine suffixes share the
+/// remaining 77. Reject overflow rather than truncate and risk a collision.
+/// Also usable after appending a derived image suffix. Digest refs have no tag.
+pub fn check_tag_length(image: &str) -> Result<()> {
+    if !image.contains('@')
+        && let Some((_, tag)) = image.rsplit('/').next().unwrap_or(image).rsplit_once(':')
+        && tag.len() > 128
+    {
+        bail!("image tag is {} bytes, exceeding the 128-byte limit; use a shorter selection or explicit image tag", tag.len());
+    }
+    Ok(())
 }
 
 /// Machine-wide runtime root shared by every checkout: `$XDG_RUNTIME_DIR/ilex-vm`.

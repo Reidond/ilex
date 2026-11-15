@@ -8,6 +8,7 @@ default), a Rust workspace for all tooling, e2e-only tests on QEMU via bcvk.
 
 ```sh
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
+cargo xtask build --shell none # headless composition check → localhost/ilex:<tag>.s-none
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
                                # on Windows: run `cargo xtask vm` in PowerShell, not in WSL
@@ -24,6 +25,21 @@ cargo xtask info               # resource identity, selection and available conf
   Plain slugs never contain `--`, so they cannot equal a hashed slug.
   The same slug selects `localhost/ilex:wt-<slug>`, VMs `ilex-<slug>-*`,
   and runtime and state directories. Never use another checkout's image or VMs.
+- `build`, `test`, `vm` and `disk` accept repeatable `--shell <name>`: the
+  first shell is the default. Flags override `ILEX_SHELLS` (comma-separated),
+  which overrides `image.toml`; an empty environment variable uses the manifest.
+  `none` alone selects a supported headless image (`multi-user.target`), used
+  to prove GNOME comes only from its manifest. Duplicates and unknown names
+  fail before podman starts. Design systems still come from `image.toml`.
+  A shell list or default different from the manifest adds `.s-<shell>` for
+  each shell in order, or `.s-none` for none, to `main` or `wt-<slug>`.
+  Slugs can contain `--` but never dots, so variants cannot collide with another
+  checkout. Tags over 128 bytes are rejected (a 48-character slug leaves 77
+  bytes for shell and future machine suffixes). Explicit `--tag`, `--image`
+  and `ILEX_IMAGE` references keep their supplied names; selection still
+  controls composition when building. `image_ref()` remains the default image.
+  Never use another checkout's `<tag>.s-*` images either. VM names and state
+  directories keep the slug alone; installed disks are separate per image.
 - VM boots take one of N machine-wide slots (`ILEX_VM_SLOTS`, default one per
   8 GiB RAM, max 4) and wait when none is free.
 - `xtask test` only builds the image when it doesn't exist yet: after changing
@@ -199,6 +215,7 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
   starts it when the WSL side prints its `ilex-viewer: --connect …` line.
   WSL can't start it itself: `/mnt/c` is mounted with `fmask=133`, so no
   `.exe` there has the execute bit interop needs.
+  `ILEX_SHELLS` reaches WSL through `WSLENV`, including without `--gui`.
 - Nothing here uses WSLg any more. It is unreliable on this machine: on most
   starts of WSL 2.7 it fails to open its shared memory with Windows
   (`/mnt/wslg/weston.log`: `rdp_allocate_shared_memory: Failed to open …`,
@@ -244,6 +261,9 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
 - Tests assert over SSH, not pixels. Screenshots are evidence: the
   `graphical::` tier saves them to `<state dir>/artifacts/graphical/` (or
   `$ILEX_ARTIFACTS/graphical/`).
+- `disk::` also checks headless images. `graphical::login` exercises GNOME's
+  login and scaling, and fails immediately before installing or booting a VM
+  when the image's default shell is not `gnome`, including `--shell none`.
 - The SSH test key and the throwaway disk overlays live in the state dir;
   `cargo xtask vm --disk` prints the exact `ssh` command line.
 - `--gui` gives the guest a GPU when the host has one (`/dev/dxg` in WSL, a

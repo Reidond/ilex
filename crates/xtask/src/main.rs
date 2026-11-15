@@ -16,6 +16,7 @@ mod iso;
 mod publish;
 mod rechunk;
 mod registry;
+mod select;
 mod test;
 mod tool;
 mod vm;

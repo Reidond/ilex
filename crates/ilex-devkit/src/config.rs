@@ -50,6 +50,28 @@ impl Selection {
             .collect()
     }
 
+    /// Check selection names before invoking podman. Manifest contents remain
+    /// compose.py's responsibility, including a selected directory's manifest.
+    pub fn validate_shells(&self, root: &Path) -> Result<()> {
+        let available = available(root, "shells")?;
+        for (index, name) in self.shells.iter().enumerate() {
+            validate_name(name)?;
+            if name == "none" || !available.contains(name) {
+                bail!(
+                    "unknown shell `{name}`; available shells: {} (use `none` for no shell)",
+                    available.iter()
+                        .map(|s| format!("{s:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if self.shells[..index].contains(name) {
+                bail!("shell selection contains duplicate `{name}`");
+            }
+        }
+        Ok(())
+    }
+
     pub fn from_labels(labels: &BTreeMap<String, String>) -> Result<Self> {
         let get = |key: &str| {
             labels.get(key).with_context(|| format!(
@@ -145,7 +167,7 @@ pub fn validate_name(name: &str) -> Result<()> {
     if !chars.next().is_some_and(|c| c.is_ascii_lowercase())
         || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
-        bail!("invalid configuration name `{name}`: expected [a-z][a-z0-9-]*");
+        bail!("invalid configuration name {name:?}: expected [a-z][a-z0-9-]*");
     }
     Ok(())
 }

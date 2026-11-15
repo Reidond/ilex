@@ -30,6 +30,21 @@ fn distro() -> String {
 pub fn forward(root: &Path, gui: bool) -> Result<()> {
     let distro = distro();
     let mut wsl = Command::new("wsl.exe");
+    // Selection must reach WSL for headless runs too. Preserve unrelated
+    // WSLENV entries, but do not path-translate the comma-separated names.
+    let mut variables = vec!["ILEX_SHELLS"];
+    if gui {
+        variables.extend(["ILEX_VIEWER_ON_WINDOWS", "ILEX_VIEWER_STATS"]);
+    }
+    let existing = std::env::var("WSLENV").unwrap_or_default();
+    let mut wslenv: Vec<_> = existing.split(':')
+        .filter(|entry| {
+            !entry.is_empty()
+                && !variables.contains(&entry.split('/').next().unwrap_or(entry))
+        })
+        .collect();
+    wslenv.extend(variables);
+    wsl.env("WSLENV", wslenv.join(":"));
 
     let viewer = if gui {
         ilex_devkit::cmd::run(
@@ -47,15 +62,7 @@ pub fn forward(root: &Path, gui: bool) -> Result<()> {
         }
         // Tell the WSL side that the window is started here (and pass the
         // frame-rate readout switch on to the bridge).
-        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-        for var in ["ILEX_VIEWER_ON_WINDOWS", "ILEX_VIEWER_STATS"] {
-            if !wslenv.is_empty() {
-                wslenv.push(':');
-            }
-            wslenv.push_str(var);
-        }
         wsl.env("ILEX_VIEWER_ON_WINDOWS", "1")
-            .env("WSLENV", wslenv)
             .stderr(Stdio::piped());
         Some(exe)
     } else {

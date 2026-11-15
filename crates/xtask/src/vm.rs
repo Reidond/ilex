@@ -47,6 +47,8 @@ use crate::disk;
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
+    #[command(flatten)]
+    pub selection: crate::select::Args,
     /// Image tag or reference to boot (defaults to this checkout's image)
     #[arg(long)]
     pub image: Option<String>,
@@ -74,21 +76,21 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    let image = args.selection.resolve(ws, args.image.as_deref())?.image;
     if args.disk || args.gui {
         #[cfg(unix)]
-        return run_disk(ws, args);
+        return run_disk(ws, args, image);
         #[cfg(not(unix))]
         bail!("--disk/--gui run in WSL2 (see CLAUDE.md)");
     }
-    run_ephemeral(ws, args)
+    run_ephemeral(ws, args, image)
 }
 
-fn run_ephemeral(ws: &Workspace, args: Args) -> Result<()> {
+fn run_ephemeral(ws: &Workspace, args: Args, image: String) -> Result<()> {
     if args.persist {
         bail!("--persist only applies to --disk/--gui");
     }
     cmd::require("bcvk")?;
-    let image = ws.resolve_image(args.image.as_deref());
     let name = ws.vm_name("vm");
     let _slot = slots::acquire(&name)?;
 
@@ -104,7 +106,7 @@ fn run_ephemeral(ws: &Workspace, args: Args) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn run_disk(ws: &Workspace, args: Args) -> Result<()> {
+fn run_disk(ws: &Workspace, args: Args, image: String) -> Result<()> {
     let viewer = args.gui && in_wsl();
     // `ILEX_DISK` boots a ready-made disk (same override the e2e tiers honour).
     let disk = match std::env::var_os("ILEX_DISK").filter(|p| !p.is_empty()) {
@@ -112,11 +114,15 @@ fn run_disk(ws: &Workspace, args: Args) -> Result<()> {
         None => {
             // The viewer's clipboard needs the guest agent: the VM-only layer.
             let image = if viewer {
-                Some(vm_image(ws, &ws.resolve_image(args.image.as_deref()))?)
+                vm_image(ws, &image)?
             } else {
-                args.image.clone()
+                image
             };
-            disk::ensure(ws, &disk::Args { image, ..disk::Args::default() })?
+            disk::ensure(ws, &disk::Args {
+                selection: args.selection.clone(),
+                image: Some(image),
+                ..disk::Args::default()
+            })?
         }
     };
 
@@ -233,7 +239,8 @@ fn vm_image(ws: &Workspace, base: &str) -> Result<String> {
     if !crate::build::image_exists(base) {
         bail!("image {base} not found in local container storage; run `cargo xtask build` first");
     }
-    let tag = format!("{}-vm", ws.image_ref());
+    let tag = format!("{base}-vm");
+    ilex_devkit::workspace::check_tag_length(&tag)?;
     let context = ws.root.join("vm");
     let containerfile = context.join("Containerfile");
     let base_id = cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", base]))?;

@@ -20,6 +20,8 @@ use crate::build;
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
+    #[command(flatten)]
+    pub selection: crate::select::Args,
     /// Build the image first even if it already exists locally
     #[arg(long)]
     pub build: bool,
@@ -80,13 +82,13 @@ fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
 /// The image to test, building it first when needed.
 fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
     let requested = std::env::var("ILEX_IMAGE").ok().filter(|s| !s.is_empty());
-    let image = ws.resolve_image(requested.as_deref());
+    let image = args.selection.resolve(ws, requested.as_deref())?.image;
     if args.build || (requested.is_none() && !bcvk::image_exists(&image)) {
-        let tag = requested.is_some().then(|| image.clone());
         build::build(
             ws,
             &build::Args {
-                tag,
+                selection: args.selection.clone(),
+                tag: Some(image.clone()),
                 no_pull: args.no_pull,
                 ..build::Args::default()
             },

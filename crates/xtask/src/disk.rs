@@ -33,6 +33,8 @@ const DEFAULT_SIZE: &str = "30G";
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
+    #[command(flatten)]
+    pub selection: crate::select::Args,
     /// Disk image format
     #[arg(long, value_enum, default_value_t = Format::Qcow2)]
     pub format: Format,
@@ -53,6 +55,7 @@ pub struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
+            selection: crate::select::Args::default(),
             format: Format::default(),
             image: None,
             out: None,
@@ -70,7 +73,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 /// Write the disk for `args` (or reuse an up-to-date one) and return its path.
 /// The image must already be built (`cargo xtask build`).
 pub fn ensure(ws: &Workspace, args: &Args) -> Result<PathBuf> {
-    let image = ws.resolve_image(args.image.as_deref());
+    let image = args.selection.resolve(ws, args.image.as_deref())?.image;
     if !build::image_exists(&image) {
         bail!("image {image} not found in local container storage; run `cargo xtask build` first");
     }

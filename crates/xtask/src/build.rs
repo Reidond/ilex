@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use ilex_devkit::{Workspace, cmd, config::Selection, git};
+use ilex_devkit::{Workspace, cmd, git};
 
 /// Where the Containerfile's builder stage looks for the host's kache store.
 const KACHE_HOST_MOUNT: &str = "/kache-host";
@@ -25,6 +25,8 @@ pub const BUILDER_IMAGE: &str = "quay.io/fedora/fedora:45";
 
 #[derive(clap::Args, Debug, Default)]
 pub struct Args {
+    #[command(flatten)]
+    pub selection: crate::select::Args,
     /// Tag (e.g. `candidate`) or full reference to build instead of this checkout's tag
     #[arg(long)]
     pub tag: Option<String>,
@@ -47,11 +49,12 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
 /// Build the image and return its full reference.
 pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
+    let resolved = args.selection.resolve(ws, args.tag.as_deref())?;
     cmd::require("podman")?;
-    let image = ws.resolve_image(args.tag.as_deref());
+    let image = resolved.image;
     // Let the compose stage report malformed manifests too. This loose read
     // supplies arguments and labels; Python remains the schema authority.
-    let selection = Selection::read(&ws.root);
+    let selection = resolved.selection;
 
     if !args.no_pull {
         for base in [BASE_IMAGE, BUILDER_IMAGE] {
@@ -70,7 +73,7 @@ pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
         .args(["--label", &format!("org.opencontainers.image.revision={revision}")])
         .args(["--label", "org.opencontainers.image.title=ilex"])
         .args(["--label", "org.opencontainers.image.source=https://github.com/Reidond/ilex"]);
-    if let Ok(selection) = selection {
+    if let Some(selection) = selection {
         build.args([
             "--build-arg",
             &format!(
