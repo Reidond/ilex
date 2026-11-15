@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ilex_devkit::{
     bcvk::{self, EphemeralOpts, EphemeralVm},
     cmd, machine,
@@ -106,15 +106,20 @@ fn fixture() -> Result<()> {
     println!("machine tmpfiles dry-run: real file exit=0");
     vm.ssh("printf '%s\\n' 'd /tmp/ilex-config-invalid-mode not-a-mode - - -' > /tmp/ilex-config-bad-tmpfiles.conf")?
         .ok("write broken tmpfiles control")?;
-    let broken =
-        vm.ssh("systemd-tmpfiles --dry-run --create /tmp/ilex-config-bad-tmpfiles.conf")?;
-    ensure(broken.code.is_some_and(|code| code != 0), || {
+    // bcvk wraps a nonzero SSH exit. Return the guest status as data so a
+    // transport failure cannot satisfy this negative control.
+    let broken = vm.ssh("systemd-tmpfiles --dry-run --create /tmp/ilex-config-bad-tmpfiles.conf; result=$?; printf '\\nILEX_TMPFILES_EXIT=%s\\n' \"$result\"")?
+        .ok("broken tmpfiles control completes over SSH")?;
+    let status: i32 = broken.out().lines()
+        .find_map(|line| line.strip_prefix("ILEX_TMPFILES_EXIT="))
+        .with_context(|| format!("tmpfiles control has no guest status: {}", broken.out()))?
+        .parse()?;
+    ensure(status != 0, || {
         "tmpfiles dry-run accepted a deliberately invalid mode".into()
     })?;
     println!(
-        "machine tmpfiles dry-run: broken line exit={}; {}",
-        broken.code.unwrap(),
-        broken.stderr.trim()
+        "machine tmpfiles dry-run: broken line exit={status}; {}",
+        broken.out()
     );
     println!(
         "parent replay: new directory and file retain 0750 root:root, content, relative link and existing-directory file"

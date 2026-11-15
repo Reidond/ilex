@@ -180,15 +180,16 @@ impl Resolved {
                 serde_json::from_str(&text).context("reading image configuration labels")?;
             Selection::from_labels(&labels.unwrap_or_default())
         })();
-        let actual = actual.map(|mut actual| {
-            if base { actual.machine = requested.machine.clone(); }
-            actual
-        });
-        let built_for = match actual {
-            Ok(actual) if actual == *requested => return Ok(None),
+        let built_for = match &actual {
             Ok(actual) => actual.summary(),
             Err(error) => format!("an unknown configuration ({error:#})"),
         };
+        if actual.is_ok_and(|mut actual| {
+            if base { actual.machine = requested.machine.clone(); }
+            actual == *requested
+        }) {
+            return Ok(None);
+        }
         let hint = if self.explicit_image {
             format!("build or pull {image} for the requested configuration")
         } else {
