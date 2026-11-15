@@ -92,7 +92,7 @@ fn fixture() -> Result<()> {
             "stat -c '%a %u:%g' /usr/share/ilex-config-parent /usr/share/ilex-config-parent/entry",
         )?
         .ok("inherited modes")?;
-    ensure(modes.out() == "750 0:0\n750 0:0", || {
+    ensure(modes.out().lines().collect::<Vec<_>>() == ["750 0:0", "750 0:0"], || {
         format!("inherited modes differ: {}", modes.out())
     })?;
     let link = vm
