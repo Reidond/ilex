@@ -221,6 +221,7 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         guest["machine"]["name"].as_str() == Some(&selection.machine),
         || "machine differs from image label".into(),
     )?;
+    let mut overlay_files = std::collections::BTreeMap::new();
     for (index, name) in selection.shells.iter().enumerate() {
         let manifest = common::manifest("shells", name, "shell.toml")?;
         let session = common::shell_property(&manifest, "session", "desktop")?;
@@ -248,9 +249,10 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
             .join(name)
             .join("rootfs");
         if overlay.is_dir() {
-            check_overlay(vm, &overlay, &overlay)?;
+            merge_overlay_files(&overlay, &overlay, &mut overlay_files)?;
         }
     }
+    check_overlay(vm, &overlay_files)?;
     for (index, name) in selection.design_systems.iter().enumerate() {
         let manifest = common::manifest("design-systems", name, "design-system.toml")?;
         let source = manifest
@@ -304,33 +306,48 @@ fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {
     Ok(())
 }
 
-fn check_overlay(
-    vm: &EphemeralVm,
+/// Mirror overlay order when collecting expectations: a later directory
+/// merges, while a file or link replaces the same path and its descendants.
+fn merge_overlay_files(
     root: &std::path::Path,
     directory: &std::path::Path,
+    files: &mut std::collections::BTreeMap<String, std::path::PathBuf>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();
-        if path.is_dir() {
-            check_overlay(vm, root, &path)?;
+        let destination = format!(
+            "/{}",
+            path.strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        if path.is_dir() && !path.is_symlink() {
+            files.remove(&destination);
+            merge_overlay_files(root, &path, files)?;
         } else {
-            let destination = format!(
-                "/{}",
-                path.strip_prefix(root)?
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            );
-            if path.is_symlink() {
-                let target = std::fs::read_link(&path)?.to_string_lossy().into_owned();
-                let guest = vm
-                    .ssh(&format!("readlink -- {}", common::quote(&destination)))?
-                    .ok("overlay symlink")?;
-                ensure(guest.out() == target, || {
-                    format!("overlay symlink {destination} differs")
-                })?;
-            } else {
-                check_file(vm, &path, &destination)?;
-            }
+            let prefix = format!("{destination}/");
+            files.retain(|name, _| name != &destination && !name.starts_with(&prefix));
+            files.insert(destination, path);
+        }
+    }
+    Ok(())
+}
+
+fn check_overlay(
+    vm: &EphemeralVm,
+    files: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> Result<()> {
+    for (destination, source) in files {
+        if source.is_symlink() {
+            let target = std::fs::read_link(source)?.to_string_lossy().into_owned();
+            let guest = vm
+                .ssh(&format!("readlink -- {}", common::quote(destination)))?
+                .ok("overlay symlink")?;
+            ensure(guest.out() == target, || {
+                format!("overlay symlink {destination} differs")
+            })?;
+        } else {
+            check_file(vm, source, destination)?;
         }
     }
     Ok(())

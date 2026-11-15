@@ -145,6 +145,32 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def remove_entry(path):
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def merge_overlay(source, destination):
+    """Later entries replace earlier files/links; real directories merge."""
+    if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+        remove_entry(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    for entry in source.iterdir():
+        target = destination / entry.name
+        if entry.is_symlink():
+            remove_entry(target)
+            shutil.copy2(entry, target, follow_symlinks=False)
+        elif entry.is_dir():
+            merge_overlay(entry, target)
+        else:
+            if target.is_symlink() or target.is_dir():
+                remove_entry(target)
+            shutil.copy2(entry, target)
+    shutil.copystat(source, destination)
+
+
 def image(args):
     ctx, out = args.context, args.out
     path = ctx / "image.toml"
@@ -186,7 +212,7 @@ def image(args):
         if overlay.exists():
             if not overlay.is_dir():
                 fail(ctx / "shells" / selected_name / "shell.toml", "rootfs", "must be a directory")
-            shutil.copytree(overlay, out / "rootfs", symlinks=True, dirs_exist_ok=True)
+            merge_overlay(overlay, out / "rootfs")
     for destination, source in token_files:
         target = out / "rootfs" / destination.lstrip("/")
         target.parent.mkdir(parents=True, exist_ok=True)
