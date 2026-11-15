@@ -182,7 +182,11 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                         &pinned,
                         inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
                     )?;
-                    require_layer_parent(ws, &pinned, &inspect, row, &repository, &auth)?;
+                    let parent =
+                        require_layer_parent(ws, &pinned, &inspect, row, &repository, &auth)?;
+                    verify(ws, &parent, &auth, args.verification_key.as_deref()).context(
+                        "verifying the declared published parent before signing its layer",
+                    )?;
                 }
                 let computed = rechunk::fingerprint(ws, &pinned)?;
                 let label = local_fingerprint(&pinned)?;
@@ -433,7 +437,7 @@ fn require_layer_parent(
     row: &config::Publication,
     repository: &str,
     auth: &Option<Auth>,
-) -> Result<()> {
+) -> Result<String> {
     let insecure = registry::is_local_registry(repository);
     let parent = row
         .parent
@@ -490,7 +494,7 @@ fn require_layer_parent(
     eprintln!(
         "{image} preserves every filesystem layer of {tag} ({config_id}) and adds one machine layer"
     );
-    Ok(())
+    Ok(pinned)
 }
 
 fn local_fingerprint(image: &str) -> Result<String> {

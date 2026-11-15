@@ -1090,7 +1090,8 @@ cargo xtask publish <machine-image> --machine ms-7c35 --tested-image-id <image_i
   digest and checks its complete selection, config digest, and filesystem diff
   IDs. The layer must have the expected `ilex.machine-key` (root config ID plus
   independently hashed current machine inputs), matching `ilex.machine-inputs`,
-  and exactly the parent's filesystem layers plus one layer. Relabelling an
+  and exactly the parent's filesystem layers plus one layer. The parent's
+  signature must also verify against the same permitted public key. Relabelling an
   unrelated or stale parent is refused. For a local check, build the layer on
   the exact root that was published, including rechunking and fingerprint labels.
   CI's ancestry, tag-snapshot and parent-still-current guards remain necessary;
