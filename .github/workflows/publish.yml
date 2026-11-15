@@ -404,8 +404,8 @@ jobs:
             fi
             echo "no :latest yet: the first publish has no upgrade tier"
           fi
-          main_head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
-          if bash .github/publish-head.sh "$GITHUB_SHA" "$main_head"; then
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          if bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$repo:latest"; then
             cargo xtask publish --digest "$STAGED"
             echo 'published=true' >> "$GITHUB_OUTPUT"
           else
@@ -593,10 +593,9 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           while IFS=$'\t' read -r machine image image_id; do
-            main_head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
-            if bash .github/publish-head.sh "$GITHUB_SHA" "$main_head"; then
-              # Check main first: an overtaken run is green even if its old
-              # base differs. A current run must still have this exact base.
+            if bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$machine"; then
+              # Each machine compares its own published revision. A forward
+              # run must still have precisely the current published base.
               latest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:latest")
               if [ "$BASE" != "$IMAGE_REPO@$latest" ]; then
                 echo "::error::machine tested base $BASE differs from current :latest $IMAGE_REPO@$latest"

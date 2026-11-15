@@ -678,17 +678,25 @@ after checking it is the one the upgrade tier tested, and moves `:sha-<short>`,
 registry, nothing pushed twice). Runs of the workflow never overlap (one
 concurrency group), so `:candidate` is always the current run's.
 
-Base publication also checks the freshly read head of main against
-`GITHUB_SHA` immediately before invoking the publisher. A re-run retains its
-original commit; if main has advanced, the step warns with both commits,
-publishes nothing and finishes green with `published=false`. With two merges
-in quick succession, the overtaken run can finish its tests but cannot move
-`:latest` backwards; the newer run publishes. Only a real successful publish
-sets `published=true`: the v1-disk follow-up and machines on a changed base
-require that output, so a green stale-run skip starts neither. An unchanged
-base still permits independent machine work, guarded by its own main-head
-check. This guard is a separate commit because it fixes a pre-existing base
-publication hazard as well as the new machine path.
+Immediately before invoking either image publisher, `.github/publish-head.sh`
+reads that image's currently published revision label and main's head. It
+requires published → run → main ancestry (the API's `ahead` or `identical`
+status for each BASE...HEAD comparison). A tested run behind main can still
+publish forward if a newer run was cancelled, skipped, or never started.
+A re-run older than the published image, or a run outside main's history,
+warns with the commits and failed condition, publishes nothing and finishes
+green. A missing tag or revision label permits the first publish, but the run
+must still belong to main. Registry/API errors and malformed labels fail red.
+The API avoids depending on checkout depth. Published history no longer
+reachable from main fails red and requires deliberate owner recovery; silently
+replacing an unrelated image would hide a history rewrite.
+
+Only a real successful base publish sets `published=true`: the v1-disk
+follow-up and machines on a changed base require that output, so a green
+stale-run skip starts neither. An unchanged base permits independent machine
+work against its own tag's revision, which may be newer than the base's.
+Never re-run a publish run from before these guards existed: re-runs use the
+original commit's workflow file and remain unguarded.
 
 Then `machines` discovers `publish = true` manifests with `xtask info
 --published-machines` (currently `gaming`). It runs only after successful base
@@ -750,9 +758,9 @@ after checking `:latest` still has the tested base digest, it signs and publishe
 `:<machine>`, `:<machine>-YYYYMMDD` and `:<machine>-sha-<short>` in the same
 repository. It never stages or touches `:candidate`, `:latest` or base date/SHA
 tags. A mismatch prints `::error::` with both base references. Immediately before
-each publisher invocation, it reads the current head of main and compares it
-with `GITHUB_SHA`. An overtaken/re-run commit prints `::warning::` with both
-commits and finishes green without publishing; the newer run publishes instead.
+each publisher invocation, it applies the ancestry guard to `:<machine>`'s
+own revision, independently of `:latest`'s older revision on an unchanged base.
+Backward/diverged candidates warn and finish green without publishing.
 
 Forced tests do not republish an unchanged fingerprint. `xtask prepare-publish`
 records the fingerprint through a config-only build **before** capability and
