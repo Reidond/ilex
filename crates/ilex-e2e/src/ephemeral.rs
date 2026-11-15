@@ -274,19 +274,41 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         }
         let packages = toml::Table::from_iter([("packages".into(), toml::Value::try_from(&expected)?)]);
         check_packages(vm, &packages)?;
+        if key == "shell-packages" && selected {
+            for package in expected["exclude"].as_array().context("shell excludes missing")? {
+                let name = package.as_str().context("shell exclude must be a string")?;
+                if !name.contains(['*', '?', '[', ']']) {
+                    vm.ssh(&format!("rpm -q -- {}; result=$?; test \"$result\" -eq 1", common::quote(name)))?
+                        .ok(&format!("literal shell exclude {name} must not be installed"))?;
+                    println!("     literal shell exclude {name} absent");
+                }
+            }
+        }
     }
     if selection.shells.is_empty() {
+        // A machine may legitimately add desktop packages to the bare base.
+        if selection.machine == "generic" {
+            vm.ssh(
+                "test -z \"$(find /usr/share/wayland-sessions /usr/share/xsessions -mindepth 1 -maxdepth 1 2>/dev/null)\" && \
+                 test ! -e /etc/systemd/system/display-manager.service && \
+                 test ! -L /etc/systemd/system/display-manager.service && \
+                 test ! -e /usr/bin/firefox && test ! -e /usr/bin/flatpak"
+            )?.ok("bare base has no desktop package files")?;
+            println!("     bare base: sessions, display manager and desktop apps absent");
+        }
         vm.ssh(
-            "test -z \"$(find /usr/share/wayland-sessions /usr/share/xsessions -mindepth 1 -maxdepth 1 2>/dev/null)\" && \
-             test ! -e /etc/systemd/system/display-manager.service && \
-             test ! -L /etc/systemd/system/display-manager.service && \
-             test ! -e /usr/bin/firefox && test ! -e /usr/bin/flatpak && \
-             test ! -e /usr/share/ilex/design-systems && \
+            "test ! -e /usr/share/ilex/design-systems && \
              test ! -L /usr/share/ilex/design-systems && \
              test ! -L /etc/systemd/user/default.target.wants/ilex-update-notify.path && \
              test ! -L /etc/systemd/user/graphical-session.target.wants/ilex-update-notify.service"
-        )?.ok("headless image has no desktop files or enabled notifier")?;
-        println!("     no shell: sessions, display manager, desktop apps, design systems and notifier enablement absent");
+        )?.ok("shell-free image has no design systems or enabled notifier")?;
+        println!("     no shell: design systems and notifier enablement absent");
+    } else {
+        vm.ssh(
+            "test -L /etc/systemd/user/default.target.wants/ilex-update-notify.path && \
+             test -L /etc/systemd/user/graphical-session.target.wants/ilex-update-notify.service"
+        )?.ok("shell image has both notifier enablement links")?;
+        println!("     shell image: both notifier enablement links present");
     }
     for (index, name) in selection.shells.iter().enumerate() {
         let manifest = common::manifest("shells", name, "shell.toml")?;

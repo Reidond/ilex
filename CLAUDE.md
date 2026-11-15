@@ -326,9 +326,12 @@ machine packages, plus the literal non-group entries of `packages.install` and
 shell-package/session/token checks pass and the target must be `multi-user.target`;
 the OS, bootc, install config, signature policy and drupe checks still run.
 `ephemeral::configuration` compares both package lists with the checkout,
-alongside labels, overlays and token hashes, and checks that a shell-free image
-has no sessions, display manager, Firefox, Flatpak, design systems or globally
-enabled notifier. Tmpfiles are per transaction: `ilex-var.conf` for base
+alongside labels, overlays and token hashes. A shell-free generic base must have
+no sessions, display manager, Firefox or Flatpak; a machine may add those packages.
+Every shell-free image must omit design systems and globally enabled notifier
+units. Images with a shell must enable both notifier units and have none of the
+literal packages excluded by `shells/packages.toml` installed, even through the
+base or machine transaction. Tmpfiles are per transaction: `ilex-var.conf` for base
 packages, `ilex-var-shells.conf` for shells, `ilex-var-machine.conf` for a
 machine; an empty transaction emits no file.
 
