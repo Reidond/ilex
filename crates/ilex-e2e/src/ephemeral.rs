@@ -288,10 +288,9 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
     Ok(())
 }
 
-/// An omitted shell must not leak in through common or machine packages.
-/// Allow packages/compositors shared with another selected shell. With no
-/// shells, nothing can excuse a leaked compositor or shell RPM. Groups are
-/// not RPM names; check their compositor directly.
+/// Sessions, compositor commands and greeter units identify an omitted shell.
+/// Its dependencies may legitimately come from common/base packages or a
+/// selected shell's group; neither package names nor group members identify it.
 fn check_unselected_shells(
     vm: &EphemeralVm,
     selection: &ilex_devkit::config::Selection,
@@ -301,20 +300,15 @@ fn check_unselected_shells(
     use ilex_devkit::config;
 
     let ws = common::workspace()?;
-    let installs = |table: &toml::Table| -> Result<Vec<String>> {
-        if table.contains_key("install") {
-            config::string_list(table, "install")
-        } else {
-            Ok(vec![])
-        }
-    };
-    let mut retained = BTreeSet::new();
+    let mut sessions = BTreeSet::new();
     let mut compositors = BTreeSet::new();
+    let mut greeters = BTreeSet::new();
     for name in &selection.shells {
         let shell = common::manifest("shells", name, "shell.toml")?;
+        sessions.insert(common::shell_property(&shell, "session", "desktop")?);
         compositors.insert(common::shell_property(&shell, "session", "compositor")?);
-        if let Some(packages) = shell.get("packages").and_then(|v| v.as_table()) {
-            retained.extend(installs(packages)?);
+        if shell.contains_key("greeter") {
+            greeters.insert(common::shell_property(&shell, "greeter", "unit")?);
         }
     }
     for name in config::available(&ws.root, "shells")? {
@@ -322,30 +316,32 @@ fn check_unselected_shells(
             continue;
         }
         let shell = common::manifest("shells", &name, "shell.toml")?;
+        let desktop = common::shell_property(&shell, "session", "desktop")?;
         let compositor = common::shell_property(&shell, "session", "compositor")?;
-        if !compositors.contains(&compositor) && !retained.contains(&compositor) {
+        for (kind, path, shared) in [
+            ("session", format!("/usr/share/wayland-sessions/{desktop}.desktop"), sessions.contains(&desktop)),
+            ("compositor", format!("/usr/bin/{compositor}"), compositors.contains(&compositor)),
+        ] {
+            if shared {
+                continue;
+            }
+            let path = common::quote(&path);
             vm.ssh(&format!(
-                "test ! -e {}",
-                common::quote(&format!("/usr/bin/{compositor}"))
+                "test ! -e {path} && test ! -L {path}"
             ))?
-            .ok("unselected shell compositor must be absent")?;
-            // This also detects an installed compositor RPM with a lost binary.
-            let out = vm.ssh(&format!("rpm -q -- {}", common::quote(&compositor)))?;
-            ensure(out.code == Some(1), || {
-                format!("unselected shell {name}: compositor RPM {compositor} must be absent\n{}", out.stdout)
-            })?;
+            .ok(&format!("unselected shell {name}: {kind} {path} must be absent"))?;
+            println!("     unselected shell {name}: {kind} {path} absent");
         }
-        if let Some(packages) = shell.get("packages").and_then(|v| v.as_table()) {
-            for package in installs(packages)? {
-                if !package.starts_with('@') && !retained.contains(&package) {
-                    let out = vm.ssh(&format!("rpm -q -- {}", common::quote(&package)))?;
-                    ensure(out.code == Some(1), || {
-                        format!("unselected shell {name}: package {package} must be absent\n{}", out.stdout)
-                    })?;
-                }
+        if shell.contains_key("greeter") {
+            let unit = common::shell_property(&shell, "greeter", "unit")?;
+            if !greeters.contains(&unit) {
+                let out = vm.ssh(&format!("systemctl cat -- {}", common::quote(&unit)))?;
+                ensure(out.code == Some(1), || {
+                    format!("unselected shell {name}: greeter {unit} must not be installed\n{}\n{}", out.stdout, out.stderr)
+                })?;
+                println!("     unselected shell {name}: greeter {unit} not installed");
             }
         }
-        println!("     unselected shell {name}: compositor and exclusive packages absent");
     }
     Ok(())
 }
