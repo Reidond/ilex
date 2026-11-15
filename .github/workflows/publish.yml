@@ -362,6 +362,10 @@ jobs:
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 30
+    outputs:
+      # A green overtaken run did not publish. Dependants need this signal,
+      # not just needs.publish.result == success.
+      published: ${{ steps.publication.outputs.published }}
     permissions:
       contents: read
       packages: write
@@ -379,10 +383,12 @@ jobs:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Publish and sign
+        id: publication
         env:
           STAGED: ${{ needs.build.outputs.digest }}
           TESTED: ${{ needs.upgrade.outputs.tested }}
           V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
+          GH_TOKEN: ${{ github.token }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
@@ -398,11 +404,23 @@ jobs:
             fi
             echo "no :latest yet: the first publish has no upgrade tier"
           fi
-          cargo xtask publish --digest "$STAGED"
+          main_head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if bash .github/publish-head.sh "$GITHUB_SHA" "$main_head"; then
+            cargo xtask publish --digest "$STAGED"
+            echo 'published=true' >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            if [ "$rc" = 3 ]; then
+              echo 'published=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            exit "$rc"
+          fi
 
       # The next run's upgrade tier boots what was just published as its v1.
       # A failure here costs that run the install, nothing else.
       - name: Start the v1-disk run
+        if: steps.publication.outputs.published == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -420,7 +438,7 @@ jobs:
       !cancelled() && !inputs.v1_disk && github.repository == 'Reidond/ilex' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
       needs.build.result == 'success' && needs.upgrade.result == 'success' &&
-      (needs.publish.result == 'success' ||
+      ((needs.publish.result == 'success' && needs.publish.outputs.published == 'true') ||
        (needs.publish.result == 'skipped' &&
         (github.ref != 'refs/heads/main' || needs.build.outputs.changed == 'false')))
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
@@ -557,7 +575,7 @@ jobs:
       - uses: sigstore/cosign-installer@v4.1.3
         if: >-
           success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true' &&
-          (needs.publish.result == 'success' || needs.build.outputs.changed == 'false')
+          (needs.publish.outputs.published == 'true' || needs.build.outputs.changed == 'false')
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
@@ -566,7 +584,7 @@ jobs:
       - name: Publish and sign tested machines (main only)
         if: >-
           success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true' &&
-          (needs.publish.result == 'success' || needs.build.outputs.changed == 'false')
+          (needs.publish.outputs.published == 'true' || needs.build.outputs.changed == 'false')
         env:
           BASE: ${{ steps.base.outputs.base }}
           GH_TOKEN: ${{ github.token }}

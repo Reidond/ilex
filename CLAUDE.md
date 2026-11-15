@@ -678,6 +678,18 @@ after checking it is the one the upgrade tier tested, and moves `:sha-<short>`,
 registry, nothing pushed twice). Runs of the workflow never overlap (one
 concurrency group), so `:candidate` is always the current run's.
 
+Base publication also checks the freshly read head of main against
+`GITHUB_SHA` immediately before invoking the publisher. A re-run retains its
+original commit; if main has advanced, the step warns with both commits,
+publishes nothing and finishes green with `published=false`. With two merges
+in quick succession, the overtaken run can finish its tests but cannot move
+`:latest` backwards; the newer run publishes. Only a real successful publish
+sets `published=true`: the v1-disk follow-up and machines on a changed base
+require that output, so a green stale-run skip starts neither. An unchanged
+base still permits independent machine work, guarded by its own main-head
+check. This guard is a separate commit because it fixes a pre-existing base
+publication hazard as well as the new machine path.
+
 Then `machines` discovers `publish = true` manifests with `xtask info
 --published-machines` (currently `gaming`). It runs only after successful base
 jobs and a successful or intentionally skipped publish, never in a `v1_disk`
