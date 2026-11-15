@@ -63,7 +63,8 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
     let repository = repo_of(&args.reference);
     let auth = Auth::login(repository)?;
-    let published = published_fingerprint(&args.reference, repository, &auth, label)?;
+    let strict = args.machine.is_some();
+    let published = published_fingerprint(&args.reference, repository, &auth, label, strict)?;
     let base_id = if let Some(base) = &args.base {
         if machine::image_machine(base)? != "generic" {
             bail!("machine base must be generic: {base}");
@@ -79,7 +80,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     };
     if let Some(id) = base_id {
         let prefix = format!("{id}-");
-        let key = published_fingerprint(&args.reference, repository, &auth, "ilex.machine-key")?;
+        let key = published_fingerprint(&args.reference, repository, &auth, "ilex.machine-key", strict)?;
         let same_base = matches!(key, Published::Fingerprint(key) if key.starts_with(&prefix));
         registry::github_output("base_changed", &(!same_base).to_string())?;
     }
@@ -128,6 +129,7 @@ fn published_fingerprint(
     repository: &str,
     auth: &Option<Auth>,
     label: &str,
+    strict: bool,
 ) -> Result<Published> {
     let mut skopeo = Command::new("skopeo");
     skopeo.args(["inspect", "--config"]);
@@ -139,10 +141,17 @@ fn published_fingerprint(
     let out = registry::capture(&mut skopeo)?;
 
     if !out.ok {
-        // Publishing is idempotent and fails loudly on a real permission
-        // problem, so "not there" and "not allowed to see it" both count as
-        // "nothing published".
-        if registry::looks_missing(&out.stderr) {
+        // Machines must not rebuild/publish on every private-package lookup
+        // failure. Only explicit manifest/repository absence is a first publish.
+        // Preserve the existing generic bootstrap behaviour separately.
+        let error = out.stderr.to_ascii_lowercase();
+        let missing = if strict {
+            !error.contains("denied") && !error.contains("unauthorized")
+                && (error.contains("manifest unknown") || error.contains("name unknown"))
+        } else {
+            registry::looks_missing(&out.stderr)
+        };
+        if missing {
             eprintln!(
                 "xtask: {reference} not found ({}); treating as unpublished",
                 first_line(&out.stderr)

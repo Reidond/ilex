@@ -720,6 +720,13 @@ publish to have succeeded. A branch run builds and tests against the staged
 digest. The cosign key/password reach only the publishing step. Registry
 authorization is the job's `packages: write` GitHub token, not a per-step
 permission boundary. Checkout does not persist credentials. The machines job
+authenticates base probes/pulls and machine comparisons using this same job
+token: select logs podman/skopeo in, and planning/build comparisons pass
+`REGISTRY_TOKEN` to xtask just as generic build does. These steps only read the
+registry and have no signing key. `changed --machine` treats manifest/name
+unknown as absent, while denied/unauthorized and other failures are errors;
+a private machine image can no longer look missing on every nightly.
+The machines job
 pins kache-action's v1 code to `ad7317540dcdd71c904f7a60a87b620a0c0e67ed`,
 sets kache `v2.1.1`, supplies an empty token input and disables PR comments.
 At that commit the input token is used only for release discovery and PR

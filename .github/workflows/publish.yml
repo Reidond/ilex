@@ -384,9 +384,12 @@ jobs:
           github-cache: "true"
 
       - name: Build publisher without signing credentials
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
           bash .github/build-publisher.sh
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
 
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
@@ -488,10 +491,14 @@ jobs:
           TESTED: ${{ needs.upgrade.outputs.tested }}
           V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
           BASE_CHANGED: ${{ needs.build.outputs.changed }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           echo "IMAGE_REPO=$repo" >> "$GITHUB_ENV"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          # Read authorization for every skopeo probe and base pull in this
+          # job. This step performs no registry writes and has no signing key.
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
           # A forced test can stage an unchanged base without publishing it.
           # Main layers must then use current :latest, never that unsigned
           # replacement. Branches exercise the staged candidate as usual.
@@ -526,6 +533,7 @@ jobs:
           BASE_ID: ${{ steps.base.outputs.base_id }}
           BASE_CHANGED: ${{ needs.build.outputs.changed }}
           FORCE_TEST: ${{ inputs.test == true }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           : > "$RUNNER_TEMP/pending-machines"
           while IFS= read -r machine; do
@@ -560,6 +568,7 @@ jobs:
           BASE: ${{ steps.base.outputs.base }}
           BASE_ID: ${{ steps.base.outputs.base_id }}
           FORCE_TEST: ${{ inputs.test == true }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           : > "$RUNNER_TEMP/tested-machines"
           podman pull --quiet "$BASE"
