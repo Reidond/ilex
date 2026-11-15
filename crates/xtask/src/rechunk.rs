@@ -208,9 +208,8 @@ pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     let mut hash = Sha256::new();
     hash.update(b"ilex-fingerprint v2\n");
     if selection.machine != "generic" {
-        // --on may itself be a machine image. Its overlays are retained even
-        // though machine.json names only this layer; the key includes that
-        // actual base's image ID as well as the current machine inputs.
+        // Cover the actual generic --on base, including its shell overlays,
+        // as well as the selected machine inputs recorded by the layer key.
         let key = local_label(image, "ilex.machine-key")?
             .context("machine image has no ilex.machine-key; rebuild its machine layer")?;
         hash.update(format!("machine-layer {key}\n"));

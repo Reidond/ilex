@@ -285,7 +285,7 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
     check_packages(vm, &machine)?;
     let overlay = common::workspace()?.root.join("machines").join(&selection.machine).join("rootfs");
     if overlay.is_dir() { check_overlay(vm, &overlay, &overlay)?; }
-    check_unselected_shells(vm, &selection)?;
+    check_unselected_configurations(vm, &selection)?;
     println!("     configuration matches labels and checkout: {selection:?}");
     Ok(())
 }
@@ -293,7 +293,7 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
 /// Sessions, compositor commands and greeter units identify an omitted shell.
 /// Its dependencies may legitimately come from common/base packages or a
 /// selected shell's group; neither package names nor group members identify it.
-fn check_unselected_shells(
+fn check_unselected_configurations(
     vm: &EphemeralVm,
     selection: &ilex_devkit::config::Selection,
 ) -> Result<()> {
