@@ -288,9 +288,10 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
     Ok(())
 }
 
-/// An omitted shell must not leak in through the common image. Explicitly
-/// shared packages/compositors are allowed when another selected component
-/// declares them. Groups are not RPM names; check their compositor directly.
+/// An omitted shell must not leak in through common or machine packages.
+/// Allow packages/compositors shared with another selected shell. With no
+/// shells, nothing can excuse a leaked compositor or shell RPM. Groups are
+/// not RPM names; check their compositor directly.
 fn check_unselected_shells(
     vm: &EphemeralVm,
     selection: &ilex_devkit::config::Selection,
@@ -307,11 +308,7 @@ fn check_unselected_shells(
             Ok(vec![])
         }
     };
-    let common_packages = config::manifest(&ws.root.join("packages.toml"))?;
     let mut retained = BTreeSet::new();
-    for section in common_packages.values().filter_map(|v| v.as_table()) {
-        retained.extend(installs(section)?);
-    }
     let mut compositors = BTreeSet::new();
     for name in &selection.shells {
         let shell = common::manifest("shells", name, "shell.toml")?;
@@ -319,10 +316,6 @@ fn check_unselected_shells(
         if let Some(packages) = shell.get("packages").and_then(|v| v.as_table()) {
             retained.extend(installs(packages)?);
         }
-    }
-    let machine = common::manifest("machines", &selection.machine, "machine.toml")?;
-    if let Some(packages) = machine.get("packages").and_then(|v| v.as_table()) {
-        retained.extend(installs(packages)?);
     }
     for name in config::available(&ws.root, "shells")? {
         if selection.shells.contains(&name) {
