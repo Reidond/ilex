@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import sys
 import uuid
@@ -121,6 +122,14 @@ class Tree:
                 return None
             raise
 
+    def require_absent(self, path):
+        try:
+            with self.parent(path) as (fd, name):
+                os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        error(self.label, path, "must be absent before a base install; reserved for the composer")
+
     def write(self, path, data, mode=0o644, previous_hash=None):
         with self.parent(path, create=True) as (fd, name):
             existing = None
@@ -132,7 +141,7 @@ class Tree:
                 if not stat.S_ISREG(existing.st_mode):
                     error(self.label, path, "generated destination must be a regular file (no symlinks)")
                 if previous_hash is None:
-                    error(self.label, path, "already exists; overlays only add files")
+                    error(self.label, path, "already exists and is not a registered generated file")
                 if hashlib.sha256(self.read(path)).hexdigest() != previous_hash:
                     error(self.label, path, "existing generated file differs from its registry")
             temporary = f".ilex-{uuid.uuid4().hex}"
@@ -156,6 +165,8 @@ class Tree:
             for path, mode in sorted(entries, key=lambda entry: stat.S_ISDIR(entry[1])):
                 if reserved(path):
                     error(label, path, f"/{RESERVED} is reserved for generated files")
+                if path in ("etc/ld.so.preload", "etc/ld.so.conf", "etc/ld.so.conf.d") or path.startswith("etc/ld.so.conf.d/"):
+                    error(label, path, "dynamic-loader configuration is forbidden in overlays")
                 if staging_path and (path == staging_path or path.startswith(staging_path + "/")):
                     error(label, path, "cannot write into the temporary installation staging")
                 if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
@@ -200,46 +211,62 @@ def json_bytes(value):
     return (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def install(payload, root):
+def install(payload, root, phase="all", base=False, remove_payload=False):
     try:
         staging_path = Path(os.path.abspath(payload)).relative_to(Path(os.path.abspath(root))).as_posix()
     except ValueError:
         staging_path = None
     with Tree(root, "generated files") as image:
-        registry_bytes = image.read(REGISTRY, optional=True)
-        registry = {} if registry_bytes is None else json.loads(registry_bytes)
-        if not isinstance(registry, dict) or any(
-            not reserved(path) or path == REGISTRY or not isinstance(digest, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", digest)
-            for path, digest in registry.items()
-        ):
-            error("generated files", REGISTRY, "invalid generated-file registry")
-        with Tree(payload / "generated", "generated files") as generated:
-            for path, mode in generated.entries():
-                if stat.S_ISDIR(mode):
-                    continue
-                if not reserved(path) or path == REGISTRY or not stat.S_ISREG(mode):
-                    error("generated files", path, "must be a regular file below the reserved directory")
-                data = generated.read(path)
-                image.write(path, data, previous_hash=registry.get(path))
-                registry[path] = hashlib.sha256(data).hexdigest()
-        image.write(REGISTRY, json_bytes(registry), previous_hash=(
-            hashlib.sha256(registry_bytes).hexdigest() if registry_bytes is not None else None
-        ))
-        with Tree(payload, "overlay staging") as staged:
-            overlays = json.loads(staged.read("overlays.json"))
-        for overlay in overlays:
-            directory = overlay["directory"]
-            parts(directory)
-            image.add_overlay(payload / directory, overlay["name"], staging_path)
+        if phase != "overlays":
+            if base:
+                image.require_absent(RESERVED)
+            registry_bytes = image.read(REGISTRY, optional=True)
+            registry = {} if registry_bytes is None else json.loads(registry_bytes)
+            if not isinstance(registry, dict):
+                error("generated files", REGISTRY, "invalid generated-file registry")
+            for path, digest in registry.items():
+                try:
+                    parts(path)
+                except ValueError as exc:
+                    error("generated files", REGISTRY, f"invalid registry key: {exc}")
+                if not reserved(path) or path == REGISTRY or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                    error("generated files", REGISTRY, f"invalid generated-file registry entry {path!r}")
+            with Tree(payload / "generated", "generated files") as generated:
+                for path, mode in generated.entries():
+                    if stat.S_ISDIR(mode):
+                        continue
+                    if not reserved(path) or path == REGISTRY or not stat.S_ISREG(mode):
+                        error("generated files", path, "must be a regular file below the reserved directory")
+                    data = generated.read(path)
+                    image.write(path, data, previous_hash=registry.get(path))
+                    registry[path] = hashlib.sha256(data).hexdigest()
+            image.write(REGISTRY, json_bytes(registry), previous_hash=(
+                hashlib.sha256(registry_bytes).hexdigest() if registry_bytes is not None else None
+            ))
+        if phase != "generated":
+            with Tree(payload, "overlay staging") as staged:
+                overlays = json.loads(staged.read("overlays.json"))
+            for overlay in overlays:
+                directory = overlay["directory"]
+                parts(directory)
+                image.add_overlay(payload / directory, overlay["name"], staging_path)
+    if remove_payload:
+        # Do this in the already-running, site-disabled interpreter: no new
+        # command may execute overlay content between installation and lint.
+        shutil.rmtree(payload)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--payload", type=Path, required=True)
     parser.add_argument("--root", type=Path, default=Path("/"))
+    parser.add_argument("--phase", choices=("all", "generated", "overlays"), default="all")
+    parser.add_argument("--base", action="store_true", help="require the reserved generated directory to be absent")
+    parser.add_argument("--remove-payload", action="store_true")
     args = parser.parse_args()
+    if args.base and args.phase == "overlays":
+        parser.error("--base requires generated-file installation")
     try:
-        install(args.payload, args.root)
+        install(args.payload, args.root, args.phase, args.base, args.remove_payload)
     except (OSError, ValueError, KeyError) as exc:
         sys.exit(f"install-files: {exc}")

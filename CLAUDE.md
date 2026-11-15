@@ -85,17 +85,36 @@ but never replace a file, symlink or other entry, even with identical content.
 Directory/non-directory conflicts and paths through any symlink (including
 `/bin` and `/lib`) are errors. Leaf symlinks may be added at new paths.
 `/usr/share/ilex` is reserved for generated files and forbidden to overlays.
+Dynamic-loader configuration is also forbidden: `/etc/ld.so.preload`,
+`/etc/ld.so.conf` and `/etc/ld.so.conf.d/**` (including the directory itself).
 A shell must provide a real session and compositor.
 
+Add-only is a visibility rule, not containment. An overlay can ship a service
+or other code that runs as root on the installed machine; review every added
+path accordingly. The build must not execute that content to produce changes
+absent from the overlay diff. All configuration runs before overlays, and only
+`bootc container lint` runs afterward.
+
 The final stage copies each overlay to temporary staging by content and runs
-`build/image_tree.py` against the real image, then removes the staging. Generated
+`build/image_tree.py` against the real image; the interpreter removes its own
+staging without launching another command. Final-stage copies use ordinary
+`COPY`, since `COPY --link` replaces ancestor directory metadata. A build guard
+requires `/tmp` and `/var/tmp` to remain `1777 root:root` in the image itself
+(a VM's `tmp.mount` hides the underlying `/tmp`). Generated
 JSON and tokens have separate staging and use directory descriptors with
 `O_NOFOLLOW`, including at the leaf. `/usr/share/ilex/.generated.json` records
 generated file hashes: a later layer may replace only an unchanged, registered
-generated file. The same installer accepts machine overlay payloads and permits
+generated file, and registry keys use the same strict path normalization. Base
+installation uses `--base --phase generated` and requires `/usr/share/ilex` to
+be absent before generating anything; it never adopts a package's registry.
+The same installer accepts machine overlay payloads and permits
 replacing a registered `machine.json` without granting overlays replacement rights.
-Final-stage Python runs in isolated mode so overlay files cannot shadow its
-standard-library imports.
+Final-stage Python runs as `python3 -I -S`: the helpers use only the standard
+library, and neither added modules nor site-packages `.pth`/sitecustomize hooks
+may run during image construction. Later machine builders must also run their
+package transaction and configuration against an overlay-free filesystem, then
+replay shell overlays followed by machine overlays last; starting dnf atop the
+finished shell image does not meet this rule.
 An explicit replacement list in a shell or machine manifest is the extension
 point for a future need such as greetd's packaged `/etc/greetd/config.toml` at
 M5. No replacement list or escape hatch exists today.
@@ -645,7 +664,13 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 - Overlays under `shells/` and `machines/` follow the same bootc rules as
   `rootfs/` and only add new files or leaf symlinks. Real directories may be
   shared; replacements, paths through symlinks and `/usr/share/ilex` are
-  forbidden. Replacements need a future explicit manifest list, not a build
+  forbidden, as are `/etc/ld.so.preload`, `/etc/ld.so.conf` and
+  `/etc/ld.so.conf.d/**`. Add-only makes added paths visible for review; it does
+  not contain root code on installed machines. Run all image configuration
+  before overlays, use `python3 -I -S` for build helpers, and run only lint after
+  installing overlays. Preserve parent directory metadata with ordinary final
+  `COPY`; `/tmp` and `/var/tmp` must be `1777 root:root` in the image.
+  Replacements need a future explicit manifest list, not a build
   escape hatch. Manifest inputs enter the build with `COPY`, because buildah's
   cache does not reliably notice changes to `RUN` bind mounts. Package entries
   name Fedora packages or comps IDs; only excludes accept DNF globs.

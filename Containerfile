@@ -82,13 +82,12 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
 
 COPY rootfs/ /
 COPY --from=build /out/ /
-# Apply only additions against the actual image, after packages and common
-# files exist. COPY keys the staged data by content; no context bind mount.
-# Generated files have their own tree and no-follow replacement registry.
-COPY --link --from=compose /out/install/ /tmp/ilex-compose/
-# Isolated Python also prevents a new overlay module from shadowing stdlib.
-RUN python3 -I /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose && \
-    rm -rf /tmp/ilex-compose
+# Ordinary COPY preserves existing ancestor modes (in particular /tmp's 1777)
+# and still keys the payload by content. --link would replace those ancestors.
+COPY --from=compose /out/install/ /tmp/ilex-compose/
+# Generated files precede configuration; overlays are applied only afterward.
+# Both helpers use only stdlib: -I -S skips overlay modules and site hooks.
+RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose --base --phase generated
 
 # Boot to a graphical target when a shell is installed; let bootc's updater
 # stage new images daily (see the drop-ins in rootfs), and offer a restart
@@ -104,8 +103,19 @@ RUN python3 -I /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose &&
 RUN chmod 0755 /usr/libexec/ilex/update-notify && \
     mkdir /app && \
     chmod 4755 /usr/libexec/drupe/drupe-enter && \
-    systemctl set-default "$(python3 -I -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
+    systemctl set-default "$(python3 -I -S -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
     systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service && \
-    systemctl --global enable ilex-update-notify.path ilex-update-notify.service
+    systemctl --global enable ilex-update-notify.path ilex-update-notify.service && \
+    for directory in /tmp /var/tmp; do \
+        actual="$(stat -c '%a %u:%g' "$directory")"; \
+        if [ "$actual" != '1777 0:0' ]; then \
+            echo "image metadata: $directory: expected 1777 0:0, found $actual" >&2; \
+            exit 1; \
+        fi; \
+    done
+
+# The final mutation applies additions against the real image and removes its
+# own staging in the same interpreter. Only bootc lint runs after overlays.
+RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose --phase overlays --remove-payload
 
 RUN bootc container lint --fatal-warnings
