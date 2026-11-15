@@ -140,12 +140,12 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 eprintln!("publishing tested machine image ID {actual} (no build)");
                 (pinned, computed)
             } else {
-                (image.clone(), local_fingerprint(&image)?)
+                let pinned = format!("sha256:{}", bcvk::image_id(&image)?);
+                let fingerprint = local_fingerprint(&pinned)?;
+                (pinned, fingerprint)
             };
             let digest = push(&source, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
-            if args.machine.is_some() {
-                check_pushed_image(&format!("{repository}@{digest}"), &source, insecure, &auth)?;
-            }
+            check_pushed_image(&format!("{repository}@{digest}"), &source, insecure, &auth)?;
             (digest, fingerprint)
         }
     };
