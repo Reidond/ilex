@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ilex_devkit::{Workspace, slots};
+use ilex_devkit::{Workspace, config, slots};
 
 mod build;
 mod changed;
@@ -22,7 +22,10 @@ mod vm;
 mod wsl;
 
 #[derive(Parser)]
-#[command(name = "cargo xtask", about = "Build, boot, test and release the ilex image")]
+#[command(
+    name = "cargo xtask",
+    about = "Build, boot, test and release the ilex image"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -85,6 +88,33 @@ fn run(cmd: Cmd) -> Result<()> {
             println!("runtime dir: {}", ws.runtime_dir().display());
             println!("state dir:   {}", ws.state_dir().display());
             println!("vm slots:    {}", slots::max_slots());
+            let selection = config::Selection::read(&ws.root)?;
+            println!(
+                "selection:   shells={} default-shell={} design-systems={} default-design-system={} machine={}",
+                selection.shells.join(","),
+                selection.default_shell.as_deref().unwrap_or("none"),
+                selection.design_systems.join(","),
+                selection.default_design_system.as_deref().unwrap_or("none"),
+                selection.machine
+            );
+            for (directory, file) in [
+                ("shells", "shell.toml"),
+                ("design-systems", "design-system.toml"),
+                ("machines", "machine.toml"),
+            ] {
+                println!("{directory} available:");
+                for name in config::available(&ws.root, directory)? {
+                    let manifest =
+                        config::manifest(&ws.root.join(directory).join(&name).join(file))?;
+                    println!(
+                        "  {name}: {}",
+                        manifest
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                    );
+                }
+            }
             Ok(())
         }
     }

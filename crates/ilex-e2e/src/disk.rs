@@ -106,20 +106,26 @@ fn root_filesystem(vm: &Vm) -> Result<()> {
 /// units *failed* is covered by `no_failed_units`.)
 fn first_boot_units(vm: &Vm) -> Result<()> {
     let mut problems = Vec::new();
-    for unit in [
+    let greeter = common::greeter()?;
+    let mut units = vec![
         "sshd.service",
         "NetworkManager.service",
-        "gdm.service",
         "ostree-remount.service",
         "bootc-status-updated-onboot.target",
-    ] {
+    ];
+    units.extend(greeter.as_deref());
+    for unit in units {
         let out = vm.ssh(&format!("systemctl is-active {unit}"))?;
         let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if state != "active" {
             problems.push(format!("{unit} is `{state}`"));
         }
     }
-    if problems.is_empty() { Ok(()) } else { bail!("{}", problems.join("\n")) }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", problems.join("\n"))
+    }
 }
 
 fn bootc_status(vm: &Vm) -> Result<()> {

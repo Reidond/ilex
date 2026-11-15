@@ -20,7 +20,7 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use ilex_devkit::{Workspace, cmd, git};
+use ilex_devkit::{Workspace, cmd, config::Selection, git};
 use sha2::{Digest, Sha256};
 
 use crate::build::{BASE_IMAGE, image_exists};
@@ -35,6 +35,9 @@ const INPUTS: &[&str] = &[
     "packages.toml",
     "Cargo.toml",
     "Cargo.lock",
+    "image.toml",
+    "build",
+    "machines/generic",
 ];
 
 #[derive(clap::Args, Debug)]
@@ -61,6 +64,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     if !image_exists(&input) {
         bail!("{input} is not in local container storage; run `cargo xtask build` first");
     }
+    image_selection(&input)?;
     // Where the result goes: a tag of its own, or over the input.
     let image = args
         .output
@@ -163,6 +167,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 /// Both are the same value, so `xtask changed` can decide right after the
 /// build and a run that changed nothing never pays for the rechunk.
 pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
+    image_selection(image)?;
     match local_label(image, FINGERPRINT_LABEL)? {
         Some(fingerprint) => Ok(fingerprint),
         None => fingerprint(ws, image),
@@ -172,6 +177,15 @@ pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
 /// Content fingerprint of `image`: `sha256:<hex>` over the sorted `rpm -qa`
 /// output of the image and the git tree hashes of [`INPUTS`] at `HEAD`.
 pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
+    let selection = image_selection(image)?;
+    let mut inputs: Vec<String> = INPUTS.iter().map(|s| s.to_string()).collect();
+    inputs.extend(selection.shells.iter().map(|name| format!("shells/{name}")));
+    inputs.extend(
+        selection
+            .design_systems
+            .iter()
+            .map(|name| format!("design-systems/{name}")),
+    );
     let rpm = cmd::output(Command::new("podman").args([
         "run",
         "--rm",
@@ -189,12 +203,15 @@ pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     packages.sort_unstable();
 
     let mut hash = Sha256::new();
-    hash.update(b"ilex-fingerprint v1\n");
+    hash.update(b"ilex-fingerprint v2\n");
+    for (key, value) in selection.labels() {
+        hash.update(format!("selection {key}={value}\n"));
+    }
     for p in &packages {
         hash.update(format!("rpm {p}\n"));
     }
-    for path in INPUTS {
-        let tree = git::tree_hash(&ws.root, path).with_context(|| format!("hashing {path}"))?;
+    for path in inputs {
+        let tree = git::tree_hash(&ws.root, &path).with_context(|| format!("hashing {path}"))?;
         eprintln!("  {path}: {tree}");
         hash.update(format!("tree {path} {tree}\n"));
     }
@@ -206,6 +223,19 @@ pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
         hash.update(b"dirty\n");
     }
     Ok(format!("sha256:{}", hex(&hash.finalize())))
+}
+
+/// Require configuration labels even when reusing an existing fingerprint.
+fn image_selection(image: &str) -> Result<Selection> {
+    let text = cmd::output(Command::new("podman").args([
+        "image",
+        "inspect",
+        "--format",
+        "{{json .Config.Labels}}",
+        image,
+    ]))?;
+    let labels = serde_json::from_str::<Option<_>>(&text).context("parsing image labels")?;
+    Selection::from_labels(&labels.unwrap_or_default())
 }
 
 /// Value of label `key` on a local image, if set.

@@ -5,10 +5,11 @@
 
 pub mod bcvk;
 pub mod cmd;
-pub mod git;
-pub mod qemu;
+pub mod config;
 #[cfg(unix)]
 pub mod display;
+pub mod git;
+pub mod qemu;
 pub mod slots;
 pub mod tool;
 #[cfg(unix)]

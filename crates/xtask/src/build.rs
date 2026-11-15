@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use ilex_devkit::{Workspace, cmd, git};
+use ilex_devkit::{Workspace, cmd, config::Selection, git};
 
 /// Where the Containerfile's builder stage looks for the host's kache store.
 const KACHE_HOST_MOUNT: &str = "/kache-host";
@@ -49,6 +49,9 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
     cmd::require("podman")?;
     let image = ws.resolve_image(args.tag.as_deref());
+    // Let the compose stage report malformed manifests too. This loose read
+    // supplies arguments and labels; Python remains the schema authority.
+    let selection = Selection::read(&ws.root);
 
     if !args.no_pull {
         for base in [BASE_IMAGE, BUILDER_IMAGE] {
@@ -62,13 +65,52 @@ pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
     let mut build = Command::new("podman");
     build
         .current_dir(&ws.root)
-        .args(["build", "--layers", "--file", "Containerfile", "--tag", &image])
+        .args([
+            "build",
+            "--layers",
+            "--file",
+            "Containerfile",
+            "--tag",
+            &image,
+        ])
         .args(["--label", &format!("ilex.base-digest={base_digest}")])
-        .args(["--label", &format!("org.opencontainers.image.revision={revision}")])
+        .args([
+            "--label",
+            &format!("org.opencontainers.image.revision={revision}"),
+        ])
         .args(["--label", "org.opencontainers.image.title=ilex"])
-        .args(["--label", "org.opencontainers.image.source=https://github.com/Reidond/ilex"]);
+        .args([
+            "--label",
+            "org.opencontainers.image.source=https://github.com/Reidond/ilex",
+        ]);
+    if let Ok(selection) = selection {
+        build.args([
+            "--build-arg",
+            &format!(
+                "ILEX_SHELLS={}",
+                if selection.shells.is_empty() {
+                    "none".into()
+                } else {
+                    selection.shells.join(",")
+                }
+            ),
+        ]);
+        build.args([
+            "--build-arg",
+            &format!(
+                "ILEX_DEFAULT_SHELL={}",
+                selection.default_shell.as_deref().unwrap_or("")
+            ),
+        ]);
+        for (key, value) in selection.labels() {
+            build.args(["--label", &format!("{key}={value}")]);
+        }
+    }
     if let Some(store) = host_kache_store().filter(|_| !args.no_host_kache) {
-        build.args(["--volume", &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display())]);
+        build.args([
+            "--volume",
+            &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display()),
+        ]);
     }
     build.args(&args.podman_args).arg(".");
     cmd::run(&mut build)?;

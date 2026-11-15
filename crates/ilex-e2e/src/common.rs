@@ -5,8 +5,11 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use anyhow::{Result, bail};
-use ilex_devkit::Workspace;
+use anyhow::{Context, Result, bail};
+use ilex_devkit::{
+    Workspace, cmd,
+    config::{self, Selection},
+};
 use libtest_mimic::{Failed, Trial};
 
 /// The checkout under test.
@@ -20,6 +23,48 @@ pub fn image() -> Result<String> {
         Ok(image) if !image.is_empty() => Ok(image),
         _ => Ok(workspace()?.image_ref()),
     }
+}
+
+/// Expectations come from the image actually being tested, including when
+/// ILEX_IMAGE selects a candidate or a later machine layer.
+pub fn selection() -> Result<Selection> {
+    let text = cmd::output(std::process::Command::new("podman").args([
+        "image",
+        "inspect",
+        "--format",
+        "{{json .Config.Labels}}",
+        &image()?,
+    ]))?;
+    let labels = serde_json::from_str::<Option<_>>(&text).context("parsing image labels")?;
+    Selection::from_labels(&labels.unwrap_or_default())
+}
+
+pub fn default_shell() -> Result<Option<toml::Table>> {
+    selection()?.default_shell_manifest(&workspace()?.root)
+}
+
+pub fn shell_property(shell: &toml::Table, table: &str, key: &str) -> Result<String> {
+    shell
+        .get(table)
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .with_context(|| format!("shell manifest lacks `{table}.{key}`"))
+}
+
+pub fn greeter() -> Result<Option<String>> {
+    default_shell()?
+        .map(|shell| shell_property(&shell, "greeter", "unit"))
+        .transpose()
+}
+
+pub fn manifest(directory: &str, name: &str, file: &str) -> Result<toml::Table> {
+    config::validate_name(name)?;
+    config::manifest(&workspace()?.root.join(directory).join(name).join(file))
+}
+
+pub fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 /// A test whose body returns an `anyhow::Result`; failures print the whole

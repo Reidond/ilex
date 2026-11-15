@@ -46,6 +46,13 @@ pub fn trials() -> Vec<Trial> {
 }
 
 fn run() -> Result<()> {
+    let selection = common::selection()?;
+    if selection.default_shell.as_deref() != Some("gnome") {
+        bail!(
+            "graphical::login requires default shell `gnome`, got {:?}; this tier exercises GNOME's login and scaling",
+            selection.default_shell
+        );
+    }
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "graphical")?;
     clear_artifacts(&artifacts);
@@ -328,19 +335,32 @@ fn as_user(vm: &Vm, cmd: &str) -> Result<String> {
 
 /// A user session exists and its shell is running.
 fn wait_session(vm: &mut Vm) -> Result<()> {
+    let shell = common::default_shell()?.context("graphical::login needs a default shell")?;
+    let compositor = common::shell_property(&shell, "session", "compositor")?;
     vm.wait_for(
         "a graphical session for the test user",
-        &format!("loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep ."),
+        &format!(
+            "loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep ."
+        ),
         SESSION_TIMEOUT,
     )?;
-    vm.wait_for("gnome-shell in the user session", &format!("pgrep -u {USER} -x gnome-shell"), SESSION_TIMEOUT)?;
+    vm.wait_for(
+        &format!("{compositor} in the user session"),
+        &format!("pgrep -u {USER} -x {}", common::quote(&compositor)),
+        SESSION_TIMEOUT,
+    )?;
     Ok(())
 }
 
 /// `gdm` is active and a greeter-class session (login screen or initial
 /// setup) exists.
 fn wait_gdm(vm: &mut Vm) -> Result<()> {
-    vm.wait_for("gdm.service to be active", "systemctl is-active gdm", SESSION_TIMEOUT)?;
+    let greeter = common::greeter()?.context("graphical::login needs a greeter")?;
+    vm.wait_for(
+        &format!("{greeter} to be active"),
+        &format!("systemctl is-active {}", common::quote(&greeter)),
+        SESSION_TIMEOUT,
+    )?;
     vm.wait_for(
         "a GDM greeter session",
         "loginctl list-sessions --no-legend | grep -w greeter",

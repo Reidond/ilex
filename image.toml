@@ -1,0 +1,5 @@
+# What the default build and CI put in ghcr.io/reidond/ilex:latest.
+shells = ["gnome"]
+default-shell = "gnome"
+
+design-systems = []

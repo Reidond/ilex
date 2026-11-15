@@ -1,7 +1,8 @@
 # ilex
 
 Personal Fedora bootc image: one `Containerfile` on `quay.io/fedora/fedora-bootc:45`
-(GNOME desktop), a Rust workspace for all tooling, e2e-only tests on QEMU via bcvk.
+composes packages, shells and design systems from manifests (GNOME desktop by
+default), a Rust workspace for all tooling, e2e-only tests on QEMU via bcvk.
 
 ## Build and test
 
@@ -60,6 +61,51 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
   boot land in `<state dir>/artifacts/iso/`.
 - Publishing (`xtask publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
+
+## Configurations: shells, design systems, machines
+
+`image.toml` names the installed shells and design systems and one default of
+each when its list is non-empty. `packages.toml` is what every shell shares
+(Firefox, Flatpak and update notifications); the common and selected shells'
+packages are installed in one dnf transaction with all their excludes.
+
+| Thing | Installed | Default | Chosen by a person |
+| --- | --- | --- | --- |
+| Shell | per image, in `image.toml` | per image, `default-shell` | at sign-in, from the greeter's sessions |
+| Design system | per image, in `image.toml` | per image, `default-design-system` | in their home, by a shell that reads design systems |
+| Machine configuration | per image tag (`:latest` is `generic`) | `generic` | per machine, with `bootc switch` |
+
+A shell is `shells/<name>/shell.toml`: its name and description, packages,
+Wayland session file (without `.desktop`), compositor command, optional greeter
+unit and theme targets. The default shell owns the greeter; GNOME uses GDM.
+To add a shell, create its directory and manifest, optionally add a `rootfs/`
+overlay, then name it in `image.toml`. Overlays follow the common `rootfs/` in
+shell list order. A shell must provide a real session and compositor.
+
+Design systems live in `design-systems/<name>/design-system.toml` with a JSON
+object token file (default `tokens.json`). None ships yet. A shell's
+`[theme] targets` must be empty until the theme generator defines outputs.
+Machines live in `machines/<name>/machine.toml`; `generic` is the base image
+with no packages, overlay or publishing setting. Derived machine layers and
+command-line selection arrive in later changes; `vm/Containerfile` still
+supplies the development viewer's clipboard agent.
+
+`build/compose.py` is the schema authority (Python standard library only).
+Unknown keys and invalid defaults fail in the first `compose` stage, before
+compilation. Plain `podman build .` composes the default image too.
+`cargo xtask info` lists the selection and available configurations; builds
+record them in the five `ilex.shells`, `ilex.default-shell`,
+`ilex.design-systems`, `ilex.default-design-system` and `ilex.machine` labels.
+The fingerprint covers the selected manifests, overlays and build scripts;
+old images without configuration labels must be rebuilt.
+
+The image records schema 1 JSON in `/usr/share/ilex/image.json` and
+`/usr/share/ilex/machine.json`, and selected design systems' tokens under
+`/usr/share/ilex/design-systems/<name>/tokens.json`. `ilex-agent config` prints
+the selection; `ilex-agent config --json` returns both documents. The agent's
+self-check validates the configuration, sessions, greeter, target, tokens and
+machine packages. `ephemeral::configuration` compares it with the image labels
+and checkout manifests, including overlay and token hashes.
 
 ## Build sharing: kache
 
@@ -570,6 +616,9 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 - **bootc rules for `rootfs/`** (copied to `/`): defaults go in `/usr`; keep
   `/etc` to files that must live there (it is 3-way merged on upgrade); never
   ship content in `/var` (use tmpfiles.d); create users with sysusers.d.
+- Overlays under `shells/` and `machines/` follow the same bootc rules as
+  `rootfs/`. Manifest inputs enter the build with `COPY`, because buildah's
+  cache does not reliably notice changes to `RUN` bind mounts.
 - `bootc container lint --fatal-warnings` runs last in the build: clean up
   what it flags in the same `RUN` step that created it.
 - Shared host-side plumbing (slug, paths, VM slots, git) lives in
@@ -578,3 +627,4 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 - Shell out to the packaged `bcvk` CLI, not the `bcvk-qemu` library.
 - Files are LF everywhere (`.gitattributes`); scripts shipped in `rootfs/`
   need the exec bit in git (`git update-index --chmod=+x`).
+  Scripts in `build/` run through their interpreter and need no exec bit.

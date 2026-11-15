@@ -1,0 +1,17 @@
+name = "gnome"
+description = "GNOME on Wayland, signed in through GDM"
+
+[packages]
+install = ["@gnome-desktop", "gdm"]
+
+[session]
+# The session file in /usr/share/wayland-sessions, without .desktop.
+desktop = "gnome"
+compositor = "gnome-shell"
+
+[greeter]
+unit = "gdm.service"
+
+[theme]
+# GNOME draws itself with Adwaita and reads no design system outputs.
+targets = []

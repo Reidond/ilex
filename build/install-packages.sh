@@ -1,0 +1,12 @@
+# Shared package transaction and bootc /var clean-up. Run through bash.
+set -euo pipefail
+
+xargs -r dnf -y install --setopt=keepcache=1 < /tmp/ilex-build/packages.args
+
+find /var/cache -mindepth 1 -maxdepth 1 ! -name libdnf5 -exec rm -rf {} +
+find /tmp /var/tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+find /var/log -mindepth 1 ! -type d -delete
+rm -rf /var/lib/dnf/repos
+{ bootc container lint --no-truncate 2>&1 || true; } \
+  | sed -n 's|^  \(d /var/.*\)$|\1|p' > "/usr/lib/tmpfiles.d/$1"
+cat "/usr/lib/tmpfiles.d/$1"

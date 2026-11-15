@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
+mod config;
 mod sigpolicy;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -20,6 +21,14 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--self-check") => self_check(),
+        Some("config") => match std::env::args().nth(2).as_deref() {
+            None => config::run(false),
+            Some("--json") => config::run(true),
+            Some(other) => {
+                eprintln!("ilex-agent: config: unknown argument `{other}`");
+                ExitCode::from(2)
+            }
+        },
         Some("enforce-sigpolicy") => match std::env::args().nth(2).as_deref() {
             None => sigpolicy::run(false),
             Some("--dry-run") => sigpolicy::run(true),
@@ -31,7 +40,7 @@ fn main() -> ExitCode {
         None | Some("--help" | "-h") => {
             println!(
                 "ilex-agent {VERSION}\n\n\
-                 Usage: ilex-agent [--self-check | --version | enforce-sigpolicy [--dry-run]]"
+                 Usage: ilex-agent [--self-check | --version | config [--json] | enforce-sigpolicy [--dry-run]]"
             );
             ExitCode::SUCCESS
         }
@@ -55,8 +64,17 @@ const CHECKS: &[Check] = &[
     ("ilex kernel arguments present", || {
         exists("/usr/lib/bootc/kargs.d/10-ilex.toml")
     }),
-    ("default target is graphical", check_graphical_default),
-    ("desktop packages installed", check_desktop_binaries),
+    ("image configuration readable", config::check_image),
+    ("default target matches the shells", config::check_target),
+    ("every shell has its session", config::check_sessions),
+    (
+        "default shell's greeter is the display manager",
+        config::check_greeter,
+    ),
+    ("common apps installed", check_common_binaries),
+    ("design systems have their tokens", config::check_tokens),
+    ("machine configuration readable", config::check_machine),
+    ("machine packages installed", config::check_packages),
     ("bootc is installed", || in_path("bootc")),
     ("sigpolicy decisions", sigpolicy::check_decisions),
     ("sigpolicy unit enabled", || {
@@ -108,19 +126,9 @@ fn check_install_btrfs() -> Result<(), String> {
     }
 }
 
-/// `systemctl set-default graphical.target` leaves this symlink behind.
-fn check_graphical_default() -> Result<(), String> {
-    let target = fs::read_link("/etc/systemd/system/default.target").map_err(|e| e.to_string())?;
-    if target.ends_with("graphical.target") {
-        Ok(())
-    } else {
-        Err(format!("default.target points to {}", target.display()))
-    }
-}
-
-/// The GNOME session, its display manager, the browser and Flatpak.
-fn check_desktop_binaries() -> Result<(), String> {
-    let missing: Vec<&str> = ["gnome-shell", "gdm", "firefox", "flatpak"]
+/// The browser and Flatpak are shared by every shell.
+fn check_common_binaries() -> Result<(), String> {
+    let missing: Vec<&str> = ["firefox", "flatpak"]
         .into_iter()
         .filter(|bin| in_path(bin).is_err())
         .collect();

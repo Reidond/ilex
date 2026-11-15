@@ -53,6 +53,7 @@ pub fn trials() -> Vec<Trial> {
             GROUP.run(graphical_default)
         }),
         trial("ephemeral::sigpolicy_noop", || GROUP.run(sigpolicy_noop)),
+        trial("ephemeral::configuration", || GROUP.run(configuration)),
     ]
 }
 
@@ -161,15 +162,193 @@ fn bootc_status(vm: &EphemeralVm) -> Result<()> {
     Ok(())
 }
 
-/// The image's default target is the graphical one (the desktop is the point
-/// of ilex), and it was reached without a display attached.
+/// The selected shells determine the target, also without a display attached.
 fn graphical_default(vm: &EphemeralVm) -> Result<()> {
+    let selection = common::selection()?;
     let out = vm
         .ssh("systemctl get-default")?
         .ok("systemctl get-default")?;
-    ensure(out.out() == "graphical.target", || {
-        format!("default target is {}", out.out())
+    ensure(out.out() == selection.default_target(), || {
+        format!(
+            "default target is {}, expected {}",
+            out.out(),
+            selection.default_target()
+        )
     })
+}
+
+/// Compare the guest with both image labels and checkout manifests. The
+/// agent's self-check separately verifies that the configuration works.
+fn configuration(vm: &EphemeralVm) -> Result<()> {
+    let selection = common::selection()?;
+    let out = vm
+        .ssh("ilex-agent config --json")?
+        .ok("ilex-agent config --json")?;
+    let guest: Value = serde_json::from_str(&out.stdout)?;
+    let image = &guest["image"];
+    let names = |key: &str| -> Result<Vec<String>> {
+        image[key]
+            .as_array()
+            .context("image configuration list missing")?
+            .iter()
+            .map(|entry| {
+                entry["name"]
+                    .as_str()
+                    .map(str::to_string)
+                    .context("configuration name missing")
+            })
+            .collect()
+    };
+    ensure(
+        image["schema"] == 1 && guest["machine"]["schema"] == 1,
+        || "configuration schema must be 1".into(),
+    )?;
+    ensure(names("shells")? == selection.shells, || {
+        "shells differ from image labels".into()
+    })?;
+    ensure(names("design-systems")? == selection.design_systems, || {
+        "design systems differ from image labels".into()
+    })?;
+    for (key, expected) in [
+        ("default-shell", &selection.default_shell),
+        ("default-design-system", &selection.default_design_system),
+    ] {
+        ensure(image[key] == serde_json::to_value(expected)?, || {
+            format!("{key} differs from image label")
+        })?;
+    }
+    ensure(
+        guest["machine"]["name"].as_str() == Some(&selection.machine),
+        || "machine differs from image label".into(),
+    )?;
+    for (index, name) in selection.shells.iter().enumerate() {
+        let manifest = common::manifest("shells", name, "shell.toml")?;
+        let session = common::shell_property(&manifest, "session", "desktop")?;
+        let compositor = common::shell_property(&manifest, "session", "compositor")?;
+        vm.ssh(&format!(
+            "test -f {} && test -x {}",
+            common::quote(&format!("/usr/share/wayland-sessions/{session}.desktop")),
+            common::quote(&format!("/usr/bin/{compositor}"))
+        ))?
+        .ok("shell session and compositor")?;
+        // Compare all declared manifest fields, including packages and theme.
+        let declared = serde_json::to_value(&manifest)?;
+        for (key, value) in declared
+            .as_object()
+            .context("shell manifest is not an object")?
+        {
+            ensure(image["shells"][index][key] == *value, || {
+                format!("shell {name}: `{key}` differs from the checkout")
+            })?;
+        }
+        check_packages(vm, &manifest)?;
+        let overlay = common::workspace()?
+            .root
+            .join("shells")
+            .join(name)
+            .join("rootfs");
+        if overlay.is_dir() {
+            check_overlay(vm, &overlay, &overlay)?;
+        }
+    }
+    for (index, name) in selection.design_systems.iter().enumerate() {
+        let manifest = common::manifest("design-systems", name, "design-system.toml")?;
+        let source = manifest
+            .get("tokens")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tokens.json");
+        let path = common::workspace()?
+            .root
+            .join("design-systems")
+            .join(name)
+            .join(source);
+        let destination = format!("/usr/share/ilex/design-systems/{name}/tokens.json");
+        ensure(
+            image["design-systems"][index]["tokens"] == destination,
+            || format!("design system {name}: tokens path differs"),
+        )?;
+        check_file(vm, &path, &destination)?;
+    }
+    let machine = common::manifest("machines", &selection.machine, "machine.toml")?;
+    let declared = serde_json::to_value(&machine)?;
+    for (key, value) in declared
+        .as_object()
+        .context("machine manifest is not an object")?
+    {
+        ensure(guest["machine"][key] == *value, || {
+            format!(
+                "machine {}: `{key}` differs from the checkout",
+                selection.machine
+            )
+        })?;
+    }
+    check_packages(vm, &machine)?;
+    println!("     configuration matches labels and checkout: {selection:?}");
+    Ok(())
+}
+
+fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {
+    if let Some(packages) = manifest
+        .get("packages")
+        .and_then(|p| p.get("install"))
+        .and_then(|v| v.as_array())
+    {
+        for package in packages {
+            let name = package.as_str().context("package must be a string")?;
+            if !name.starts_with('@') {
+                vm.ssh(&format!("rpm -q -- {}", common::quote(name)))?
+                    .ok("manifest package installed")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_overlay(
+    vm: &EphemeralVm,
+    root: &std::path::Path,
+    directory: &std::path::Path,
+) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            check_overlay(vm, root, &path)?;
+        } else {
+            let destination = format!(
+                "/{}",
+                path.strip_prefix(root)?
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            );
+            if path.is_symlink() {
+                let target = std::fs::read_link(&path)?.to_string_lossy().into_owned();
+                let guest = vm
+                    .ssh(&format!("readlink -- {}", common::quote(&destination)))?
+                    .ok("overlay symlink")?;
+                ensure(guest.out() == target, || {
+                    format!("overlay symlink {destination} differs")
+                })?;
+            } else {
+                check_file(vm, &path, &destination)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_file(vm: &EphemeralVm, source: &std::path::Path, destination: &str) -> Result<()> {
+    let host = ilex_devkit::cmd::output(
+        std::process::Command::new("sha256sum")
+            .arg("--")
+            .arg(source),
+    )?;
+    let guest = vm
+        .ssh(&format!("sha256sum -- {}", common::quote(destination)))?
+        .ok("configuration file sha256")?;
+    ensure(
+        host.split_whitespace().next() == guest.out().split_whitespace().next(),
+        || format!("{destination} sha256 differs from {}", source.display()),
+    )
 }
 
 /// Compare image references, ignoring a leading `localhost/`.
