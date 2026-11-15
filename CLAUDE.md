@@ -818,7 +818,11 @@ that rewrites the config is refused before signing or moving the machine tags.
 The local generic publish path also freezes its source by image ID and checks
 the pushed manifest config before signing. CI's generic `--digest` path signs
 the already staged/tested immutable digest and copies with `--preserve-digests`;
-it performs no local push that could rewrite a config.
+it performs no local push. The earlier unsigned `--stage` push also freezes
+its source by ID and verifies the registry config before reporting a staged
+digest, so the local ephemeral and remote upgrade tiers see that same config.
+A failed stage check may leave unsigned candidate, but produces no digest
+output for dependent tests and cannot sign or move any signed tag.
 
 The first main run builds, rechunks, stages and tests the generic phase-0 base,
 publishes it, then builds/tests/signs `:gaming` on precisely that digest. If the

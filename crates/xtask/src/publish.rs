@@ -206,17 +206,19 @@ fn require_ci_revision(image: &str, revision: Option<&str>) -> Result<()> {
 /// much of it machines on `:latest` would have to download.
 fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
     let image = ws.resolve_image(args.image.as_deref());
-    require_machine(&image, "generic")?;
-    let fingerprint = local_fingerprint(&image)?;
+    let image_id = format!("sha256:{}", bcvk::image_id(&image)?);
+    require_machine(&image_id, "generic")?;
+    let fingerprint = local_fingerprint(&image_id)?;
     let insecure = registry::is_local_registry(repository);
     let auth = Auth::login(repository)?;
     let digest = push(
-        &image,
+        &image_id,
         &format!("{repository}:{STAGE_TAG}"),
         insecure,
         &auth,
     )?;
     let pinned = format!("{repository}@{digest}");
+    check_pushed_image(&pinned, &image_id, insecure, &auth)?;
     eprintln!("staged {pinned} as :{STAGE_TAG} (fingerprint {fingerprint}; unsigned)");
 
     // Reproducible layers only help machines if the registry gets the same
@@ -282,7 +284,7 @@ fn push(image: &str, dest: &str, insecure: bool, auth: &Option<Auth>) -> Result<
 }
 
 /// Prove against the registry that pushing preserved the tested local config.
-/// This check happens before any signing or moving tag can expose the image.
+/// Before signing/signed moving tags; staging remains unsigned on failure too.
 fn check_pushed_image(pinned: &str, image_id: &str, insecure: bool, auth: &Option<Auth>) -> Result<()> {
     let manifest = skopeo_json(&["inspect", "--raw"], pinned, insecure, auth)?
         .with_context(|| format!("pushed image {pinned} is missing from the registry"))?;
@@ -291,7 +293,7 @@ fn check_pushed_image(pinned: &str, image_id: &str, insecure: bool, auth: &Optio
     if config != image_id {
         bail!("{pinned} config digest {config} differs from local/tested image ID {image_id}; refusing to sign");
     }
-    eprintln!("pushed manifest config {config} matches local/tested image ID {image_id}; safe to sign");
+    eprintln!("pushed manifest config {config} matches local/tested image ID {image_id}; identity preserved");
     Ok(())
 }
 
