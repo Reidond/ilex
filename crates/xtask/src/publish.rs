@@ -28,6 +28,7 @@ use crate::registry::{self, Auth, FINGERPRINT_LABEL};
 
 /// The public key baked into the image; the signature must verify against it.
 const PUBKEY: &str = "rootfs/etc/pki/containers/ilex.pub";
+const REVISION_LABEL: &str = "org.opencontainers.image.revision";
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
@@ -112,6 +113,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             if config["config"]["Labels"]["ilex.machine"].as_str() != Some("generic") {
                 bail!("{pinned} is not a generic base image; refusing to move :latest");
             }
+            require_ci_revision(&pinned, config["config"]["Labels"][REVISION_LABEL].as_str())?;
             let fingerprint = config["config"]["Labels"][FINGERPRINT_LABEL]
                 .as_str()
                 .map(str::to_string)
@@ -144,6 +146,9 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 let fingerprint = local_fingerprint(&pinned)?;
                 (pinned, fingerprint)
             };
+            if registry::is_ci() {
+                require_ci_revision(&source, rechunk::local_label(&source, REVISION_LABEL)?.as_deref())?;
+            }
             let digest = push(&source, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
             check_pushed_image(&format!("{repository}@{digest}"), &source, insecure, &auth)?;
             (digest, fingerprint)
@@ -177,6 +182,23 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     registry::github_output("digest", &digest)?;
     registry::github_output("image", &pinned)?;
     registry::github_output("tags", &format!("{moving_tag},{date_tag},{sha_tag}"))?;
+    Ok(())
+}
+
+/// A signed CI image must record the exact clean commit of this run. Each
+/// machine checks its own layer, never the possibly older generic base.
+fn require_ci_revision(image: &str, revision: Option<&str>) -> Result<()> {
+    if !registry::is_ci() {
+        return Ok(());
+    }
+    let expected = std::env::var("GITHUB_SHA").context("CI publication requires GITHUB_SHA")?;
+    if expected.len() != 40 || !expected.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        bail!("CI publication requires GITHUB_SHA to be 40 lowercase hex digits, got {expected:?}");
+    }
+    if revision != Some(expected.as_str()) {
+        bail!("CI publication of {image} requires {REVISION_LABEL}={expected}, got {}; refusing to sign", revision.unwrap_or("(missing)"));
+    }
+    eprintln!("CI revision check: {image} records {expected}, matching GITHUB_SHA");
     Ok(())
 }
 

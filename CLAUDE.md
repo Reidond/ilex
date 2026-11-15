@@ -807,6 +807,11 @@ ephemeral checks. Tests use the immutable image ID; the tested list records
 name, reference and ID. `publish --machine --tested-image-id` builds nothing:
 it refuses a replaced tag or a label that differs from the independently
 recomputed fingerprint, then pushes that exact tested ID, signs and verifies.
+Before any signed-image push/copy, CI publication also requires that image's
+`org.opencontainers.image.revision` to equal the run's 40-hex `GITHUB_SHA`.
+Missing, wrong or `-dirty` labels fail before signing. The unchanged-base path
+checks the machine layer's current revision; it does not require its older
+generic base to carry the machine run's commit. Unsigned staging is not signing.
 Before signing, it reads the pushed manifest by digest with `skopeo inspect
 --raw` and requires its config digest to equal that tested image ID. A push
 that rewrites the config is refused before signing or moving the machine tags.
