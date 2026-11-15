@@ -811,6 +811,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          published=$(bash .github/installer-revision.sh "$GITHUB_REPOSITORY")
+          if bash .github/publish-head.sh revision "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$published"; then
+            : # Forward installer release; the tag records this run's commit.
+          else
+            rc=$?
+            if [ "$rc" = 3 ]; then exit 0; fi
+            exit "$rc"
+          fi
           dir=/mnt/ilex/state/iso
           base="installer-$(date -u +%Y%m%d)"
           tag="$base"

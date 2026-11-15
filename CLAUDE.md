@@ -892,6 +892,18 @@ the release `installer-YYYYMMDD` (`-N` suffix if one exists that day) with
 the ISO and uploads it as the workflow artifact `installer-iso` instead, so it
 can be inspected; nothing is released.
 
+Immediately before creating a release, the ISO job applies the same ancestry
+guard independently of base publication. `.github/installer-revision.sh` reads
+the newest published, non-prerelease `installer-*` release and resolves its
+actual tag to a commit (the release was created with `--target GITHUB_SHA`).
+It does not trust `target_commitish`, which could name a moving branch. The
+previous installer commit must precede/equal the run, and the run must
+precede/equal main. An old re-run skips green before `gh release create
+--latest`; read/API errors or rewritten published history fail red. With no
+installer release yet, only the run-to-main condition applies. This guards
+image signing/tag movement and installer release creation, not the builds or
+unsigned candidate staging that happen before them.
+
 ```sh
 cargo xtask iso                # build; the ISO, its .sha256 and release-notes.md land in <state dir>/iso/
 cargo xtask iso --due          # is a new ISO due? (reads the latest installer release; needs gh)
