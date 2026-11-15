@@ -156,9 +156,9 @@ pub fn check_decisions() -> Result<(), String> {
     let cases: [(&str, Option<Booted>, Decision); 12] = [
         ("ephemeral VM (no deployment)", None, NoDeployment),
         (
-            "gaming machine, unverified",
-            Some(("ghcr.io/reidond/ilex:gaming", "registry", None)),
-            Enforce("ghcr.io/reidond/ilex:gaming".into()),
+            "ms-7c35 machine, unverified",
+            Some(("ghcr.io/reidond/ilex:ms-7c35", "registry", None)),
+            Enforce("ghcr.io/reidond/ilex:ms-7c35".into()),
         ),
         (
             "ghcr unverified",

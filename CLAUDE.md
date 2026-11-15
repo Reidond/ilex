@@ -294,7 +294,10 @@ self-check validates the configuration, sessions, greeter, target, tokens and
 machine packages. `ephemeral::configuration` compares it with the image labels
 and checkout manifests, including overlay and token hashes.
 
-### This PC: `gaming`
+### This PC: `ms-7c35`
+
+The name is the board's model number, lowercased: DMI's system product is
+`MS-7C35` and its board product is `MEG X570 UNIFY (MS-7C35)`.
 
 | Part | Hardware |
 | --- | --- |
@@ -305,7 +308,7 @@ and checkout manifests, including overlay and token hashes.
 | Disk | Corsair MP400, 2 TB NVMe |
 | Display | AOC U27G3X, 3840x2160 at 160 Hz, EDID size 60 x 34 cm (27.2 inches, 162 DPI) |
 
-`machines/gaming/machine.toml` adds `steam-devices`, `gamemode`, `gamescope` and
+`machines/ms-7c35/machine.toml` adds `steam-devices`, `gamemode`, `gamescope` and
 `mangohud`. Steam itself is a Flatpak the person installs from Flathub; it is
 not in the image. The host's `steam-devices` udev rules give it controller
 access, and Flatpak clients reach the host's GameMode daemon through the
@@ -355,10 +358,10 @@ the kernel's amdgpu driver, `amd-gpu-firmware` and Mesa's radeonsi and RADV
 drivers. This configuration has no overlay or kernel arguments. GNOME chooses
 150% scaling for this display unless the person has saved another choice.
 
-CI publishes the signed `:gaming` image. Install ilex with the ISO, then run:
+CI publishes the signed `:ms-7c35` image. Install ilex with the ISO, then run:
 
 ```sh
-sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:gaming
+sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:ms-7c35
 ```
 
 Restart to use it.
@@ -748,7 +751,7 @@ Never re-run a publish run from before these guards existed: re-runs use the
 original commit's workflow file and remain unguarded.
 
 Then `machines` discovers `publish = true` manifests with `xtask info
---published-machines` (currently `gaming`). It runs only after successful base
+--published-machines` (currently `ms-7c35`). It runs only after successful base
 jobs and a successful or intentionally skipped publish, never in a `v1_disk`
 run or a pull request. Every name is validated against the manifest's name
 rules before entering a loop or tag. If the base changed, main requires its
@@ -868,7 +871,7 @@ A failed stage check may leave unsigned candidate, but produces no digest
 output for dependent tests and cannot sign or move any signed tag.
 
 The first main run builds, rechunks, stages and tests the generic phase-0 base,
-publishes it, then builds/tests/signs `:gaming` on precisely that digest. If the
+publishes it, then builds/tests/signs `:ms-7c35` on precisely that digest. If the
 base is already current, it skips base publication, pins current `:latest` and
 builds the missing/changed machine instead. An incompatible pre-phase-0
 `:latest` is the explicit successful skip above; a later base publication
@@ -882,7 +885,7 @@ each lower PR would start its own main run using that PR's unguarded workflow,
 publish latest, and have no machines job. Squash/rebase/merge commit all work
 when the complete guarded workflow reaches main together. The first main log
 should show ancestry and digest-swap allows for latest, `published=true`, the
-v1-disk dispatch, gaming's first-publish ancestry and absent-tag swap allows,
+v1-disk dispatch, ms-7c35's first-publish ancestry and absent-tag swap allows,
 matching pushed config/tested ID, then cosign verification before moving tags.
 Installer ancestry runs only when an ISO release is due/forced. Production
 guards, cosign installation/key matching, real ghcr writes and those main-only
@@ -924,11 +927,11 @@ cargo xtask rechunk <tag> [--output <tag>] # reproducible layers + ilex.fingerpr
 cargo xtask publish <tag> --stage      # CI only: push as unsigned :candidate, print digest=
 cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :latest to it
 cargo xtask info --published-machines  # validated publish=true names, one per line
-cargo xtask changed <ref> --machine gaming --inputs-only # inputs_changed=; no local image
-cargo xtask changed <ref> --machine gaming --image <machine-image> # full fingerprint
-cargo xtask prepare-publish <machine-image> --machine gaming # before tests; prints image_id=
+cargo xtask changed <ref> --machine ms-7c35 --inputs-only # inputs_changed=; no local image
+cargo xtask changed <ref> --machine ms-7c35 --image <machine-image> # full fingerprint
+cargo xtask prepare-publish <machine-image> --machine ms-7c35 # before tests; prints image_id=
 ILEX_IMAGE=sha256:<image_id> cargo xtask test ephemeral::
-cargo xtask publish <machine-image> --machine gaming --tested-image-id <image_id> # CI only; no build
+cargo xtask publish <machine-image> --machine ms-7c35 --tested-image-id <image_id> # CI only; no build
 ```
 
 - The background parts (`vm-prep.sh`) log every line with the time it was
@@ -961,7 +964,7 @@ cargo xtask publish <machine-image> --machine gaming --tested-image-id <image_id
   `--verification-key <scratch>/cosign.pub` too. This override requires
   `--allow-local-registry` and a local repository even in CI; real publishes
   always verify against the committed public key. Stop/remove the registry
-  container and remove scratch keys afterwards. `publish --machine gaming`
+  container and remove scratch keys afterwards. `publish --machine ms-7c35`
   uses the same local path; `--stage` and `--digest` cannot be combined with
   `--machine`, and image labels must match the requested machine (base
   publishing and staging require `generic`).

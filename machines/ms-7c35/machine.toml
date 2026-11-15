@@ -1,12 +1,15 @@
-# This PC: MSI MEG X570 UNIFY, Ryzen 9 5900X (12 cores, 24 threads), 64 GiB,
-# Radeon RX 9070 XT (PCI 1002:7550), 2 TB NVMe, AOC U27G3X (27 inches,
-# 3840x2160 at 160 Hz; mutter scales it to 150% by itself).
+# This PC, named after its motherboard: MSI MEG X570 UNIFY. `ms-7c35` is the
+# board's model number, lowercased: the DMI product_name is "MS-7C35" and
+# board_name is "MEG X570 UNIFY (MS-7C35)".
+# Ryzen 9 5900X (12 cores, 24 threads), 64 GiB, Radeon RX 9070 XT
+# (PCI 1002:7550), 2 TB NVMe, AOC U27G3X (27 inches, 3840x2160 at 160 Hz;
+# mutter scales it to 150% by itself).
 #
 # The Radeon needs nothing here: the kernel driver, amd-gpu-firmware and Mesa
 # (radeonsi, RADV) are in every ilex image. No kernel argument is needed.
-name = "gaming"
-description = "Desktop PC for games: Radeon graphics, Steam from Flathub"
-# Published by CI as ghcr.io/reidond/ilex:gaming.
+name = "ms-7c35"
+description = "MSI MEG X570 UNIFY (MS-7C35): Radeon graphics, games, Steam from Flathub"
+# Published by CI as ghcr.io/reidond/ilex:ms-7c35.
 publish = true
 
 [packages]
