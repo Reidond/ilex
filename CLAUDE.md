@@ -13,11 +13,15 @@ cargo xtask vm                 # interactive ephemeral VM of this checkout's ima
 cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slots
 ```
 
-- The slug comes from the checkout path: the main checkout is `main`
-  (`localhost/ilex:main`, VMs `ilex-main-*`); any linked git worktree
-  (`.claude/worktrees/<name>/`, `.t3/worktrees/ilex/<name>/`, or `git worktree
-  add` anywhere) is `<name>`, sanitised (`localhost/ilex:wt-<name>`, VMs
-  `ilex-<name>-*`). Never use another checkout's image or VMs.
+- The main checkout reserves the slug `main` (`localhost/ilex:main`, VMs
+  `ilex-main-*`). Linked git worktrees (Claude, T3, or made anywhere with
+  `git worktree add`) use git's worktree name: the directory name unless git
+  had to number it to make it unique. Short, valid lowercase names stay
+  unchanged; long or unusual names, and the reserved name `main`, get a
+  bounded readable part plus a hash suffix (at most 48 characters, using
+  16 hex digits of SHA-256 of the original git name). The same slug selects
+  `localhost/ilex:wt-<slug>`, VMs `ilex-<slug>-*`, and runtime and state
+  directories. Never use another checkout's image or VMs.
 - VM boots take one of N machine-wide slots (`ILEX_VM_SLOTS`, default one per
   8 GiB RAM, max 4) and wait when none is free.
 - `xtask test` only builds the image when it doesn't exist yet: after changing

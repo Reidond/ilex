@@ -690,6 +690,7 @@ dependencies = [
  "memmap2",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
  "x11rb",
 ]

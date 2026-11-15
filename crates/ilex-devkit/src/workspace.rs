@@ -2,24 +2,31 @@
 //!
 //! The main checkout owns `localhost/ilex:main` and VMs named `ilex-main-*`.
 //! A linked git worktree (including Claude Code and T3 worktrees) owns
-//! `localhost/ilex:wt-<name>` and VMs named `ilex-<name>-*`, so parallel
+//! `localhost/ilex:wt-<slug>` and VMs named `ilex-<slug>-*`, so parallel
 //! sessions never overwrite each other's images or VMs.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 
 use crate::git;
 
 /// Local repository every build is tagged into.
 pub const IMAGE_REPO: &str = "localhost/ilex";
 
+// `/run/user/0/ilex-vm/<slug>/graphical/vdagent.sock` adds 43 bytes to the
+// slug: 48 leaves 16 bytes spare below Linux's 107-byte socket path limit.
+// `ilex-<slug>-ephemeral` also fits the 63-character hostname budget.
+const MAX_SLUG_LEN: usize = 48;
+const HASH_HEX_LEN: usize = 16;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     /// Root of this checkout (the directory holding `Containerfile`).
     pub root: PathBuf,
-    /// `main` for the main checkout, the sanitised worktree name otherwise.
+    /// `main` for the main checkout, a bounded worktree identity otherwise.
     pub slug: String,
     /// Git's unique, unsanitised name for a linked worktree.
     pub worktree: Option<String>,
@@ -55,7 +62,7 @@ impl Workspace {
         Self { root, slug, worktree }
     }
 
-    /// Tag part of this checkout's image: `main` or `wt-<name>`.
+    /// Tag part of this checkout's image: `main` or `wt-<slug>`.
     pub fn image_tag(&self) -> String {
         match &self.worktree {
             Some(_) => format!("wt-{}", self.slug),
@@ -147,8 +154,9 @@ fn worktree_name(root: &Path) -> Option<String> {
     (parts.next()? == "worktrees").then(|| name.to_string())
 }
 
-/// Lowercase, `[a-z0-9-]` only, no leading/trailing/double dashes — safe in
-/// image tags, VM names and file names.
+/// Keep short, valid names stable. Hash the original git name when changing
+/// it, shortening it, or escaping the main checkout's reserved identity.
+/// The result is bounded ASCII with no leading/trailing/double dashes.
 fn sanitize(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
@@ -159,6 +167,17 @@ fn sanitize(name: &str) -> String {
             out.push('-');
         }
     }
-    let out = out.trim_matches('-').to_string();
-    if out.is_empty() { "wt".to_string() } else { out }
+    let out = out.trim_matches('-');
+    let out = match out {
+        "" => "wt",
+        "main" => "wt-main",
+        out => out,
+    };
+    if out == name && out.len() <= MAX_SLUG_LEN {
+        return out.to_string();
+    }
+    let readable_len = out.len().min(MAX_SLUG_LEN - 1 - HASH_HEX_LEN);
+    let readable = out[..readable_len].trim_end_matches('-');
+    let hash = format!("{:x}", Sha256::digest(name.as_bytes()));
+    format!("{readable}-{}", &hash[..HASH_HEX_LEN])
 }
