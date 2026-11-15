@@ -35,7 +35,6 @@ const INPUTS: &[&str] = &[
     "packages.toml",
     "Cargo.toml",
     "Cargo.lock",
-    "image.toml",
     "build",
     "machines/generic",
 ];
@@ -179,6 +178,9 @@ pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
 pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     let selection = image_selection(image)?;
     let mut inputs: Vec<String> = INPUTS.iter().map(|s| s.to_string()).collect();
+    if !selection.shells.is_empty() {
+        inputs.push("shells/packages.toml".into());
+    }
     if selection.machine != "generic" {
         inputs.extend([format!("machines/{}", selection.machine), "machines/Containerfile".into()]);
     }
@@ -206,7 +208,7 @@ pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     packages.sort_unstable();
 
     let mut hash = Sha256::new();
-    hash.update(b"ilex-fingerprint v2\n");
+    hash.update(b"ilex-fingerprint v3\n");
     if selection.machine != "generic" {
         // Cover the actual generic --on base, including its shell overlays,
         // as well as the selected machine inputs recorded by the layer key.

@@ -1,16 +1,6 @@
-# Packages every ilex image has, whatever its shells. A shell's own packages
-# are in shells/<name>/shell.toml, a machine's in machines/<name>/machine.toml.
-#
-# Each table groups related packages:
+# Packages of the base: every ilex image has them, with or without a shell.
+# Keep it small: fedora-bootc plus ilex's own files. `cargo xtask build --shell
+# none` enforces a budget of 128 MiB over fedora-bootc (see CLAUDE.md).
+# Tables as in shells/packages.toml:
 #   install = packages and @groups to install
 #   exclude = packages kept out even when a group pulls them in (dnf --exclude)
-
-[apps]
-install = ["firefox", "flatpak"]
-
-[updates]
-# notify-send for the update-ready notification.
-install = ["libnotify"]
-# bootc owns OS updates. Without these, a software centre tries to manage the
-# OS itself and asks for a password to "check available updates" at login.
-exclude = ["PackageKit", "PackageKit-command-not-found", "gnome-software-rpm-ostree"]

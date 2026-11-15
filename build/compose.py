@@ -200,16 +200,26 @@ def image(args):
     default("--default-shell" if args.default_shell else "--shells" if args.shells else path,
             "value" if args.default_shell or args.shells else "default-shell", shell_default, shells)
 
-    package_path = ctx / "packages.toml"
-    common = load(package_path)
-    package_sets = [packages(package_path, key, value) for key, value in common.items()]
+    if not shells:
+        designs, design_default = [], None
+
+    def package_file(package_path):
+        return [packages(package_path, key, value) for key, value in load(package_path).items()]
+
+    def flattened(package_sets):
+        return {kind: [p for group in package_sets for p in group.get(kind, [])]
+                for kind in ("install", "exclude")}
+
+    base_packages = flattened(package_file(ctx / "packages.toml"))
+    shell_packages = flattened(package_file(ctx / "shells/packages.toml") if shells else [])
+    shell_sets = [shell_packages]
     manifests = []
     for selected_name in shells:
         if not (ctx / "shells" / selected_name).is_dir():
             fail(path, "shells", f"'{selected_name}' has no directory under {ctx / 'shells'}")
         manifest = shell(ctx / "shells" / selected_name / "shell.toml", selected_name == shell_default)
         manifests.append(manifest)
-        package_sets.append(manifest["packages"])
+        shell_sets.append(manifest["packages"])
     design_manifests, token_files = [], []
     for selected_name in designs:
         if not (ctx / "design-systems" / selected_name).is_dir():
@@ -238,16 +248,17 @@ def image(args):
         generated.write("usr/share/ilex/image.json", json_bytes({
             "schema": 1, "shells": manifests, "default-shell": shell_default,
             "design-systems": design_manifests, "default-design-system": design_default,
+            "packages": base_packages, "shell-packages": shell_packages,
         }))
         generated.write("usr/share/ilex/machine.json", json_bytes(machine))
     with Tree(out / "install", "installation staging", create=True) as staging:
         staging.write("overlays.json", json_bytes(overlays))
         staging.write("install-files.py", Path(__file__).with_name("image_tree.py").read_bytes())
-    install = [p for group in package_sets for p in group.get("install", [])]
-    exclude = [f"--exclude={p}" for group in package_sets for p in group.get("exclude", [])]
-    with Tree(out / "build", "package staging", create=True) as build:
-        build.write("packages.args", "".join(p + "\n" for p in install + exclude).encode("utf-8"))
-        build.write("install-packages.sh", (ctx / "build/install-packages.sh").read_bytes())
+    for part, package_set in (("base", base_packages), ("shells", flattened(shell_sets))):
+        arguments = package_set["install"] + [f"--exclude={p}" for p in package_set["exclude"]]
+        with Tree(out / "build" / part, "package staging", create=True) as build:
+            build.write("packages.args", "".join(p + "\n" for p in arguments).encode("utf-8"))
+            build.write("install-packages.sh", (ctx / "build/install-packages.sh").read_bytes())
 
 
 def main():

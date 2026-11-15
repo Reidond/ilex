@@ -67,7 +67,7 @@ EOF
 
 FROM quay.io/fedora/fedora-bootc:45
 
-# Packages: the common packages and selected shells, in one transaction. The dnf
+# Base packages: the same transaction under every shell selection. The dnf
 # cache mount keeps /var/cache/libdnf5 out of the image, and a tmpfs keeps
 # what scriptlets write to /run out of it too. Then, as bootc requires: drop
 # caches and log files, and declare every /var directory the packages
@@ -75,10 +75,17 @@ FROM quay.io/fedora/fedora-bootc:45
 # entry, with their modes and owners), so /var is recreated on boot,
 # SELinux-labeled, instead of shipped. Log directories are kept for that
 # reason: a daemon that has to create its own (tuned) gets var_log_t.
-COPY --from=compose /out/build/ /tmp/ilex-build/
+COPY --from=compose /out/build/base/ /tmp/ilex-build/
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     --mount=type=tmpfs,target=/run \
     bash /tmp/ilex-build/install-packages.sh ilex-var.conf
+
+# Shells share one transaction and its excludes, in a separate image layer.
+# With no shell this payload is empty: no dnf and no tmpfiles file.
+COPY --from=compose /out/build/shells/ /tmp/ilex-build/
+RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
+    --mount=type=tmpfs,target=/run \
+    bash /tmp/ilex-build/install-packages.sh ilex-var-shells.conf
 
 COPY rootfs/ /
 COPY --from=build /out/ /
@@ -105,7 +112,9 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify && \
     chmod 4755 /usr/libexec/drupe/drupe-enter && \
     systemctl set-default "$(python3 -I -S -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
     systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service && \
-    systemctl --global enable ilex-update-notify.path ilex-update-notify.service && \
+    if [ "$(systemctl get-default)" = graphical.target ]; then \
+        systemctl --global enable ilex-update-notify.path ilex-update-notify.service; \
+    fi && \
     for directory in /tmp /var/tmp; do \
         actual="$(stat -c '%a %u:%g' "$directory")"; \
         if [ "$actual" != '1777 0:0' ]; then \

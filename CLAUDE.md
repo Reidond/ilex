@@ -1,15 +1,17 @@
 # ilex
 
-Personal Fedora bootc image: one `Containerfile` on `quay.io/fedora/fedora-bootc:45`
-that composes packages, shells and design systems from manifests (GNOME desktop by
-default), machine configurations as one derived layer, a Rust workspace for all
-tooling, e2e-only tests on QEMU via bcvk.
+Personal Fedora bootc image: a small base (fedora-bootc plus ilex's own files),
+an ordered list of shells (GNOME by default, with desktop apps and design
+systems), then one machine configuration. One `Containerfile` builds each root
+image: base packages, shells' packages in their own transaction and image layer,
+then ilex files and configuration, overlays, lint. A machine is one derived
+layer on that root. Rust tooling, e2e-only tests on QEMU via bcvk.
 
 ## Build and test
 
 ```sh
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
-cargo xtask build --shell none # headless composition check → localhost/ilex:<tag>.s-none
+cargo xtask build --shell none # small base → localhost/ilex:<tag>.s-none (128 MiB growth budget)
 cargo xtask build --machine vm # build the base, then localhost/ilex:<tag>.m-vm
 cargo xtask build --machine vm --on <image> # only a machine layer on an existing image
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
@@ -32,9 +34,9 @@ cargo xtask info               # resource identity, selection and available conf
 - `build`, `test`, `vm` and `disk` accept repeatable `--shell <name>`: the
   first shell is the default. Flags override `ILEX_SHELLS` (comma-separated),
   which overrides `image.toml`; an empty environment variable uses the manifest.
-  `none` alone selects a supported headless image (`multi-user.target`), used
-  to prove GNOME comes only from its manifest. Duplicates and unknown names
-  fail before podman starts. Design systems still come from `image.toml`.
+  `none` alone selects the small base (`multi-user.target`), without desktop
+  apps, enabled update notifications or design systems. Duplicates and unknown
+  names fail before podman starts. With shells, design systems come from `image.toml`.
   A shell list or default different from the manifest adds `.s-<shell>` for
   each shell in order, or `.s-none` for none, to `main` or `wt-<slug>`.
   Slugs can contain `--` but never dots, so variants cannot collide with another
@@ -101,12 +103,24 @@ cargo xtask info               # resource identity, selection and available conf
 ## Configurations: shells, design systems, machines
 
 `image.toml` names the installed shells and design systems and one default of
-each when its list is non-empty. `packages.toml` is what every shell shares
-(Firefox, Flatpak and update notifications); the common and selected shells'
-packages are installed in one dnf transaction with all their excludes.
+each when its list is non-empty. `packages.toml` is the base's package list,
+installed first in every root image; it is empty today. `shells/packages.toml`
+contains Firefox, Flatpak, libnotify and the PackageKit excludes, installed only
+with a shell. These and all selected shells' packages share a second transaction
+and image layer, with their combined excludes. A shell's excludes cannot prevent
+installation of a base package. The machine remains the last, squashed layer.
+
+`cargo xtask build` checks every root built without shells against the local
+fedora-bootc image: growth must be at most **128 MiB** (uncompressed `.Size`).
+The error includes both sizes. Packages that exceed the budget belong in a
+shell or machine, or need a justified budget change in a commit. The base adds
+ilex-agent, signature policy, the updater and drupe, with no added RPM today.
+The notifier's three small files remain in `rootfs/`, but neither user unit is
+enabled globally without a shell: no session means no notification is attempted.
 
 | Thing | Installed | Default | Chosen by a person |
 | --- | --- | --- | --- |
+| Base | every image: fedora-bootc, ilex plumbing, `packages.toml` | always present | not selectable independently of ilex |
 | Shell | per image, in `image.toml` | per image, `default-shell` | at sign-in, from the greeter's sessions |
 | Design system | per image, in `image.toml` | per image, `default-design-system` | planned (M1): state in their home, read by a shell; not built |
 | Machine configuration | per image tag (`:latest` is `generic`) | `generic` | per machine, with `bootc switch` |
@@ -165,7 +179,9 @@ first). URLs, paths, `.rpm` filenames, options and xargs quoting are rejected.
 transaction enables `localpkg_gpgcheck=1`. Human-facing manifest strings reject
 all C0, C1 and DEL control characters.
 
-Design systems are data in `design-systems/<name>/`: `design-system.toml`
+Design systems ship only in images with a shell; the bare base records empty
+lists and null defaults and has no design-system directory or tokens.
+They are data in `design-systems/<name>/`: `design-system.toml`
 names the directory, describes it and names a JSON object token file (default
 `tokens.json`). For `ilex`, this is the export of the owner's Claude
 design-system artifact titled "ilex". Change values in that artifact and
@@ -285,14 +301,26 @@ record them in the five `ilex.shells`, `ilex.default-shell`,
 `ilex.design-systems`, `ilex.default-design-system` and `ilex.machine` labels.
 The fingerprint covers the selected manifests, overlays and build scripts;
 old images without configuration labels must be rebuilt.
+Fingerprint v3 includes `shells/packages.toml` only with a shell, and excludes
+`image.toml`: the five selection labels already cover its resolved selection.
+An edit to an unselected shell or design system does not change the base's
+fingerprint. An agent or `rootfs/` edit reruns no package transaction.
 
 The image records schema 1 JSON in `/usr/share/ilex/image.json` and
 `/usr/share/ilex/machine.json`, and selected design systems' tokens under
 `/usr/share/ilex/design-systems/<name>/tokens.json`. `ilex-agent config` prints
 the selection; `ilex-agent config --json` returns both documents. The agent's
 self-check validates the configuration, sessions, greeter, target, tokens and
-machine packages. `ephemeral::configuration` compares it with the image labels
-and checkout manifests, including overlay and token hashes.
+machine packages, plus the literal non-group entries of `packages.install` and
+`shell-packages.install` recorded in `image.json`. With no shell, the empty
+package/session/token checks pass and the target must be `multi-user.target`;
+the OS, bootc, install config, signature policy and drupe checks still run.
+`ephemeral::configuration` compares both package lists with the checkout,
+alongside labels, overlays and token hashes, and checks that a shell-free image
+has no sessions, display manager, Firefox, Flatpak, design systems or globally
+enabled notifier. Tmpfiles are per transaction: `ilex-var.conf` for base
+packages, `ilex-var-shells.conf` for shells, `ilex-var-machine.conf` for a
+machine; an empty transaction emits no file.
 
 ### This PC: `ms-7c35`
 
@@ -405,6 +433,9 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 - In Git Bash, prefix with `MSYS_NO_PATHCONV=1` when passing Linux paths.
 - Image builds and VM boots take minutes: run them in the background.
 - `cargo check`/`clippy` work natively on Windows too, for quick feedback.
+  `cargo clippy --workspace --all-targets` works on Windows and Linux; the
+  `config::` fixtures that create Unix modes and symlinks are compiled on Unix
+  and run in WSL on Windows.
 - `cargo xtask vm` is the exception: run it on Windows itself (PowerShell or
   Git Bash, in the checkout). It hands itself to the distro (`wsl.exe -d
   FedoraLinux-45 -u root --cd <checkout> -e bash -lc 'cargo xtask vm …'`;
@@ -1117,6 +1148,9 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 
 ## Conventions
 
+- `packages.toml` belongs to the base and stays within its 128 MiB growth
+  budget; desktop-wide dependencies belong in `shells/packages.toml`. Both
+  transactions precede ilex files, configuration and overlays.
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one
   libtest-mimic binary, tiers `ephemeral::`, `disk::`, `upgrade::`,
   `graphical::`, `tool::`, local opt-in `config::`). Anything worth testing in a shipped binary must be

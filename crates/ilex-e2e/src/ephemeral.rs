@@ -240,6 +240,54 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         guest["machine"]["name"].as_str() == Some(&selection.machine),
         || "machine differs from image label".into(),
     )?;
+    for (key, path, selected) in [
+        ("packages", "packages.toml", true),
+        ("shell-packages", "shells/packages.toml", !selection.shells.is_empty()),
+    ] {
+        let mut expected = serde_json::json!({"install": [], "exclude": []});
+        if selected {
+            let manifest = ilex_devkit::config::manifest(&common::workspace()?.root.join(path))?;
+            for kind in ["install", "exclude"] {
+                let mut entries = Vec::new();
+                for group in manifest.values() {
+                    if let Some(values) = group.get(kind) {
+                        entries.extend(values.as_array().context("package list missing")?
+                            .iter().map(serde_json::to_value).collect::<std::result::Result<Vec<_>, _>>()?);
+                    }
+                }
+                expected[kind] = Value::Array(entries);
+            }
+        }
+        // TOML host tables sort keys; the composer preserves file order.
+        // Compare multisets so table ordering cannot hide missing/extra entries.
+        for kind in ["install", "exclude"] {
+            let entries = |value: &Value| -> Result<Vec<String>> {
+                let mut entries = value[kind].as_array().context("package list missing")?
+                    .iter().map(|v| v.as_str().map(str::to_owned).context("package name missing"))
+                    .collect::<Result<Vec<_>>>()?;
+                entries.sort();
+                Ok(entries)
+            };
+            ensure(entries(&image[key])? == entries(&expected)?, || {
+                format!("{key}.{kind} differs from {path}")
+            })?;
+        }
+        let packages = toml::Table::from_iter([("packages".into(), toml::Value::try_from(&expected)?)]);
+        check_packages(vm, &packages)?;
+    }
+    if selection.shells.is_empty() {
+        vm.ssh(
+            "test -z \"$(find /usr/share/wayland-sessions /usr/share/xsessions -mindepth 1 -maxdepth 1 2>/dev/null)\" && \
+             test ! -e /etc/systemd/system/display-manager.service && \
+             test ! -L /etc/systemd/system/display-manager.service && \
+             test ! -e /usr/bin/firefox && test ! -e /usr/bin/flatpak && \
+             test ! -e /usr/share/ilex/design-systems && \
+             test ! -L /usr/share/ilex/design-systems && \
+             test ! -L /etc/systemd/user/default.target.wants/ilex-update-notify.path && \
+             test ! -L /etc/systemd/user/graphical-session.target.wants/ilex-update-notify.service"
+        )?.ok("headless image has no desktop files or enabled notifier")?;
+        println!("     no shell: sessions, display manager, desktop apps, design systems and notifier enablement absent");
+    }
     for (index, name) in selection.shells.iter().enumerate() {
         let manifest = common::manifest("shells", name, "shell.toml")?;
         let session = common::shell_property(&manifest, "session", "desktop")?;

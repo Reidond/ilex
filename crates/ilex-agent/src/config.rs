@@ -35,6 +35,13 @@ fn list<'a>(value: &'a Value, key: &str) -> Result<&'a [Value]> {
 
 fn image() -> Result<Value> {
     let value = read(IMAGE)?;
+    for key in ["packages", "shell-packages"] {
+        for kind in ["install", "exclude"] {
+            if !list(&value[key], kind)?.iter().all(Value::is_string) {
+                return Err(format!("{IMAGE}: `{key}.{kind}` must contain strings"));
+            }
+        }
+    }
     for (key, default) in [
         ("shells", "default-shell"),
         ("design-systems", "default-design-system"),
@@ -196,15 +203,26 @@ pub fn check_tokens() -> Result<()> {
 }
 
 pub fn check_packages() -> Result<()> {
-    let machine = machine()?;
-    if let Some(install) = machine["packages"].get("install") {
+    installed_packages(&machine()?["packages"], "machine")
+}
+
+pub fn check_base_packages() -> Result<()> {
+    installed_packages(&image()?["packages"], "base")
+}
+
+pub fn check_shell_packages() -> Result<()> {
+    installed_packages(&image()?["shell-packages"], "shell")
+}
+
+fn installed_packages(packages: &Value, part: &str) -> Result<()> {
+    if let Some(install) = packages.get("install") {
         for package in install
             .as_array()
-            .ok_or("machine packages.install must be a list")?
+            .ok_or_else(|| format!("{part} packages.install must be a list"))?
         {
             let name = package
                 .as_str()
-                .ok_or("machine packages.install must contain strings")?;
+                .ok_or_else(|| format!("{part} packages.install must contain strings"))?;
             if name.starts_with('@') {
                 continue;
             }
@@ -213,7 +231,7 @@ pub fn check_packages() -> Result<()> {
                 .output()
                 .map_err(|e| e.to_string())?;
             if !output.status.success() {
-                return Err(format!("machine package `{name}` is not installed"));
+                return Err(format!("{part} package `{name}` is not installed"));
             }
         }
     }

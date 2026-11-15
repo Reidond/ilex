@@ -36,6 +36,14 @@ impl Selection {
         })
     }
 
+    /// Design systems serve sessions; the bare base carries none.
+    pub fn without_shell_designs(&mut self) {
+        if self.shells.is_empty() {
+            self.design_systems.clear();
+            self.default_design_system = None;
+        }
+    }
+
     pub fn labels(&self) -> BTreeMap<String, String> {
         LABELS
             .into_iter()
@@ -113,6 +121,9 @@ impl Selection {
             machine: get("ilex.machine")?.clone(),
         };
         validate_name(&selected.machine)?;
+        if selected.shells.is_empty() && !selected.design_systems.is_empty() {
+            bail!("an image without shells cannot have design systems; rebuild the base");
+        }
         if selected.shells.iter().any(|name| name == "none") {
             bail!("ilex.shells: `none` is a selection, not a shell name");
         }

@@ -71,7 +71,8 @@ const CHECKS: &[Check] = &[
         "default shell's greeter is the display manager",
         config::check_greeter,
     ),
-    ("common apps installed", check_common_binaries),
+    ("base packages installed", config::check_base_packages),
+    ("shell packages installed", config::check_shell_packages),
     ("design systems have their tokens", config::check_tokens),
     ("machine configuration readable", config::check_machine),
     ("machine packages installed", config::check_packages),
@@ -123,19 +124,6 @@ fn check_install_btrfs() -> Result<(), String> {
         Ok(())
     } else {
         Err("no `type = \"btrfs\"` in 00-ilex.toml".into())
-    }
-}
-
-/// The browser and Flatpak are shared by every shell.
-fn check_common_binaries() -> Result<(), String> {
-    let missing: Vec<&str> = ["firefox", "flatpak"]
-        .into_iter()
-        .filter(|bin| in_path(bin).is_err())
-        .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("missing: {}", missing.join(", ")))
     }
 }
 

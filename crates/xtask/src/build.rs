@@ -22,6 +22,8 @@ const KACHE_HOST_MOUNT: &str = "/kache-host";
 pub const BASE_IMAGE: &str = "quay.io/fedora/fedora-bootc:45";
 /// The builder stage compiles the Rust binaries against the same glibc.
 pub const BUILDER_IMAGE: &str = "quay.io/fedora/fedora:45";
+/// Everything beyond fedora-bootc in a root image with no shell.
+const BASE_BUDGET: u64 = 128 * 1024 * 1024;
 
 #[derive(clap::Args, Debug, Default)]
 pub struct Args {
@@ -79,6 +81,7 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
     // Let the compose stage report malformed manifests too. This loose read
     // supplies arguments and labels; Python remains the schema authority.
     let selection = resolved.selection;
+    let bare_base = selection.as_ref().is_some_and(|s| s.shells.is_empty());
 
     if !args.no_pull {
         for base in [BASE_IMAGE, BUILDER_IMAGE] {
@@ -87,6 +90,7 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
     }
     let base_digest = image_digest(BASE_IMAGE)
         .with_context(|| format!("resolving the digest of {BASE_IMAGE}"))?;
+    let base_size = if bare_base { Some(image_size(BASE_IMAGE)?) } else { None };
     let revision = git::revision(&ws.root)?;
 
     let mut build = Command::new("podman");
@@ -125,8 +129,28 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
     }
     build.args(&args.podman_args).arg(".");
     cmd::run(build.stdout(std::io::stderr()))?;
+    if let Some(base_size) = base_size {
+        let size = image_size(&image)?;
+        let growth = size.saturating_sub(base_size);
+        if growth > BASE_BUDGET {
+            bail!(
+                "base size budget exceeded: {image} is {size} bytes ({:.2} MiB), \
+                 fedora-bootc is {base_size} bytes ({:.2} MiB); \
+                 growth {:.2} MiB exceeds the 128 MiB budget. \
+                 Move packages to a shell or machine, or justify a budget change in a commit",
+                size as f64 / 1048576.0, base_size as f64 / 1048576.0, growth as f64 / 1048576.0
+            );
+        }
+        eprintln!("base size: {:.2} MiB, fedora-bootc {:.2} MiB, growth {:.2} MiB (budget 128 MiB)",
+            size as f64 / 1048576.0, base_size as f64 / 1048576.0, growth as f64 / 1048576.0);
+    }
     eprintln!("built {image} (base {base_digest}, revision {revision})");
     Ok(image)
+}
+
+fn image_size(image: &str) -> Result<u64> {
+    cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Size}}", image]))?
+        .parse().with_context(|| format!("reading the size of {image}"))
 }
 
 /// This machine's kache store, if it has one a build can read: the directory

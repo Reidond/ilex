@@ -1,0 +1,13 @@
+# Packages every image with a shell has, whatever its shells. They are
+# installed in the shells' transaction; the base has none of them.
+# A shell's own packages are in shells/<name>/shell.toml.
+
+[apps]
+install = ["firefox", "flatpak"]
+
+[updates]
+# notify-send for the update-ready notification.
+install = ["libnotify"]
+# bootc owns OS updates. Without these, a software centre tries to manage the
+# OS itself and asks for a password to "check available updates" at login.
+exclude = ["PackageKit", "PackageKit-command-not-found", "gnome-software-rpm-ostree"]
