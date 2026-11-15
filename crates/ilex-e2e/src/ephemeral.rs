@@ -303,8 +303,10 @@ fn check_unselected_shells(
     let mut sessions = BTreeSet::new();
     let mut compositors = BTreeSet::new();
     let mut greeters = BTreeSet::new();
+    let mut shared_overlays = vec![ws.root.join("rootfs")];
     for name in &selection.shells {
         let shell = common::manifest("shells", name, "shell.toml")?;
+        shared_overlays.push(ws.root.join("shells").join(name).join("rootfs"));
         sessions.insert(common::shell_property(&shell, "session", "desktop")?);
         compositors.insert(common::shell_property(&shell, "session", "compositor")?);
         if shell.contains_key("greeter") {
@@ -342,6 +344,38 @@ fn check_unselected_shells(
                 println!("     unselected shell {name}: greeter {unit} not installed");
             }
         }
+        let overlay = ws.root.join("shells").join(&name).join("rootfs");
+        if overlay.is_dir() {
+            check_overlay_absent(vm, &name, &overlay, &overlay, &shared_overlays)?;
+        }
+    }
+    Ok(())
+}
+
+/// Shared parent directories do not exempt their children: only an exact
+/// source path in common rootfs or a selected shell excuses an omitted leaf.
+fn check_overlay_absent(
+    vm: &EphemeralVm,
+    shell: &str,
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    shared: &[std::path::PathBuf],
+) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() && !path.is_symlink() {
+            check_overlay_absent(vm, shell, root, &path, shared)?;
+            continue;
+        }
+        let relative = path.strip_prefix(root)?;
+        if shared.iter().any(|source| source.join(relative).symlink_metadata().is_ok()) {
+            continue;
+        }
+        let destination = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
+        let quoted = common::quote(&destination);
+        vm.ssh(&format!("test ! -e {quoted} && test ! -L {quoted}"))?
+            .ok(&format!("unselected shell {shell}: overlay {destination} must be absent"))?;
+        println!("     unselected shell {shell}: overlay {destination} absent");
     }
     Ok(())
 }
