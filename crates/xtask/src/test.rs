@@ -94,7 +94,9 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
             rebuild = true;
         } else if let Some(message) = resolved.mismatch()? {
             if requested.is_some() {
-                bail!("{message}");
+                bail!(
+                    "{message}; ILEX_IMAGE overrides the variant; unset ILEX_IMAGE to test it, or pass --build to rebuild ILEX_IMAGE with this selection"
+                );
             }
             eprintln!("ilex: {message}; rebuilding the implicit image");
             rebuild = true;

@@ -109,6 +109,12 @@ impl Resolved {
         if !self.check_selection {
             return Ok(None);
         }
+        if !crate::build::image_exists(&self.image) {
+            return Ok(Some(format!(
+                "image {} not found in local container storage; run `{}` first",
+                self.image, self.build_command,
+            )));
+        }
         let requested = self.selection.as_ref().context(
             "cannot read the requested selection from image.toml; run `cargo xtask build` for manifest diagnostics",
         )?;
