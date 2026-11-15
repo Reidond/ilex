@@ -51,6 +51,10 @@ const ETC_EDITED: &str = "/etc/motd";
 const ETC_EDIT: &str = "ilex-e2e local edit";
 
 const REBOOT_TIMEOUT: Duration = Duration::from_secs(600);
+// bootc installs an explicit root=UUID and OSTree bind-mounts /sysroot/boot.
+// GPT discovery must not add an ESP automount over that bind mount in this
+// three-partition bcvk fixture. This is not a shipped image kernel argument.
+const FIXTURE_KARG: &str = "systemd.gpt_auto=0";
 
 pub fn trials() -> Vec<Trial> {
     const NAME: &str = "upgrade::upgrade_and_rollback";
@@ -119,8 +123,27 @@ fn upgrade_and_rollback() -> Result<()> {
 
     step(&format!("installing v1 ({v1_source}) as {installed}"));
     let name = ws.vm_name("upgrade");
-    let vm = LibvirtVm::boot(&name, &installed, &LibvirtOpts::default())?;
+    let opts = LibvirtOpts {
+        extra_args: vec!["--karg".into(), FIXTURE_KARG.into()],
+        ..Default::default()
+    };
+    let vm = LibvirtVm::boot(&name, &installed, &opts)?;
     step(&format!("{name} is up (VM slot {})", vm.slot_index()));
+    let cmdline = vm
+        .ssh("cat /proc/cmdline")?
+        .ok("reading fixture kernel arguments")?;
+    ensure(
+        cmdline
+            .stdout
+            .split_ascii_whitespace()
+            .any(|arg| arg == FIXTURE_KARG),
+        || {
+            format!(
+                "upgrade fixture is missing {FIXTURE_KARG}: {}",
+                cmdline.out()
+            )
+        },
+    )?;
     if prepare_only() {
         step("v1 is installed and its base disk cached (ILEX_UPGRADE_PREPARE); stopping here");
         return Ok(());
@@ -143,6 +166,7 @@ fn upgrade_and_rollback() -> Result<()> {
     ensure(v1.staged.is_none(), || {
         format!("v1 has a staged deployment: {:?}", v1.staged)
     })?;
+    boot_diagnostics(&vm, "v1 before building v2", false);
     vm.ssh(&format!(
         "mkdir -p $(dirname {VAR_FILE}) && echo {token} > {VAR_FILE} && echo '{ETC_EDIT} {token}' >> {ETC_EDITED}"
     ))?
@@ -173,12 +197,16 @@ fn upgrade_and_rollback() -> Result<()> {
     ensure(!path_exists(&vm, MARKER_USR)?, || {
         "the marker appeared before the reboot".into()
     })?;
+    boot_diagnostics(&vm, "v1 after staging v2", false);
 
     step("rebooting into v2");
     vm.reboot(REBOOT_TIMEOUT)?;
 
     // --- v2 ---------------------------------------------------------------
     let after = status(&vm)?;
+    if after.booted != v2 {
+        boot_diagnostics(&vm, "unexpected boot after upgrade", true);
+    }
     ensure(after.booted == v2, || {
         format!("booted {:?}, expected the staged {v2:?}", after.booted)
     })?;
@@ -214,6 +242,27 @@ fn upgrade_and_rollback() -> Result<()> {
     })?;
     step("upgrade and rollback verified");
     Ok(())
+}
+
+fn boot_diagnostics(vm: &LibvirtVm, phase: &str, failed: bool) {
+    // Read mountinfo rather than stat /boot: observing an autofs path can
+    // activate it and change the shutdown behaviour being investigated.
+    let mut script = String::from(concat!(
+        "date --iso-8601=seconds; uname -r; cat /proc/cmdline; cat /etc/fstab; ",
+        "grep ' /boot ' /proc/1/mountinfo; ",
+        "systemctl show boot.mount boot.automount ostree-finalize-staged-hold.service ",
+        "-p Id -p LoadState -p ActiveState -p SubState -p Where -p What -p Options -p TimeoutIdleUSec"
+    ));
+    if failed {
+        script.push_str("; findmnt /boot; lsblk -f; bootc status --json; journalctl -b -1 -u ostree-finalize-staged.service -u ostree-finalize-staged-hold.service -u boot.mount -u boot.automount --no-pager -n 120");
+    }
+    match vm.ssh_timeout(&script, Duration::from_secs(30)) {
+        Ok(output) => eprintln!(
+            "upgrade boot diagnostics ({phase}):\n{}\n{}",
+            output.stdout, output.stderr
+        ),
+        Err(error) => eprintln!("upgrade boot diagnostics ({phase}) unavailable: {error:#}"),
+    }
 }
 
 /// What must hold on the freshly booted v2.

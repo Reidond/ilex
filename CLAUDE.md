@@ -87,6 +87,20 @@ cargo xtask info               # resource identity, selection and available conf
   most of the tier's time. `ILEX_UPGRADE_PREPARE=1` only installs and boots v1
   (filling bcvk's base-disk cache) and stops; CI runs that ahead of time and
   caches the disk (see CI publishing).
+- The upgrade VM fixture passes `--karg systemd.gpt_auto=0` to bcvk's install.
+  Its root is already selected by UUID and OSTree generates a bind mount from
+  `/sysroot/boot`. With this three-partition layout and empty fstab, GPT discovery
+  also generates an ESP `boot.automount` over that bind mount. The conflicting
+  autofs mount can make v1's shutdown finalization fail with
+  `Remounting /boot read-write: Invalid argument`, leaving v1 booted. Disabling
+  discovery only in this VM fixture preserves the real upgrade, boot, signature
+  policy and rollback assertions; shipped image kernel arguments are unaffected.
+  bcvk includes install kargs in its disk hash. CI additionally uses the
+  `v1-disk-gpt-auto-off-<bcvk>-<digest>` cache profile, through
+  `.github/v1-disk-key.sh`, for both restore and preparation, so it does not
+  restore the previous fixture's disks. Upgrade logs retain the guest command
+  line, `/boot` mount and automount state, plus the prior finalization journal
+  when the booted digest is wrong.
 - `iso::` is opt-in and slow (the ISO takes ~8 minutes to build once the
   installer image is cached, the install and boot ~8 more), so it only exists
   when a filter names it: `cargo xtask test iso::` builds the installer ISO
@@ -787,7 +801,8 @@ Three paths start together on separate runners:
   only explicit absence permits legacy `latest` as the first-run fallback.
   Registry/authentication errors are fatal. It records `own` (the installer
   tag's digest or `-`), v1's digest and `exists`. Its cached disk key is
-  `v1-disk-<bcvk>-<v1 digest>`, so the legacy disk remains usable. It installs
+  `v1-disk-gpt-auto-off-<bcvk>-<v1 digest>`, including the fixture's install
+  profile. The earlier disk profile is not restored. It installs
   v1 itself on a cache miss, in the background with the VM stack. It waits for
   build's "Stage the candidate", pulls `candidate.<installer>` by digest, and
   runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`

@@ -68,6 +68,9 @@ vm_stack() (
     echo "apt-debs: $(find "$debs" -maxdepth 1 -name '*.deb' | wc -l) packages from the cache"
     sudo apt-get update
     sudo apt-get install -y "${apt[@]}" qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo
+    uname -a
+    qemu-system-x86_64 --version
+    virsh --version
     # What the lists no longer have (superseded versions) leaves the cache.
     sudo apt-get "${apt[@]}" autoclean
     sudo rm -rf "$debs/partial" "$debs/lock"
@@ -98,6 +101,7 @@ vm_stack() (
     done
     ls -l /usr/share/qemu/firmware/ /etc/qemu/firmware/
     for unit in libvirtd virtqemud; do sudo systemctl try-restart "$unit" || true; done
+    sudo virsh version
     curl -fsSL -o "$RUNNER_TEMP/bcvk.tar.gz" \
         "https://github.com/bootc-dev/bcvk/releases/download/${BCVK_VERSION}/bcvk-x86_64-unknown-linux-gnu.tar.gz"
     echo "${BCVK_SHA256}  $RUNNER_TEMP/bcvk.tar.gz" | sha256sum --check -

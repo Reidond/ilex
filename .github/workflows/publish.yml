@@ -644,7 +644,8 @@ jobs:
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "v1: $repo@$digest"
           echo "ILEX_UPGRADE_FROM=$repo@$digest" >> "$GITHUB_ENV"
-          echo "key=v1-disk-$BCVK_VERSION-${digest#sha256:}" >> "$GITHUB_OUTPUT"
+          key=$(bash .github/v1-disk-key.sh "$digest")
+          echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Already cached?
         id: cached
