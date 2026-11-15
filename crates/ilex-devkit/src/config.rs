@@ -50,6 +50,17 @@ impl Selection {
             .collect()
     }
 
+    pub fn summary(&self) -> String {
+        format!(
+            "shells=[{}] default-shell={} design-systems=[{}] default-design-system={} machine={}",
+            self.shells.join(","),
+            self.default_shell.as_deref().unwrap_or("none"),
+            self.design_systems.join(","),
+            self.default_design_system.as_deref().unwrap_or("none"),
+            self.machine
+        )
+    }
+
     /// Check selection names before invoking podman. Manifest contents remain
     /// compose.py's responsibility, including a selected directory's manifest.
     pub fn validate_shells(&self, root: &Path) -> Result<()> {

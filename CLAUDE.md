@@ -12,6 +12,7 @@ cargo xtask build --shell none # headless composition check → localhost/ilex:<
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
                                # on Windows: run `cargo xtask vm` in PowerShell, not in WSL
+cargo xtask vm --gui --print-image # show the own-namespace viewer tag, without a build or boot
 cargo xtask info               # resource identity, selection and available configurations
 ```
 
@@ -154,7 +155,8 @@ Unknown keys and invalid defaults fail in the first `compose` stage, before
 compilation. Plain `podman build .` composes the default image too, but does not
 set the configuration labels: build with `cargo xtask build` to test or rechunk
 the result.
-`cargo xtask info` lists the selection and available configurations; builds
+`cargo xtask info` honours `ILEX_SHELLS`, listing the resolved image, selection
+and available configurations; builds
 record them in the five `ilex.shells`, `ilex.default-shell`,
 `ilex.design-systems`, `ilex.default-design-system` and `ilex.machine` labels.
 The fingerprint covers the selected manifests, overlays and build scripts;
@@ -216,6 +218,7 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
   WSL can't start it itself: `/mnt/c` is mounted with `fmask=133`, so no
   `.exe` there has the execute bit interop needs.
   `ILEX_SHELLS` reaches WSL through `WSLENV`, including without `--gui`.
+  Selection is validated natively before building the viewer or entering WSL.
 - Nothing here uses WSLg any more. It is unreliable on this machine: on most
   starts of WSL 2.7 it fails to open its shared memory with Windows
   (`/mnt/wslg/weston.log`: `rdp_allocate_shared_memory: Failed to open …`,
@@ -329,7 +332,8 @@ in `viewer.rs`):
   catches up with a resized window, the viewer stretches its last frame
   (and scales the pointer) instead of showing it in a corner.
 - Clipboard (text, both ways): `--gui` installs the checkout's image plus
-  `vm/Containerfile` (`spice-vdagent`; tagged `<image tag>-vm`, never
+  `vm/Containerfile` (`spice-vdagent`; tagged with this checkout's implicit
+  variant reference plus `-vm`, even for an explicit or digest `--image`, never
   published, rebuilt only when the base image or the Containerfile changes,
   per its `ilex.vm-key` label, because every rebuild's new digest makes bcvk
   install the disk again), QEMU puts the guest's SPICE agent port on

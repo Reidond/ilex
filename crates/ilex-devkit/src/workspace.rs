@@ -79,21 +79,20 @@ impl Workspace {
     /// an empty list gets `.s-none`. Slugs have no dots (hashed slugs may
     /// contain `--`), so another checkout cannot own this variant's tag.
     /// `None` keeps the default image. VM names and state paths stay unchanged.
-    pub fn variant_ref(&self, shells: Option<&[String]>) -> Result<String> {
+    /// The caller validates the selection and the resulting tag length.
+    pub fn variant_ref(&self, shells: Option<&[String]>) -> String {
         let mut image = self.image_ref();
         if let Some(shells) = shells {
             if shells.is_empty() {
                 image.push_str(".s-none");
             } else {
                 for shell in shells {
-                    crate::config::validate_name(shell)?;
                     image.push_str(".s-");
                     image.push_str(shell);
                 }
             }
         }
-        check_tag_length(&image)?;
-        Ok(image)
+        image
     }
 
     /// Turn a user-supplied tag or reference into a full image reference:

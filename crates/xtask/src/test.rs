@@ -1,4 +1,4 @@
-//! `cargo xtask test [--build] [filters...]`: build the image if needed, then
+//! `cargo xtask test [--shell NAME] [--build] [filters...]`: build if needed, then
 //! run the e2e harness against it.
 //!
 //! The image under test is this checkout's (`localhost/ilex:main` or
@@ -6,6 +6,8 @@
 //! with `--build`. Set `ILEX_IMAGE` to test a different image (a tag such as
 //! `candidate`, or a full reference): it is used as given and never rebuilt
 //! unless `--build` is passed.
+//! Repeat `--shell` to choose the installed shells (first is default), or use
+//! `--shell none` for the headless variant; ILEX_SHELLS is the environment default.
 //!
 //! Filters select tests by substring, so `ephemeral::` runs one tier and
 //! several filters (`ephemeral:: upgrade::`) run the union. Everything after

@@ -15,6 +15,8 @@ pub struct Args {
 
 pub struct Resolved {
     pub image: String,
+    /// This checkout's own tag, even when `image` is an explicit reference.
+    pub implicit_image: String,
     // A malformed default manifest still goes to compose for its authoritative
     // schema diagnostic. Explicit selection must be resolved before podman.
     pub selection: Option<Selection>,
@@ -42,17 +44,13 @@ impl Args {
         // An explicit tag/reference keeps its existing meaning. Only implicit
         // checkout tags acquire shell suffixes; never append them twice when
         // test hands a resolved reference to build, or vm hands one to disk.
-        let image = match image {
-            Some(image) => ws.resolve_image(Some(image)),
-            None => ws.variant_ref(
-                selection
-                    .as_ref()
-                    .filter(|_| variant)
-                    .map(|s| s.shells.as_slice()),
-            )?,
-        };
+        let implicit_image = ws.variant_ref(
+            selection.as_ref().filter(|_| variant).map(|s| s.shells.as_slice()),
+        );
+        let image = image.map(|image| ws.resolve_image(Some(image)))
+            .unwrap_or_else(|| implicit_image.clone());
         check_tag_length(&image)?;
-        Ok(Resolved { image, selection })
+        Ok(Resolved { image, implicit_image, selection })
     }
 
     fn requested_shells(&self) -> Result<Option<Vec<String>>> {
@@ -72,5 +70,14 @@ impl Args {
             return Ok(Some(vec![]));
         }
         Ok(Some(shells))
+    }
+}
+
+impl Resolved {
+    /// Layers we build belong to this checkout, never to the base reference.
+    pub fn viewer_image(&self) -> Result<String> {
+        let image = format!("{}-vm", self.implicit_image);
+        check_tag_length(&image)?;
+        Ok(image)
     }
 }

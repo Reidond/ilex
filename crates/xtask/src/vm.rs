@@ -52,6 +52,9 @@ pub struct Args {
     /// Image tag or reference to boot (defaults to this checkout's image)
     #[arg(long)]
     pub image: Option<String>,
+    /// Print the target image reference without inspecting, building or booting it
+    #[arg(long)]
+    pub print_image: bool,
     /// Boot the installed disk image (UEFI, 4K virtio-vga) instead of an ephemeral VM
     #[arg(long)]
     pub disk: bool,
@@ -75,15 +78,22 @@ pub struct Args {
     pub command: Vec<String>,
 }
 
-pub fn run(ws: &Workspace, args: Args) -> Result<()> {
-    let image = args.selection.resolve(ws, args.image.as_deref())?.image;
+pub fn run(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Result<()> {
+    if args.print_image {
+        #[cfg(unix)]
+        let viewer = args.gui && in_wsl();
+        #[cfg(not(unix))]
+        let viewer = args.gui && cfg!(windows);
+        println!("{}", if viewer { resolved.viewer_image()? } else { resolved.image });
+        return Ok(());
+    }
     if args.disk || args.gui {
         #[cfg(unix)]
-        return run_disk(ws, args, image);
+        return run_disk(ws, args, resolved);
         #[cfg(not(unix))]
         bail!("--disk/--gui run in WSL2 (see CLAUDE.md)");
     }
-    run_ephemeral(ws, args, image)
+    run_ephemeral(ws, args, resolved.image)
 }
 
 fn run_ephemeral(ws: &Workspace, args: Args, image: String) -> Result<()> {
@@ -106,7 +116,7 @@ fn run_ephemeral(ws: &Workspace, args: Args, image: String) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn run_disk(ws: &Workspace, args: Args, image: String) -> Result<()> {
+fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Result<()> {
     let viewer = args.gui && in_wsl();
     // `ILEX_DISK` boots a ready-made disk (same override the e2e tiers honour).
     let disk = match std::env::var_os("ILEX_DISK").filter(|p| !p.is_empty()) {
@@ -114,9 +124,9 @@ fn run_disk(ws: &Workspace, args: Args, image: String) -> Result<()> {
         None => {
             // The viewer's clipboard needs the guest agent: the VM-only layer.
             let image = if viewer {
-                vm_image(ws, &image)?
+                vm_image(ws, &resolved.image, &resolved.viewer_image()?)?
             } else {
-                image
+                resolved.image
             };
             disk::ensure(ws, &disk::Args {
                 selection: args.selection.clone(),
@@ -226,21 +236,19 @@ fn run_disk(ws: &Workspace, args: Args, image: String) -> Result<()> {
 }
 
 /// The image `--gui` installs: `base` plus `vm/Containerfile` (the guest
-/// side of the clipboard), tagged `<image tag>-vm`: never the checkout's own
-/// tag, never published.
+/// side of the clipboard), tagged with this checkout's implicit variant plus
+/// `-vm`, even for an explicit or digest base. Never published.
 ///
 /// It is only rebuilt when `base` or the Containerfile changed (the label
 /// `ilex.vm-key` records both): even a fully cached `podman build` commits a
 /// new manifest, and a new digest makes bcvk install the disk again.
 #[cfg(unix)]
-fn vm_image(ws: &Workspace, base: &str) -> Result<String> {
+fn vm_image(ws: &Workspace, base: &str, tag: &str) -> Result<String> {
     use sha2::{Digest, Sha256};
 
     if !crate::build::image_exists(base) {
         bail!("image {base} not found in local container storage; run `cargo xtask build` first");
     }
-    let tag = format!("{base}-vm");
-    ilex_devkit::workspace::check_tag_length(&tag)?;
     let context = ws.root.join("vm");
     let containerfile = context.join("Containerfile");
     let base_id = cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", base]))?;
@@ -251,20 +259,20 @@ fn vm_image(ws: &Workspace, base: &str) -> Result<String> {
         "inspect",
         "--format",
         "{{index .Labels \"ilex.vm-key\"}}",
-        &tag,
+        tag,
     ]));
     if current.as_deref() == Some(key.as_str()) {
-        return Ok(tag);
+        return Ok(tag.into());
     }
     cmd::run(
         Command::new("podman")
             .args(["build", "--layers", "--build-arg"])
             .arg(format!("BASE={base}"))
-            .args(["--label", &format!("ilex.vm-key={key}"), "--tag", &tag, "--file"])
+            .args(["--label", &format!("ilex.vm-key={key}"), "--tag", tag, "--file"])
             .arg(&containerfile)
             .arg(&context),
     )?;
-    Ok(tag)
+    Ok(tag.into())
 }
 
 /// Is this Linux the WSL2 distro of a Windows machine?

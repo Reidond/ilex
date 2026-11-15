@@ -5,7 +5,7 @@
 
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilex_devkit::{Workspace, config, slots};
 
@@ -70,8 +70,16 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Build(args) => build::run(&ws, args),
         Cmd::Rechunk(args) => rechunk::run(&ws, args),
         // The VM stack lives in WSL2; --gui's window is ilex-viewer.exe.
-        Cmd::Vm(args) if cfg!(windows) => wsl::forward(&ws.root, args.gui),
-        Cmd::Vm(args) => vm::run(&ws, args),
+        Cmd::Vm(args) => {
+            // Reject invalid selection before building the native viewer or
+            // handing over to WSL. --print-image only needs these local files.
+            let resolved = args.selection.resolve(&ws, args.image.as_deref())?;
+            if cfg!(windows) && !args.print_image {
+                wsl::forward(&ws.root, args.gui)
+            } else {
+                vm::run(&ws, args, resolved)
+            }
+        }
         Cmd::Disk(args) => disk::run(&ws, args),
         Cmd::Test(args) => test::run(&ws, args),
         Cmd::Changed(args) => changed::run(&ws, args),
@@ -79,22 +87,16 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Iso(args) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
         Cmd::Info => {
+            let resolved = select::Args::default().resolve(&ws, None)?;
             println!("root:        {}", ws.root.display());
             println!("slug:        {}", ws.slug);
-            println!("image:       {}", ws.image_ref());
+            println!("image:       {}", resolved.image);
             println!("vm prefix:   {}", ws.vm_prefix());
             println!("runtime dir: {}", ws.runtime_dir().display());
             println!("state dir:   {}", ws.state_dir().display());
             println!("vm slots:    {}", slots::max_slots());
-            let selection = config::Selection::read(&ws.root)?;
-            let summary = format!(
-                "selection:   shells={} default-shell={} design-systems={} default-design-system={} machine={}",
-                selection.shells.join(","),
-                selection.default_shell.as_deref().unwrap_or("none"),
-                selection.design_systems.join(","),
-                selection.default_design_system.as_deref().unwrap_or("none"),
-                selection.machine
-            );
+            let selection = resolved.selection.context("reading image.toml for info; run `cargo xtask build` for manifest diagnostics")?;
+            let summary = format!("selection:   {}", selection.summary());
             println!("{}", terminal_text(&summary));
             for (directory, file) in [
                 ("shells", "shell.toml"),
