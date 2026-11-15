@@ -72,10 +72,10 @@ fn run(cmd: Cmd) -> Result<()> {
         // The VM stack lives in WSL2; --gui's window is ilex-viewer.exe.
         Cmd::Vm(args) => {
             // Reject invalid selection before building the native viewer or
-            // handing over to WSL. --print-image only needs these local files.
+            // handing over to WSL. GUI prediction inspects Linux image labels.
             let resolved = args.resolve(&ws)?;
-            if cfg!(windows) && !args.print_image {
-                wsl::forward(&ws.root, args.gui)
+            if cfg!(windows) {
+                wsl::forward(&ws.root, args.gui && !args.print_image)
             } else {
                 vm::run(&ws, args, resolved)
             }
@@ -87,7 +87,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Iso(args) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
         Cmd::Info => {
-            let resolved = select::Args::default().resolve(&ws, None)?;
+            let resolved = select::Args::default().resolve(&ws, None, None)?;
             println!("root:        {}", ws.root.display());
             println!("slug:        {}", ws.slug);
             println!("image:       {}", resolved.image);

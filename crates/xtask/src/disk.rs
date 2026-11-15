@@ -73,7 +73,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 /// Write the disk for `args` (or reuse an up-to-date one) and return its path.
 /// The image must already be built (`cargo xtask build`).
 pub fn ensure(ws: &Workspace, args: &Args) -> Result<PathBuf> {
-    let resolved = args.selection.resolve(ws, args.image.as_deref())?;
+    let resolved = args.selection.resolve(ws, args.image.as_deref(), None)?;
     resolved.require_match()?;
     ensure_image(ws, args, &resolved.image)
 }

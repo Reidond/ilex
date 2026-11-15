@@ -26,7 +26,7 @@ RUN for directory in /tmp /var/tmp; do \
         fi; \
     done
 # Replaying against the prepared filesystem rejects package/overlay collisions,
-# and retains every inherited shell or machine addition before the new overlay.
+# and retains every inherited shell addition before the machine overlay.
 RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose --phase overlays \
     --inherited /usr/share/ilex/.machine-replay --remove-payload
 RUN bootc container lint --fatal-warnings

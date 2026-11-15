@@ -10,12 +10,12 @@ tooling, e2e-only tests on QEMU via bcvk.
 ```sh
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
 cargo xtask build --shell none # headless composition check → localhost/ilex:<tag>.s-none
-cargo xtask build --machine vm # base if missing, then localhost/ilex:<tag>.m-vm
+cargo xtask build --machine vm # build the base, then localhost/ilex:<tag>.m-vm
 cargo xtask build --machine vm --on <image> # only a machine layer on an existing image
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
                                # on Windows: run `cargo xtask vm` in PowerShell, not in WSL
-cargo xtask vm --gui --print-image # show the own-namespace viewer tag, without a build or boot
+cargo xtask vm --gui --print-image # inspect selection and show the image to boot, without building
 cargo xtask info               # resource identity, selection and available configurations
 ```
 
@@ -48,13 +48,18 @@ cargo xtask info               # resource identity, selection and available conf
   8 GiB RAM, max 4) and wait when none is free.
 - `xtask test` builds an implicit image when missing or its selection is stale;
   after changing other content that ships in the image, pass `--build`.
+  Without `--on`, `build --machine <name>` and `test --build --machine <name>`
+  always build the generic base first, then build or reuse the machine layer.
+  A fully cached base keeps its ID, so an unchanged machine layer is still skipped.
+  `--on` deliberately uses the supplied existing base without rebuilding it.
   Filters are substrings and
   several run their union (`xtask test ephemeral:: upgrade::`); arguments after
   `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
 - Reusing an implicit image compares all five selection labels with the current
   manifests and flags. `test` rebuilds a stale selection; `vm` and `disk` refuse
   it and print the selection it was built for and the build command to run.
-  Explicit image references are compared only when `--shell` or `ILEX_SHELLS`
+  Explicit image references are compared only when `--shell`, `--machine`,
+  `ILEX_SHELLS` or `ILEX_MACHINE`
   requests a selection; a mismatch is refused unless `test --build` was given.
   An explicit reference without selection keeps CI's existing behaviour.
 - An ephemeral VM has no ostree deployment, so `bootc status` there names no
@@ -118,7 +123,10 @@ A shell must provide a real session and compositor.
 
 Add-only is a visibility rule, not containment. An overlay can ship a service
 or other code that runs as root on the installed machine; review every added
-path accordingly. The build must not execute that content to produce changes
+path accordingly. New units, drop-ins and masks (including a new leaf symlink
+to `/dev/null`) are additions and can change existing units' behaviour. They
+require review just as executable files do; add-only only prevents replacing
+existing filesystem entries. The build must not execute that content to produce changes
 absent from the overlay diff. All configuration runs before overlays, and only
 `bootc container lint` runs afterward.
 
@@ -163,15 +171,20 @@ defaults to false, and optional `[packages] install` and `exclude` use the same
 grammar as shell packages. Machine names cannot be `latest`, `candidate`, `main`,
 `rechunked`, `upgrade`, `base`, or start with `sha`, `wt-` or a digit.
 An optional `rootfs/` only adds paths against the **whole base image**, including
-its packages, signature policy, units and every earlier shell/machine overlay.
+existing package/configuration files and shell overlay files. Those files cannot
+be replaced; new drop-ins, masks and units remain additions a reviewer must read.
 Put kernel arguments in `rootfs/usr/lib/bootc/kargs.d/20-<name>.toml`, using
 bootc's `kargs = ["..."]` format; bootc applies the difference at install,
 upgrade and switch. Other machine defaults (udev, sysctl, unit drop-ins) go in
 `rootfs/usr/` too. No replacement list exists.
 
 `build`, `test`, `vm` and `disk` accept `--machine <name>`, overriding
-`ILEX_MACHINE`, then `generic`. In WSL `vm --gui` defaults to `vm` (spice-vdagent
-for clipboard), unless a flag or environment selection says otherwise.
+`ILEX_MACHINE`, then `generic`. In WSL `vm --gui` adds `vm` (spice-vdagent for
+clipboard) only when the selected image is generic. An already selected machine
+image is booted unchanged: `--machine vm` and `--image <own .m-vm>` reuse it;
+another machine prints that the viewer's clipboard needs machine `vm`.
+`--print-image` inspects labels to apply this same decision without building or
+booting. On Windows it forwards that inspection to WSL without starting a viewer.
 The implicit tag is `<checkout tag>[.s-<shell>...].m-<machine>`. A layer built
 on an explicit base, including a digest or another repository's image, always
 gets a local tag in this checkout's namespace: `<checkout tag>.b-<16 hex SHA-256
@@ -181,7 +194,16 @@ shell-variant namespace keeps that prefix. Only an explicit build `--tag`
 chooses another output name. Both suffixes count towards the 128-byte tag limit.
 `xtask build --machine <name> --on <image>` builds only the layer and prints its
 resulting full reference on stdout; scripts must use that result rather than
-append a suffix to their input. No image is pushed by building.
+append a suffix to their input. Build subprocesses (including base builds and
+pulls) send stdout to stderr, so `image=$(cargo xtask build --machine "$machine"
+--on "$base")` captures only the reference. No image is pushed by building.
+
+Machines do not stack. The host builder requires the base's `ilex.machine` label
+to be `generic`, and preparation independently requires its unchanged registered
+`machine.json` to name `generic`. Both errors name the base's machine. A future
+explicit stack would need a tmpfiles file per machine, the stack recorded in
+`machine.json` and a label such as `ilex.machines`, and configuration/self-check
+coverage for every layer. None of that extension is implemented.
 
 `machines/Containerfile` reconstructs an overlay-free preparation filesystem
 from composer-owned, hash-registered `/usr/share/ilex/.overlays.json` provenance.
@@ -195,12 +217,18 @@ The machine build squashes its new build steps into one layer, preserving all
 base layers. `ilex.machine-key` covers the base image ID and every path, type,
 mode, link target and byte of the machine directory and shared build helpers;
 an unchanged key skips the build, preserving its image ID and installed disk.
-Machine fingerprints include that key too, so an inherited machine overlay
-change still counts when `--on` layers one machine on another without changing RPMs.
+Machine fingerprints include that key too, covering the actual supplied generic
+base's content even when its manifests are outside this checkout.
 
 The local opt-in `config::machine_fixture` tier builds and boots a throwaway
-machine outside the repository with a fresh marker and a kargs file, checking
-configuration, self-check and the base tmpfiles hash. Its marker lives under
+machine outside the repository with a fresh marker and a kargs file. An internal
+fixture builder adds a shell-style parent overlay with the production installer
+while retaining generic's labels and registered `machine.json`; it does not
+relax machine admission. The guest checks the parent's new directory, file mode,
+content, relative symlink and file in an existing directory after verify/remove/
+replay. A colliding machine overlay must fail the build. The tier also checks
+configuration, self-check, and the existence and parsing of machine tmpfiles.
+Its marker lives under
 `/usr/share/ilex-config-fixture`, outside the generated-file namespace. CI does
 not register this tier.
 
@@ -385,12 +413,13 @@ in `viewer.rs`):
   pointer over the window or pressing a key wakes it. While the guest
   catches up with a resized window, the viewer stretches its last frame
   (and scales the pointer) instead of showing it in a corner.
-- Clipboard (text, both ways): `--gui` installs machine `vm` (`spice-vdagent`)
-  through `machines/Containerfile`, tagged `<checkout tag>.m-vm` for the default
+- Clipboard (text, both ways): on a generic image `--gui` installs machine `vm`
+  (`spice-vdagent`) through `machines/Containerfile`, tagged `<checkout tag>.m-vm` for the default
   base (explicit bases follow the local `.b-<hash>` rule above), never
   published, rebuilt only when the base or machine inputs change,
   per its `ilex.machine-key` label, because every rebuild's new digest makes bcvk
-  install the disk again), QEMU puts the guest's SPICE agent port on
+  install the disk again. Existing machine images are used unchanged; only `vm`
+  supplies the viewer's clipboard agent. QEMU puts the guest's SPICE agent port on
   `vdagent.sock`, and the bridge speaks the agent protocol itself
   (`vdagent.rs`). QEMU's own `qemu-vdagent` chardev doesn't work here:
   `spice-vdagentd` reads EOF from it ("lost spice client connection") and

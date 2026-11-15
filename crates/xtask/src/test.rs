@@ -86,7 +86,7 @@ fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
 /// The image to test, building it first when needed.
 fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
     let requested = std::env::var("ILEX_IMAGE").ok().filter(|s| !s.is_empty());
-    let resolved = args.selection.resolve(ws, requested.as_deref())?;
+    let resolved = args.selection.resolve(ws, requested.as_deref(), None)?;
     let image = resolved.image.clone();
     let mut rebuild = args.build;
     if !rebuild {
@@ -103,12 +103,13 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
         }
     }
     if rebuild {
+        let machine_layer = args.selection.requested_machine()?.as_deref().is_some_and(|m| m != "generic");
         return build::build_resolved(
             ws,
             &build::Args {
                 selection: args.selection.clone(),
-                tag: if args.selection.requested_machine()?.as_deref().is_some_and(|m| m != "generic") { None } else { requested.clone() },
-                on: if args.selection.requested_machine()?.as_deref().is_some_and(|m| m != "generic") { requested.clone() } else { None },
+                tag: if machine_layer { None } else { requested.clone() },
+                on: if machine_layer { requested.clone() } else { None },
                 no_pull: args.no_pull,
                 ..build::Args::default()
             },

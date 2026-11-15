@@ -52,7 +52,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
 /// Build the image and return its full reference.
 pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
-    let resolved = args.selection.resolve_build(ws, args.on.as_deref(), args.tag.as_deref())?;
+    let resolved = args.selection.resolve(ws, args.on.as_deref(), args.tag.as_deref())?;
     build_resolved(ws, args, resolved)
 }
 
@@ -61,7 +61,7 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
     cmd::require("podman")?;
     if resolved.machine != "generic" {
         let base = &resolved.base_image;
-        if args.on.is_none() && (!image_exists(base) || resolved.base_mismatch()?.is_some()) {
+        if args.on.is_none() {
             build(ws, &Args {
                 selection: crate::select::Args { shells: args.selection.shells.clone(), machine: Some("generic".into()) },
                 tag: Some(base.clone()),
@@ -82,7 +82,7 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
 
     if !args.no_pull {
         for base in [BASE_IMAGE, BUILDER_IMAGE] {
-            cmd::run(Command::new("podman").args(["pull", "--quiet", base]))?;
+            cmd::run(Command::new("podman").args(["pull", "--quiet", base]).stdout(std::io::stderr()))?;
         }
     }
     let base_digest = image_digest(BASE_IMAGE)
@@ -124,7 +124,7 @@ pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Reso
         build.args(["--volume", &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display())]);
     }
     build.args(&args.podman_args).arg(".");
-    cmd::run(&mut build)?;
+    cmd::run(build.stdout(std::io::stderr()))?;
     eprintln!("built {image} (base {base_digest}, revision {revision})");
     Ok(image)
 }
@@ -150,7 +150,6 @@ pub fn image_digest(image: &str) -> Result<String> {
 }
 
 /// True if `image` exists in local container storage.
-#[allow(dead_code)]
 pub fn image_exists(image: &str) -> bool {
     Command::new("podman")
         .args(["image", "exists", image])

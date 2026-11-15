@@ -52,7 +52,7 @@ pub struct Args {
     /// Image tag or reference to boot (defaults to this checkout's image)
     #[arg(long)]
     pub image: Option<String>,
-    /// Print the target image reference without inspecting, building or booting it
+    /// Print the image to boot (GUI inspects machine labels; no build or boot)
     #[arg(long)]
     pub print_image: bool,
     /// Boot the installed disk image (UEFI, 4K virtio-vga) instead of an ephemeral VM
@@ -80,15 +80,26 @@ pub struct Args {
 
 impl Args {
     pub fn resolve(&self, ws: &Workspace) -> Result<crate::select::Resolved> {
-        #[cfg(unix)]
-        let viewer = self.gui && in_wsl();
-        #[cfg(not(unix))]
-        let viewer = self.gui && cfg!(windows);
-        let mut selection = self.selection.clone();
-        if viewer && selection.requested_machine()?.is_none() {
-            selection.machine = Some("vm".into());
+        self.selection.resolve(ws, self.image.as_deref(), None)
+    }
+}
+
+/// Add the clipboard agent only to a generic image. An existing machine image
+/// is used unchanged; composing machines requires an explicit future schema.
+fn viewer_image(ws: &Workspace, resolved: &crate::select::Resolved, build: bool) -> Result<String> {
+    resolved.require_match()?;
+    let machine = ilex_devkit::machine::image_machine(&resolved.image)?;
+    if machine == "generic" {
+        if build {
+            ilex_devkit::machine::build(ws, &resolved.image, &ws.root.join("machines/vm"), None, &[])
+        } else {
+            ilex_devkit::machine::image_ref(ws, &resolved.image, "vm")
         }
-        selection.resolve(ws, self.image.as_deref())
+    } else {
+        if machine != "vm" {
+            eprintln!("viewer clipboard needs machine `vm`; booting machine `{machine}` image {} as it is", resolved.image);
+        }
+        Ok(resolved.image.clone())
     }
 }
 
@@ -98,8 +109,8 @@ pub fn run(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Res
         let viewer = args.gui && in_wsl();
         #[cfg(not(unix))]
         let viewer = args.gui && cfg!(windows);
-        let image = if viewer && resolved.machine != "generic" {
-            ilex_devkit::machine::image_ref(ws, &resolved.base_image, &resolved.machine)?
+        let image = if viewer {
+            viewer_image(ws, &resolved, false)?
         } else { resolved.image };
         println!("{image}");
         return Ok(());
@@ -140,10 +151,8 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
     let disk = match std::env::var_os("ILEX_DISK").filter(|p| !p.is_empty()) {
         Some(path) => path.into(),
         None => {
-            let image = if viewer && resolved.machine != "generic" {
-                resolved.require_base_match()?;
-                ilex_devkit::machine::build(ws, &resolved.base_image,
-                    &ws.root.join("machines").join(&resolved.machine), None, &[])?
+            let image = if viewer {
+                viewer_image(ws, &resolved, true)?
             } else {
                 resolved.require_match()?;
                 resolved.image

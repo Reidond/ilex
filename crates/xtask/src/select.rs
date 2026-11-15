@@ -33,16 +33,8 @@ pub struct Resolved {
 }
 
 impl Args {
-    pub fn resolve(&self, ws: &Workspace, image: Option<&str>) -> Result<Resolved> {
-        self.resolve_output(ws, image, None)
-    }
-
-    /// A build's explicit output tag can shorten an otherwise overlong variant.
-    pub fn resolve_build(&self, ws: &Workspace, base: Option<&str>, output: Option<&str>) -> Result<Resolved> {
-        self.resolve_output(ws, base, output)
-    }
-
-    fn resolve_output(&self, ws: &Workspace, image: Option<&str>, output: Option<&str>) -> Result<Resolved> {
+    /// An explicit build output can shorten an otherwise overlong variant.
+    pub fn resolve(&self, ws: &Workspace, image: Option<&str>, output: Option<&str>) -> Result<Resolved> {
         let requested = self.requested_shells()?;
         let requested_machine = self.requested_machine()?;
         // Explicit image references without selection retain the CI contract:
@@ -200,10 +192,6 @@ impl Resolved {
     }
 
     /// A layer changes the machine, while preserving its base's composition.
-    pub fn base_mismatch(&self) -> Result<Option<String>> {
-        self.mismatch_for(&self.base_image, true)
-    }
-
     pub fn require_base_match(&self) -> Result<()> {
         if let Some(message) = self.mismatch_for(&self.base_image, true)? {
             bail!("{message}");

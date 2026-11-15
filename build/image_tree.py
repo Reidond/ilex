@@ -258,6 +258,12 @@ def prepare(root, replay):
     """
     with Tree(root, "inherited overlays") as image:
         registered, _ = registry(image)
+        machine_path = f"{RESERVED}/machine.json"
+        if machine_path not in registered:
+            error("machine base", machine_path, "must be an unchanged registered generated file")
+        machine = json.loads(image.read(machine_path))
+        if machine.get("schema") != 1 or machine.get("name") != "generic":
+            error("machine base", machine_path, f"base machine is {machine.get('name')!r}; machine layers require generic; machines do not stack")
         if PROVENANCE not in registered:
             error("inherited overlays", PROVENANCE, "missing registered overlay provenance; rebuild the base with cargo xtask build")
         overlays = json.loads(image.read(PROVENANCE))

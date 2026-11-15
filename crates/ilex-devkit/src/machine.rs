@@ -25,12 +25,31 @@ pub fn image_ref(ws: &Workspace, base: &str, name: &str) -> Result<String> {
         let hash = format!("{:x}", Sha256::digest(base.as_bytes()));
         format!("{own}.b-{}", &hash[..16])
     };
-    let image = format!("{prefix}.m-{name}");
+    checked_output(format!("{prefix}.m-{name}"))
+}
+
+fn checked_output(image: String) -> Result<String> {
     check_tag_length(&image)?;
     if image.contains('@') {
         bail!("machine output must be a tag, not a digest reference");
     }
     Ok(image)
+}
+
+/// Read the actual image's machine, also for explicit references from CI.
+pub fn image_machine(image: &str) -> Result<String> {
+    let name = cmd::output(Command::new("podman").args([
+        "image",
+        "inspect",
+        "--format",
+        "{{index .Labels \"ilex.machine\"}}",
+        image,
+    ]))?;
+    if name.is_empty() || name == "<no value>" {
+        bail!("image {image} has no ilex.machine label; rebuild it with cargo xtask build");
+    }
+    config::validate_machine_name(&name)?;
+    Ok(name)
 }
 
 /// Hash paths, entry types, modes, link targets and bytes, without following links.
@@ -90,15 +109,17 @@ pub fn build(
         bail!("generic is the base image, not a machine layer");
     }
     let image = match output {
-        Some(tag) => ws.resolve_image(Some(tag)),
+        Some(tag) => checked_output(ws.resolve_image(Some(tag)))?,
         None => image_ref(ws, base, name)?,
     };
-    check_tag_length(&image)?;
     if image == base {
         bail!("machine output must differ from its base image");
     }
-    if image.contains('@') {
-        bail!("machine output must be a tag, not a digest reference");
+    let base_machine = image_machine(base)?;
+    if base_machine != "generic" {
+        bail!(
+            "cannot build a machine layer on {base}: base machine is `{base_machine}`; machines do not stack"
+        );
     }
     let base_id = bcvk::image_id(base).with_context(|| format!("resolving machine base {base}"))?;
     let mut inputs = Sha256::new();
@@ -164,6 +185,6 @@ pub fn build(
         .args(["--unsetlabel", "ilex.fingerprint"])
         .args(podman_args)
         .arg("build");
-    cmd::run(&mut build)?;
+    cmd::run(build.stdout(std::io::stderr()))?;
     Ok(image)
 }
