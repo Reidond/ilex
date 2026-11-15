@@ -2,7 +2,9 @@ name = "gnome"
 description = "GNOME on Wayland, signed in through GDM"
 
 [packages]
-install = ["@gnome-desktop", "gdm"]
+# Previously a weak dependency of systemd-container, now installed in the
+# base without QEMU. Keep GNOME's existing VM package set unchanged.
+install = ["@gnome-desktop", "gdm", "qemu-kvm-core"]
 
 [session]
 # The session file in /usr/share/wayland-sessions, without .desktop.
