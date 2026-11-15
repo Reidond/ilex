@@ -8,6 +8,7 @@
 [tools]
 # drupe mounts signed tool images with systemd-dissect, also without a shell.
 install = ["systemd-container"]
-# Its VM helpers recommend QEMU; drupe only needs the signed-image tools.
-# Shells and machines may still install QEMU in their own transactions.
-exclude = ["qemu-*"]
+# Keep out systemd-container's three QEMU recommendations: drupe needs only
+# the signed-image tools. Do not exclude fedora-bootc's qemu-user-static packages.
+# Shells and machines may install these VM packages in their own transactions.
+exclude = ["qemu-kvm-core", "qemu-device-display-virtio-gpu", "qemu-device-display-virtio-vga"]

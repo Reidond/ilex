@@ -120,8 +120,12 @@ shell or machine, or need a justified budget change in a commit. The base adds
 ilex-agent, signature policy, the updater and drupe, plus the latter's
 `systemd-container` runtime dependency. A package-free base boots, but cannot
 install or run drupe tools: `tool::` checks this on both kinds of root.
-The base excludes `qemu-*`, optional recommendations of systemd's VM helpers;
-shells and machines may install them in their own transactions.
+The base excludes exactly systemd-container's three QEMU recommendations:
+`qemu-kvm-core`, `qemu-device-display-virtio-gpu` and
+`qemu-device-display-virtio-vga`. Fedora's existing `qemu-user-static-*` packages
+are unaffected; shells and machines may install the excluded VM packages in
+their own transactions. GNOME does not request the file-less `qemu-kvm-core`
+metapackage merely to preserve an RPM count.
 Measured on 2026-11-15: the base is 1,957.11 MiB against fedora-bootc's
 1,917.59 MiB (39.52 MiB growth), with 543 `rpm -qa` entries against 540:
 `systemd-container`, its recommended `systemd-import-keys`, and Fedora's
