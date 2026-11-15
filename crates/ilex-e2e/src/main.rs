@@ -11,6 +11,8 @@ use std::panic::{self, AssertUnwindSafe};
 use libtest_mimic::{Arguments, Trial};
 
 mod common;
+// Fixtures preserve Unix modes and symlinks; these tiers run in WSL on Windows.
+#[cfg(unix)]
 mod config;
 mod disk;
 mod ephemeral;
@@ -29,6 +31,7 @@ fn main() {
     trials.extend(upgrade::trials());
     trials.extend(graphical::trials());
     trials.extend(tool::trials());
+    #[cfg(unix)]
     if !std::env::var_os("CI").is_some_and(|v| !v.is_empty()) && filters.iter().any(|f| f.contains("config")) {
         trials.extend(config::trials());
     }
