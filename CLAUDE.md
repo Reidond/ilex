@@ -1027,7 +1027,7 @@ cargo xtask info --published-machines  # compatibility: default-shell-list machi
 cargo xtask info --publications       # validated TSV: tag, kind, parent, machine, shells
 cargo xtask info --installer          # installer tag; PR 11 switches CI/ISO to it
 cargo xtask publish <root-image> --stage --as generic.gnome # unsigned :candidate.generic.gnome
-cargo xtask publish --digest <staged-digest> --as generic.gnome # sign, verify, move composition tags
+cargo xtask publish --digest <staged-digest> --as generic.gnome --tested-fingerprint <fingerprint> # recorded by --stage, before tests
 cargo xtask publish <machine-image> --as ms-7c35.gnome --tested-image-id <image_id> # no build
 cargo xtask changed <ref> --machine ms-7c35 --inputs-only # inputs_changed=; no local image
 cargo xtask changed <ref> --machine ms-7c35 --image <machine-image> # full fingerprint
@@ -1071,7 +1071,7 @@ cargo xtask publish <machine-image> --machine ms-7c35 --tested-image-id <image_i
   `--machine`, and image labels must match the requested machine (base
   publishing and staging require `generic`).
 - `publish --as <tag>` first requires a validated publication from `image.toml`.
-  Roots require `--stage` or `--digest`; layers require `--tested-image-id` and
+  Roots require `--stage` or `--digest` with `--tested-fingerprint`; layers require `--tested-image-id` and
   refuse staging/digest mode. Before staging or signing it compares **all five
   labels** of the pinned local image ID or staged digest with the row's resolved
   `selection`, including both design fields; deriving the same tag alone is
@@ -1096,9 +1096,12 @@ cargo xtask publish <machine-image> --machine ms-7c35 --tested-image-id <image_i
   CI's ancestry, tag-snapshot and parent-still-current guards remain necessary;
   the registry tag can change after the publisher resolves it.
 - `image.toml` declares selection and parent names, not revision or fingerprint
-  values. Revision is compared with CI's `GITHUB_SHA`; a root's `--digest`
-  fingerprint is syntax-checked, while its RPM/source recomputation happens at
-  staging. The signing job must still pass the exact staged/tested digest:
+  values. Revision is compared with CI's `GITHUB_SHA`. Root staging independently
+  recomputes the RPM/source fingerprint and prints `fingerprint=` beside
+  `digest=`. CI must carry both values through the tests: root `--digest --as`
+  requires `--tested-fingerprint` and compares it with the pinned registry
+  config before copying or signing. No pull or RPM execution runs in the root
+  signing step. The signing job must still pass the exact staged/tested digest:
   neither a fingerprint label nor five correct labels prove that an arbitrary
   hand-pushed image was built or VM-tested. The legacy paths only enforce their
   old machine-name contract, not the manifest's five-field composition; they

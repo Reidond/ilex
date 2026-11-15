@@ -59,6 +59,9 @@ pub struct Args {
     /// Immutable ID recorded before this machine's capability and VM tests
     #[arg(long, conflicts_with_all = ["stage", "digest"])]
     pub tested_image_id: Option<String>,
+    /// Root fingerprint recorded by --stage before testing this digest
+    #[arg(long, requires = "digest", value_name = "sha256:…")]
+    pub tested_fingerprint: Option<String>,
     /// Throwaway public key for local-registry verification only
     #[arg(long, requires = "allow_local_registry")]
     pub verification_key: Option<PathBuf>,
@@ -76,6 +79,9 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         );
     }
     let publication = publication(ws, &args)?;
+    if args.tested_fingerprint.is_some() && publication.is_none() {
+        bail!("--tested-fingerprint requires --as");
+    }
     if args.tested_image_id.is_some() && args.machine.is_none() && publication.is_none() {
         bail!("--tested-image-id requires --machine or --as");
     }
@@ -146,6 +152,12 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 .with_context(|| format!("{pinned} has no {FINGERPRINT_LABEL} label"))?;
             if publication.is_some() {
                 require_fingerprint(&pinned, &fingerprint)?;
+                let tested = args.tested_fingerprint.as_ref().unwrap();
+                if &fingerprint != tested {
+                    bail!(
+                        "{pinned} fingerprint label {fingerprint} differs from tested {tested}; refusing to sign a different staged root"
+                    );
+                }
             }
             copy(&pinned, &format!("{repository}:{sha_tag}"), insecure, &auth)?;
             (digest.clone(), fingerprint)
@@ -333,6 +345,9 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
         }
         None => eprintln!("no :{comparison} to compare with"),
     }
+    if publication.is_some() {
+        registry::github_output("fingerprint", &fingerprint)?;
+    }
     registry::github_output("digest", &digest)
 }
 
@@ -349,6 +364,12 @@ fn publication(ws: &Workspace, args: &Args) -> Result<Option<config::Publication
             bail!(
                 "--as {tag} is a root composition: use --stage or --digest, not --tested-image-id"
             );
+        }
+        if args.digest.is_some() {
+            let tested = args.tested_fingerprint.as_deref().context(
+                "--digest --as requires --tested-fingerprint recorded by --stage before tests",
+            )?;
+            require_fingerprint("--tested-fingerprint", tested)?;
         }
     } else if args.stage || args.digest.is_some() || args.tested_image_id.is_none() {
         bail!(
