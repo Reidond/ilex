@@ -521,15 +521,19 @@ jobs:
         run: |
           : > "$RUNNER_TEMP/pending-machines"
           while IFS= read -r machine; do
-            cargo xtask changed "$IMAGE_REPO:$machine" --machine "$machine" --inputs-only --base-id "$BASE_ID" > "$RUNNER_TEMP/machine-inputs"
+            reference="$IMAGE_REPO:$machine"
+            previous=$(bash .github/publish-head.sh digest "$reference")
+            if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
+            cargo xtask changed "$reference" --machine "$machine" --inputs-only --base-id "$BASE_ID" > "$RUNNER_TEMP/machine-inputs"
             cat "$RUNNER_TEMP/machine-inputs"
             if [ "$BASE_CHANGED" != true ] && [ "$FORCE_TEST" != true ] &&
                grep -qx 'inputs_changed=false' "$RUNNER_TEMP/machine-inputs" &&
                grep -qx 'base_changed=false' "$RUNNER_TEMP/machine-inputs"; then
               echo "$machine: published base and machine inputs unchanged; skipping without pulling the base"
+              printf -- '- `%s`: skipped before build, inputs/base unchanged at `%s`\n' "$machine" "$previous" >> "$GITHUB_STEP_SUMMARY"
               continue
             fi
-            printf '%s\n' "$machine" >> "$RUNNER_TEMP/pending-machines"
+            printf '%s\t%s\n' "$machine" "$previous" >> "$RUNNER_TEMP/pending-machines"
           done < "$RUNNER_TEMP/published-machines"
           if [ -s "$RUNNER_TEMP/pending-machines" ]; then echo 'build=true' >> "$GITHUB_OUTPUT"; fi
 
@@ -555,12 +559,14 @@ jobs:
           podman run --rm -i --network=none --entrypoint python3 "$BASE" -I -S - < .github/check-filecaps.py
           export ILEX_UPGRADE_FROM="$BASE"
           nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
-          while IFS= read -r machine; do
+          while IFS=$'\t' read -r machine previous; do
             # info validated the basename, the manifest's equal name and its
             # publish boolean before printing ANY names. No eval/source, and
             # no machine name is interpolated into sg's shell command.
             image=$(cargo xtask build --machine "$machine" --on "$BASE")
-            cargo xtask changed "$IMAGE_REPO:$machine" --machine "$machine" --image "$image" > "$RUNNER_TEMP/machine-change"
+            reference="$IMAGE_REPO:$machine"
+            if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
+            cargo xtask changed "$reference" --machine "$machine" --image "$image" > "$RUNNER_TEMP/machine-change"
             cat "$RUNNER_TEMP/machine-change"
             if grep -qx 'changed=false' "$RUNNER_TEMP/machine-change" && [ "$FORCE_TEST" != true ]; then
               echo "$machine: image unchanged; skipping"
@@ -575,11 +581,13 @@ jobs:
             export ILEX_IMAGE="sha256:$image_id"
             sg libvirt -c 'cargo xtask test ephemeral::'
             # Forced tests do not force an unchanged image to be republished.
-            if grep -qx 'changed=true' "$RUNNER_TEMP/machine-change"; then
-              printf '%s\t%s\t%s\n' "$machine" "$image" "$image_id" >> "$RUNNER_TEMP/tested-machines"
-            fi
+            publish=false
+            if grep -qx 'changed=true' "$RUNNER_TEMP/machine-change"; then publish=true; fi
+            printf '%s\t%s\t%s\t%s\t%s\n' "$machine" "$image" "$image_id" "$previous" "$publish" >> "$RUNNER_TEMP/tested-machines"
+            printf -- '- `%s`: tests passed on `%s`, planned tag `%s`, changed=%s; publication requires main\n' \
+              "$machine" "$image_id" "$previous" "$publish" >> "$GITHUB_STEP_SUMMARY"
           done < "$RUNNER_TEMP/pending-machines"
-          if [ -s "$RUNNER_TEMP/tested-machines" ]; then echo 'changed=true' >> "$GITHUB_OUTPUT"; fi
+          if grep -q $'\ttrue$' "$RUNNER_TEMP/tested-machines"; then echo 'changed=true' >> "$GITHUB_OUTPUT"; fi
 
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         if: >-
@@ -600,23 +608,7 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          while IFS=$'\t' read -r machine image image_id; do
-            if bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$machine"; then
-              # Each machine compares its own published revision. A forward
-              # run must still have precisely the current published base.
-              latest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:latest")
-              if [ "$BASE" != "$IMAGE_REPO@$latest" ]; then
-                echo "::error::machine tested base $BASE differs from current :latest $IMAGE_REPO@$latest"
-                exit 1
-              fi
-              cargo xtask publish "$image" --machine "$machine" --tested-image-id "$image_id"
-            else
-              rc=$?
-              if [ "$rc" = 3 ]; then exit 0; fi
-              exit "$rc"
-            fi
-          done < "$RUNNER_TEMP/tested-machines"
+        run: bash .github/publish-machines.sh
 
   # Only in a run started with `v1_disk` (the publish job starts one after each
   # publish): the published :latest installed to a disk exactly the way the

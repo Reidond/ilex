@@ -778,6 +778,17 @@ tags. A mismatch prints `::error::` with both base references. Immediately befor
 each publisher invocation, it applies the ancestry guard to `:<machine>`'s
 own revision, independently of `:latest`'s older revision on an unchanged base.
 Backward/diverged candidates warn and finish green without publishing.
+Planning also records each machine tag's digest (or explicit absence), and
+both input/full-fingerprint comparisons use that immutable snapshot. The
+tested list keeps name, reference, tested ID, prior digest and changed flag.
+Before publication, `.github/publish-machines.sh` requires the own-tag digest
+still to match, in addition to ancestry and exact latest/base equality. A
+same-commit digest change skips that machine green and continues with the
+others; tested inventory and the Actions summary distinguish published and
+skipped machines. A newer generic digest is protected by the base swap first,
+then by the machine's latest/base check. An unchanged-base job resolves current
+latest and own tags anew; a whole machines-job rerun repeats planning, building
+and tests, rather than replaying an old tested list or layer from another job.
 
 Forced tests do not republish an unchanged fingerprint. `xtask prepare-publish`
 records the fingerprint through a config-only build **before** capability and
