@@ -39,7 +39,9 @@ fn fixture() -> Result<()> {
     );
     fs::write(
         directory.join("machine.toml"),
-        "name = \"fixture\"\ndescription = \"Local machine overlay fixture\"\n",
+        // Empty transactions deliberately emit no tmpfiles file. Request an
+        // already-installed package to exercise the transaction and its file.
+        "name = \"fixture\"\ndescription = \"Local machine overlay fixture\"\n\n[packages]\ninstall = [\"bash\"]\n",
     )?;
     fs::write(
         directory.join("rootfs/usr/share/ilex-config-fixture/marker"),
