@@ -64,22 +64,22 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
 /// Build the installer ISO (unless `ILEX_ISO` names one already) and tell the
 /// harness what it is and what the installed machine must track. The
-/// installer carries no image: it installs the published `:latest`, so what
+/// installer carries no image: it installs the published installer composition, so what
 /// `iso::` checks is the installer and that image, not the one under test.
 fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
     if std::env::var_os("ILEX_ISO").is_some_and(|p| !p.is_empty()) {
         return Ok(());
     }
+    let (source, target) = crate::iso::default_refs(ws)?;
     let iso = crate::iso::build(
         ws,
         &crate::iso::Build {
-            source: crate::iso::DEFAULT_SOURCE,
-            target: crate::iso::DEFAULT_TARGET,
+            source: &source,
+            target: &target,
             output_dir: None,
         },
     )?;
-    test.env("ILEX_ISO", iso)
-        .env("ILEX_ISO_TARGET", crate::iso::DEFAULT_TARGET);
+    test.env("ILEX_ISO", iso).env("ILEX_ISO_TARGET", target);
     Ok(())
 }
 

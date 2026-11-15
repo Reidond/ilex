@@ -18,10 +18,10 @@
 //! Inputs, all optional:
 //!
 //! * `ILEX_IMAGE`: the candidate, v2's base (xtask sets it);
-//! * `ILEX_UPGRADE_FROM`: v1, e.g. the published `ghcr.io/<owner>/ilex:latest`
+//! * `ILEX_UPGRADE_FROM`: v1, e.g. the published `ghcr.io/<owner>/ilex:generic.gnome`
 //!   in CI. Without it v1 is the candidate itself, so the test covers
 //!   "upgrade from what you just built". When `CI` is set and this is empty
-//!   (the very first run has no `:latest`), the tier is skipped;
+//!   (the very first run has no published v1), the tier is skipped;
 //! * `ILEX_UPGRADE_PREPARE=1`: only install v1 and boot it, then stop. bcvk
 //!   caches the installed base disk per image, so the real run that follows
 //!   boots v1 in seconds. CI does this ahead of time, after each publish, and
@@ -323,7 +323,11 @@ fn build_v2(candidate: &str, installed: &str, token: &str) -> Result<()> {
 /// verification. The deployment itself never changes, so the rollback that
 /// follows is unaffected.
 fn check_sigpolicy(vm: &LibvirtVm, installed: &str) -> Result<()> {
-    const GHCR: &str = "ghcr.io/reidond/ilex:latest";
+    let ws = common::workspace()?;
+    let ghcr = format!(
+        "ghcr.io/reidond/ilex:{}",
+        ilex_devkit::config::installer(&ws.root)?
+    );
     const UNIT: &str = "ilex-sigpolicy.service";
 
     // --- another image: untouched ---------------------------------------
@@ -342,22 +346,22 @@ fn check_sigpolicy(vm: &LibvirtVm, installed: &str) -> Result<()> {
 
     // --- tracking ghcr, unverified, as after an ISO install ---------------
     step(&format!(
-        "sigpolicy: pointing the origin at {GHCR} without verification"
+        "sigpolicy: pointing the origin at {ghcr} without verification"
     ));
     // /sysroot is read-only on a running system; remount it in a private
     // mount namespace, as the unit does.
     vm.ssh(&format!(
         "unshare --mount --propagation private sh -c \
          'mount -o remount,rw /sysroot && \
-         bootc switch --mutate-in-place --transport registry {GHCR}'"
+         bootc switch --mutate-in-place --transport registry {ghcr}'"
     ))?
     .ok("bootc switch --mutate-in-place")?;
     let unverified = booted(vm)?;
     ensure(
-        unverified.image == GHCR
+        unverified.image == ghcr
             && unverified.transport == "registry"
             && unverified.signature.is_none(),
-        || format!("expected {GHCR} tracked unverified, got {unverified:?}"),
+        || format!("expected {ghcr} tracked unverified, got {unverified:?}"),
     )?;
     ensure(unverified.digest == before.digest, || {
         "the in-place switch changed the booted digest".to_string()
@@ -367,10 +371,10 @@ fn check_sigpolicy(vm: &LibvirtVm, installed: &str) -> Result<()> {
     vm.reboot(REBOOT_TIMEOUT)?;
     let enforced = booted(vm)?;
     ensure(
-        enforced.image == GHCR
+        enforced.image == ghcr
             && enforced.transport == "registry"
             && enforced.signature.as_deref() == Some("containerPolicy"),
-        || format!("expected {GHCR} with container policy enforcement, got {enforced:?}"),
+        || format!("expected {ghcr} with container policy enforcement, got {enforced:?}"),
     )?;
     ensure(enforced.digest == before.digest && !enforced.staged, || {
         format!("enforcement changed the deployment: {enforced:?}")

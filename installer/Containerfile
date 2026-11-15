@@ -1,5 +1,5 @@
 # The ilex installer: fedora-bootc plus Anaconda, a network installer. It
-# carries no ilex image: its kickstart installs the newest `:latest` from the
+# carries no ilex image: its kickstart installs the newest installer composition from the
 # registry (so one ISO stays current, and fits GitHub's 2 GiB release asset
 # limit). `image-builder` turns this container into the ISO
 # (`cargo xtask iso`). Follows osbuild's example for an Anaconda installer
@@ -13,8 +13,8 @@ LABEL org.opencontainers.image.source="https://github.com/Reidond/ilex"
 ARG PRODUCT_VERSION=45
 # Where the installer takes the image from (with its transport: pykickstart
 # requires one), and what the installed machine updates from (without).
-ARG SOURCE_IMGREF=registry:ghcr.io/reidond/ilex:latest
-ARG TARGET_IMGREF=ghcr.io/reidond/ilex:latest
+ARG SOURCE_IMGREF
+ARG TARGET_IMGREF
 
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     dnf -y install --setopt=keepcache=1 \
@@ -99,7 +99,8 @@ EOT
 # Kickstart defaults: install the newest ilex image and keep tracking ghcr.
 # Anaconda still asks for the disk, the user and everything else.
 COPY interactive-defaults.ks /tmp/interactive-defaults.ks
-RUN sed -e "s|@SOURCE_IMGREF@|${SOURCE_IMGREF}|g" -e "s|@TARGET_IMGREF@|${TARGET_IMGREF}|g" \
+RUN test -n "$SOURCE_IMGREF" && test -n "$TARGET_IMGREF" && \
+    sed -e "s|@SOURCE_IMGREF@|${SOURCE_IMGREF}|g" -e "s|@TARGET_IMGREF@|${TARGET_IMGREF}|g" \
         /tmp/interactive-defaults.ks > /usr/share/anaconda/interactive-defaults.ks && \
     rm /tmp/interactive-defaults.ks && \
     cat /usr/share/anaconda/interactive-defaults.ks

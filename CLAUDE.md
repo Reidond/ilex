@@ -74,14 +74,14 @@ cargo xtask info               # resource identity, selection and available conf
 - `upgrade::` installs a real libvirt VM (`bcvk libvirt run`, a few minutes,
   then cached per image under `/var/lib/libvirt/images`), so run it when
   touching the update path. v1 is the image under test unless
-  `ILEX_UPGRADE_FROM=<ref>` names an older one (CI: the published `:latest`);
+  `ILEX_UPGRADE_FROM=<ref>` names an older one (CI: the installer composition, or legacy `:latest` until its first publication);
   with `CI` set and no `ILEX_UPGRADE_FROM` the tier is skipped. v2 is the
   candidate plus a marker layer, tagged `<image tag>-upgrade`, never the
   checkout's own tag. The VM uses `uefi-insecure` firmware: Secure Boot needs
   SMM, which KVM can't do under WSL2's nested virtualization.
   On v2 the same VM checks signature enforcement: v2's `ilex-sigpolicy.service`
   left the containers-storage origin alone at boot; the origin is pointed at
-  `ghcr.io/reidond/ilex:latest` unverified (the state an ISO install leaves),
+  the installer composition unverified (the state an ISO install leaves),
   and after a reboot the unit must have added the enforcement (a second run
   is a no-op). Then the rollback to v1. One VM, one install: installing is
   most of the tier's time. `ILEX_UPGRADE_PREPARE=1` only installs and boots v1
@@ -93,7 +93,7 @@ cargo xtask info               # resource identity, selection and available conf
   (`ILEX_ISO=<path>` reuses one), installs it unattended in QEMU/UEFI onto a
   blank disk over QEMU's user networking, boots the result and asserts over SSH
   that `bootc status` shows the booted image tracking
-  `ghcr.io/reidond/ilex:latest` at the digest the registry serves, that the
+  `ghcr.io/reidond/ilex:generic.gnome` at the digest the registry serves, that the
   system is `running` with no failed units and that GDM is up. The installer
   is a network installer: what it installs is the *published* image, not the
   image under test. Screenshots of Anaconda's welcome screen and of the first
@@ -173,18 +173,17 @@ TSV without a header: tag, kind (`root` or `layer`), parent tag (`-` for roots),
 machine name, comma-separated shells (`-` for none). All roots precede layers.
 `ilex_devkit::config::publications` exposes these five fields, including machine
 and shells, for CI and the later installer's machine table. Its `selection`
-field resolves all five expected labels from the same manifest snapshot:
-the row's machine and ordered shells, the first shell as default, and the
-manifest's design systems and default (both cleared without shells).
+field resolves all five expected labels from the same manifest snapshot,
+including both design fields (cleared without shells).
 `cargo xtask info --installer` prints the validated installer tag.
 
-This PR adds the new publisher beside the existing one. CI and the ISO still
-use their existing `latest`/machine names until PR 11 switches them together;
-PR 12 makes CI publish every root, including `base`. `--published-machines`
-remains for the current workflow: it derives non-generic machines from the
-publication entry matching the manifest's default shell list. No machine
-manifest controls publication. Removing a publication stops that tag updating;
-once a machine tracks it, switch the machine before removing or renaming it.
+CI currently builds and publishes the installer root and its listed machine
+layers. PR 12 extends the same jobs to every root, including `base`; the
+publication schema and the publisher already support it. Removing a publication
+stops that tag updating. No machine tracks a published tag yet, so names can
+change freely for now. Once the first machine is installed, switch it before
+removing or renaming its tag (including reordering shells). A tracked tag must
+keep moving, and its visible composition must stay the one its person chose.
 
 A shell is `shells/<name>/shell.toml`: its name and description, packages,
 Wayland session file (without `.desktop`), compositor command, optional greeter
@@ -452,10 +451,13 @@ the kernel's amdgpu driver, `amd-gpu-firmware` and Mesa's radeonsi and RADV
 drivers. This configuration has no overlay or kernel arguments. GNOME chooses
 150% scaling for this display unless the person has saved another choice.
 
-CI publishes the signed `:ms-7c35` image. Install ilex with the ISO, then run:
+CI publishes the signed `:ms-7c35.gnome` image. For now the installer installs
+`generic.gnome`; this PC moves to its machine composition with the interim
+`bootc switch` step below. A later installer change will select the machine's
+composition during installation.
 
 ```sh
-sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:ms-7c35
+sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:ms-7c35.gnome
 ```
 
 Restart to use it.
@@ -752,371 +754,233 @@ size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
 
 ## CI publishing
 
-`.github/workflows/publish.yml` runs on every merge to `main`, nightly at
-03:00 UTC and on demand. Three jobs start together, so the slow parts overlap
-on separate runners:
+`.github/workflows/publish.yml` runs on merges to `main`, nightly at 03:00 UTC
+and on demand. `image.toml` supplies the installer composition (currently
+`generic.gnome`) and `info --publications` supplies the validated tag, kind,
+parent, machine and ordered shells of every publication. This workflow builds
+one root, the installer's, until PR 12 adds the other roots, including `base`.
+The existing legacy tags (`latest`, `candidate`, bare date and `sha-` tags)
+stay in the registry: CI neither moves nor deletes them.
 
-- `build`: build → `changed` → `rechunk` → stage the candidate in ghcr as
-  `:candidate` (`xtask publish --stage`: unsigned, never `:latest`) →
-  `ephemeral::`. In the background from its first minute (`.github/vm-prep.sh
-  ephemeral`): the VM stack, and a pull of `:latest`, which records the
-  registry's compressed blob for each layer, so staging uploads only the
-  layers that changed and machines download only those (`--stage` prints how
-  many: "N of M layers are new against :latest").
-- `upgrade`: the upgrade tier's v1 (the published `:latest`, by digest)
-  already installed to a disk, restored from the Actions cache; from its first
-  minute (`vm-prep.sh upgrade`) the VM stack, a pull of v1 and v1's disk
-  booted once with `ILEX_UPGRADE_PREPARE=1`. It polls the jobs API until the
-  build job's "Stage the candidate" step succeeds (or the build job ends
-  without it: nothing to test), pulls `:candidate` by digest and runs
-  `upgrade::`.
-- `installer-due` → `iso` (see Installer ISO).
+Three paths start together on separate runners:
 
-Then `publish` (main only, when the image changed) signs the staged digest,
-after checking it is the one the upgrade tier tested, and moves `:sha-<short>`,
-`:YYYYMMDD` and `:latest` to it (`xtask publish --digest`: tags in the
-registry, nothing pushed twice). Runs of the workflow never overlap (one
-concurrency group), so `:candidate` is always the current run's.
+- `build`: snapshot the installer tag's digest (explicit `-` for absence),
+  build its shell selection → `changed` against that tag → rechunk → unsigned
+  `candidate.generic.gnome` through `publish --stage --as` → `ephemeral::`.
+  From its first minute, `vm-prep.sh ephemeral` prepares the VM stack and pulls
+  the root's current digest for compressed-blob reuse. Only while its tag is
+  absent does the reuse pull fall back to legacy `latest`. Staging freezes the
+  local ID and checks the pushed manifest's config digest before reporting a
+  staged digest. Tests boot that same rechunked config. The stage log compares
+  layers with the composition's own published tag.
+- `upgrade`: `.github/upgrade-from.sh` resolves the installer's tag as v1;
+  only explicit absence permits legacy `latest` as the first-run fallback.
+  Registry/authentication errors are fatal. It records `own` (the installer
+  tag's digest or `-`), v1's digest and `exists`. Its cached disk key is
+  `v1-disk-<bcvk>-<v1 digest>`, so the legacy disk remains usable. It installs
+  v1 itself on a cache miss, in the background with the VM stack. It waits for
+  build's "Stage the candidate", pulls `candidate.<installer>` by digest, and
+  runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`
+  and no upgrade tier is the explicit first-publish case.
+- `installer-due` → `iso`: described below. Automatic due builds run on main;
+  a branch requests an ISO explicitly with `iso=true`.
 
-Immediately before invoking either image publisher, `.github/publish-head.sh`
-reads that image's currently published revision label and main's head. It
-requires published → run → main ancestry (the API's `ahead` or `identical`
-status for each BASE...HEAD comparison). A tested run behind main can still
-publish forward if a newer run was cancelled, skipped, or never started.
-A re-run older than the published image, or a run outside main's history,
-warns with the commits and failed condition, publishes nothing and finishes
-green. A missing tag or revision label permits the first publish, but the run
-must still belong to main. Registry/API errors and malformed labels fail red.
-The API avoids depending on checkout depth. Published history no longer
-reachable from main fails red and requires deliberate owner recovery; silently
-replacing an unrelated image would hide a history rewrite.
+`publish` requires successful build and upgrade jobs, changed content, this
+repository, main and a push/schedule/dispatch event. A skipped or failed test
+job cannot reach signing. It first builds the publisher without the signing
+key, then invokes that executable directly. `.github/publish-root.sh` checks
+that upgrade tested exactly the staged digest (unless neither v1 exists),
+validates all explicit outputs, including the fingerprint recorded by staging,
+applies ancestry to the composition's own
+revision, then swaps against **build's own-tag snapshot**. Legacy v1 is never
+used as the swap value. `publish --digest <staged> --as generic.gnome` signs
+and verifies that immutable digest, then moves the composition and date tags;
+it copies with `--preserve-digests`, without another local push.
 
-Commit ancestry alone cannot order two nightly images built from the same
-commit. Upgrade exposes the v1 digest it resolved before testing (or explicit
-`-`/`exists=false` when latest is absent). Immediately before base publication,
-the digest swap guard requires current `:latest` to equal that snapshot.
-A mismatch warns with both digests and skips green with `published=false`.
-Thus "Re-run failed jobs" cannot replay an older staged digest over a newer
-same-commit nightly. Registry read errors are red, never absence. A first
-publish passes only while latest is still absent. An unchanged base never
-enters base publication; a forced run with a v1 records/tests it normally.
-Missing upgrade outputs are errors, not an implicit first publish. The CI
-upgrade job always sets `ILEX_UPGRADE_FROM` when v1 exists; the CLI's legitimate
-no-source tier skip is not used as evidence that an existing v1 was tested.
+Every composition `X` has `X_sha-<7 hex>`, `X` and `X_YYYYMMDD` companions.
+The SHA reference is populated before signing; only after signature verification
+are the moving composition/date tags updated. A failed/cancelled sign can leave
+an unsigned SHA reference, but never moves the composition/date tags to it.
+Unsigned `candidate.X` is the sole staging namespace. Runs use one serialized
+`publish` concurrency group; v1-disk has its own group and writes no image tag.
+
+Immediately before each publisher, `.github/publish-head.sh image` reads that
+**tag's own** revision and main's head and requires published → run → main
+ancestry using the API's `ahead`/`identical` statuses. A tested forward run may
+publish behind main's head when a newer run never started or was cancelled.
+A missing tag/revision permits a first publish, still within main's history.
+Backward or outside-main candidates warn and skip green (exit 3). Malformed
+labels, registry/API failures and published history unreachable from main fail
+red. The digest swap separately requires the tag still to equal its snapshot,
+including continued absence for a first publish. Same-commit stale replays skip
+green with both digests and `published=false`. Missing snapshots are errors.
+Only a real publication sets `published=true`; v1-disk dispatch and machines
+on a changed root require it. Failed dependencies and green stale-root skips
+start neither. Forced tests do not republish an unchanged fingerprint.
+
+`machines` reads the five-column publications table, considering layers on the
+installer root in this PR (other parents are deferred until PR 12). Each row
+retains its composition tag, parent tag, machine and shell list. The parent is
+the exact staged/tested digest when changed in this run; main requires it to
+have published. An unchanged main root resolves its current signed tag once,
+even if `test=true` staged an unsigned equivalent. Branches test the staged
+parent. `machine-base.sh` requires root configuration labels, verifies the
+pulled image ID equals the registry config digest and checks generated-file
+and overlay metadata. There is no unlabelled legacy-parent skip: these new
+parent tags can only have been created by the composition publisher.
+
+Planning snapshots each layer's own tag and compares inputs and parent ID using
+that immutable reference, without pulling the large root when unchanged. A
+missed machine publication catches up through the parent ID in the machine
+key. Neither unchanged inputs nor a full unchanged fingerprint republish;
+`test=true` still tests. An unchanged nightly does not query DNF for
+machine-only package updates: those arrive on the next parent change or forced
+build. Registry reads are authenticated with the job token; only explicit
+manifest/name unknown is absence. Denied/unauthorized and transport errors fail.
+
+A machine preserves every parent layer and adds one squashed layer; no rechunk.
+`prepare-publish --machine` labels its fingerprint before capability checks and
+`ephemeral::`, which boots the immutable ID. All selected tests must pass before
+the signing step receives its key. The tested inventory retains composition,
+parent tag, parent digest, image reference, tested ID, own-tag snapshot and changed
+flag. `.github/publish-machines.sh` checks each composition's own ancestry and
+snapshot and requires **its parent tag** still to equal that tested digest.
+An individual ancestry/snapshot skip continues to later rows and is recorded in
+the inventory and summary. A moved parent fails with both digests. A whole-job
+retry plans/builds/tests again; it never replays only an old signing step.
+
+`publish --as` requires a listed composition and recomputes its tag from all five
+selection labels against the row's complete declared selection, including both
+design fields. Matching the tag spelling alone is insufficient. Roots accept `--stage` or `--digest --tested-fingerprint`; layers require
+`--tested-image-id`. A layer must still have that ID and the independently
+recomputed fingerprint label. Publication builds nothing. Every signed image
+must carry exactly this run's clean 40-hex `GITHUB_SHA` revision; a layer checks
+its own revision, while an unchanged parent may be older. Local pushes freeze
+the ID and check the pushed config digest before signing. Staging independently
+recomputes the root fingerprint, checks the clean CI revision and reports both
+`fingerprint=` and `digest=` before tests. CI carries both through the successful
+build/test jobs; the root signer compares the staged config's fingerprint with
+`--tested-fingerprint` without pulling/executing the root. Each fingerprint must
+be a SHA-256 digest. The layer publisher independently resolves its declared
+published parent, verifies all five parent labels, current machine inputs/key
+and exactly the parent's filesystem diff IDs plus one layer. CI's ancestry,
+snapshot and parent-still-current guards remain necessary too. The resolved
+parent must also verify against the same permitted public key before signing
+a layer.
+
+Both signing jobs pin kache-action to `ad7317540dcdd71c904f7a60a87b620a0c0e67ed`,
+binary v2.1.1, empty token and PR comments disabled; cosign-installer v4.1.3 is
+pinned to `756fe2d284c7292c4e9b62c8a28f1e5629c59532`. `build-publisher.sh` builds
+with `--locked` and discovers the executable from Cargo metadata before the
+key-bearing step. No Cargo, rustc, kache or build script runs with the key.
+The key/password are step environment values; the installer and cache post
+steps have none. Guard subprocesses explicitly remove them. The trusted signing
+shell, prebuilt publisher and required git/podman/skopeo/cosign tools retain
+them; podman does not forward them into the image's RPM query. This is not
+process isolation. The packages-write job token also authorizes registry reads;
+action inputs are not a per-step credential boundary. Checkout credentials are
+not persisted in machines. Other jobs retain their existing action settings.
 
 <a id="published-history-recovery"></a>
 
 **Published history recovery (owner action, never an agent publishing locally).**
-If a guard says the published revision is not an ancestor of main, repeating
-the run cannot repair it. There is no override input. Choose one recovery:
+A guard reporting published history outside main has no override. If the old
+revision may remain in history, the owner fetches it, merges it into main with
+`git merge -s ours <rev>` (preserving the tree) and pushes normally. If it must
+stay purged, identify the exact digest and all its tags, then delete that ghcr
+**package version**, not the whole package. The next fresh run sees the affected
+tag as a first publish. Removing the installer composition may restore the
+legacy upgrade fallback; only with both sources absent does upgrade skip while
+ephemeral still runs. Removing a layer version does not bypass root tests.
+For the installer, deleting its release and tag (`gh release delete
+installer-… --cleanup-tag`) exposes the previous installer or first publication.
+Repeat for every affected tag/release. Do not sign or retag locally. Ordinary
+reverts keep ancestry and require no recovery.
 
-- If the old revision may stay in history, on the owner's main branch run
-  `git fetch origin <rev>` and `git merge -s ours <rev>`, then push normally.
-  This preserves the current tree while making that revision an ancestor of
-  main. For an installer, deleting its release and tag with
-  `gh release delete installer-… --cleanup-tag` is another option: the guard
-  then considers the previous published installer (or first publication).
-- If the revision must not return, for example after purging a secret, do
-  not merge it. The owner deletes the exact ghcr **package version behind
-  the affected tag**, not the whole package, after identifying its digest
-  and other tags on that version. The next current-main run sees that tag
-  as a first publish. Deleting the version behind `:latest` also makes
-  upgrade report `exists=false`/v1 `-`, so the upgrade tier is skipped for
-  that first base publish; generic ephemeral tests still run. Removing only
-  a machine version makes that machine first-publish without bypassing the
-  generic tests. For an affected installer, remove its release and tag.
-  Repeat for any other affected published tags/releases whose revision was
-  purged. Do not retag or sign replacement images from a development machine.
+Never re-run a pre-guard workflow: it uses its original, unguarded definition.
+After anything newer stages or publishes, start a new full main run instead of
+repeatedly clicking "Re-run failed jobs" on an old run. A stale root swap skips
+green; a candidate mismatch fails safely with staged/tested digests; a moved
+machine parent fails. A transient read/API error can justify retrying the newest
+run. A machines-job retry while its parent is current re-plans and re-tests.
+Partial publication is not undone: a fresh run/nightly catches up missing layers.
 
-An ordinary revert keeps the old commit in history and needs neither recovery.
-A `cannot read`/`cannot compare` error instead needs the registry/API problem
-resolved; a retry of the newest run can be appropriate. Never re-run a
-pre-guard workflow. After any newer publication, start a new full run on main
-instead of repeatedly clicking "Re-run failed jobs" on an older one. A stale
-base swap warns/skips green; an old machine base fails with both digests.
-A machines-job retry is useful while its base is still current: it re-plans
-current machine tags and repeats build/tests, never resumes only a signing
-step. If base publication partially succeeded before a later error, the swap
-may also skip its retry; a fresh full run/nightly catches machine work up on
-current latest without replaying the old candidate.
+**First run on main.** Merge the entire twelve-branch stack as one push: PR 12
+into PR 11, then each result down through #32 and the earlier stack into #25,
+finally #25 into main. Non-main pushes start no publish run. Bottom-up main
+merges would execute older workflow definitions and move legacy tags.
 
-Only a real successful base publish sets `published=true`: the v1-disk
-follow-up and machines on a changed base require that output, so a green
-stale-run skip starts neither. An unchanged base permits independent machine
-work against its own tag's revision, which may be newer than the base's.
-Never re-run a publish run from before these guards existed: re-runs use the
-original commit's workflow file and remain unguarded.
+Today legacy `latest` exists with revision on main; `generic.gnome` and
+`ms-7c35.gnome` are absent. In this PR, build records `generic.gnome=-`, stages
+`candidate.generic.gnome` by ID/config and boots it. Upgrade logs the legacy
+fallback, with `own=-`, `exists=true`, v1 equal to legacy latest's digest, and
+tests that staged digest. Root ancestry logs `published=-` / `first-publish`;
+swap logs `expected=- current=-; allow`. The publisher checks composition and
+revision, copies `generic.gnome_sha-…`, signs/verifies, then creates
+`generic.gnome` and `generic.gnome_YYYYMMDD`, logging `published=true` and
+starting v1-disk for the new installer tag. Machines tests `ms-7c35.gnome` on
+that exact digest; its own first-publish/absent-swap and parent-current guards
+allow, then tested ID/config/revision checks precede sign/verify and tag moves.
+ISO is due because its fingerprint changed; it may release only after the
+installer tag exists, otherwise it warns green and a later run retries. PR 12
+adds the independently guarded `base` root; it is deliberately not built here.
 
-Then `machines` discovers default-shell-list publications with `xtask info
---published-machines` (currently `ms-7c35`). It runs only after successful base
-jobs and a successful or intentionally skipped publish, never in a `v1_disk`
-run or a pull request. Every name is validated against the manifest's name
-rules before entering a loop or tag. If the base changed, main requires its
-publish to have succeeded. A branch run builds and tests against the staged
-digest. The cosign key/password reach only the publishing step. Registry
-authorization is the job's `packages: write` GitHub token, not a per-step
-permission boundary. Checkout does not persist credentials. The machines job
-authenticates base probes/pulls and machine comparisons using this same job
-token: select logs podman/skopeo in, and planning/build comparisons pass
-`REGISTRY_TOKEN` to xtask just as generic build does. These steps only read the
-registry and have no signing key. `changed --machine` treats manifest/name
-unknown as absent, while denied/unauthorized and other failures are errors;
-a private machine image can no longer look missing on every nightly.
-The machines job
-pins kache-action's v1 code to `ad7317540dcdd71c904f7a60a87b620a0c0e67ed`,
-sets kache `v2.1.1`, supplies an empty token input and disables PR comments.
-At that commit the input token is used only for release discovery and PR
-comments; an explicit version and no comments avoid both. GitHub cache
-restore/save uses the separate Actions cache runtime authorization, including
-the post step. Other actions still execute within the job's permissions; this
-does not turn the job into a credential sandbox.
-Both signing jobs pin cosign-installer's v4.1.3 action to
-`756fe2d284c7292c4e9b62c8a28f1e5629c59532`; base `publish` also pins kache's
-v1 action to the same commit as machines. Both select binary v2.1.1, pass an
-empty token and disable PR comments; job token permissions remain unchanged.
-Both jobs run `cargo build --locked -p xtask` before the signing step and record
-the executable path from Cargo metadata. The key-bearing step invokes that
-prebuilt binary directly, never Cargo, rustc, kache or a dependency build script.
-The machines prebuild also runs on a changed branch-test image, with no key.
-The cosign installer's own steps and cache post steps receive no signing key:
-the key/password are step environment values, not job environment values.
-Guard/API/registry probes outside the publisher explicitly remove both key
-variables. What retains the key environment is the trusted signing shell,
-the prebuilt publisher and its required child tools (git, podman, skopeo and
-cosign; podman does not forward it into the image's RPM query). This is not
-process isolation or a guarantee against malicious trusted publisher/tool code.
+The second full run resolves v1 from `generic.gnome`, with no legacy read. It
+snapshots that root and each layer independently. Unchanged content skips
+publication; changed content swaps only from its own snapshot. If the layer
+failed on the first run, planning detects its missing/stale parent key and
+catches up. Healthy logs include `publish ancestry guard: …:<tag> … allow`,
+`publish digest swap: …:<tag> expected=… current=…; allow`, matching pushed
+config/tested ID, exact CI revision, signature verification, `root publication
+result: generic.gnome published=true` and `machine publication summary: 1
+published, 0 skipped`. Real-key/ghcr signing, production ancestry/swap outputs,
+unchanged-main skips/recovery, v1-disk follow-up and guarded ISO release await
+the first main execution. Branch tests cannot establish those paths.
 
-The machine base is the exact staged/tested digest, or current `:latest`
-resolved once by digest when the base is unchanged on main (even when `test`
-staged an unsigned equivalent without publishing it). Branches test the staged
-digest. The only legacy skip is an unchanged base with **no `ilex.machine`
-label at all**, before any opted-in machine tag exists. It prints a notice and
-needs a phase-0 base published first. A newly built unlabelled base, a labelled
-base with incompatible configuration, missing generated-file/overlay metadata,
-or any registry/podman probe failure fails the job. After a machine tag exists,
-an unlabelled base is a regression and fails too. Only the explicit legacy
-status 10 from `.github/machine-base.sh registry` is treated as a successful
-skip; failures checking machine-tag existence are never evidence of absence.
-Otherwise a machine is skipped when neither base nor machine inputs changed,
-unless `test` forces testing. `changed --machine --inputs-only` compares the
-same content/mode/link hash the builder writes as `ilex.machine-inputs`, without
-needing a local image. A built layer's fingerprint includes `ilex.machine-key`,
-covering the actual base image ID; the inherited base fingerprint is cleared.
-CI passes the registry manifest's config digest as `--base-id` to the inputs
-check and requires
-`base_changed=false` before skipping: an earlier failed/cancelled machines job
-must catch up even when generic `:latest` and the manifests are now unchanged.
-The config digest is the image ID (with `sha256:` removed); the job verifies
-that equality again after pulling. Registry config/manifest reads decide the
-inputs-only question, so an unchanged nightly does not pull the 5 GB base or
-install the VM stack. The base is pulled only when at least one machine needs
-a build. The complete fingerprint is compared again before testing/publishing.
-
-The early skip does not query Fedora repositories. An update to a package
-installed only by a machine layer, such as Gamescope, reaches `:<machine>` on
-the next generic base change or a forced CI run (`test=true`), when that runner
-builds a fresh layer and its RPM versions enter the full fingerprint. A nightly
-with unchanged base and manifest inputs deliberately skips that package lookup.
-
-Machine images preserve every base layer and add one squashed layer; they are
-not rechunked. Before testing, the job compares RPM-recorded file capabilities
-with `getcap` on the actual base and machine filesystems using
-`.github/check-filecaps.py`; missing capabilities fail the job. Each changed
-machine runs `ephemeral::` only, so installed-system-only behaviour (SELinux,
-kernel arguments) still needs local `disk::` evidence. All machine tests must
-pass before the single publishing step receives the signing key/password. On main only,
-after checking `:latest` still has the tested base digest, it signs and publishes
-`:<machine>`, `:<machine>-YYYYMMDD` and `:<machine>-sha-<short>` in the same
-repository. It never stages or touches `:candidate`, `:latest` or base date/SHA
-tags. A mismatch prints `::error::` with both base references. Immediately before
-each publisher invocation, it applies the ancestry guard to `:<machine>`'s
-own revision, independently of `:latest`'s older revision on an unchanged base.
-Backward/diverged candidates warn and finish green without publishing.
-Planning also records each machine tag's digest (or explicit absence), and
-both input/full-fingerprint comparisons use that immutable snapshot. The
-tested list keeps name, reference, tested ID, prior digest and changed flag.
-Before publication, `.github/publish-machines.sh` requires the own-tag digest
-still to match, in addition to ancestry and exact latest/base equality. A
-same-commit digest change skips that machine green and continues with the
-others; tested inventory and the Actions summary distinguish published and
-skipped machines. A newer generic digest is protected by the base swap first,
-then by the machine's latest/base check. An unchanged-base job resolves current
-latest and own tags anew; a whole machines-job rerun repeats planning, building
-and tests, rather than replaying an old tested list or layer from another job.
-
-Forced tests do not republish an unchanged fingerprint. `xtask prepare-publish`
-records the fingerprint through a config-only build **before** capability and
-ephemeral checks. Tests use the immutable image ID; the tested list records
-name, reference and ID. `publish --machine --tested-image-id` builds nothing:
-it refuses a replaced tag or a label that differs from the independently
-recomputed fingerprint, then pushes that exact tested ID, signs and verifies.
-Before any signed-image push/copy, CI publication also requires that image's
-`org.opencontainers.image.revision` to equal the run's 40-hex `GITHUB_SHA`.
-Missing, wrong or `-dirty` labels fail before signing. The unchanged-base path
-checks the machine layer's current revision; it does not require its older
-generic base to carry the machine run's commit. Unsigned staging is not signing.
-Before signing, it reads the pushed manifest by digest with `skopeo inspect
---raw` and requires its config digest to equal that tested image ID. A push
-that rewrites the config is refused before signing or moving the machine tags.
-The local generic publish path also freezes its source by image ID and checks
-the pushed manifest config before signing. CI's generic `--digest` path signs
-the already staged/tested immutable digest and copies with `--preserve-digests`;
-it performs no local push. The earlier unsigned `--stage` push also freezes
-its source by ID and verifies the registry config before reporting a staged
-digest, so the local ephemeral and remote upgrade tiers see that same config.
-A failed stage check may leave unsigned candidate, but produces no digest
-output for dependent tests and cannot sign or move any signed tag.
-
-The first main run builds, rechunks, stages and tests the generic phase-0 base,
-publishes it, then builds/tests/signs `:ms-7c35` on precisely that digest. If the
-base is already current, it skips base publication, pins current `:latest` and
-builds the missing/changed machine instead. An incompatible pre-phase-0
-`:latest` is the explicit successful skip above; a later base publication
-enables machines. A failed machines job leaves its existing tags on their old
-base; it does not undo a successful base publish.
-
-Merge phase 0 into main as **one push**: merge #32 into #31, then each result
-down the stack through #26 into #25, and finally #25 into main. Pushes to those
-non-main branches start no publish run. Do not merge bottom-up into main:
-each lower PR would start its own main run using that PR's unguarded workflow,
-publish latest, and have no machines job. Squash/rebase/merge commit all work
-when the complete guarded workflow reaches main together. The first main log
-should show ancestry and digest-swap allows for latest, `published=true`, the
-v1-disk dispatch, ms-7c35's first-publish ancestry and absent-tag swap allows,
-matching pushed config/tested ID, then cosign verification before moving tags.
-Installer ancestry runs only when an ISO release is due/forced. Production
-guards, cosign installation/key matching, real ghcr writes and those main-only
-paths still need watching on that first run.
-
-Installing v1 to a disk takes ~14 minutes on a runner (11 of them bcvk's
-install VM importing the image's 64 layers into ostree), more than everything
-else in a run, so it happens ahead of time: after each publish the `publish`
-job starts the workflow again with `v1_disk`, a run of just the `v1-disk` job
-in a concurrency group of its own (nothing waits for it; a newer one cancels
-it). It installs the new `:latest` the way the upgrade tier does and saves
-bcvk's base disk (~5 GB, 1.9 GiB in the cache) in the Actions cache under the
-image digest and the bcvk version (`v1-disk-<bcvk>-<digest>`), with the two
-`user.bootc.*` xattrs bcvk recognizes a base disk by in a file next to it (the
-cache drops xattrs); older disks are deleted. The next run's upgrade job
-restores it (~40 s) and puts it back into bcvk's pool, and bcvk boots it
-instead of installing. A run that finds no disk (the v1-disk run hasn't
-finished, or the cache evicted it) or one bcvk rejects (other install options)
-installs v1 itself, ~10 minutes slower. `gh workflow run publish.yml --ref
-<branch> -f v1_disk=true` fills the cache for runs on that branch.
-
-`changed` fingerprints the image as built, so an unchanged generic base stops
-its path right after the build (no rechunk or base tests, and upgrade stops when
-it sees that), unless a manual run forces the tests (`test`), which rechunks
-too. The machines job still checks machine inputs and published base identity.
-The rechunked image (same content, reproducible layers, its own tag
-`rechunked`) is what is always tested and published. Rechunking while the
-tests ran on the image as built was measured: about 7 minutes faster, but the
-`upgrade::` tier then builds its v2 from layers that share nothing with the
-published v1 (71 layers, 4.9 GB to stage instead of a few) and the VM boots v1
-again after the reboot, so the tests run after the rechunk. The rechunk
-streams chunkah's OCI archive straight into `podman load`
-(`--log-driver=passthrough`): through conmon, which also logs everything a
-container prints, the 4.7 GB stream took 7.5 of its 9.5 minutes.
+After publication, the independent v1-disk run installs the installer composition
+and caches bcvk's base disk (~5 GB, ~1.9 GiB compressed) with its two
+`user.bootc.*` xattrs recorded beside it. Superseded disks are removed from the
+Actions cache. A cache miss costs the next upgrade run an install (~14 minutes
+on a runner). The runner is `vars.ILEX_RUNNER` or `ubuntu-26.04`; its 145 GB root
+has enough space without clearing toolchains. VM packages use the apt-debs
+Actions cache; background logs have timestamps. Rechunk runs before both tiers:
+testing the unrechunked image breaks layer sharing in the upgrade test.
 
 ```sh
-cargo xtask changed <ref> --image <tag> # prints changed=/exists=/fingerprint=; $GITHUB_OUTPUT when set
-cargo xtask rechunk <tag> [--output <tag>] # reproducible layers + ilex.fingerprint label; in place unless --output
-cargo xtask publish <tag> --stage      # CI only: push as unsigned :candidate, print digest=
-cargo xtask publish --digest <digest>  # CI only: sign what is staged, move :latest to it
-cargo xtask info --published-machines  # compatibility: default-shell-list machines, one per line
-cargo xtask info --publications       # validated TSV: tag, kind, parent, machine, shells
-cargo xtask info --installer          # installer tag; PR 11 switches CI/ISO to it
-cargo xtask publish <root-image> --stage --as generic.gnome # unsigned :candidate.generic.gnome
-cargo xtask publish --digest <staged-digest> --as generic.gnome --tested-fingerprint <fingerprint> # recorded by --stage, before tests
-cargo xtask publish <machine-image> --as ms-7c35.gnome --tested-image-id <image_id> # no build
-cargo xtask changed <ref> --machine ms-7c35 --inputs-only # inputs_changed=; no local image
-cargo xtask changed <ref> --machine ms-7c35 --image <machine-image> # full fingerprint
-cargo xtask prepare-publish <machine-image> --machine ms-7c35 # before tests; prints image_id=
-ILEX_IMAGE=sha256:<image_id> cargo xtask test ephemeral::
-cargo xtask publish <machine-image> --machine ms-7c35 --tested-image-id <image_id> # CI only; no build
+cargo xtask info --publications
+cargo xtask info --installer
+cargo xtask changed ghcr.io/reidond/ilex:generic.gnome --image <image>
+cargo xtask rechunk <image> --output <rechunked>
+cargo xtask publish <rechunked> --stage --as generic.gnome
+cargo xtask publish --digest <staged-digest> --as generic.gnome --tested-fingerprint <fingerprint>
+cargo xtask changed <ref> --machine ms-7c35 --inputs-only --base-id <config-digest>
+cargo xtask prepare-publish <machine-image> --machine ms-7c35
+ILEX_IMAGE=sha256:<tested-id> cargo xtask test ephemeral::
+cargo xtask publish <machine-image> --as ms-7c35.gnome --tested-image-id <tested-id>
 ```
 
-- The background parts (`vm-prep.sh`) log every line with the time it was
-  printed; the "Wait for" steps print those logs.
-- The VM stack's Ubuntu packages (qemu, libvirt, virtiofsd, passt: 62.9 MB)
-  come from the Actions cache (`apt-debs-<runner>-<hash of their names>`, the
-  newest one restored by prefix): apt downloads only what it lacks. Ubuntu's
-  Azure mirror stalls on single requests at times; the same download took 9 s
-  in one job and 14 minutes in the other. The build and v1-disk jobs save a
-  new entry when apt downloaded something; `autoclean` drops superseded
-  versions first.
-- The runner is `vars.ILEX_RUNNER` (a repository variable) or `ubuntu-26.04`,
-  for every job: moving to a larger, org-owned or self-hosted runner is one
-  setting (Settings → Secrets and variables → Actions → Variables). The
-  runner's root disk is 145 GB with ~110 GB free, so the workflow doesn't
-  clear the preinstalled toolchains first. Each runner boots one VM at a
-  time (the default `ILEX_VM_SLOTS` on 16 GiB).
-- A manual run from another branch (`gh workflow run publish.yml --ref <branch>
-  -f test=true`, and `-f iso=true` for the ISO) builds, stages `:candidate`
-  and tests (including published machines), but never signs, moves tags other
-  than `:candidate` or releases the ISO. Publishing jobs/steps require main,
-  this repository and a push, schedule or workflow_dispatch event; PR/fork
-  events cannot reach them. Signing secrets exist only on publishing steps.
-- `publish` refuses to run unless `CI=true`/`GITHUB_ACTIONS=true`. The one
-  override is a registry on this machine, which can never be ghcr:
-  `podman run -d -p 5000:5000 docker.io/library/registry:2`, then
-  `cargo xtask publish <tag> --allow-local-registry --repository localhost:5000/ilex`
-  (needs `cosign` v2, `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD`).
-  Generate a throwaway key pair in a scratch directory for this check and pass
-  `--verification-key <scratch>/cosign.pub` too. This override requires
-  `--allow-local-registry` and a local repository even in CI; real publishes
-  always verify against the committed public key. Stop/remove the registry
-  container and remove scratch keys afterwards. `publish --machine ms-7c35`
-  uses the same local path; `--stage` and `--digest` cannot be combined with
-  `--machine`, and image labels must match the requested machine (base
-  publishing and staging require `generic`).
-- `publish --as <tag>` first requires a validated publication from `image.toml`.
-  Roots require `--stage` or `--digest` with `--tested-fingerprint`; layers require `--tested-image-id` and
-  refuse staging/digest mode. Before staging or signing it compares **all five
-  labels** of the pinned local image ID or staged digest with the row's resolved
-  `selection`, including both design fields; deriving the same tag alone is
-  insufficient. The design fields do not enter the tag spelling. It builds
-  nothing. The layer checks the tested ID and independently recomputed
-  fingerprint; staging now independently recomputes the root fingerprint too.
-  Fingerprint labels must be SHA-256 digests. Every new path, including unsigned
-  staging, checks CI's exact revision. A local push checks
-  the registry manifest's config digest against the pinned ID before signing;
-  digest publication copies with `--preserve-digests`. Signatures verify before
-  moving the composition and date tags. `--as` uses the same committed key in
-  production and the same explicit local-registry throwaway-key override.
-  `--allow-local-registry` cannot target ghcr, including when `CI=true`.
-- A layer's `--as` parent comes from its publication row, in the same registry
-  repository. Before pushing, the publisher resolves that published root by
-  digest and checks its complete selection, config digest, and filesystem diff
-  IDs. The layer must have the expected `ilex.machine-key` (root config ID plus
-  independently hashed current machine inputs), matching `ilex.machine-inputs`,
-  and exactly the parent's filesystem layers plus one layer. The parent's
-  signature must also verify against the same permitted public key. Relabelling an
-  unrelated or stale parent is refused. For a local check, build the layer on
-  the exact root that was published, including rechunking and fingerprint labels.
-  CI's ancestry, tag-snapshot and parent-still-current guards remain necessary;
-  the registry tag can change after the publisher resolves it.
-- `image.toml` declares selection and parent names, not revision or fingerprint
-  values. Revision is compared with CI's `GITHUB_SHA`. Root staging independently
-  recomputes the RPM/source fingerprint and prints `fingerprint=` beside
-  `digest=`. CI must carry both values through the tests: root `--digest --as`
-  requires `--tested-fingerprint` and compares it with the pinned registry
-  config before copying or signing. No pull or RPM execution runs in the root
-  signing step. The signing job must still pass the exact staged/tested digest:
-  neither a fingerprint label nor five correct labels prove that an arbitrary
-  hand-pushed image was built or VM-tested. The legacy paths only enforce their
-  old machine-name contract, not the manifest's five-field composition; they
-  stay for the unchanged workflow until PR 11 removes them.
-- Signatures are cosign **v2** key-pair signatures in the legacy `.sig` tag
-  format, which bootc/containers-image verify (keyless and cosign v3's
-  default format don't work). Machines check them via
-  `rootfs/etc/containers/{policy.json,registries.d/ilex.yaml}` and the public
-  key `rootfs/etc/pki/containers/ilex.pub`. Verify a published image with
-  `cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true ghcr.io/reidond/ilex:latest`.
-- The private key is not in the repo. It was generated on the WSL box into
-  `/root/ilex-secrets/` (`cosign.key`, `cosign.password`, `cosign.pub`); keep a
-  backup. Losing it means every machine needs a new `ilex.pub` before it can
-  upgrade (machines only accept the baked-in key).
+Publishing and releases only happen in CI. A branch dispatch with `test=true`
+builds, stages `candidate.<installer>`, upgrades (including legacy fallback) and
+tests machine layers; it signs nothing and moves no published tag. Add `iso=true`
+to build the ISO as an artifact on a branch. PR/fork events cannot reach signing.
+
+The sole local publishing override is an explicitly allowed loopback registry,
+never ghcr, even with `CI=true`. Run a checkout-specific `registry:2` container
+on a free local port, generate a throwaway cosign v2 key pair in a scratch
+directory, then use `--allow-local-registry --repository localhost:<port>/ilex`
+and `--verification-key <scratch>/cosign.pub` with `publish --as`. Set only that
+throwaway `COSIGN_PRIVATE_KEY`/`COSIGN_PASSWORD`. Stage before signing roots;
+prepare and test layer IDs first. Stop/remove the container and scratch keys
+afterwards, and remove only this checkout's image names. Never prune shared
+container storage or read/use the owner's key for local tests.
+
+Signatures use cosign **v2** key-pair legacy `.sig` tags; bootc/containers-image
+cannot use keyless or cosign v3's default format. Policy and the public key live
+in `rootfs/etc/containers/{policy.json,registries.d/ilex.yaml}` and
+`rootfs/etc/pki/containers/ilex.pub`. Verify a published composition with
+`cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true
+ghcr.io/reidond/ilex:generic.gnome`. The private key is a repository secret; losing
+it requires deploying a new public key to machines before they can update.
 
 ### Installer ISO
 
@@ -1124,7 +988,7 @@ The installer is a **network installer** published as a GitHub Release: it
 carries no ilex image, so one small ISO stays current by itself and fits
 GitHub's limit of 2 GiB per release asset (an ISO with the ~5 GB image in it
 was 2.6 GiB). Download it, write it to a USB stick and boot it; Anaconda asks
-for the disk and the user, then installs the newest `ghcr.io/reidond/ilex:latest`
+for the disk and the user, then installs the newest `ghcr.io/reidond/ilex:generic.gnome`
 over a (wired) network connection and the machine updates itself from there:
 
 ```
@@ -1135,15 +999,22 @@ https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso.sha2
 Because it always installs the newest image it doesn't follow every publish.
 On every run, `cargo xtask iso --due` decides, in the `installer-due` job (the `iso`
 job reads its `iso_due=`): a new ISO is due when there is no `installer-*`
-release yet, when `installer/` or `crates/xtask/src/iso.rs` changed since the
-latest one (its notes carry an `installer-fingerprint:` line), or when the
+release yet, when `installer/` or `crates/xtask/src/iso.rs` changed, or the resolved source/target
+from `image.toml`'s `installer` differ from the latest one (its notes carry an `installer-fingerprint:` line), or when the
 latest one is 7 days old (Fedora and Anaconda fixes). A manual run with `iso`
 checked (`-f iso=true`) builds one regardless. On `main` the `iso` job creates
 the release `installer-YYYYMMDD` (`-N` suffix if one exists that day) with
 `ilex-installer.iso`, its `.sha256` and notes, marked latest, using
-`GITHUB_TOKEN` (the job has `contents: write`). From any other branch it builds
-the ISO and uploads it as the workflow artifact `installer-iso` instead, so it
+`GITHUB_TOKEN` (the job has `contents: write`). From any other branch an
+explicit `iso=true` builds the ISO and uploads it as the workflow artifact `installer-iso` instead, so it
 can be inspected; nothing is released.
+
+The installer installs and tracks `generic.gnome` for now. Its source and target
+come from `image.toml`'s `installer`, and both enter the installer fingerprint.
+Before releasing, the ISO job also requires that composition's registry tag to
+exist. Explicit absence warns green and creates no release; registry errors are
+red. The next full main run retries. This avoids releasing a network installer
+whose image has not been published yet.
 
 Immediately before creating a release, the ISO job applies the same ancestry
 guard independently of base publication. `.github/installer-revision.sh` reads
@@ -1163,9 +1034,9 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 ```
 
 - `installer/Containerfile` is `fedora-bootc:45` plus Anaconda; its kickstart
-  (`installer/interactive-defaults.ks`) installs `registry:ghcr.io/reidond/ilex:latest`
+  (`installer/interactive-defaults.ks`) installs `registry:ghcr.io/reidond/ilex:generic.gnome`
   (`--source-imgref`; pykickstart requires the transport) and tracks
-  `ghcr.io/reidond/ilex:latest` (`--target-imgref`). The installer drops GPU
+  `ghcr.io/reidond/ilex:generic.gnome` (`--target-imgref`). The installer drops GPU
   firmware, Vulkan drivers and CJK fonts before it builds its initramfs: a stock
   build was 1.98 GiB, 16 MiB under the limit. `xtask iso` fails if the ISO
   reaches 2 GiB.
@@ -1186,7 +1057,8 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   `TMPDIR` live on volumes under `/mnt`. `xtask iso` does the same locally: when
   the `image-builder` on `PATH` is older than 89 (or missing) it builds
   `installer/image-builder/Containerfile` and runs image-builder from that
-  container against this host's container storage.
+  container against this host's container storage. The installer and fallback
+  image-builder helper tags both include the checkout slug.
 - The installer is branded by `/.buildstamp`, the file Anaconda takes its
   product name, version and "final release" flag from (`Product=ilex`,
   `Version=45`, `IsFinal=True`). Without it the installer calls itself

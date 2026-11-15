@@ -153,12 +153,22 @@ pub fn check_decisions() -> Result<(), String> {
     use Decision::*;
     // (image, transport, signature as raw JSON) of the booted deployment.
     type Booted<'a> = (&'a str, &'a str, Option<&'a str>);
-    let cases: [(&str, Option<Booted>, Decision); 12] = [
+    let cases: [(&str, Option<Booted>, Decision); 14] = [
+        (
+            "installer composition",
+            Some(("ghcr.io/reidond/ilex:generic.gnome", "registry", None)),
+            Enforce("ghcr.io/reidond/ilex:generic.gnome".into()),
+        ),
+        (
+            "bare base composition",
+            Some(("ghcr.io/reidond/ilex:base", "registry", None)),
+            Enforce("ghcr.io/reidond/ilex:base".into()),
+        ),
         ("ephemeral VM (no deployment)", None, NoDeployment),
         (
             "ms-7c35 machine, unverified",
-            Some(("ghcr.io/reidond/ilex:ms-7c35", "registry", None)),
-            Enforce("ghcr.io/reidond/ilex:ms-7c35".into()),
+            Some(("ghcr.io/reidond/ilex:ms-7c35.gnome", "registry", None)),
+            Enforce("ghcr.io/reidond/ilex:ms-7c35.gnome".into()),
         ),
         (
             "ghcr unverified",
@@ -178,16 +188,16 @@ pub fn check_decisions() -> Result<(), String> {
         (
             "ghcr, signature explicitly insecure",
             Some((
-                "ghcr.io/reidond/ilex:latest",
+                "ghcr.io/reidond/ilex:generic.gnome",
                 "registry",
                 Some("\"insecure\""),
             )),
-            Enforce("ghcr.io/reidond/ilex:latest".into()),
+            Enforce("ghcr.io/reidond/ilex:generic.gnome".into()),
         ),
         (
             "ghcr, container policy",
             Some((
-                "ghcr.io/reidond/ilex:latest",
+                "ghcr.io/reidond/ilex:generic.gnome",
                 "registry",
                 Some("\"containerPolicy\""),
             )),
@@ -196,7 +206,7 @@ pub fn check_decisions() -> Result<(), String> {
         (
             "ghcr, ostree remote",
             Some((
-                "ghcr.io/reidond/ilex:latest",
+                "ghcr.io/reidond/ilex:generic.gnome",
                 "registry",
                 Some("{\"ostreeRemote\":\"r\"}"),
             )),
@@ -209,7 +219,7 @@ pub fn check_decisions() -> Result<(), String> {
         ),
         (
             "ghcr name over containers-storage",
-            Some(("ghcr.io/reidond/ilex:latest", "containers-storage", None)),
+            Some(("ghcr.io/reidond/ilex:generic.gnome", "containers-storage", None)),
             Foreign(String::new()),
         ),
         (

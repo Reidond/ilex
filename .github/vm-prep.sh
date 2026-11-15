@@ -3,7 +3,7 @@
 # builds; the workflow's "Wait for" steps collect it.
 #
 #   vm-prep.sh ephemeral   the build job: the VM stack and, meanwhile, a pull
-#                          of the published :latest (`latest-pull`). The pull
+#                          of the published root (or legacy :latest) (`root-pull`). The pull
 #                          records which compressed blob in the registry holds
 #                          each of its layers, so staging the candidate reuses
 #                          them.
@@ -23,7 +23,7 @@
 #                          the v1-disk run: bcvk's base disk into DIR for the
 #                          Actions cache, with the xattrs bcvk recognizes it by
 #                          (the cache drops xattrs) in a file next to it.
-#   vm-prep.sh wait NAME   wait for NAME (vm-stack, latest-pull, v1-pull,
+#   vm-prep.sh wait NAME   wait for NAME (vm-stack, root-pull, v1-pull,
 #                          upgrade-prepare) and print its log. A failed
 #                          vm-stack fails; a failed pull or upgrade-prepare only
 #                          warns: the push uploads more, the test pulls and
@@ -179,7 +179,11 @@ skip() {
 case "${1:-}" in
     ephemeral)
         # The pull needs nothing from the VM stack: both at once.
-        run latest-pull podman pull --quiet "$ILEX_UPGRADE_FROM" &
+        if [ -n "${ILEX_REUSE_FROM:-}" ]; then
+            run root-pull podman pull --quiet "$ILEX_REUSE_FROM" &
+        else
+            skip root-pull "no published root or legacy image for blob reuse"
+        fi
         run vm-stack vm_stack
         wait
         ;;
@@ -207,7 +211,7 @@ case "${1:-}" in
         if [ "$rc" != 0 ]; then
             case "$name" in
                 vm-stack) exit "$rc" ;;
-                latest-pull) echo "::warning::pulling :latest failed (exit $rc); staging uploads every layer" ;;
+                root-pull) echo "::warning::pulling the published root failed (exit $rc); staging uploads every layer" ;;
                 v1-pull) echo "::warning::pulling v1 failed (exit $rc); the test pulls it itself" ;;
                 upgrade-prepare) echo "::warning::preparing v1's disk failed (exit $rc); the upgrade test installs it itself" ;;
             esac

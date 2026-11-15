@@ -1,7 +1,7 @@
 //! `iso::` tier (opt-in, slow): install from the installer ISO.
 //!
 //! The plan's phase-5 done-when is "a machine installed from the ISO shows
-//! `ghcr.io/<owner>/ilex:latest` in `bootc status`". This tier does exactly
+//! `ghcr.io/<owner>/ilex:generic.gnome` in `bootc status`". This tier does exactly
 //! that in QEMU/KVM with UEFI firmware:
 //!
 //! 1. Boot the ISO with nothing else attached and wait for Anaconda's welcome
@@ -12,7 +12,7 @@
 //!    only answers what the shipped `interactive-defaults.ks` leaves open (the
 //!    language, the disk, the root account); the `bootc` command, and with it
 //!    the image the machine installs and tracks, is the shipped one. The
-//!    installer carries no image: it pulls `ghcr.io/<owner>/ilex:latest` over
+//!    installer carries no image: it pulls `ghcr.io/<owner>/ilex:generic.gnome` over
 //!    the network (QEMU user networking). Its `%pre` asks Anaconda itself what
 //!    product it thinks it is and prints that on the serial console.
 //! 3. Boot the installed disk and assert over SSH: `bootc status` names the
@@ -54,8 +54,6 @@ const INSTALLER_SCREEN: (u32, u32) = (1280, 800);
 const INSTALLER_MEMORY: &str = "6G";
 /// What a bootc root needs: the system disk of the install (sparse).
 const DISK_SIZE: &str = "40G";
-/// What the installed machine tracks when nothing else is asked.
-const DEFAULT_TARGET: &str = "ghcr.io/reidond/ilex:latest";
 
 /// Printed on the serial console by the kickstart's `%post` once the payload
 /// is installed; its absence means the installer gave up.
@@ -135,11 +133,14 @@ fn iso_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn target() -> String {
-    std::env::var("ILEX_ISO_TARGET")
-        .ok()
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| DEFAULT_TARGET.to_string())
+fn target() -> Result<String> {
+    if let Ok(target) = std::env::var("ILEX_ISO_TARGET")
+        && !target.is_empty()
+    {
+        return Ok(target);
+    }
+    let ws = common::workspace()?;
+    Ok(format!("ghcr.io/reidond/ilex:{}", ilex_devkit::config::installer(&ws.root)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +398,7 @@ fn bootc_status(vm: &Vm, artifacts: &Path) -> Result<()> {
     let digest = image["imageDigest"].as_str().unwrap_or("?");
     println!("     booted image: {transport}:{name} ({digest})");
     println!("     spec.image: {}", status["spec"]["image"]);
-    let wanted = target();
+    let wanted = target()?;
     if name != wanted {
         bail!("the machine tracks {name}, expected {wanted}");
     }

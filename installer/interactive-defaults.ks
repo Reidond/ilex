@@ -11,7 +11,8 @@
 # --target-imgref: where the installed machine pulls updates from, so no
 #   `bootc switch` is needed after an ISO install (no transport here).
 #
-# The installer Containerfile fills in both placeholders.
+# xtask iso resolves image.toml's installer composition; the Containerfile
+# fills in both placeholders. For now this installs and tracks generic.gnome.
 bootc --source-imgref @SOURCE_IMGREF@ --target-imgref @TARGET_IMGREF@
 
 # ilex is a GNOME desktop: boot the installed system to the login screen.

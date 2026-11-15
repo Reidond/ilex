@@ -1,15 +1,15 @@
 //! `cargo xtask publish`: push by digest, tag and sign (CI only).
 //!
-//! 1. Push the rechunked image once as `:sha-<short>` and read back the
+//! 1. Push a tested composition once as `:<tag>_sha-<short>` and read back the
 //!    digest the registry stored. In CI the image is already there: the build
-//!    job pushed it as `:candidate` (`--stage`) so the upgrade tier could pull
+//!    job pushed it as `:candidate.<tag>` (`--stage`) so the upgrade tier could pull
 //!    it on its own runner, and the publish job hands that digest over
 //!    (`--digest`), so what is signed is exactly what was tested.
 //! 2. Sign that digest with the cosign key pair (`COSIGN_PRIVATE_KEY` +
 //!    `COSIGN_PASSWORD`), in the legacy `sha256-<digest>.sig` tag format that
 //!    bootc / containers-image verify, and check the signature against the
 //!    public key shipped in the image.
-//! 3. Only then point `:latest` and `:YYYYMMDD` at the digest, so a machine
+//! 3. Only then point `:<tag>` and `:<tag>_YYYYMMDD` at the digest, so a machine
 //!    never sees a moving tag whose image has no signature yet.
 //!
 //! Signing is key based on purpose: containers-image can't verify keyless
@@ -41,9 +41,8 @@ pub struct Args {
     /// (`--repository localhost:5000/ilex`). Never reaches ghcr.
     #[arg(long)]
     pub allow_local_registry: bool,
-    /// Only push the image as `:candidate`, unsigned, for tests on other
-    /// runners, and print its `digest=`. Nothing is signed and `:latest`
-    /// doesn't move; machines only accept signed images.
+    /// Push unsigned as `:candidate.<tag>` for tests and print its `digest=`.
+    /// Published composition tags do not move.
     #[arg(long, conflicts_with = "digest")]
     pub stage: bool,
     /// Publish the image already in the repository at this digest (what
@@ -51,11 +50,8 @@ pub struct Args {
     #[arg(long, value_name = "sha256:…")]
     pub digest: Option<String>,
     /// Publish only this image.toml composition, under its derived tag
-    #[arg(long = "as", conflicts_with = "machine")]
-    pub as_tag: Option<String>,
-    /// Publish a machine as :<name>, :<name>-YYYYMMDD and :<name>-sha-<short>
-    #[arg(long, requires = "tested_image_id", conflicts_with_all = ["stage", "digest"])]
-    pub machine: Option<String>,
+    #[arg(long = "as")]
+    pub as_tag: String,
     /// Immutable ID recorded before this machine's capability and VM tests
     #[arg(long, conflicts_with_all = ["stage", "digest"])]
     pub tested_image_id: Option<String>,
@@ -67,9 +63,6 @@ pub struct Args {
     pub verification_key: Option<PathBuf>,
 }
 
-/// The unsigned tag `--stage` pushes.
-const STAGE_TAG: &str = "candidate";
-
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let repository = registry::repository(args.repository.as_deref(), "ilex")?;
     registry::require_ci("xtask publish", &repository, args.allow_local_registry)?;
@@ -79,20 +72,8 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         );
     }
     let publication = publication(ws, &args)?;
-    if args.tested_fingerprint.is_some() && publication.is_none() {
-        bail!("--tested-fingerprint requires --as");
-    }
-    if args.tested_image_id.is_some() && args.machine.is_none() && publication.is_none() {
-        bail!("--tested-image-id requires --machine or --as");
-    }
     if args.verification_key.is_some() && !registry::is_local_registry(&repository) {
         bail!("--verification-key is only allowed with a registry on this machine");
-    }
-    if let Some(name) = &args.machine {
-        config::machine_manifest(&ws.root, name)?;
-        if name == "generic" {
-            bail!("generic is published as :latest, without --machine");
-        }
     }
     cmd::require("podman")?;
     cmd::require("skopeo")?;
@@ -113,20 +94,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
     // 1. The digest everything else uses, tagged `sha-<short>`: pushed now,
     //    or already in the repository (`--digest`, staged by the build job).
-    let (moving_tag, date_tag, sha_tag) = match (&args.as_tag, &args.machine) {
-        (Some(tag), _) => (
-            tag.clone(),
-            format!("{tag}_{date}"),
-            format!("{tag}_sha-{short}"),
-        ),
-        (_, Some(name)) => (
-            name.clone(),
-            format!("{name}-{date}"),
-            format!("{name}-sha-{short}"),
-        ),
-        _ => ("latest".into(), date.clone(), format!("sha-{short}")),
-    };
-    for tag in [&moving_tag, &date_tag, &sha_tag] {
+    let moving_tag = &args.as_tag;
+    let date_tag = format!("{moving_tag}_{date}");
+    let sha_tag = format!("{moving_tag}_sha-{short}");
+    for tag in [moving_tag, &date_tag, &sha_tag] {
         check_tag_length(&format!("{repository}:{tag}"))?;
     }
     let (digest, fingerprint) = match &args.digest {
@@ -137,20 +108,15 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             let pinned = format!("{repository}@{digest}");
             let config = skopeo_json(&["inspect", "--config"], &pinned, insecure, &auth)?
                 .with_context(|| format!("{pinned} is not in the registry"))?;
-            if let Some(row) = &publication {
-                let labels = serde_json::from_value(config["config"]["Labels"].clone())
-                    .context("reading staged image's configuration labels")?;
-                require_composition(&pinned, &labels, row)?;
-            }
-            if config["config"]["Labels"]["ilex.machine"].as_str() != Some("generic") {
-                bail!("{pinned} is not a generic base image; refusing to move :latest");
-            }
+            let labels = serde_json::from_value(config["config"]["Labels"].clone())
+                .context("reading staged image's configuration labels")?;
+            require_composition(&pinned, &labels, &publication)?;
             require_ci_revision(&pinned, config["config"]["Labels"][REVISION_LABEL].as_str())?;
             let fingerprint = config["config"]["Labels"][FINGERPRINT_LABEL]
                 .as_str()
                 .map(str::to_string)
                 .with_context(|| format!("{pinned} has no {FINGERPRINT_LABEL} label"))?;
-            if publication.is_some() {
+            {
                 require_fingerprint(&pinned, &fingerprint)?;
                 let tested = args.tested_fingerprint.as_ref().unwrap();
                 if &fingerprint != tested {
@@ -164,50 +130,42 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         }
         None => {
             let image = ws.resolve_image(args.image.as_deref());
-            let (source, fingerprint) = if let Some(tested) = &args.tested_image_id {
-                let expected = tested.strip_prefix("sha256:").unwrap_or(tested);
-                if !registry::is_digest(&format!("sha256:{expected}")) {
-                    bail!("--tested-image-id {tested:?} is not a sha256 image ID");
-                }
-                let actual = bcvk::image_id(&image)?;
-                if actual != expected {
-                    bail!(
-                        "{image} is image {actual}, but tests recorded {expected}; refusing to publish a replacement image"
-                    );
-                }
-                let pinned = format!("sha256:{actual}");
-                if let Some(row) = &publication {
-                    let inspect = require_local_composition(&pinned, row)?;
-                    require_ci_revision(
-                        &pinned,
-                        inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
-                    )?;
-                    let parent =
-                        require_layer_parent(ws, &pinned, &inspect, row, &repository, &auth)?;
-                    verify(ws, &parent, &auth, args.verification_key.as_deref()).context(
-                        "verifying the declared published parent before signing its layer",
-                    )?;
-                }
-                let computed = rechunk::fingerprint(ws, &pinned)?;
-                let label = local_fingerprint(&pinned)?;
-                if publication.is_some() {
-                    require_fingerprint(&pinned, &label)?;
-                }
-                if label != computed {
-                    bail!(
-                        "{image} fingerprint label {label} differs from recomputed {computed}; run prepare-publish and test that image ID first"
-                    );
-                }
-                eprintln!("publishing tested machine image ID {actual} (no build)");
-                (pinned, computed)
-            } else {
-                let pinned = format!("sha256:{}", bcvk::image_id(&image)?);
-                let fingerprint = local_fingerprint(&pinned)?;
-                (pinned, fingerprint)
-            };
-            if publication.is_none() {
-                require_machine(&source, args.machine.as_deref().unwrap_or("generic"))?;
+            let tested = args.tested_image_id.as_ref().context("layer requires --tested-image-id")?;
+            let expected = tested.strip_prefix("sha256:").unwrap_or(tested);
+            if !registry::is_digest(&format!("sha256:{expected}")) {
+                bail!("--tested-image-id {tested:?} is not a sha256 image ID");
             }
+            let actual = bcvk::image_id(&image)?;
+            if actual != expected {
+                bail!(
+                    "{image} is image {actual}, but tests recorded {expected}; refusing to publish a replacement image"
+                );
+            }
+            let pinned = format!("sha256:{actual}");
+            {
+                let row = &publication;
+                let inspect = require_local_composition(&pinned, row)?;
+                require_ci_revision(
+                    &pinned,
+                    inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
+                )?;
+                let parent = require_layer_parent(ws, &pinned, &inspect, row, &repository, &auth)?;
+                verify(ws, &parent, &auth, args.verification_key.as_deref()).context(
+                    "verifying the declared published parent before signing its layer",
+                )?;
+            }
+            let computed = rechunk::fingerprint(ws, &pinned)?;
+            let label = local_fingerprint(&pinned)?;
+            {
+                require_fingerprint(&pinned, &label)?;
+            }
+            if label != computed {
+                bail!(
+                    "{image} fingerprint label {label} differs from recomputed {computed}; run prepare-publish and test that image ID first"
+                );
+            }
+            eprintln!("publishing tested machine image ID {actual} (no build)");
+            let (source, fingerprint) = (pinned, computed);
             if registry::is_ci() {
                 require_ci_revision(
                     &source,
@@ -239,7 +197,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     verify(ws, &pinned, &auth, args.verification_key.as_deref())?;
 
     // 3. Move the tags now that the digest is signed.
-    for tag in [&moving_tag, &date_tag] {
+    for tag in [moving_tag, &date_tag] {
         copy(&pinned, &format!("{repository}:{tag}"), insecure, &auth)?;
     }
 
@@ -274,29 +232,17 @@ fn require_ci_revision(image: &str, revision: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `--stage`: push the local image as `:candidate`, unsigned, and report how
-/// much of it machines on `:latest` would have to download.
+/// Stage this root unsigned and report the update size against its own tag.
 fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
     let image = ws.resolve_image(args.image.as_deref());
     let image_id = format!("sha256:{}", bcvk::image_id(&image)?);
     let publication = publication(ws, args)?;
-    if let Some(row) = &publication {
-        let inspect = require_local_composition(&image_id, row)?;
-        require_ci_revision(
-            &image_id,
-            inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
-        )?;
-    } else {
-        require_machine(&image_id, "generic")?;
-    }
-    let stage_tag = args
-        .as_tag
-        .as_ref()
-        .map(|tag| format!("candidate.{tag}"))
-        .unwrap_or_else(|| STAGE_TAG.into());
+    let inspect = require_local_composition(&image_id, &publication)?;
+    require_ci_revision(&image_id, inspect["Config"]["Labels"][REVISION_LABEL].as_str())?;
+    let stage_tag = format!("candidate.{}", args.as_tag);
     check_tag_length(&format!("{repository}:{stage_tag}"))?;
     let fingerprint = local_fingerprint(&image_id)?;
-    if publication.is_some() {
+    {
         require_fingerprint(&image_id, &fingerprint)?;
         let computed = rechunk::fingerprint(ws, &image_id)?;
         if fingerprint != computed {
@@ -332,7 +278,7 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
         )
     };
     let staged = layers(&pinned)?.unwrap_or_default();
-    let comparison = args.as_tag.as_deref().unwrap_or("latest");
+    let comparison = &args.as_tag;
     match layers(&format!("{repository}:{comparison}"))? {
         Some(latest) => {
             let new: Vec<_> = staged
@@ -349,16 +295,14 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
         }
         None => eprintln!("no :{comparison} to compare with"),
     }
-    if publication.is_some() {
+    {
         registry::github_output("fingerprint", &fingerprint)?;
     }
     registry::github_output("digest", &digest)
 }
 
-fn publication(ws: &Workspace, args: &Args) -> Result<Option<config::Publication>> {
-    let Some(tag) = &args.as_tag else {
-        return Ok(None);
-    };
+fn publication(ws: &Workspace, args: &Args) -> Result<config::Publication> {
+    let tag = &args.as_tag;
     let row = config::publications(&ws.root)?
         .into_iter()
         .find(|row| &row.tag == tag)
@@ -380,7 +324,7 @@ fn publication(ws: &Workspace, args: &Args) -> Result<Option<config::Publication
             "--as {tag} is a layer composition: requires --tested-image-id and cannot use --stage or --digest"
         );
     }
-    Ok(Some(row))
+    Ok(row)
 }
 
 fn require_local_composition(image: &str, row: &config::Publication) -> Result<serde_json::Value> {
@@ -622,12 +566,3 @@ fn verify(
     Ok(())
 }
 
-fn require_machine(image: &str, expected: &str) -> Result<()> {
-    let actual = machine::image_machine(image)?;
-    if actual != expected {
-        bail!(
-            "{image} is machine {actual}, expected {expected}; refusing to publish under another machine's tags"
-        );
-    }
-    Ok(())
-}

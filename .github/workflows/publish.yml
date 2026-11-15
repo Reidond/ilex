@@ -10,27 +10,27 @@
 # Three jobs start together, so the slow parts overlap on separate machines:
 #
 # * build: build → changed → rechunk → stage the candidate in ghcr as
-#   `:candidate` (unsigned; machines only accept signed images) → the
+#   `:candidate.<tag>` (unsigned; machines only accept signed images) → the
 #   ephemeral tier;
-# * upgrade: restores the upgrade tier's v1 (the published :latest), already
+# * upgrade: restores the upgrade tier's v1 (the published :generic.gnome), already
 #   installed to a disk, from the Actions cache (or installs it, ~14 minutes),
 #   waits for the build job to stage the candidate, pulls it by digest and
 #   runs the upgrade tier;
 # * installer-due → iso: see below.
 #
 # Then publish signs the staged digest, the one both tiers tested, and moves
-# :latest to it; nothing is pushed twice. Runs of this workflow never overlap
-# (the concurrency group), so `:candidate` is always this run's.
+# :generic.gnome to it; nothing is pushed twice. Runs of this workflow never overlap
+# (the concurrency group), so `:candidate.<tag>` is always this run's.
 # Then machines builds/tests opted-in layers on that digest (or current
-# :latest by digest when unchanged); only main signs/publishes machine tags.
+# :generic.gnome by digest when unchanged); only main signs/publishes machine tags.
 #
 # After a publish, the publish job starts this workflow again with `v1_disk`:
 # that run (the v1-disk job alone, in a concurrency group of its own, so
-# nothing waits for it) installs the new :latest to a disk and puts it in the
+# nothing waits for it) installs the new :generic.gnome to a disk and puts it in the
 # Actions cache for the next run's upgrade tier.
 #
 # The installer ISO is a network installer: it carries no ilex image and installs
-# the newest :latest from ghcr, so it needn't follow every publish. It is built
+# the newest :generic.gnome from ghcr, so it needn't follow every publish. It is built
 # (and, on main, released as a GitHub Release) when `cargo xtask iso --due` says
 # so: no installer release yet, `installer/` (or the ISO code in xtask) changed
 # since the latest one, or the latest one is a week old (Fedora and Anaconda
@@ -58,12 +58,12 @@ on:
         type: boolean
         default: false
       v1_disk:
-        description: Only install the published :latest to a disk for the upgrade tier's cache (the publish job starts this after each publish)
+        description: Only install the published installer composition to a disk for the upgrade tier's cache (the publish job starts this after each publish)
         type: boolean
         default: false
 
 # A v1-disk run has a group of its own (per branch: each has its cache scope):
-# publish runs never wait for it, and a newer :latest supersedes the disk it
+# publish runs never wait for it, and a newer :generic.gnome supersedes the disk it
 # is making.
 concurrency:
   group: ${{ inputs.v1_disk && format('v1-disk-{0}', github.ref) || 'publish' }}
@@ -97,8 +97,10 @@ jobs:
     timeout-minutes: 120
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
-      # What `xtask publish --stage` pushed as :candidate.
+      # What `xtask publish --stage --as` pushed as candidate.<tag>.
       digest: ${{ steps.stage.outputs.digest }}
+      tag: ${{ steps.composition.outputs.tag }}
+      snapshot: ${{ steps.composition.outputs.snapshot }}
     env:
       # `xtask build --tag candidate` tags the image localhost/ilex:candidate.
       # The image as built; `xtask rechunk --output rechunked` makes the image
@@ -107,12 +109,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Registry names (ghcr needs lowercase)
+      - name: Registry names and installer composition
+        id: composition
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "IMAGE_REPO=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex" >> "$GITHUB_ENV"
-          echo "ILEX_UPGRADE_FROM=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex:latest" >> "$GITHUB_ENV"
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
+          tag=$(cargo xtask info --installer)
+          bash .github/publication-tag.sh "$tag"
+          echo "INSTALLER_TAG=$tag" >> "$GITHUB_ENV"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          cargo xtask info --publications > "$RUNNER_TEMP/publications"
+          shells=$(awk -F '\t' -v tag="$tag" '$1 == tag && $2 == "root" {print $5}' "$RUNNER_TEMP/publications")
+          test -n "$shells"
+          echo "ILEX_SHELLS=$shells" >> "$GITHUB_ENV"
           # `changed` needs skopeo before the VM stack is installed.
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+          snapshot=$(bash .github/publish-head.sh digest "$IMAGE_REPO:$tag")
+          echo "snapshot=$snapshot" >> "$GITHUB_OUTPUT"
+          reuse=$snapshot
+          if [ "$reuse" = - ]; then reuse=$(bash .github/publish-head.sh digest "$IMAGE_REPO:latest"); fi
+          if [ "$reuse" != - ]; then echo "ILEX_REUSE_FROM=$IMAGE_REPO@$reuse" >> "$GITHUB_ENV"; fi
+
 
       # The runner's root disk is 145 GB with about 110 GB free: container
       # storage for the build, the rechunk and the test VM fits without
@@ -125,7 +145,7 @@ jobs:
           github-cache: "true"
 
       # In the background while the image builds: the VM stack for the
-      # ephemeral tier, and a pull of :latest. The pull records which
+      # ephemeral tier, and a pull of :generic.gnome. The pull records which
       # compressed blob in the registry holds each of its layers, so staging
       # the candidate (reproducible layers, mostly the same) uploads only what
       # changed and machines download only that. A run that changed nothing
@@ -138,7 +158,7 @@ jobs:
           key: ${{ env.APT_DEBS }}
           restore-keys: ${{ env.APT_DEBS }}
 
-      - name: VM stack and :latest (background)
+      - name: VM stack and :generic.gnome (background)
         run: nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
 
       - name: Build the candidate image
@@ -148,7 +168,7 @@ jobs:
       # published one, everything below is skipped.
       - name: Compare with the published image
         id: changed
-        run: cargo xtask changed "$IMAGE_REPO:latest" --image candidate
+        run: cargo xtask changed "$IMAGE_REPO:$INSTALLER_TAG" --image candidate
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -164,18 +184,18 @@ jobs:
         env:
           FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
 
-      - name: Wait for :latest
+      - name: Wait for :generic.gnome
         if: steps.changed.outputs.changed == 'true' || inputs.test
         timeout-minutes: 15
-        run: .github/vm-prep.sh wait latest-pull
+        run: .github/vm-prep.sh wait root-pull
 
       # The upgrade job waits for this step (by name) and pulls the digest.
-      # Unsigned, never :latest: a branch run stages too, so its upgrade tier
+      # Unsigned, never :generic.gnome: a branch run stages too, so its upgrade tier
       # can run, but only main publishes.
       - name: Stage the candidate
         id: stage
         if: steps.changed.outputs.changed == 'true' || inputs.test
-        run: cargo xtask publish rechunked --stage
+        run: cargo xtask publish rechunked --stage --as "$INSTALLER_TAG"
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -205,7 +225,7 @@ jobs:
 
   # The upgrade tier on a runner of its own. Installing v1 to a disk takes ~14
   # minutes on a runner, most of the tier's time, so the v1-disk run installs
-  # each new :latest ahead of time and this job restores that disk from the
+  # each new :generic.gnome ahead of time and this job restores that disk from the
   # Actions cache. Without one (say, a run that starts before the v1-disk run
   # of the last publish is done) it installs v1 itself, from its first minute.
   upgrade:
@@ -214,14 +234,15 @@ jobs:
     timeout-minutes: 120
     outputs:
       # The digest the upgrade tier tested; empty when there was nothing to
-      # test (no :latest yet, or no candidate).
+      # test (no :generic.gnome yet, or no candidate).
       tested: ${{ steps.candidate.outputs.digest }}
-      # false: there is no :latest yet (the very first publish).
+      # false: neither the installer tag nor legacy latest exists.
       exists: ${{ steps.from.outputs.exists }}
-      # The v1 :latest resolved before testing; '-' when no v1 exists.
+      # The v1 (installer tag or legacy latest) resolved before testing; '-' when no v1 exists.
       v1: ${{ steps.from.outputs.digest }}
+      own: ${{ steps.from.outputs.own }}
     env:
-      # The candidate, pulled from :candidate below and tagged like on the
+      # The candidate, pulled from candidate.<tag> below and tagged like on the
       # build runner; set before it exists so `xtask test` never builds one.
       ILEX_IMAGE: localhost/ilex:rechunked
     steps:
@@ -239,22 +260,10 @@ jobs:
           # packages. Only explicit manifest/name unknown means no v1;
           # denied/unauthorized and transport errors fail the lookup.
           podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
-          # The very first run has no published :latest, so there is nothing
-          # to upgrade from and the tier is skipped (`exists=false`, which
-          # lets publish go ahead without it). Any other failure to look is an
-          # error: publish refuses a candidate this tier didn't test.
-          digest=$(bash .github/publish-head.sh digest "$repo:latest")
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          if [ "$digest" != - ]; then
-            # v1 by digest: the one its cached disk is keyed by.
-            echo "v1: $repo@$digest"
-            echo "ILEX_UPGRADE_FROM=$repo@$digest" >> "$GITHUB_ENV"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "disk_key=v1-disk-$BCVK_VERSION-${digest#sha256:}" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::no $repo:latest yet: nothing to upgrade from"
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          tag=$(cargo xtask info --installer)
+          bash .github/publication-tag.sh "$tag"
+          echo "INSTALLER_TAG=$tag" >> "$GITHUB_ENV"
+          bash .github/upgrade-from.sh "$repo" "$tag"
 
       # v1 installed to a disk by the v1-disk run that followed the publish of
       # v1 (see that job). vm-prep.sh hands it to bcvk; on a miss v1 is
@@ -314,7 +323,7 @@ jobs:
             esac
             sleep 10
           done
-          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:candidate")
+          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:candidate.$INSTALLER_TAG")
           echo "candidate: $IMAGE_REPO@$digest"
           podman pull --quiet "$IMAGE_REPO@$digest"
           podman tag "$IMAGE_REPO@$digest" "$ILEX_IMAGE"
@@ -353,11 +362,12 @@ jobs:
           if-no-files-found: ignore
 
   # Main only: a manual run dispatched from another branch builds, stages and
-  # tests, but never moves :latest. Signs the staged digest, the one both tiers
-  # tested, then moves :latest and the date tag to it.
+  # tests, but never moves :generic.gnome. Signs the staged digest, the one both tiers
+  # tested, then moves :generic.gnome and the date tag to it.
   publish:
     needs: [build, upgrade]
     if: >-
+      needs.build.result == 'success' && needs.upgrade.result == 'success' &&
       needs.build.outputs.changed == 'true' &&
       github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
@@ -397,6 +407,9 @@ jobs:
       - name: Publish and sign
         id: publication
         env:
+          TAG: ${{ needs.build.outputs.tag }}
+          SNAPSHOT: ${{ needs.build.outputs.snapshot }}
+          OWN: ${{ needs.upgrade.outputs.own }}
           STAGED: ${{ needs.build.outputs.digest }}
           TESTED: ${{ needs.upgrade.outputs.tested }}
           V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
@@ -406,37 +419,8 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          # The upgrade tier must have tested this very digest. The one
-          # exception is the very first publish: the upgrade job found no
-          # :latest to upgrade from.
-          if [ "$TESTED" != "$STAGED" ]; then
-            if [ -n "$TESTED" ] || [ "$V1_EXISTS" != false ]; then
-              echo "::error::the build job staged ${STAGED:-nothing}, but the upgrade tier tested ${TESTED:-nothing}"
-              exit 1
-            fi
-            echo "no :latest yet: the first publish has no upgrade tier"
-          fi
-          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
-          [[ "$STAGED" =~ ^sha256:[0-9a-f]{64}$ ]]
-          if { [ "$V1_EXISTS" = true ] && [[ "$V1_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; } ||
-             { [ "$V1_EXISTS" = false ] && [ "$V1_DIGEST" = - ]; }; then :; else
-            echo '::error::upgrade did not record an explicit v1 digest or first-publish absence'; exit 1
-          fi
-          without_key() { env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD "$@"; }
-          if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$repo:latest" &&
-             without_key bash .github/publish-head.sh swap "$repo:latest" "$V1_DIGEST"; then
-            "$XTASK_PUBLISHER" publish --digest "$STAGED"
-            echo 'published=true' >> "$GITHUB_OUTPUT"
-            echo 'base publication result: published=true'
-          else
-            rc=$?
-            if [ "$rc" = 3 ]; then
-              echo 'published=false' >> "$GITHUB_OUTPUT"
-              echo 'base publication result: published=false (guard skip)'
-              exit 0
-            fi
-            exit "$rc"
-          fi
+          export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          bash .github/publish-root.sh
 
       # The next run's upgrade tier boots what was just published as its v1.
       # A failure here costs that run the install, nothing else.
@@ -482,77 +466,25 @@ jobs:
           pr-comment: "false"
           github-cache: "true"
 
-      - name: Published machines (validated manifest names only)
-        run: cargo xtask info --published-machines > "$RUNNER_TEMP/published-machines"
+      - name: Publications (validated compositions, parents and selections)
+        run: cargo xtask info --publications > "$RUNNER_TEMP/publications"
 
-      - name: Select the immutable machine base (registry metadata only)
-        id: base
+      - name: Plan changed machine compositions (registry metadata only)
+        id: plan
         env:
+          ROOT_TAG: ${{ needs.build.outputs.tag }}
           STAGED: ${{ needs.build.outputs.digest }}
           TESTED: ${{ needs.upgrade.outputs.tested }}
           V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
           BASE_CHANGED: ${{ needs.build.outputs.changed }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
-          echo "IMAGE_REPO=$repo" >> "$GITHUB_ENV"
-          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
-          # Read authorization for every skopeo probe and base pull in this
-          # job. This step performs no registry writes and has no signing key.
-          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
-          # A forced test can stage an unchanged base without publishing it.
-          # Main layers must then use current :latest, never that unsigned
-          # replacement. Branches exercise the staged candidate as usual.
-          if [ -n "$STAGED" ] && { [ "$BASE_CHANGED" = true ] || [ "$GITHUB_REF" != refs/heads/main ]; }; then
-            if [ "$TESTED" != "$STAGED" ] && { [ -n "$TESTED" ] || [ "$V1_EXISTS" != false ]; }; then
-              echo "::error::the upgrade tier did not test the staged base $STAGED"; exit 1
-            fi
-            digest=$STAGED
-          else
-            # Unchanged base: resolve current :latest ONCE, then use only its
-            # digest. The workflow concurrency group prevents another publish.
-            digest=$(skopeo inspect --retry-times 3 --format '{{.Digest}}' "docker://$repo:latest")
-          fi
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          base="$repo@$digest"
-          echo "machine base: $base"
-          if bash .github/machine-base.sh registry "$base" "$BASE_CHANGED" "$RUNNER_TEMP/published-machines" "$repo" > "$RUNNER_TEMP/base-info"; then
-            cat "$RUNNER_TEMP/base-info" >> "$GITHUB_OUTPUT"
-          else
-            rc=$?
-            # Only the deliberate unlabelled/unchanged/unpublished case is
-            # green. Probe, metadata, registry and newly built base errors fail.
-            if [ "$rc" != 10 ]; then exit "$rc"; fi
-            exit 0
-          fi
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-
-      - name: Plan changed machine layers without pulling the base
-        id: plan
-        if: steps.base.outputs.base != ''
-        env:
-          BASE_ID: ${{ steps.base.outputs.base_id }}
-          BASE_CHANGED: ${{ needs.build.outputs.changed }}
           FORCE_TEST: ${{ inputs.test == true }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          : > "$RUNNER_TEMP/pending-machines"
-          while IFS= read -r machine; do
-            reference="$IMAGE_REPO:$machine"
-            previous=$(bash .github/publish-head.sh digest "$reference")
-            if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
-            cargo xtask changed "$reference" --machine "$machine" --inputs-only --base-id "$BASE_ID" > "$RUNNER_TEMP/machine-inputs"
-            cat "$RUNNER_TEMP/machine-inputs"
-            if [ "$BASE_CHANGED" != true ] && [ "$FORCE_TEST" != true ] &&
-               grep -qx 'inputs_changed=false' "$RUNNER_TEMP/machine-inputs" &&
-               grep -qx 'base_changed=false' "$RUNNER_TEMP/machine-inputs"; then
-              echo "$machine: published base and machine inputs unchanged; skipping without pulling the base"
-              printf -- '- %s: skipped before build, inputs/base unchanged at %s\n' "$machine" "$previous" >> "$GITHUB_STEP_SUMMARY"
-              continue
-            fi
-            printf '%s\t%s\n' "$machine" "$previous" >> "$RUNNER_TEMP/pending-machines"
-          done < "$RUNNER_TEMP/published-machines"
-          if [ -s "$RUNNER_TEMP/pending-machines" ]; then echo 'build=true' >> "$GITHUB_OUTPUT"; fi
+          export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+          bash .github/plan-machines.sh
 
       - name: apt's packages from the cache
         if: steps.plan.outputs.build == 'true'
@@ -566,49 +498,9 @@ jobs:
         id: tested
         if: steps.plan.outputs.build == 'true'
         env:
-          BASE: ${{ steps.base.outputs.base }}
-          BASE_ID: ${{ steps.base.outputs.base_id }}
           FORCE_TEST: ${{ inputs.test == true }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          : > "$RUNNER_TEMP/tested-machines"
-          podman pull --quiet "$BASE"
-          bash .github/machine-base.sh files "$BASE" "$BASE_ID"
-          podman run --rm -i --network=none --entrypoint python3 "$BASE" -I -S - < .github/check-filecaps.py
-          export ILEX_UPGRADE_FROM="$BASE"
-          nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
-          while IFS=$'\t' read -r machine previous; do
-            # info validated the basename, the manifest's equal name and its
-            # publish boolean before printing ANY names. No eval/source, and
-            # no machine name is interpolated into sg's shell command.
-            image=$(cargo xtask build --machine "$machine" --on "$BASE")
-            reference="$IMAGE_REPO:$machine"
-            if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
-            cargo xtask changed "$reference" --machine "$machine" --image "$image" > "$RUNNER_TEMP/machine-change"
-            cat "$RUNNER_TEMP/machine-change"
-            if grep -qx 'changed=false' "$RUNNER_TEMP/machine-change" && [ "$FORCE_TEST" != true ]; then
-              echo "$machine: image unchanged; skipping"
-              printf -- '- %s: skipped publication, full fingerprint unchanged at %s\n' "$machine" "$previous" >> "$GITHUB_STEP_SUMMARY"
-              continue
-            fi
-            # All image mutation happens BEFORE tests and before signing keys
-            # are exposed. Test the ID, then publication must use that same ID.
-            cargo xtask prepare-publish "$image" --machine "$machine"
-            image_id=$(podman image inspect --format '{{.Id}}' "$image")
-            podman run --rm -i --network=none --entrypoint python3 "$image_id" -I -S - < .github/check-filecaps.py
-            .github/vm-prep.sh wait vm-stack
-            export ILEX_IMAGE="sha256:$image_id"
-            sg libvirt -c 'cargo xtask test ephemeral::'
-            # Forced tests do not force an unchanged image to be republished.
-            publish=false
-            if grep -qx 'changed=true' "$RUNNER_TEMP/machine-change"; then publish=true; fi
-            printf '%s\t%s\t%s\t%s\t%s\n' "$machine" "$image" "$image_id" "$previous" "$publish" >> "$RUNNER_TEMP/tested-machines"
-            outcome='pending main-only publication'
-            if [ "$publish" = false ]; then outcome='skipped publication, fingerprint unchanged'; fi
-            printf -- '- %s: tests passed on %s, planned tag %s; %s\n' \
-              "$machine" "$image_id" "$previous" "$outcome" >> "$GITHUB_STEP_SUMMARY"
-          done < "$RUNNER_TEMP/pending-machines"
-          if grep -q $'\ttrue$' "$RUNNER_TEMP/tested-machines"; then echo 'changed=true' >> "$GITHUB_OUTPUT"; fi
+        run: bash .github/test-machines.sh
 
       - name: Build publisher without signing credentials
         if: steps.tested.outputs.changed == 'true'
@@ -628,7 +520,6 @@ jobs:
           success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true' &&
           (needs.publish.outputs.published == 'true' || needs.build.outputs.changed == 'false')
         env:
-          BASE: ${{ steps.base.outputs.base }}
           GH_TOKEN: ${{ github.token }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
@@ -636,7 +527,7 @@ jobs:
         run: bash .github/publish-machines.sh
 
   # Only in a run started with `v1_disk` (the publish job starts one after each
-  # publish): the published :latest installed to a disk exactly the way the
+  # publish): the published :generic.gnome installed to a disk exactly the way the
   # upgrade tier installs its v1, and kept in the Actions cache under its
   # digest, so the next run's upgrade tier restores it instead of spending ~14
   # minutes installing v1. One disk (~5 GB) at a time: older ones are deleted.
@@ -654,12 +545,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Which :latest
+      - name: Which installer composition
         id: v1
         run: |
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
-          digest=$(skopeo inspect --retry-times 3 --format '{{.Digest}}' "docker://$repo:latest")
+          tag=$(cargo xtask info --installer)
+          bash .github/publication-tag.sh "$tag"
+          digest=$(bash .github/publish-head.sh digest "$repo:$tag")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "v1: $repo@$digest"
           echo "ILEX_UPGRADE_FROM=$repo@$digest" >> "$GITHUB_ENV"
           echo "key=v1-disk-$BCVK_VERSION-${digest#sha256:}" >> "$GITHUB_OUTPUT"
@@ -748,7 +642,9 @@ jobs:
   # is released. It runs next to the image jobs; nothing waits for it.
   iso:
     needs: installer-due
-    if: inputs.iso || needs.installer-due.outputs.iso_due == 'true'
+    if: >-
+      !inputs.v1_disk && (inputs.iso ||
+      (github.ref == 'refs/heads/main' && needs.installer-due.outputs.iso_due == 'true'))
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60
     permissions:
@@ -833,10 +729,21 @@ jobs:
 
       # Main only. Each asset has to be under 2 GiB (`xtask iso` checks).
       - name: Publish the release
-        if: github.ref == 'refs/heads/main'
+        if: >-
+          success() && github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
+          contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          tag=$(cargo xtask info --installer)
+          bash .github/publication-tag.sh "$tag"
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          digest=$(bash .github/publish-head.sh digest "$repo:$tag")
+          if [ "$digest" = - ]; then
+            echo "::warning::Not releasing installer: $repo:$tag does not exist yet; the next full run retries"
+            exit 0
+          fi
           published=$(bash .github/installer-revision.sh "$GITHUB_REPOSITORY")
           if bash .github/publish-head.sh revision "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$published"; then
             : # Forward installer release; the tag records this run's commit.

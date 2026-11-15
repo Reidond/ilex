@@ -2,7 +2,7 @@
 //!
 //! A network installer: `image-builder` turns `installer/Containerfile` (a
 //! fedora-bootc image with Anaconda in it) into the ISO, and the kickstart
-//! defaults make Anaconda install the newest `ghcr.io/<owner>/ilex:latest`
+//! defaults make Anaconda install the newest installer composition from `image.toml`
 //! straight from the registry (`--source-imgref registry:…`) and track it
 //! afterwards (`--target-imgref`). The ISO carries no ilex image, so it stays
 //! current by itself and fits GitHub's 2 GiB limit per release asset.
@@ -21,17 +21,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use ilex_devkit::{Workspace, cmd};
+use ilex_devkit::{Workspace, cmd, config};
 use sha2::{Digest, Sha256};
 
 use crate::registry;
 
-/// What the installer installs from when nothing else is asked for (with the
-/// transport pykickstart requires) and what installed machines update from.
-/// The installer Containerfile's `SOURCE_IMGREF` and `TARGET_IMGREF` defaults
-/// match.
-pub const DEFAULT_SOURCE: &str = "registry:ghcr.io/reidond/ilex:latest";
-pub const DEFAULT_TARGET: &str = "ghcr.io/reidond/ilex:latest";
+/// Resolve the network installer's current composition from the manifest.
+pub fn default_refs(ws: &Workspace) -> Result<(String, String)> {
+    let target = format!("ghcr.io/reidond/ilex:{}", config::installer(&ws.root)?);
+    Ok((format!("registry:{target}"), target))
+}
 /// Basename of the ISO that is built and released.
 const ISO_NAME: &str = "ilex-installer";
 /// Repo paths (relative to the checkout) that make one ISO differ from the
@@ -49,11 +48,11 @@ pub struct Args {
     #[arg(long)]
     pub output_dir: Option<PathBuf>,
     /// The image the installer installs, with its transport
-    #[arg(long, default_value = DEFAULT_SOURCE)]
-    pub source_imgref: String,
+    #[arg(long, alias = "source")]
+    pub source_imgref: Option<String>,
     /// The image the installed machine updates from, without a transport
-    #[arg(long, default_value = DEFAULT_TARGET)]
-    pub target_imgref: String,
+    #[arg(long, alias = "target")]
+    pub target_imgref: Option<String>,
     /// Don't build: say whether a new ISO is due, from the latest
     /// `installer-*` release of `--repository`
     #[arg(long)]
@@ -67,15 +66,18 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    let (source, target) = default_refs(ws)?;
+    let source = args.source_imgref.as_deref().unwrap_or(&source);
+    let target = args.target_imgref.as_deref().unwrap_or(&target);
     if args.due {
-        return due(ws, &args);
+        return due(ws, &args, source, target);
     }
     cmd::require("podman")?;
     let iso = build(
         ws,
         &Build {
-            source: &args.source_imgref,
-            target: &args.target_imgref,
+            source,
+            target,
             output_dir: args.output_dir.as_deref(),
         },
     )?;
@@ -135,7 +137,11 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
     )?;
     fs::write(
         out_dir.join("release-notes.md"),
-        release_notes(&installer_fingerprint(ws)?, &sha256, spec.target),
+        release_notes(
+            &installer_fingerprint(ws, spec.source, spec.target)?,
+            &sha256,
+            spec.target,
+        ),
     )?;
     eprintln!(
         "built {} ({:.2} GiB, sha256 {sha256})",
@@ -169,8 +175,12 @@ fn release_notes(fingerprint: &str, sha256: &str, target: &str) -> String {
 }
 
 /// What the installer is built from: a hash of [`INSTALLER_INPUTS`].
-fn installer_fingerprint(ws: &Workspace) -> Result<String> {
+fn installer_fingerprint(ws: &Workspace, source: &str, target: &str) -> Result<String> {
     let mut hash = Sha256::new();
+    for reference in [source, target] {
+        hash.update(reference.as_bytes());
+        hash.update(b"\0");
+    }
     for input in INSTALLER_INPUTS {
         hash.update(input.as_bytes());
         hash_tree(&ws.root, &ws.root.join(input), &mut hash)?;
@@ -201,7 +211,7 @@ fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> Result<()> {
 
 /// `--due`: is a new ISO worth building? Prints the answer and the reason and
 /// writes `iso_due=true|false`.
-fn due(ws: &Workspace, args: &Args) -> Result<()> {
+fn due(ws: &Workspace, args: &Args, source: &str, target: &str) -> Result<()> {
     let repository = args
         .repository
         .clone()
@@ -212,12 +222,18 @@ fn due(ws: &Workspace, args: &Args) -> Result<()> {
         })
         .context("which GitHub repository? pass --repository or set GITHUB_REPOSITORY")?;
     cmd::require("gh")?;
-    let (is_due, reason) = iso_due(ws, &repository, args.max_age_days)?;
+    let (is_due, reason) = iso_due(ws, &repository, args.max_age_days, source, target)?;
     eprintln!("installer ISO due: {is_due} ({reason})");
     registry::github_output("iso_due", &is_due.to_string())
 }
 
-fn iso_due(ws: &Workspace, repository: &str, max_age_days: u64) -> Result<(bool, String)> {
+fn iso_due(
+    ws: &Workspace,
+    repository: &str,
+    max_age_days: u64,
+    source: &str,
+    target: &str,
+) -> Result<(bool, String)> {
     let releases = registry::capture(
         Command::new("gh").args(["api", &format!("repos/{repository}/releases?per_page=30")]),
     )?;
@@ -240,7 +256,7 @@ fn iso_due(ws: &Workspace, repository: &str, max_age_days: u64) -> Result<(bool,
     };
     let tag = latest["tag_name"].as_str().unwrap_or("?");
 
-    let current = installer_fingerprint(ws)?;
+    let current = installer_fingerprint(ws, source, target)?;
     let published = latest["body"]
         .as_str()
         .unwrap_or("")
@@ -276,9 +292,6 @@ fn iso_due(ws: &Workspace, repository: &str, max_age_days: u64) -> Result<(bool,
 /// repository has 87, whose only installer type is the unattended,
 /// disk-wiping `bootc-installer`.
 const MIN_IMAGE_BUILDER: u32 = 89;
-/// Where a too-old or missing host image-builder is replaced by one in a
-/// container (Fedora 45 `updates-testing`).
-const IMAGE_BUILDER_IMAGE: &str = "localhost/ilex-image-builder:latest";
 
 /// Major version of the image-builder on `PATH`, if there is one.
 fn host_image_builder() -> Option<u32> {
@@ -322,13 +335,14 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
         host_image_builder().map_or("is not".to_string(), |v| format!("{v} is too old:")),
     );
 
-    // The image-builder container.
+    // The helper is checkout-owned too: concurrent ISO builds must not retag it.
+    let helper = format!("localhost/ilex-image-builder:{}", ws.slug);
     let context = ws.root.join("installer").join("image-builder");
     cmd::run(
         Command::new("podman")
             .args(["build", "--network=host", "--file"])
             .arg(context.join("Containerfile"))
-            .args(["--tag", IMAGE_BUILDER_IMAGE])
+            .args(["--tag", &helper])
             .arg(&context),
     )?;
 
@@ -352,7 +366,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
         .arg("--volume")
         .arg(format!("{}:/out", out_dir.display()))
         .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"])
-        .arg(IMAGE_BUILDER_IMAGE)
+        .arg(&helper)
         .args([
             "sh",
             "-c",

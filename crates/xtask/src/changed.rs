@@ -1,5 +1,5 @@
 //! `cargo xtask changed <ref>`: has the image's content changed since the
-//! published `<ref>` (usually `ghcr.io/<owner>/ilex:latest`)?
+//! published `<ref>` (usually `ghcr.io/<owner>/ilex:generic.gnome`)?
 //!
 //! Compares the candidate's fingerprint with the `ilex.fingerprint` label on
 //! the published image. The candidate can be the image as built (the
@@ -20,7 +20,7 @@ use crate::registry::{self, Auth, FINGERPRINT_LABEL};
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
-    /// Published image to compare against, e.g. `ghcr.io/reidond/ilex:latest`
+    /// Published image to compare against, e.g. `ghcr.io/reidond/ilex:generic.gnome`
     pub reference: String,
     /// Candidate image: tag or reference (defaults to this checkout's image)
     #[arg(long)]
@@ -114,7 +114,7 @@ enum Published {
     Fingerprint(String),
 }
 
-/// `ghcr.io/o/ilex:latest` → `ghcr.io/o/ilex`
+/// `ghcr.io/o/ilex:generic.gnome` → `ghcr.io/o/ilex`
 fn repo_of(reference: &str) -> &str {
     let name = reference.split('@').next().unwrap_or(reference);
     match name.rsplit_once(':') {

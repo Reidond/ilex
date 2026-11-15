@@ -57,9 +57,6 @@ enum Cmd {
     Tool(tool::Args),
     /// Show this checkout's slug, image, VM names and state directories
     Info {
-        /// Compatibility list: published machines with the default shell list
-        #[arg(long, conflicts_with_all = ["publications", "installer"])]
-        published_machines: bool,
         /// Validated TSV: tag, kind, parent (- for roots), machine, shells (comma-separated, - for none)
         #[arg(long, conflicts_with = "installer")]
         publications: bool,
@@ -103,15 +100,6 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::PreparePublish(args) => prepare_publish::run(&ws, args),
         Cmd::Iso(args) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
-        Cmd::Info {
-            published_machines: true,
-            ..
-        } => {
-            for name in config::published_machines(&ws.root)? {
-                println!("{name}");
-            }
-            Ok(())
-        }
         Cmd::Info {
             publications: true, ..
         } => {

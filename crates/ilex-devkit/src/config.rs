@@ -238,15 +238,6 @@ pub fn machine_manifest(root: &Path, name: &str) -> Result<toml::Table> {
     Ok(table)
 }
 
-pub fn published_machines(root: &Path) -> Result<Vec<String>> {
-    let defaults = Selection::read(root)?;
-    Ok(publications(root)?
-        .into_iter()
-        .filter(|row| row.kind == "layer" && row.shells == defaults.shells)
-        .map(|row| row.machine)
-        .collect())
-}
-
 /// One image CI can publish. Shell order also determines the default shell.
 #[derive(Clone, Debug)]
 pub struct Publication {
