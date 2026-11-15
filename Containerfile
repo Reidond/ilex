@@ -6,11 +6,9 @@ FROM quay.io/fedora/fedora-bootc:45 AS compose
 ARG ILEX_SHELLS=""
 ARG ILEX_DEFAULT_SHELL=""
 # COPY inputs: buildah does not reliably invalidate RUN bind mounts.
-COPY image.toml packages.toml /ctx/
-COPY build/ /ctx/build/
-COPY shells/ /ctx/shells/
-COPY design-systems/ /ctx/design-systems/
-COPY machines/generic/ /ctx/machines/generic/
+# One linked layer avoids committing the large bootc base per input directory;
+# --parents keeps the manifest layout intact. Both work with buildah 1.42.
+COPY --link --parents image.toml packages.toml build/ shells/ design-systems/ machines/generic/ /ctx/
 RUN python3 /ctx/build/compose.py image --context /ctx --out /out \
         --shells "${ILEX_SHELLS}" --default-shell "${ILEX_DEFAULT_SHELL}"
 
