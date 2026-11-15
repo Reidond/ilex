@@ -195,6 +195,8 @@ The machine build squashes its new build steps into one layer, preserving all
 base layers. `ilex.machine-key` covers the base image ID and every path, type,
 mode, link target and byte of the machine directory and shared build helpers;
 an unchanged key skips the build, preserving its image ID and installed disk.
+Machine fingerprints include that key too, so an inherited machine overlay
+change still counts when `--on` layers one machine on another without changing RPMs.
 
 The local opt-in `config::machine_fixture` tier builds and boots a throwaway
 machine outside the repository with a fresh marker and a kargs file, checking
