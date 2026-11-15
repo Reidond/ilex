@@ -326,4 +326,3 @@ fn require_machine(image: &str, expected: &str) -> Result<()> {
     }
     Ok(())
 }
-

@@ -574,16 +574,16 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          # Main must still point to the exact base these layers were tested
-          # on. No fallback to a different/latest image is allowed.
-          latest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:latest")
-          if [ "$BASE" != "$IMAGE_REPO@$latest" ]; then
-            echo "::error::machine tested base $BASE differs from current :latest $IMAGE_REPO@$latest"
-            exit 1
-          fi
           while IFS=$'\t' read -r machine image image_id; do
             main_head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
             if bash .github/publish-head.sh "$GITHUB_SHA" "$main_head"; then
+              # Check main first: an overtaken run is green even if its old
+              # base differs. A current run must still have this exact base.
+              latest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:latest")
+              if [ "$BASE" != "$IMAGE_REPO@$latest" ]; then
+                echo "::error::machine tested base $BASE differs from current :latest $IMAGE_REPO@$latest"
+                exit 1
+              fi
               cargo xtask publish "$image" --machine "$machine" --tested-image-id "$image_id"
             else
               rc=$?
