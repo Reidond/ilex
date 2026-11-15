@@ -79,6 +79,9 @@ impl Selection {
             machine: get("ilex.machine")?.clone(),
         };
         validate_name(&selected.machine)?;
+        if selected.shells.iter().any(|name| name == "none") {
+            bail!("ilex.shells: `none` is a selection, not a shell name");
+        }
         for (key, default, names) in [
             (
                 "ilex.default-shell",
@@ -139,11 +142,10 @@ pub fn available(root: &Path, directory: &str) -> Result<Vec<String>> {
 
 pub fn validate_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
-    if name == "none"
-        || !chars.next().is_some_and(|c| c.is_ascii_lowercase())
+    if !chars.next().is_some_and(|c| c.is_ascii_lowercase())
         || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
-        bail!("invalid configuration name `{name}`: expected [a-z][a-z0-9-]*, except `none`");
+        bail!("invalid configuration name `{name}`: expected [a-z][a-z0-9-]*");
     }
     Ok(())
 }

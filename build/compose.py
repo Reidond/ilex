@@ -49,8 +49,8 @@ def strings(path, key, value):
 
 def name(path, key, value):
     string(path, key, value)
-    if not re.fullmatch(r"[a-z][a-z0-9-]*", value) or value == "none":
-        fail(path, key, "must match [a-z][a-z0-9-]* and must not be 'none'")
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", value):
+        fail(path, key, "must match [a-z][a-z0-9-]*")
     return value
 
 
@@ -92,6 +92,8 @@ def default(path, key, value, choices):
 def shell(path, is_default):
     data = table(path, "", load(path), {"name", "description", "packages", "session", "greeter", "theme"})
     identity(path, data)
+    if data["name"] == "none":
+        fail(path, "name", "must not be 'none' (reserved for shell selection)")
     packages(path, "packages", data.setdefault("packages", {}))
     session = table(path, "session", data.get("session"), {"desktop", "compositor"})
     for key in ("desktop", "compositor"):
