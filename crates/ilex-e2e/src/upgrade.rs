@@ -51,10 +51,10 @@ const ETC_EDITED: &str = "/etc/motd";
 const ETC_EDIT: &str = "ilex-e2e local edit";
 
 const REBOOT_TIMEOUT: Duration = Duration::from_secs(600);
-// bootc installs an explicit root=UUID and OSTree bind-mounts /sysroot/boot.
-// GPT discovery must not add an ESP automount over that bind mount in this
-// three-partition bcvk fixture. This is not a shipped image kernel argument.
-const FIXTURE_KARG: &str = "systemd.gpt_auto=0";
+// The one immutable pre-fix image used by CI's first-publication fallback.
+// Its own finalizer runs before v2 can supply the shipped protection.
+const LEGACY_V1_DIGEST: &str =
+    "sha256:4499cbcfac1f862b1db805b9f67e03e8d948a9a09c69db0bdbd574de21aefe96";
 
 pub fn trials() -> Vec<Trial> {
     const NAME: &str = "upgrade::upgrade_and_rollback";
@@ -123,27 +123,29 @@ fn upgrade_and_rollback() -> Result<()> {
 
     step(&format!("installing v1 ({v1_source}) as {installed}"));
     let name = ws.vm_name("upgrade");
-    let opts = LibvirtOpts {
-        extra_args: vec!["--karg".into(), FIXTURE_KARG.into()],
-        ..Default::default()
-    };
+    let opts = LibvirtOpts::default();
     let vm = LibvirtVm::boot(&name, &installed, &opts)?;
     step(&format!("{name} is up (VM slot {})", vm.slot_index()));
-    let cmdline = vm
-        .ssh("cat /proc/cmdline")?
-        .ok("reading fixture kernel arguments")?;
-    ensure(
-        cmdline
-            .stdout
-            .split_ascii_whitespace()
-            .any(|arg| arg == FIXTURE_KARG),
-        || {
-            format!(
-                "upgrade fixture is missing {FIXTURE_KARG}: {}",
-                cmdline.out()
-            )
-        },
-    )?;
+    boot_diagnostics(&vm, "v1 before boot protection check", false);
+    let v1 = status(&vm)?;
+    ensure(v1.staged.is_none(), || {
+        format!("v1 has a staged deployment: {:?}", v1.staged)
+    })?;
+    if upgrade_from().is_some() && v1.booted.digest == LEGACY_V1_DIGEST {
+        // Compatibility only for this pre-fix published deployment. Repair
+        // its running mount before staging; /run vanishes at reboot, so v2
+        // must pass the shipped-mask assertion without this assistance.
+        step("legacy v1 compatibility: runtime-mask boot.automount and restore boot.mount");
+        // Unmount the covering bind before stopping autofs; otherwise the
+        // dead autofs mount can remain pinned underneath it (fd=-1).
+        vm.ssh("systemctl stop boot.mount boot.automount && systemctl mask --runtime boot.automount && systemctl start boot.mount")?
+            .ok("protecting legacy v1's finalization")?;
+        boot_diagnostics(&vm, "legacy v1 after runtime masking", false);
+        vm.ssh("test \"$(systemctl show boot.mount -p ActiveState --value)\" = active && awk '$4 == \"/boot\" && $5 == \"/boot\" { found=1 } END { exit !found }' /proc/1/mountinfo && ! grep -E ' /boot .* - autofs ' /proc/1/mountinfo")?
+            .ok("checking legacy v1's repaired boot mount")?;
+    } else {
+        check_boot_mount(&vm, "v1")?;
+    }
     if prepare_only() {
         step("v1 is installed and its base disk cached (ILEX_UPGRADE_PREPARE); stopping here");
         return Ok(());
@@ -155,16 +157,12 @@ fn upgrade_and_rollback() -> Result<()> {
         .ok("masking the update timer")?;
 
     // --- v1 ---------------------------------------------------------------
-    let v1 = status(&vm)?;
     step(&format!(
         "v1 booted: {} {}",
         v1.booted.image, v1.booted.digest
     ));
     ensure(!path_exists(&vm, MARKER_USR)?, || {
         format!("{MARKER_USR} already exists on v1")
-    })?;
-    ensure(v1.staged.is_none(), || {
-        format!("v1 has a staged deployment: {:?}", v1.staged)
     })?;
     boot_diagnostics(&vm, "v1 before building v2", false);
     vm.ssh(&format!(
@@ -217,9 +215,11 @@ fn upgrade_and_rollback() -> Result<()> {
         )
     })?;
     check_v2(&vm, &token)?;
+    check_boot_mount(&vm, "v2")?;
 
     // --- signature enforcement, on v2 -----------------------------------
     check_sigpolicy(&vm, &installed)?;
+    check_boot_mount(&vm, "v2 after policy reboot")?;
 
     // --- rollback ---------------------------------------------------------
     step("bootc rollback");
@@ -231,6 +231,9 @@ fn upgrade_and_rollback() -> Result<()> {
     ensure(back.booted == v1.booted, || {
         format!("booted {:?}, expected v1 {:?}", back.booted, v1.booted)
     })?;
+    if v1.booted.digest != LEGACY_V1_DIGEST {
+        check_boot_mount(&vm, "v1 after rollback")?;
+    }
     ensure(!path_exists(&vm, MARKER_USR)?, || {
         format!("{MARKER_USR} still exists after rollback")
     })?;
@@ -241,6 +244,18 @@ fn upgrade_and_rollback() -> Result<()> {
         format!("/var file changed across rollback: {}", var.out())
     })?;
     step("upgrade and rollback verified");
+    Ok(())
+}
+
+fn check_boot_mount(vm: &LibvirtVm, phase: &str) -> Result<()> {
+    let result = vm
+        .ssh(common::BOOT_MOUNT_CHECK)
+        .and_then(|out| out.ok("checking shipped boot mount protection"));
+    if result.is_err() {
+        boot_diagnostics(vm, phase, true);
+    }
+    let output = result?;
+    step(&format!("{phase}: {}", output.out()));
     Ok(())
 }
 

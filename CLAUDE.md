@@ -87,20 +87,40 @@ cargo xtask info               # resource identity, selection and available conf
   most of the tier's time. `ILEX_UPGRADE_PREPARE=1` only installs and boots v1
   (filling bcvk's base-disk cache) and stops; CI runs that ahead of time and
   caches the disk (see CI publishing).
-- The upgrade VM fixture passes `--karg systemd.gpt_auto=0` to bcvk's install.
-  Its root is already selected by UUID and OSTree generates a bind mount from
-  `/sysroot/boot`. With this three-partition layout and empty fstab, GPT discovery
-  also generates an ESP `boot.automount` over that bind mount. The conflicting
-  autofs mount can make v1's shutdown finalization fail with
-  `Remounting /boot read-write: Invalid argument`, leaving v1 booted. Disabling
-  discovery only in this VM fixture preserves the real upgrade, boot, signature
-  policy and rollback assertions; shipped image kernel arguments are unaffected.
-  bcvk includes install kargs in its disk hash. CI additionally uses the
-  `v1-disk-gpt-auto-off-<bcvk>-<digest>` cache profile, through
-  `.github/v1-disk-key.sh`, for both restore and preparation, so it does not
-  restore the previous fixture's disks. Upgrade logs retain the guest command
-  line, `/boot` mount and automount state, plus the prior finalization journal
-  when the booted digest is wrong.
+- Every image ships an empty `/usr/lib/systemd/system/boot.automount` (systemd's
+  supported zero-length unit mask, portable across Windows and Linux checkouts).
+  GPT discovery otherwise creates an ESP/XBOOTLDR automount over OSTree's
+  `/sysroot/boot` bind on ordinary `bootc install to-disk` installs with empty
+  fstab, including bcvk. Its teardown can precede staged finalization and leave
+  the old deployment booted (`Remounting /boot read-write: Invalid argument`).
+  The vendor mask outranks GPT's `generator.late` unit; OSTree's `boot.mount`
+  and Anaconda's explicit fstab mounts still work. Unlike `systemd.gpt_auto=0`
+  or masking the whole generator, it preserves root, swap, home, srv and `/efi`
+  discovery. A unit ordering drop-in does not remove the conflicting autofs
+  mount. Upstream: bootc [#2402](https://github.com/bootc-dev/bootc/issues/2402)
+  and [#2622](https://github.com/bootc-dev/bootc/issues/2622), OSTree's merged
+  [#3690](https://github.com/ostreedev/ostree/pull/3690) (2026-11-12); Fedora's
+  tested 2026.4 build still reproduces it. Reassess the mask after that fix is
+  packaged and validated; do not backport its filesystem/mount logic locally.
+- No test fixture adds a GPT-disabling kernel argument. `disk::` and
+  `upgrade::` require the shipped vendor mask, an active real `/boot`, no
+  autofs at `/boot`, no runtime mask and no global GPT opt-out. Upgrade checks
+  again on v2 after its policy reboot and on a protected v1 after rollback.
+  Only the explicitly selected, immutable legacy v1
+  `sha256:4499cbcfac1f862b1db805b9f67e03e8d948a9a09c69db0bdbd574de21aefe96`
+  has both boot units stopped, then receives a runtime `boot.automount` mask
+  and a started `boot.mount` before staging, because its own old finalizer
+  runs before v2 can supply the fix. Stopping the bind first is necessary:
+  masking an active automount alone can leave dead autofs pinned underneath.
+  This is compatibility for an old shipped defect, not protection supplied to
+  the image under test: `/run` disappears at reboot and v2 must pass the normal
+  assertions. A different unprotected v1 fails rather than silently receiving
+  a repair. Legacy rollback still checks the exact original digest. CI's
+  `v1-disk-boot-mask-<bcvk>-<digest>` profile uses the shared
+  `.github/v1-disk-key.sh` and never restores the old kernel-argument profile.
+  Logs retain command line and mount state, plus prior finalization journal
+  on failure. The defect predates the stack: fix it with the common shipped
+  image, rather than a phase-0-only fixture workaround.
 - `iso::` is opt-in and slow (the ISO takes ~8 minutes to build once the
   installer image is cached, the install and boot ~8 more), so it only exists
   when a filter names it: `cargo xtask test iso::` builds the installer ISO
@@ -801,8 +821,8 @@ Three paths start together on separate runners:
   only explicit absence permits legacy `latest` as the first-run fallback.
   Registry/authentication errors are fatal. It records `own` (the installer
   tag's digest or `-`), v1's digest and `exists`. Its cached disk key is
-  `v1-disk-gpt-auto-off-<bcvk>-<v1 digest>`, including the fixture's install
-  profile. The earlier disk profile is not restored. It installs
+  `v1-disk-boot-mask-<bcvk>-<v1 digest>`, with plain image install options.
+  The earlier kernel-argument profile is not restored. It installs
   v1 itself on a cache miss, in the background with the VM stack. It waits for
   build's "Stage the candidate", pulls `candidate.<installer>` by digest, and
   runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`

@@ -12,6 +12,23 @@ use ilex_devkit::{
 };
 use libtest_mimic::{Failed, Trial};
 
+/// Installed guests must use the image's narrow vendor mask, not a fixture
+/// kernel argument or runtime mask. Read mountinfo without triggering autofs.
+pub const BOOT_MOUNT_CHECK: &str = r#"set -eu
+test -f /usr/lib/systemd/system/boot.automount
+test ! -s /usr/lib/systemd/system/boot.automount
+test ! -e /run/systemd/system/boot.automount
+test ! -L /run/systemd/system/boot.automount
+test -x /usr/lib/systemd/system-generators/systemd-gpt-auto-generator
+test "$(systemctl show boot.automount -p LoadState --value)" = masked
+test "$(systemctl show boot.mount -p ActiveState --value)" = active
+awk '$5 == "/boot" { count++; for (i=6; i<NF; i++) if ($i == "-" && $(i+1) == "autofs") bad=1 } END { exit (!count || bad) }' /proc/1/mountinfo
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in systemd.gpt_auto=0|systemd.gpt_auto=no|systemd.gpt_auto=off|systemd.gpt_auto=false|rd.systemd.gpt_auto=0|rd.systemd.gpt_auto=no|rd.systemd.gpt_auto=off|rd.systemd.gpt_auto=false) exit 1;; esac
+done
+echo 'shipped boot.automount mask verified; /boot mounted without autofs; GPT discovery enabled'
+"#;
+
 /// The checkout under test.
 pub fn workspace() -> Result<Workspace> {
     Workspace::discover()

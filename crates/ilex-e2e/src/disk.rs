@@ -29,11 +29,22 @@ fn run() -> Result<()> {
     let mut report = Report::default();
     report.check("system reaches `running`", system_running(&vm));
     report.check("no failed units", no_failed_units(&vm));
+    report.check("shipped boot mask prevents an autofs /boot", boot_mount(&vm));
     report.check("kargs.d arguments are on the kernel command line", kargs(&vm));
     report.check("root filesystem matches the install config", root_filesystem(&vm));
     report.check("first-boot units succeeded", first_boot_units(&vm));
     report.check("bootc booted from the installed image", bootc_status(&vm));
     report.finish()
+}
+
+fn boot_mount(vm: &Vm) -> Result<()> {
+    let result = vm.ssh_ok(common::BOOT_MOUNT_CHECK);
+    if result.is_err() {
+        let diagnostics = vm.ssh_ok("cat /proc/cmdline; cat /etc/fstab; grep ' /boot ' /proc/1/mountinfo; systemctl show boot.mount boot.automount -p Id -p LoadState -p ActiveState -p FragmentPath; journalctl -b -u boot.mount -u boot.automount --no-pager");
+        eprintln!("installed boot mount diagnostics: {diagnostics:?}");
+    }
+    println!("     {}", result?);
+    Ok(())
 }
 
 fn system_running(vm: &Vm) -> Result<()> {
