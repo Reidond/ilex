@@ -266,6 +266,38 @@ self-check validates the configuration, sessions, greeter, target, tokens and
 machine packages. `ephemeral::configuration` compares it with the image labels
 and checkout manifests, including overlay and token hashes.
 
+### This PC: `gaming`
+
+| Part | Hardware |
+| --- | --- |
+| Board | MSI MEG X570 UNIFY (MS-7C35) |
+| CPU | AMD Ryzen 9 5900X, 12 cores, 24 threads |
+| Memory | 2 x 32 GiB DDR4-3200 (64 GiB) |
+| GPU | AMD Radeon RX 9070 XT, PCI `1002:7550` |
+| Disk | Corsair MP400, 2 TB NVMe |
+| Display | AOC U27G3X, 3840x2160 at 160 Hz, EDID size 60 x 34 cm (27.2 inches, 162 DPI) |
+
+`machines/gaming/machine.toml` adds `steam-devices` (controller udev rules,
+including for Flatpak Steam), `gamemode` (games request CPU and I/O priority),
+`gamescope` (Valve's micro-compositor for resolution, upscaling and HDR) and
+`mangohud` (frame-time overlay and gamescope's `mangoapp` overlay). Steam itself
+is a Flatpak the person installs from Flathub; it is not in the image.
+
+The Radeon needs no extra driver package: the common image already contains
+the kernel's amdgpu driver, `amd-gpu-firmware` and Mesa's radeonsi and RADV
+drivers. This configuration has no overlay or kernel arguments. GNOME chooses
+150% scaling for this display unless the person has saved another choice.
+
+After PR 7 (the last PR of phase 0) enables CI publishing and CI has published
+the signed `:gaming` image, install ilex with the ISO, then run:
+
+```sh
+sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:gaming
+```
+
+Restart to use it. This tag is not published by adding the manifest alone;
+the switch command becomes usable after that final publishing PR.
+
 ## Build sharing: kache
 
 Image builds compile through [kache](https://github.com/kunobi-ninja/kache), a

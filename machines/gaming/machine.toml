@@ -1,0 +1,18 @@
+# This PC: MSI MEG X570 UNIFY, Ryzen 9 5900X (12 cores, 24 threads), 64 GiB,
+# Radeon RX 9070 XT (PCI 1002:7550), 2 TB NVMe, AOC U27G3X (27 inches,
+# 3840x2160 at 160 Hz; mutter scales it to 150% by itself).
+#
+# The Radeon needs nothing here: the kernel driver, amd-gpu-firmware and Mesa
+# (radeonsi, RADV) are in every ilex image. No kernel argument is needed.
+name = "gaming"
+description = "Desktop PC for games: Radeon graphics, Steam from Flathub"
+# CI publishes ghcr.io/reidond/ilex:gaming.
+publish = true
+
+[packages]
+# Steam itself is a Flatpak the person installs; it is not in the image.
+# steam-devices: udev rules so Steam (also as a Flatpak) can use controllers.
+# gamemode: the daemon games ask for CPU and I/O priority.
+# gamescope: Valve's micro-compositor (fixed resolution, upscaling, HDR).
+# mangohud: frame-time overlay, and gamescope's own overlay (mangoapp).
+install = ["steam-devices", "gamemode", "gamescope", "mangohud"]
