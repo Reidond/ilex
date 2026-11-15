@@ -50,6 +50,7 @@ impl Selection {
             .collect()
     }
 
+    /// Diagnostics can describe a manifest before compose has validated it.
     pub fn summary(&self) -> String {
         format!(
             "shells=[{}] default-shell={} design-systems=[{}] default-design-system={} machine={}",
@@ -58,7 +59,7 @@ impl Selection {
             self.design_systems.join(","),
             self.default_design_system.as_deref().unwrap_or("none"),
             self.machine
-        )
+        ).escape_debug().to_string()
     }
 
     /// Check selection names before invoking podman. Manifest contents remain
