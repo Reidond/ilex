@@ -6,13 +6,16 @@
 # (radeonsi, RADV) are in every ilex image. No kernel argument is needed.
 name = "gaming"
 description = "Desktop PC for games: Radeon graphics, Steam from Flathub"
-# CI publishes ghcr.io/reidond/ilex:gaming.
+# Published as ghcr.io/reidond/ilex:gaming once CI builds machine images.
 publish = true
 
 [packages]
 # Steam itself is a Flatpak the person installs; it is not in the image.
 # steam-devices: udev rules so Steam (also as a Flatpak) can use controllers.
-# gamemode: the daemon games ask for CPU and I/O priority.
-# gamescope: Valve's micro-compositor (fixed resolution, upscaling, HDR).
-# mangohud: frame-time overlay, and gamescope's own overlay (mangoapp).
+# gamemode: while a game requests it, performance governor, split-lock
+# mitigation off where supported, screensaver inhibition, and default
+# best-effort I/O clients tuned to priority 0. Helpers need gamemode membership.
+# gamescope: host compositor to wrap all of Flatpak Steam or native programs.
+# mangohud: host overlay for native programs and gamescope's mangoapp overlay.
+# Per-game use inside Flatpak Steam needs matching VulkanLayer extensions.
 install = ["steam-devices", "gamemode", "gamescope", "mangohud"]

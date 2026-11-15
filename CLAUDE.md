@@ -277,26 +277,64 @@ and checkout manifests, including overlay and token hashes.
 | Disk | Corsair MP400, 2 TB NVMe |
 | Display | AOC U27G3X, 3840x2160 at 160 Hz, EDID size 60 x 34 cm (27.2 inches, 162 DPI) |
 
-`machines/gaming/machine.toml` adds `steam-devices` (controller udev rules,
-including for Flatpak Steam), `gamemode` (games request CPU and I/O priority),
-`gamescope` (Valve's micro-compositor for resolution, upscaling and HDR) and
-`mangohud` (frame-time overlay and gamescope's `mangoapp` overlay). Steam itself
-is a Flatpak the person installs from Flathub; it is not in the image.
+`machines/gaming/machine.toml` adds `steam-devices`, `gamemode`, `gamescope` and
+`mangohud`. Steam itself is a Flatpak the person installs from Flathub; it is
+not in the image. The host's `steam-devices` udev rules give it controller
+access, and Flatpak clients reach the host's GameMode daemon through the
+GameMode portal.
+
+While an opted-in game runs, GameMode requests the performance CPU governor,
+disables split-lock mitigation where supported and inhibits the screensaver.
+Fedora leaves CPU niceness unchanged (`renice=0`). Its `ioprio=0` tunes clients
+at the default best-effort I/O priority 4 to priority 0; it does not disable
+I/O tuning. The governor and split-lock helpers need membership of `gamemode`.
+Add the login user once, then sign out and back in before starting games:
+
+```sh
+sudo usermod -aG gamemode "$USER"
+```
+
+The image supplies the group and packaged polkit rule; membership remains
+per-machine state in `/etc`.
+
+The host's Gamescope and MangoHud serve native programs or wrap the whole
+Flatpak Steam application; they do not supply commands or Vulkan layers inside
+its sandbox. For a fullscreen wrapper on this PC's 4K 160 Hz display, with
+adaptive sync and the host's `mangoapp` overlay:
+
+```sh
+gamescope -f -W 3840 -H 2160 -r 160 --adaptive-sync --mangoapp -- flatpak run com.valvesoftware.Steam
+```
+
+For per-game use inside Flatpak Steam, install the Flathub VulkanLayer
+extensions. Their branch must match Steam's installed runtime, shown by
+`flatpak info --show-runtime com.valvesoftware.Steam` (currently `26.08`):
+
+```sh
+flatpak install flathub \
+  org.freedesktop.Platform.VulkanLayer.gamescope//26.08 \
+  org.freedesktop.Platform.VulkanLayer.MangoHud//26.08
+```
+
+Replace `26.08` if Steam's runtime changes. Steam's wrapper exposes the matching
+extensions' commands, so per-game launch options can use `mangohud %command%`
+or `gamescope -- %command%`. Per-game Gamescope also requires Steam Play
+compatibility tools packaged for Flatpak; see the
+[Gamescope extension's notes](https://github.com/flathub/org.freedesktop.Platform.VulkanLayer.gamescope#notes).
 
 The Radeon needs no extra driver package: the common image already contains
 the kernel's amdgpu driver, `amd-gpu-firmware` and Mesa's radeonsi and RADV
 drivers. This configuration has no overlay or kernel arguments. GNOME chooses
 150% scaling for this display unless the person has saved another choice.
 
-After PR 7 (the last PR of phase 0) enables CI publishing and CI has published
-the signed `:gaming` image, install ilex with the ISO, then run:
+Once CI publishes the signed `:gaming` image (it does not build machine images
+yet), install ilex with the ISO, then run:
 
 ```sh
 sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:gaming
 ```
 
-Restart to use it. This tag is not published by adding the manifest alone;
-the switch command becomes usable after that final publishing PR.
+Restart to use it.
 
 ## Build sharing: kache
 
