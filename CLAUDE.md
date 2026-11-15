@@ -14,8 +14,9 @@ cargo xtask info               # slug, image tag, VM prefix, state dirs, VM slot
 ```
 
 - The slug comes from the checkout path: the main checkout is `main`
-  (`localhost/ilex:main`, VMs `ilex-main-*`); a worktree at
-  `.claude/worktrees/<name>/` is `<name>` (`localhost/ilex:wt-<name>`, VMs
+  (`localhost/ilex:main`, VMs `ilex-main-*`); any linked git worktree
+  (`.claude/worktrees/<name>/`, `.t3/worktrees/ilex/<name>/`, or `git worktree
+  add` anywhere) is `<name>`, sanitised (`localhost/ilex:wt-<name>`, VMs
   `ilex-<name>-*`). Never use another checkout's image or VMs.
 - VM boots take one of N machine-wide slots (`ILEX_VM_SLOTS`, default one per
   8 GiB RAM, max 4) and wait when none is free.

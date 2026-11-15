@@ -181,7 +181,7 @@ fn receive(
                 for row in 0..h {
                     let dst = &mut fb.pixels[(y + row) * stride + x..(y + row) * stride + x + w];
                     let src = &pixels[row * w * 4..(row + 1) * w * 4];
-                    for (d, s) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                    for (d, s) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
                         *d = u32::from_le_bytes([s[0], s[1], s[2], 0]);
                     }
                 }
@@ -198,7 +198,9 @@ fn receive(
                 pixels,
             } => {
                 let rgba = pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .flat_map(|p| [p[2], p[1], p[0], p[3]])
                     .collect();
                 let _ = proxy.send_event(UserEvent::Cursor {

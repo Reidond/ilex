@@ -1,11 +1,12 @@
 //! Which checkout are we in, and what does it own?
 //!
 //! The main checkout owns `localhost/ilex:main` and VMs named `ilex-main-*`.
-//! A Claude Code worktree at `.claude/worktrees/<name>/` owns
+//! A linked git worktree (including Claude Code and T3 worktrees) owns
 //! `localhost/ilex:wt-<name>` and VMs named `ilex-<name>-*`, so parallel
 //! sessions never overwrite each other's images or VMs.
 
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -17,9 +18,10 @@ pub const IMAGE_REPO: &str = "localhost/ilex";
 pub struct Workspace {
     /// Root of this checkout (the directory holding `Containerfile`).
     pub root: PathBuf,
-    /// `main` for the main checkout, the sanitized worktree name otherwise.
+    /// `main` for the main checkout, the sanitised worktree name otherwise.
     pub slug: String,
-    /// Worktree name when running inside `.claude/worktrees/<name>/`.
+    /// Checkout directory name for a linked git worktree, or the legacy
+    /// `.claude/worktrees/<name>/` name.
     pub worktree: Option<String>,
 }
 
@@ -134,14 +136,24 @@ fn state_root() -> PathBuf {
     env::temp_dir().join("ilex-state")
 }
 
-/// `.../.claude/worktrees/<name>` → `Some(name)`.
+/// Preserve Claude Code's path-based names; recognise other linked worktrees
+/// by their `.git` file, without asking git to resolve its `gitdir:` path
+/// (which can be a Windows path even when we run in WSL).
 fn worktree_name(root: &Path) -> Option<String> {
     let parts: Vec<String> = root
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
-    parts.windows(3).rev().find_map(|w| {
+    let claude_name = parts.windows(3).rev().find_map(|w| {
         (w[0] == ".claude" && w[1] == "worktrees").then(|| w[2].clone())
+    });
+    claude_name.or_else(|| {
+        let dotgit = fs::read_to_string(root.join(".git")).ok()?;
+        let gitdir = dotgit.strip_prefix("gitdir:")?.trim();
+        if gitdir.is_empty() {
+            return None;
+        }
+        Some(root.file_name()?.to_string_lossy().into_owned())
     })
 }
 
