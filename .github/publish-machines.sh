@@ -44,3 +44,4 @@ while IFS=$'\t' read -r machine image image_id expected changed; do
     published_count=$((published_count + 1))
 done < "$RUNNER_TEMP/tested-machines"
 echo "machine publication summary: $published_count published, $skipped_count skipped"
+echo "Machine publication summary: $published_count published, $skipped_count skipped" >> "$GITHUB_STEP_SUMMARY"

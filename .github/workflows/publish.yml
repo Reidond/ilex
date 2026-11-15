@@ -427,10 +427,12 @@ jobs:
              without_key bash .github/publish-head.sh swap "$repo:latest" "$V1_DIGEST"; then
             "$XTASK_PUBLISHER" publish --digest "$STAGED"
             echo 'published=true' >> "$GITHUB_OUTPUT"
+            echo 'base publication result: published=true'
           else
             rc=$?
             if [ "$rc" = 3 ]; then
               echo 'published=false' >> "$GITHUB_OUTPUT"
+              echo 'base publication result: published=false (guard skip)'
               exit 0
             fi
             exit "$rc"
@@ -586,6 +588,7 @@ jobs:
             cat "$RUNNER_TEMP/machine-change"
             if grep -qx 'changed=false' "$RUNNER_TEMP/machine-change" && [ "$FORCE_TEST" != true ]; then
               echo "$machine: image unchanged; skipping"
+              printf -- '- %s: skipped publication, full fingerprint unchanged at %s\n' "$machine" "$previous" >> "$GITHUB_STEP_SUMMARY"
               continue
             fi
             # All image mutation happens BEFORE tests and before signing keys
@@ -600,8 +603,10 @@ jobs:
             publish=false
             if grep -qx 'changed=true' "$RUNNER_TEMP/machine-change"; then publish=true; fi
             printf '%s\t%s\t%s\t%s\t%s\n' "$machine" "$image" "$image_id" "$previous" "$publish" >> "$RUNNER_TEMP/tested-machines"
-            printf -- '- %s: tests passed on %s, planned tag %s, changed=%s; publication requires main\n' \
-              "$machine" "$image_id" "$previous" "$publish" >> "$GITHUB_STEP_SUMMARY"
+            outcome='pending main-only publication'
+            if [ "$publish" = false ]; then outcome='skipped publication, fingerprint unchanged'; fi
+            printf -- '- %s: tests passed on %s, planned tag %s; %s\n' \
+              "$machine" "$image_id" "$previous" "$outcome" >> "$GITHUB_STEP_SUMMARY"
           done < "$RUNNER_TEMP/pending-machines"
           if grep -q $'\ttrue$' "$RUNNER_TEMP/tested-machines"; then echo 'changed=true' >> "$GITHUB_OUTPUT"; fi
 
