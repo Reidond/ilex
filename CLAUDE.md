@@ -693,6 +693,9 @@ unless `test` forces testing. `changed --machine --inputs-only` compares the
 same content/mode/link hash the builder writes as `ilex.machine-inputs`, without
 needing a local image. A built layer's fingerprint includes `ilex.machine-key`,
 covering the actual base image ID; the inherited base fingerprint is cleared.
+CI also passes `--base <pinned-local-base>` to the inputs check and requires
+`base_changed=false` before skipping: an earlier failed/cancelled machines job
+must catch up even when generic `:latest` and the manifests are now unchanged.
 The complete fingerprint is compared again before testing/publishing.
 
 Machine images preserve every base layer and add one squashed layer; they are

@@ -498,11 +498,12 @@ jobs:
             # info validated the basename, the manifest's equal name and its
             # publish boolean before printing ANY names. No eval/source, and
             # no machine name is interpolated into sg's shell command.
-            cargo xtask changed "$IMAGE_REPO:$machine" --machine "$machine" --inputs-only > "$RUNNER_TEMP/machine-inputs"
+            cargo xtask changed "$IMAGE_REPO:$machine" --machine "$machine" --inputs-only --base "$BASE" > "$RUNNER_TEMP/machine-inputs"
             cat "$RUNNER_TEMP/machine-inputs"
             if [ "$BASE_CHANGED" != true ] && [ "$FORCE_TEST" != true ] &&
-               grep -qx 'inputs_changed=false' "$RUNNER_TEMP/machine-inputs"; then
-              echo "$machine: base and machine inputs unchanged; skipping"
+               grep -qx 'inputs_changed=false' "$RUNNER_TEMP/machine-inputs" &&
+               grep -qx 'base_changed=false' "$RUNNER_TEMP/machine-inputs"; then
+              echo "$machine: published base and machine inputs unchanged; skipping"
               continue
             fi
             if [ "$stack_started" = false ]; then

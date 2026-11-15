@@ -13,7 +13,7 @@
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use ilex_devkit::{Workspace, config, machine};
+use ilex_devkit::{Workspace, bcvk, config, machine};
 
 use crate::rechunk;
 use crate::registry::{self, Auth, FINGERPRINT_LABEL};
@@ -31,6 +31,10 @@ pub struct Args {
     /// Compare only machine inputs; no local image or base is needed
     #[arg(long, requires = "machine", conflicts_with = "image")]
     pub inputs_only: bool,
+    /// Also compare the published machine's base identity with this local
+    /// generic base; prints base_changed= (recovers a missed machine publish)
+    #[arg(long, requires = "inputs_only")]
+    pub base: Option<String>,
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
@@ -57,6 +61,15 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let repository = repo_of(&args.reference);
     let auth = Auth::login(repository)?;
     let published = published_fingerprint(&args.reference, repository, &auth, label)?;
+    if let Some(base) = &args.base {
+        if machine::image_machine(base)? != "generic" {
+            bail!("machine base must be generic: {base}");
+        }
+        let prefix = format!("{}-", bcvk::image_id(base)?);
+        let key = published_fingerprint(&args.reference, repository, &auth, "ilex.machine-key")?;
+        let same_base = matches!(key, Published::Fingerprint(key) if key.starts_with(&prefix));
+        registry::github_output("base_changed", &(!same_base).to_string())?;
+    }
 
     let (exists, changed) = match &published {
         Published::Missing => (false, true),
