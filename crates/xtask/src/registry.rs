@@ -237,23 +237,12 @@ pub fn is_digest(s: &str) -> bool {
         .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// Does a registry client's error mean "no such image"? A repository that
-/// was never pushed to answers "name unknown"/404; ghcr answers
-/// "denied"/"unauthorized" for a package that doesn't exist (or isn't public
-/// yet). Callers treat all of these as "nothing there": what they do next
-/// (publish, build) fails loudly on a real permission problem.
+/// Only explicit registry absence permits bootstrap. Authentication failures,
+/// generic 404s and transport errors must not masquerade as a missing tag,
+/// including during staging's comparison with the published root.
 pub fn looks_missing(stderr: &str) -> bool {
     let err = stderr.to_ascii_lowercase();
-    [
-        "manifest unknown",
-        "name unknown",
-        "not found",
-        "404",
-        "denied",
-        "unauthorized",
-    ]
-    .iter()
-    .any(|m| err.contains(m))
+    err.contains("manifest unknown") || err.contains("name unknown")
 }
 
 /// Seconds since the Unix epoch, now.
