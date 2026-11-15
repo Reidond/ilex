@@ -704,6 +704,42 @@ Missing upgrade outputs are errors, not an implicit first publish. The CI
 upgrade job always sets `ILEX_UPGRADE_FROM` when v1 exists; the CLI's legitimate
 no-source tier skip is not used as evidence that an existing v1 was tested.
 
+<a id="published-history-recovery"></a>
+
+**Published history recovery (owner action, never an agent publishing locally).**
+If a guard says the published revision is not an ancestor of main, repeating
+the run cannot repair it. There is no override input. Choose one recovery:
+
+- If the old revision may stay in history, on the owner's main branch run
+  `git fetch origin <rev>` and `git merge -s ours <rev>`, then push normally.
+  This preserves the current tree while making that revision an ancestor of
+  main. For an installer, deleting its release and tag with
+  `gh release delete installer-… --cleanup-tag` is another option: the guard
+  then considers the previous published installer (or first publication).
+- If the revision must not return, for example after purging a secret, do
+  not merge it. The owner deletes the exact ghcr **package version behind
+  the affected tag**, not the whole package, after identifying its digest
+  and other tags on that version. The next current-main run sees that tag
+  as a first publish. Deleting the version behind `:latest` also makes
+  upgrade report `exists=false`/v1 `-`, so the upgrade tier is skipped for
+  that first base publish; generic ephemeral tests still run. Removing only
+  a machine version makes that machine first-publish without bypassing the
+  generic tests. For an affected installer, remove its release and tag.
+  Repeat for any other affected published tags/releases whose revision was
+  purged. Do not retag or sign replacement images from a development machine.
+
+An ordinary revert keeps the old commit in history and needs neither recovery.
+A `cannot read`/`cannot compare` error instead needs the registry/API problem
+resolved; a retry of the newest run can be appropriate. Never re-run a
+pre-guard workflow. After any newer publication, start a new full run on main
+instead of repeatedly clicking "Re-run failed jobs" on an older one. A stale
+base swap warns/skips green; an old machine base fails with both digests.
+A machines-job retry is useful while its base is still current: it re-plans
+current machine tags and repeats build/tests, never resumes only a signing
+step. If base publication partially succeeded before a later error, the swap
+may also skip its retry; a fresh full run/nightly catches machine work up on
+current latest without replaying the old candidate.
+
 Only a real successful base publish sets `published=true`: the v1-disk
 follow-up and machines on a changed base require that output, so a green
 stale-run skip starts neither. An unchanged base permits independent machine
@@ -838,6 +874,19 @@ builds the missing/changed machine instead. An incompatible pre-phase-0
 `:latest` is the explicit successful skip above; a later base publication
 enables machines. A failed machines job leaves its existing tags on their old
 base; it does not undo a successful base publish.
+
+Merge phase 0 into main as **one push**: merge #32 into #31, then each result
+down the stack through #26 into #25, and finally #25 into main. Pushes to those
+non-main branches start no publish run. Do not merge bottom-up into main:
+each lower PR would start its own main run using that PR's unguarded workflow,
+publish latest, and have no machines job. Squash/rebase/merge commit all work
+when the complete guarded workflow reaches main together. The first main log
+should show ancestry and digest-swap allows for latest, `published=true`, the
+v1-disk dispatch, gaming's first-publish ancestry and absent-tag swap allows,
+matching pushed config/tested ID, then cosign verification before moving tags.
+Installer ancestry runs only when an ISO release is due/forced. Production
+guards, cosign installation/key matching, real ghcr writes and those main-only
+paths still need watching on that first run.
 
 Installing v1 to a disk takes ~14 minutes on a runner (11 of them bcvk's
 install VM importing the image's 64 layers into ostree), more than everything

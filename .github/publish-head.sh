@@ -90,7 +90,7 @@ compare() {
 if [ "$published" != - ]; then
     lineage=$(compare "$published" "$head")
     case "$lineage" in ahead|identical) ;;
-        *) fail "$target published revision $published is not an ancestor of main $head (run $run, $lineage); refusing rewritten/unrelated published history; owner recovery required" ;; esac
+        *) fail "$target published revision $published is not an ancestor of main $head (run $run, $lineage); refusing rewritten/unrelated history. Owner recovery: see CLAUDE.md#published-history-recovery (merge history, or remove the affected package version/installer release); no override." ;; esac
 fi
 upper=$(compare "$run" "$head")
 case "$upper" in ahead|identical) ;;
