@@ -98,6 +98,7 @@ jobs:
     outputs:
       changed: ${{ steps.roots.outputs.changed }}
       installer_changed: ${{ steps.changed.outputs.changed || 'false' }}
+      other_changed: ${{ steps.roots.outputs.other_changed }}
       roots: ${{ steps.roots.outputs.roots }}
       # What `xtask publish --stage --as` pushed as candidate.<tag>.
       digest: ${{ steps.stage.outputs.digest }}
@@ -405,7 +406,7 @@ jobs:
     needs: [build, upgrade]
     if: >-
       needs.build.result == 'success' && needs.upgrade.result == 'success' &&
-      needs.build.outputs.changed == 'true' &&
+      needs.build.outputs.installer_changed == 'true' &&
       github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
@@ -446,6 +447,7 @@ jobs:
         id: publication
         env:
           ROOTS: ${{ needs.build.outputs.roots }}
+          ROOT_SCOPE: installer
           INSTALLER_TAG: ${{ needs.build.outputs.tag }}
           OWN: ${{ needs.upgrade.outputs.own }}
           TESTED: ${{ needs.upgrade.outputs.tested }}
@@ -469,18 +471,70 @@ jobs:
           gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f v1_disk=true ||
             echo "::warning::could not start the v1-disk run; the next upgrade tier installs v1 itself"
 
+  # Other roots have their own signing job: a failed/slow base publication must
+  # never hold the installer's publication, v1-disk dispatch or ISO release.
+  # Both jobs still require the complete successful build/test inventory.
+  publish-other-roots:
+    needs: [build, upgrade]
+    if: >-
+      needs.build.result == 'success' && needs.upgrade.result == 'success' &&
+      needs.build.outputs.other_changed == 'true' &&
+      github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
+      contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 30
+    outputs:
+      roots: ${{ steps.publication.outputs.roots }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          version: v2.1.1
+          token: ""
+          pr-comment: "false"
+          github-cache: "true"
+
+      - name: Build publisher without signing credentials
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          bash .github/build-publisher.sh
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Publish and sign other roots
+        id: publication
+        env:
+          ROOTS: ${{ needs.build.outputs.roots }}
+          ROOT_SCOPE: other
+          INSTALLER_TAG: ${{ needs.build.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          bash .github/publish-roots.sh
+
   # The exact tested/published generic base plus one squashed machine layer.
   # No rechunk and no machine candidate tag. A branch only builds and tests.
   machines:
-    needs: [build, upgrade, publish]
+    needs: [build, upgrade, publish, publish-other-roots]
     # !cancelled() permits the intentionally skipped publish job, but never a
     # failed base/test job. On main a changed base MUST have been published.
     # No PR/fork event can reach code with registry or signing credentials.
     if: >-
       !cancelled() && !inputs.v1_disk && github.repository == 'Reidond/ilex' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
-      needs.build.result == 'success' && needs.upgrade.result == 'success' &&
-      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+      needs.build.result == 'success' && needs.upgrade.result == 'success'
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     permissions:
@@ -508,7 +562,8 @@ jobs:
         id: plan
         env:
           ROOTS: ${{ needs.build.outputs.roots }}
-          PUBLISHED_ROOTS: ${{ needs.publish.outputs.roots }}
+          PUBLISHED_INSTALLER_ROOTS: ${{ needs.publish.outputs.roots || '[]' }}
+          PUBLISHED_OTHER_ROOTS: ${{ needs.publish-other-roots.outputs.roots || '[]' }}
           FORCE_TEST: ${{ inputs.test == true }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -516,6 +571,9 @@ jobs:
           echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
           podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+          export PUBLISHED_ROOTS
+          PUBLISHED_ROOTS=$(jq -cs 'add' <<<"$PUBLISHED_INSTALLER_ROOTS
+          $PUBLISHED_OTHER_ROOTS")
           bash .github/plan-machines.sh
 
       - name: apt's packages from the cache
@@ -776,8 +834,7 @@ jobs:
       !cancelled() && github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
       needs.iso.result == 'success' && needs.build.result == 'success' && needs.upgrade.result == 'success' &&
-      ((needs.publish.result == 'success' &&
-        (needs.publish.outputs.published == 'true' || needs.build.outputs.installer_changed == 'false')) ||
+      ((needs.publish.result == 'success' && needs.publish.outputs.published == 'true') ||
        (needs.publish.result == 'skipped' && needs.build.outputs.installer_changed == 'false'))
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60

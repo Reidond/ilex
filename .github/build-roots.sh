@@ -60,5 +60,8 @@ while IFS=$'\t' read -r tag kind _ _ shells; do
     echo "root build duration: $tag $((SECONDS - started)) seconds"
 done < "$RUNNER_TEMP/publications"
 python3 -I .github/root-table.py <<<"$roots" > "$RUNNER_TEMP/tested-roots"
-echo "roots=$roots" >> "$GITHUB_OUTPUT"
-echo "changed=$(jq -r 'any(.changed)' <<<"$roots")" >> "$GITHUB_OUTPUT"
+{
+    echo "roots=$roots"
+    echo "changed=$(jq -r 'any(.changed)' <<<"$roots")"
+    echo "other_changed=$(jq -r --arg installer "$INSTALLER_TAG" '[.[] | select(.tag != $installer)] | any(.changed)' <<<"$roots")"
+} >> "$GITHUB_OUTPUT"

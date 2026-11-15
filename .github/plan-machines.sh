@@ -12,7 +12,7 @@ while IFS=$'\t' read -r tag kind parent machine shells; do
     IFS=$'\t' read -r _ _ BASE_CHANGED STAGED _ _ <<<"$row"
     if [ "$GITHUB_REF" = refs/heads/main ] && [ "$BASE_CHANGED" = true ]; then
         published=$(jq -er --arg tag "$parent" \
-            '[.[] | select(.tag == $tag) | .published] | if length == 1 then .[0] | tostring else error("missing/duplicate publication") end' <<<"$PUBLISHED_ROOTS")
+            '[.[] | select(.tag == $tag) | .published] | if length == 0 then "false" elif length == 1 then .[0] | tostring else error("duplicate publication") end' <<<"$PUBLISHED_ROOTS")
         if [ "$published" = false ]; then
             echo "::notice::$tag skipped: changed parent $parent was not published"
             continue

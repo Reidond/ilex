@@ -829,13 +829,18 @@ Only a real publication sets `published=true`; v1-disk dispatch and machines
 on a changed root require it. Failed dependencies and green stale-root skips
 start neither. Forced tests do not republish an unchanged fingerprint.
 
-`publish-roots.sh` processes every changed root independently, installer first.
+`publish-roots.sh` processes changed roots independently. The `publish` job
+handles only the installer root; `publish-other-roots` handles the others,
+including `base`, in parallel after the complete build/test inventory passes.
 `base` uses its ephemeral evidence without borrowing upgrade outputs. Results
 record `published=true|false` per root; v1-disk dispatch depends only on the
-installer's result. A stale-root skip continues to later roots. A hard failure
-stops publication red; any earlier successful publication stays signed. Build
-or test failures block all signing, and publication failures block machines.
-A fresh run catches up. Different revisions on `base` and `generic.gnome` are
+installer's result. The release job depends only on the installer publisher:
+a failed or slow base publication cannot block it. A stale-root skip continues
+to later roots in its job. A hard failure stops that job red; independent
+successful publications stay signed. Build/test failures block all signing;
+machines use only their own parent's positive publication result. Missing
+results from a failed parent publisher skip that parent's layers. A fresh run
+catches up. Different revisions on `base` and `generic.gnome` are
 not an inconsistent dependency pair: both are independent root builds, and
 nothing builds `FROM` the published base. A mismatched machine/parent pair
 would be a layer built on a digest other than its published parent; the
@@ -891,7 +896,7 @@ snapshot and parent-still-current guards remain necessary too. The resolved
 parent must also verify against the same permitted public key before signing
 a layer.
 
-Both signing jobs pin kache-action to `ad7317540dcdd71c904f7a60a87b620a0c0e67ed`,
+All signing jobs pin kache-action to `ad7317540dcdd71c904f7a60a87b620a0c0e67ed`,
 binary v2.1.1, empty token and PR comments disabled; cosign-installer v4.1.3 is
 pinned to `756fe2d284c7292c4e9b62c8a28f1e5629c59532`. `build-publisher.sh` builds
 with `--locked` and discovers the executable from Cargo metadata before the

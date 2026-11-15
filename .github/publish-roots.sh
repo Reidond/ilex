@@ -4,10 +4,14 @@
 set -euo pipefail
 without_key() { env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD "$@"; }
 without_key python3 -I .github/root-table.py <<<"$ROOTS" > "$RUNNER_TEMP/root-rows"
+scope=${ROOT_SCOPE:?root publication scope required}
+case "$scope" in all|installer|other) ;; *) exit 2 ;; esac
 results='[]'
 while IFS=$'\t' read -r TAG SNAPSHOT changed STAGED FINGERPRINT IMAGE_ID; do
     export TAG SNAPSHOT STAGED FINGERPRINT IMAGE_ID
     without_key bash .github/publication-tag.sh "$TAG"
+    if { [ "$scope" = installer ] && [ "$TAG" != "$INSTALLER_TAG" ]; } ||
+       { [ "$scope" = other ] && [ "$TAG" = "$INSTALLER_TAG" ]; }; then continue; fi
     published=false
     if [ "$changed" = true ]; then
         result="$RUNNER_TEMP/root-result"
