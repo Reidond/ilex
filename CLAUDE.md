@@ -685,7 +685,9 @@ publish to have succeeded. A branch run builds and tests against the staged
 digest, with no signing keys or registry token in those steps.
 
 The machine base is the exact staged/tested digest, or current `:latest`
-resolved once by digest when the base is unchanged. An old `:latest` without
+resolved once by digest when the base is unchanged on main (even when `test`
+staged an unsigned equivalent without publishing it). Branches test the staged
+digest. An old `:latest` without
 generic's labels or generated-file/overlay registry is skipped with a notice:
 it cannot accept machine layers and needs a phase-0 base published first.
 Otherwise a machine is skipped when neither base nor machine inputs changed,

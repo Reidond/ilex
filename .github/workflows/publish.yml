@@ -441,11 +441,15 @@ jobs:
           STAGED: ${{ needs.build.outputs.digest }}
           TESTED: ${{ needs.upgrade.outputs.tested }}
           V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
+          BASE_CHANGED: ${{ needs.build.outputs.changed }}
         run: |
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           echo "IMAGE_REPO=$repo" >> "$GITHUB_ENV"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
-          if [ -n "$STAGED" ]; then
+          # A forced test can stage an unchanged base without publishing it.
+          # Main layers must then use current :latest, never that unsigned
+          # replacement. Branches exercise the staged candidate as usual.
+          if [ -n "$STAGED" ] && { [ "$BASE_CHANGED" = true ] || [ "$GITHUB_REF" != refs/heads/main ]; }; then
             if [ "$TESTED" != "$STAGED" ] && { [ -n "$TESTED" ] || [ "$V1_EXISTS" != false ]; }; then
               echo "::error::the upgrade tier did not test the staged base $STAGED"; exit 1
             fi
