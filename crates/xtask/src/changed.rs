@@ -146,8 +146,7 @@ fn published_fingerprint(
         // Preserve the existing generic bootstrap behaviour separately.
         let error = out.stderr.to_ascii_lowercase();
         let missing = if strict {
-            !error.contains("denied") && !error.contains("unauthorized")
-                && (error.contains("manifest unknown") || error.contains("name unknown"))
+            error.contains("manifest unknown") || error.contains("name unknown")
         } else {
             registry::looks_missing(&out.stderr)
         };

@@ -17,7 +17,7 @@ image_digest() {
         [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid registry digest for $tag: $digest"
         echo "$digest"
     else
-        if ! grep -qiE 'manifest unknown|name unknown' "$error" || grep -qiE 'denied|unauthorized' "$error"; then
+        if ! grep -qiE 'manifest unknown|name unknown' "$error"; then
             cat "$error" >&2; rm -f "$error"
             fail "cannot read published digest of $tag"
         fi
