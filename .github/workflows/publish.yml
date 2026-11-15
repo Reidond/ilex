@@ -235,10 +235,9 @@ jobs:
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           echo "IMAGE_REPO=$repo" >> "$GITHUB_ENV"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
-          # Logged in (podman and skopeo share the login), so a package that
-          # is still private is found, and pulled, like a public one. That
-          # makes ghcr's "denied" or "unauthorized" mean what `xtask changed`
-          # reads it as: no such package yet.
+          # Podman and skopeo share read authorization for public/private
+          # packages. Only explicit manifest/name unknown means no v1;
+          # denied/unauthorized and transport errors fail the lookup.
           podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
           # The very first run has no published :latest, so there is nothing
           # to upgrade from and the tier is skipped (`exists=false`, which
