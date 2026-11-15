@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ilex_devkit::{Workspace, cmd, git};
 
 /// Where the Containerfile's builder stage looks for the host's kache store.
@@ -30,6 +30,9 @@ pub struct Args {
     /// Tag (e.g. `candidate`) or full reference to build instead of this checkout's tag
     #[arg(long)]
     pub tag: Option<String>,
+    /// Build only a machine layer on this existing image (tag or full reference).
+    #[arg(long)]
+    pub on: Option<String>,
     /// Don't pull the base images first; build from local storage
     #[arg(long)]
     pub no_pull: bool,
@@ -49,14 +52,30 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
 /// Build the image and return its full reference.
 pub fn build(ws: &Workspace, args: &Args) -> Result<String> {
-    let resolved = args.selection.resolve(ws, args.tag.as_deref())?;
+    let resolved = args.selection.resolve(ws, args.on.as_deref())?;
     build_resolved(ws, args, resolved)
 }
 
 /// `test` already resolved the selection while deciding whether to rebuild.
 pub fn build_resolved(ws: &Workspace, args: &Args, resolved: crate::select::Resolved) -> Result<String> {
     cmd::require("podman")?;
-    let image = resolved.image;
+    if resolved.machine != "generic" {
+        let base = &resolved.base_image;
+        if args.on.is_none() && (!image_exists(base) || resolved.base_mismatch()?.is_some()) {
+            build(ws, &Args {
+                selection: crate::select::Args { shells: args.selection.shells.clone(), machine: Some("generic".into()) },
+                tag: Some(base.clone()),
+                no_pull: args.no_pull,
+                no_host_kache: args.no_host_kache,
+                ..Args::default()
+            })?;
+        }
+        resolved.require_base_match()?;
+        return ilex_devkit::machine::build(ws, base, &ws.root.join("machines").join(&resolved.machine), args.tag.as_deref(), &args.podman_args);
+    }
+    if args.on.is_some() { bail!("--on requires a machine other than generic"); }
+    let image = args.tag.as_deref().map_or(resolved.image, |tag| ws.resolve_image(Some(tag)));
+    ilex_devkit::workspace::check_tag_length(&image)?;
     // Let the compose stage report malformed manifests too. This loose read
     // supplies arguments and labels; Python remains the schema authority.
     let selection = resolved.selection;

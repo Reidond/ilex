@@ -179,6 +179,9 @@ pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
 pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     let selection = image_selection(image)?;
     let mut inputs: Vec<String> = INPUTS.iter().map(|s| s.to_string()).collect();
+    if selection.machine != "generic" {
+        inputs.extend([format!("machines/{}", selection.machine), "machines/Containerfile".into()]);
+    }
     inputs.extend(selection.shells.iter().map(|name| format!("shells/{name}")));
     inputs.extend(
         selection

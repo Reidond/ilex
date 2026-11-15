@@ -184,6 +184,16 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_machine_name(name: &str) -> Result<()> {
+    validate_name(name)?;
+    if ["latest", "candidate", "main", "rechunked", "upgrade", "base"].contains(&name)
+        || name.starts_with("sha") || name.starts_with("wt-")
+    {
+        bail!("machine name `{name}` is reserved");
+    }
+    Ok(())
+}
+
 pub fn string_list(table: &toml::Table, key: &str) -> Result<Vec<String>> {
     table
         .get(key)

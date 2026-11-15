@@ -78,13 +78,30 @@ pub struct Args {
     pub command: Vec<String>,
 }
 
+impl Args {
+    pub fn resolve(&self, ws: &Workspace) -> Result<crate::select::Resolved> {
+        #[cfg(unix)]
+        let viewer = self.gui && in_wsl();
+        #[cfg(not(unix))]
+        let viewer = self.gui && cfg!(windows);
+        let mut selection = self.selection.clone();
+        if viewer && selection.requested_machine()?.is_none() {
+            selection.machine = Some("vm".into());
+        }
+        selection.resolve(ws, self.image.as_deref())
+    }
+}
+
 pub fn run(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Result<()> {
     if args.print_image {
         #[cfg(unix)]
         let viewer = args.gui && in_wsl();
         #[cfg(not(unix))]
         let viewer = args.gui && cfg!(windows);
-        println!("{}", if viewer { resolved.viewer_image()? } else { resolved.image });
+        let image = if viewer && resolved.machine != "generic" {
+            ilex_devkit::machine::image_ref(ws, &resolved.base_image, &resolved.machine)?
+        } else { resolved.image };
+        println!("{image}");
         return Ok(());
     }
     if args.disk || args.gui {
@@ -123,11 +140,12 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
     let disk = match std::env::var_os("ILEX_DISK").filter(|p| !p.is_empty()) {
         Some(path) => path.into(),
         None => {
-            resolved.require_match()?;
-            // The viewer's clipboard needs the guest agent: the VM-only layer.
-            let image = if viewer {
-                vm_image(ws, &resolved.image, &resolved.viewer_image()?)?
+            let image = if viewer && resolved.machine != "generic" {
+                resolved.require_base_match()?;
+                ilex_devkit::machine::build(ws, &resolved.base_image,
+                    &ws.root.join("machines").join(&resolved.machine), None, &[])?
             } else {
+                resolved.require_match()?;
                 resolved.image
             };
             disk::ensure_image(ws, &disk::Args::default(), &image)?
@@ -231,46 +249,6 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
         bail!("`{script}` failed with {}", out.status);
     }
     Ok(())
-}
-
-/// The image `--gui` installs: `base` plus `vm/Containerfile` (the guest
-/// side of the clipboard), tagged with this checkout's implicit variant plus
-/// `-vm`, even for an explicit or digest base. Never published.
-///
-/// It is only rebuilt when `base` or the Containerfile changed (the label
-/// `ilex.vm-key` records both): even a fully cached `podman build` commits a
-/// new manifest, and a new digest makes bcvk install the disk again.
-#[cfg(unix)]
-fn vm_image(ws: &Workspace, base: &str, tag: &str) -> Result<String> {
-    use sha2::{Digest, Sha256};
-
-    if !crate::build::image_exists(base) {
-        bail!("image {base} not found in local container storage; run `cargo xtask build` first");
-    }
-    let context = ws.root.join("vm");
-    let containerfile = context.join("Containerfile");
-    let base_id = cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", base]))?;
-    let recipe = std::fs::read(&containerfile).with_context(|| format!("reading {}", containerfile.display()))?;
-    let key = format!("{base_id}-{:x}", Sha256::digest(&recipe));
-    let current = cmd::probe(Command::new("podman").args([
-        "image",
-        "inspect",
-        "--format",
-        "{{index .Labels \"ilex.vm-key\"}}",
-        tag,
-    ]));
-    if current.as_deref() == Some(key.as_str()) {
-        return Ok(tag.into());
-    }
-    cmd::run(
-        Command::new("podman")
-            .args(["build", "--layers", "--build-arg"])
-            .arg(format!("BASE={base}"))
-            .args(["--label", &format!("ilex.vm-key={key}"), "--tag", tag, "--file"])
-            .arg(&containerfile)
-            .arg(&context),
-    )?;
-    Ok(tag.into())
 }
 
 /// Is this Linux the WSL2 distro of a Windows machine?

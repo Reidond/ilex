@@ -32,7 +32,7 @@ pub fn forward(root: &Path, gui: bool) -> Result<()> {
     let mut wsl = Command::new("wsl.exe");
     // Selection must reach WSL for headless runs too. Preserve unrelated
     // WSLENV entries, but do not path-translate the comma-separated names.
-    let mut variables = vec!["ILEX_SHELLS"];
+    let mut variables = vec!["ILEX_SHELLS", "ILEX_MACHINE"];
     if gui {
         variables.extend(["ILEX_VIEWER_ON_WINDOWS", "ILEX_VIEWER_STATS"]);
     }

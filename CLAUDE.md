@@ -2,13 +2,16 @@
 
 Personal Fedora bootc image: one `Containerfile` on `quay.io/fedora/fedora-bootc:45`
 that composes packages, shells and design systems from manifests (GNOME desktop by
-default), a Rust workspace for all tooling, e2e-only tests on QEMU via bcvk.
+default), machine configurations as one derived layer, a Rust workspace for all
+tooling, e2e-only tests on QEMU via bcvk.
 
 ## Build and test
 
 ```sh
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
 cargo xtask build --shell none # headless composition check → localhost/ilex:<tag>.s-none
+cargo xtask build --machine vm # base if missing, then localhost/ilex:<tag>.m-vm
+cargo xtask build --machine vm --on <image> # only a machine layer on an existing image
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
                                # on Windows: run `cargo xtask vm` in PowerShell, not in WSL
@@ -39,7 +42,7 @@ cargo xtask info               # resource identity, selection and available conf
   bytes for shell and future machine suffixes). Explicit `--tag`, `--image`
   and `ILEX_IMAGE` references keep their supplied names; selection still
   controls composition when building. `image_ref()` remains the default image.
-  Never use another checkout's `<tag>.s-*` images either. VM names and state
+  Never use another checkout's `<tag>.s-*` or `.m-*` images either. VM names and state
   directories keep the slug alone; installed disks are separate per image.
 - VM boots take one of N machine-wide slots (`ILEX_VM_SLOTS`, default one per
   8 GiB RAM, max 4) and wait when none is free.
@@ -154,8 +157,50 @@ Design systems live in `design-systems/<name>/design-system.toml` with a JSON
 object token file (default `tokens.json`). None ships yet. A shell's
 `[theme] targets` must be empty until the theme generator defines outputs.
 Machines live in `machines/<name>/machine.toml`; `generic` is the base image
-with no packages, overlay or publishing setting. `vm/Containerfile` supplies
-the development viewer's clipboard agent.
+with no packages, overlay or publishing setting. Add a machine by creating one
+directory: `name` must equal its basename, `description` is required, `publish`
+defaults to false, and optional `[packages] install` and `exclude` use the same
+grammar as shell packages. Machine names cannot be `latest`, `candidate`, `main`,
+`rechunked`, `upgrade`, `base`, or start with `sha`, `wt-` or a digit.
+An optional `rootfs/` only adds paths against the **whole base image**, including
+its packages, signature policy, units and every earlier shell/machine overlay.
+Put kernel arguments in `rootfs/usr/lib/bootc/kargs.d/20-<name>.toml`, using
+bootc's `kargs = ["..."]` format; bootc applies the difference at install,
+upgrade and switch. Other machine defaults (udev, sysctl, unit drop-ins) go in
+`rootfs/usr/` too. No replacement list exists.
+
+`build`, `test`, `vm` and `disk` accept `--machine <name>`, overriding
+`ILEX_MACHINE`, then `generic`. In WSL `vm --gui` defaults to `vm` (spice-vdagent
+for clipboard), unless a flag or environment selection says otherwise.
+The implicit tag is `<checkout tag>[.s-<shell>...].m-<machine>`. A layer built
+on an explicit base, including a digest or another repository's image, always
+gets a local tag in this checkout's namespace: `<checkout tag>.b-<16 hex SHA-256
+of base reference>.m-<machine>`. This prevents overwriting another checkout's
+layer and lets distinct bases coexist. A base already in this checkout's own
+shell-variant namespace keeps that prefix. Only an explicit build `--tag`
+chooses another output name. Both suffixes count towards the 128-byte tag limit.
+`xtask build --machine <name> --on <image>` builds only the layer and prints its
+resulting full reference on stdout; scripts must use that result rather than
+append a suffix to their input. No image is pushed by building.
+
+`machines/Containerfile` reconstructs an overlay-free preparation filesystem
+from composer-owned, hash-registered `/usr/share/ilex/.overlays.json` provenance.
+Before launching dnf it verifies inherited additions (contents, links, modes and
+owners), stages them and removes only those additions. Package installation and
+configuration then run without overlay code. It replaces `machine.json` only
+when the generated-file registry still matches, replays inherited overlays in
+order, and installs the new machine overlay last against the real filesystem.
+Only lint runs afterwards. A base without registered provenance must be rebuilt.
+The machine build squashes its new build steps into one layer, preserving all
+base layers. `ilex.machine-key` covers the base image ID and every path, type,
+mode, link target and byte of the machine directory and shared build helpers;
+an unchanged key skips the build, preserving its image ID and installed disk.
+
+The local opt-in `config::machine_fixture` tier builds and boots a throwaway
+machine outside the repository with a fresh marker and a kargs file, checking
+configuration, self-check and the base tmpfiles hash. Its marker lives under
+`/usr/share/ilex-config-fixture`, outside the generated-file namespace. CI does
+not register this tier.
 
 `build/compose.py` is the schema authority (Python standard library only).
 Unknown keys and invalid defaults fail in the first `compose` stage, before
@@ -224,7 +269,7 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
   starts it when the WSL side prints its `ilex-viewer: --connect …` line.
   WSL can't start it itself: `/mnt/c` is mounted with `fmask=133`, so no
   `.exe` there has the execute bit interop needs.
-  `ILEX_SHELLS` reaches WSL through `WSLENV`, including without `--gui`.
+  `ILEX_SHELLS` and `ILEX_MACHINE` reach WSL through `WSLENV`, including without `--gui`.
   Selection is validated natively before building the viewer or entering WSL.
 - Nothing here uses WSLg any more. It is unreliable on this machine: on most
   starts of WSL 2.7 it fails to open its shared memory with Windows
@@ -338,11 +383,11 @@ in `viewer.rs`):
   pointer over the window or pressing a key wakes it. While the guest
   catches up with a resized window, the viewer stretches its last frame
   (and scales the pointer) instead of showing it in a corner.
-- Clipboard (text, both ways): `--gui` installs the checkout's image plus
-  `vm/Containerfile` (`spice-vdagent`; tagged with this checkout's implicit
-  variant reference plus `-vm`, even for an explicit or digest `--image`, never
-  published, rebuilt only when the base image or the Containerfile changes,
-  per its `ilex.vm-key` label, because every rebuild's new digest makes bcvk
+- Clipboard (text, both ways): `--gui` installs machine `vm` (`spice-vdagent`)
+  through `machines/Containerfile`, tagged `<checkout tag>.m-vm` for the default
+  base (explicit bases follow the local `.b-<hash>` rule above), never
+  published, rebuilt only when the base or machine inputs change,
+  per its `ilex.machine-key` label, because every rebuild's new digest makes bcvk
   install the disk again), QEMU puts the guest's SPICE agent port on
   `vdagent.sock`, and the bridge speaks the agent protocol itself
   (`vdagent.rs`). QEMU's own `qemu-vdagent` chardev doesn't work here:
@@ -355,6 +400,8 @@ in `viewer.rs`):
   announcement; and mutter's first fetch of a new X11 clipboard owner's
   text comes back empty, so each Windows copy is offered twice, 500 ms
   apart (else the first paste in GNOME pastes nothing).
+  Old checkout-owned `...-vm` images can be removed by their own tag with
+  `podman rmi`; do not prune the shared container storage.
 - Closing the window quits QEMU; QEMU exiting closes the window.
   `ILEX_VIEWER_STATS=1 cargo xtask vm --gui` makes the viewer print frames
   received and drawn per second, the bridge its frames per second and
@@ -687,7 +734,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one
   libtest-mimic binary, tiers `ephemeral::`, `disk::`, `upgrade::`,
-  `graphical::`, `tool::`). Anything worth testing in a shipped binary must be
+  `graphical::`, `tool::`, local opt-in `config::`). Anything worth testing in a shipped binary must be
   observable from inside the VM: give it a `--self-check` mode.
 - **bootc rules for `rootfs/`** (copied to `/`): defaults go in `/usr`; keep
   `/etc` to files that must live there (it is 3-way merged on upgrade); never

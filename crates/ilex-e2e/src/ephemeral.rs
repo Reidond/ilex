@@ -283,6 +283,8 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         })?;
     }
     check_packages(vm, &machine)?;
+    let overlay = common::workspace()?.root.join("machines").join(&selection.machine).join("rootfs");
+    if overlay.is_dir() { check_overlay(vm, &overlay, &overlay)?; }
     check_unselected_shells(vm, &selection)?;
     println!("     configuration matches labels and checkout: {selection:?}");
     Ok(())

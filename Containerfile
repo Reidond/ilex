@@ -9,7 +9,7 @@ ARG ILEX_DEFAULT_SHELL=""
 # One linked layer avoids committing the large bootc base per input directory;
 # --parents keeps the manifest layout intact. Both work with buildah 1.42.
 COPY --link --parents image.toml packages.toml build/ shells/ design-systems/ machines/generic/ /ctx/
-RUN python3 /ctx/build/compose.py image --context /ctx --out /out \
+RUN python3 -I -S -c 'import runpy,sys; sys.path.insert(0,"/ctx/build"); runpy.run_path("/ctx/build/compose.py",run_name="__main__")' image --context /ctx --out /out \
         --shells "${ILEX_SHELLS}" --default-shell "${ILEX_DEFAULT_SHELL}"
 
 # Builder: compile the Rust binaries on Fedora 45 so they link against the

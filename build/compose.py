@@ -156,6 +156,34 @@ def generic(path):
     return {"schema": 1, **data, "publish": False, "packages": {}}
 
 
+def machine(args):
+    path, out = args.dir / "machine.toml", args.out
+    data = table(path, "", load(path), {"name", "description", "publish", "packages"})
+    identity(path, data)
+    value = data["name"]
+    if value in {"generic", "latest", "candidate", "main", "rechunked", "upgrade", "base"} or value.startswith(("sha", "wt-")):
+        fail(path, "name", f"'{value}' is reserved and cannot name a machine layer")
+    if not isinstance(data.setdefault("publish", False), bool):
+        fail(path, "publish", "must be a boolean")
+    package_set = packages(path, "packages", data.setdefault("packages", {}))
+    overlays = []
+    overlay = args.dir / "rootfs"
+    if overlay.exists() or overlay.is_symlink():
+        directory, label = "overlays/000", f"machines/{value}/rootfs"
+        with Tree(out / "install" / directory, label, create=True) as staged:
+            staged.add_overlay(overlay, label)
+        overlays.append({"name": label, "directory": directory})
+    with Tree(out / "install/generated", "generated files", create=True) as generated:
+        generated.write("usr/share/ilex/machine.json", json_bytes({"schema": 1, **data}))
+    with Tree(out / "install", "installation staging", create=True) as staging:
+        staging.write("overlays.json", json_bytes(overlays))
+        staging.write("install-files.py", Path(__file__).with_name("image_tree.py").read_bytes())
+    arguments = package_set.get("install", []) + [f"--exclude={p}" for p in package_set.get("exclude", [])]
+    with Tree(out / "build", "package staging", create=True) as build:
+        build.write("packages.args", "".join(p + "\n" for p in arguments).encode("utf-8"))
+        build.write("install-packages.sh", Path(__file__).with_name("install-packages.sh").read_bytes())
+
+
 def image(args):
     ctx, out = args.context, args.out
     path = ctx / "image.toml"
@@ -230,9 +258,12 @@ def main():
     compose.add_argument("--out", type=Path, required=True)
     compose.add_argument("--shells", default="")
     compose.add_argument("--default-shell", default="")
+    layer = commands.add_parser("machine")
+    layer.add_argument("--dir", type=Path, required=True)
+    layer.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     try:
-        image(args)
+        (image if args.command == "image" else machine)(args)
     except (ValueError, OSError) as error:
         sys.exit(f"compose: {error}")
 

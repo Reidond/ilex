@@ -1,5 +1,4 @@
-//! Selection shared by build, test, vm and disk. Machine selection joins it
-//! here when derived machine images are introduced.
+//! Selection shared by build, test, vm and disk.
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -14,25 +13,33 @@ pub struct Args {
     /// Defaults to ILEX_SHELLS (comma-separated), then image.toml.
     #[arg(long = "shell")]
     pub shells: Vec<String>,
+    /// Machine configuration (defaults to ILEX_MACHINE, then generic).
+    #[arg(long)]
+    pub machine: Option<String>,
 }
 
 pub struct Resolved {
     pub image: String,
     /// This checkout's own tag, even when `image` is an explicit reference.
     pub implicit_image: String,
+    pub base_image: String,
+    pub machine: String,
     // A malformed default manifest still goes to compose for its authoritative
     // schema diagnostic. Explicit selection must be resolved before podman.
     pub selection: Option<Selection>,
     check_selection: bool,
+    check_base_selection: bool,
     build_command: String,
 }
 
 impl Args {
     pub fn resolve(&self, ws: &Workspace, image: Option<&str>) -> Result<Resolved> {
         let requested = self.requested_shells()?;
+        let requested_machine = self.requested_machine()?;
         // Explicit image references without selection retain the CI contract:
         // use the named image, without comparing it with this checkout.
-        let check_selection = image.is_none() || requested.is_some();
+        let check_base_selection = image.is_none() || requested.is_some();
+        let check_selection = check_base_selection || requested_machine.is_some();
         let mut build_command = "cargo xtask build".to_string();
         if let Some(shells) = &requested {
             if shells.is_empty() {
@@ -43,6 +50,10 @@ impl Args {
                     build_command.push_str(shell);
                 }
             }
+        }
+        if let Some(machine) = &requested_machine {
+            build_command.push_str(" --machine ");
+            build_command.push_str(machine);
         }
         let defaults = Selection::read(&ws.root);
         let (selection, variant) = match requested {
@@ -57,18 +68,32 @@ impl Args {
             }
             None => (defaults.ok(), false),
         };
+        let machine = requested_machine.unwrap_or_else(|| "generic".into());
+        ilex_devkit::config::validate_machine_name(&machine)?;
+        let available = ilex_devkit::config::available(&ws.root, "machines")?;
+        if !available.contains(&machine) {
+            bail!("unknown machine `{machine}`; available machines: {}", available.join(", "));
+        }
+        let selection = selection.map(|mut selection| {
+            selection.machine = machine.clone();
+            selection
+        });
         if let Some(selection) = &selection {
             selection.validate_shells(&ws.root)?;
         }
         // An explicit tag/reference keeps its existing meaning. Only implicit
         // checkout tags acquire shell suffixes; never append them twice when
         // test hands a resolved reference to build, or vm hands one to disk.
-        let implicit_image = ws.variant_ref(
+        let implicit_base = ws.variant_ref(
             selection
                 .as_ref()
                 .filter(|_| variant)
                 .map(|s| s.shells.as_slice()),
         );
+        let implicit_image = if machine == "generic" { implicit_base.clone() } else {
+            ilex_devkit::machine::image_ref(ws, &implicit_base, &machine)?
+        };
+        let base_image = image.map(|image| ws.resolve_image(Some(image))).unwrap_or(implicit_base);
         let image = image
             .map(|image| ws.resolve_image(Some(image)))
             .unwrap_or_else(|| implicit_image.clone());
@@ -76,10 +101,22 @@ impl Args {
         Ok(Resolved {
             image,
             implicit_image,
+            base_image,
+            machine,
             selection,
             check_selection,
+            check_base_selection,
             build_command,
         })
+    }
+
+    pub fn requested_machine(&self) -> Result<Option<String>> {
+        if let Some(name) = &self.machine { return Ok(Some(name.clone())); }
+        match std::env::var("ILEX_MACHINE") {
+            Ok(value) if !value.is_empty() => Ok(Some(value)),
+            Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(error) => Err(error).context("reading ILEX_MACHINE"),
+        }
     }
 
     fn requested_shells(&self) -> Result<Option<Vec<String>>> {
@@ -106,7 +143,11 @@ impl Resolved {
     /// A stale or unlabelled image is rebuilt only when the caller owns the
     /// implicit tag. Explicit references are never silently recomposed.
     pub fn mismatch(&self) -> Result<Option<String>> {
-        if !self.check_selection {
+        self.mismatch_for(&self.image, false)
+    }
+
+    fn mismatch_for(&self, image: &str, base: bool) -> Result<Option<String>> {
+        if !(if base { self.check_base_selection } else { self.check_selection }) {
             return Ok(None);
         }
         if !crate::build::image_exists(&self.image) {
@@ -124,12 +165,16 @@ impl Resolved {
                 "inspect",
                 "--format",
                 "{{json .Config.Labels}}",
-                &self.image,
+                image,
             ]))?;
             let labels: Option<BTreeMap<String, String>> =
                 serde_json::from_str(&text).context("reading image configuration labels")?;
             Selection::from_labels(&labels.unwrap_or_default())
         })();
+        let actual = actual.map(|mut actual| {
+            if base { actual.machine = requested.machine.clone(); }
+            actual
+        });
         let built_for = match actual {
             Ok(actual) if actual == *requested => return Ok(None),
             Ok(actual) => actual.summary(),
@@ -137,11 +182,23 @@ impl Resolved {
         };
         Ok(Some(format!(
             "image {} was built for {built_for}; requested {}; run `{}` and use {}",
-            self.image,
+            image,
             requested.summary(),
             self.build_command,
             self.implicit_image,
         )))
+    }
+
+    /// A layer changes the machine, while preserving its base's composition.
+    pub fn base_mismatch(&self) -> Result<Option<String>> {
+        self.mismatch_for(&self.base_image, true)
+    }
+
+    pub fn require_base_match(&self) -> Result<()> {
+        if let Some(message) = self.mismatch_for(&self.base_image, true)? {
+            bail!("{message}");
+        }
+        Ok(())
     }
 
     pub fn require_match(&self) -> Result<()> {
@@ -151,10 +208,4 @@ impl Resolved {
         Ok(())
     }
 
-    /// Layers we build belong to this checkout, never to the base reference.
-    pub fn viewer_image(&self) -> Result<String> {
-        let image = format!("{}-vm", self.implicit_image);
-        check_tag_length(&image)?;
-        Ok(image)
-    }
 }

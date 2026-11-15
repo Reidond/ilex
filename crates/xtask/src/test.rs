@@ -103,16 +103,17 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
         }
     }
     if rebuild {
-        build::build_resolved(
+        return build::build_resolved(
             ws,
             &build::Args {
                 selection: args.selection.clone(),
-                tag: Some(image.clone()),
+                tag: if args.selection.requested_machine()?.as_deref().is_some_and(|m| m != "generic") { None } else { requested.clone() },
+                on: if args.selection.requested_machine()?.as_deref().is_some_and(|m| m != "generic") { requested.clone() } else { None },
                 no_pull: args.no_pull,
                 ..build::Args::default()
             },
             resolved,
-        )?;
+        );
     }
     Ok(image)
 }

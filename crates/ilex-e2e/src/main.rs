@@ -11,6 +11,7 @@ use std::panic::{self, AssertUnwindSafe};
 use libtest_mimic::{Arguments, Trial};
 
 mod common;
+mod config;
 mod disk;
 mod ephemeral;
 mod graphical;
@@ -28,6 +29,9 @@ fn main() {
     trials.extend(upgrade::trials());
     trials.extend(graphical::trials());
     trials.extend(tool::trials());
+    if !std::env::var_os("CI").is_some_and(|v| !v.is_empty()) && filters.iter().any(|f| f.contains("config")) {
+        trials.extend(config::trials());
+    }
     // Opt-in: builds an installer ISO and runs an install (tens of minutes),
     // so it only exists when a filter asks for it (`cargo xtask test iso::`).
     if filters.iter().any(|f| f.contains("iso")) {

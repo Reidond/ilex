@@ -73,7 +73,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Vm(args) => {
             // Reject invalid selection before building the native viewer or
             // handing over to WSL. --print-image only needs these local files.
-            let resolved = args.selection.resolve(&ws, args.image.as_deref())?;
+            let resolved = args.resolve(&ws)?;
             if cfg!(windows) && !args.print_image {
                 wsl::forward(&ws.root, args.gui)
             } else {

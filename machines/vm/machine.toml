@@ -1,0 +1,8 @@
+name = "vm"
+description = "QEMU guest: the development VM of `cargo xtask vm --gui`"
+# Never on real machines, never published.
+publish = false
+
+[packages]
+# The guest side of the viewer's clipboard, served by the display bridge.
+install = ["spice-vdagent"]

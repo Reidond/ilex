@@ -1,0 +1,32 @@
+# One layer on an existing ilex image. The machine directory is a named context;
+# MACHINE preserves its original basename for authoritative identity validation.
+ARG BASE
+FROM quay.io/fedora/fedora-bootc:45 AS compose
+ARG MACHINE
+COPY compose.py image_tree.py install-packages.sh /ctx/build/
+COPY --from=machine / /ctx/machines/${MACHINE}/
+RUN python3 -I -S -c 'import runpy,sys; sys.path.insert(0,"/ctx/build"); runpy.run_path("/ctx/build/compose.py",run_name="__main__")' \
+    machine --dir /ctx/machines/${MACHINE} --out /out
+
+FROM ${BASE}
+# No shell/site hooks may execute before inherited overlays have been removed.
+# Provenance is composer-generated and hash-registered, never supplied by overlays.
+COPY image_tree.py /tmp/ilex-machine-prepare.py
+RUN python3 -I -S /tmp/ilex-machine-prepare.py --prepare --payload /usr/share/ilex/.machine-replay
+COPY --from=compose /out/build/ /tmp/ilex-build/
+RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
+    --mount=type=tmpfs,target=/run \
+    bash /tmp/ilex-build/install-packages.sh ilex-var-machine.conf
+COPY --from=compose /out/install/ /tmp/ilex-compose/
+RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose --phase generated
+RUN for directory in /tmp /var/tmp; do \
+        actual="$(stat -c '%a %u:%g' "$directory")"; \
+        if [ "$actual" != '1777 0:0' ]; then \
+            echo "image metadata: $directory: expected 1777 0:0, found $actual" >&2; exit 1; \
+        fi; \
+    done
+# Replaying against the prepared filesystem rejects package/overlay collisions,
+# and retains every inherited shell or machine addition before the new overlay.
+RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose --phase overlays \
+    --inherited /usr/share/ilex/.machine-replay --remove-payload
+RUN bootc container lint --fatal-warnings
