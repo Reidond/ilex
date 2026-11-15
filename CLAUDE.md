@@ -691,6 +691,19 @@ The API avoids depending on checkout depth. Published history no longer
 reachable from main fails red and requires deliberate owner recovery; silently
 replacing an unrelated image would hide a history rewrite.
 
+Commit ancestry alone cannot order two nightly images built from the same
+commit. Upgrade exposes the v1 digest it resolved before testing (or explicit
+`-`/`exists=false` when latest is absent). Immediately before base publication,
+the digest swap guard requires current `:latest` to equal that snapshot.
+A mismatch warns with both digests and skips green with `published=false`.
+Thus "Re-run failed jobs" cannot replay an older staged digest over a newer
+same-commit nightly. Registry read errors are red, never absence. A first
+publish passes only while latest is still absent. An unchanged base never
+enters base publication; a forced run with a v1 records/tests it normally.
+Missing upgrade outputs are errors, not an implicit first publish. The CI
+upgrade job always sets `ILEX_UPGRADE_FROM` when v1 exists; the CLI's legitimate
+no-source tier skip is not used as evidence that an existing v1 was tested.
+
 Only a real successful base publish sets `published=true`: the v1-disk
 follow-up and machines on a changed base require that output, so a green
 stale-run skip starts neither. An unchanged base permits independent machine

@@ -218,6 +218,8 @@ jobs:
       tested: ${{ steps.candidate.outputs.digest }}
       # false: there is no :latest yet (the very first publish).
       exists: ${{ steps.from.outputs.exists }}
+      # The v1 :latest resolved before testing; '-' when no v1 exists.
+      v1: ${{ steps.from.outputs.digest }}
     env:
       # The candidate, pulled from :candidate below and tagged like on the
       # build runner; set before it exists so `xtask test` never builds one.
@@ -242,17 +244,17 @@ jobs:
           # to upgrade from and the tier is skipped (`exists=false`, which
           # lets publish go ahead without it). Any other failure to look is an
           # error: publish refuses a candidate this tier didn't test.
-          if digest=$(skopeo inspect --retry-times 3 --format '{{.Digest}}' "docker://$repo:latest" 2>"$RUNNER_TEMP/skopeo.err"); then
+          digest=$(bash .github/publish-head.sh digest "$repo:latest")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          if [ "$digest" != - ]; then
             # v1 by digest: the one its cached disk is keyed by.
             echo "v1: $repo@$digest"
             echo "ILEX_UPGRADE_FROM=$repo@$digest" >> "$GITHUB_ENV"
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "disk_key=v1-disk-$BCVK_VERSION-${digest#sha256:}" >> "$GITHUB_OUTPUT"
-          elif grep -qiE "manifest unknown|name unknown|not found|404|denied|unauthorized" "$RUNNER_TEMP/skopeo.err"; then
+          else
             echo "::notice::no $repo:latest yet: nothing to upgrade from"
             echo "exists=false" >> "$GITHUB_OUTPUT"
-          else
-            cat "$RUNNER_TEMP/skopeo.err"; exit 1
           fi
 
       # v1 installed to a disk by the v1-disk run that followed the publish of
@@ -388,6 +390,7 @@ jobs:
           STAGED: ${{ needs.build.outputs.digest }}
           TESTED: ${{ needs.upgrade.outputs.tested }}
           V1_EXISTS: ${{ needs.upgrade.outputs.exists }}
+          V1_DIGEST: ${{ needs.upgrade.outputs.v1 }}
           GH_TOKEN: ${{ github.token }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
@@ -405,7 +408,13 @@ jobs:
             echo "no :latest yet: the first publish has no upgrade tier"
           fi
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
-          if bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$repo:latest"; then
+          [[ "$STAGED" =~ ^sha256:[0-9a-f]{64}$ ]]
+          if { [ "$V1_EXISTS" = true ] && [[ "$V1_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; } ||
+             { [ "$V1_EXISTS" = false ] && [ "$V1_DIGEST" = - ]; }; then :; else
+            echo '::error::upgrade did not record an explicit v1 digest or first-publish absence'; exit 1
+          fi
+          if bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$repo:latest" &&
+             bash .github/publish-head.sh swap "$repo:latest" "$V1_DIGEST"; then
             cargo xtask publish --digest "$STAGED"
             echo 'published=true' >> "$GITHUB_OUTPUT"
           else

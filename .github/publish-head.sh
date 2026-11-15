@@ -4,6 +4,41 @@
 # PATH-injected gh/skopeo provide local controls without registry/API writes.
 set -euo pipefail
 fail() { echo "::error::$*" >&2; exit 2; }
+# digest TAG: read an immutable snapshot; '-' means explicit registry absence.
+# swap TAG EXPECTED: compare immediately before publication (serialized jobs).
+# These modes need no GitHub API, so local registry controls use real reads.
+image_digest() {
+    local tag=$1 digest error
+    local inspect=(skopeo inspect --retry-times 3 --format '{{.Digest}}')
+    case "$tag" in localhost:*|127.0.0.1:*|\[::1\]:*) inspect+=(--tls-verify=false) ;; esac
+    error=$(mktemp)
+    if digest=$("${inspect[@]}" "docker://$tag" 2>"$error"); then
+        rm -f "$error"
+        [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid registry digest for $tag: $digest"
+        echo "$digest"
+    else
+        if ! grep -qiE 'manifest unknown|name unknown' "$error" || grep -qiE 'denied|unauthorized' "$error"; then
+            cat "$error" >&2; rm -f "$error"
+            fail "cannot read published digest of $tag"
+        fi
+        rm -f "$error"
+        echo -
+    fi
+}
+case ${1:-} in
+    digest) image_digest "${2:?image tag required}"; exit 0 ;;
+    swap)
+        tag=${2:?image tag required}; expected=${3:-}
+        [[ "$expected" = - || "$expected" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+            fail "missing/invalid tested registry snapshot for $tag: $expected"
+        current=$(image_digest "$tag")
+        if [ "$current" != "$expected" ]; then
+            echo "::warning::Not publishing $tag: tested registry snapshot $expected differs from current $current; start a new full run instead of replaying a stale digest." >&2
+            exit 3
+        fi
+        echo "publish digest swap: $tag expected=$expected current=$current; allow"
+        exit 0 ;;
+esac
 mode=${1:-}; run=${2:-}; repo=${3:-}; target=${4:-}
 [[ "$run" =~ ^[0-9a-f]{40}$ && "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
     fail 'publish ancestry guard requires a full run SHA and owner/repository'
