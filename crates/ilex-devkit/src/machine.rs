@@ -14,10 +14,11 @@ use crate::{Workspace, bcvk, cmd, config, workspace::check_tag_length};
 pub fn image_ref(ws: &Workspace, base: &str, name: &str) -> Result<String> {
     config::validate_machine_name(name)?;
     let own = ws.image_ref();
-    let prefix = if base == own
-        || base
-            .strip_prefix(&own)
-            .is_some_and(|s| s.starts_with(".s-"))
+    let prefix = if !base.contains('@')
+        && (base == own
+            || base
+                .strip_prefix(&own)
+                .is_some_and(|s| s.starts_with(".s-")))
     {
         base.to_owned()
     } else {
@@ -95,6 +96,9 @@ pub fn build(
     check_tag_length(&image)?;
     if image == base {
         bail!("machine output must differ from its base image");
+    }
+    if image.contains('@') {
+        bail!("machine output must be a tag, not a digest reference");
     }
     let base_id = bcvk::image_id(base).with_context(|| format!("resolving machine base {base}"))?;
     let mut inputs = Sha256::new();
