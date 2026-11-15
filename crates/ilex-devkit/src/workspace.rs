@@ -156,7 +156,9 @@ fn worktree_name(root: &Path) -> Option<String> {
 
 /// Keep short, valid names stable. Hash the original git name when changing
 /// it, shortening it, or escaping the main checkout's reserved identity.
-/// The result is bounded ASCII with no leading/trailing/double dashes.
+/// Plain slugs have no double dashes; hashed slugs use `--` before the hash,
+/// so the two forms cannot overlap. Both are bounded ASCII without leading
+/// or trailing dashes.
 fn sanitize(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
@@ -176,8 +178,8 @@ fn sanitize(name: &str) -> String {
     if out == name && out.len() <= MAX_SLUG_LEN {
         return out.to_string();
     }
-    let readable_len = out.len().min(MAX_SLUG_LEN - 1 - HASH_HEX_LEN);
+    let readable_len = out.len().min(MAX_SLUG_LEN - 2 - HASH_HEX_LEN);
     let readable = out[..readable_len].trim_end_matches('-');
     let hash = format!("{:x}", Sha256::digest(name.as_bytes()));
-    format!("{readable}-{}", &hash[..HASH_HEX_LEN])
+    format!("{readable}--{}", &hash[..HASH_HEX_LEN])
 }
