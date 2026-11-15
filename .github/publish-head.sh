@@ -19,11 +19,12 @@ case "$mode" in
         if config=$("${inspect[@]}" "docker://$target" 2>"$error"); then
             rm -f "$error"
             jq -e 'type == "object" and (.config | type == "object") and
-                ((.config.Labels // {}) | type == "object")' <<<"$config" >/dev/null ||
+                (.config.Labels == null or (.config.Labels | type == "object"))' <<<"$config" >/dev/null ||
                 fail "unreadable config/labels on $target"
             if jq -e '(.config.Labels // {}) | has("org.opencontainers.image.revision")' <<<"$config" >/dev/null; then
                 published=$(jq -er '.config.Labels["org.opencontainers.image.revision"] | select(type == "string")' <<<"$config") ||
                     fail "unreadable revision label on $target"
+                [[ "$published" =~ ^[0-9a-f]{40}$ ]] || fail "invalid published revision on $target: $published"
             fi
         else
             # Only explicit registry absence permits a first publish.

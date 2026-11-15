@@ -8,7 +8,10 @@ releases=$(gh api "repos/$repo/releases?per_page=100" --paginate --slurp) ||
     fail 'cannot read installer releases'
 tag=$(jq -er '
     if type != "array" or any(.[]; type != "array") then error("invalid pages") else . end |
-    flatten | map(select(.draft == false and .prerelease == false and
+    flatten | if any(.[]; type != "object" or (.draft | type != "boolean") or
+        (.prerelease | type != "boolean") or (.tag_name | type != "string"))
+        then error("invalid release") else . end |
+    map(select(.draft == false and .prerelease == false and
         (.tag_name | startswith("installer-")))) |
     sort_by(.published_at) | last | if . == null then "-" else
         if (.published_at | type != "string") or (.published_at | length == 0)
