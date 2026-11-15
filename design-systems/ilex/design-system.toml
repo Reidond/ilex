@@ -1,5 +1,6 @@
 name = "ilex"
 description = "Breeze frames, Adwaita interiors, holly green. Design 1.0, 14 November 2026"
-# The design system's token file, as its Claude design-system artifact
-# exports it. The only place a value is edited.
+# Export of the owner's Claude design-system artifact titled "ilex".
+# Change values there, then replace tokens.json with the whole new export.
+# Never edit tokens.json by hand.
 tokens = "tokens.json"

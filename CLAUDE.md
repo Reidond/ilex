@@ -167,8 +167,11 @@ all C0, C1 and DEL control characters.
 
 Design systems are data in `design-systems/<name>/`: `design-system.toml`
 names the directory, describes it and names a JSON object token file (default
-`tokens.json`). The token file is the design system's own exported file and
-the only place a token value is edited. The image ships its unchanged bytes
+`tokens.json`). For `ilex`, this is the export of the owner's Claude
+design-system artifact titled "ilex". Change values in that artifact and
+replace `tokens.json` with the whole new export; never edit it by hand.
+A hand-written design system's values are edited in its token file. Nothing
+else in the repository repeats a token value. The image ships unchanged bytes
 at `/usr/share/ilex/design-systems/<name>/tokens.json`, as recorded in
 `image.json`. The first and default design system is `ilex`: Breeze frames,
 Adwaita interiors and holly green, with light and dark tokens.
