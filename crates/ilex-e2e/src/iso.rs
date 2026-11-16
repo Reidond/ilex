@@ -1,4 +1,4 @@
-//! Opt-in ISO e2e tier: actual DMI/override selection in the GTK installer,
+//! Opt-in ISO e2e tier: actual DMI/override selection in Anaconda's web interface,
 //! then installation and first boot of the exact produced ISO. The catalogue
 //! beside the ISO determines the expected source/target; registry resolution,
 //! digest and origin enforcement assertions are mandatory for installation.
@@ -47,7 +47,7 @@ const INSTALL_DONE: &str = "ILEX-INSTALL-DONE";
 /// tracks, are the shipped ones.
 const KICKSTART: &str = r#"# Test-only: unattended answers for what interactive-defaults.ks leaves open.
 %include /usr/share/anaconda/interactive-defaults.ks
-cmdline
+graphical
 lang en_US.UTF-8
 keyboard us
 timezone UTC --utc
@@ -212,7 +212,7 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     wait_welcome(&mut vm, &ctl, &artifacts)?;
     let screenshot = match name {
         "welcome" => "01-welcome.png",
-        "detect" => "02-detected.png",
+        "detect" => "02-welcome.png",
         "detect_board" => "03-board-detected.png",
         _ => "05-kernel-argument.png",
     };
@@ -355,10 +355,11 @@ fn wait_welcome(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         }
         if let Ok(frame) = ctl.screenshot() {
             let fp = frame.fingerprint();
-            // Anaconda's window is light; GRUB, the kernel's console and the
-            // splash are dark. Two identical frames in a row: it has settled.
+            // Require the web interface's blue masthead and light content,
+            // rather than Firefox's blank startup window or the boot splash.
+            // Two identical frames three seconds apart: the page has settled.
             if (frame.width, frame.height) == INSTALLER_SCREEN
-                && is_light(&frame)
+                && is_webui(&frame)
                 && previous == Some(fp)
             {
                 break frame;
@@ -372,10 +373,31 @@ fn wait_welcome(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_secs(3));
     };
     println!(
-        "GTK welcome screen settled ({}x{})",
+        "Anaconda web interface settled ({}x{})",
         frame.width, frame.height
     );
     Ok(())
+}
+
+/// The stock web interface has a blue masthead above a light page. Sample a
+/// whole row so translated white title text and the logo do not matter.
+/// This only times screenshots; selection assertions use the serial console.
+fn is_webui(frame: &Frame) -> bool {
+    if frame.width == 0 || frame.height == 0 || !is_light(frame) {
+        return false;
+    }
+    let row = frame.height as usize / 24;
+    let width = frame.width as usize;
+    let pixels = &frame.rgb[row * width * 3..(row + 1) * width * 3];
+    let blue = pixels
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|[r, g, b]| {
+            u16::from(*b) > u16::from(*r) + 30 && u16::from(*b) > u16::from(*g) + 15
+        })
+        .count();
+    blue * 4 > width * 3
 }
 
 /// Is the most common colour of the picture light (Anaconda's window)?
@@ -431,12 +453,12 @@ fn unattended_install(
                 break status;
             }
             if last_shot.elapsed() > Duration::from_secs(20) {
-                // The last picture with something on it is the evidence if
-                // the install fails (the machine goes black as it powers off).
+                // Keep the last drawn web page, not a startup console or the
+                // shutdown screen (the machine goes black as it powers off).
                 if let Ok(png) = ctl.screenshot_png()
-                    && Frame::decode(&png).is_ok_and(|f| !f.is_blank())
+                    && Frame::decode(&png).is_ok_and(|f| is_webui(&f))
                 {
-                    let _ = fs::write(artifacts.join("02-installing.png"), png);
+                    let _ = fs::write(artifacts.join("06-installing.png"), png);
                 }
                 last_shot = Instant::now();
             }
@@ -472,7 +494,7 @@ fn unattended_install(
         // `%post` of a finished one prints this.
         if !console.contains(INSTALL_DONE) {
             bail!(
-                "the installer powered off without finishing the install (no {INSTALL_DONE} on the serial console; see 02-installing.png)"
+                "the installer powered off without finishing the install (no {INSTALL_DONE} on the serial console; see 06-installing.png)"
             );
         }
         // The kickstart's `%pre` printed Anaconda's own idea of the product.

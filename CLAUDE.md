@@ -143,7 +143,7 @@ cargo xtask info               # resource identity, selection and available conf
   image, rather than a phase-0-only fixture workaround.
 - `iso::` is opt-in and slow: `cargo xtask test iso::` builds the network
   installer (`ILEX_ISO=<path>` reuses one with `compositions.json` beside it).
-  `welcome`, `detect`, `detect_board` and `kernel_argument` boot the GTK
+  `welcome`, `detect`, `detect_board` and `kernel_argument` boot Anaconda's web
   installer and check its actual `%pre` selection over serial. The kernel
   trial changes GRUB in a private ISO copy; installation uses the untouched ISO.
   `install` installs onto a blank disk and checks the exact registry digest,
@@ -158,7 +158,11 @@ cargo xtask info               # resource identity, selection and available conf
   `GITHUB_ACTIONS` is set. CI supplies `ILEX_ISO_DIGEST`; registry resolution
   and exact booted/tracked comparisons are mandatory for the install trial.
   `ILEX_ISO_TARGET`, when supplied, must agree with the ISO catalogue.
-  Screenshots and serial logs land in `<state dir>/artifacts/iso/`.
+  Screenshots and serial logs land in `<state dir>/artifacts/iso/`: the settled
+  web welcome (`02-welcome.png` has the detected composition), graphical
+  unattended progress (`06-installing.png`) and first boot (`07-gdm.png`).
+  Screenshot timing recognises the web page's blue header and light content;
+  selection assertions still read serial, not pixels.
   The frozen legacy `:latest` predates the `reject` policy default: its local
   testing-tag install boots with an enforcing origin and passes the handoff/GDM
   checks, but `bootc upgrade --check` refuses its old insecure default. Keep
@@ -1185,8 +1189,9 @@ it requires deploying a new public key to machines before they can update.
 The installer is a **network installer** published as a GitHub Release: it
 carries no ilex image, so one small ISO stays current by itself and fits
 GitHub's limit of 2 GiB per release asset (an ISO with the ~5 GB image in it
-was 2.6 GiB). Download it, write it to a USB stick and boot it; Anaconda asks
-for the disk and the user, then installs the newest selected ilex composition
+was 2.6 GiB). Download it, write it to a USB stick and boot it; Anaconda's web
+interface asks for language and keyboard, network, date and time, installation
+method, storage, an account, then review and install. It installs the newest selected ilex composition
 over a (wired) network connection and the machine updates itself from there:
 
 ```
@@ -1220,8 +1225,28 @@ Selection precedence: the last `ilex.composition=<tag>` kernel argument, then
 defaults), then DMI detection. An unknown override fails with the offered tags;
 no match, conflict or unavailable default shell list falls back to the default.
 The helper prints `ILEX-COMPOSITION`, generates a validated `bootc` include
-and updates the installer's os-release. The GTK front end remains unchanged;
-the graphical chooser and web interface are later work.
+and updates the installer's os-release, which the web interface shows in its
+title and the review screen's **Operating system** line. A graphical machine
+and desktop chooser is later work.
+
+On **Create account**, create a separate **maintenance/recovery administrator**
+and keep its credentials for administration and recovery. This is a traditional
+local account. A separate daily user managed by systemd-homed and created at
+first boot is planned for a later PR; that setup is not delivered here.
+The stock account page is retained without patching the web interface's bundles.
+
+Storage offers erase-all and use-free-space installation, with a reclaim-space
+dialog to shrink or delete existing partitions for dual boot. Check the storage
+selection and review before starting installation. The UI exposes Anaconda's
+storage options; this PR qualifies the ordinary bootc install only.
+
+Locally, Firefox in GNOME Kiosk displays Cockpit's Anaconda application.
+`webui-cockpit-ws.service` serves it on `127.0.0.1:80` with a root bridge
+(`--local-session`); it is not exposed to the network by default. Remote browser
+installation is opt-in with `inst.webui.remote` and
+`inst.webui.remote.pin=<PIN>` on the boot command line, using HTTPS. Do not put
+that PIN in shared logs or screenshots. Anaconda's network geolocation may
+preselect language and time zone; `inst.geoloc=0` disables that lookup.
 
 The installer reserves `/etc/ilex/setup.json` on the target, schema 1, with
 the selected composition/image, null profile ID/schema, requested TPM mode
@@ -1299,12 +1324,17 @@ cargo xtask iso                # build; the ISO, its .sha256 and release-notes.m
 cargo xtask iso --due          # is a new ISO due? (reads the latest installer release; needs gh)
 ```
 
-- `installer/Containerfile` is `fedora-bootc:45` plus Anaconda; its kickstart
+- `installer/Containerfile` is `fedora-bootc:45` plus `anaconda-core`,
+  `anaconda-tui` and `anaconda-webui` (Cockpit and Firefox). The `anaconda`
+  metapackage would select GTK on this base's basic Fedora identity.
+  `slitherer`, a second browser with QtWebEngine, is excluded and both it and
+  `anaconda-gui` are checked absent. `NetworkManager-wifi` is explicit, keeping
+  the Wi-Fi support formerly pulled in by GTK; wired networking is recommended.
+  Its kickstart
   (`installer/interactive-defaults.ks`) installs `registry:ghcr.io/reidond/ilex:<selected tag>`
   (`--source-imgref`; pykickstart requires the transport) and tracks
   `ghcr.io/reidond/ilex:<selected tag>` (`--target-imgref`). The installer drops GPU
-  firmware, Vulkan drivers and CJK fonts before it builds its initramfs: a stock
-  build was 1.98 GiB, 16 MiB under the limit. `xtask iso` fails if the ISO
+  firmware and Vulkan drivers before it builds its initramfs. `xtask iso` fails if the ISO
   reaches 2 GiB.
 - The installer base is not cached between runs (an `ilex-installer-base`
   package was tried, and saved ~11 of 22 minutes per build): the weekly rebuild
@@ -1325,11 +1355,15 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   `installer/image-builder/Containerfile` and runs image-builder from that
   container against this host's container storage. The installer and fallback
   image-builder helper tags both include the checkout slug.
-- The installer is branded by `/.buildstamp`, the file Anaconda takes its
+- Anaconda is branded by `/.buildstamp`, the file it takes its
   product name, version and "final release" flag from (`Product=ilex`,
   `Version=45`, `IsFinal=True`). Without it the installer calls itself
-  "anaconda bluesky" with a red pre-release banner. The Fedora logo in its
-  sidebar is Fedora's own artwork; ilex has none yet.
+  "anaconda bluesky" with a red pre-release banner. The web interface reads
+  the installer's `/etc/os-release`: `NAME="ilex"` for its welcome heading,
+  `PRETTY_NAME` for its title, about box and review. This is a real `/etc` file,
+  replacing the symlink; Fedora's `ID`/`VERSION_ID` and `/usr/lib/os-release`
+  stay unchanged. `%pre` refines `PRETTY_NAME` with the selected machine,
+  desktops and tag. The Fedora logo is Fedora's artwork; ilex has none yet.
 - Anaconda reads `interactive-defaults.ks` only when it has no kickstart: an
   unattended install has to `%include /usr/share/anaconda/interactive-defaults.ks`
   (without it Anaconda falls back to an RPM install from a mirror). The defaults

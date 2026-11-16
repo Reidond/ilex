@@ -189,8 +189,8 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 fn release_notes(fingerprint: &str, sha256: &str, table: &installer::Table) -> String {
     let mut notes = format!(
-        "Network installer for ilex. Write `{ISO_NAME}.iso` to a USB stick and boot it: Anaconda \
-         asks for the disk and the user, then installs the detected machine's signed composition over the network \
+        "Network installer for ilex. Write `{ISO_NAME}.iso` to a USB stick and boot it: Anaconda's web interface \
+         asks for the disk and a maintenance/recovery administrator account, then installs the detected machine's signed composition over the network \
          (a wired connection is needed) and the machine updates itself from there.\n\n\
          SHA-256 of `{ISO_NAME}.iso`: `{sha256}`\n\n{FINGERPRINT_LINE}{fingerprint}\n"
     );

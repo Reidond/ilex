@@ -24,9 +24,12 @@ LABEL org.opencontainers.image.source="https://github.com/Reidond/ilex"
 # the FROM above).
 ARG PRODUCT_VERSION=45
 
+# The anaconda metapackage selects GTK on fedora-bootc's basic identity.
+# Keep Firefox as the web interface's browser: slitherer is a weak dependency
+# that adds a second browser and QtWebEngine. GTK also used to bring Wi-Fi.
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
-    dnf -y install --setopt=keepcache=1 \
-        anaconda \
+    dnf -y install --setopt=keepcache=1 --exclude=slitherer \
+        anaconda-core anaconda-tui anaconda-webui NetworkManager-wifi \
         anaconda-install-img-deps \
         anaconda-dracut \
         dracut-config-generic \
@@ -39,6 +42,7 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
         jq \
         xorrisofs \
         squashfs-tools && \
+    ! rpm -q anaconda-gui && ! rpm -q slitherer && \
     mkdir -p /boot/efi && cp -ra /usr/lib/efi/*/*/EFI /boot/efi
 
 # The ISO has to stay under GitHub's 2 GiB limit per release asset (a stock
@@ -63,7 +67,13 @@ RUN printf '%s\n' \
         'BugURL=https://github.com/Reidond/ilex/issues' \
         'IsFinal=True' \
         'UUID=ilex-installer.x86_64' \
-        > /.buildstamp
+        > /.buildstamp && \
+    cp --remove-destination /usr/lib/os-release /etc/os-release && \
+    sed -i 's/^NAME=.*/NAME="ilex"/; s/^PRETTY_NAME=.*/PRETTY_NAME="ilex"/' /etc/os-release
+
+# Cockpit reads the installer's os-release for the heading, title and review.
+# Only /etc is branded; Fedora's ID/VERSION_ID and /usr/lib/os-release stay.
+# The kickstart's apply helper refines PRETTY_NAME with the chosen composition.
 
 # What `lorax` normally does to make `anaconda` run; this is the bare minimum.
 RUN echo "install:x:0:0:root:/root:/usr/libexec/anaconda/run-anaconda" >> /etc/passwd && \
