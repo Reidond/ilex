@@ -11,9 +11,13 @@
 # --target-imgref: where the installed machine pulls updates from, so no
 #   `bootc switch` is needed after an ISO install (no transport here).
 #
-# xtask iso resolves image.toml's installer composition; the Containerfile
-# fills in both placeholders. For now this installs and tracks generic.gnome.
-bootc --source-imgref @SOURCE_IMGREF@ --target-imgref @TARGET_IMGREF@
+# Kernel override, then a kickstart pre-answer, then DMI detection. The
+# generated include contains only validated references from this ISO's table.
+%pre --erroronfail
+python3 -I -S /usr/libexec/ilex-installer/ilex-installer-choice apply
+%end
+
+%include /tmp/ilex-bootc.ks
 
 # ilex is a GNOME desktop: boot the installed system to the login screen.
 # Without this Anaconda picks multi-user.target, because it looks for a

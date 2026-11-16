@@ -396,12 +396,16 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
     ensure(guest["machine"].get("publish").is_none(), || {
         "machine.json must not contain publish; publications belong in image.toml".into()
     })?;
+    ensure(guest["machine"].get("match").is_none(), || {
+        "machine.json must not contain installer-only match metadata".into()
+    })?;
     let machine = common::manifest("machines", &selection.machine, "machine.toml")?;
     let declared = serde_json::to_value(&machine)?;
     for (key, value) in declared
         .as_object()
         .context("machine manifest is not an object")?
     {
+        if key == "match" { continue; }
         ensure(guest["machine"][key] == *value, || {
             format!(
                 "machine {}: `{key}` differs from the checkout",

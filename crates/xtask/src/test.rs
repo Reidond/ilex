@@ -55,7 +55,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         .args(&args.test_args)
         .env("ILEX_IMAGE", &image)
         .env("ILEX_ROOT", &ws.root);
-    // `iso::` installs from an installer ISO built from the image under test.
+    // `iso::` exercises the installer and its published payload, independently of this image.
     if args.filters.iter().any(|f| f.contains("iso")) {
         prepare_iso(ws, &mut test)?;
     }
@@ -70,16 +70,14 @@ fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
     if std::env::var_os("ILEX_ISO").is_some_and(|p| !p.is_empty()) {
         return Ok(());
     }
-    let (source, target) = crate::iso::default_refs(ws)?;
     let iso = crate::iso::build(
         ws,
         &crate::iso::Build {
-            source: &source,
-            target: &target,
+            testing_tag: None,
             output_dir: None,
         },
     )?;
-    test.env("ILEX_ISO", iso).env("ILEX_ISO_TARGET", target);
+    test.env("ILEX_ISO", iso);
     Ok(())
 }
 

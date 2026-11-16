@@ -144,9 +144,36 @@ def design_system(path):
     return data, source
 
 
+def machine_matches(path, data):
+    """Installer-only rules: never emit them in machine.json."""
+    if "match" not in data:
+        return
+    if data["name"] in ("generic", "vm"):
+        fail(path, "match", "is forbidden: generic is the fallback; vm is never installed on hardware")
+    rules = data["match"]
+    if not isinstance(rules, list):
+        fail(path, "match", "must be an array of tables")
+    placeholders = {"to be filled by o.e.m.", "default string", "system manufacturer",
+                    "system product name", "base board manufacturer", "base board product name",
+                    "not applicable", "not specified", "none", "o.e.m.", "type1productconfigid", "invalid"}
+    for rule in rules:
+        table(path, "match", rule, {"sys_vendor", "product_name", "board_vendor", "board_name"})
+        keys = set(rule)
+        if keys not in ({"sys_vendor", "product_name"}, {"board_vendor", "board_name"},
+                        {"sys_vendor", "product_name", "board_vendor", "board_name"}):
+            fail(path, "match", "needs a vendor and a model of the same SMBIOS structure (no incomplete pairs)")
+        for key, value in rule.items():
+            string(path, f"match.{key}", value)
+            if len(value) > 128 or value != value.strip():
+                fail(path, f"match.{key}", "must have 1–128 characters without surrounding whitespace")
+            if value.lower() in placeholders:
+                fail(path, f"match.{key}", "is a firmware placeholder; it would match other machines")
+
+
 def generic(path):
-    data = table(path, "", load(path), {"name", "description", "packages"})
+    data = table(path, "", load(path), {"name", "description", "packages", "match"})
     identity(path, data)
+    machine_matches(path, data)
     for key in ("packages",):
         if key in data:
             fail(path, key, "is not allowed for generic")
@@ -157,8 +184,10 @@ def generic(path):
 
 def machine(args):
     path, out = args.dir / "machine.toml", args.out
-    data = table(path, "", load(path), {"name", "description", "packages"})
+    data = table(path, "", load(path), {"name", "description", "packages", "match"})
     identity(path, data)
+    machine_matches(path, data)
+    data.pop("match", None)
     value = data["name"]
     if value in {"generic", "latest", "main", "rechunked", "upgrade", "base"} or value.startswith(("candidate", "sha", "wt-")):
         fail(path, "name", f"'{value}' is reserved and cannot name a machine layer")

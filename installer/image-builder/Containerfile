@@ -1,5 +1,4 @@
 # image-builder >= 89 for `cargo xtask iso` on machines whose own image-builder
-# is older or missing. Fedora 45's stable repository has 87; the `generic-iso`
-# image type needs 89 (updates-testing). CI installs the same package directly.
+# is older or missing. The generic-iso type needs 89, in Fedora 45 updates.
 FROM quay.io/fedora/fedora:45
-RUN dnf -y install --enablerepo=updates-testing image-builder podman skopeo && dnf clean all
+RUN dnf -y install image-builder podman skopeo && dnf clean all

@@ -51,7 +51,7 @@ enum Cmd {
     Publish(publish::Args),
     /// Record a machine fingerprint before testing its immutable image ID
     PreparePublish(prepare_publish::Args),
-    /// Build the installer ISO for a published digest and push it (CI only)
+    /// Build the network installer ISO (releases are CI-only)
     Iso(iso::Args),
     /// Build a drupe tool image from Fedora packages (`cargo xtask tool strace`)
     Tool(tool::Args),
@@ -142,6 +142,21 @@ fn run(cmd: Cmd) -> Result<()> {
             let summary = format!("selection:   {}", selection.summary());
             println!("{}", terminal_text(&summary));
             println!("installer:   {installer}");
+            let table = ilex_devkit::installer::table(&ws.root, None)?;
+            println!("installer table:");
+            for entry in &table.compositions {
+                println!(
+                    "  {}: machine={} shells={}",
+                    entry.tag,
+                    entry.machine,
+                    entry.shells.join(",")
+                );
+            }
+            for (name, machine) in &table.machines {
+                for rule in &machine.matches {
+                    println!("  {name} match: {rule:?}");
+                }
+            }
             println!("publications (tag, kind, parent, machine, shells):");
             for row in publications {
                 println!(

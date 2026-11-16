@@ -7,6 +7,7 @@ pub mod bcvk;
 pub mod cmd;
 pub mod config;
 pub mod git;
+pub mod installer;
 pub mod machine;
 pub mod qemu;
 #[cfg(unix)]

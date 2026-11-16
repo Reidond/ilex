@@ -5,16 +5,24 @@
 # (`cargo xtask iso`). Follows osbuild's example for an Anaconda installer
 # container:
 # https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/
+# Assemble the small installer configuration on scratch: each COPY here avoids
+# committing the full Anaconda root, and table changes do not rebuild dracut.
+FROM scratch AS installer-config
+COPY --from=generated iso.yaml /usr/lib/image-builder/bootc/iso.yaml
+COPY --from=generated compositions.json /usr/share/ilex-installer/compositions.json
+COPY --from=generated ilex.yaml /etc/containers/registries.d/ilex.yaml
+COPY --from=generated ilex.pub /etc/pki/containers/ilex.pub
+COPY policy.json /etc/containers/policy.json
+COPY 90-ilex-installer.toml /usr/lib/bootc/install/90-ilex-installer.toml
+COPY --chmod=0755 chooser/ilex-installer-choice /usr/libexec/ilex-installer/ilex-installer-choice
+COPY interactive-defaults.ks /usr/share/anaconda/interactive-defaults.ks
+
 FROM quay.io/fedora/fedora-bootc:45
 LABEL org.opencontainers.image.source="https://github.com/Reidond/ilex"
 
 # The Fedora release the installer reports as its version (keep in step with
 # the FROM above).
 ARG PRODUCT_VERSION=45
-# Where the installer takes the image from (with its transport: pykickstart
-# requires one), and what the installed machine updates from (without).
-ARG SOURCE_IMGREF
-ARG TARGET_IMGREF
 
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     dnf -y install --setopt=keepcache=1 \
@@ -43,9 +51,6 @@ RUN rpm -qa 'nvidia-gpu-firmware' 'amd-gpu-firmware' 'intel-gpu-firmware' \
         'mesa-vulkan-drivers' 'intel-mediasdk' 'qemu-user-static*' \
         'intel-audio-firmware' 'cirrus-audio-firmware' \
     | xargs -r rpm -e --nodeps
-
-# How image-builder lays out the ISO: volume label and boot menu.
-COPY iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 
 # Product identity. Anaconda takes its name, version and "is this a final
 # release" from /.buildstamp (the file lorax writes into an installer image).
@@ -98,9 +103,4 @@ EOT
 
 # Kickstart defaults: install the newest ilex image and keep tracking ghcr.
 # Anaconda still asks for the disk, the user and everything else.
-COPY interactive-defaults.ks /tmp/interactive-defaults.ks
-RUN test -n "$SOURCE_IMGREF" && test -n "$TARGET_IMGREF" && \
-    sed -e "s|@SOURCE_IMGREF@|${SOURCE_IMGREF}|g" -e "s|@TARGET_IMGREF@|${TARGET_IMGREF}|g" \
-        /tmp/interactive-defaults.ks > /usr/share/anaconda/interactive-defaults.ks && \
-    rm /tmp/interactive-defaults.ks && \
-    cat /usr/share/anaconda/interactive-defaults.ks
+COPY --from=installer-config / /

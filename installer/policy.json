@@ -1,0 +1,12 @@
+{
+    "default": [{"type": "reject"}],
+    "transports": {
+        "docker": {
+            "ghcr.io/reidond/ilex": [{
+                "type": "sigstoreSigned",
+                "keyPath": "/etc/pki/containers/ilex.pub",
+                "signedIdentity": {"type": "matchRepository"}
+            }]
+        }
+    }
+}

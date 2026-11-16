@@ -81,7 +81,7 @@ cargo xtask info               # resource identity, selection and available conf
   SMM, which KVM can't do under WSL2's nested virtualization.
   On v2 the same VM checks signature enforcement: v2's `ilex-sigpolicy.service`
   left the containers-storage origin alone at boot; the origin is pointed at
-  the installer composition unverified (the state an ISO install leaves),
+  the installer composition unverified (the state older ISO installs leave),
   and after a reboot the unit must have added the enforcement (a second run
   is a no-op). The agent must refuse a singleton `insecureAcceptAnything`
   default in the effective policy before changing the origin, including in
@@ -141,21 +141,24 @@ cargo xtask info               # resource identity, selection and available conf
   Logs retain command line and mount state, plus prior finalization journal
   on failure. The defect predates the stack: fix it with the common shipped
   image, rather than a phase-0-only fixture workaround.
-- `iso::` is opt-in and slow (the ISO takes ~8 minutes to build once the
-  installer image is cached, the install and boot ~8 more), so it only exists
-  when a filter names it: `cargo xtask test iso::` builds the installer ISO
-  (`ILEX_ISO=<path>` reuses one), installs it unattended in QEMU/UEFI onto a
-  blank disk over QEMU's user networking, boots the result and asserts over SSH
-  that `bootc status` shows the booted image tracking
-  `ghcr.io/reidond/ilex:generic.gnome` at the digest the registry serves, that the
-  system is `running` with no failed units and that GDM is up. The installer
-  is a network installer: what it installs is the *published* image, not the
-  image under test. Screenshots of Anaconda's welcome screen and of the first
-  boot land in `<state dir>/artifacts/iso/`.
-  Registry resolution is mandatory before any VM boots. CI passes
-  `ILEX_ISO_DIGEST` from signature verification; both the booted digest and the
-  tracked registry composition must match. `ILEX_ISO_TARGET` changes the
-  assertion only, never the shipped kickstart's source/target.
+- `iso::` is opt-in and slow: `cargo xtask test iso::` builds the network
+  installer (`ILEX_ISO=<path>` reuses one with `compositions.json` beside it).
+  `welcome`, `detect`, `detect_board` and `kernel_argument` boot the GTK
+  installer and check its actual `%pre` selection over serial. The kernel
+  trial changes GRUB in a private ISO copy; installation uses the untouched ISO.
+  `install` installs onto a blank disk and checks the exact registry digest,
+  enforcing origin from first boot, sigpolicy's already-verified journal,
+  `bootc upgrade --check`, setup handoff, system `running`, no failed units
+  and GDM. These assertions test the published image, not the branch image.
+  `ILEX_ISO_MACHINE=ms-7c35` supplies that machine's SMBIOS identity;
+  `ILEX_ISO_EXPECT=generic.gnome` pre-answers via the kickstart choice file.
+  Build locally with `cargo xtask iso --testing-tag latest` before composition
+  tags exist: the selected composition stays visible, while every entry
+  installs signed legacy `:latest`. This flag is forbidden whenever `CI` or
+  `GITHUB_ACTIONS` is set. CI supplies `ILEX_ISO_DIGEST`; registry resolution
+  and exact booted/tracked comparisons are mandatory for the install trial.
+  `ILEX_ISO_TARGET`, when supplied, must agree with the ISO catalogue.
+  Screenshots and serial logs land in `<state dir>/artifacts/iso/`.
 - Publishing (`xtask publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
 
@@ -333,8 +336,16 @@ directory: `name` must equal its basename, `description` is required,
 and optional `[packages] install` and `exclude` use the same
 grammar as shell packages. Machine names cannot be `latest`, `candidate`, `main`,
 `rechunked`, `upgrade`, `base`, or start with `candidate`, `sha`, `wt-` or a digit.
-These are the only machine manifest keys; `publish` and other unknown keys are
-errors. Generated schema-1 `machine.json` has no `publish` field.
+Optional `[[match]]` tables describe installer DMI detection. Each has a
+complete `sys_vendor`/`product_name` pair or `board_vendor`/`board_name` pair
+(all four are allowed), compared exactly and case-sensitively after stripping
+firmware whitespace. Values have 1–128 characters, no control characters or
+surrounding whitespace; firmware placeholders are refused. `generic` and `vm`
+cannot have match rules. `xtask info` and `iso` reject identical/subset rules
+across different machines. Runtime conflicts fall back to the default with
+the conflicting names reported. Match metadata stays out of `machine.json`.
+These are the only machine manifest keys; `publish` and other unknown keys
+remain errors.
 An optional `rootfs/` only adds paths against the **whole base image**, including
 existing package/configuration files and shell overlay files. Those files cannot
 be replaced; new drop-ins, masks and units remain additions a reviewer must read.
@@ -508,16 +519,13 @@ the kernel's amdgpu driver, `amd-gpu-firmware` and Mesa's radeonsi and RADV
 drivers. This configuration has no overlay or kernel arguments. GNOME chooses
 150% scaling for this display unless the person has saved another choice.
 
-CI publishes the signed `:ms-7c35.gnome` image. For now the installer installs
-`generic.gnome`; this PC moves to its machine composition with the interim
-`bootc switch` step below. A later installer change will select the machine's
-composition during installation.
-
-```sh
-sudo bootc switch --enforce-container-sigpolicy ghcr.io/reidond/ilex:ms-7c35.gnome
-```
-
-Restart to use it.
+CI publishes the signed `:ms-7c35.gnome` image. The installer recognises this
+PC and installs that composition directly. Its two independent match tables
+use vendor `Micro-Star International Co., Ltd.` with system model `MS-7C35`
+or board model `MEG X570 UNIFY (MS-7C35)`. The values came from Windows CIM's
+SMBIOS tables on 2026-11-15; Linux DMI values have not yet been measured on
+the physical PC. `ilex.composition=generic.gnome` at boot explicitly chooses
+generic instead.
 
 ## Build sharing: kache
 
@@ -1174,11 +1182,11 @@ https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso.sha2
 Because it always installs the newest image it doesn't follow every publish.
 On every run, `cargo xtask iso --due` decides, in the `installer-due` job (the `iso`
 job reads its `iso_due=`): a new ISO is due when there is no `installer-*`
-release yet, when `installer/` or `crates/xtask/src/iso.rs` changed, or the resolved source/target
-from `image.toml`'s `installer` differ from the latest one (its notes carry an `installer-fingerprint:` line), or when the
+release yet, when installer inputs differ from the latest one (its notes carry
+an `installer-fingerprint:` line), or when the
 latest one is 7 days old (Fedora and Anaconda fixes). A manual run with `iso`
 checked (`-f iso=true`) builds one regardless. `iso` constructs it in parallel
-with image CI and uploads `installer-iso` (ISO, checksum and notes) on every
+with image CI and uploads `installer-iso` (ISO, checksum, catalogue and notes) on every
 branch, including main. On main only, `installer-release` downloads that exact
 artifact after successful image tests and either actual publication or an
 unchanged root. It cannot run after a failed dependency, a cancelled run or a
@@ -1187,17 +1195,45 @@ only the intentionally skipped publisher with `changed=false`. Branches stop
 at the artifact: no `iso::` tier and no release, since the tier installs the
 published image rather than the branch image.
 
-The installer installs and tracks `generic.gnome` for now. Its source and target
-come from `image.toml`'s `installer`, and both enter the installer fingerprint.
+The installer generates `compositions.json` from every published composition
+with at least one shell, their descriptions and the machines' match rules.
+The default is `image.toml`'s `installer` (`generic.gnome`); its ordered shells
+also determine the detected machine's composition. `base` and shell-free
+machines are excluded. The boot menu has one entry, **Install ilex**.
+Selection precedence: the last `ilex.composition=<tag>` kernel argument, then
+`/run/ilex-installer/choice` (a kickstart can write it before including the
+defaults), then DMI detection. An unknown override fails with the offered tags;
+no match, conflict or unavailable default shell list falls back to the default.
+The helper prints `ILEX-COMPOSITION`, generates a validated `bootc` include
+and updates the installer's os-release. The GTK front end remains unchanged;
+the graphical chooser and web interface are later work.
+
+The installer reserves `/etc/ilex/setup.json` on the target, schema 1, with
+the selected composition/image, null profile ID/schema, requested TPM mode
+`unspecified`, actual capability `unknown` and status `not-configured`.
+The catalogue reserves empty `profiles` and `security-capabilities` objects.
+These are nonsecret contracts only: no TPM probing/enrollment, encrypted home
+setup or profile provisioning is delivered here. See `installer/setup/README.md`
+for extension rules; future helpers below `installer/` enter the fingerprint.
+
+The fingerprint covers all of `installer/` (including the reserved setup helper
+directory), the ISO/table-generation code, generated catalogue/menu and the
+committed registry configuration/public key. Adding a publication or match rule
+makes an ISO due. There are no `--source`/`--target` overrides; local
+`--testing-tag <tag>` maps all entries to one signed ilex tag and is labelled
+in both the catalogue and release notes. It is forbidden in CI.
 The release job has `packages: read`, logs in using the job token and a private
 auth file shared by skopeo and cosign, and installs cosign v2 through the same
 pinned cosign-installer action as publication. It resolves the installer's tag
 and verifies the immutable `<repository>@<digest>` with
 `cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true`.
 Explicit manifest/name absence warns green with no release; denied/transport
-errors and missing, damaged or wrong-key signatures fail red. Anaconda itself
-does not enforce signature policy during the initial install, so this verified
-target is a prerequisite, even when the tag predates this run.
+errors and missing, damaged or wrong-key signatures fail red for the default.
+Before and after this gate, `cargo xtask iso --check-registry` checks every
+offered tag and its digest's legacy cosign signature tag: missing tags/signature
+tags exit 3 (warn and defer release); registry errors exit 1. This is a presence
+guard, not cryptographic verification of every offered tag. The installer
+itself requires the ilex signature for whichever image it installs.
 
 The job prepares KVM/QEMU/libvirt with `vm-prep.sh`, restores its apt package
 cache, checks disk space and the ISO checksum, then runs
@@ -1220,7 +1256,7 @@ The ISO stays in `installer-iso`, and available screenshots/serial logs/journals
 are retained as `installer-test-evidence` on success or failure (three days).
 The next fresh full main run retries an installer still due. Before the first
 published `generic.gnome`, a local production-target installation cannot run;
-the tier does not substitute legacy latest or a test payload in the kickstart.
+local testing uses an explicitly labelled `--testing-tag latest` build instead.
 
 Immediately before creating a release, `installer-release` applies the same ancestry
 guard independently of base publication. `.github/installer-revision.sh` reads
@@ -1240,9 +1276,9 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 ```
 
 - `installer/Containerfile` is `fedora-bootc:45` plus Anaconda; its kickstart
-  (`installer/interactive-defaults.ks`) installs `registry:ghcr.io/reidond/ilex:generic.gnome`
+  (`installer/interactive-defaults.ks`) installs `registry:ghcr.io/reidond/ilex:<selected tag>`
   (`--source-imgref`; pykickstart requires the transport) and tracks
-  `ghcr.io/reidond/ilex:generic.gnome` (`--target-imgref`). The installer drops GPU
+  `ghcr.io/reidond/ilex:<selected tag>` (`--target-imgref`). The installer drops GPU
   firmware, Vulkan drivers and CJK fonts before it builds its initramfs: a stock
   build was 1.98 GiB, 16 MiB under the limit. `xtask iso` fails if the ISO
   reaches 2 GiB.
@@ -1251,7 +1287,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   exists to pick up Fedora and Anaconda fixes, which a cached base would pin,
   and the build is now rare.
 - `image-builder` needs root, the `generic-iso` type needs **image-builder
-  ≥ 89** (Fedora 45 `updates-testing` for now; 87 only has the unattended,
+  ≥ 89** (Fedora 45 `updates`; 87 only has the unattended,
   disk-wiping `bootc-installer` type) and storage that isn't overlayfs. The CI
   job starts its own rootful, privileged `fedora:45` container with
   `sudo podman run` on the runner, after unloading Ubuntu's
@@ -1283,15 +1319,16 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   its RAM-backed `/var/tmp` and needed 16 GiB; 6 GiB failed with "no space
   left on device".) The installed system still calls itself "Fedora Linux 45"
   (its os-release) and its hostname is `fedora` until one is set.
-- Kickstart's `bootc` command (pykickstart) can't pass
-  `--enforce-container-sigpolicy`, so an ISO-installed machine tracks ghcr
-  *unverified*: `bootc status` shows `spec.image` as just `{image, transport:
-  registry}` with no `signature` (a plain `bootc switch` leaves the same state).
+- Kickstart's `bootc` command cannot pass `--enforce-container-sigpolicy`.
+  The installer enables it through `/usr/lib/bootc/install/90-ilex-installer.toml`
+  instead, so the target origin records `signature: containerPolicy` from the
+  initial installation. Its own policy rejects everything except signed ilex
+  images, using the same committed public key and registry signature config.
   Unverified pulls still apply `policy.json`: signed ilex images are accepted
   and unsigned ones rejected while that policy is present. Origin enforcement
   via `containerPolicy` additionally refuses a singleton insecure default in
   the selected policy. OSTree-remote verification does not apply that ban.
-  The image adds this itself:
+  The image retains a safety net for machines installed otherwise:
   `ilex-sigpolicy.service` (enabled by the preset, `ConditionPathExists=
   /run/ostree-booted`, ordered before the updater) runs `ilex-agent
   enforce-sigpolicy` at every boot. When the booted deployment tracks

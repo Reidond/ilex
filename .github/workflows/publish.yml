@@ -778,7 +778,7 @@ jobs:
       # Container storage, image-builder's cache, the ISO and TMPDIR live on
       # the runner's big disk under /mnt, off overlayfs (podman can't nest
       # overlay on overlay). `generic-iso` needs image-builder 89, which Fedora
-      # 45 has only in updates-testing for now.
+      # 45 provides in updates.
       #
       # The installer's base (Anaconda, the initramfs) is rebuilt every time on
       # purpose: the weekly build exists to pick up Fedora and Anaconda fixes,
@@ -804,7 +804,7 @@ jobs:
               -e ILEX_STATE_DIR=/mnt/ilex-state -e TMPDIR=/mnt/ilex-state/tmp \
               quay.io/fedora/fedora:45 bash -euxc '
                 dnf -y install git cargo gcc podman skopeo
-                dnf -y install --enablerepo=updates-testing image-builder
+                dnf -y install image-builder
                 image-builder version
                 git config --global --add safe.directory /src
                 cargo xtask iso --output-dir /mnt/ilex-state/iso
@@ -832,6 +832,7 @@ jobs:
           path: |
             /mnt/ilex/state/iso/ilex-installer.iso
             /mnt/ilex/state/iso/ilex-installer.iso.sha256
+            /mnt/ilex/state/iso/compositions.json
             /mnt/ilex/state/iso/release-notes.md
           compression-level: 0
           retention-days: 3

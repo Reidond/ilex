@@ -1,0 +1,164 @@
+#!/usr/bin/python3 -I -S
+"""Select a published composition. Standard library only; no network or shell."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+
+REPOSITORY = "ghcr.io/reidond/ilex"
+FIELDS = ("sys_vendor", "product_name", "board_vendor", "board_name")
+
+
+def tag(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", value):
+        raise ValueError(f"invalid composition tag {value!r}")
+    return value
+
+
+def human(value):
+    return (isinstance(value, str) and 0 < len(value) <= 120
+            and not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value))
+
+
+def load(path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema") != 1 or data.get("repository") != REPOSITORY:
+        raise ValueError("unsupported installer table schema or repository")
+    entries = data["compositions"]
+    seen = set()
+    for entry in entries:
+        value = tag(entry["tag"])
+        machine = entry["machine"]
+        shells = entry["shells"]
+        if (not re.fullmatch(r"[a-z][a-z0-9-]*", machine) or machine == "vm"
+                or not shells or len(set(shells)) != len(shells)
+                or any(not re.fullmatch(r"[a-z][a-z0-9-]*", s) for s in shells)
+                or value != ".".join([machine, *shells]) or value in seen):
+            raise ValueError("invalid or duplicate installer composition")
+        seen.add(value)
+        if not human(data["machines"][machine]["description"]):
+            raise ValueError("invalid machine description")
+        for shell in shells:
+            if not human(data["shells"][shell]["description"]):
+                raise ValueError("invalid shell description")
+    if data["default"] not in seen or not data["default"].startswith("generic."):
+        raise ValueError("default must name an offered generic composition")
+    if data.get("testing-tag") is not None:
+        tag(data["testing-tag"])
+    for name, machine in data["machines"].items():
+        for rule in machine["match"]:
+            keys = set(rule)
+            if (name in ("generic", "vm") or keys not in (
+                    {"sys_vendor", "product_name"}, {"board_vendor", "board_name"}, set(FIELDS))
+                    or any(not isinstance(v, str) or not v or len(v) > 128
+                           or v.strip() != v or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in v)
+                           for v in rule.values())):
+                raise ValueError("invalid DMI match table")
+    return data
+
+
+def detect(data, dmi_dir):
+    identity = {}
+    for field in FIELDS:
+        try:
+            identity[field] = (dmi_dir / field).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            identity[field] = ""
+    matches = sorted(name for name, machine in data["machines"].items()
+                     if any(all(identity[k] == v for k, v in rule.items()) for rule in machine["match"]))
+    default = next(e for e in data["compositions"] if e["tag"] == data["default"])
+    selected, reason = default, "no machine configuration matches this computer"
+    if len(matches) > 1:
+        reason = "matches more than one machine configuration: " + ", ".join(matches)
+    elif matches:
+        candidate = next((e for e in data["compositions"]
+                          if e["machine"] == matches[0] and e["shells"] == default["shells"]), None)
+        if candidate:
+            selected, reason = candidate, "detected"
+        else:
+            reason = "detected machine has no published composition with the default desktops"
+    return {"tag": selected["tag"], "reason": reason, "identity": identity, "matches": matches}
+
+
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".ilex-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
+            output.write(text)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def apply(data, result, args):
+    chosen = None
+    for argument in args.cmdline.read_text(encoding="utf-8").split():
+        if argument.startswith("ilex.composition="):
+            chosen, result["reason"] = argument.split("=", 1)[1], "chosen at boot"
+    if chosen is None and args.choice.exists():
+        chosen, result["reason"] = args.choice.read_text(encoding="utf-8").strip(), "chosen in the installer"
+    chosen = result["tag"] if chosen is None else chosen
+    entry = next((e for e in data["compositions"] if e["tag"] == chosen), None)
+    if entry is None:
+        raise ValueError(f"unknown composition {chosen!r}; offered: " + ", ".join(e["tag"] for e in data["compositions"]))
+    target = REPOSITORY + ":" + tag(data.get("testing-tag") or chosen)
+    # Versioned, nonsecret reservation only. No probes or enrollment run here.
+    setup = {"schema": 1, "composition": chosen, "image": target,
+             "profile": {"id": None, "schema": None},
+             "security": {"capabilities": {}, "tpm": {"requested": "unspecified",
+                          "capability": "unknown", "status": "not-configured"}}}
+    record = json.dumps(setup, indent=2, sort_keys=True) + "\n"
+    kickstart = (f"bootc --source-imgref registry:{target} --target-imgref {target}\n"
+                 "\n%post --erroronfail\ninstall -d -m 0755 /etc/ilex\n"
+                 "cat > /etc/ilex/setup.json <<'ILEX_SETUP_JSON'\n" + record
+                 + "ILEX_SETUP_JSON\nchmod 0644 /etc/ilex/setup.json\n%end\n")
+    atomic_write(args.output, kickstart)
+    atomic_write(args.choice.parent / "setup.json", record)
+    description = data["machines"][entry["machine"]]["description"].split(":", 1)[0]
+    pretty = f"ilex: {description}, {', '.join(entry['shells'])} ({chosen})"
+    # Replace the /etc symlink rather than editing Fedora's /usr/lib file.
+    lines = args.os_release.read_text(encoding="utf-8").splitlines()
+    lines = [line for line in lines if not line.startswith(("NAME=", "PRETTY_NAME="))]
+    # os-release uses shell quoting; quote all four special characters.
+    quote = lambda s: '"' + re.sub(r'([\\"$`])', r'\\\1', s) + '"'
+    atomic_write(args.os_release, "\n".join(lines + ['NAME="ilex"', "PRETTY_NAME=" + quote(pretty)]) + "\n")
+    message = f"ILEX-COMPOSITION {chosen} ({result['reason']}) installs {target}"
+    print(message, flush=True)
+    for console in ("/dev/ttyS0", "/dev/tty0"):
+        try:
+            with open(console, "w", encoding="utf-8") as output:
+                print(message, file=output, flush=True)
+        except OSError:
+            pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("detect", "apply"))
+    parser.add_argument("--table", type=Path, default=Path("/usr/share/ilex-installer/compositions.json"))
+    parser.add_argument("--dmi-dir", type=Path, default=Path("/sys/class/dmi/id"))
+    parser.add_argument("--cmdline", type=Path, default=Path("/proc/cmdline"))
+    parser.add_argument("--choice", type=Path, default=Path("/run/ilex-installer/choice"))
+    parser.add_argument("--output", type=Path, default=Path("/tmp/ilex-bootc.ks"))
+    parser.add_argument("--os-release", type=Path, default=Path("/etc/os-release"))
+    args = parser.parse_args()
+    try:
+        data = load(args.table)
+        result = detect(data, args.dmi_dir)
+        if args.command == "detect":
+            print(json.dumps(result, sort_keys=True))
+        else:
+            apply(data, result, args)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        parser.exit(1, f"ilex-installer-choice: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,31 +1,9 @@
-//! `iso::` tier (opt-in, slow): install from the installer ISO.
-//!
-//! The plan's phase-5 done-when is "a machine installed from the ISO shows
-//! `ghcr.io/<owner>/ilex:generic.gnome` in `bootc status`". This tier does exactly
-//! that in QEMU/KVM with UEFI firmware:
-//!
-//! 1. Boot the ISO with nothing else attached and wait for Anaconda's welcome
-//!    screen; save a screenshot (the installer must call itself ilex and show
-//!    no pre-release banner).
-//! 2. Boot it again onto a blank disk, with a test-only kickstart on a second
-//!    disk labelled `OEMDRV`, which Anaconda picks up on its own. The kickstart
-//!    only answers what the shipped `interactive-defaults.ks` leaves open (the
-//!    language, the disk, the root account); the `bootc` command, and with it
-//!    the image the machine installs and tracks, is the shipped one. The
-//!    installer carries no image: it pulls `ghcr.io/<owner>/ilex:generic.gnome` over
-//!    the network (QEMU user networking). Its `%pre` asks Anaconda itself what
-//!    product it thinks it is and prints that on the serial console.
-//! 3. Boot the installed disk and assert over SSH: `bootc status` names the
-//!    booted image and tracks the target, the system reaches `running` with no
-//!    failed units, and GDM is up (screenshot).
-//!
-//! It only exists when a filter names it (`cargo xtask test iso::`), because
-//! it builds an ISO and runs an install: tens of minutes. `cargo xtask test
-//! iso::` builds the ISO first; `ILEX_ISO=<path>` uses a ready-made one (and
-//! `ILEX_ISO_TARGET` says what it makes the machine track). `ILEX_ISO_DIGEST`
-//! supplies the digest verified before CI's installation gate. The image it
-//! installs is the published one, not the image under test. Registry lookup
-//! and the installed digest comparison are mandatory, never best effort.
+//! Opt-in ISO e2e tier: actual DMI/override selection in the GTK installer,
+//! then installation and first boot of the exact produced ISO. The catalogue
+//! beside the ISO determines the expected source/target; registry resolution,
+//! digest and origin enforcement assertions are mandatory for installation.
+//! A local --testing-tag build installs the published signed legacy payload,
+//! so it cannot establish that the current branch image passes these checks.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ilex_devkit::qemu::{self, Vm, VmConfig};
-use ilex_devkit::{Workspace, cmd};
+use ilex_devkit::{Workspace, cmd, installer};
 use ilex_vmctl::{Frame, Vmctl, WaitCond};
 use libtest_mimic::{Failed, Trial};
 
@@ -94,15 +72,222 @@ echo ILEX-INSTALL-DONE > /dev/ttyS0
 "#;
 
 pub fn trials() -> Vec<Trial> {
-    vec![Trial::test("iso::install", || {
+    let mut trials = Vec::new();
+    for (name, machine, board_only, kernel) in [
+        ("welcome", None, false, false),
+        ("detect", Some("ms-7c35"), false, false),
+        ("detect_board", Some("ms-7c35"), true, false),
+        ("kernel_argument", Some("ms-7c35"), false, true),
+    ] {
+        trials.push(Trial::test(format!("iso::{name}"), move || {
+            boot_selection(name, machine, board_only, kernel)
+                .map_err(|e| Failed::from(format!("{e:#}")))
+        }));
+    }
+    trials.push(Trial::test("iso::install", || {
         run().map_err(|e| Failed::from(format!("{e:#}")))
-    })]
+    }));
+    trials
+}
+
+fn table(iso: &Path) -> Result<installer::Table> {
+    let table: installer::Table =
+        serde_json::from_slice(&fs::read(iso.with_file_name("compositions.json"))?)?;
+    if table.schema != 1 || table.repository != installer::REPOSITORY {
+        bail!("invalid ISO catalogue");
+    }
+    Ok(table)
+}
+
+fn selection(
+    table: &installer::Table,
+    machine: Option<&str>,
+    answer: Option<&str>,
+) -> Result<String> {
+    if let Some(tag) = answer {
+        if !table.compositions.iter().any(|e| e.tag == tag) {
+            bail!("ILEX_ISO_EXPECT is not offered: {tag}");
+        }
+        return Ok(tag.into());
+    }
+    let default = table
+        .compositions
+        .iter()
+        .find(|e| e.tag == table.default)
+        .context("missing default composition")?;
+    Ok(table
+        .compositions
+        .iter()
+        .find(|e| Some(e.machine.as_str()) == machine && e.shells == default.shells)
+        .unwrap_or(default)
+        .tag
+        .clone())
+}
+
+fn smbios(
+    table: &installer::Table,
+    machine: Option<&str>,
+    board_only: bool,
+) -> Result<Vec<String>> {
+    let Some(machine) = machine else {
+        return Ok(vec![]);
+    };
+    let rules = &table
+        .machines
+        .get(machine)
+        .with_context(|| format!("machine {machine} is not offered"))?
+        .matches;
+    if rules.is_empty() {
+        bail!("machine {machine} has no DMI fixture");
+    }
+    let mut structures = Vec::new();
+    for (vendor, model, kind) in [
+        ("sys_vendor", "product_name", 1),
+        ("board_vendor", "board_name", 2),
+    ] {
+        if kind == 1 && board_only {
+            continue;
+        }
+        if let Some(rule) = rules
+            .iter()
+            .find(|r| r.contains_key(vendor) && r.contains_key(model))
+        {
+            structures.push(format!(
+                "type={kind},manufacturer={},product={}",
+                rule[vendor].replace(',', ",,"),
+                rule[model].replace(',', ",,")
+            ));
+        }
+    }
+    if structures.is_empty() {
+        bail!("no complete SMBIOS fixture for {machine}");
+    }
+    Ok(structures)
+}
+
+/// Exercise the actual initramfs/Anaconda %pre path; no registry is needed.
+fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: bool) -> Result<()> {
+    let ws = common::workspace()?;
+    let iso = iso_path()?;
+    let table = table(&iso)?;
+    let work = ws.state_dir().join(format!("iso-{name}"));
+    fs::create_dir_all(&work)?;
+    let artifacts = qemu::artifact_dir(&ws, "iso")?;
+    let expected = selection(&table, machine, kernel.then_some(table.default.as_str()))?;
+    let boot_iso = if kernel {
+        kernel_iso(&iso, &work, &table.default)?
+    } else {
+        iso.clone()
+    };
+    let disk = work.join("blank.qcow2");
+    blank_disk(&disk)?;
+    let mut config = VmConfig::new(format!("iso-{name}"), &disk);
+    config.memory = INSTALLER_MEMORY.into();
+    config.vcpus = 4;
+    config.cdrom = Some(boot_iso);
+    config.smbios = smbios(&table, machine, board_only)?;
+    let mut vm = Vm::boot(&ws, &config)?;
+    let ctl = Vmctl::from_info(vm.info.clone());
+    let serial = vm.info.dir.join("serial.log");
+    let reason = if kernel {
+        "chosen at boot"
+    } else if machine.is_some() {
+        "detected"
+    } else {
+        "no machine configuration matches this computer"
+    };
+    let wanted = format!("ILEX-COMPOSITION {expected} ({reason})");
+    let started = Instant::now();
+    loop {
+        let console = fs::read_to_string(&serial).unwrap_or_default();
+        if console.contains(&wanted) {
+            fs::write(artifacts.join(format!("{name}-serial.txt")), &console)?;
+            break;
+        }
+        if started.elapsed() > WELCOME_TIMEOUT || vm.exited()?.is_some() {
+            bail!("missing {wanted}; serial: {console}");
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    wait_welcome(&mut vm, &ctl, &artifacts)?;
+    let screenshot = match name {
+        "welcome" => "01-welcome.png",
+        "detect" => "02-detected.png",
+        "detect_board" => "03-board-detected.png",
+        _ => "05-kernel-argument.png",
+    };
+    ctl.save_screenshot(&artifacts.join(screenshot))?;
+    println!(
+        "{wanted}; screenshot {}",
+        artifacts.join(screenshot).display()
+    );
+    Ok(())
+}
+
+/// Test-only ISO copy with a kernel argument in GRUB. The installation trial
+/// always boots the untouched produced ISO. This needs no GUI input backend.
+fn kernel_iso(iso: &Path, work: &Path, tag: &str) -> Result<PathBuf> {
+    installer::validate_tag(tag)?;
+    let grub = work.join("grub.cfg");
+    cmd::run(
+        Command::new("xorriso")
+            .args(["-osirrox", "on", "-indev"])
+            .arg(iso)
+            .args(["-extract", "/EFI/BOOT/grub.cfg"])
+            .arg(&grub),
+    )?;
+    let original = fs::read_to_string(&grub)?;
+    let mut changed = false;
+    let edited = original
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("linux ") || line.trim_start().starts_with("linuxefi ")
+            {
+                changed = true;
+                format!("{line} ilex.composition=invalid-first-choice ilex.composition={tag}\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect::<String>();
+    if !changed {
+        bail!("no linux line in ISO's GRUB configuration");
+    }
+    fs::write(&grub, edited)?;
+    let output = work.join("kernel-argument.iso");
+    if output.exists() {
+        fs::remove_file(&output)?;
+    }
+    cmd::run(
+        Command::new("xorriso")
+            .arg("-indev")
+            .arg(iso)
+            .arg("-outdev")
+            .arg(&output)
+            .args(["-boot_image", "any", "replay", "-map"])
+            .arg(&grub)
+            .arg("/EFI/BOOT/grub.cfg"),
+    )?;
+    Ok(output)
 }
 
 fn run() -> Result<()> {
     let ws = common::workspace()?;
     let iso = iso_path()?;
-    let target = target()?;
+    let table = table(&iso)?;
+    let machine = std::env::var("ILEX_ISO_MACHINE").ok();
+    let answer = std::env::var("ILEX_ISO_EXPECT").ok();
+    let chosen = selection(&table, machine.as_deref(), answer.as_deref())?;
+    let target = format!(
+        "{}:{}",
+        installer::REPOSITORY,
+        table.testing_tag.as_deref().unwrap_or(&chosen)
+    );
+    if let Ok(asserted) = std::env::var("ILEX_ISO_TARGET")
+        && asserted != target
+    {
+        bail!("ILEX_ISO_TARGET={asserted} disagrees with the ISO catalogue's {target}");
+    }
     let digest = published_digest(&target)?;
     if let Ok(verified) = std::env::var("ILEX_ISO_DIGEST") {
         require_digest(&verified)?;
@@ -114,22 +299,32 @@ fn run() -> Result<()> {
     }
     println!("installer target: {target} at {digest}");
     let artifacts = qemu::artifact_dir(&ws, "iso")?;
-    clear_artifacts(&artifacts);
     let work = ws.state_dir().join("iso-test");
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
     let mut report = Report::default();
-    report.check(
-        "Anaconda welcome screen",
-        welcome(&ws, &iso, &work, &artifacts),
-    );
 
     let disk = work.join("ilex.qcow2");
     let vars = work.join("OVMF_VARS.fd");
-    let installed = unattended_install(&ws, &iso, &disk, &vars, &work, &artifacts, &mut report);
+    let installed = unattended_install(
+        &ws,
+        &iso,
+        (&disk, &vars),
+        &work,
+        &artifacts,
+        (&table, machine.as_deref(), &chosen),
+        &mut report,
+    );
     if installed {
-        installed_system(&ws, &disk, &vars, &artifacts, &target, &digest, &mut report)?;
+        installed_system(
+            &ws,
+            &disk,
+            &vars,
+            &artifacts,
+            (&target, &digest, &chosen),
+            &mut report,
+        )?;
     }
     println!("artifacts: {}", artifacts.display());
     report.finish()
@@ -146,36 +341,12 @@ fn iso_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn target() -> Result<String> {
-    if let Ok(target) = std::env::var("ILEX_ISO_TARGET")
-        && !target.is_empty()
-    {
-        return Ok(target);
-    }
-    let ws = common::workspace()?;
-    Ok(format!(
-        "ghcr.io/reidond/ilex:{}",
-        ilex_devkit::config::installer(&ws.root)?
-    ))
-}
-
 // ---------------------------------------------------------------------------
 // 1. Anaconda welcome screen
 // ---------------------------------------------------------------------------
 
 /// Boot the ISO interactively and save Anaconda's welcome screen.
-fn welcome(ws: &Workspace, iso: &Path, work: &Path, artifacts: &Path) -> Result<()> {
-    let disk = work.join("welcome.qcow2");
-    blank_disk(&disk)?;
-    let mut config = VmConfig::new("iso-welcome", &disk);
-    config.snapshot = false;
-    config.memory = "6G".into();
-    config.vcpus = 4;
-    config.cdrom = Some(iso.to_path_buf());
-    config.efi_vars = Some(work.join("welcome-OVMF_VARS.fd"));
-    let mut vm = Vm::boot(ws, &config)?;
-    let ctl = Vmctl::from_info(vm.info.clone());
-
+fn wait_welcome(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     let started = Instant::now();
     let mut previous = None;
     let frame = loop {
@@ -200,13 +371,9 @@ fn welcome(ws: &Workspace, iso: &Path, work: &Path, artifacts: &Path) -> Result<
         }
         std::thread::sleep(Duration::from_secs(3));
     };
-    let path = artifacts.join("01-anaconda-welcome.png");
-    ctl.save_screenshot(&path)?;
     println!(
-        "     screenshot {} ({}x{})",
-        path.display(),
-        frame.width,
-        frame.height
+        "GTK welcome screen settled ({}x{})",
+        frame.width, frame.height
     );
     Ok(())
 }
@@ -234,12 +401,14 @@ fn is_light(frame: &Frame) -> bool {
 fn unattended_install(
     ws: &Workspace,
     iso: &Path,
-    disk: &Path,
-    vars: &Path,
+    storage: (&Path, &Path),
     work: &Path,
     artifacts: &Path,
+    choice: (&installer::Table, Option<&str>, &str),
     report: &mut Report,
 ) -> bool {
+    let (disk, vars) = storage;
+    let (table, machine, chosen) = choice;
     let install = || -> Result<()> {
         blank_disk(disk)?;
         let oemdrv = kickstart_disk(work)?;
@@ -250,6 +419,7 @@ fn unattended_install(
         config.cdrom = Some(iso.to_path_buf());
         config.extra_disks = vec![oemdrv];
         config.efi_vars = Some(vars.to_path_buf());
+        config.smbios = smbios(table, machine, false)?;
         let mut vm = Vm::boot(ws, &config)?;
         let ctl = Vmctl::from_info(vm.info.clone());
         let serial = vm.info.dir.join("serial.log");
@@ -284,6 +454,16 @@ fn unattended_install(
             started.elapsed()
         );
         let console = fs::read_to_string(&serial).unwrap_or_default();
+        let reason = if std::env::var_os("ILEX_ISO_EXPECT").is_some() {
+            "chosen in the installer"
+        } else if machine.is_some() {
+            "detected"
+        } else {
+            "no machine configuration matches this computer"
+        };
+        if !console.contains(&format!("ILEX-COMPOSITION {chosen} ({reason})")) {
+            bail!("installer selected an unexpected composition: {console}");
+        }
         let _ = fs::write(artifacts.join("installer-serial.txt"), &console);
         if !status.success() {
             bail!("the installer VM exited with {status}");
@@ -332,7 +512,14 @@ fn kickstart_disk(work: &Path) -> Result<PathBuf> {
     let dir = work.join("oemdrv");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
-    fs::write(dir.join("ks.cfg"), KICKSTART)?;
+    let mut answers = String::new();
+    if let Ok(tag) = std::env::var("ILEX_ISO_EXPECT") {
+        installer::validate_tag(&tag)?;
+        answers = format!(
+            "%pre --erroronfail\nmkdir -p /run/ilex-installer\nprintf '%s\\n' '{tag}' > /run/ilex-installer/choice\n%end\n"
+        );
+    }
+    fs::write(dir.join("ks.cfg"), answers + KICKSTART)?;
     let image = work.join("oemdrv.img");
     let _ = fs::remove_file(&image);
     fs::File::create(&image)?.set_len(16 << 20)?;
@@ -355,10 +542,10 @@ fn installed_system(
     disk: &Path,
     vars: &Path,
     artifacts: &Path,
-    target: &str,
-    digest: &str,
+    expected: (&str, &str, &str),
     report: &mut Report,
 ) -> Result<()> {
+    let (target, digest, chosen) = expected;
     // Same firmware variables as the installer: the boot entry it wrote is
     // there. A throwaway overlay keeps the installed disk pristine.
     let mut config = VmConfig::new("iso", disk);
@@ -380,6 +567,42 @@ fn installed_system(
     report.check("system reaches `running`", system_running(&vm));
     report.check("no failed units", no_failed_units(&vm));
     report.check("GDM is up", gdm(&mut vm, &ctl, artifacts));
+    report.check(
+        "nonsecret versioned target setup handoff",
+        (|| {
+            let record = vm.ssh_ok("cat /etc/ilex/setup.json")?;
+            qemu::write_artifact(artifacts, "setup.json", &record)?;
+            let value: serde_json::Value = serde_json::from_str(&record)?;
+            if value["schema"] != 1
+                || value["composition"] != chosen
+                || value["image"] != target
+                || !value["profile"]["id"].is_null()
+                || !value["profile"]["schema"].is_null()
+                || value["security"]["tpm"]["requested"] != "unspecified"
+                || value["security"]["tpm"]["capability"] != "unknown"
+                || value["security"]["tpm"]["status"] != "not-configured"
+            {
+                bail!("unexpected setup record: {record}");
+            }
+            Ok(())
+        })(),
+    );
+    report.check(
+        "origin was already verified on first boot",
+        (|| {
+            let log = vm.ssh_ok("journalctl -b -u ilex-sigpolicy.service --no-pager")?;
+            qemu::write_artifact(artifacts, "sigpolicy-journal.txt", &log)?;
+            if !log.contains("already") || !log.contains("verified") {
+                bail!("sigpolicy did not report an already verified origin: {log}");
+            }
+            Ok(())
+        })(),
+    );
+    report.check(
+        "verified bootc upgrade check",
+        vm.ssh_ok("timeout 300 bootc upgrade --check")
+            .map(|out| println!("{out}")),
+    );
     if report.has_failures() {
         let _ = ctl.save_screenshot(&artifacts.join("failure.png"));
         if let Ok(journal) = vm.ssh("journalctl -b --no-pager -n 500 -o short-monotonic") {
@@ -426,6 +649,9 @@ fn bootc_status(vm: &Vm, artifacts: &Path, wanted: &str, expected_digest: &str) 
     }
     if digest != expected_digest {
         bail!("the machine booted {digest}, but verified {wanted} was {expected_digest}");
+    }
+    if origin["signature"] != "containerPolicy" {
+        bail!("installed origin is not enforcing: {origin}");
     }
     println!("     {wanted} is the verified published digest {expected_digest}");
     Ok(())
@@ -498,7 +724,7 @@ fn gdm(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     };
     ctl.wait_screen(&cond, TIMEOUT)
         .context("waiting for GDM's login screen")?;
-    let path = artifacts.join("03-gdm.png");
+    let path = artifacts.join("07-gdm.png");
     let frame = ctl.save_screenshot(&path)?;
     println!(
         "     screenshot {} ({}x{})",
@@ -507,18 +733,4 @@ fn gdm(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         frame.height
     );
     Ok(())
-}
-
-fn clear_artifacts(artifacts: &Path) {
-    let Ok(entries) = fs::read_dir(artifacts) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.extension()
-            .is_some_and(|x| x == "png" || x == "txt" || x == "json")
-        {
-            let _ = fs::remove_file(p);
-        }
-    }
 }

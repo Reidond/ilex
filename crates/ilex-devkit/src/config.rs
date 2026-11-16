@@ -231,11 +231,92 @@ pub fn machine_manifest(root: &Path, name: &str) -> Result<toml::Table> {
         bail!("machines/{name}/machine.toml: name must equal directory name {name:?}");
     }
     for key in table.keys() {
-        if !["name", "description", "packages"].contains(&key.as_str()) {
+        if !["name", "description", "packages", "match"].contains(&key.as_str()) {
             bail!("machines/{name}/machine.toml: `{key}` is an unknown key");
         }
     }
+    machine_matches(name, &table)?;
     Ok(table)
+}
+
+pub type DmiMatch = BTreeMap<String, String>;
+
+/// Installer-only SMBIOS rules. Keep in step with build/compose.py.
+pub fn machine_matches(name: &str, table: &toml::Table) -> Result<Vec<DmiMatch>> {
+    let Some(value) = table.get("match") else {
+        return Ok(vec![]);
+    };
+    if name == "generic" || name == "vm" {
+        bail!(
+            "machine {name}: match is forbidden (generic is the fallback; vm is never installed on hardware)"
+        );
+    }
+    let mut rules = Vec::new();
+    for value in value
+        .as_array()
+        .context("match must be an array of tables")?
+    {
+        let table = value.as_table().context("match entries must be tables")?;
+        let mut rule = DmiMatch::new();
+        for (key, value) in table {
+            if !["sys_vendor", "product_name", "board_vendor", "board_name"].contains(&key.as_str())
+            {
+                bail!("machine {name}: match.{key} is an unknown key");
+            }
+            let value = value.as_str().context("match values must be strings")?;
+            if value.is_empty()
+                || value.chars().count() > 128
+                || value.trim() != value
+                || value.chars().any(char::is_control)
+            {
+                bail!(
+                    "machine {name}: match.{key} must have 1–128 characters, no control characters or surrounding whitespace"
+                );
+            }
+            if [
+                "to be filled by o.e.m.",
+                "default string",
+                "system manufacturer",
+                "system product name",
+                "base board manufacturer",
+                "base board product name",
+                "not applicable",
+                "not specified",
+                "none",
+                "o.e.m.",
+                "type1productconfigid",
+                "invalid",
+            ]
+            .contains(&value.to_ascii_lowercase().as_str())
+            {
+                bail!(
+                    "machine {name}: match.{key} {value:?} is a firmware placeholder; it would match other machines"
+                );
+            }
+            rule.insert(key.clone(), value.to_owned());
+        }
+        if !((rule.contains_key("sys_vendor") && rule.contains_key("product_name"))
+            || (rule.contains_key("board_vendor") && rule.contains_key("board_name")))
+            || !rule.len().is_multiple_of(2)
+        {
+            bail!(
+                "machine {name}: a match table needs a vendor and a model of the same SMBIOS structure (no incomplete pairs)"
+            );
+        }
+        rules.push(rule);
+    }
+    Ok(rules)
+}
+
+pub fn description(table: &toml::Table) -> Result<String> {
+    let text = table
+        .get("description")
+        .and_then(|v| v.as_str())
+        .context("description must be a string")?;
+    if text.is_empty() || text.chars().count() > 120 || text.chars().any(char::is_control) {
+        bail!("description must have 1–120 characters without control characters");
+    }
+    Ok(text.to_owned())
 }
 
 /// One image CI can publish. Shell order also determines the default shell.
@@ -248,6 +329,9 @@ pub struct Publication {
     pub shells: Vec<String>,
     /// Complete expected labels, resolved from this row and image.toml together.
     pub selection: Selection,
+    pub description: String,
+    pub matches: Vec<DmiMatch>,
+    pub shell_descriptions: BTreeMap<String, String>,
 }
 
 /// A composition has a published name only when its labels are consistent.
@@ -303,8 +387,20 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
         }
     }
     // Also reject obsolete keys in an unselected machine manifest.
+    let mut all_rules: Vec<(String, DmiMatch)> = Vec::new();
     for name in available(root, "machines")? {
-        machine_manifest(root, &name)?;
+        let manifest = machine_manifest(root, &name)?;
+        for rule in machine_matches(&name, &manifest)? {
+            for (other, previous) in &all_rules {
+                if other != &name
+                    && (rule.iter().all(|(k, v)| previous.get(k) == Some(v))
+                        || previous.iter().all(|(k, v)| rule.get(k) == Some(v)))
+                {
+                    bail!("machines {other} and {name} have identical or subset match tables");
+                }
+            }
+            all_rules.push((name.clone(), rule));
+        }
     }
     let defaults = Selection::from_manifest(&image)?;
     defaults.validate_shells(root)?;
@@ -338,6 +434,9 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
         parent: None,
         machine: "generic".into(),
         shells: vec![],
+        description: description(&machine_manifest(root, "generic")?)?,
+        matches: vec![],
+        shell_descriptions: BTreeMap::new(),
         selection: Selection {
             shells: vec![],
             default_shell: None,
@@ -404,6 +503,19 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
                 bail!("image.toml: duplicate derived tag `{tag}`");
             }
             let row = Publication {
+                description: description(&machine_manifest(root, name)?)?,
+                matches: machine_matches(name, &machine_manifest(root, name)?)?,
+                shell_descriptions: shells
+                    .iter()
+                    .map(|shell| {
+                        Ok((
+                            shell.clone(),
+                            description(&manifest(
+                                &root.join("shells").join(shell).join("shell.toml"),
+                            )?)?,
+                        ))
+                    })
+                    .collect::<Result<_>>()?,
                 tag,
                 kind: if name == "generic" { "root" } else { "layer" },
                 parent: (name != "generic").then(|| parent.clone()),

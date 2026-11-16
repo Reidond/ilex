@@ -326,6 +326,8 @@ pub struct VmConfig {
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
+    /// Extra SMBIOS structures; double commas inside values for QEMU.
+    pub smbios: Vec<String>,
     /// Keep the UEFI variable store here, copying the firmware's template when
     /// it doesn't exist yet. Boot entries an installer writes survive into
     /// later boots that name the same file; by default every boot starts from
@@ -349,6 +351,7 @@ impl VmConfig {
             x_display: None,
             cdrom: None,
             extra_disks: Vec::new(),
+            smbios: Vec::new(),
             efi_vars: None,
         }
     }
@@ -472,6 +475,9 @@ impl Vm {
             .arg(format!("file:{}", dir.join("serial.log").display()))
             .arg("-qmp")
             .arg(format!("unix:{},server=on,wait=off", qmp_sock.display()));
+        for structure in &config.smbios {
+            qemu.args(["-smbios", structure]);
+        }
         // QEMU refuses a VNC server next to a GL display ("Display vnc is
         // incompatible with the GL context").
         if !gl {
