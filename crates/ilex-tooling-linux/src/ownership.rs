@@ -94,10 +94,35 @@ pub fn check_output(ws: &Workspace, image: &str) -> Result<()> {
     let reserved = ["localhost/ilex:main", "localhost/ilex-installer:main", "localhost/ilex-image-builder:main"];
     ensure!(!reserved.iter().any(|main| image == *main || image.strip_prefix(main).is_some_and(|suffix| suffix.starts_with('.')))
         || ws.identity()?.is_main, "main image namespace is reserved for the declared canonical primary checkout");
-    if crate::bcvk::image_exists(image) {
+    if image_exists(image)? {
         require_image(ws, image)?;
     }
     Ok(())
+}
+
+/// Ownership checks must distinguish a missing image from a storage error.
+pub fn image_exists(image: &str) -> Result<bool> {
+    let status = Command::new("podman").args(["image", "exists", image]).status()?;
+    ensure!(matches!(status.code(), Some(0 | 1)), "cannot inspect image ownership for {image}: {status}");
+    Ok(status.success())
+}
+
+pub fn image_lock(image: &str) -> Result<File> {
+    crate::require_linux()?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // Image aliases belong to the store, not XDG_RUNTIME_DIR. Two clients
+        // with different runtime roots must still serialize the same final tag.
+        let uid = fs::metadata("/proc/self")?.uid();
+        let store = cmd::output(Command::new("podman").args(["info", "--format", "{{.Store.GraphRoot}}"]))?;
+        let store = fs::canonicalize(store)?;
+        let store_key = digest(store.as_os_str().as_encoded_bytes());
+        let key = digest(image.as_bytes());
+        lock(&std::path::PathBuf::from(format!("/tmp/ilex-image-locks-{uid}")).join(&store_key[7..]).join(format!("{}.lock", &key[7..])))
+    }
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("image store locks for {image} require Linux")
 }
 
 /// Call under the resource's writer lock. A pre-existing file needs a receipt;
@@ -142,12 +167,7 @@ pub struct ImageTransaction {
 impl ImageTransaction {
     pub fn new(ws: &Workspace, final_ref: &str) -> Result<Self> {
         ws.ensure_state()?;
-        let key = digest(final_ref.as_bytes());
-        let file = lock(
-            &crate::workspace::vm_runtime_root()
-                .join("image-locks")
-                .join(format!("{}.lock", &key[7..])),
-        )?;
+        let file = image_lock(final_ref)?;
         check_output(ws, final_ref)?;
         let owner = ws.identity()?.owner;
         let nonce = digest(
@@ -202,9 +222,19 @@ pub fn vm_lease(ws: &Workspace, name: &str) -> Result<File> {
         name.starts_with(&ws.vm_prefix()) && !name.contains(['/', '\\']),
         "VM name {name} is outside this checkout's owner-qualified namespace"
     );
-    let root = ws.ensure_runtime()?;
+    ws.ensure_runtime()?;
+    // A different XDG runtime root cannot establish a second lease on a host
+    // container/domain name. Persistent receipts still authorize its namespace.
+    crate::require_linux()?;
+    #[cfg(target_os = "linux")]
+    let root = {
+        use std::os::unix::fs::MetadataExt;
+        std::path::PathBuf::from(format!("/tmp/ilex-vm-leases-{}", fs::metadata("/proc/self")?.uid()))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let root = ws.runtime_dir();
     let key = digest(name.as_bytes());
-    let path = root.join("leases").join(format!("{}.lock", &key[7..]));
+    let path = root.join(format!("{}.lock", &key[7..]));
     fs::create_dir_all(path.parent().unwrap())?;
     let file = OpenOptions::new()
         .create(true)

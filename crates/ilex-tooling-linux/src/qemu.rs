@@ -439,7 +439,7 @@ pub struct Vm {
     pub info: VmInfo,
     child: Child,
     overlay: Option<PathBuf>,
-    // Last field: freed only after QEMU is gone.
+    // Freed only after QEMU is gone; the lifetime name lease follows it.
     _slot: VmSlot,
     _lease: fs::File,
 }

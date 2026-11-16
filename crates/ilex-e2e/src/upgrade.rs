@@ -128,7 +128,7 @@ fn upgrade_and_rollback() -> Result<()> {
             "test -f /usr/lib/systemd/system/boot.automount && test ! -s /usr/lib/systemd/system/boot.automount",
         ])).context("candidate must ship the boot.automount mask")?;
     }
-    let (v1_source, installed) = prepare_v1(&ws, &candidate)?;
+    let (v1_source, installed, _alias_lease) = prepare_v1(&ws, &candidate)?;
     let token = unique_token();
 
     step(&format!("installing v1 ({v1_source}) as {installed}"));
@@ -412,7 +412,7 @@ fn unique_token() -> String {
 /// Make v1 available under the tag the VM is installed from; returns what v1
 /// is and that tag. A tag of our own keeps the checkout's real image tag from
 /// being replaced by v2.
-fn prepare_v1(ws: &Workspace, candidate: &str) -> Result<(String, String)> {
+fn prepare_v1(ws: &Workspace, candidate: &str) -> Result<(String, String, std::fs::File)> {
     let source = match upgrade_from() {
         Some(from) => {
             if !bcvk::image_exists(&from) {
@@ -422,15 +422,32 @@ fn prepare_v1(ws: &Workspace, candidate: &str) -> Result<(String, String)> {
         }
         None => candidate.to_string(),
     };
-    // v1 may deliberately be an external, unlabelled legacy image. This is
-    // an explicit fixture alias, never an implicitly reusable checkout image.
-    // Allocate once per run and never overwrite another run's alias.
+    // A deliberately external v1 must retain its exact digest. A leased alias
+    // receipt authorizes that explicit allocation without relabelling the image.
+    // Keep the alias stable: bcvk's base-disk cache hashes the source reference.
     ws.ensure_state()?;
     ws.verify_implicit_image(candidate)?;
-    let installed = format!("{}-upgrade-{}-{}", ws.image_ref(), std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos());
-    anyhow::ensure!(!bcvk::image_exists(&installed), "upgrade fixture alias already exists; refusing replacement");
+    let installed = format!("{}-upgrade", ws.image_ref());
+    let lease = ilex_devkit::ownership::image_lock(&installed)?;
+    let owner = ws.identity()?.owner;
+    let receipt_path = ws.state_dir().join("upgrade-alias.json");
+    if ilex_devkit::ownership::image_exists(&installed)?
+        && ilex_devkit::ownership::image_owner(&installed)?.as_deref() != Some(owner.as_str())
+    {
+        let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(&receipt_path)
+            .context("unlabelled/foreign upgrade alias without an allocation receipt; refusing adoption")?)?;
+        anyhow::ensure!(receipt["schema"] == ilex_devkit::core::SCHEMA_VERSION
+            && receipt["owner"].as_str() == Some(owner.as_str())
+            && receipt["image"].as_str() == Some(installed.as_str())
+            && receipt["id"].as_str() == Some(bcvk::image_id(&installed)?.as_str()),
+            "unlabelled/foreign upgrade alias differs from this owner's explicit allocation receipt; refusing replacement");
+    }
+    let id = bcvk::image_id(&source)?;
+    std::fs::write(receipt_path, serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": ilex_devkit::core::SCHEMA_VERSION, "owner": owner, "image": installed, "id": id,
+    }))?)?;
     cmd::run(Command::new("podman").args(["tag", &source, &installed]))?;
-    Ok((source, installed))
+    Ok((source, installed, lease))
 }
 
 /// v2 = the candidate plus a layer that adds a `/usr` marker and an `/etc`

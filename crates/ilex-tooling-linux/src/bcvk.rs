@@ -280,6 +280,9 @@ impl EphemeralVm {
             .args(&opts.extra_args)
             .arg(image);
         let started = cmd::run(&mut run);
+        // A failed CLI may have lost a name race to an unrelated launcher.
+        // Never turn its current occupant into our cleanup guard on failure.
+        started.with_context(|| format!("starting ephemeral VM {name}; inspect any partial resource explicitly before retrying"))?;
         vm.container = cmd::probe(Command::new("podman").args([
             "container",
             "inspect",
@@ -287,7 +290,6 @@ impl EphemeralVm {
             "{{.Id}}",
             name,
         ]));
-        started.with_context(|| format!("starting ephemeral VM {name}"))?;
         ensure!(
             vm.container.is_some(),
             "bcvk did not create an identifiable container"
@@ -456,8 +458,8 @@ impl LibvirtVm {
         }
         run.args(&opts.extra_args).arg(image);
         let started = cmd::run(&mut run);
+        started.with_context(|| format!("installing libvirt VM {name}; inspect any partial resource explicitly before retrying"))?;
         vm.uuid = domain_id(name)?;
-        started.with_context(|| format!("installing libvirt VM {name}"))?;
         ensure!(
             vm.uuid.is_some(),
             "bcvk did not create an identifiable domain"

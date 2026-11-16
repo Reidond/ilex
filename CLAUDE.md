@@ -79,8 +79,9 @@ cargo xtask info               # resource identity, selection and available conf
   `ILEX_UPGRADE_FROM=<ref>` names an older one (CI: the installer composition, or legacy `:latest` until its first publication);
   with `CI` set and no `ILEX_UPGRADE_FROM` the tier is skipped. v2 is the
   candidate plus a marker layer, tagged `<image tag>-upgrade`, never the
-  checkout's own tag. Upgrade fixture aliases include a process/time suffix;
-  an explicit legacy v1 remains unmodified and is never implicitly adopted.
+  checkout's own tag. A lifetime lease and allocation receipt fence the stable
+  upgrade fixture alias (preserving bcvk's warm-up cache); explicit legacy v1
+  remains unmodified and is never implicitly adopted.
   The VM uses `uefi-insecure` firmware: Secure Boot needs
   SMM, which KVM can't do under WSL2's nested virtualization.
   On v2 the same VM checks signature enforcement: v2's `ilex-sigpolicy.service`
