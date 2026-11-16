@@ -13,6 +13,7 @@ pub mod ownership;
 pub mod provider;
 pub mod qemu;
 pub mod qmp;
+pub mod security;
 pub mod slots;
 pub mod source;
 pub mod tool;

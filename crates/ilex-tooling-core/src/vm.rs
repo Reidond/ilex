@@ -12,6 +12,15 @@ pub enum Requirement {
     Required,
 }
 
+/// Native acceleration never silently falls back to software emulation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Accelerator {
+    #[default]
+    Native,
+    Tcg,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TpmLifecycle {
@@ -98,6 +107,8 @@ pub struct SshProvisioning {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSpec {
     pub schema: u32,
+    #[serde(default)]
+    pub accelerator: Accelerator,
     pub owner: String,
     pub run: String,
     pub purpose: String,

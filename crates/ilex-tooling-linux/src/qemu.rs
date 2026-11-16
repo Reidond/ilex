@@ -200,6 +200,12 @@ pub fn test_key(ws: &Workspace) -> Result<TestKey> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmInfo {
     #[serde(default)]
+    pub accelerator: ilex_tooling_core::Accelerator,
+    #[serde(default)]
+    pub secure_boot: bool,
+    #[serde(default)]
+    pub persistent_tpm: bool,
+    #[serde(default)]
     pub schema: u32,
     pub owner: String,
     pub run: String,
@@ -439,7 +445,8 @@ pub struct Vm {
     pub info: VmInfo,
     child: Child,
     overlay: Option<PathBuf>,
-    // Freed only after QEMU is gone; the lifetime name lease follows it.
+    _security: Option<crate::security::Bundle>,
+    // Freed after QEMU and swtpm; the lifetime name lease follows it.
     _slot: VmSlot,
     _lease: fs::File,
 }
@@ -458,7 +465,9 @@ impl Vm {
         spec: ilex_tooling_core::VmSpec,
     ) -> Result<Vm> {
         cmd::require("qemu-system-x86_64")?;
-        if !Path::new("/dev/kvm").exists() {
+        if spec.accelerator == ilex_tooling_core::Accelerator::Native
+            && !Path::new("/dev/kvm").exists()
+        {
             bail!(
                 "/dev/kvm not found: booting VMs needs KVM (on Windows, run inside WSL2 with nested virtualization)"
             );
@@ -484,16 +493,25 @@ impl Vm {
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
         let key = test_key(ws)?;
-        let (ovmf_code, ovmf_vars) = find_ovmf()?;
+        let security = if crate::security::requested(&spec) {
+            Some(crate::security::Bundle::prepare(ws, &spec, &dir)?)
+        } else {
+            None
+        };
+        let (ovmf_code, ovmf_vars) = match &security {
+            Some(bundle) => (bundle.code.clone(), bundle.vars.clone()),
+            None => find_ovmf()?,
+        };
         let vars = match &config.efi_vars {
             Some(persistent) => std::path::absolute(persistent)?,
+            None if security.is_some() => ovmf_vars.clone(),
             None => dir.join("OVMF_VARS.fd"),
         };
         if config.efi_vars.is_some() && !vars.starts_with(ws.state_dir()) {
             if let Some(parent) = vars.parent() { fs::create_dir_all(parent)?; }
             crate::ownership::claim_file(ws, &vars)?;
         }
-        if config.efi_vars.is_none() || !vars.exists() {
+        if security.is_none() && (config.efi_vars.is_none() || !vars.exists()) {
             if let Some(parent) = vars.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -548,7 +566,26 @@ impl Vm {
         // multi-gigabyte VM (and its slot's RAM) running.
         qemu.args(["-name", &name])
             .args(["-run-with", "exit-with-parent=on"])
-            .args(["-accel", "kvm", "-machine", "q35", "-cpu", "host"])
+            .args([
+                "-accel",
+                if spec.accelerator == ilex_tooling_core::Accelerator::Tcg {
+                    "tcg,thread=multi"
+                } else {
+                    "kvm"
+                },
+                "-machine",
+                if security.is_some() {
+                    "q35,smm=on"
+                } else {
+                    "q35"
+                },
+                "-cpu",
+                if spec.accelerator == ilex_tooling_core::Accelerator::Tcg {
+                    "max"
+                } else {
+                    "host"
+                },
+            ])
             .args(["-smp", &config.vcpus.to_string(), "-m", &config.memory])
             .arg("-drive")
             .arg(format!(
@@ -565,6 +602,22 @@ impl Vm {
                 "if=virtio,format={drive_format},file={}",
                 drive_file.display()
             ));
+        if security.is_some() {
+            qemu.args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
+        }
+        if !matches!(spec.tpm, ilex_tooling_core::TpmLifecycle::Off) {
+            qemu.arg("-chardev")
+                .arg(format!(
+                    "socket,id=chrtpm,path={}",
+                    dir.join("tpm.sock").display()
+                ))
+                .args([
+                    "-tpmdev",
+                    "emulator,id=tpm0,chardev=chrtpm",
+                    "-device",
+                    "tpm-tis,tpmdev=tpm0",
+                ]);
+        }
         if let Some(iso) = &config.cdrom {
             qemu.arg("-drive").arg(format!(
                 "media=cdrom,readonly=on,file={}",
@@ -684,6 +737,9 @@ impl Vm {
         }
 
         let info = VmInfo {
+            accelerator: spec.accelerator,
+            secure_boot: spec.secure_boot == ilex_tooling_core::Requirement::Required,
+            persistent_tpm: !matches!(spec.tpm, ilex_tooling_core::TpmLifecycle::Off),
             gpu: gl,
             schema: ilex_tooling_core::SCHEMA_VERSION,
             owner: spec.owner,
@@ -717,6 +773,7 @@ impl Vm {
             info,
             child,
             overlay,
+            _security: security,
             _slot: slot,
             _lease: lease,
         })
@@ -771,6 +828,15 @@ impl Vm {
     pub fn wait_ssh(&mut self, timeout: Duration) -> Result<()> {
         let started = Instant::now();
         loop {
+            if self.info.secure_boot
+                && fs::read_to_string(self.info.dir.join("qemu.log"))
+                    .is_ok_and(|log| log.contains("KVM: entry failed"))
+            {
+                bail!(
+                    "secure KVM guest is unqualified: KVM entry failed (see {}); select TCG explicitly",
+                    self.info.dir.join("qemu.log").display()
+                );
+            }
             if let Some(status) = self.exited()? {
                 bail!(
                     "qemu exited with {status} while waiting for SSH ({})",

@@ -135,6 +135,18 @@ impl Vmctl {
             (self.info.width, self.info.height),
         );
         caps.vm_id = Some(format!("{}:{}", self.info.pid, self.info.process_start));
+        // Provisioned capabilities of this exact process; guest qualification
+        // still belongs to the booted security tier, not this control probe.
+        if self.info.accelerator == ilex_tooling_core::Accelerator::Tcg {
+            caps.provider = "linux-qemu-tcg".into();
+            caps.features.insert(ilex_tooling_core::Capability::Start, ilex_tooling_core::CapabilityStatus::Available);
+        }
+        if self.info.secure_boot {
+            caps.features.insert(ilex_tooling_core::Capability::FirmwareEnforcement, ilex_tooling_core::CapabilityStatus::Available);
+        }
+        if self.info.persistent_tpm {
+            caps.features.insert(ilex_tooling_core::Capability::PersistentTpm, ilex_tooling_core::CapabilityStatus::Available);
+        }
         caps.screenshot_dimensions = self
             .mapping
             .lock()
@@ -148,7 +160,7 @@ impl Vmctl {
             schema: self.info.schema,
             owner: self.info.owner.clone(),
             run: self.info.run.clone(),
-            provider: "linux-qemu-kvm".into(),
+            provider: if self.info.accelerator == ilex_tooling_core::Accelerator::Tcg { "linux-qemu-tcg" } else { "linux-qemu-kvm" }.into(),
             opaque_id: format!("{}:{}", self.info.pid, self.info.process_start),
             guest_arch: self.info.architecture,
         }

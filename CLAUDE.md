@@ -92,8 +92,10 @@ cargo xtask info               # resource identity, selection and available conf
   checkout's own tag. A lifetime lease and allocation receipt fence the stable
   upgrade fixture alias (preserving bcvk's warm-up cache); explicit legacy v1
   remains unmodified and is never implicitly adopted.
-  The VM uses `uefi-insecure` firmware: Secure Boot needs
-  SMM, which KVM can't do under WSL2's nested virtualization.
+  Ordinary upgrade VMs keep `uefi-insecure` firmware.
+  Secure Boot requires SMM; the measured WSL kernel supports it
+  (`KVM_CAP_X86_SMM=1`). Probe each host rather than inferring capability
+  from nested virtualization. The separate security tier qualifies enforcement.
   On v2 the same VM checks signature enforcement: v2's `ilex-sigpolicy.service`
   left the containers-storage origin alone at boot; the origin is pointed at
   the installer composition unverified (the state older ISO installs leave),
@@ -222,6 +224,71 @@ cargo xtask info               # resource identity, selection and available conf
   legacy-payload installation into a passing update check.
 - Publishing (`xtask publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
+
+## Linux security qualification
+
+`cargo xtask security` reports this Linux host's KVM SMM capability and
+security prerequisites. Its result is explicitly `not_yet_qualified` until
+the booted-guest tier passes. `cargo xtask security --self-check` runs
+`security::firmware` against this checkout's image (`ILEX_IMAGE` can select
+the CI candidate). `--accelerator tcg` explicitly selects emulation; a failed
+KVM/SMM probe never silently changes accelerators. On Windows run these
+Linux-backend commands inside the existing WSL executor.
+
+The shared `VmSpec` remains the contract for part 4: `secure_boot=required`
+and `tpm=persistent { bundle_id }`, with a writable owned disk, UEFI and no
+external `firmware_state`. Native acceleration is the default; the additive
+`accelerator=tcg` choice uses an emulated `max` CPU. Existing ordinary VMs
+keep their nonsecure firmware and no TPM. Secure requests select a distro
+firmware descriptor declaring Microsoft-enrolled keys, Secure Boot and SMM,
+and require the matching CODE/VARS pair's combined 4 MiB layout. Fedora's
+qcow2 pair and Ubuntu's raw pair are converted into private raw files.
+Ordinary `ILEX_OVMF_CODE/VARS` overrides cannot qualify security requests.
+
+Disk, CODE, VARS and manufactured SHA256 swtpm state form one lifecycle:
+`<state>/security/<bundle_id>/bundle.json` binds owner/run/purpose/disk and
+policy, checks the CODE hash, and refuses missing TPM state or a changed
+policy. A lock prevents concurrent use. `stop` preserves identity; `start`
+reuses it; `destroy_owned` removes the complete bundle after stopping both
+processes. Keep the persistent disk alongside it. Installer tests can retain
+the same disk and bundle across boots. Policy changes/fresh TPM negatives
+require separate disposable fixtures. No host TPM is passed through.
+An interrupted manufacture fails closed and retains its directory for
+diagnosis; remove only that disposable fixture after its owning process ends.
+
+`security::firmware` boots Fedora shim from a real installed disk (no direct
+kernel boot), checks SB=1/SetupMode=0/TPM2, and replays SHA256 PCR7 from the
+binary event log. It requires meaningful policy and authority events. A
+public test credential encrypted to this TPM/PCR7 must decrypt after both
+warm reboot and a full QEMU/swtpm stop/start. An unsigned generated EFI
+application must emit its serial marker with SB off, then receive an explicit
+firmware rejection with SB required. Both controls use identical payload
+bytes. The tier uses 4 GiB and two vCPUs; each SSH/control deadline is 420s
+with KVM or 900s with TCG. This does not qualify encrypted installation,
+desktop performance or the unresolved 4 GiB nested Hyper-V builder failure.
+`ILEX_SECURITY_MEMORY=2G` selects an explicit smaller diagnostic fixture;
+timing evidence records its actual memory. It does not qualify a 4 GiB VM.
+The 16 November 2026 WSL run also reproduced a 4 GiB KVM SMM entry failure
+after shim/GRUB (`hardware error 0xffffffff`, QMP `internal-error`). A host
+SMM capability of 1 alone is therefore insufficient. Entry failures fail
+early; neither SMM nor Secure Boot is disabled to continue the test.
+Disk construction still uses bcvk's KVM installer; a host with no KVM at all
+needs an already delivered, checkout-owned `ILEX_DISK` to qualify TCG. Missing
+disk-construction support fails as unqualified. The hosted workflow's existing
+ordinary KVM tiers still require KVM independently of the SMM decision.
+
+CI runs the tier on the tested candidate, probes the actual runner each
+time, explicitly chooses KVM or TCG, and enforces a 45-minute total deadline.
+Failures/timeouts are unqualified and fail the build; an unchanged image's
+unrun tier is labelled **UNQUALIFIED** in the summary. `test=true` forces it.
+The optional dispatch input `security_accelerator=tcg` forces the explicit
+emulation route even when the host advertises SMM; `kvm` requires KVM/SMM,
+and the default `probe` selects from the actual runner probe. A KVM entry
+failure never silently retries another accelerator within a qualification.
+Serial logs, firmware identity, versions, PCR replay, timing and cleanup
+evidence are retained under `artifacts/security/` (CI: `security-evidence`).
+TPM state and credential files are not uploaded or cached. Existing apt/disk
+caches and the GPT automount workaround retain their behavior.
 
 ## ilexctl
 

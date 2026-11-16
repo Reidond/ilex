@@ -19,6 +19,7 @@ mod ephemeral;
 mod graphical;
 mod homed;
 mod iso;
+mod security;
 mod tool;
 mod upgrade;
 
@@ -37,13 +38,19 @@ fn main() {
         trials.extend(homed::trials());
     }
     #[cfg(target_os = "linux")]
-    if !std::env::var_os("CI").is_some_and(|v| !v.is_empty()) && filters.iter().any(|f| f.contains("config")) {
+    if !std::env::var_os("CI").is_some_and(|v| !v.is_empty())
+        && filters.iter().any(|f| f.contains("config"))
+    {
         trials.extend(config::trials());
     }
     // Opt-in: builds an installer ISO and runs an install (tens of minutes),
     // so it only exists when a filter asks for it (`cargo xtask test iso::`).
     if filters.iter().any(|f| f.contains("iso")) {
         trials.extend(iso::trials());
+    }
+    // Security is opt-in, but an explicitly selected unqualified host fails.
+    if filters.iter().any(|f| f.contains("security")) {
+        trials.extend(security::trials());
     }
 
     // libtest-mimic takes a single filter; accept several and run the union.

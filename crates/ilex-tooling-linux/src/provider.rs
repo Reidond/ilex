@@ -150,6 +150,7 @@ pub fn spec(ws: &Workspace, config: &VmConfig) -> Result<VmSpec> {
     }
     Ok(VmSpec {
         schema: SCHEMA_VERSION,
+        accelerator: Accelerator::Native,
         owner: identity.owner,
         run: format!(
             "{}-{}",
@@ -239,6 +240,10 @@ pub struct LinuxVm {
     running: Option<qemu::Vm>,
 }
 impl LinuxVm {
+    /// Backend SSH/lifecycle adapter while portable guest execution evolves.
+    pub fn running_mut(&mut self) -> Result<&mut qemu::Vm> {
+        self.running.as_mut().context("VM has not been started")
+    }
     /// Temporary fixture export retaining the same process, overlay and slot.
     pub fn into_legacy_vm(mut self) -> Result<qemu::Vm> {
         self.running.take().context("VM has not been started")
@@ -262,13 +267,48 @@ impl VmProvider for LinuxProvider {
             } => ("gtk-gl", width, height),
             VmDisplay::Window { width, height, .. } => ("gtk", width, height),
         };
-        Ok(capabilities(display, (width, height)))
+        let mut caps = capabilities(display, (width, height));
+        if spec.accelerator == Accelerator::Tcg {
+            caps.provider = "linux-qemu-tcg".into();
+            caps.features
+                .insert(Capability::Start, CapabilityStatus::Available);
+        }
+        if crate::security::requested(spec) {
+            let status = match crate::security::validate(spec) {
+                Ok(()) => CapabilityStatus::Available,
+                Err(e) => CapabilityStatus::Unavailable(format!("{e:#}")),
+            };
+            caps.features.insert(
+                Capability::FirmwareEnforcement,
+                if spec.secure_boot == Requirement::Required {
+                    status.clone()
+                } else {
+                    CapabilityStatus::Unavailable("Secure Boot is off for this VM".into())
+                },
+            );
+            caps.features.insert(
+                Capability::PersistentTpm,
+                if matches!(spec.tpm, TpmLifecycle::Off) {
+                    CapabilityStatus::Unavailable("TPM is off for this VM".into())
+                } else {
+                    status
+                },
+            );
+        }
+        Ok(caps)
     }
     fn validate(&self, spec: &VmSpec) -> Result<()> {
         // Version/ownership precede any backend mutation.
         spec.validate(&self.identity, &self.probe(spec)?)?;
         self.probe(spec)?.require(Capability::Start)?;
         require_arch(spec.guest_arch)?;
+        if crate::security::requested(spec) {
+            crate::security::validate(spec)?;
+            ensure!(
+                matches!(spec.boot, BootSource::Disk { writable: true, .. }),
+                "security bundle requires a persistent writable disk; create an owned overlay explicitly"
+            );
+        }
         ensure!(
             spec.host_arch == Architecture::host()?,
             "host architecture does not match VM request"
@@ -373,7 +413,12 @@ impl VmProvider for LinuxProvider {
             schema: SCHEMA_VERSION,
             owner: vm.spec.owner.clone(),
             run: vm.spec.run.clone(),
-            provider: "linux-qemu-kvm".into(),
+            provider: if vm.spec.accelerator == Accelerator::Tcg {
+                "linux-qemu-tcg"
+            } else {
+                "linux-qemu-kvm"
+            }
+            .into(),
             opaque_id: format!("{}:{}", running.info.pid, running.info.process_start),
             guest_arch: vm.spec.guest_arch,
         })
@@ -384,7 +429,11 @@ impl VmProvider for LinuxProvider {
         Ok(())
     }
     fn destroy_owned(&self, vm: &mut LinuxVm) -> Result<()> {
-        self.stop(vm)
+        self.stop(vm)?;
+        if crate::security::requested(&vm.spec) {
+            crate::security::destroy_bundle(&self.ws, &vm.spec)?;
+        }
+        Ok(())
     }
     fn guest_endpoint(&self, vm: &LinuxVm) -> Result<GuestEndpoint> {
         self.identity.authorize(&vm.spec.owner)?;

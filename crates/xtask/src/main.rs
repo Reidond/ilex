@@ -21,6 +21,7 @@ mod publish;
 mod rechunk;
 mod registry;
 mod select;
+mod security;
 mod test;
 mod tool;
 mod vm;
@@ -64,6 +65,8 @@ enum Cmd {
     Doctor(doctor::Args),
     /// Inspect automatic primary ownership, release stale claims, or rebuild legacy images
     Identity(identity::Args),
+    /// Probe secure firmware/KVM/SMM; --self-check boots the firmware tier
+    Security(security::Args),
 }
 
 fn main() -> ExitCode {
@@ -104,5 +107,6 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Info(args) => info::run(&ws, args),
         Cmd::Doctor(args) => doctor::run(&ws, args),
         Cmd::Identity(args) => identity::run(&args),
+        Cmd::Security(args) => security::run(&ws, args),
     }
 }

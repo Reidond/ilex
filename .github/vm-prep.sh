@@ -71,7 +71,7 @@ vm_stack() (
     # e2fsprogs creates OEMDRV, openssh-client supplies SSH/keygen, and ovmf
     # supplies UEFI firmware. Do not rely on the runner's preinstalled tools.
     sudo apt-get install -y "${apt[@]}" qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo \
-        xorriso e2fsprogs openssh-client ovmf
+        xorriso e2fsprogs openssh-client ovmf swtpm swtpm-tools
     uname -a
     qemu-system-x86_64 --version
     virsh --version

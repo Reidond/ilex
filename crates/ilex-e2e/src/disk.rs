@@ -39,7 +39,7 @@ fn run() -> Result<()> {
 }
 
 fn contracts(ws: &ilex_devkit::Workspace, vm: &Vm) -> Result<()> {
-    use ilex_devkit::core::{Capability, Input, Requirement, VmControl, VmProvider};
+    use ilex_devkit::core::{Capability, Input, VmControl, VmProvider};
     let control = ilex_vmctl::Vmctl::attach(ws, Some("disk"))?;
     let frame = VmControl::capture(&control)?;
     anyhow::ensure!(frame.vm.owner == ws.identity()?.owner && frame.vm.run == vm.info.run, "control attached to a different checkout/run");
@@ -50,9 +50,9 @@ fn contracts(ws: &ilex_devkit::Workspace, vm: &Vm) -> Result<()> {
     caps.require(Capability::Screenshot)?;
     println!("     owner={} run={} capture={}x{} generation={}", frame.vm.owner, frame.vm.run, frame.width, frame.height, frame.generation);
     let mut spec = ilex_devkit::provider::spec(ws, &VmConfig::new("unsupported-contract", "unused.qcow2"))?;
-    spec.secure_boot = Requirement::Required;
+    spec.require.push(Capability::Suspend);
     let provider = ilex_devkit::provider::LinuxProvider::new(ws.clone())?;
-    let error = provider.validate(&spec).expect_err("ordinary backend must reject secure boot");
+    let error = provider.validate(&spec).expect_err("ordinary backend must reject suspend");
     println!("     unsupported capability rejected before mutation: {error:#}");
     anyhow::ensure!(!ws.runtime_dir().join("unsupported-contract").exists(), "unsupported capability mutated runtime state");
     Ok(())

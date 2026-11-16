@@ -61,6 +61,11 @@ on:
         description: Only install the published installer composition to a disk for the upgrade tier's cache (the publish job starts this after each publish)
         type: boolean
         default: false
+      security_accelerator:
+        description: Security tier accelerator (probe selects KVM only with SMM; tcg explicitly forces emulation)
+        type: choice
+        options: [probe, kvm, tcg]
+        default: probe
 
 # A v1-disk run has a group of its own (per branch: each has its cache scope):
 # publish runs never wait for it, and a newer :generic.gnome supersedes the disk it
@@ -247,6 +252,26 @@ jobs:
         run: |
           podman run --rm -i --network=none --entrypoint python3 "$ILEX_IMAGE" -I -S - < .github/check-filecaps.py
           sg libvirt -c 'cargo xtask test ephemeral::'
+
+      - name: Qualify candidate secure firmware and persistent TPM
+        if: steps.changed.outputs.changed == 'true' || inputs.test
+        env:
+          ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
+          ILEX_SECURITY_ACCELERATOR: ${{ inputs.security_accelerator || 'probe' }}
+        run: bash .github/security-tier.sh
+
+      - name: Report unchanged security tier as unqualified
+        if: steps.changed.outputs.changed != 'true' && !inputs.test
+        run: echo 'security::firmware **UNQUALIFIED** (unchanged image; tier not run). Use test=true to qualify this runner.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep security qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-evidence
+          path: ${{ runner.temp }}/security-artifacts/security
+          if-no-files-found: ignore
+          retention-days: 3
 
       # Keep the installer staging step early: upgrade starts while other roots
       # build/rechunk/boot. A job output is committed only after all tests pass.
