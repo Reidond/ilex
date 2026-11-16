@@ -24,8 +24,11 @@ pub fn disk(ws: &Workspace) -> Result<PathBuf> {
         return Ok(path.into());
     }
     let image = common::image()?;
-    if cmd::probe(std::process::Command::new("podman").args(["image", "exists", &image])).is_none() {
-        bail!("image {image} not found in local container storage (run `cargo xtask build`, or set ILEX_IMAGE)");
+    if cmd::probe(std::process::Command::new("podman").args(["image", "exists", &image])).is_none()
+    {
+        bail!(
+            "image {image} not found in local container storage (run `cargo xtask build`, or set ILEX_IMAGE)"
+        );
     }
     let mut spec = DiskSpec::new(&image);
     spec.format = DiskFormat::Qcow2;
@@ -39,11 +42,62 @@ pub fn boot(ws: &Workspace, config: VmConfig) -> Result<Vm> {
     let spec = ilex_devkit::provider::spec(ws, &config)?;
     let mut fixture = provider.create(spec)?;
     let handle = provider.start(&mut fixture)?;
+    if config.purpose == "disk" {
+        foreign_teardown(ws, &mut fixture)?;
+    }
     let mut vm = fixture.into_legacy_vm()?;
-    anyhow::ensure!(vm.info.run == handle.run && vm.info.owner == handle.owner, "provider and fixture ownership disagree");
-    vm.wait_ssh(BOOT_TIMEOUT).with_context(|| format!("booting {}", vm.info.name))?;
+    anyhow::ensure!(
+        vm.info.run == handle.run && vm.info.owner == handle.owner,
+        "provider and fixture ownership disagree"
+    );
+    vm.wait_ssh(BOOT_TIMEOUT)
+        .with_context(|| format!("booting {}", vm.info.name))?;
     println!("{} is up: {}", vm.info.name, vm.info.ssh_command_line());
     Ok(vm)
+}
+
+/// An actual other checkout must not stop a live guard on a refused teardown.
+/// The following SSH wait and disk assertions prove that the VM stayed alive.
+fn foreign_teardown(ws: &Workspace, fixture: &mut ilex_devkit::provider::LinuxVm) -> Result<()> {
+    use ilex_devkit::{core::VmProvider, git, provider::LinuxProvider};
+    use std::{
+        fs,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    struct Peer(PathBuf);
+    impl Drop for Peer {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let parent = ws.state_dir().join("ownership-self-check");
+    fs::create_dir_all(&parent)?;
+    let peer = Peer(parent.join(format!(
+        "peer-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    )));
+    let common = cmd::output(git::git(&ws.root).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ]))?;
+    cmd::run(
+        Command::new("git")
+            .args(["clone", "--quiet", "--no-hardlinks"])
+            .arg(common)
+            .arg(&peer.0),
+    )?;
+    let other = LinuxProvider::new(Workspace::from_root(peer.0.clone()))?;
+    let rejection = other
+        .destroy_owned(fixture)
+        .err()
+        .context("foreign checkout was allowed to destroy the VM")?;
+    println!(
+        "ok   foreign checkout teardown rejected while retaining the live guard: {rejection:#}"
+    );
+    fs::remove_dir_all(&peer.0)?;
+    Ok(())
 }
 
 /// Collects named checks from one boot, so one failure doesn't hide the rest.
@@ -72,7 +126,11 @@ impl Report {
         if self.failures.is_empty() {
             Ok(())
         } else {
-            bail!("{} check(s) failed:\n  {}", self.failures.len(), self.failures.join("\n  "))
+            bail!(
+                "{} check(s) failed:\n  {}",
+                self.failures.len(),
+                self.failures.join("\n  ")
+            )
         }
     }
 }
@@ -86,7 +144,8 @@ pub fn guest_toml(vm: &Vm, glob: &str) -> Result<Vec<toml::Table>> {
         .lines()
         .map(|f| {
             let text = vm.ssh_ok(&format!("cat {f}"))?;
-            text.parse::<toml::Table>().with_context(|| format!("parsing {f}"))
+            text.parse::<toml::Table>()
+                .with_context(|| format!("parsing {f}"))
         })
         .collect()
 }

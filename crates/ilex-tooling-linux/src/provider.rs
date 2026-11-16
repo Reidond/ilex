@@ -383,8 +383,8 @@ impl VmProvider for LinuxProvider {
         drop(vm.running.take());
         Ok(())
     }
-    fn destroy_owned(&self, mut vm: LinuxVm) -> Result<()> {
-        self.stop(&mut vm)
+    fn destroy_owned(&self, vm: &mut LinuxVm) -> Result<()> {
+        self.stop(vm)
     }
     fn guest_endpoint(&self, vm: &LinuxVm) -> Result<GuestEndpoint> {
         self.identity.authorize(&vm.spec.owner)?;

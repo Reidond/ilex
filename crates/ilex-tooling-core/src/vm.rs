@@ -198,7 +198,8 @@ pub trait VmProvider {
     fn start(&self, vm: &mut Self::Vm) -> Result<VmHandle>;
     fn inspect(&self, vm: &Self::Vm) -> Result<VmHandle>;
     fn stop(&self, vm: &mut Self::Vm) -> Result<()>;
-    fn destroy_owned(&self, vm: Self::Vm) -> Result<()>;
+    /// Borrow the guard so an ownership error cannot implicitly drop/stop it.
+    fn destroy_owned(&self, vm: &mut Self::Vm) -> Result<()>;
     fn guest_endpoint(&self, vm: &Self::Vm) -> Result<GuestEndpoint>;
 }
 
