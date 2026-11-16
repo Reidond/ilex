@@ -1008,6 +1008,7 @@ cargo xtask identity release-main --owner <UUID> # only when that checkout no lo
 cargo xtask identity rebuild-legacy-image --expected-id <ID> # explicit rebuild, preserving old image
 cargo xtask doctor --self-check --json  # disposable real Git checkouts; no images/VMs
 cargo xtask doctor --self-check-build --json # Linux: actual gated Podman builds and ownership rejection
+cargo xtask disk --self-check           # Linux: disposable CLI alias faults; no real store or VM
 cargo xtask doctor --arch aarch64        # explicit rejection on the current Linux backend
 cargo xtask doctor --require firmware_enforcement # fails: ordinary defaults are nonsecure
 ilex-vmctl capabilities --json          # attach to a running VM; MCP: capabilities
@@ -1036,6 +1037,18 @@ Image labels `ilex.checkout-owner`, `ilex.source-digest` and
 request/result JSON with the immutable image ID and local executor identity.
 This is local provenance, not the remote source-transfer implementation (T3).
 Rechunk/ISO/tool orchestration retains its compatibility path.
+
+Immutable-ID disk inputs use a versioned local alias because bcvk's inner
+transport cannot parse `sha256:...` as a local image ID. The shared ownership
+helper leases that alias in the Podman store through installation, validates
+the full source ID before tagging, and binds reuse to a store/owner/alias/ID
+allocation receipt in `<state>/image-aliases/`. Explicit source labels may be
+foreign/CI labels and are retained. An existing same-ID alias without a receipt
+is refused; an inspection/store error never means absence. Earlier unreceipted
+aliases are not adopted. `disk --self-check` injects inspect/exists exit 125,
+unreceipted same-ID aliases, mismatched owners/IDs and cross-output concurrency
+through the actual CLI with private stubs. CI retains its JSON alongside the
+security evidence; real image-ID disk installation and guest boots remain e2e.
 
 State/runtime roots carry `.ilex-owner.json` schema/owner receipts, and disk
 cache outputs carry `<filename>.ilex-owner`. Receipt checks precede reuse or

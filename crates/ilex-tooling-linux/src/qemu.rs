@@ -155,44 +155,28 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
             digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid source image ID"
         );
-        let alias = format!("{}-disk-{}", ws.image_ref(), &digest[..16]);
-        if let Some(existing) = cmd::probe(
-            Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", &alias]),
-        ) {
-            anyhow::ensure!(
-                existing.strip_prefix("sha256:").unwrap_or(&existing) == digest,
-                "owned disk alias points to a different image"
-            );
-        } else {
-            cmd::run(Command::new("podman").args(["tag", &spec.image, &alias]))?;
-        }
-        let actual = cmd::output(
-            Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", &alias]),
-        )?;
-        anyhow::ensure!(
-            actual.strip_prefix("sha256:").unwrap_or(&actual) == digest,
-            "disk source alias ID mismatch"
-        );
-        Some(alias)
+        // A fresh versioned alias avoids implicitly adopting aliases allocated
+        // by the old, unreceipted path. The helper retains a store-wide lease.
+        let alias = format!("{}-disk-v1-{}", ws.image_ref(), &digest[..16]);
+        Some(crate::ownership::ImageAlias::for_image_id(
+            ws,
+            &alias,
+            &spec.image,
+        )?)
     } else {
         None
     };
-    let source = source_alias.as_deref().unwrap_or(&spec.image);
+    let source = source_alias
+        .as_ref()
+        .map_or(spec.image.as_str(), |alias| alias.reference());
     let mut bcvk = Command::new("bcvk");
     bcvk.args(["to-disk", "--format", spec.format.name()])
         .args(["--disk-size", &spec.size])
         .arg(source)
         .arg(&out);
     cmd::run(&mut bcvk)?;
-    if source_alias.is_some() {
-        let actual = cmd::output(
-            Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", source]),
-        )?;
-        anyhow::ensure!(
-            actual.strip_prefix("sha256:").unwrap_or(&actual)
-                == spec.image.strip_prefix("sha256:").unwrap(),
-            "disk source alias changed during installation"
-        );
+    if let Some(alias) = &source_alias {
+        alias.verify()?;
     }
     Ok(out)
 }

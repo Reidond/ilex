@@ -7,10 +7,11 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use ilex_devkit::qemu::{self, DiskFormat, DiskSpec};
 use ilex_devkit::Workspace;
+use ilex_devkit::qemu::{self, DiskFormat, DiskSpec};
 
 use crate::build;
+mod check;
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Format {
@@ -33,6 +34,9 @@ const DEFAULT_SIZE: &str = "30G";
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
+    /// Inject alias inspection/store failures in disposable CLI fixtures (Linux)
+    #[arg(long)]
+    pub self_check: bool,
     #[command(flatten)]
     pub selection: crate::select::Args,
     /// Disk image format
@@ -55,6 +59,7 @@ pub struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
+            self_check: false,
             selection: crate::select::Args::default(),
             format: Format::default(),
             image: None,
@@ -65,6 +70,9 @@ impl Default for Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    if args.self_check {
+        return check::run(ws);
+    }
     let path = ensure(ws, &args)?;
     println!("{}", path.display());
     Ok(())

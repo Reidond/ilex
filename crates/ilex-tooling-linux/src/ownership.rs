@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -128,6 +128,10 @@ pub fn image_exists(image: &str) -> Result<bool> {
 }
 
 pub fn image_lock(image: &str) -> Result<File> {
+    lock(&image_lock_path(image)?)
+}
+
+fn image_lock_path(image: &str) -> Result<PathBuf> {
     crate::require_linux()?;
     #[cfg(target_os = "linux")]
     {
@@ -140,14 +144,125 @@ pub fn image_lock(image: &str) -> Result<File> {
         let store = fs::canonicalize(store)?;
         let store_key = digest(store.as_os_str().as_encoded_bytes());
         let key = digest(image.as_bytes());
-        lock(
-            &std::path::PathBuf::from(format!("/tmp/ilex-image-locks-{uid}"))
+        Ok(
+            PathBuf::from(format!("/tmp/ilex-image-locks-{uid}"))
                 .join(&store_key[7..])
                 .join(format!("{}.lock", &key[7..])),
         )
     }
     #[cfg(not(target_os = "linux"))]
     anyhow::bail!("image store locks for {image} require Linux")
+}
+
+#[derive(Serialize, Deserialize)]
+struct ImageAliasReceipt {
+    schema: u32,
+    owner: String,
+    image: String,
+    id: String,
+}
+
+/// A receipt authorizes an immutable alias even when its explicit source has
+/// foreign/CI labels. Keep this guard alive while a consumer uses the alias.
+/// Existing aliases always require a matching allocation receipt; matching
+/// contents or labels alone never authorize adoption or replacement.
+pub struct ImageAlias {
+    image: String,
+    id: String,
+    _lease: File,
+}
+
+impl ImageAlias {
+    pub fn for_image_id(ws: &Workspace, image: &str, source: &str) -> Result<Self> {
+        ensure!(
+            image.starts_with(&format!("{}-", ws.image_ref())),
+            "image alias is outside this checkout's namespace"
+        );
+        let digest = source
+            .strip_prefix("sha256:")
+            .context("expected an immutable image ID")?;
+        ensure!(
+            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid source image ID"
+        );
+        ws.ensure_state()?;
+        let lock_path = image_lock_path(image)?;
+        let lease = lock(&lock_path)?;
+        // Bind receipts to the same local store/UID namespace as the lease,
+        // even if the checkout is used with more than one Podman store.
+        let key = ilex_tooling_core::digest(lock_path.as_os_str().as_encoded_bytes());
+        let receipt_path = ws
+            .state_dir()
+            .join("image-aliases")
+            .join(format!("{}.json", &key[7..]));
+        let expected = ImageAliasReceipt {
+            schema: SCHEMA_VERSION,
+            owner: ws.identity()?.owner,
+            image: image.into(),
+            id: digest.to_ascii_lowercase(),
+        };
+        let exists = image_exists(image)?;
+        let has_receipt = receipt_path.try_exists()?;
+        if has_receipt {
+            let receipt: ImageAliasReceipt = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+            check_version(receipt.schema)?;
+            ws.identity()?.authorize(&receipt.owner)?;
+            ensure!(
+                receipt.image == expected.image && receipt.id == expected.id,
+                "image alias allocation receipt does not match requested alias/source"
+            );
+        } else {
+            ensure!(
+                !exists,
+                "existing image alias {image} has no allocation receipt; refusing adoption or replacement"
+            );
+        }
+        let alias = Self {
+            image: image.into(),
+            id: expected.id.clone(),
+            _lease: lease,
+        };
+        if exists {
+            alias.verify()?;
+        }
+        // Validate the immutable input before any promotion. An inspect/store
+        // error is fatal, never permission to overwrite an existing alias.
+        alias.verify_reference(source)?;
+        if !exists {
+            cmd::run(Command::new("podman").args(["tag", source, image]))?;
+            alias.verify()?;
+            if !has_receipt {
+                fs::create_dir_all(receipt_path.parent().unwrap())?;
+                let mut receipt = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&receipt_path)?;
+                receipt.write_all(&serde_json::to_vec_pretty(&expected)?)?;
+                receipt.sync_all()?;
+            }
+        }
+        Ok(alias)
+    }
+
+    pub fn reference(&self) -> &str {
+        &self.image
+    }
+
+    pub fn verify(&self) -> Result<()> {
+        self.verify_reference(&self.image)
+    }
+
+    fn verify_reference(&self, reference: &str) -> Result<()> {
+        let actual = crate::bcvk::image_id(reference)?;
+        ensure!(
+            actual
+                .strip_prefix("sha256:")
+                .unwrap_or(&actual)
+                .eq_ignore_ascii_case(&self.id),
+            "image alias/source ID mismatch for {reference}"
+        );
+        Ok(())
+    }
 }
 
 /// Call under the resource's writer lock. A pre-existing file needs a receipt;

@@ -15,6 +15,7 @@ finish() {
     return "$result"
 }
 trap finish EXIT
+timeout --signal=TERM --kill-after=10s 5m cargo xtask disk --self-check > "$ILEX_ARTIFACTS/security/disk-alias-self-check.json"
 cargo xtask security > "$ILEX_ARTIFACTS/security/runner-probe.json"
 # KVM_CHECK_EXTENSION(KVM_CAP_X86_SMM), not a virtualized-host heuristic.
 requested=${ILEX_SECURITY_ACCELERATOR:-probe}
