@@ -23,6 +23,7 @@ fn main() -> ExitCode {
         }
         Some("--self-check") => self_check(),
         Some("home-create") => homed::create(std::env::args().skip(2).collect()),
+        Some("profile") => profile(std::env::args().skip(2)),
         // Internal user@ dependency; labels a new homed filesystem before
         // the first user process starts. Not an account-provisioning front end.
         Some("home-label") => homed::label(std::env::args().skip(2).collect()),
@@ -46,7 +47,8 @@ fn main() -> ExitCode {
             println!(
                 "ilex-agent {VERSION}\n\n\
                  Usage: ilex-agent [--self-check | --version | config [--json] | enforce-sigpolicy [--dry-run]]\n\
-                 \x20      ilex-agent home-create NAME --disk-size=GiB [--admin] [--real-name=NAME]"
+                 \x20      ilex-agent home-create NAME --disk-size=GiB [--admin] [--real-name=NAME]\n\
+                 \x20      ilex-agent profile list | apply [ID | --selected] [--shell gnome] [--install-apps]"
             );
             ExitCode::SUCCESS
         }
@@ -71,6 +73,13 @@ const CHECKS: &[Check] = &[
         exists("/usr/lib/bootc/kargs.d/10-ilex.toml")
     }),
     ("image configuration readable", config::check_image),
+    ("public user catalogue", || {
+        if profile(["check".to_string()].into_iter()) == ExitCode::SUCCESS {
+            Ok(())
+        } else {
+            Err("profile catalogue validation failed".into())
+        }
+    }),
     ("default target matches the shells", config::check_target),
     ("every shell has its session", config::check_sessions),
     (
@@ -97,6 +106,20 @@ const CHECKS: &[Check] = &[
         exists("/etc/systemd/system/multi-user.target.wants/drupe.service")
     }),
 ];
+
+fn profile(args: impl Iterator<Item = String>) -> ExitCode {
+    match std::process::Command::new("/usr/bin/python3")
+        .args(["-I", "-S", "/usr/libexec/ilex/profile.py"])
+        .args(args)
+        .status()
+    {
+        Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+        Err(error) => {
+            eprintln!("ilex-agent: profile: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
 fn self_check() -> ExitCode {
     let mut failed = 0;

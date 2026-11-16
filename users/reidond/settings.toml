@@ -1,0 +1,4 @@
+# Optional defaults, applied only for the selected desktop, as its user.
+[gnome]
+color-scheme = "default"
+clock-show-weekday = true

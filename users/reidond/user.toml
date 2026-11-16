@@ -1,0 +1,9 @@
+schema = 1
+revision = 1
+username = "reidond"
+display-name = "Reidond"
+shell = "bash"
+locale = "en_US.UTF-8"
+groups = []
+storage = "luks-btrfs"
+disk-size-gib = 20

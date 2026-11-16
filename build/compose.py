@@ -5,13 +5,15 @@ Python's standard library is enough, including in a plain podman build.
 """
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
+import stat
 import sys
 import tomllib
 
-from image_tree import Tree, json_bytes
+from image_tree import Tree, json_bytes, parts
 
 
 def fail(path, key, message):
@@ -244,10 +246,131 @@ def publications(path, data):
         fail(path, "installer", "must name a published generic composition with at least one shell")
 
 
+def user_profiles(ctx, names, generated):
+    """Public templates, never homed records or executable build inputs.
+
+    Deliberately small v1 dotfile/settings allowlists. Extend them by review,
+    rather than allowing credentials, login hooks or arbitrary dconf paths.
+    Every read (including manifests and ancestors) is descriptor/no-follow.
+    """
+    catalogue = []
+    with Tree(ctx, "profile inputs") as source:
+        for profile in names:
+            prefix = f"users/{profile}"
+            path = f"{prefix}/user.toml"
+
+            def manifest(leaf, optional=False):
+                raw = source.read(f"{prefix}/{leaf}", optional=optional)
+                if raw is None:
+                    return {}
+                try:
+                    return tomllib.loads(raw.decode("utf-8"))
+                except (UnicodeError, ValueError) as error:
+                    fail(f"{prefix}/{leaf}", "manifest", str(error))
+
+            data = table(path, "", manifest("user.toml"), {
+                "schema", "revision", "username", "display-name", "shell", "locale",
+                "groups", "storage", "disk-size-gib",
+            })
+            if type(data.get("schema")) is not int or data["schema"] != 1:
+                fail(path, "schema", "must be 1")
+            if type(data.get("revision")) is not int or not 1 <= data["revision"] <= 2**31 - 1:
+                fail(path, "revision", "must be a positive 31-bit integer; increase when changing a profile")
+            username = string(path, "username", data.get("username"))
+            if username != profile or len(username) > 31 or not re.fullmatch(r"[a-z][a-z0-9-]*", username):
+                fail(path, "username", "must equal the profile directory and be a Unix username of at most 31 bytes")
+            display = string(path, "display-name", data.get("display-name"))
+            if len(display) > 256:
+                fail(path, "display-name", "must be at most 256 characters")
+            if data.get("shell") not in ("bash",):
+                fail(path, "shell", "must be bash (the supported login shell)")
+            if not re.fullmatch(r"[a-z]{2,3}_[A-Z]{2}\.UTF-8", string(path, "locale", data.get("locale"))):
+                fail(path, "locale", "must have the form en_US.UTF-8")
+            groups = selected(path, "groups", data.get("groups", []))
+            if set(groups) - {"wheel", "gamemode"}:
+                fail(path, "groups", "only explicitly approved wheel and gamemode are supported")
+            data["groups"] = groups
+            if data.get("storage") != "luks-btrfs":
+                fail(path, "storage", "must be luks-btrfs")
+            size = data.get("disk-size-gib")
+            if type(size) is not int or not 2 <= size <= 1048576:
+                fail(path, "disk-size-gib", "must be an integer between 2 and 1048576")
+
+            settings = table(path, "settings", manifest("settings.toml", True), {"gnome"})
+            gnome = table(path, "settings.gnome", settings.get("gnome", {}), {
+                "color-scheme", "clock-show-weekday", "clock-format",
+            })
+            for key, value in gnome.items():
+                if key == "clock-show-weekday":
+                    valid = type(value) is bool
+                else:
+                    valid = value in ({"default", "prefer-dark", "prefer-light"} if key == "color-scheme" else {"12h", "24h"}) if isinstance(value, str) else False
+                if not valid:
+                    fail(path, f"settings.gnome.{key}", "has an unsupported value")
+
+            apps = table(path, "apps", manifest("apps.toml", True), {"flatpaks"})
+            requests = apps.setdefault("flatpaks", [])
+            if not isinstance(requests, list):
+                fail(path, "apps.flatpaks", "must be an array of tables")
+            seen_apps = set()
+            for app in requests:
+                table(path, "apps.flatpaks", app, {"id", "remote"})
+                app_id = string(path, "apps.flatpaks.id", app.get("id"))
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*){2,}", app_id):
+                    fail(path, "apps.flatpaks.id", "must be a Flatpak application ID")
+                if app.get("remote") != "flathub" or app_id in seen_apps:
+                    fail(path, "apps.flatpaks", "requires remote flathub and unique application IDs")
+                seen_apps.add(app_id)
+
+            files = {}
+            for entry, mode in source.entries(prefix):
+                relative = entry[len(prefix) + 1:]
+                parts(relative)
+                if "\\" in relative:
+                    fail(path, relative, "backslashes are forbidden")
+                if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                    fail(path, relative, "only real directories and regular files are supported (no symlinks)")
+                if stat.S_ISDIR(mode):
+                    if relative not in {"home", "home/.config", "home/.config/ilex", "home/.config/git"}:
+                        fail(path, relative, "unexpected profile directory")
+                    continue
+                if relative in {"user.toml", "settings.toml", "apps.toml"}:
+                    continue
+                target = relative.removeprefix("home/")
+                # Nothing that carries authentication, credentials or session hooks.
+                if not relative.startswith("home/") or not (
+                    target in {".gitignore", ".editorconfig", ".config/git/ignore"}
+                    or re.fullmatch(r"\.config/ilex/[a-z][a-z0-9-]*\.(?:txt|toml|json)", target)
+                ):
+                    fail(path, relative, "is outside the safe dotfile allowlist; identity, keyrings and credential paths are reserved")
+                if mode & 0o111:
+                    # Windows /mnt checkouts have synthetic mode bits; regular
+                    # files there are non-executable with the supported mount.
+                    fail(path, relative, "executable dotfiles are forbidden")
+                raw = source.read(entry)
+                if len(raw) > 65536:
+                    fail(path, relative, "must be at most 64 KiB")
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeError:
+                    fail(path, relative, "must be UTF-8 text")
+                if any(ord(c) < 32 and c not in "\n\t" for c in text) or re.search(
+                    r"(?i)-----BEGIN .*PRIVATE KEY-----|[\"']?(?:password|secret|token|recovery[_-]?key)[\"']?\s*[:=]", text
+                ):
+                    fail(path, relative, "contains forbidden control or credential material")
+                files[target] = hashlib.sha256(raw).hexdigest()
+                generated.write(f"usr/share/ilex/{prefix}/home/{target}", raw)
+            payload = json_bytes({**data, "files": files, "settings": settings, "apps": apps})
+            generated.write(f"usr/share/ilex/{prefix}/user.json", payload)
+            catalogue.append({"id": profile, "schema": 1, "revision": data["revision"],
+                              "sha256": hashlib.sha256(payload).hexdigest()})
+    generated.write("usr/share/ilex/users.json", json_bytes({"schema": 1, "profiles": catalogue}))
+
+
 def image(args):
     ctx, out = args.context, args.out
     path = ctx / "image.toml"
-    data = table(path, "", load(path), {"shells", "default-shell", "design-systems", "default-design-system", "installer", "publish"})
+    data = table(path, "", load(path), {"shells", "default-shell", "design-systems", "default-design-system", "installer", "publish", "users"})
     publications(path, data)
     shells = selected(path, "shells", data.get("shells"))
     shell_default = default(path, "default-shell", data.get("default-shell"), shells)
@@ -304,6 +427,7 @@ def image(args):
                 staged.add_overlay(overlay, label)
             overlays.append({"name": label, "directory": directory})
     with Tree(out / "install/generated", "generated files", create=True) as generated:
+        user_profiles(ctx, selected(path, "users", data.get("users", [])), generated)
         for destination, source in token_files:
             generated.write(destination.lstrip("/"), source.read_bytes())
         generated.write("usr/share/ilex/image.json", json_bytes({

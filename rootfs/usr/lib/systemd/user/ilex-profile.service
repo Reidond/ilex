@@ -1,0 +1,10 @@
+[Unit]
+Description=Update the selected ilex home profile without replacing user edits
+After=dbus.socket
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ilex-agent profile apply --selected
+
+[Install]
+WantedBy=default.target

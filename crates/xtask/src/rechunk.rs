@@ -29,6 +29,7 @@ use crate::registry::FINGERPRINT_LABEL;
 /// Repo paths whose content ends up in the image. `Cargo.toml`/`Cargo.lock`
 /// pin the dependencies of the shipped binaries.
 const INPUTS: &[&str] = &[
+    "users",
     "rootfs",
     "crates",
     "Containerfile",

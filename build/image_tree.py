@@ -109,7 +109,7 @@ class Tree:
         try:
             with self.parent(path) as (fd, name):
                 try:
-                    source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    source = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
                 except FileNotFoundError:
                     raise
                 except OSError as exc:

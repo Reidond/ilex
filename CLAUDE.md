@@ -673,6 +673,62 @@ retained; other home/authentication denials still fail the trial. No tracer
 access is granted in policy. This tier qualifies homed integration, not
 encrypted root, Secure Boot or the future Windows security backend.
 
+## Public user profiles
+
+`image.toml` selects public profiles with `users = ["reidond"]`. This is a
+fourth configuration dimension; every root (including shell-free `base`) and
+its machine layers carry the same catalogue. No publication name, OCI layer
+selection or image label gains a user dimension. Images work without selecting
+a profile: `home-create` still accepts a custom local username.
+
+`users/<id>/user.toml` is a template, never an exported homed record. Schema 1
+requires `schema`, positive `revision`, `username` equal to the directory,
+`display-name`, `shell = "bash"`, `locale` such as `en_US.UTF-8`,
+`storage = "luks-btrfs"`, and `disk-size-gib` (2–1048576). Optional `groups`
+can name only `wheel` and `gamemode`; provisioning must explicitly authorize
+administration and check group availability. Applying a profile never changes
+an identity, storage size or groups. Unknown fields, including homed secret,
+privileged, password, recovery, binding/status and signature fields, fail the
+build. The minimal `reidond` example has no email, credentials or administrative
+groups; the owner should adjust its name/settings before use.
+
+Optional `settings.toml` accepts `[gnome]` with `color-scheme` (`default`,
+`prefer-dark`, `prefer-light`), boolean `clock-show-weekday`, and `clock-format`
+(`12h`, `24h`). No command strings or arbitrary dconf paths are accepted.
+Optional `apps.toml` accepts `[[flatpaks]]` entries with an application `id`
+and `remote = "flathub"`. Apps install only on explicit `--install-apps`,
+using an already configured user remote; failures can be retried after login.
+No network operation runs automatically or gates authentication.
+
+Initial `home/` files are deliberately restricted to `.gitignore`,
+`.editorconfig`, `.config/git/ignore` and `.config/ilex/<name>.txt|toml|json`.
+Only small, non-executable UTF-8 regular files are supported. Symlinks,
+special files, traversal, credentials, identity/keyring paths and login hooks
+are refused. Extend these allowlists by review. The composer reads every
+profile input through no-follow directory descriptors and stages canonical
+`users.json` (schema 1), `users/<id>/user.json`, and `home/` templates through
+the existing generated-file installer and `.generated.json`. Profile inputs
+enter root content/cache and installer fingerprints.
+
+After `sudo ilex-agent home-create NAME --disk-size=20`, authenticate locally
+as the new daily user and run `ilex-agent profile list`, then
+`ilex-agent profile apply reidond`. A public profile can seed a custom homed
+username; its identity suggestions remain metadata for setup. Apply refuses
+root, an inactive/non-LUKS home, or a caller/home UID mismatch. It uses NSS,
+not `$HOME`, and writes with owned no-follow directory descriptors. Nothing
+imports or rewrites `.identity`, `.identity-blob`, keyrings or credentials.
+
+`~/.local/state/ilex/profile.json` stores schema, profile revision/digest and
+managed file/setting hashes or values. Missing files are seeded atomically;
+updates replace only the last managed contents. Existing files, edits,
+deletions, symlink/hardlink paths and explicitly set desktop settings are
+preserved and reported as conflicts (exit 1). Invalid/newer state, a newer
+profile revision, or changed content without a revision bump declines updates
+(exit 2). Never lower a revision during rollback. Removed profile files are
+left in place. The per-user `ilex-profile.service` reapplies only an already
+selected profile on login, without app installation; no selection is a no-op.
+There are no root-run profile hooks. Installer choice/provisioning UX is PR 22.
+
 ## Build sharing: kache
 
 Image builds compile through [kache](https://github.com/kunobi-ninja/kache), a

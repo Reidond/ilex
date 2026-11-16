@@ -31,6 +31,8 @@ const ISO_NAME: &str = "ilex-installer";
 /// Repo paths (relative to the checkout) that make one ISO differ from the
 /// next.
 const INSTALLER_INPUTS: &[&str] = &[
+    "users",
+    "build/compose.py",
     "installer",
     "crates/xtask/src/iso.rs",
     "crates/ilex-devkit/src/installer.rs",
