@@ -166,10 +166,12 @@ def main():
         run("useradd", "--create-home", "--groups", "wheel", "--shell", "/bin/bash", "ilexmaint")
         run("chpasswd", input="ilexmaint:" + secrets[0] + "\n")
         assert "ilexmaint:" in open("/etc/passwd").read()
-        tty("ilexmaint", secrets[0], "sudo -k; sudo -p ILEX-SUDO: id -u", [(r"ILEX-SUDO:", secrets[0])])
+        # Split the prompt in the echoed shell command: only sudo's actual
+        # prompt may trigger sending the credential into the terminal.
+        tty("ilexmaint", secrets[0], "sudo -k; sudo -p ILEX-'SUDO:' id -u", [(r"ILEX-SUDO:", secrets[0])])
         return "local maintenance login and password-authenticated sudo passed"
     if action == "maintenance-recovery":
-        tty("ilexmaint", secrets[0], "sudo -k; sudo -p ILEX-SUDO: id -u", [(r"ILEX-SUDO:", secrets[0])])
+        tty("ilexmaint", secrets[0], "sudo -k; sudo -p ILEX-'SUDO:' id -u", [(r"ILEX-SUDO:", secrets[0])])
         return "maintenance recovery login and sudo still work with the daily home inactive"
     if action == "create":
         create(name, secrets[0], request.get("admin", False))
@@ -191,7 +193,7 @@ def main():
         activate(name, secrets[0])
         return {"sizes": sizes(name), "sha256": checksum(name)}
     if action == "tty":
-        text = tty(name, secrets[0], "test \"$SYSTEMD_HOME\" = 1 && test \"$SYSTEMD_HOME_SUSPEND\" = 0 && test -r ~/e2e-data && ls -Zd ~/ ~/e2e-data && loginctl show-session self -p Type -p Name && sudo -k && sudo -p ILEX-SUDO: id -u", [(r"ILEX-SUDO:", secrets[0])])
+        text = tty(name, secrets[0], "test \"$SYSTEMD_HOME\" = 1 && test \"$SYSTEMD_HOME_SUSPEND\" = 0 && test -r ~/e2e-data && ls -Zd ~/ ~/e2e-data && loginctl show-session self -p Type -p Name && sudo -k && sudo -p ILEX-'SUDO:' id -u", [(r"ILEX-SUDO:", secrets[0])])
         assert re.search(r"\r?\n0\r?\n", text), text
         assert "Type=tty" in text, text
         assert "Name=" + name in text, text
@@ -289,7 +291,7 @@ def main():
             assert checksum(name) == digest
             assert checksum("homedother") == other_digest
             assert run("getent", "passwd", "ilexmaint").startswith("ilexmaint:")
-            tty("ilexmaint", secrets[1], "sudo -k; sudo -p ILEX-SUDO: id -u", [(r"ILEX-SUDO:", secrets[1])])
+            tty("ilexmaint", secrets[1], "sudo -k; sudo -p ILEX-'SUDO:' id -u", [(r"ILEX-SUDO:", secrets[1])])
         finally:
             os.unlink("/var/home/e2e-fill")
             os.sync()
