@@ -180,6 +180,40 @@ fn graphical_default(vm: &EphemeralVm) -> Result<()> {
 /// Compare the guest with both image labels and checkout manifests. The
 /// agent's self-check separately verifies that the configuration works.
 fn configuration(vm: &EphemeralVm) -> Result<()> {
+    let out = vm
+        .ssh("cat /etc/containers/policy.json")?
+        .ok("reading the container signature policy")?;
+    let policy: Value = serde_json::from_str(&out.stdout)?;
+    ensure(
+        policy["default"] == serde_json::json!([{ "type": "reject" }]),
+        || "container policy default must reject for enforcing bootc pulls".into(),
+    )?;
+    ensure(
+        policy["transports"]["docker"]["ghcr.io/reidond/ilex"]
+            == serde_json::json!([{
+                "type": "sigstoreSigned",
+                "keyPath": "/etc/pki/containers/ilex.pub",
+                "signedIdentity": { "type": "matchRepository" }
+            }]),
+        || "ilex must require its sigstore signature and matching repository identity".into(),
+    )?;
+    for transport in [
+        "docker",
+        "containers-storage",
+        "dir",
+        "docker-archive",
+        "docker-daemon",
+        "oci",
+        "oci-archive",
+        "sif",
+        "tarball",
+    ] {
+        ensure(
+            policy["transports"][transport][""]
+                == serde_json::json!([{ "type": "insecureAcceptAnything" }]),
+            || format!("container policy must explicitly accept the {transport} transport"),
+        )?;
+    }
     let selection = common::selection()?;
     let out = vm
         .ssh("ilex-agent config --json")?

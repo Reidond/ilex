@@ -1,11 +1,11 @@
 //! Keep machines that track `ghcr.io/reidond/ilex` on signed images.
 //!
 //! The image ships a `policy.json` that demands a cosign signature for
-//! `ghcr.io/reidond/ilex` (plus `registries.d` and the public key), but bootc
-//! only consults that policy for a deployment whose origin says so
-//! (`bootc switch --enforce-container-sigpolicy`). A machine installed from
-//! the ISO, or switched with a plain `bootc switch`, tracks ghcr *unverified*:
-//! kickstart's `bootc` command has no way to pass the flag.
+//! `ghcr.io/reidond/ilex` (plus `registries.d` and the public key). Unverified
+//! pulls still apply that policy; origin enforcement additionally requires a
+//! non-permissive policy default. A machine installed from the ISO, or switched
+//! with a plain `bootc switch`, tracks ghcr *unverified*: kickstart's `bootc`
+//! command has no way to pass `--enforce-container-sigpolicy`.
 //!
 //! `ilex-agent enforce-sigpolicy`, run at every boot by `ilex-sigpolicy.service`,
 //! rewrites the origin in place (`bootc switch --mutate-in-place`: no
@@ -16,6 +16,7 @@
 //! images in containers-storage, other registries, machines already
 //! enforcing) is left alone, so running it again is always safe.
 
+use std::fs;
 use std::process::{Command, ExitCode};
 
 use serde_json::Value;
@@ -28,6 +29,31 @@ const SWITCH_SCRIPT: &str = concat!(
 
 /// The repository whose images are signed with the key in `policy.json`.
 pub const REPOSITORY: &str = "ghcr.io/reidond/ilex";
+const POLICY: &str = "/etc/containers/policy.json";
+
+/// Enforcing origins cannot pull at all with a permissive system default,
+/// even when their repository has a signature requirement of its own.
+pub fn check_policy() -> Result<(), String> {
+    let bytes = fs::read(POLICY).map_err(|e| format!("reading {POLICY}: {e}"))?;
+    let policy = serde_json::from_slice(&bytes).map_err(|e| format!("parsing {POLICY}: {e}"))?;
+    check_default(&policy)
+}
+
+fn check_default(policy: &Value) -> Result<(), String> {
+    let requirements = policy["default"]
+        .as_array()
+        .filter(|requirements| !requirements.is_empty())
+        .ok_or_else(|| format!("{POLICY}: missing or empty default policy"))?;
+    if requirements
+        .iter()
+        .any(|requirement| requirement["type"] == "insecureAcceptAnything")
+    {
+        return Err(format!(
+            "{POLICY}: default contains insecureAcceptAnything; refusing enforcement because bootc would refuse every update"
+        ));
+    }
+    Ok(())
+}
 
 /// What to do about the booted deployment.
 #[derive(Debug, PartialEq, Eq)]
@@ -98,11 +124,16 @@ fn enforce(dry_run: bool) -> Result<(), String> {
             println!("no booted deployment (not an installed bootc system): nothing to do");
         }
         Decision::Foreign(why) => println!("not an ilex registry image ({why}): nothing to do"),
-        Decision::Enforced => println!("{REPOSITORY} is already verified against policy.json"),
-        Decision::Enforce(image) if dry_run => {
-            println!("would enforce signatures for {image} (dry run)");
+        Decision::Enforced => {
+            check_policy()?;
+            println!("{REPOSITORY} is already verified against policy.json");
         }
         Decision::Enforce(image) => {
+            check_policy()?;
+            if dry_run {
+                println!("would enforce signatures for {image} (dry run)");
+                return Ok(());
+            }
             println!("{image} is tracked without signature verification: enforcing");
             // /sysroot is mounted read-only on a running system, which bootc
             // does not work around for --mutate-in-place ("Writing origin: Read-only
@@ -146,7 +177,8 @@ fn bootc_status() -> Result<Value, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("parsing `bootc status`: {e}"))
 }
 
-/// For `--self-check`: the decision table, over canned `bootc status` output,
+/// For `--self-check`: the decision table and unsafe policy defaults,
+/// over canned `bootc status` output and policy documents,
 /// since the interesting machines (installed, tracking ghcr) can't be
 /// reached from an ephemeral VM.
 pub fn check_decisions() -> Result<(), String> {
@@ -219,7 +251,11 @@ pub fn check_decisions() -> Result<(), String> {
         ),
         (
             "ghcr name over containers-storage",
-            Some(("ghcr.io/reidond/ilex:generic.gnome", "containers-storage", None)),
+            Some((
+                "ghcr.io/reidond/ilex:generic.gnome",
+                "containers-storage",
+                None,
+            )),
             Foreign(String::new()),
         ),
         (
@@ -252,6 +288,25 @@ pub fn check_decisions() -> Result<(), String> {
         };
         if !same {
             return Err(format!("{name}: decided {got:?}, expected {want:?}"));
+        }
+    }
+    for (policy, safe) in [
+        (r#"{"default":[{"type":"reject"}]}"#, true),
+        (
+            r#"{"default":[{"type":"sigstoreSigned","keyPath":"/etc/pki/containers/ilex.pub"}]}"#,
+            true,
+        ),
+        (r#"{"default":[{"type":"insecureAcceptAnything"}]}"#, false),
+        (
+            r#"{"default":[{"type":"reject"},{"type":"insecureAcceptAnything"}]}"#,
+            false,
+        ),
+        (r#"{"default":[]}"#, false),
+        (r#"{}"#, false),
+    ] {
+        let value = serde_json::from_str(policy).map_err(|e| e.to_string())?;
+        if check_default(&value).is_ok() != safe {
+            return Err(format!("unexpected enforcement safety for {policy}"));
         }
     }
     Ok(())

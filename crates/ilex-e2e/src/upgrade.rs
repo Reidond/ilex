@@ -12,7 +12,8 @@
 //! 4. signature enforcement, by v2's own `ilex-sigpolicy.service`: it left
 //!    the containers-storage origin alone at boot; the origin is then pointed
 //!    at ghcr unverified, the way an ISO install leaves it, and after a reboot
-//!    the unit must have added the verification (a second run is a no-op);
+//!    the unit must have added the verification (a second run is a no-op),
+//!    then `bootc upgrade --check` fetches and verifies the tracked image;
 //! 5. `bootc rollback` and reboot: v1 is booted again, the marker is gone.
 //!
 //! Inputs, all optional:
@@ -27,6 +28,9 @@
 //!   boots v1 in seconds. CI does this ahead of time, after each publish, and
 //!   keeps the disk in the Actions cache, which takes the install (most of
 //!   this tier's time) off its critical path.
+//! * `ILEX_SIGPOLICY_LEGACY=1`: check signed legacy `:latest` before the first
+//!   installer-composition publication. CI sets this only when that tag is
+//!   explicitly absent, alongside its existing legacy-v1 fallback.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -157,8 +161,8 @@ fn upgrade_and_rollback() -> Result<()> {
         step("v1 is installed and its base disk cached (ILEX_UPGRADE_PREPARE); stopping here");
         return Ok(());
     }
-    // Nothing here may reach for the network or stage an update of its own,
-    // least of all once the origin points at ghcr (step 4). Masked in /etc,
+    // The timer must not stage an update of its own, least of all once the
+    // origin points at ghcr (step 4). Masked in /etc,
     // so it stays masked across the upgrade.
     vm.ssh("systemctl mask --now bootc-fetch-apply-updates.timer")?
         .ok("masking the update timer")?;
@@ -455,10 +459,13 @@ fn build_v2(candidate: &str, installed: &str, token: &str) -> Result<()> {
 /// follows is unaffected.
 fn check_sigpolicy(vm: &LibvirtVm, installed: &str) -> Result<()> {
     let ws = common::workspace()?;
-    let ghcr = format!(
-        "ghcr.io/reidond/ilex:{}",
+    let tag = if std::env::var("ILEX_SIGPOLICY_LEGACY").is_ok_and(|v| v == "1") {
+        step("sigpolicy: explicit first-publication fallback to signed legacy :latest");
+        "latest".to_string()
+    } else {
         ilex_devkit::config::installer(&ws.root)?
-    );
+    };
+    let ghcr = format!("ghcr.io/reidond/ilex:{tag}");
     const UNIT: &str = "ilex-sigpolicy.service";
 
     // --- another image: untouched ---------------------------------------
@@ -498,6 +505,42 @@ fn check_sigpolicy(vm: &LibvirtVm, installed: &str) -> Result<()> {
         "the in-place switch changed the booted digest".to_string()
     })?;
 
+    // A locally retained permissive policy must fail before the agent changes
+    // the origin. Restore the shipped policy even if either refusal fails.
+    step("sigpolicy: unsafe default must refuse enforcement, including dry run");
+    let refusal = vm
+        .ssh(
+            r#"set -eu
+policy=/etc/containers/policy.json
+backup=$(mktemp /run/ilex-e2e-policy.XXXXXX)
+cp "$policy" "$backup"
+trap 'cp "$backup" "$policy"; rm -f "$backup"' EXIT
+python3 - <<'PY'
+import json
+from pathlib import Path
+path = Path('/etc/containers/policy.json')
+policy = json.loads(path.read_text())
+policy['default'] = [{'type': 'insecureAcceptAnything'}]
+path.write_text(json.dumps(policy) + '\n')
+PY
+for mode in apply dry-run; do
+    flag=
+    if [ "$mode" = dry-run ]; then flag=--dry-run; fi
+    if output=$(ilex-agent enforce-sigpolicy $flag 2>&1); then
+        echo "unsafe policy unexpectedly accepted ($mode): $output"
+        exit 1
+    fi
+    printf '%s\n' "$output"
+    printf '%s\n' "$output" | grep -F 'default contains insecureAcceptAnything'
+done
+"#,
+        )?
+        .ok("refusing an unsafe policy default before switching")?;
+    eprintln!("{}", refusal.stdout.trim_end());
+    ensure(booted(vm)? == unverified, || {
+        "refusing an unsafe policy default changed the origin".into()
+    })?;
+
     step("sigpolicy: rebooting, the unit must enforce at boot");
     vm.reboot(REBOOT_TIMEOUT)?;
     let enforced = booted(vm)?;
@@ -529,6 +572,33 @@ fn check_sigpolicy(vm: &LibvirtVm, installed: &str) -> Result<()> {
         format!("expected `already verified` after the restart, journal:\n{ran}")
     })?;
     step("signature enforcement verified");
+
+    // Proving that the origin was rewritten is insufficient: ostree-ext
+    // refuses enforcing pulls with an insecureAcceptAnything policy default.
+    // /v2/ may return 401; any HTTP response proves ghcr is reachable. Only
+    // connectivity failures may skip this check, never policy/signature errors.
+    let route = vm.ssh_timeout(
+        "curl --silent --show-error --output /dev/null --connect-timeout 10 --max-time 30 https://ghcr.io/v2/; \
+         rc=$?; case $rc in 5|6|7|28) echo ghcr-unreachable; exit 0;; *) exit $rc;; esac",
+        Duration::from_secs(45),
+    )?
+    .ok("checking the VM's route to ghcr")?;
+    if route.out() == "ghcr-unreachable" {
+        step(&format!(
+            "SKIP bootc upgrade --check: VM cannot reach ghcr.io: {}",
+            route.stderr.trim()
+        ));
+        return Ok(());
+    }
+    step(&format!("sigpolicy: bootc upgrade --check against {ghcr}"));
+    let check = vm
+        .ssh_timeout("bootc upgrade --check", Duration::from_secs(180))?
+        .ok("bootc upgrade --check with container policy enforcement")?;
+    eprintln!("{}\n{}", check.stdout.trim_end(), check.stderr.trim_end());
+    ensure(booted(vm)? == enforced, || {
+        "bootc upgrade --check changed the deployment or staged an update".into()
+    })?;
+    step("enforcing registry check verified");
     Ok(())
 }
 

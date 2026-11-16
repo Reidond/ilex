@@ -83,7 +83,14 @@ cargo xtask info               # resource identity, selection and available conf
   left the containers-storage origin alone at boot; the origin is pointed at
   the installer composition unverified (the state an ISO install leaves),
   and after a reboot the unit must have added the enforcement (a second run
-  is a no-op). Then the rollback to v1. One VM, one install: installing is
+  is a no-op). The agent must refuse an `insecureAcceptAnything` default
+  before changing the origin, including in dry-run mode. After enforcement,
+  `bootc upgrade --check` must fetch and verify the tracked image without
+  staging an update; only an unreachable ghcr skips that check, with a printed
+  reason. Before the installer's composition is first published, CI explicitly
+  sets `ILEX_SIGPOLICY_LEGACY=1` to check signed legacy `:latest` instead (the
+  same absence check that selects legacy v1); local runs can opt in too.
+  Then the rollback to v1. One VM, one install: installing is
   most of the tier's time. `ILEX_UPGRADE_PREPARE=1` only installs and boots v1
   (filling bcvk's base-disk cache) and stops; CI runs that ahead of time and
   caches the disk (see CI publishing).
@@ -979,8 +986,8 @@ machine parent fails. A transient read/API error can justify retrying the newest
 run. A machines-job retry while its parent is current re-plans and re-tests.
 Partial publication is not undone: a fresh run/nightly catches up missing layers.
 
-**First run on main.** Merge the entire twelve-branch stack as one push: PR 12
-into PR 11, then each result down through #32 and the earlier stack into #25,
+**First run on main.** Merge the entire thirteen-branch stack as one push: PR 13
+into PR 12, then each result down through #32 and the earlier stack into #25,
 finally #25 into main. Non-main pushes start no publish run. Bottom-up main
 merges would execute older workflow definitions and move legacy tags.
 
@@ -1094,7 +1101,16 @@ container storage or read/use the owner's key for local tests.
 Signatures use cosign **v2** key-pair legacy `.sig` tags; bootc/containers-image
 cannot use keyless or cosign v3's default format. Policy and the public key live
 in `rootfs/etc/containers/{policy.json,registries.d/ilex.yaml}` and
-`rootfs/etc/pki/containers/ilex.pub`. Verify a published composition with
+`rootfs/etc/pki/containers/ilex.pub`. The policy's default is `reject`: bootc's
+import library refuses every enforcing pull when the default is
+`insecureAcceptAnything`, even if a repository has its own signature rule.
+Each current transport (`docker`, `containers-storage`, `dir`, `docker-archive`,
+`docker-daemon`, `oci`, `oci-archive`, `sif`, `tarball`) explicitly accepts
+images through its empty scope. The more specific ilex and existing Red Hat
+registry signature requirements still take precedence. Other podman, toolbox,
+Flatpak OCI and bootc pulls keep their previous behaviour. A future transport
+must be listed explicitly before it can be used.
+Verify a published composition with
 `cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true
 ghcr.io/reidond/ilex:generic.gnome`. The private key is a repository secret; losing
 it requires deploying a new public key to machines before they can update.
@@ -1228,8 +1244,11 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 - Kickstart's `bootc` command (pykickstart) can't pass
   `--enforce-container-sigpolicy`, so an ISO-installed machine tracks ghcr
   *unverified*: `bootc status` shows `spec.image` as just `{image, transport:
-  registry}` with no `signature`, and bootc ignores `policy.json` for it (a
-  plain `bootc switch` leaves the same state). The image fixes this itself:
+  registry}` with no `signature` (a plain `bootc switch` leaves the same state).
+  Unverified pulls still apply `policy.json`: signed ilex images are accepted
+  and unsigned ones rejected while that policy is present. Origin enforcement
+  additionally insists on a non-permissive system policy. The image adds this
+  itself:
   `ilex-sigpolicy.service` (enabled by the preset, `ConditionPathExists=
   /run/ostree-booted`, ordered before the updater) runs `ilex-agent
   enforce-sigpolicy` at every boot. When the booted deployment tracks
@@ -1241,7 +1260,10 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   images or transports (test images in containers-storage, other registries,
   `ghcr.io/reidond/ilex-iso`) and machines that already verify, so there is
   nothing to run by hand; `ilex-agent enforce-sigpolicy --dry-run` shows what
-  it would do. `/sysroot` is mounted read-only on a running system and bootc
+  it would do. Before enforcing, the agent refuses an `insecureAcceptAnything`
+  policy default with a non-zero exit and an explanation: changing the origin
+  with that default would stop updates. The agent's self-check checks it too.
+  `/sysroot` is mounted read-only on a running system and bootc
   doesn't remount it for `--mutate-in-place` ("Writing origin: Read-only file
   system"), so the agent runs the switch under `unshare --mount` with
   `/sysroot` remounted writable in that private namespace only.

@@ -78,6 +78,10 @@ const CHECKS: &[Check] = &[
     ("machine packages installed", config::check_packages),
     ("bootc is installed", || in_path("bootc")),
     ("sigpolicy decisions", sigpolicy::check_decisions),
+    (
+        "sigpolicy default supports enforcement",
+        sigpolicy::check_policy,
+    ),
     ("sigpolicy unit enabled", || {
         exists("/etc/systemd/system/multi-user.target.wants/ilex-sigpolicy.service")
     }),
