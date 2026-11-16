@@ -53,6 +53,32 @@ pub fn build_resolved(
     args: &Args,
     resolved: crate::select::Resolved,
 ) -> Result<String> {
+    build_resolved_inner(ws, args, resolved, None)
+}
+
+pub fn rebuild_legacy(ws: &Workspace, args: &Args, expected_id: &str) -> Result<String> {
+    if args.tag.is_some()
+        || args.on.is_some()
+        || args.selection.machine.is_some()
+        || !args.selection.shells.is_empty()
+    {
+        bail!("legacy rebuild targets the default selection and image of this checkout");
+    }
+    let resolved = args.selection.resolve(ws, None, None)?;
+    if resolved.machine != "generic" || resolved.image != ws.image_ref() {
+        bail!(
+            "legacy rebuild requires the checkout's default generic image; clear selection environment overrides"
+        );
+    }
+    build_resolved_inner(ws, args, resolved, Some(expected_id))
+}
+
+fn build_resolved_inner(
+    ws: &Workspace,
+    args: &Args,
+    resolved: crate::select::Resolved,
+    legacy_expected: Option<&str>,
+) -> Result<String> {
     ilex_devkit::provider::require_arch(ilex_devkit::core::Architecture::X86_64)?;
     cmd::require("podman")?;
     if resolved.machine != "generic" {
@@ -116,7 +142,11 @@ pub fn build_resolved(
         recipe_version: ilex_devkit::executor::RECIPE_VERSION.into(),
     };
     use ilex_devkit::core::BuildExecutor;
-    let result = ilex_devkit::executor::LocalBuildExecutor::new(ws.clone())?.execute(&request)?;
+    let executor = ilex_devkit::executor::LocalBuildExecutor::new(ws.clone())?;
+    let result = match legacy_expected {
+        Some(id) => executor.execute_rebuilding_legacy(&request, id)?,
+        None => executor.execute(&request)?,
+    };
     Ok(result
         .image
         .context("image build returned no image")?

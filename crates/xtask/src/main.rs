@@ -14,6 +14,7 @@ mod changed;
 mod disk;
 mod doctor;
 mod info;
+mod identity;
 mod iso;
 mod prepare_publish;
 mod publish;
@@ -61,6 +62,8 @@ enum Cmd {
     Info(info::Args),
     /// Probe the backend; --self-check exercises owned checkout fixtures
     Doctor(doctor::Args),
+    /// Inspect automatic primary ownership, release stale claims, or rebuild legacy images
+    Identity(identity::Args),
 }
 
 fn main() -> ExitCode {
@@ -75,6 +78,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cmd: Cmd) -> Result<()> {
+    if let Cmd::Identity(args) = &cmd { return identity::run(args); }
     let ws = Workspace::discover()?;
     match cmd {
         Cmd::Build(args) => build::run(&ws, args),
@@ -99,5 +103,6 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Tool(args) => tool::run(&ws, args),
         Cmd::Info(args) => info::run(&ws, args),
         Cmd::Doctor(args) => doctor::run(&ws, args),
+        Cmd::Identity(args) => identity::run(&args),
     }
 }

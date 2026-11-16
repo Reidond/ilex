@@ -84,26 +84,46 @@ pub fn image_owner(image: &str) -> Result<Option<String>> {
 }
 
 pub fn require_image(ws: &Workspace, image: &str) -> Result<()> {
-    let owner = image_owner(image)?.with_context(|| format!("unlabelled legacy image {image}; refusing adoption or replacement; inspect/migrate only your own image explicitly, or use a fresh owned tag"))?;
+    let owner = image_owner(image)?.with_context(|| format!("unlabelled legacy image {image}; refusing implicit adoption; run cargo xtask build from the registered primary to rebuild :main, or inspect this checkout's image ID and use cargo xtask identity rebuild-legacy-image --expected-id <id>; a fresh owned tag is also supported"))?;
     ws.identity()?
         .authorize(&owner)
         .with_context(|| format!("image {image} belongs to another checkout"))
 }
 
 pub fn check_output(ws: &Workspace, image: &str) -> Result<()> {
-    let reserved = ["localhost/ilex:main", "localhost/ilex-installer:main", "localhost/ilex-image-builder:main"];
-    ensure!(!reserved.iter().any(|main| image == *main || image.strip_prefix(main).is_some_and(|suffix| suffix.starts_with('.')))
-        || ws.identity()?.is_main, "main image namespace is reserved for the declared canonical primary checkout");
+    check_output_namespace(ws, image)?;
     if image_exists(image)? {
         require_image(ws, image)?;
     }
     Ok(())
 }
 
+fn check_output_namespace(ws: &Workspace, image: &str) -> Result<()> {
+    let reserved = [
+        "localhost/ilex:main",
+        "localhost/ilex-installer:main",
+        "localhost/ilex-image-builder:main",
+    ];
+    ensure!(
+        !reserved.iter().any(|main| image == *main
+            || image
+                .strip_prefix(main)
+                .is_some_and(|suffix| suffix.starts_with('.')))
+            || ws.identity()?.is_main,
+        "main image namespace is reserved for the declared canonical primary checkout"
+    );
+    Ok(())
+}
+
 /// Ownership checks must distinguish a missing image from a storage error.
 pub fn image_exists(image: &str) -> Result<bool> {
-    let status = Command::new("podman").args(["image", "exists", image]).status()?;
-    ensure!(matches!(status.code(), Some(0 | 1)), "cannot inspect image ownership for {image}: {status}");
+    let status = Command::new("podman")
+        .args(["image", "exists", image])
+        .status()?;
+    ensure!(
+        matches!(status.code(), Some(0 | 1)),
+        "cannot inspect image ownership for {image}: {status}"
+    );
     Ok(status.success())
 }
 
@@ -115,11 +135,16 @@ pub fn image_lock(image: &str) -> Result<File> {
         // Image aliases belong to the store, not XDG_RUNTIME_DIR. Two clients
         // with different runtime roots must still serialize the same final tag.
         let uid = fs::metadata("/proc/self")?.uid();
-        let store = cmd::output(Command::new("podman").args(["info", "--format", "{{.Store.GraphRoot}}"]))?;
+        let store =
+            cmd::output(Command::new("podman").args(["info", "--format", "{{.Store.GraphRoot}}"]))?;
         let store = fs::canonicalize(store)?;
         let store_key = digest(store.as_os_str().as_encoded_bytes());
         let key = digest(image.as_bytes());
-        lock(&std::path::PathBuf::from(format!("/tmp/ilex-image-locks-{uid}")).join(&store_key[7..]).join(format!("{}.lock", &key[7..])))
+        lock(
+            &std::path::PathBuf::from(format!("/tmp/ilex-image-locks-{uid}"))
+                .join(&store_key[7..])
+                .join(format!("{}.lock", &key[7..])),
+        )
     }
     #[cfg(not(target_os = "linux"))]
     anyhow::bail!("image store locks for {image} require Linux")
@@ -162,14 +187,53 @@ pub struct ImageTransaction {
     final_ref: String,
     temporary: String,
     owner: String,
+    legacy_id: Option<String>,
     _lock: File,
 }
 impl ImageTransaction {
     pub fn new(ws: &Workspace, final_ref: &str) -> Result<Self> {
+        Self::begin(ws, final_ref, None)
+    }
+    pub fn rebuild_legacy(ws: &Workspace, final_ref: &str, expected_id: &str) -> Result<Self> {
+        ensure!(
+            final_ref == ws.image_ref(),
+            "legacy rebuild must target this checkout's default image"
+        );
+        Self::begin(ws, final_ref, Some(expected_id))
+    }
+    fn begin(ws: &Workspace, final_ref: &str, expected_id: Option<&str>) -> Result<Self> {
+        check_output_namespace(ws, final_ref)?;
         ws.ensure_state()?;
         let file = image_lock(final_ref)?;
-        check_output(ws, final_ref)?;
-        let owner = ws.identity()?.owner;
+        let identity = ws.identity()?;
+        let primary_output = identity.is_main
+            && (ws.is_implicit_image(final_ref)
+                || [
+                    "localhost/ilex-installer:main",
+                    "localhost/ilex-image-builder:main",
+                ]
+                .contains(&final_ref));
+        let legacy_id = if image_exists(final_ref)?
+            && image_owner(final_ref)?.is_none()
+            && (expected_id.is_some() || primary_output)
+        {
+            let id = crate::bcvk::image_id(final_ref)?;
+            if let Some(expected) = expected_id {
+                ensure!(id == expected, "legacy image changed; refusing replacement");
+            }
+            eprintln!(
+                "unlabelled legacy {final_ref} ({id}): rebuilding from owned source; keeping the old tag until validation"
+            );
+            Some(id)
+        } else {
+            check_output(ws, final_ref)?;
+            ensure!(
+                expected_id.is_none(),
+                "explicit legacy rebuild requires an existing unlabelled image"
+            );
+            None
+        };
+        let owner = identity.owner;
         let nonce = digest(
             format!(
                 "{owner}:{}:{}",
@@ -187,11 +251,15 @@ impl ImageTransaction {
             final_ref: final_ref.into(),
             temporary,
             owner,
+            legacy_id,
             _lock: file,
         })
     }
     pub fn temporary(&self) -> &str {
         &self.temporary
+    }
+    pub fn needs_legacy_rebuild(&self) -> bool {
+        self.legacy_id.is_some()
     }
     pub fn promote(&self, ws: &Workspace) -> Result<String> {
         let actual = image_owner(&self.temporary)?.context("temporary image has no owner label")?;
@@ -199,7 +267,38 @@ impl ImageTransaction {
             actual == self.owner,
             "temporary image owner was overridden; refusing promotion"
         );
-        check_output(ws, &self.final_ref)?;
+        if let Some(legacy) = &self.legacy_id {
+            ensure!(
+                image_owner(&self.final_ref)?.is_none()
+                    && crate::bcvk::image_id(&self.final_ref)? == *legacy,
+                "legacy final image changed; refusing promotion"
+            );
+            let backup = format!(
+                "localhost/ilex-legacy:{}.{legacy}",
+                self.owner.replace('-', "")
+            );
+            if image_exists(&backup)? {
+                ensure!(
+                    crate::bcvk::image_id(&backup)? == *legacy,
+                    "legacy backup alias collision"
+                );
+            }
+            cmd::run(Command::new("podman").args(["tag", legacy, &backup]))?;
+            let dir = ws.ensure_state()?.join("legacy-images");
+            fs::create_dir_all(&dir)?;
+            fs::write(
+                dir.join(format!("{legacy}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "schema": SCHEMA_VERSION, "owner": self.owner, "previous_id": legacy, "backup": backup, "replacement": self.final_ref,
+                }))?,
+            )?;
+            eprintln!(
+                "preserved legacy image as {backup}; only the validated rebuild will become {}",
+                self.final_ref
+            );
+        } else {
+            check_output(ws, &self.final_ref)?;
+        }
         cmd::run(Command::new("podman").args(["tag", &self.temporary, &self.final_ref]))?;
         Ok(self.final_ref.clone())
     }
@@ -229,7 +328,10 @@ pub fn vm_lease(ws: &Workspace, name: &str) -> Result<File> {
     #[cfg(target_os = "linux")]
     let root = {
         use std::os::unix::fs::MetadataExt;
-        std::path::PathBuf::from(format!("/tmp/ilex-vm-leases-{}", fs::metadata("/proc/self")?.uid()))
+        std::path::PathBuf::from(format!(
+            "/tmp/ilex-vm-leases-{}",
+            fs::metadata("/proc/self")?.uid()
+        ))
     };
     #[cfg(not(target_os = "linux"))]
     let root = ws.runtime_dir();

@@ -27,12 +27,19 @@ cargo xtask info               # resource identity, selection and available conf
   includes both the canonical common Git directory and checkout path, so two
   clones' primary checkouts, same-named linked worktrees, and reused worktree
   names at new paths allocate different names. Receipts fence even a hash collision.
-  `main` (`localhost/ilex:main`, VMs `ilex-main-*`) is reserved for the actual
-  primary checkout explicitly declared by local Git `ilex.canonicalCheckout`
-  as its absolute canonical path. Merely having a `.git` directory cannot
-  prove that a clone is the canonical repository; undeclared clones use hashes.
-  The same slug selects `localhost/ilex:wt-<slug>`, VMs `ilex-<slug>-*`,
-  and runtime and state directories. Never use another checkout's image or VMs.
+  The first primary checkout of `github.com/Reidond/ilex` automatically claims
+  `main` (`localhost/ilex:main`, VMs `ilex-main-*`) in machine-wide tooling state.
+  A linked-worktree call discovers and registers its actual primary through
+  Git's common directory, so the normal primary is registered without opening
+  that checkout or setting configuration. Later clones keep owner-qualified
+  names. Windows and WSL share `%ProgramData%/ilex/tooling/main-claims`;
+  native Linux uses `/var/lib/ilex-tooling/main-claims`. Claims and releases are
+  immutable, atomically published records. A missing checkout's claim is
+  released only by the explicit command below. `canonicalCheckout` is no longer used.
+  The same slug selects `localhost/ilex:wt-<slug>` and VMs `ilex-<slug>-*`.
+  State/runtime paths stay owner-qualified even for `main` (`main--<owner hash>`),
+  so registering main never adopts old unreceipted directories or keys.
+  Never use another checkout's image or VMs.
 - `build`, `test`, `vm` and `disk` accept repeatable `--shell <name>`: the
   first shell is the default. Flags override `ILEX_SHELLS` (comma-separated),
   which overrides `image.toml`; an empty environment variable uses the manifest.
@@ -890,6 +897,9 @@ The `ilex-devkit` facade preserves the Linux/WSL API, handoff and viewer.
 ```sh
 cargo xtask info --json                 # identity, source manifest, paths, capabilities
 cargo xtask info --capabilities
+cargo xtask identity status             # automatic primary claim; no hand-written config
+cargo xtask identity release-main --owner <UUID> # only when that checkout no longer exists
+cargo xtask identity rebuild-legacy-image --expected-id <ID> # explicit rebuild, preserving old image
 cargo xtask doctor --self-check --json  # disposable real Git checkouts; no images/VMs
 cargo xtask doctor --self-check-build --json # Linux: actual gated Podman builds and ownership rejection
 cargo xtask doctor --arch aarch64        # explicit rejection on the current Linux backend
@@ -897,8 +907,8 @@ cargo xtask doctor --require firmware_enforcement # fails: ordinary defaults are
 ilex-vmctl capabilities --json          # attach to a running VM; MCP: capabilities
 ```
 
-Only an explicitly declared canonical primary checkout gets `main` (see the
-allocation policy above). All other primary/linked/T3 checkouts include their
+Only the automatically registered canonical primary checkout gets `main` (see
+the allocation policy above). All other primary/linked/T3 checkouts include their
 canonical owner hash, even for short, valid Git worktree names; missing Git
 metadata can never acquire `main` and cannot authorize mutations.
 The canonical native checkout path plus common Git directory
@@ -928,12 +938,48 @@ exclusive lifetime lease, refuse any pre-existing container/domain, and remove
 only the recorded created container ID/domain UUID. A stale resource requires
 its owner to inspect and explicitly remove it; launch no longer force-replaces
 by name. Immutable image-content caches internal to bcvk remain shared.
-Unlabelled legacy tags and nonempty unlabelled state/disk caches fail visibly
-with `unlabelled legacy ...; refusing adoption`. Nothing is auto-relabeled,
-deleted or migrated. Old hashless resources remain untouched: build into the
-new namespace, or explicitly inspect and migrate only resources you own.
+Unlabelled legacy tags are refused for implicit reuse. An explicit source build
+by the registered primary rebuilds its unlabelled `main` outputs under a job
+alias, validates the new source and owner, preserves the previous ID under
+`localhost/ilex-legacy:<owner>.<old ID>` with an allocation receipt, and only then
+promotes the freshly built image. It does not relabel or run the old image.
+Other checkouts can explicitly rebuild an inspected legacy default image using
+`identity rebuild-legacy-image --expected-id <ID>`; ordinary builds still refuse
+unlabelled outputs there. Foreign labelled images are always refused.
+Nonempty unlabelled state/disk caches fail visibly with `unlabelled legacy ...;
+refusing adoption`. Old resources are never automatically deleted or imported.
 Build output flags (`--tag`, `--manifest`, `--output`, `--iidfile`) are reserved
 for the executor; use xtask `--tag` to choose the final output.
+
+### One-time tooling migration
+
+No owner configuration or hand-written receipt is needed. The first tooling
+call from the existing canonical primary or any of its linked worktrees
+registers that primary as `main`. `identity status` shows the registered UUID
+and checkout path. A second clone cannot take the claim; removing a checkout
+does not silently transfer it. An agent may run `identity release-main --owner
+<registered UUID>` after the checkout is gone; the command verifies absence and
+appends a release receipt, leaving all images, VMs and data untouched.
+
+Owner-qualified worktrees and the new `main--<owner hash>` data paths start
+with cold disk/tool/ISO caches and newly generated development tool-signing
+keys and SSH test keys. Existing tool images remain signed by their old keys;
+rebuild them in the new state rather than importing unknown keys. Production
+signing keys and image signatures are not changed. The ISO helper mounts its
+owned host cache at `/var/cache/image-builder`, including the persistent
+`store/` and `tmp/` directories; repeated ISO builds reuse that host store.
+
+Old hashless images, VMs, runtime directories, disk caches and development keys
+stay where they were. A new launcher refuses an existing bcvk name. For optional
+cleanup, first inspect the exact legacy container/domain ID, image labels,
+disk paths and PID creation identity and establish that they belong to this
+checkout/session. Stop its owning launcher, or destroy only the verified
+container ID/domain UUID. Remove only the inspected alias (`podman untag
+<reference> <reference>`) and the specific old state/runtime directory after
+confirming no VM uses its disks or keys. Never prune the store, force-replace a
+name, or infer ownership from the old slug alone. If ownership cannot be
+established, leave the resource in place; normal new-namespace work does not
+need its removal. `legacy-images/*.json` records backups made during a rebuild.
 
 VM metadata includes schema, owner, run, architecture and PID creation identity.
 Unknown versions and foreign owner records are rejected before replacement;

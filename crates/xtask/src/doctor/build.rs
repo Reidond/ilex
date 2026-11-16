@@ -243,7 +243,8 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
             .args(["build", "--quiet", "--file"])
             .arg(&legacy_recipe)
             .args(["--tag", &b.image_ref()])
-            .arg(&root).stdout(Stdio::from(std::io::stderr())),
+            .arg(&root)
+            .stdout(Stdio::from(std::io::stderr())),
     )?;
     images.ids.push(bcvk::image_id(&b.image_ref())?);
     let out = command(&exe, b, &root, "build").arg("--no-pull").output()?;
@@ -252,11 +253,50 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
             && String::from_utf8_lossy(&out.stderr).contains("unlabelled legacy image"),
         "unlabelled image silently adopted"
     );
+    let legacy_id = bcvk::image_id(&b.image_ref())?;
+    let rebuilt = command(&exe, b, &root, "identity")
+        .args([
+            "rebuild-legacy-image",
+            "--expected-id",
+            &legacy_id,
+            "--no-pull",
+            "--",
+            "--file",
+        ])
+        .arg(&recipe)
+        .arg("--no-cache")
+        .arg("--volume")
+        .arg(format!("{}:/gate:rw", gate.display()))
+        .output()?;
+    ensure!(
+        rebuilt.status.success(),
+        "explicit legacy rebuild failed: {}",
+        String::from_utf8_lossy(&rebuilt.stderr)
+    );
+    ownership::require_image(b, &b.image_ref())?;
+    images.ids.push(bcvk::image_id(&b.image_ref())?);
+    let receipt_path = root
+        .join("state")
+        .join(&b.slug)
+        .join("legacy-images")
+        .join(format!("{legacy_id}.json"));
+    let receipt: serde_json::Value = serde_json::from_slice(&fs::read(receipt_path)?)?;
+    let backup = receipt["backup"]
+        .as_str()
+        .context("legacy backup receipt missing")?;
+    ensure!(
+        bcvk::image_id(backup)? == legacy_id && bcvk::image_id(&b.image_ref())? != legacy_id,
+        "legacy image was adopted instead of rebuilt"
+    );
+    images.tags.push(backup.into());
     ensure!(
         ownership::vm_lease(b, &a.vm_name("foreign")).is_err(),
         "bcvk name from another checkout accepted"
     );
-    ensure!(ownership::check_output(b, "localhost/ilex:main").is_err(), "noncanonical checkout can allocate reserved main output");
+    ensure!(
+        ownership::check_output(b, "localhost/ilex:main").is_err(),
+        "noncanonical checkout can allocate reserved main output"
+    );
     let disk = root.join("legacy-cache.qcow2");
     fs::write(&disk, b"unlabelled")?;
     ensure!(
@@ -273,6 +313,6 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
         "foreign disk adopted"
     );
     Ok(
-        serde_json::json!({"result": "passed", "a": a.identity()?, "b": b.identity()?, "same_worktree_name": a.worktree, "accepted_id": accepted, "accepted_source_digest": accepted_digest, "source_races": race_logs, "foreign_image_rejected_by": rejected, "unlabelled_image_rejected": true, "foreign_bcvk_name_rejected": true, "foreign_and_legacy_disk_rejected": true, "cleanup": "only fixture tags untagged; fixture clones/state removed"}),
+        serde_json::json!({"result": "passed", "a": a.identity()?, "b": b.identity()?, "same_worktree_name": a.worktree, "accepted_id": accepted, "accepted_source_digest": accepted_digest, "source_races": race_logs, "foreign_image_rejected_by": rejected, "unlabelled_image_rejected": true, "explicit_legacy_rebuilt_with_backup": true, "foreign_bcvk_name_rejected": true, "foreign_and_legacy_disk_rejected": true, "cleanup": "only fixture tags untagged; fixture clones/state removed"}),
     )
 }

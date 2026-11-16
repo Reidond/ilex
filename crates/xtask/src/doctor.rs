@@ -158,12 +158,52 @@ fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
         b.vm_prefix() != c.vm_prefix() && b.state_dir() != c.state_dir(),
         "same-name VM/state allocation collides"
     );
-    cmd::run(
-        git::git(&main)
-            .args(["config", "--local", "ilex.canonicalCheckout"])
-            .arg(&main),
-    )?;
-    let a = Workspace::from_root(main.clone());
+    let registry = ilex_devkit::main_claim::MainClaims::at(dir.join("main-claims"));
+    let allocated = registry.allocate(a.identity()?, &main)?;
+    let allocated_other = registry.allocate(other_main.identity()?, &other_main.root)?;
+    ensure!(
+        allocated.is_main && allocated.slug == "main" && !allocated_other.is_main,
+        "automatic first-primary claim collided"
+    );
+    ensure!(
+        registry.release_stale(&allocated.owner).is_err(),
+        "live primary claim released"
+    );
+    ensure!(
+        registry
+            .release_stale(&other_main.identity()?.owner)
+            .is_err(),
+        "wrong owner released claim"
+    );
+    let racing_registry = dir.join("racing-claims");
+    let contenders = [
+        (a.identity()?, main.clone()),
+        (other_main.identity()?, other_main.root.clone()),
+    ];
+    let raced = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let (id, path) = contenders[i % 2].clone();
+                let registry = racing_registry.clone();
+                scope.spawn(move || {
+                    ilex_devkit::main_claim::MainClaims::at(registry).allocate(id, &path)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("claim worker panicked"))
+            .collect::<Result<Vec<_>>>()
+    })?;
+    let winner = ilex_devkit::main_claim::MainClaims::at(racing_registry)
+        .current()?
+        .expect("claim winner missing");
+    ensure!(
+        raced
+            .iter()
+            .all(|id| id.is_main == (id.owner == winner.owner)),
+        "concurrent first-primary claims collided"
+    );
     let (clean, clean_source) = b.source_identity()?;
     let tracked = linked.join("image.toml");
     let mut bytes = fs::read(&tracked)?;
@@ -177,7 +217,7 @@ fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
     let (dirty, source) = b.source_identity()?;
     let main_identity = a.identity()?;
     ensure!(
-        a.slug == "main" && b.slug != "main",
+        allocated.slug == "main" && b.slug != "main" && !b.identity()?.is_main,
         "T3 worktree acquired the reserved main slug"
     );
     ensure!(
@@ -262,6 +302,21 @@ fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
     let mut result = result;
     result["relocated_worktree"] = serde_json::to_value(moved.identity()?)?;
     result["foreign_and_unlabelled_state_rejected"] = true.into();
+    result["automatic_main_claim"] = serde_json::to_value(&allocated)?;
+    result["later_primary"] = serde_json::to_value(&allocated_other)?;
+    ensure!(
+        main.starts_with(&dir),
+        "fixture primary escaped self-check root"
+    );
+    fs::remove_dir_all(&main)?;
+    registry.release_stale(&allocated.owner)?;
+    let reassigned = registry.allocate(other_main.identity()?, &other_main.root)?;
+    ensure!(
+        reassigned.is_main && reassigned.owner != allocated.owner,
+        "stale-claim release did not permit reassignment"
+    );
+    result["stale_claim_release_and_reassignment"] = true.into();
+    result["concurrent_main_claims_have_one_owner"] = true.into();
     // Ensure the source checkout remains readable; no source mutation above.
     let _ = git::head_sha(&ws.root)?;
     fs::remove_dir_all(&dir)?;

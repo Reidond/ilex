@@ -84,35 +84,19 @@ impl LocalBuildExecutor {
         Ok(())
     }
 }
-impl BuildExecutor for LocalBuildExecutor {
-    fn probe(&self) -> Result<ExecutorProbe> {
-        crate::provider::require_arch(Architecture::X86_64)?;
-        let mut versions = BTreeMap::new();
-        versions.insert(
-            "podman".into(),
-            cmd::output(Command::new("podman").arg("--version"))?,
-        );
-        Ok(ExecutorProbe {
-            executor_id: self.executor_id(),
-            host_arch: Architecture::host()?,
-            supported_guest_arches: vec![Architecture::X86_64],
-            versions,
-        })
+impl LocalBuildExecutor {
+    pub fn execute_rebuilding_legacy(
+        &self,
+        request: &BuildRequest,
+        expected_id: &str,
+    ) -> Result<BuildResult> {
+        self.execute_inner(request, Some(expected_id))
     }
-    fn stage(&self, request: &BuildRequest) -> Result<String> {
-        self.authorize(request)?;
-        let source = crate::source::manifest(&self.ws)?;
-        ensure!(
-            source.digest == request.source.digest && source.revision == request.source.revision,
-            "local checkout differs from requested source manifest; retry build"
-        );
-        ensure!(
-            request.checkout.snapshot_digest.as_deref() == Some(source.digest.as_str()),
-            "checkout source digest mismatch"
-        );
-        Ok(source.digest)
-    }
-    fn execute(&self, request: &BuildRequest) -> Result<BuildResult> {
+    fn execute_inner(
+        &self,
+        request: &BuildRequest,
+        legacy_expected: Option<&str>,
+    ) -> Result<BuildResult> {
         self.stage(request)?;
         let BuildOperation::Image(options) = &request.operation else {
             bail!(
@@ -120,7 +104,12 @@ impl BuildExecutor for LocalBuildExecutor {
             );
         };
         crate::ownership::validate_build_args(&options.podman_args)?;
-        let transaction = crate::ownership::ImageTransaction::new(&self.ws, &options.output)?;
+        let transaction = match legacy_expected {
+            Some(id) => {
+                crate::ownership::ImageTransaction::rebuild_legacy(&self.ws, &options.output, id)?
+            }
+            None => crate::ownership::ImageTransaction::new(&self.ws, &options.output)?,
+        };
         // Waiting for another writer can outlive the staged source inventory.
         self.stage(request)?;
         let probe = self.probe()?;
@@ -161,6 +150,38 @@ impl BuildExecutor for LocalBuildExecutor {
         };
         fs::write(dir.join("result.json"), serde_json::to_vec_pretty(&result)?)?;
         Ok(result)
+    }
+}
+impl BuildExecutor for LocalBuildExecutor {
+    fn probe(&self) -> Result<ExecutorProbe> {
+        crate::provider::require_arch(Architecture::X86_64)?;
+        let mut versions = BTreeMap::new();
+        versions.insert(
+            "podman".into(),
+            cmd::output(Command::new("podman").arg("--version"))?,
+        );
+        Ok(ExecutorProbe {
+            executor_id: self.executor_id(),
+            host_arch: Architecture::host()?,
+            supported_guest_arches: vec![Architecture::X86_64],
+            versions,
+        })
+    }
+    fn stage(&self, request: &BuildRequest) -> Result<String> {
+        self.authorize(request)?;
+        let source = crate::source::manifest(&self.ws)?;
+        ensure!(
+            source.digest == request.source.digest && source.revision == request.source.revision,
+            "local checkout differs from requested source manifest; retry build"
+        );
+        ensure!(
+            request.checkout.snapshot_digest.as_deref() == Some(source.digest.as_str()),
+            "checkout source digest mismatch"
+        );
+        Ok(source.digest)
+    }
+    fn execute(&self, request: &BuildRequest) -> Result<BuildResult> {
+        self.execute_inner(request, None)
     }
     fn inspect(&self, job: &str) -> Result<BuildResult> {
         self.ws.ensure_state()?;

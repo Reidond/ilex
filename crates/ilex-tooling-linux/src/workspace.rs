@@ -163,7 +163,7 @@ impl Workspace {
     /// Per-checkout runtime directory for sockets:
     /// `$XDG_RUNTIME_DIR/ilex-vm/<slug>/` (QMP, VNC, ...).
     pub fn runtime_dir(&self) -> PathBuf {
-        vm_runtime_root().join(&self.slug)
+        vm_runtime_root().join(self.state_slug())
     }
 
     /// Per-checkout persistent state (disk images, test artifacts):
@@ -171,7 +171,27 @@ impl Workspace {
     /// Kept outside the checkout so it never lands in a build context and,
     /// on WSL, stays on the Linux filesystem.
     pub fn state_dir(&self) -> PathBuf {
-        state_root().join(&self.slug)
+        state_root().join(self.state_slug())
+    }
+
+    fn state_slug(&self) -> String {
+        if self.slug != "main" {
+            return self.slug.clone();
+        }
+        // Main can change owners only through explicit stale-claim release.
+        // Its data paths remain owner-qualified, including --slug observers.
+        let owner = if self.root.as_os_str().is_empty() {
+            crate::main_claim::MainClaims::system()
+                .and_then(|r| r.current())
+                .ok()
+                .flatten()
+                .map(|c| c.owner)
+        } else {
+            self.identity().ok().map(|id| id.owner)
+        };
+        owner
+            .map(|o| format!("main--{}", &digest(o.as_bytes())[7..39]))
+            .unwrap_or_else(|| "unclaimed-main".into())
     }
 
     /// Mutating/reusing state requires a matching receipt. Never import legacy
@@ -190,8 +210,7 @@ impl Workspace {
 
     pub fn is_implicit_image(&self, image: &str) -> bool {
         let own = self.image_ref();
-        image == own
-            || image.strip_prefix(&own).is_some_and(|s| s.starts_with('.'))
+        image == own || image.strip_prefix(&own).is_some_and(|s| s.starts_with('.'))
     }
 
     pub fn verify_implicit_image(&self, image: &str) -> Result<()> {
@@ -210,25 +229,33 @@ fn allocation(root: &Path, worktree: Option<&str>) -> Result<CheckoutIdentity> {
     ]))
     .context("identifying the canonical Git repository")?;
     let common = std::fs::canonicalize(&common).unwrap_or_else(|_| PathBuf::from(common));
-    // A clone cannot infer that it is THE canonical repository. Only a local
-    // declaration matching Git's actual primary checkout can reserve `main`.
-    let canonical = crate::cmd::probe(git::git(root).args([
-        "config",
-        "--local",
-        "--get",
-        "ilex.canonicalCheckout",
-    ]));
-    let is_main = worktree.is_none()
-        && root.join(".git").is_dir()
-        && canonical.is_some_and(|p| {
-            let path = std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(p));
-            native_path(&path) == native_path(root)
-        });
+    let repository_id = digest(native_path(&common).as_bytes());
+    let origin = crate::cmd::probe(git::git(root).args(["config", "--get", "remote.origin.url"]));
+    let mut is_main = false;
+    if origin
+        .as_deref()
+        .is_some_and(crate::main_claim::canonical_origin)
+        && common.file_name().is_some_and(|n| n == ".git")
+        && let Some(primary) = common.parent()
+        && primary.join(".git").is_dir()
+    {
+        // Even a linked-worktree call registers Git's actual primary. No
+        // working-tree files or local Git configuration are changed.
+        let candidate = CheckoutIdentity::new(
+            repository_id.clone(),
+            native_path(primary),
+            "primary",
+            false,
+        );
+        let allocated = crate::main_claim::MainClaims::system()?.allocate(candidate, primary)?;
+        is_main =
+            worktree.is_none() && native_path(root) == allocated.checkout_id && allocated.is_main;
+    }
     let name = worktree
         .or_else(|| root.file_name().and_then(|s| s.to_str()))
         .unwrap_or("checkout");
     Ok(CheckoutIdentity::new(
-        digest(native_path(&common).as_bytes()),
+        repository_id,
         native_path(root),
         name,
         is_main,
@@ -297,7 +324,7 @@ fn worktree_name(root: &Path) -> Option<String> {
 
 /// Canonical native path key. WSL translation belongs to this compatibility
 /// backend, never to core. Windows path identity is case-insensitive.
-fn native_path(path: &Path) -> String {
+pub(crate) fn native_path(path: &Path) -> String {
     let path = path.to_string_lossy().replace('\\', "/");
     let path = path.strip_prefix("//?/").unwrap_or(&path);
     if let Some(rest) = path.strip_prefix("/mnt/") {

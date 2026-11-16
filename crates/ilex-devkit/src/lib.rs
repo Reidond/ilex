@@ -3,6 +3,7 @@
 pub use ilex_tooling_core as core;
 pub use ilex_tooling_linux::fingerprint;
 pub use ilex_tooling_linux::ownership;
+pub use ilex_tooling_linux::main_claim;
 pub use ilex_tooling_linux::{
     IMAGE_REPO, Workspace, bcvk, cmd, config, executor, git, image, installer, machine, provider,
     qemu, qmp, slots, source, tool, viewer, workspace,

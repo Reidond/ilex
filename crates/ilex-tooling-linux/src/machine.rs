@@ -168,7 +168,10 @@ pub fn build(
         "{{index .Labels \"ilex.machine-key\"}}|{{index .Labels \"ilex.machine\"}}",
         &image,
     ]));
-    if current.as_deref() == Some(&format!("{key}|{name}")) && podman_args.is_empty() {
+    if !transaction.needs_legacy_rebuild()
+        && current.as_deref() == Some(&format!("{key}|{name}"))
+        && podman_args.is_empty()
+    {
         eprintln!("machine {name} layer is up to date: {image}");
         return Ok(image);
     }
