@@ -28,7 +28,7 @@ def run(*args, **kwargs):
     return sp.run(args, check=True, text=True, capture_output=True, **kwargs).stdout.strip()
 
 
-def terminal(argv, dialogue, timeout=180, allow_failure=False, optional=False):
+def terminal(argv, dialogue, timeout=180, allow_failure=False, optional=False, current_password=None):
     pid, fd = pty.fork()
     if pid == 0:
         os.execvpe(argv[0], argv, os.environ)
@@ -46,6 +46,13 @@ def terminal(argv, dialogue, timeout=180, allow_failure=False, optional=False):
                     if response is not None:
                         os.write(fd, response.encode() + b"\n")
                     break
+                if current_password is not None:
+                    current = re.search(rb"(?:^|[\r\n])(?:\(?(?:current|old)[^\r\n]*?)?password[^\r\n]*:", transcript[cursor:], re.I)
+                    if current:
+                        cursor += current.end()
+                        os.write(fd, current_password.encode() + b"\n")
+                        current_password = None
+                        continue
                 if time.monotonic() > deadline:
                     raise RuntimeError("terminal prompt timed out: " + pattern)
                 ready, _, _ = select.select([fd], [], [], 0.2)
@@ -107,15 +114,25 @@ def activate(name, password):
     terminal(["/usr/bin/homectl", "activate", name], [(r"password[^\r\n]*:", password)])
 
 
-def tty(name, password, command, extra=()):
-    # A real login PAM session, on its own controlling terminal.
-    text = terminal(["/bin/login", name], [
+def tty(name, password, command, extra=(), current_password=None):
+    # Leave the caller's SSH session/cgroup. Otherwise pam_systemd may reuse
+    # root's session and never start the target user's manager/dependencies.
+    text = terminal(login_argv(name), [
         (r"password[^\r\n]*:", password),
         (r"[$#] ", command + "; printf 'ILEX-TTY-DONE:%s\\n' $?; exit"),
         *extra,
         (r"ILEX-TTY-DONE:0\r?\n", None),
-    ])
+    ], current_password=current_password)
     return text
+
+
+def login_argv(name):
+    return ["/usr/bin/systemd-run", "--quiet", "--wait", "--collect", "--pty",
+            "--service-type=exec", "--setenv=LC_ALL=C", "--setenv=TERM=dumb",
+            # Use Fedora's normal init -> getty -> login SELinux transitions.
+            # init_t intentionally cannot execute login_exec_t directly.
+            "/usr/sbin/agetty", "--skip-login", "--login-options=" + name,
+            "--noreset", "--noclear", "--noissue", "-", "dumb"]
 
 
 def sizes(name):
@@ -174,26 +191,28 @@ def main():
         activate(name, secrets[0])
         return {"sizes": sizes(name), "sha256": checksum(name)}
     if action == "tty":
-        text = tty(name, secrets[0], "test \"$SYSTEMD_HOME\" = 1 && test \"$SYSTEMD_HOME_SUSPEND\" = 0 && test -r ~/e2e-data && ls -Zd ~ ~/e2e-data && loginctl show-session self -p Type && sudo -k && sudo -p ILEX-SUDO: id -u", [(r"ILEX-SUDO:", secrets[0])])
+        text = tty(name, secrets[0], "test \"$SYSTEMD_HOME\" = 1 && test \"$SYSTEMD_HOME_SUSPEND\" = 0 && test -r ~/e2e-data && ls -Zd ~/ ~/e2e-data && loginctl show-session self -p Type -p Name && sudo -k && sudo -p ILEX-SUDO: id -u", [(r"ILEX-SUDO:", secrets[0])])
         assert re.search(r"\r?\n0\r?\n", text), text
         assert "Type=tty" in text, text
+        assert "Name=" + name in text, text
         assert ":user_home_dir_t:" in text and ":user_home_t:" in text, text
         return "TTY PAM activates home, suspend=off, sudo authenticates the homed password"
     if action == "password":
-        # pam_systemd_home reuses the password acquired by this login session;
-        # passwd therefore starts at the new-password prompt. The host checks
-        # both old-password rejection and a fresh login with the new password.
+        # Handle both a current-password challenge and reuse of the login
+        # credential. The host then checks old-password rejection and a fresh
+        # login with the new password.
         tty(name, secrets[0], "passwd", [
             (r"new[^\r\n]*password[^\r\n]*:", secrets[1]),
             (r"(?:retype|repeat)[^\r\n]*password[^\r\n]*:", secrets[1]),
-        ])
+        ], current_password=secrets[0])
         return "password changed through the installed passwd PAM stack"
     if action == "wrong-password":
         # login retries on rejection: wait for the real rejection, then close
         # this terminal rather than providing more attempts/locking the user.
         pid, fd = pty.fork()
         if pid == 0:
-            os.execv("/bin/login", ["/bin/login", name])
+            argv = login_argv(name)
+            os.execv(argv[0], argv)
         data = b""
         sent = False
         try:

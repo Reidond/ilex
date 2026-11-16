@@ -588,7 +588,10 @@ authorize each request; SELinux remains enforcing. Reassess this small module
 when Fedora ships the corresponding caller integration.
 
 New homed filesystems also need their initial SELinux labels before user
-processes create files. A `user@` dependency labels the active home once,
+processes create files. Creation sets a `defcontext` of `user_home_dir_t` for
+initially unlabeled inodes, so login's early SELinux PAM lookup can search
+the new filesystem root. This is a fallback, not a fixed mount context.
+A `user@` dependency then labels the active home once,
 using `restorecon -R -x` without forcing security user/role/range. A root-only
 filesystem-UUID marker under `/var/lib/ilex/homed-labels` prevents later logins
 from replacing custom labels or rescanning large homes. Local passwd accounts

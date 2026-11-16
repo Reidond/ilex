@@ -190,6 +190,10 @@ fn create_inner(args: Vec<String>) -> Result<u8, String> {
         "--rebalance-weight=off",
         "--luks-discard=no",
         "--luks-offline-discard=no",
+        // login's SELinux PAM hook reads the new filesystem's root before
+        // user@ can initialize per-path labels. Use the ordinary home-dir
+        // type for initially unlabeled inodes, not a fixed mount context.
+        "--luks-extra-mount-options=defcontext=system_u:object_r:user_home_dir_t:s0",
         "--auto-login=no",
         "--stop-delay=0",
     ]);
