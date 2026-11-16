@@ -455,10 +455,11 @@ fn unattended_install(
                 break status;
             }
             if last_shot.elapsed() > Duration::from_secs(20) {
-                // Keep the last drawn web page, not a startup console or the
-                // shutdown screen (the machine goes black as it powers off).
+                // The progress page hides the blue masthead used by welcome.
+                // Keep its light, nonblank content rather than the startup
+                // console or shutdown screen.
                 if let Ok(png) = ctl.screenshot_png()
-                    && Frame::decode(&png).is_ok_and(|f| is_webui(&f))
+                    && Frame::decode(&png).is_ok_and(|f| is_light(&f) && !f.is_blank())
                 {
                     let _ = fs::write(artifacts.join("06-installing.png"), png);
                 }

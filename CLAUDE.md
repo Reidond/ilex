@@ -161,8 +161,10 @@ cargo xtask info               # resource identity, selection and available conf
   Screenshots and serial logs land in `<state dir>/artifacts/iso/`: the settled
   web welcome (`02-welcome.png` has the detected composition), graphical
   unattended progress (`06-installing.png`) and first boot (`07-gdm.png`).
-  Screenshot timing recognises the web page's blue header and light content;
-  selection assertions still read serial, not pixels.
+  Welcome timing recognises the web page's blue header and light content;
+  progress capture keeps light, nonblank pages (progress hides the header).
+  Selection assertions still read serial, not pixels. The graphical kickstart
+  uses `Etc/UTC`: WebUI 90 rejects bare `UTC` as an incomplete timezone.
   The frozen legacy `:latest` predates the `reject` policy default: its local
   testing-tag install boots with an enforcing origin and passes the handoff/GDM
   checks, but `bootc upgrade --check` refuses its old insecure default. Keep
