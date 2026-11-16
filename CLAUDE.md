@@ -159,6 +159,12 @@ cargo xtask info               # resource identity, selection and available conf
   and exact booted/tracked comparisons are mandatory for the install trial.
   `ILEX_ISO_TARGET`, when supplied, must agree with the ISO catalogue.
   Screenshots and serial logs land in `<state dir>/artifacts/iso/`.
+  The frozen legacy `:latest` predates the `reject` policy default: its local
+  testing-tag install boots with an enforcing origin and passes the handoff/GDM
+  checks, but `bootc upgrade --check` refuses its old insecure default. Keep
+  that assertion; testing the fixed published composition awaits the stack's
+  first publication. A passing candidate-image CI run does not turn that
+  legacy-payload installation into a passing update check.
 - Publishing (`xtask publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
 
@@ -199,7 +205,7 @@ enabled globally without a shell: no session means no notification is attempted.
 | Base | every image: fedora-bootc, ilex plumbing, `packages.toml` | always present | not selectable independently of ilex |
 | Shell | per image, in `image.toml` | per image, `default-shell` | at sign-in, from the greeter's sessions |
 | Design system | per image, in `image.toml` | per image, `default-design-system` | planned (M1): state in their home, read by a shell; not built |
-| Machine configuration | per composition tag (`generic.gnome`, `ms-7c35.gnome`) | `generic` | per machine, with `bootc switch` |
+| Machine configuration | per composition tag (`generic.gnome`, `ms-7c35.gnome`) | installer DMI match, otherwise `generic` | installer kernel override; later `bootc switch` |
 
 ### Compositions
 
@@ -232,8 +238,9 @@ the authority for the image's name. Publications add no image label or file.
 `cargo xtask info --publications` validates the complete list before printing
 TSV without a header: tag, kind (`root` or `layer`), parent tag (`-` for roots),
 machine name, comma-separated shells (`-` for none). All roots precede layers.
-`ilex_devkit::config::publications` exposes these five fields, including machine
-and shells, for CI and the later installer's machine table. Its `selection`
+`ilex_devkit::config::publications` exposes these five fields for CI, plus
+machine descriptions/match rules and shell descriptions for the installer
+catalogue. Its `selection`
 field resolves all five expected labels from the same manifest snapshot,
 including both design fields (cleared without shells).
 `cargo xtask info --installer` prints the validated installer tag.
@@ -996,8 +1003,8 @@ machine parent fails. A transient read/API error can justify retrying the newest
 run. A machines-job retry while its parent is current re-plans and re-tests.
 Partial publication is not undone: a fresh run/nightly catches up missing layers.
 
-**First run on main.** Merge the entire thirteen-branch stack as one push: PR 13
-into PR 12, then each result down through #32 and the earlier stack into #25,
+**First run on main.** Merge the entire stack as one push: its top PR into its
+base, then each result down through #32 and the earlier stack into #25,
 finally #25 into main. Non-main pushes start no publish run. Bottom-up main
 merges would execute older workflow definitions and move legacy tags.
 
@@ -1171,7 +1178,7 @@ The installer is a **network installer** published as a GitHub Release: it
 carries no ilex image, so one small ISO stays current by itself and fits
 GitHub's limit of 2 GiB per release asset (an ISO with the ~5 GB image in it
 was 2.6 GiB). Download it, write it to a USB stick and boot it; Anaconda asks
-for the disk and the user, then installs the newest `ghcr.io/reidond/ilex:generic.gnome`
+for the disk and the user, then installs the newest selected ilex composition
 over a (wired) network connection and the machine updates itself from there:
 
 ```
