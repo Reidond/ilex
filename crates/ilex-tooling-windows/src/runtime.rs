@@ -91,6 +91,7 @@ pub fn command(path: &Path, exe: &str) -> Command {
     c
 }
 pub fn fetch() -> Result<PathBuf> {
+    let packages = manifest()?.packages;
     let base = root()?.join("runtimes");
     secure_dir(&root()?)?;
     secure_dir(&base)?;
@@ -111,7 +112,6 @@ pub fn fetch() -> Result<PathBuf> {
     }
     fs::create_dir(&staging)?;
     // Failed/interrupted extraction remains unpublished and is removed on the next fetch.
-    let packages = manifest()?.packages;
     for batch in packages.chunks(8) {
         std::thread::scope(|scope| -> Result<()> {
             let mut pending = Vec::new();
@@ -308,34 +308,38 @@ fn gpu_smoke(path: &Path) -> Result<()> {
     let port = reservation.local_addr()?.port();
     drop(reservation);
     let endpoint = format!("tcp:127.0.0.1:{port},server=on,wait=off");
-    let mut child = command(path, "qemu-system-x86_64.exe")
-        .args([
-            "-accel",
-            "whpx,kernel-irqchip=off",
-            "-machine",
-            "q35",
-            "-cpu",
-            "max",
-            "-m",
-            "256",
-            "-smp",
-            "1",
-            "-nic",
-            "none",
-            "-device",
-            "virtio-vga-gl",
-            "-display",
-            "sdl,gl=on",
-            "-qmp",
-            &endpoint,
-            "-monitor",
-            "none",
-            "-serial",
-            "none",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn()?;
+    let fixture_name = format!("ilex-runtime-smoke-{}-{port}", std::process::id());
+    let (_job, mut child) = spawn_owned(
+        command(path, "qemu-system-x86_64.exe")
+            .args([
+                "-name",
+                &fixture_name,
+                "-accel",
+                "whpx,kernel-irqchip=off",
+                "-machine",
+                "q35",
+                "-cpu",
+                "max",
+                "-m",
+                "256",
+                "-smp",
+                "1",
+                "-nic",
+                "none",
+                "-device",
+                "virtio-vga-gl",
+                "-display",
+                "sdl,gl=on",
+                "-qmp",
+                &endpoint,
+                "-monitor",
+                "none",
+                "-serial",
+                "none",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()),
+    )?;
     let result = (|| -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(20);
         let stream = loop {
@@ -356,6 +360,11 @@ fn gpu_smoke(path: &Path) -> Result<()> {
             TcpTransport(BufReader::new(stream)),
             Duration::from_secs(5),
         )?;
+        let identity = client.execute("query-name", serde_json::json!({}))?;
+        ensure!(
+            identity["name"] == fixture_name,
+            "QMP fixture identity mismatch; refusing VM control"
+        );
         std::thread::sleep(Duration::from_secs(3));
         let status = client.execute("query-status", serde_json::json!({}))?;
         ensure!(

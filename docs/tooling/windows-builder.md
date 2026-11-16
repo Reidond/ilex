@@ -44,6 +44,9 @@ load before `ready.json` is flushed and the directory is renamed. An OS file
 lock serializes installation and is released after a crash. The next fetch
 cleans unpublished extraction and reuses checksum-verified archives. Each child
 uses a private DLL/PATH search; the parent environment is untouched.
+Helper processes belong to an unnamed Windows Job Object with kill-on-close;
+an interrupted xtask cannot leave downloads or provisioning PowerShell running.
+The persistent Hyper-V VM belongs to the journal rather than the helper job.
 
 `runtime update` uses only the lock shipped in this checkout. It boots a small
 WHPX/q35/virtio-vga-gl/SDL GL firmware fixture and quits it through QMP before
@@ -115,7 +118,9 @@ stdin operation selects `probe`, `idle`, `smoke` or `update`; arbitrary SSH shel
 commands are unavailable. Update receives a versioned recipe frame and checks
 its SHA256 before installing fixed script paths. T3 extends the finite protocol
 with job operations and must hold `/run/lock/ilex-builder-jobs.lock` for active
-jobs and use `ilex-job-*.service` units. Maintenance refuses active jobs.
+jobs and use `ilex-job-*.service` units. Job registration must also take the
+installation's host `host.lock`, so it cannot race maintenance between the idle
+probe and shutdown. Updates wait for idle; shutdown refuses active jobs.
 
 The recipe installs rootful Podman, Rust/Cargo, the packaged bcvk CLI v0.22.0
 (SHA256 checked), QEMU/KVM, libvirt, OVMF, swtpm, Hyper-V KVP and ISO dependencies.

@@ -84,6 +84,7 @@ pub fn verify_fedora_metadata() -> Result<()> {
     Ok(())
 }
 pub fn run(operation: Operation, options: Options) -> Result<Value> {
+    ilex_tooling_core::check_version(1)?;
     verify_fedora_metadata()?;
     let base = root()?.join("builder");
     // Status never creates state, downloads, starts a VM, or repairs a journal.
@@ -103,7 +104,7 @@ pub fn run(operation: Operation, options: Options) -> Result<Value> {
                     &json!({"schema":1,"operation":operation,"root":base,"revision":revision()}),
                 )?,
             )?;
-            let output = powershell(&script, &request).output()?;
+            let output = output_owned(&mut powershell(&script, &request), Stdio::piped())?;
             ensure!(
                 output.status.success(),
                 "builder status failed: {}",
@@ -149,9 +150,7 @@ pub fn run(operation: Operation, options: Options) -> Result<Value> {
             &json!({"schema":1,"operation":operation,"root":base,"runtime":qemu,"image":image,"revision":revision(),"options":options}),
         )?,
     )?;
-    let output = powershell(&script, &request)
-        .stderr(Stdio::inherit())
-        .output()?;
+    let output = output_owned(&mut powershell(&script, &request), Stdio::inherit())?;
     ensure!(
         output.status.success(),
         "builder helper failed: {}",

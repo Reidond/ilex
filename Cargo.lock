@@ -1388,6 +1388,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 

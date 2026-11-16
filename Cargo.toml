@@ -12,6 +12,7 @@ publish = false
 ilex-tooling-core = { path = "crates/ilex-tooling-core" }
 ilex-tooling-qmp = { path = "crates/ilex-tooling-qmp" }
 ilex-tooling-linux = { path = "crates/ilex-tooling-linux" }
+ilex-tooling-windows = { path = "crates/ilex-tooling-windows" }
 ilex-devkit = { path = "crates/ilex-devkit" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

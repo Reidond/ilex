@@ -28,9 +28,11 @@ enum Operation {
         /// Exercise rollback after the real guest update (returns failure after recovery)
         #[arg(long)]
         rollback_probe: bool,
+        #[arg(long, default_value_t = 0)]
+        wait_for_memory_seconds: u32,
     },
     /// Boot real nested KVM userspace and report the pinned identity/revision
-    #[command(name = "self-check", alias = "--self-check")]
+    #[command(name = "self-check", long_flag = "self-check")]
     SelfCheck,
     /// Remove only journal-owned resources from an incomplete bootstrap
     CleanupIncomplete,
@@ -57,8 +59,12 @@ pub fn run(args: Args) -> Result<()> {
             }
             Operation::Status { .. } => Op::Status,
             Operation::Down => Op::Down,
-            Operation::Update { rollback_probe } => {
+            Operation::Update {
+                rollback_probe,
+                wait_for_memory_seconds,
+            } => {
                 options.rollback_probe = rollback_probe;
+                options.wait_for_memory_seconds = wait_for_memory_seconds;
                 Op::Update
             }
             Operation::SelfCheck => Op::SelfCheck,

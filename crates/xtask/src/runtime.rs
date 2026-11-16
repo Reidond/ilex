@@ -13,7 +13,7 @@ enum Operation {
     /// Fetch, boot a WHPX/SDL/GL firmware fixture, and atomically activate
     Update,
     /// Load real qemu-img and exercise corrupt/traversal/link rejection
-    #[command(name = "self-check", alias = "--self-check")]
+    #[command(name = "self-check", long_flag = "self-check")]
     SelfCheck,
 }
 pub fn run(args: Args) -> Result<()> {

@@ -32,6 +32,7 @@ public sealed class IlexSerialCapture : IDisposable {
  private readonly Thread thread;
  public IlexSerialCapture(string pipeName,string output) {
   thread=new Thread(delegate() {
+   bool reported=false;
    while(!stopping) {
     try {
      using(var pipe=new NamedPipeClientStream(".",pipeName,PipeDirection.In)) {
@@ -42,6 +43,7 @@ public sealed class IlexSerialCapture : IDisposable {
       }
      }
     } catch(IOException) {} catch(TimeoutException) {} catch(ObjectDisposedException) {}
+    catch(Exception error) {if(!reported) {Console.Error.WriteLine("builder serial diagnostics: "+error.Message);reported=true;}Thread.Sleep(500);}
     finally {active=null;}
    }
   });
@@ -189,9 +191,20 @@ function Guest([string]$op,[int]$timeout=1200) {
 function Stop-Owned {
     $vm=Owned-VM
     if($vm.State -eq 'Off') {return}
-    $null=Guest 'idle'
+    $idle=(Guest 'idle') | ConvertFrom-Json
+    if(!$idle.idle) {throw 'Builder has active jobs; refusing shutdown'}
     Stop-VM -VM $vm -Confirm:$false -ErrorAction Stop
     if((Owned-VM).State -ne 'Off') {throw 'Graceful builder shutdown did not complete'}
+}
+function Wait-Idle {
+    $deadline=[DateTime]::UtcNow.AddMinutes(30)
+    do {
+        $idle=(Guest 'idle') | ConvertFrom-Json
+        if($idle.idle) {return}
+        if([DateTime]::UtcNow -ge $deadline) {throw 'Timed out waiting for builder jobs to become idle; no update performed'}
+        Say 'Waiting for active builder jobs before update'
+        Start-Sleep -Seconds 10
+    } while($true)
 }
 function Start-Owned {
     $vm=Owned-VM
@@ -226,7 +239,7 @@ function Seed {
         )
         ssh_keys=@{ed25519_private=[IO.File]::ReadAllText((Join-Path $seed 'host'));ed25519_public=$hostPublic}
         write_files=$files
-        runcmd=@(@('/bin/bash','/var/lib/ilex-builder/provision.sh',$r.revision))
+        runcmd=@(,@('/bin/bash','/var/lib/ilex-builder/provision.sh',$r.revision))
     }
     [IO.File]::WriteAllText((Join-Path $seed 'user-data'),"#cloud-config`n"+($cloud | ConvertTo-Json -Depth 15))
     [IO.File]::WriteAllText((Join-Path $seed 'meta-data'),"instance-id: $($j.run)`nlocal-hostname: $name`n")
@@ -256,6 +269,7 @@ function Reply {
     $vm=Owned-VM
     $reply=[ordered]@{schema=1;name=$name;owner=$owner;state='absent';provisioning_revision=$r.revision;root=$root}
     if($j) {$reply.journal=$j}
+    if($script:probe) {$reply.probe=$script:probe}
     if($vm) {$reply.state=[string]$vm.State;$reply.vm_id=[string]$vm.Id;$reply.addresses=@(Addresses $vm)}
     if($script:address) {$reply.endpoint=@{schema=1;vm_id=$j.vm_id;owner=$owner;address=$script:address;user='ilex';identity_file=(Join-Path $root 'identity');known_hosts_file=(Join-Path $root 'known_hosts');host_key_alias=$name;provisioning_revision=$j.revision}}
     return ($reply | ConvertTo-Json -Depth 18)
@@ -362,6 +376,7 @@ try {
         } else {
             if($j.update_phase -eq 'updating') {throw 'Interrupted update: run builder rollback before another update'}
             Start-Owned
+            Wait-Idle
             Stop-Owned
             Preflight ([long]$j.memory_bytes)
             if($j.checkpoint_id) {throw 'Recovery checkpoint retained; accept it with builder accept-update before updating again'}

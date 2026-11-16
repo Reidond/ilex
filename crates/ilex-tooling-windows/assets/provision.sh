@@ -33,9 +33,9 @@ print('/dev/'+c[0]['name'])
 PY
 )
     signature=$(blkid -p -s TYPE -o value "$device" || true)
-    if [ -z "$signature" ]; then mkfs.xfs -L ilex-builder-data "$device"; else
+    if [ -z "$signature" ]; then mkfs.xfs -L ilex-data "$device"; else
         test "$signature" = xfs
-        test "$(blkid -s LABEL -o value "$device")" = ilex-builder-data
+        test "$(blkid -s LABEL -o value "$device")" = ilex-data
     fi
     mkdir -p /var/lib/ilex-data
     uuid=$(blkid -s UUID -o value "$device")
@@ -72,11 +72,14 @@ chmod 0440 /etc/sudoers.d/ilex-builder
 visudo -cf /etc/sudoers.d/ilex-builder
 rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /var/lib/ilex-builder/packages.txt
 python3 - "$revision" <<'PY'
-import json,os,sys,subprocess
+import hashlib,json,os,sys,subprocess
 p='/var/lib/ilex-builder/provision.json'
 v={'schema':1,'revision':sys.argv[1],'owner':open('/var/lib/ilex-builder/owner').read().strip(),
    'data_uuid':subprocess.check_output(['findmnt','-n','-o','UUID','/var/lib/ilex-data'],text=True).strip(),
-   'bcvk':subprocess.check_output(['bcvk','--version'],text=True).strip()}
+   'bcvk':subprocess.check_output(['bcvk','--version'],text=True).strip(),
+   'package_manifest_sha256':hashlib.sha256(open('/var/lib/ilex-builder/packages.txt','rb').read()).hexdigest(),
+   'packages':[line for line in open('/var/lib/ilex-builder/packages.txt').read().splitlines()
+               if line.split()[0] in {'podman','qemu-kvm','qemu-system-x86-core','libvirt-daemon-kvm','image-builder','cargo','rust','kernel-core','hyperv-daemons'}]}
 with open(p+'.partial','w') as f: json.dump(v,f); f.flush(); os.fsync(f.fileno())
 os.replace(p+'.partial',p)
 PY
