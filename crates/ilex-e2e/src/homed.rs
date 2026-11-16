@@ -39,6 +39,12 @@ fn password() -> Result<String> {
 /// Unlike Vm::ssh_ok, neither the command nor its errors can contain the
 /// credential: JSON travels only through an anonymous stdin pipe to Python.
 fn guest(vm: &Vm, request: Value) -> Result<Value> {
+    // /run is cleared by the lifecycle's reboots. Reinstall this nonsecret
+    // driver on each call; credentials still travel only through stdin.
+    vm.ssh_ok(&format!(
+        "umask 077; printf %s {} | base64 -d > /run/ilex-homed-e2e.py",
+        qemu::base64(GUEST_DRIVER.as_bytes())
+    ))?;
     let mut child = Command::new("ssh")
         .args([
             "-o",
@@ -88,14 +94,13 @@ fn guest(vm: &Vm, request: Value) -> Result<Value> {
 }
 
 fn prepare(vm: &Vm) -> Result<()> {
-    vm.ssh_ok(&format!(
-        "umask 077; printf %s {} | base64 -d > /run/ilex-homed-e2e.py",
-        qemu::base64(GUEST_DRIVER.as_bytes())
-    ))?;
     vm.ssh_ok(
         r#"set -eu
 test "$(getenforce)" = Enforcing
 test -e /run/ostree-booted
+timeout 300 systemctl is-system-running --wait
+test -f /usr/share/selinux/packages/ilex-homed.cil
+semodule -l | grep -x ilex-homed
 authselect check
 authselect current | grep -F with-systemd-homed
 systemctl is-enabled systemd-homed.service
@@ -120,7 +125,7 @@ test "$(readlink -f /home)" = /var/home
 
 fn inactive(vm: &mut Vm, name: &str) -> Result<()> {
     vm.wait_for("home becomes inactive after its final reference", &format!(
-        "homectl inspect {name} --json=short | python3 -c 'import json,sys; r=json.load(sys.stdin); assert any(v.get(\"state\") == \"inactive\" for v in r.get(\"status\", {{}}).values())'"), WAIT)?;
+        r#"homectl inspect {name} --json=short | python3 -c 'import json,sys; r=json.load(sys.stdin); assert any(v.get("state") == "inactive" for v in r.get("status", {{}}).values())'"#), WAIT)?;
     vm.ssh_ok(&format!(
         "! mountpoint -q /home/{name} && test ! -e /home/{name}/e2e-data && getent passwd {name}"
     ))?;
@@ -160,7 +165,7 @@ fn audit(vm: &Vm, artifacts: &Path) -> Result<()> {
 }
 
 fn evidence(vm: &Vm, artifacts: &Path) -> Result<()> {
-    let text = vm.ssh_ok("rpm -q systemd systemd-udev systemd-pam selinux-policy-targeted gdm accountsservice; getenforce; findmnt /var/home; ls -Zd /var/home /var/home/*.home; lsattr /var/home/*.home; systemctl --failed --no-legend; bootc status --json")?;
+    let text = vm.ssh_ok("rpm -q systemd systemd-udev systemd-pam selinux-policy-targeted gdm accountsservice; getenforce; findmnt /var/home; ls -Zd /var/home /var/home/*.home; lsattr /var/home/*.home; stat -c '%n apparent=%s blocks=%b block-unit=%B' /var/home/*.home; systemctl --failed --no-legend; bootc status --json")?;
     qemu::write_artifact(artifacts, "runtime.txt", &text)?;
     Ok(())
 }
@@ -188,15 +193,22 @@ fn lifecycle() -> Result<()> {
             json!({"action":"create", "admin":true, "secrets":[old]}),
         )?;
         // Homed refuses the existing traditional maintenance user; no import.
-        let collision = vm.ssh("ilex-agent home-create ilexmaint --disk-size=2 </dev/null")?;
-        ensure!(
-            !collision.status.success(),
-            "local account collision was accepted"
-        );
+        guest(&vm, json!({"action":"collision", "secrets":[old]}))?;
         inactive(&mut vm, USER)?;
         guest(&vm, json!({"action":"wrong-password", "secrets":[new]}))?;
         inactive(&mut vm, USER)?;
         guest(&vm, json!({"action":"activate", "secrets":[old]}))?;
+        vm.ssh_ok("homectl deactivate homedtest")?;
+        inactive(&mut vm, USER)?;
+        guest(&vm, json!({"action":"tty", "secrets":[old]}))?;
+        inactive(&mut vm, USER)?;
+        guest(&vm, json!({"action":"password", "secrets":[old,new]}))?;
+        inactive(&mut vm, USER)?;
+        guest(&vm, json!({"action":"wrong-password", "secrets":[old]}))?;
+        guest(&vm, json!({"action":"tty", "secrets":[new]}))?;
+        inactive(&mut vm, USER)?;
+        guest(&vm, json!({"action":"activate", "secrets":[new]}))?;
+        ssh_boundaries(&vm)?;
         vm.ssh_ok("homectl deactivate homedtest")?;
         inactive(&mut vm, USER)?;
 
@@ -205,7 +217,9 @@ fn lifecycle() -> Result<()> {
         vm.reboot(vmtest::BOOT_TIMEOUT)?;
         wait_gdm(&mut vm)?;
         inactive(&mut vm, USER)?;
-        discover(&vm)?;
+        guest(&vm, json!({"action":"tty", "secrets":[new]}))?;
+        inactive(&mut vm, USER)?;
+        discover(&mut vm)?;
         shot(&ctl, &artifacts, "01-gdm-inactive")?;
         // GDM's not-listed route avoids depending on tile ordering.
         // Escape then Tab navigates from the selected user list to Not listed.
@@ -216,7 +230,7 @@ fn lifecycle() -> Result<()> {
         ctl.type_text(USER)?;
         ctl.key("Return")?;
         std::thread::sleep(Duration::from_secs(3));
-        ctl.type_text(&old)?;
+        ctl.type_text(&new)?;
         ctl.key("Return")?;
         vm.wait_for(
             "homed user's graphical session",
@@ -226,22 +240,11 @@ fn lifecycle() -> Result<()> {
         vm.ssh_ok("test \"$(findmnt -nro FSTYPE --target /home/homedtest)\" = btrfs; id homedtest | grep wheel; test \"$(loginctl show-user homedtest -p Linger --value)\" = no")?;
         shot(&ctl, &artifacts, "02-gdm-homed-session")?;
         ssh_boundaries(&vm)?;
-        guest(&vm, json!({"action":"tty", "secrets":[old]}))?;
+        guest(&vm, json!({"action":"tty", "secrets":[new]}))?;
         vm.ssh_ok("mountpoint -q /home/homedtest; pgrep -u homedtest -x gnome-shell")?;
         // End the desktop through its own session bus. No forced home
         // deactivation: PAM/logind must release the last reference itself.
         vm.ssh_ok("uid=$(id -u homedtest); runuser -u homedtest -- env XDG_RUNTIME_DIR=/run/user/$uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus gnome-session-quit --logout --no-prompt")?;
-        inactive(&mut vm, USER)?;
-        guest(&vm, json!({"action":"tty", "secrets":[old]}))?;
-        inactive(&mut vm, USER)?;
-        guest(&vm, json!({"action":"password", "secrets":[old,new]}))?;
-        inactive(&mut vm, USER)?;
-        guest(&vm, json!({"action":"wrong-password", "secrets":[old]}))?;
-        guest(&vm, json!({"action":"tty", "secrets":[new]}))?;
-        inactive(&mut vm, USER)?;
-        vm.reboot(vmtest::BOOT_TIMEOUT)?;
-        inactive(&mut vm, USER)?;
-        guest(&vm, json!({"action":"tty", "secrets":[new]}))?;
         inactive(&mut vm, USER)?;
         guest(
             &vm,
@@ -264,7 +267,15 @@ fn lifecycle() -> Result<()> {
         }
     }
     let avc = audit(&vm, &artifacts);
-    result.and(avc)
+    finish(result, avc)
+}
+
+fn finish(result: Result<()>, avc: Result<()>) -> Result<()> {
+    match (result, avc) {
+        (Err(error), Err(audit)) => Err(error.context(format!("AVC audit also failed: {audit:#}"))),
+        (result, Ok(())) => result,
+        (Ok(()), Err(error)) => Err(error),
+    }
 }
 
 fn wait_gdm(vm: &mut Vm) -> Result<()> {
@@ -276,9 +287,11 @@ fn wait_gdm(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-fn discover(vm: &Vm) -> Result<()> {
+fn discover(vm: &mut Vm) -> Result<()> {
     let uid = vm.ssh_ok("id -u homedtest")?;
     let path = format!("/org/freedesktop/Accounts/User{uid}");
+    vm.wait_for("AccountsService enumerates the inactive homed identity", &format!(
+        "busctl call org.freedesktop.Accounts /org/freedesktop/Accounts org.freedesktop.Accounts ListCachedUsers | grep -F {}", common::quote(&path)), WAIT)?;
     let listed = vm.ssh_ok("busctl call org.freedesktop.Accounts /org/freedesktop/Accounts org.freedesktop.Accounts ListCachedUsers")?;
     ensure!(
         listed.contains(&path),
@@ -401,5 +414,5 @@ fn allocation() -> Result<()> {
         evidence(&vm, &artifacts)
     })();
     let avc = audit(&vm, &artifacts);
-    result.and(avc)
+    finish(result, avc)
 }

@@ -158,6 +158,17 @@ def main():
         assert not any(line.startswith(name + ":") for line in open("/etc/passwd"))
         assert run("getent", "passwd", name).startswith(name + ":")
         return "created encrypted home; NSS resolves identity without a passwd entry"
+    if action == "collision":
+        before = run("getent", "-s", "files", "passwd", "ilexmaint")
+        try:
+            create("ilexmaint", secrets[0])
+        except RuntimeError as error:
+            assert re.search(r"already|exist|used|conflict", str(error), re.I), str(error)
+        else:
+            raise RuntimeError("local account collision was accepted")
+        assert run("getent", "-s", "files", "passwd", "ilexmaint") == before
+        assert not os.path.exists("/var/home/ilexmaint.home")
+        return "homed refused the local account collision without changing the maintenance identity"
     if action == "activate":
         activate(name, secrets[0])
         return {"sizes": sizes(name), "sha256": checksum(name)}
@@ -189,9 +200,9 @@ def main():
                 if not sent and re.search(b"password[^\r\n]*:", data, re.I):
                     os.write(fd, secrets[0].encode() + b"\n")
                     sent = True
-                if b"Login incorrect" in data:
+                if re.search(rb"Login incorrect|Password incorrect or not sufficient for authentication", data):
                     return "wrong password rejected by login PAM"
-            raise RuntimeError("login did not reject the wrong password")
+            raise RuntimeError("login did not reject the wrong password\n" + data.decode(errors="replace"))
         finally:
             os.close(fd)
             os.kill(pid, signal.SIGKILL)
@@ -217,6 +228,8 @@ def main():
     if action == "multi-home":
         create("homedother", secrets[0])
         activate("homedother", secrets[0])
+        groups = run("id", "-nG", "homedother").split()
+        assert "ilex-homed" in groups and "wheel" not in groups, groups
         digests = {user: checksum(user) for user in (name, "homedother")}
         assert sizes(name)[0] > 0 and sizes("homedother")[0] > 0
         return {"concurrent_home_sha256": digests}

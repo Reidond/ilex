@@ -12,6 +12,33 @@ COPY --link --parents image.toml packages.toml build/ shells/ design-systems/ ma
 RUN python3 -I -S -c 'import runpy,sys; sys.path.insert(0,"/ctx/build"); runpy.run_path("/ctx/build/compose.py",run_name="__main__")' image --context /ctx --out /out \
         --shells "${ILEX_SHELLS}" --default-shell "${ILEX_DEFAULT_SHELL}"
 
+# Fedora's homed enumeration counts all shadow entries against a 50-human
+# limit. Build only its daemon with the one-line fix from the exact Fedora
+# SRPM. Runtime libraries/data remain Fedora's; installation below refuses
+# another RPM version so a future update cannot silently retain this backport.
+FROM quay.io/fedora/fedora:45 AS accountsservice-build
+RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
+    dnf -y install --setopt=keepcache=1 gcc meson ninja-build gettext-devel \
+        glib2-devel polkit-devel systemd-devel json-c-devel dbus-devel \
+        libxcrypt-devel rpm-build cpio bzip2 patch
+WORKDIR /src
+ARG ACCOUNTS_SRPM_SHA256=394b5016ef1a895b2c8ecf348be692830b483fe6f4612a771c0d6b764f2171e6
+RUN curl -fsSL -o accountsservice.src.rpm \
+        https://kojipkgs.fedoraproject.org/packages/accountsservice/26.27.3/2.fc45/src/accountsservice-26.27.3-2.fc45.src.rpm && \
+    echo "${ACCOUNTS_SRPM_SHA256}  accountsservice.src.rpm" | sha256sum -c - && \
+    rpm2cpio accountsservice.src.rpm | cpio -idm --no-absolute-filenames && \
+    tar -xjf accountsservice-26.27.3.tar.bz2
+COPY build/accountsservice-homed.patch /src/
+RUN cd accountsservice-26.27.3 && \
+    patch --batch --fuzz=0 -p1 < /src/accountsservice-homed.patch && \
+    meson setup _build --buildtype=release --prefix=/usr --libexecdir=/usr/libexec \
+        --sysconfdir=/etc --localstatedir=/var -Dadmin_group=wheel \
+        -Dtests=false -Dintrospection=false -Dvapi=false -Dgtk_doc=false -Ddocbook=false && \
+    ninja -C _build src/accounts-daemon && \
+    install -Dm755 _build/src/accounts-daemon /out/accounts-daemon && \
+    strip /out/accounts-daemon && \
+    install -Dm644 /src/accountsservice-homed.patch /out/accountsservice-homed.patch
+
 # Builder: compile the Rust binaries on Fedora 45 so they link against the
 # same glibc as the image.
 FROM quay.io/fedora/fedora:45 AS build
@@ -89,6 +116,7 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
 
 COPY rootfs/ /
 COPY --from=build /out/ /
+COPY --from=accountsservice-build /out/ /tmp/ilex-accountsservice/
 # Ordinary COPY preserves existing ancestor modes (in particular /tmp's 1777)
 # and still keys the payload by content. --link would replace those ancestors.
 COPY --from=compose /out/install/ /tmp/ilex-compose/
@@ -117,6 +145,14 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify && \
     authselect enable-feature with-systemd-homed && \
     mv /var/lib/authselect/checksum /usr/share/authselect/checksum && \
     authselect check && \
+    semodule -n -i /usr/share/selinux/packages/ilex-homed.cil && \
+    if rpm -q accountsservice >/dev/null 2>&1; then \
+        test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' accountsservice)" = 26.27.3-2.fc45 && \
+        install -m755 /tmp/ilex-accountsservice/accounts-daemon /usr/libexec/accounts-daemon && \
+        install -Dm644 /tmp/ilex-accountsservice/accountsservice-homed.patch \
+            /usr/share/doc/ilex/accountsservice-homed.patch; \
+    fi && \
+    rm -rf /tmp/ilex-accountsservice && \
     if [ "$(systemctl get-default)" = graphical.target ]; then \
         systemctl --global enable ilex-update-notify.path ilex-update-notify.service; \
     fi && \

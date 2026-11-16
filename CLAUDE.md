@@ -579,6 +579,23 @@ Do not edit generated PAM files. Home suspension is off (the packaged PAM
 module's default); screen lock does not evict the home key. Lingering is not
 enabled. Root encryption and TPM enrollment are separate work.
 
+Fedora policy 45.24 denies `passwd_t` D-Bus messages to homed, including
+`chpasswd`'s PAM query. The image installs `ilex-homed.cil` before overlays:
+bidirectional `dbus send_msg` between `passwd_t` and `systemd_homed_t`,
+matching Fedora's `systemd_homed_dbus_chat` interface, plus `filesystem getattr`
+from `systemd_homework_t` to `pidfs_t` for the fsck spawn path. D-Bus/polkit/homed still
+authorize each request; SELinux remains enforcing. Reassess this small module
+when Fedora ships the corresponding caller integration.
+
+AccountsService 26.27.3-2.fc45 also counts every shadow entry (60 on the
+tested desktop) against the homed generator's 50-user limit, hiding all
+homed users from GDM. `build/accountsservice-homed.patch` changes that one
+comparison to the enumerated human-user table. A separate build stage uses
+the SHA-256-pinned Fedora SRPM and replaces only `/usr/libexec/accounts-daemon`
+when that exact RPM is installed; its client library/data remain packaged.
+Another RPM version fails the build for review/removal of this backport.
+The shell-free image installs no AccountsService daemon or package.
+
 Keep Anaconda's distinctly named local wheel administrator for maintenance.
 Create the daily account locally from that account:
 

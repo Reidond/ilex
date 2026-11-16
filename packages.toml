@@ -17,4 +17,4 @@ exclude = ["qemu-kvm-core", "qemu-device-display-virtio-gpu", "qemu-device-displ
 # Human accounts are provisioned on the installed machine, never in the image.
 # F45 packages homectl/the daemon in systemd-udev, PAM in systemd-pam;
 # there is no separate RPM named systemd-homed.
-install = ["systemd-udev", "systemd-pam", "btrfs-progs"]
+install = ["systemd-udev", "systemd-pam", "btrfs-progs", "policycoreutils"]

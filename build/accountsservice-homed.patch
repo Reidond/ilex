@@ -1,0 +1,21 @@
+From: ilex
+Subject: [PATCH] homed: apply the user limit to enumerated users
+
+local_users contains every entry from /etc/shadow, including system users.
+On Fedora's desktop image its size exceeds MAX_LOCAL_USERS before homed is
+enumerated. Bound the human-user table, as the other generators do.
+
+Source: Fedora accountsservice-26.27.3-2.fc45.src.rpm, src/daemon.c
+Remove this backport once the Fedora package includes the fix.
+
+--- a/src/daemon.c
++++ b/src/daemon.c
+@@ -709,7 +709,7 @@ entry_generator_homed (Daemon         *daemon,
+ 
+         /* Every ieration */
+         s = *state;
+-        if (g_hash_table_size (local_users) < MAX_LOCAL_USERS) {
++        if (g_hash_table_size (users) < MAX_LOCAL_USERS) {
+                 g_autofree char *status = NULL;
+ 
+                 homed_clear_pwent (&s->pwent);
