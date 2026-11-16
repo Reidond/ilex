@@ -202,6 +202,7 @@ pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
         hash.update(format!("machine-layer {key}\n"));
     }
     hash_selection(&mut hash, &selection);
+    hash_users(ws, &mut hash)?;
     for p in &packages {
         hash.update(format!("rpm {p}\n"));
     }
@@ -217,6 +218,7 @@ pub fn root_inputs(ws: &Workspace, selection: &Selection) -> Result<String> {
     let mut hash = Sha256::new();
     hash.update(b"ilex-root-inputs v1\n");
     hash_selection(&mut hash, selection);
+    hash_users(ws, &mut hash)?;
     for image in [crate::build::BASE_IMAGE, crate::build::BUILDER_IMAGE] {
         let digest = cmd::output(Command::new("podman").args([
             "image",
@@ -259,6 +261,19 @@ fn hash_selection(hash: &mut Sha256, selection: &Selection) {
     for (key, value) in selection.labels() {
         hash.update(format!("selection {key}={value}\n"));
     }
+}
+
+// User selection affects the public catalogue, never the five OCI selection
+// labels or publication names. Hash it separately so changing only the list
+// cannot reuse a root with a different catalogue.
+fn hash_users(ws: &Workspace, hash: &mut Sha256) -> Result<()> {
+    let manifest = ilex_devkit::config::manifest(&ws.root.join("image.toml"))?;
+    let users = manifest
+        .get("users")
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "[]".into());
+    hash.update(format!("users {users}\n"));
+    Ok(())
 }
 
 fn hash_inputs(ws: &Workspace, hash: &mut Sha256, inputs: Vec<String>) -> Result<()> {

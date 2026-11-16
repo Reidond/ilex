@@ -378,6 +378,7 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
             "default-shell",
             "design-systems",
             "default-design-system",
+            "users",
             "installer",
             "publish",
         ]

@@ -148,7 +148,7 @@ def profile(name):
         raise ValueError("profile is not installed in this image")
     raw = read_image(f"{ROOT}/users/{name}/user.json")
     data = json.loads(raw)
-    if entry["sha256"] != digest(raw) or data.get("schema") != 1 or data.get("revision") != entry["revision"]:
+    if entry.get("schema") != 1 or entry["sha256"] != digest(raw) or data.get("schema") != 1 or data.get("revision") != entry["revision"]:
         raise ValueError("profile schema, revision or digest differs from catalogue")
     for path, expected in data["files"].items():
         parts(path)
