@@ -438,7 +438,18 @@ def self_check(data, address=None):
     # The VM has a nonloopback interface. The same port must be unreachable on
     # it, even to another local process; the listener accepts IPv4 loopback only.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        probe.connect(("10.0.2.2", 9))
+        # The local chooser can precede NetworkManager's DHCP completion.
+        # This opt-in VM probe needs a real nonloopback route; wait for it
+        # rather than skipping the reachability assertion on a fast boot.
+        deadline = time.monotonic() + 45
+        while True:
+            try:
+                probe.connect(("10.0.2.2", 9))
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.2)
         address = probe.getsockname()[0]
     assert not address.startswith("127.")
     try:

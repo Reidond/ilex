@@ -154,6 +154,13 @@ cargo xtask info               # resource identity, selection and available conf
   there. The chooser HTTP probes are enabled only by the harness's public
   `ilex.chooser.self-check=1` systemd credential (SMBIOS), then the person-facing
   form is still submitted with real key events.
+  Lifecycle trials close Firefox with Ctrl+Shift+W and Enter at its quit
+  confirmation, crash it, delay real
+  browser/compositor teardown by four seconds, and force escalation of a hung
+  teardown. The latter faults use the fixed public `ilex.chooser.lifecycle`
+  SMBIOS credential (`crash`, `delay`, `hung`); there is no HTTP control API.
+  Normal/fault handoffs check `ILEX-CHOOSER-HANDOFF` before `%pre`: the actual
+  old PID identities and logind session are absent at Anaconda's ExecStartPre.
   `install` installs onto a blank disk and checks the exact registry digest,
   enforcing origin from first boot, sigpolicy's already-verified journal,
   `bootc upgrade --check`, setup handoff, system `running`, no failed units
@@ -1271,8 +1278,18 @@ The chooser is skipped for `ilex.composition=`, `inst.ks`, `inst.text`,
 `inst.cmdline`, `inst.webui.remote`, `inst.rdp`, or an OEMDRV kickstart found at
 `/run/install/ks.cfg`. Kiosk/server failure falls through to detection; `%pre`
 waits for an activating chooser before reading its answer. The private URL
-file is removed during session cleanup, and both browser and compositor close
-before Anaconda starts. `ILEX-CHOOSER default=… offered=…` on serial records
+file is removed during session cleanup. The supervisor leaves Anaconda's
+`run-in-new-session` launcher alive while its child closes the browser and
+compositor, so the launcher can wait and close PAM. Teardown has a 15-second
+grace period, then bounded TERM/KILL of the actual session process group and
+tracked descendants, orphan reaping, and explicit retirement of that logind
+session/scope. PID start times protect against signalling a reused PID.
+Both Anaconda units require the chooser and recheck the old processes/session
+in ExecStartPre. If teardown cannot be verified, startup fails closed rather
+than racing a seat still owned by the chooser; ordinary browser failure still
+cleans up and falls back to detection. Lifecycle audits go to the journal and
+to ttyS0 when present; no hardware serial port is required for a handoff.
+`ILEX-CHOOSER default=… offered=…` on serial records
 the offered defaults without logging the capability URL.
 
 On **Create account**, create a separate **maintenance/recovery administrator**

@@ -17,6 +17,8 @@ COPY 90-ilex-installer.toml /usr/lib/bootc/install/90-ilex-installer.toml
 COPY --chmod=0755 chooser/ilex-installer-choice /usr/libexec/ilex-installer/ilex-installer-choice
 COPY --chmod=0755 chooser/chooser-session chooser/chooser-kiosk /usr/libexec/ilex-installer/
 COPY chooser/ilex-installer-chooser.service /usr/lib/systemd/system/
+COPY chooser/anaconda-chooser.conf /usr/lib/systemd/system/anaconda.service.d/10-ilex-chooser.conf
+COPY chooser/anaconda-chooser.conf /usr/lib/systemd/system/anaconda-direct.service.d/10-ilex-chooser.conf
 COPY interactive-defaults.ks /usr/share/anaconda/interactive-defaults.ks
 
 FROM quay.io/fedora/fedora-bootc:45

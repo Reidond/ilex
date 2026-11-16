@@ -13,8 +13,10 @@ ConditionPathExists=!/run/install/ks.cfg
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/ilex-installer/chooser-session
+ExecStart=/usr/bin/python3 -I -S /usr/libexec/ilex-installer/chooser-session
 TimeoutStartSec=infinity
+TimeoutStopSec=60
+KillMode=mixed
 UMask=0077
 
 [Install]

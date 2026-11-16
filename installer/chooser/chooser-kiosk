@@ -1,31 +1,3 @@
 #!/bin/bash
-# Anaconda opens its own session on this VT after ours has fully closed.
-set -eu
-umask 077
-server=$1
-run=/run/ilex-installer
-compositor= browser=
-cleanup() {
-    trap - EXIT TERM INT
-    [ -z "$browser" ] || kill "$browser" 2>/dev/null || :
-    [ -z "$compositor" ] || kill "$compositor" 2>/dev/null || :
-    wait 2>/dev/null || :
-}
-trap cleanup EXIT
-trap 'exit 0' TERM INT
-export XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=wl-ilex-chooser
-gnome-kiosk --wayland --wayland-display "$WAYLAND_DISPLAY" &
-compositor=$!
-for ((attempt=0; attempt<100; attempt++)); do
-    [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] || break
-    kill -0 "$compositor" 2>/dev/null || exit 0
-    sleep 0.1
-done
-[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] || exit 0
-profile=$(mktemp -d "$run/firefox.XXXXXX")
-cp -a /usr/share/anaconda/firefox-theme/default/. "$profile/"
-HOME=$run MOZ_ENABLE_WAYLAND=1 firefox --kiosk --new-instance --profile "$profile" "$(cat "$run/url")" &
-browser=$!
-while kill -0 "$server" 2>/dev/null && kill -0 "$browser" 2>/dev/null && kill -0 "$compositor" 2>/dev/null; do
-    sleep 0.3
-done
+# Keep the session leader intact through bounded browser/compositor cleanup.
+exec /usr/bin/python3 -I -S /usr/libexec/ilex-installer/chooser-session kiosk "$@"

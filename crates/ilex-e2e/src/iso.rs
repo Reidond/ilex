@@ -80,6 +80,10 @@ pub fn trials() -> Vec<Trial> {
         ("chooser", Some("ms-7c35"), false, false),
         ("detect_board", Some("ms-7c35"), true, false),
         ("kernel_argument", Some("ms-7c35"), false, true),
+        ("chooser_browser_closed", Some("ms-7c35"), false, false),
+        ("chooser_browser_crashed", Some("ms-7c35"), false, false),
+        ("chooser_delayed", Some("ms-7c35"), false, false),
+        ("chooser_forced", Some("ms-7c35"), false, false),
     ] {
         trials.push(Trial::test(format!("iso::{name}"), move || {
             boot_selection(name, machine, board_only, kernel)
@@ -193,6 +197,17 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
             .smbios
             .push("type=11,value=io.systemd.credential:ilex.chooser.self-check=1".into());
     }
+    let fault = match name {
+        "chooser_browser_crashed" => Some("crash"),
+        "chooser_delayed" => Some("delay"),
+        "chooser_forced" => Some("hung"),
+        _ => None,
+    };
+    if let Some(fault) = fault {
+        config.smbios.push(format!(
+            "type=11,value=io.systemd.credential:ilex.chooser.lifecycle={fault}"
+        ));
+    }
     let mut vm = Vm::boot(&ws, &config)?;
     let ctl = Vmctl::from_info(vm.info.clone());
     let serial = vm.info.dir.join("serial.log");
@@ -202,7 +217,11 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     } else {
         let wanted = format!("ILEX-CHOOSER default={detected} offered=");
         wait_serial(&mut vm, &serial, &wanted)?;
-        wait_welcome(&mut vm, &ctl, &artifacts)?;
+        if name != "chooser_browser_crashed" {
+            wait_welcome(&mut vm, &ctl, &artifacts)?;
+        } else {
+            wait_serial(&mut vm, &serial, "ILEX-CHOOSER-BROWSER READY")?;
+        }
         if name == "detect_board" {
             fs::write(
                 artifacts.join("detect_board-serial.txt"),
@@ -210,11 +229,12 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
             )?;
             return Ok(());
         }
-        ctl.save_screenshot(&artifacts.join(if name == "chooser" {
-            "03-chooser-detected.png"
-        } else {
-            "01-chooser.png"
-        }))?;
+        let shot = match name {
+            "chooser" => "03-chooser-detected.png".into(),
+            "welcome" => "01-chooser.png".into(),
+            _ => format!("{name}-before.png"),
+        };
+        ctl.save_screenshot(&artifacts.join(shot))?;
         if name == "chooser" {
             wait_serial(&mut vm, &serial, "ILEX-CHOOSER-CHECK OK")?;
             for key in ["shift+tab", "shift+tab", "up", "tab", "tab"] {
@@ -223,10 +243,22 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
             std::thread::sleep(Duration::from_secs(1));
             ctl.save_screenshot(&artifacts.join("04-chooser-generic.png"))?;
         }
-        ctl.key("Return")?;
+        match name {
+            "chooser_browser_closed" => {
+                ctl.key("ctrl+shift+w")?;
+                // The stock Firefox profile asks before quitting. Confirm its
+                // native dialog with Enter, rather than submitting the page.
+                std::thread::sleep(Duration::from_secs(1));
+                ctl.key("Return")?;
+            }
+            "chooser_browser_crashed" => (), // The fixed credential kills Firefox.
+            _ => ctl.key("Return")?,
+        }
     }
     let reason = if kernel {
         "chosen at boot"
+    } else if matches!(name, "chooser_browser_closed" | "chooser_browser_crashed") {
+        "detected"
     } else {
         "chosen in the installer"
     };
@@ -236,18 +268,76 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     if kernel && console.contains("ILEX-CHOOSER") {
         bail!("kernel override did not skip the chooser: {console}");
     }
+    if !kernel {
+        assert_handoff(&console, name, &artifacts)?;
+    }
     fs::write(artifacts.join(format!("{name}-serial.txt")), console)?;
     wait_welcome(&mut vm, &ctl, &artifacts)?;
     let screenshot = if name == "welcome" {
-        "02-welcome.png"
+        "02-welcome.png".into()
+    } else if name == "chooser" {
+        "chooser-welcome.png".into()
     } else {
-        "chooser-welcome.png"
+        format!("{name}-welcome.png")
     };
-    ctl.save_screenshot(&artifacts.join(screenshot))?;
+    ctl.save_screenshot(&artifacts.join(&screenshot))?;
     println!(
         "{wanted}; screenshot {}",
         artifacts.join(screenshot).display()
     );
+    Ok(())
+}
+
+/// ExecStartPre rechecks the actual old PID identities and logind sessions at
+/// Anaconda's startup boundary. A stale success marker alone cannot pass.
+fn assert_handoff(console: &str, name: &str, artifacts: &Path) -> Result<()> {
+    let marker = "ILEX-CHOOSER-HANDOFF ";
+    let start = console
+        .find(marker)
+        .context("Anaconda started without the session teardown gate")?;
+    let composition = console
+        .find("ILEX-COMPOSITION ")
+        .context("no composition line")?;
+    if start >= composition {
+        bail!("session teardown was not verified before Anaconda's %pre");
+    }
+    let line = console[start + marker.len()..]
+        .lines()
+        .next()
+        .unwrap()
+        .trim();
+    let audit: serde_json::Value = serde_json::from_str(line)?;
+    fs::write(artifacts.join(format!("{name}-handoff.json")), line)?;
+    if audit["live"] != 0
+        || audit["old_sessions"] != 0
+        || audit["pids"].as_array().is_none_or(Vec::is_empty)
+        || audit["sessions"].as_array().is_none_or(Vec::is_empty)
+    {
+        bail!("old session/processes not proven gone: {audit}");
+    }
+    if name == "chooser_delayed"
+        && (audit["test"] != "delay"
+            || !console.contains("ILEX-CHOOSER-FAULT delay=4 both-live=1")
+            || audit["cleanup_seconds"].as_f64().unwrap_or(0.0) < 4.0
+            || audit["forced"] != false)
+    {
+        bail!("the launcher did not wait for delayed cleanup: {audit}");
+    }
+    if name == "chooser_forced" && (audit["test"] != "hung" || audit["forced"] != true) {
+        bail!("hung session did not exercise bounded escalation: {audit}");
+    }
+    if name == "chooser_browser_crashed"
+        && (!console.contains("ILEX-CHOOSER-FAULT browser-crash")
+            || audit["exit"] != "browser"
+            || audit["browser_status"] != -9)
+    {
+        bail!("the trial did not crash the running browser: {audit}");
+    }
+    if name == "chooser_browser_closed"
+        && (audit["exit"] != "browser" || audit["browser_status"] != 0)
+    {
+        bail!("the real quit shortcut did not close Firefox: {audit}");
+    }
     Ok(())
 }
 
@@ -258,7 +348,9 @@ fn wait_serial(vm: &mut Vm, serial: &Path, wanted: &str) -> Result<()> {
         if console.contains(wanted) {
             return Ok(());
         }
-        if console.contains("ILEX-CHOOSER-CHECK FAILED:") {
+        if console.contains("ILEX-CHOOSER-CHECK FAILED:")
+            || console.contains("ILEX-CHOOSER-LIFECYCLE FAILED:")
+        {
             bail!("chooser HTTP self-check failed; serial: {console}");
         }
         if started.elapsed() > WELCOME_TIMEOUT || vm.exited()?.is_some() {
