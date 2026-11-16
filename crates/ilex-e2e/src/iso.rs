@@ -588,6 +588,16 @@ fn unattended_install(
     let (disk, vars) = storage;
     let (table, machine, chosen) = choice;
     let install = || -> Result<()> {
+        let timeout = std::env::var("ILEX_ISO_INSTALL_TIMEOUT")
+            .ok()
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .context("ILEX_ISO_INSTALL_TIMEOUT must be a positive number of seconds")?
+            .map_or(INSTALL_TIMEOUT, Duration::from_secs);
+        if timeout.is_zero() {
+            bail!("ILEX_ISO_INSTALL_TIMEOUT must be positive");
+        }
+        println!("     installer time limit: {timeout:?}");
         blank_disk(disk)?;
         let oemdrv = kickstart_disk(work)?;
         let mut config = VmConfig::new("iso-install", disk);
@@ -619,10 +629,10 @@ fn unattended_install(
                 }
                 last_shot = Instant::now();
             }
-            if started.elapsed() > INSTALL_TIMEOUT {
+            if started.elapsed() > timeout {
                 let _ = ctl.save_screenshot(&artifacts.join("02-install-timeout.png"));
                 bail!(
-                    "the install did not finish within {INSTALL_TIMEOUT:?} (serial log: {})",
+                    "the install did not finish within {timeout:?} (serial log: {})",
                     serial.display()
                 );
             }

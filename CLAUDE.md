@@ -173,6 +173,9 @@ cargo xtask info               # resource identity, selection and available conf
   `GITHUB_ACTIONS` is set. CI supplies `ILEX_ISO_DIGEST`; registry resolution
   and exact booted/tracked comparisons are mandatory for the install trial.
   `ILEX_ISO_TARGET`, when supplied, must agree with the ISO catalogue.
+  `ILEX_ISO_INSTALL_TIMEOUT` overrides the install's default 1800-second limit
+  for a heavily contended host (positive seconds, e.g. `3600`); it does not
+  change chooser teardown deadlines or any installed-image assertion.
   Screenshots and serial logs land in `<state dir>/artifacts/iso/`: the settled
   unknown-machine chooser (`01-chooser.png`), detected/changed choices
   (`03-chooser-detected.png`, `04-chooser-generic.png`), web welcome
