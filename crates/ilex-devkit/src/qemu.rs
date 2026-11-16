@@ -323,6 +323,9 @@ pub struct VmConfig {
     /// An install ISO attached as a CD-ROM. Firmware tries the disk first and
     /// falls through to the CD when the disk is empty.
     pub cdrom: Option<PathBuf>,
+    /// Attach a second UART, saved as `serial-secondary.log`, for observing
+    /// faults in the primary diagnostic sink independently.
+    pub secondary_serial: bool,
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
@@ -350,6 +353,7 @@ impl VmConfig {
             gl: false,
             x_display: None,
             cdrom: None,
+            secondary_serial: false,
             extra_disks: Vec::new(),
             smbios: Vec::new(),
             efi_vars: None,
@@ -475,6 +479,10 @@ impl Vm {
             .arg(format!("file:{}", dir.join("serial.log").display()))
             .arg("-qmp")
             .arg(format!("unix:{},server=on,wait=off", qmp_sock.display()));
+        if config.secondary_serial {
+            qemu.arg("-serial")
+                .arg(format!("file:{}", dir.join("serial-secondary.log").display()));
+        }
         for structure in &config.smbios {
             qemu.args(["-smbios", structure]);
         }

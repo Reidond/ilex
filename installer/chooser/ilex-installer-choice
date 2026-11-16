@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import secrets
 import socket
 import subprocess
@@ -21,6 +22,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 REPOSITORY = "ghcr.io/reidond/ilex"
 FIELDS = ("sys_vendor", "product_name", "board_vendor", "board_name")
+diagnostic = runpy.run_path(str(Path(__file__).with_name("diagnostics.py")))["emit"]
 
 
 def tag(value):
@@ -152,13 +154,7 @@ def apply(data, result, args):
     quote = lambda s: '"' + re.sub(r'([\\"$`])', r'\\\1', s) + '"'
     atomic_write(args.os_release, "\n".join(lines + ['NAME="ilex"', "PRETTY_NAME=" + quote(pretty)]) + "\n")
     message = f"ILEX-COMPOSITION {chosen} ({result['reason']}) installs {target}"
-    print(message, flush=True)
-    for console in ("/dev/ttyS0", "/dev/tty0"):
-        try:
-            with open(console, "w", encoding="utf-8") as output:
-                print(message, file=output, flush=True)
-        except OSError:
-            pass
+    diagnostic(message, consoles=("/dev/ttyS0", "/dev/tty0"), journal=sys.stdout)
 
 
 PAGE = """<!DOCTYPE html>
@@ -372,19 +368,14 @@ def serve(data, result, args):
         print(origin + prefix, flush=True)  # private file, read by chooser-kiosk
         message = (f"ILEX-CHOOSER default={result['tag']} offered="
                    + ",".join(e["tag"] for e in data["compositions"]))
-        try:
-            with open("/dev/ttyS0", "w", encoding="utf-8") as console:
-                print(message, file=console, flush=True)
-        except OSError:
-            pass
+        diagnostic(message)
         if args.self_check:
             def check():
-                with open("/dev/ttyS0", "w", encoding="utf-8") as console:
-                    try:
-                        summary = self_check(data, origin + prefix)
-                        print("ILEX-CHOOSER-CHECK OK: " + summary, file=console, flush=True)
-                    except Exception as error:
-                        print(f"ILEX-CHOOSER-CHECK FAILED: {error!r}", file=console, flush=True)
+                try:
+                    summary = self_check(data, origin + prefix)
+                    diagnostic("ILEX-CHOOSER-CHECK OK: " + summary)
+                except Exception as error:
+                    diagnostic(f"ILEX-CHOOSER-CHECK FAILED: {error!r}")
             threading.Thread(target=check, daemon=True).start()
         while not done:
             server.handle_request()

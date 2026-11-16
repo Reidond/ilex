@@ -84,6 +84,8 @@ pub fn trials() -> Vec<Trial> {
         ("chooser_browser_crashed", Some("ms-7c35"), false, false),
         ("chooser_delayed", Some("ms-7c35"), false, false),
         ("chooser_forced", Some("ms-7c35"), false, false),
+        ("chooser_serial_unavailable", Some("ms-7c35"), false, false),
+        ("chooser_serial_backpressure", Some("ms-7c35"), false, false),
     ] {
         trials.push(Trial::test(format!("iso::{name}"), move || {
             boot_selection(name, machine, board_only, kernel)
@@ -192,7 +194,14 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     config.vcpus = 4;
     config.cdrom = Some(iso.clone());
     config.smbios = smbios(&table, machine, board_only)?;
-    if name == "chooser" {
+    let serial_fault = name.strip_prefix("chooser_serial_");
+    config.secondary_serial = serial_fault.is_some();
+    if let Some(mode) = serial_fault {
+        config.smbios.push(format!(
+            "type=11,value=io.systemd.credential:ilex.chooser.serial-test={mode}"
+        ));
+    }
+    if name == "chooser" || serial_fault.is_some() {
         config
             .smbios
             .push("type=11,value=io.systemd.credential:ilex.chooser.self-check=1".into());
@@ -210,7 +219,11 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     }
     let mut vm = Vm::boot(&ws, &config)?;
     let ctl = Vmctl::from_info(vm.info.clone());
-    let serial = vm.info.dir.join("serial.log");
+    let serial = vm.info.dir.join(if serial_fault.is_some() {
+        "serial-secondary.log"
+    } else {
+        "serial.log"
+    });
     if kernel {
         wait_serial(&mut vm, &serial, "Press enter to boot")?;
         kernel_argument(&iso, &work, &table.default, &ctl, &artifacts)?;
@@ -235,8 +248,10 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
             _ => format!("{name}-before.png"),
         };
         ctl.save_screenshot(&artifacts.join(shot))?;
-        if name == "chooser" {
+        if name == "chooser" || serial_fault.is_some() {
             wait_serial(&mut vm, &serial, "ILEX-CHOOSER-CHECK OK")?;
+        }
+        if name == "chooser" {
             for key in ["shift+tab", "shift+tab", "up", "tab", "tab"] {
                 ctl.key(key)?;
             }
@@ -270,6 +285,40 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     }
     if !kernel {
         assert_handoff(&console, name, &artifacts)?;
+    }
+    if let Some(mode) = serial_fault {
+        // Read the independent UART, not the unavailable/flow-stopped sink.
+        // Require actual EAGAIN/ENOENT outcomes from the shipped mirror at
+        // server startup, kiosk startup, HTTP self-check, gate and apply.
+        for message in [
+            "ILEX-CHOOSER",
+            "ILEX-CHOOSER-BROWSER",
+            "ILEX-CHOOSER-CHECK",
+            "ILEX-CHOOSER-HANDOFF",
+            "ILEX-COMPOSITION",
+        ] {
+            wait_serial(&mut vm, &serial, &format!("\"message\": \"{message}\""))?;
+        }
+        let console = fs::read_to_string(&serial)?;
+        let audits = console
+            .lines()
+            .filter_map(|line| line.strip_prefix("ILEX-CHOOSER-SERIAL "))
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if audits.len() < 5
+            || audits.iter().any(|audit| {
+                audit["mode"] != mode
+                    || audit["status"] != mode
+                    || audit["seconds"].as_f64().unwrap_or(f64::INFINITY) >= 1.0
+            })
+        {
+            bail!("serial fault was not exercised without blocking: {audits:?}");
+        }
+        fs::write(artifacts.join(format!("{name}-serial.txt")), console)?;
+        fs::write(
+            artifacts.join(format!("{name}-diagnostics.json")),
+            serde_json::to_vec_pretty(&audits)?,
+        )?;
     }
     fs::write(artifacts.join(format!("{name}-serial.txt")), console)?;
     wait_welcome(&mut vm, &ctl, &artifacts)?;

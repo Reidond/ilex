@@ -161,6 +161,14 @@ cargo xtask info               # resource identity, selection and available conf
   SMBIOS credential (`crash`, `delay`, `hung`); there is no HTTP control API.
   Normal/fault handoffs check `ILEX-CHOOSER-HANDOFF` before `%pre`: the actual
   old PID identities and logind session are absent at Anaconda's ExecStartPre.
+  `chooser_serial_unavailable` and `chooser_serial_backpressure` exercise
+  the shipped diagnostic path with a missing sink and a private PTY stopped
+  by `tcflow(TCOOFF)`. Fixed public SMBIOS credential
+  `ilex.chooser.serial-test=unavailable|backpressure` selects these faults.
+  A second virtual UART observes server/kiosk readiness, HTTP probe completion,
+  the teardown gate and `%pre` independently of the faulted sink; each actual
+  mirror must report ENOENT/EAGAIN and finish in under one second. QMP
+  screenshots record the chooser and the resulting stock Anaconda page.
   `install` installs onto a blank disk and checks the exact registry digest,
   enforcing origin from first boot, sigpolicy's already-verified journal,
   `bootc upgrade --check`, setup handoff, system `running`, no failed units
@@ -1290,8 +1298,18 @@ session/scope. PID start times protect against signalling a reused PID.
 Both Anaconda units require the chooser and recheck the old processes/session
 in ExecStartPre. If teardown cannot be verified, startup fails closed rather
 than racing a seat still owned by the chooser; ordinary browser failure still
-cleans up and falls back to detection. Lifecycle audits go to the journal and
-to ttyS0 when present; no hardware serial port is required for a handoff.
+cleans up and falls back to detection. Diagnostics keep their ordinary
+journal/Anaconda output. Console mirrors share `diagnostics.py`: open with
+`O_NONBLOCK|O_NOCTTY`, attempt at most 4096 bytes once, and skip unavailable,
+backpressured or partial output without retrying or draining. Each disposable
+worker gets a 200 ms wait budget and, if needed, SIGKILL plus a separate
+200 ms reap budget. This also isolates a UART driver's last-close wait from
+the control path; the real console's termios and queued output are untouched.
+Server startup, HTTP self-check, kiosk lifecycle/error messages, the startup
+gate and `apply`'s ttyS0/tty0 mirrors all use this helper. Normal journal I/O
+is retained; the budgets apply to optional console workers, not every OS I/O
+operation. No hardware serial port or successful serial write is required
+for a handoff.
 `ILEX-CHOOSER default=… offered=…` on serial records
 the offered defaults without logging the capability URL.
 

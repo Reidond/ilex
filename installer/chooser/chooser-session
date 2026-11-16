@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import signal
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import time
 RUN = Path("/run/ilex-installer")
 PROGRAM = "/usr/libexec/ilex-installer/"
 stopping = False
+serial = runpy.run_path(str(Path(__file__).with_name("diagnostics.py")))["emit"]
 
 
 def stop(unused_signal, unused_frame):
@@ -79,17 +81,6 @@ def signal_process(item, sig):
             os.kill(item["pid"], sig)
         except ProcessLookupError:
             pass
-
-
-def serial(message):
-    # Keep diagnostics in the journal too. Physical machines need not have
-    # a serial console; missing ttyS0 must never block a verified handoff.
-    print(message, flush=True)
-    try:
-        with open("/dev/ttyS0", "w", encoding="utf-8") as output:
-            print(message, file=output, flush=True)
-    except OSError:
-        pass
 
 
 class Supervisor:
