@@ -224,9 +224,10 @@ fn lifecycle() -> Result<()> {
         inactive(&mut vm, USER)?;
         discover(&mut vm)?;
         shot(&ctl, &artifacts, "01-gdm-inactive")?;
-        // GDM's not-listed route avoids depending on tile ordering.
-        // Escape then Tab navigates from the selected user list to Not listed.
+        // This fresh fixture has two visible identities. From the selected
+        // first tile, pass the second tile to reach GDM's Not listed route.
         ctl.key("Escape")?;
+        ctl.key("Tab")?;
         ctl.key("Tab")?;
         ctl.key("Return")?;
         std::thread::sleep(Duration::from_secs(2));
