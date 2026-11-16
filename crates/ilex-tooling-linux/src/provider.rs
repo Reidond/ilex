@@ -90,22 +90,36 @@ pub fn capabilities(display: &str, dimensions: (u32, u32)) -> VmCapabilities {
         for status in features.values_mut() {
             *status = Unavailable("Linux backend must run in Linux/WSL".into());
         }
+    } else if let Err(error) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+    {
+        features.insert(
+            Start,
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                PermissionDenied(format!("opening /dev/kvm: {error}"))
+            } else {
+                Unavailable(format!("opening /dev/kvm: {error}"))
+            },
+        );
     }
+    let can_capture = matches!(features.get(&Screenshot), Some(Available));
     VmCapabilities {
         schema: SCHEMA_VERSION,
         provider: "linux-qemu-kvm".into(),
         vm_id: None,
         phase: BootPhase::Unknown,
         features,
-        screenshot_source: Some(
+        screenshot_source: can_capture.then(|| {
             if display.starts_with("viewer") {
                 "wsl-display-bridge"
             } else {
                 "qmp-screendump"
             }
-            .into(),
-        ),
-        screenshot_dimensions: Some(dimensions),
+            .into()
+        }),
+        screenshot_dimensions: can_capture.then_some(dimensions),
         text_layout: Some("US physical keyboard; ASCII text only".into()),
     }
 }
@@ -253,6 +267,7 @@ impl VmProvider for LinuxProvider {
     fn validate(&self, spec: &VmSpec) -> Result<()> {
         // Version/ownership precede any backend mutation.
         spec.validate(&self.identity, &self.probe(spec)?)?;
+        self.probe(spec)?.require(Capability::Start)?;
         require_arch(spec.guest_arch)?;
         ensure!(
             spec.host_arch == Architecture::host()?,

@@ -127,7 +127,11 @@ impl Vmctl {
 
     pub fn capabilities(&self) -> ilex_tooling_core::VmCapabilities {
         let mut caps = ilex_devkit::provider::capabilities(
-            &self.info.display,
+            if self.info.display == "viewer" && self.info.gpu {
+                "viewer-gl"
+            } else {
+                &self.info.display
+            },
             (self.info.width, self.info.height),
         );
         caps.vm_id = Some(format!("{}:{}", self.info.pid, self.info.process_start));
@@ -465,6 +469,11 @@ impl ilex_tooling_core::VmControl for Vmctl {
             current.generation == generation
                 && (current.width, current.height) == (frame.width, frame.height),
             "framebuffer resized; capture again before pointer input"
+        );
+        anyhow::ensure!(
+            current.coordinate_space == frame.coordinate_space
+                && current.viewport == frame.viewport,
+            "frame coordinate space or viewport changed; capture again"
         );
         send_events(
             &mut self.qmp()?,

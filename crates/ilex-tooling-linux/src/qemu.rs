@@ -218,6 +218,8 @@ pub struct VmInfo {
     /// `none` (headless), `gtk`, or `gtk-gl` (a GTK window and virgl: QMP
     /// `screendump` can't capture it and there is no VNC server).
     pub display: String,
+    #[serde(default)]
+    pub gpu: bool,
 }
 
 const INFO_FILE: &str = "vm.toml";
@@ -664,6 +666,7 @@ impl Vm {
         }
 
         let info = VmInfo {
+            gpu: gl,
             schema: ilex_tooling_core::SCHEMA_VERSION,
             owner: spec.owner,
             run: spec.run,
