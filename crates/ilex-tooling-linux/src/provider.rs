@@ -106,6 +106,9 @@ pub fn capabilities(display: &str, dimensions: (u32, u32)) -> VmCapabilities {
     }
     let can_capture = matches!(features.get(&Screenshot), Some(Available));
     VmCapabilities {
+        provisioning: BTreeMap::new(),
+        qualification: None,
+        runtime: VmRuntimeStatus::Unknown,
         schema: SCHEMA_VERSION,
         provider: "linux-qemu-kvm".into(),
         vm_id: None,
@@ -151,6 +154,7 @@ pub fn spec(ws: &Workspace, config: &VmConfig) -> Result<VmSpec> {
     Ok(VmSpec {
         schema: SCHEMA_VERSION,
         accelerator: Accelerator::Native,
+        security_launch: SecurityLaunch::RequireQualified,
         owner: identity.owner,
         run: format!(
             "{}-{}",
@@ -278,7 +282,7 @@ impl VmProvider for LinuxProvider {
                 Ok(()) => CapabilityStatus::Available,
                 Err(e) => CapabilityStatus::Unavailable(format!("{e:#}")),
             };
-            caps.features.insert(
+            caps.provisioning.insert(
                 Capability::FirmwareEnforcement,
                 if spec.secure_boot == Requirement::Required {
                     status.clone()
@@ -286,7 +290,7 @@ impl VmProvider for LinuxProvider {
                     CapabilityStatus::Unavailable("Secure Boot is off for this VM".into())
                 },
             );
-            caps.features.insert(
+            caps.provisioning.insert(
                 Capability::PersistentTpm,
                 if matches!(spec.tpm, TpmLifecycle::Off) {
                     CapabilityStatus::Unavailable("TPM is off for this VM".into())
@@ -294,6 +298,10 @@ impl VmProvider for LinuxProvider {
                     status
                 },
             );
+            let profile = crate::qualification::profile(&self.ws, spec)?;
+            let path = crate::qualification::record_path(&self.ws, &profile)?;
+            let qualification = crate::qualification::load(&path, &spec.owner, &profile)?;
+            crate::qualification::apply(&mut caps, qualification);
         }
         Ok(caps)
     }

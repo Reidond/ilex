@@ -245,6 +245,33 @@ and require the matching CODE/VARS pair's combined 4 MiB layout. Fedora's
 qcow2 pair and Ubuntu's raw pair are converted into private raw files.
 Ordinary `ILEX_OVMF_CODE/VARS` overrides cannot qualify security requests.
 
+`VmCapabilities.provisioning` reports prerequisites separately from effective
+`features`. SMM/firmware/executable checks can make provisioning available;
+they never make `FirmwareEnforcement` or `PersistentTpm` effective. Those
+require a passing `qualification` for the exact `SecurityProfile`: accelerator,
+RAM/vCPUs, CPU model, guest architecture, host boot/machine/CPU/kernel/backend
+evidence and firmware/template fingerprints. Host identity is hashed. Evidence
+lives under `<state>/security-qualification/<profile hash>/record.json` and
+contains the run, artifact path and outcome (`unknown`, `qualifying`, `passed`
+or `failed`). A new measurement replaces a prior pass with `qualifying` before
+launch; interruption/failure cannot preserve that pass. This is local test
+evidence, not remote attestation or an encrypted-install qualification.
+
+Secure requests default to `security_launch=require_qualified` and fail before
+launch for unknown/failed profiles. A harness explicitly sets
+`security_launch=qualification_fixture` to measure any requested resource size
+while still requiring provisioning support. This flag never promotes status.
+There is no universal RAM ceiling: 2 GiB evidence does not qualify 4/6 GiB,
+and two-vCPU evidence does not qualify another CPU count. PR17 consumes these
+shared types and `ilex_devkit::qualification` records rather than a second
+capability contract. Old metadata without evidence remains unqualified.
+
+vmctl reports live QMP `runtime` separately. A paused, stopped, failed or
+unreachable guest never exposes effective security capabilities as available,
+even with historical passing profile evidence. An SMM `internal-error` is a
+failed runtime. Resume can restore a passing profile only when QMP is running;
+a stored failure remains failed until a new explicit qualification succeeds.
+
 Disk, CODE, VARS and manufactured SHA256 swtpm state form one lifecycle:
 `<state>/security/<bundle_id>/bundle.json` binds owner/run/purpose/disk and
 policy, checks the CODE hash, and refuses missing TPM state or a changed
@@ -262,8 +289,12 @@ binary event log. It requires meaningful policy and authority events. A
 public test credential encrypted to this TPM/PCR7 must decrypt after both
 warm reboot and a full QEMU/swtpm stop/start. An unsigned generated EFI
 application must emit its serial marker with SB off, then receive an explicit
-firmware rejection with SB required. Both controls use identical payload
-bytes. The tier uses 4 GiB and two vCPUs; each SSH/control deadline is 420s
+firmware rejection with SB required. Both controls use identical payload,
+secure CODE and enrolled VARS template. The off copy changes only the
+`SecureBootEnable` boolean, retaining all enrolled keys. When the factory
+template omits that boolean (Ubuntu), it is added with value zero rather than
+replacing the enrolled key store. Manifest hashes record the common firmware
+and the private off-state change. The tier uses 4 GiB and two vCPUs; each SSH/control deadline is 420s
 with KVM or 900s with TCG. This does not qualify encrypted installation,
 desktop performance or the unresolved 4 GiB nested Hyper-V builder failure.
 `ILEX_SECURITY_MEMORY=2G` selects an explicit smaller diagnostic fixture;
@@ -276,6 +307,11 @@ Disk construction still uses bcvk's KVM installer; a host with no KVM at all
 needs an already delivered, checkout-owned `ILEX_DISK` to qualify TCG. Missing
 disk-construction support fails as unqualified. The hosted workflow's existing
 ordinary KVM tiers still require KVM independently of the SMM decision.
+For immutable `sha256:...` image IDs, disk construction gives bcvk an
+ID-verified checkout-owned local alias: its inner containers-storage transport
+otherwise parses the ID as a registry name. The disk key remains the original
+immutable ID. The alias retains only an additional local name for the existing
+image; no registry upload or extra image contents are created.
 
 CI runs the tier on the tested candidate, probes the actual runner each
 time, explicitly chooses KVM or TCG, and enforces a 45-minute total deadline.

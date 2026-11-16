@@ -11,6 +11,7 @@ pub mod machine;
 pub mod main_claim;
 pub mod ownership;
 pub mod provider;
+pub mod qualification;
 pub mod qemu;
 pub mod qmp;
 pub mod security;

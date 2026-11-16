@@ -21,6 +21,16 @@ pub enum Accelerator {
     Tcg,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityLaunch {
+    #[default]
+    RequireQualified,
+    /// Explicitly launch an unqualified measurement fixture. Prerequisites
+    /// remain required and capability status is never promoted by this flag.
+    QualificationFixture,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TpmLifecycle {
@@ -83,7 +93,7 @@ pub struct AttachedDisk {
     pub read_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resources {
     pub memory_bytes: u64,
     pub vcpus: u32,
@@ -109,6 +119,8 @@ pub struct VmSpec {
     pub schema: u32,
     #[serde(default)]
     pub accelerator: Accelerator,
+    #[serde(default)]
+    pub security_launch: SecurityLaunch,
     pub owner: String,
     pub run: String,
     pub purpose: String,
@@ -164,15 +176,37 @@ impl VmSpec {
             caps.require(Capability::GpuRendering)?;
         }
         if self.secure_boot == Requirement::Required {
-            caps.require(Capability::FirmwareEnforcement)?;
+            self.require_security(caps, Capability::FirmwareEnforcement)?;
         }
         if !matches!(self.tpm, TpmLifecycle::Off) {
-            caps.require(Capability::PersistentTpm)?;
+            self.require_security(caps, Capability::PersistentTpm)?;
         }
         for &feature in &self.require {
-            caps.require(feature)?;
+            if matches!(
+                feature,
+                Capability::FirmwareEnforcement | Capability::PersistentTpm
+            ) {
+                self.require_security(caps, feature)?;
+            } else {
+                caps.require(feature)?;
+            }
         }
         Ok(())
+    }
+    fn require_security(&self, caps: &VmCapabilities, feature: Capability) -> Result<()> {
+        if self.security_launch == SecurityLaunch::QualificationFixture {
+            caps.require_provisioning(feature)
+        } else {
+            caps.require(feature)?;
+            let profile = &caps.qualification.as_ref().unwrap().profile;
+            ensure!(
+                profile.accelerator == self.accelerator
+                    && profile.resources == self.resources
+                    && profile.guest_arch == self.guest_arch,
+                "qualification does not match requested accelerator/resources/architecture"
+            );
+            Ok(())
+        }
     }
 }
 

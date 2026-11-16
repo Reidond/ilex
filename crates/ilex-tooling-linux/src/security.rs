@@ -79,7 +79,9 @@ pub fn kvm_smm() -> Result<i32> {
 }
 
 pub fn requested(spec: &VmSpec) -> bool {
-    spec.secure_boot == Requirement::Required || !matches!(spec.tpm, TpmLifecycle::Off)
+    spec.secure_boot == Requirement::Required
+        || !matches!(spec.tpm, TpmLifecycle::Off)
+        || spec.security_launch == ilex_tooling_core::SecurityLaunch::QualificationFixture
 }
 
 pub fn validate(spec: &VmSpec) -> Result<()> {
@@ -230,6 +232,168 @@ struct Manifest {
     tpm: TpmLifecycle,
     descriptor: PathBuf,
     code_sha256: String,
+    #[serde(default)]
+    firmware_identity: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    vars_template_sha256: String,
+    #[serde(default)]
+    vars_initial_sha256: String,
+    #[serde(default)]
+    sb_disabled_byte: Option<usize>,
+}
+
+pub(crate) fn firmware_identity(
+    ws: &Workspace,
+    spec: &VmSpec,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let root = bundle_path(ws, spec)?;
+    let mut identity = if root.join("bundle.json").exists() {
+        let manifest: Manifest = serde_json::from_slice(&fs::read(root.join("bundle.json"))?)?;
+        manifest.authorize(ws, spec)?;
+        ensure!(
+            manifest.code_sha256 == hash(&fs::read(root.join("CODE.fd"))?),
+            "bundle CODE changed"
+        );
+        ensure!(
+            !manifest.firmware_identity.is_empty(),
+            "old bundle has no qualification identity; recreate this disposable fixture"
+        );
+        manifest.firmware_identity
+    } else {
+        let pair = firmware()?;
+        std::collections::BTreeMap::from([
+            (
+                "descriptor_sha256".into(),
+                hash(&fs::read(&pair.descriptor)?),
+            ),
+            ("code_source_sha256".into(), hash(&fs::read(&pair.code)?)),
+            (
+                "enrolled_vars_source_sha256".into(),
+                hash(&fs::read(&pair.vars)?),
+            ),
+            ("pcr_banks".into(), "sha256".into()),
+            (
+                "off_control".into(),
+                "same-code-enrolled-vars-SecureBootEnable-only-v1".into(),
+            ),
+        ])
+    };
+    identity.insert(
+        "secure_boot".into(),
+        if spec.secure_boot == Requirement::Required {
+            "required"
+        } else {
+            "off"
+        }
+        .into(),
+    );
+    identity.insert(
+        "tpm".into(),
+        if matches!(spec.tpm, TpmLifecycle::Off) {
+            "off"
+        } else {
+            "persistent"
+        }
+        .into(),
+    );
+    Ok(identity)
+}
+
+/// Fresh enrolled x64 EDK2 authenticated variable stores only. Keep every
+/// certificate and other byte intact; flip the single NV/BS enable boolean.
+/// Layout: edk2 MdeModulePkg/Include/Guid/VariableFormat.h (60-byte header,
+/// x64 name/data alignment=1, VAR_ADDED=0x3f).
+fn disable_secure_boot(path: &Path) -> Result<usize> {
+    let mut bytes = fs::read(path)?;
+    let name: Vec<u8> = "SecureBootEnable\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let guid = [
+        0xc7, 0x0b, 0xa3, 0xf0, 0x08, 0xaf, 0x56, 0x45, 0x99, 0xc4, 0x00, 0x10, 0x09, 0xc9, 0x3a,
+        0x44,
+    ];
+    let store_guid = [
+        0x78, 0x2c, 0xf3, 0xaa, 0x7b, 0x94, 0x9a, 0x43, 0xa1, 0x80, 0x2e, 0x14, 0x4e, 0xc3, 0x77,
+        0x92,
+    ];
+    let stores: Vec<_> = bytes
+        .windows(16)
+        .enumerate()
+        .filter_map(|(at, value)| {
+            (value == store_guid && bytes.get(at + 20..at + 22) == Some(&[0x5a, 0xfe]))
+                .then_some(at)
+        })
+        .collect();
+    ensure!(
+        stores.len() == 1,
+        "expected one healthy authenticated variable store"
+    );
+    let number = |b: &[u8], at: usize| -> Result<usize> {
+        Ok(u32::from_le_bytes(
+            b.get(at..at + 4)
+                .context("truncated variable header")?
+                .try_into()?,
+        ) as usize)
+    };
+    let store = stores[0];
+    let limit = store
+        .checked_add(number(&bytes, store + 16)?)
+        .context("variable store overflow")?;
+    ensure!(limit <= bytes.len(), "invalid variable store size");
+    let mut at = (store + 28 + 3) & !3;
+    let mut candidates = Vec::new();
+    while at + 60 <= limit && bytes[at..at + 2] != [0xff, 0xff] {
+        ensure!(bytes[at..at + 2] == [0xaa, 0x55], "invalid variable entry");
+        let name_size = number(&bytes, at + 36)?;
+        let data_size = number(&bytes, at + 40)?;
+        let data = (at + 60)
+            .checked_add(name_size)
+            .context("variable name overflow")?;
+        let end = data
+            .checked_add(data_size)
+            .context("variable data overflow")?;
+        ensure!(
+            name_size.is_multiple_of(2) && end <= limit,
+            "invalid variable size"
+        );
+        if bytes[at + 2] == 0x3f && bytes[at + 44..at + 60] == guid && bytes[at + 60..data] == name
+        {
+            ensure!(
+                bytes[at + 4..at + 8] == 3u32.to_le_bytes() && data_size == 1 && bytes[data] == 1,
+                "unexpected SecureBootEnable attributes/value"
+            );
+            candidates.push(data);
+        }
+        at = (end + 3) & !3;
+    }
+    ensure!(
+        candidates.len() <= 1,
+        "duplicate SecureBootEnable variables"
+    );
+    let data_offset = if let Some(offset) = candidates.first() {
+        *offset
+    } else {
+        // Ubuntu's enrolled template omits this boolean (firmware defaults to
+        // enabled with PK present). Append only that NV/BS variable; retain
+        // PK/KEK/db/dbx and every existing variable byte unchanged.
+        let size = (60 + name.len() + 1 + 3) & !3;
+        ensure!(
+            at + size <= limit && bytes[at..at + size].iter().all(|b| *b == 0xff),
+            "no free space for SB-off boolean"
+        );
+        bytes[at..at + 60].fill(0);
+        bytes[at..at + 4].copy_from_slice(&[0xaa, 0x55, 0x3f, 0]);
+        bytes[at + 4..at + 8].copy_from_slice(&3u32.to_le_bytes());
+        bytes[at + 36..at + 40].copy_from_slice(&(name.len() as u32).to_le_bytes());
+        bytes[at + 40..at + 44].copy_from_slice(&1u32.to_le_bytes());
+        bytes[at + 44..at + 60].copy_from_slice(&guid);
+        bytes[at + 60..at + 60 + name.len()].copy_from_slice(&name);
+        at + 60 + name.len()
+    };
+    bytes[data_offset] = 0;
+    fs::write(path, bytes)?;
+    Ok(data_offset)
 }
 impl Manifest {
     fn authorize(&self, ws: &Workspace, spec: &VmSpec) -> Result<()> {
@@ -302,24 +466,16 @@ impl Bundle {
                 !code.exists() && !vars.exists() && !root.join("tpm").exists(),
                 "incomplete security bundle; destroy this disposable fixture explicitly"
             );
+            let identity = firmware_identity(ws, spec)?;
             let pair = firmware()?;
             convert(&pair.code, &pair.code_format, &code)?;
-            if spec.secure_boot == Requirement::Required {
-                convert(&pair.vars, &pair.vars_format, &vars)?;
+            convert(&pair.vars, &pair.vars_format, &vars)?;
+            let vars_template_sha256 = hash(&fs::read(&vars)?);
+            let sb_disabled_byte = if spec.secure_boot == Requirement::Off {
+                Some(disable_secure_boot(&vars)?)
             } else {
-                // Explicit SB-off TPM fixtures use blank matching 4M vars, never
-                // modify the positive fixture's enrolled policy.
-                let blank = pair
-                    .vars
-                    .to_string_lossy()
-                    .replace(".secboot", "")
-                    .replace(".ms", "");
-                convert(Path::new(&blank), &pair.vars_format, &vars)?;
-                ensure!(
-                    fs::metadata(&vars)?.len() + fs::metadata(&code)?.len() == 4 * 1024 * 1024,
-                    "SB-off vars are not a matching 4M layout"
-                );
-            }
+                None
+            };
             if !matches!(spec.tpm, TpmLifecycle::Off) {
                 fs::create_dir(root.join("tpm"))?;
                 cmd::run(
@@ -342,6 +498,10 @@ impl Bundle {
                 tpm: spec.tpm.clone(),
                 descriptor: pair.descriptor,
                 code_sha256: hash(&fs::read(&code)?),
+                firmware_identity: identity,
+                vars_template_sha256,
+                vars_initial_sha256: hash(&fs::read(&vars)?),
+                sb_disabled_byte,
             };
             fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
         }

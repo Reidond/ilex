@@ -147,12 +147,53 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
         .with_context(|| format!("locking {}", lock_path.display()))?;
     crate::ownership::claim_file(ws, &out)?;
 
+    // bcvk's inner containers-storage transport parses `sha256:...` as a
+    // registry name, unlike podman inspect. Give it an owned content-addressed
+    // local alias while retaining the original immutable ID as the disk key.
+    let source_alias = if let Some(digest) = spec.image.strip_prefix("sha256:") {
+        anyhow::ensure!(
+            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid source image ID"
+        );
+        let alias = format!("{}-disk-{}", ws.image_ref(), &digest[..16]);
+        if let Some(existing) = cmd::probe(
+            Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", &alias]),
+        ) {
+            anyhow::ensure!(
+                existing.strip_prefix("sha256:").unwrap_or(&existing) == digest,
+                "owned disk alias points to a different image"
+            );
+        } else {
+            cmd::run(Command::new("podman").args(["tag", &spec.image, &alias]))?;
+        }
+        let actual = cmd::output(
+            Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", &alias]),
+        )?;
+        anyhow::ensure!(
+            actual.strip_prefix("sha256:").unwrap_or(&actual) == digest,
+            "disk source alias ID mismatch"
+        );
+        Some(alias)
+    } else {
+        None
+    };
+    let source = source_alias.as_deref().unwrap_or(&spec.image);
     let mut bcvk = Command::new("bcvk");
     bcvk.args(["to-disk", "--format", spec.format.name()])
         .args(["--disk-size", &spec.size])
-        .arg(&spec.image)
+        .arg(source)
         .arg(&out);
     cmd::run(&mut bcvk)?;
+    if source_alias.is_some() {
+        let actual = cmd::output(
+            Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", source]),
+        )?;
+        anyhow::ensure!(
+            actual.strip_prefix("sha256:").unwrap_or(&actual)
+                == spec.image.strip_prefix("sha256:").unwrap(),
+            "disk source alias changed during installation"
+        );
+    }
     Ok(out)
 }
 
@@ -199,6 +240,10 @@ pub fn test_key(ws: &Workspace) -> Result<TestKey> {
 /// The published description of a running VM: `<runtime dir>/<purpose>/vm.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmInfo {
+    #[serde(default)]
+    pub security_profile: Option<ilex_tooling_core::SecurityProfile>,
+    #[serde(default)]
+    pub qualification_record: Option<PathBuf>,
     #[serde(default)]
     pub accelerator: ilex_tooling_core::Accelerator,
     #[serde(default)]
@@ -561,6 +606,15 @@ impl Vm {
         let qmp_sock = dir.join("qmp.sock");
         let vnc_sock = dir.join("vnc.sock");
 
+        let security_profile = if security.is_some() {
+            Some(crate::qualification::profile(ws, &spec)?)
+        } else {
+            None
+        };
+        let qualification_record = security_profile
+            .as_ref()
+            .map(|p| crate::qualification::record_path(ws, p))
+            .transpose()?;
         let mut qemu = Command::new("qemu-system-x86_64");
         // exit-with-parent: a killed harness or xtask must not leave a
         // multi-gigabyte VM (and its slot's RAM) running.
@@ -737,6 +791,8 @@ impl Vm {
         }
 
         let info = VmInfo {
+            security_profile,
+            qualification_record,
             accelerator: spec.accelerator,
             secure_boot: spec.secure_boot == ilex_tooling_core::Requirement::Required,
             persistent_tpm: !matches!(spec.tpm, ilex_tooling_core::TpmLifecycle::Off),
@@ -832,6 +888,10 @@ impl Vm {
                 && fs::read_to_string(self.info.dir.join("qemu.log"))
                     .is_ok_and(|log| log.contains("KVM: entry failed"))
             {
+                crate::qualification::runtime_failure(
+                    &self.info,
+                    "KVM entry failed (SMM); see retained qemu.log",
+                )?;
                 bail!(
                     "secure KVM guest is unqualified: KVM entry failed (see {}); select TCG explicitly",
                     self.info.dir.join("qemu.log").display()

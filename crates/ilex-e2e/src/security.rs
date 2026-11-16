@@ -4,7 +4,10 @@ use crate::{common, disk::vmtest};
 use anyhow::{Result, ensure};
 use ilex_devkit::{
     Workspace, cmd,
-    core::{Accelerator, Requirement, TpmLifecycle, VmProvider, VmSpec},
+    core::{
+        Accelerator, Capability, QualificationStatus, Requirement, SecurityLaunch, TpmLifecycle,
+        VmProvider, VmRuntimeStatus, VmSpec,
+    },
     provider::{LinuxProvider, LinuxVm},
     qemu::{self, VmConfig},
     security,
@@ -25,7 +28,10 @@ pub fn trials() -> Vec<Trial> {
 fn run() -> Result<()> {
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "security")?;
-    fs::write(artifacts.join("result.json"), b"{\"qualification\":\"unqualified\",\"reason\":\"run has not completed\"}\n")?;
+    fs::write(
+        artifacts.join("result.json"),
+        b"{\"qualification\":\"unqualified\",\"reason\":\"run has not completed\"}\n",
+    )?;
     fs::write(
         artifacts.join("host.json"),
         serde_json::to_vec_pretty(&security::host_probe())?,
@@ -78,9 +84,20 @@ impl Fixture {
     ) -> Result<Self> {
         let mut config = VmConfig::new(purpose, source);
         config.memory = std::env::var("ILEX_SECURITY_MEMORY").unwrap_or_else(|_| "4G".into());
+        config.purpose = format!(
+            "{}-{}-{}",
+            config.purpose,
+            if accelerator == Accelerator::Native {
+                "kvm"
+            } else {
+                "tcg"
+            },
+            ilex_devkit::provider::memory_bytes(&config.memory)? / (1024 * 1024)
+        );
         config.snapshot = false;
         let mut spec = ilex_devkit::provider::spec(ws, &config)?;
         spec.accelerator = accelerator;
+        spec.security_launch = SecurityLaunch::QualificationFixture;
         spec.secure_boot = if secure {
             Requirement::Required
         } else {
@@ -176,74 +193,198 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
         vmtest::disk(ws)?
     };
     let mut fixture = Fixture::new(ws, &disk, "security-firmware", accelerator, true, true)?;
-    println!(
-        "security: {accelerator:?}, {} bytes, 2 vCPUs; each boot deadline {deadline:?}",
-        fixture.spec.resources.memory_bytes
-    );
-    let first = match fixture.start(deadline) {
-        Ok(seconds) => seconds,
-        Err(error) => {
-            let _ = fixture.logs(artifacts, "failed-start");
-            return Err(error);
-        }
-    };
-    let result = (|| -> Result<()> {
-        measurements(fixture.vm.running_mut()?, artifacts, "first")?;
-        let vm = fixture.vm.running_mut()?;
-        let versions = vm
+    let mut qualification = ilex_devkit::qualification::Run::begin(ws, &fixture.spec, artifacts)?;
+    let mut result = (|| -> Result<()> {
+        let caps = fixture.provider.probe(&fixture.spec)?;
+        caps.require_provisioning(Capability::FirmwareEnforcement)?;
+        ensure!(
+            caps.require(Capability::FirmwareEnforcement).is_err(),
+            "fixture launch promoted unqualified capabilities"
+        );
+        let mut regular = fixture.spec.clone();
+        regular.security_launch = SecurityLaunch::RequireQualified;
+        ensure!(
+            fixture.provider.validate(&regular).is_err(),
+            "unqualified regular launch accepted"
+        );
+        println!(
+            "security: {accelerator:?}, {} bytes, 2 vCPUs; each boot deadline {deadline:?}",
+            fixture.spec.resources.memory_bytes
+        );
+        let first = match fixture.start(deadline) {
+            Ok(seconds) => seconds,
+            Err(error) => {
+                let _ = fixture.logs(artifacts, "failed-start");
+                return Err(error);
+            }
+        };
+        let result = (|| -> Result<()> {
+            measurements(fixture.vm.running_mut()?, artifacts, "first")?;
+            let vm = fixture.vm.running_mut()?;
+            let versions = vm
             .ssh_ok("rpm -q shim-x64 grub2-efi-x64 systemd; uname -r; bootctl status --no-pager; sha256sum /sys/firmware/efi/efivars/PK-* /sys/firmware/efi/efivars/KEK-* /sys/firmware/efi/efivars/db-* /sys/firmware/efi/efivars/dbx-*")?;
-        fs::write(artifacts.join("guest.txt"), versions)?;
-        // Encrypt a deliberately public test value to this TPM's primary seed
-        // and PCR7 policy. Successful decrypt after cold restart proves TPM
-        // identity persistence, rather than merely seeing the same PCR hash.
-        // systemd-creds accepts a numeric PCR mask; manufacturing activates
-        // only SHA256, so no implicit SHA1 policy can satisfy this fixture.
-        vm.ssh_ok("set -eu; printf ilex-public-tpm-persistence > /var/tmp/ilex-security-plain; systemd-creds encrypt --with-key=tpm2 --tpm2-device=auto --tpm2-pcrs=7 /var/tmp/ilex-security-plain /var/tmp/ilex-security.cred; systemd-creds decrypt /var/tmp/ilex-security.cred - | cmp - /var/tmp/ilex-security-plain")?;
-        let start = Instant::now();
-        vm.reboot(deadline)?;
-        let warm = start.elapsed().as_secs_f64();
-        measurements(fixture.vm.running_mut()?, artifacts, "warm")?;
-        decrypt(fixture.vm.running_mut()?)?;
-        fixture.logs(artifacts, "warm")?;
-        // Graceful poweroff, then start a NEW QEMU and swtpm using the bundle.
-        let vm = fixture.vm.running_mut()?;
-        let _ = vm.ssh("systemctl poweroff");
-        let start = Instant::now();
-        while vm.exited()?.is_none() {
-            ensure!(
-                start.elapsed() < Duration::from_secs(90),
-                "guest poweroff deadline exceeded"
-            );
-            thread::sleep(Duration::from_millis(100));
-        }
-        fixture.provider.stop(&mut fixture.vm)?;
-        let cold = fixture.start(deadline)?;
-        measurements(fixture.vm.running_mut()?, artifacts, "cold")?;
-        decrypt(fixture.vm.running_mut()?)?;
-        let bundle = security::bundle_path(ws, &fixture.spec)?;
-        fs::copy(bundle.join("bundle.json"), artifacts.join("bundle.json"))?;
-        fs::write(
-            artifacts.join("timing.json"),
-            serde_json::to_vec_pretty(
-                &serde_json::json!({"accelerator": accelerator, "memory_bytes": fixture.spec.resources.memory_bytes, "vcpus": 2, "boot_deadline_seconds": deadline.as_secs(), "first_ssh_seconds": first, "warm_ssh_seconds": warm, "cold_ssh_seconds": cold, "tpm_decrypt_after_warm_and_cold": true}),
-            )?,
-        )?;
+            fs::write(artifacts.join("guest.txt"), versions)?;
+            // Encrypt a deliberately public test value to this TPM's primary seed
+            // and PCR7 policy. Successful decrypt after cold restart proves TPM
+            // identity persistence, rather than merely seeing the same PCR hash.
+            // systemd-creds accepts a numeric PCR mask; manufacturing activates
+            // only SHA256, so no implicit SHA1 policy can satisfy this fixture.
+            vm.ssh_ok("set -eu; printf ilex-public-tpm-persistence > /var/tmp/ilex-security-plain; systemd-creds encrypt --with-key=tpm2 --tpm2-device=auto --tpm2-pcrs=7 /var/tmp/ilex-security-plain /var/tmp/ilex-security.cred; systemd-creds decrypt /var/tmp/ilex-security.cred - | cmp - /var/tmp/ilex-security-plain")?;
+            let start = Instant::now();
+            vm.reboot(deadline)?;
+            let warm = start.elapsed().as_secs_f64();
+            measurements(fixture.vm.running_mut()?, artifacts, "warm")?;
+            decrypt(fixture.vm.running_mut()?)?;
+            fixture.logs(artifacts, "warm")?;
+            // Graceful poweroff, then start a NEW QEMU and swtpm using the bundle.
+            let vm = fixture.vm.running_mut()?;
+            let _ = vm.ssh("systemctl poweroff");
+            let start = Instant::now();
+            while vm.exited()?.is_none() {
+                ensure!(
+                    start.elapsed() < Duration::from_secs(90),
+                    "guest poweroff deadline exceeded"
+                );
+                thread::sleep(Duration::from_millis(100));
+            }
+            fixture.provider.stop(&mut fixture.vm)?;
+            let cold = fixture.start(deadline)?;
+            measurements(fixture.vm.running_mut()?, artifacts, "cold")?;
+            decrypt(fixture.vm.running_mut()?)?;
+            let bundle = security::bundle_path(ws, &fixture.spec)?;
+            fs::copy(bundle.join("bundle.json"), artifacts.join("bundle.json"))?;
+            fs::write(
+                artifacts.join("timing.json"),
+                serde_json::to_vec_pretty(
+                    &serde_json::json!({"accelerator": accelerator, "memory_bytes": fixture.spec.resources.memory_bytes, "vcpus": 2, "boot_deadline_seconds": deadline.as_secs(), "first_ssh_seconds": first, "warm_ssh_seconds": warm, "cold_ssh_seconds": cold, "tpm_decrypt_after_warm_and_cold": true}),
+                )?,
+            )?;
+            Ok(())
+        })();
+        fixture.logs(artifacts, "final")?;
+        result?;
+        fixture.provider.stop(&mut fixture.vm)?; // Keep identity; release its slot.
+        unsigned_control(ws, artifacts, accelerator, deadline)?;
+        ensure!(
+            !qemu::running_vms(ws)
+                .iter()
+                .any(|v| v.run == fixture.spec.run),
+            "security VM leaked"
+        );
         Ok(())
     })();
-    fixture.logs(artifacts, "final")?;
-    result?;
+    qualification.finish(&result)?;
+    if result.is_ok() {
+        result = qualification_contract(&mut fixture, artifacts);
+        if result.is_err() {
+            qualification.finish(&result)?;
+        }
+    } else {
+        let caps = fixture.provider.probe(&fixture.spec)?;
+        ensure!(
+            matches!(
+                caps.qualification.as_ref().map(|q| &q.outcome),
+                Some(QualificationStatus::Failed(_))
+            ),
+            "recorded failure lost"
+        );
+        ensure!(
+            caps.require(Capability::FirmwareEnforcement).is_err(),
+            "failed profile became qualified"
+        );
+        fs::write(
+            artifacts.join("failed-profile.json"),
+            serde_json::to_vec_pretty(&caps)?,
+        )?;
+        if let Ok(vm) = fixture.vm.running_mut() {
+            let control = ilex_vmctl::Vmctl::from_info(vm.info.clone());
+            let caps = control.capabilities();
+            ensure!(
+                caps.require(Capability::FirmwareEnforcement).is_err(),
+                "failed runtime advertised available enforcement"
+            );
+            fs::write(
+                artifacts.join("failed-runtime.json"),
+                serde_json::to_vec_pretty(&caps)?,
+            )?;
+        }
+    }
+    fs::write(
+        artifacts.join("qualification.json"),
+        serde_json::to_vec_pretty(qualification.evidence())?,
+    )?;
     fixture.cleanup()?;
-    drop(fixture); // Release the VM slot before the unsigned control fixtures.
-    unsigned_control(ws, artifacts, accelerator, deadline)?;
-    ensure!(
-        !qemu::running_vms(ws)
-            .iter()
-            .any(|v| v.purpose.starts_with("security-")),
-        "security VM leaked"
-    );
+    result?;
     fs::write(
         artifacts.join("cleanup.txt"),
         "Owned QEMU/swtpm stopped; fixture disks and vars/TPM bundles removed. Base disk and image retained.\n",
+    )?;
+    Ok(())
+}
+
+fn qualification_contract(fixture: &mut Fixture, artifacts: &Path) -> Result<()> {
+    let mut regular = fixture.spec.clone();
+    regular.security_launch = SecurityLaunch::RequireQualified;
+    let caps = fixture.provider.probe(&regular)?;
+    caps.require(Capability::FirmwareEnforcement)?;
+    caps.require(Capability::PersistentTpm)?;
+    fixture.provider.validate(&regular)?;
+    fs::write(
+        artifacts.join("qualified-profile.json"),
+        serde_json::to_vec_pretty(&caps)?,
+    )?;
+    for label in ["six-gib", "different-vcpus"] {
+        let mut other = regular.clone();
+        if label == "six-gib" {
+            other.resources.memory_bytes = 6 * 1024 * 1024 * 1024;
+        } else {
+            other.resources.vcpus += 1;
+        }
+        let caps = fixture.provider.probe(&other)?;
+        caps.require_provisioning(Capability::FirmwareEnforcement)?;
+        ensure!(
+            caps.require(Capability::FirmwareEnforcement).is_err()
+                && fixture.provider.validate(&other).is_err(),
+            "unmeasured {label} profile was qualified"
+        );
+        other.security_launch = SecurityLaunch::QualificationFixture;
+        fixture.provider.validate(&other)?;
+        fs::write(
+            artifacts.join(format!("unknown-{label}.json")),
+            serde_json::to_vec_pretty(&caps)?,
+        )?;
+    }
+    // Exercise live QMP truth, not a synthetic paused-status helper.
+    fixture.provider.start(&mut fixture.vm)?;
+    let vm = fixture.vm.running_mut()?;
+    let control = ilex_vmctl::Vmctl::from_info(vm.info.clone());
+    {
+        let mut qmp = ilex_devkit::qmp::Qmp::connect(&vm.info.qmp_sock)?;
+        qmp.execute("stop", serde_json::json!({}))?;
+    }
+    let caps = control.capabilities();
+    ensure!(
+        matches!(caps.runtime, VmRuntimeStatus::Paused(_))
+            && caps.require(Capability::FirmwareEnforcement).is_err(),
+        "paused runtime retained qualified capabilities"
+    );
+    fs::write(
+        artifacts.join("paused-runtime.json"),
+        serde_json::to_vec_pretty(&caps)?,
+    )?;
+    {
+        let mut qmp = ilex_devkit::qmp::Qmp::connect(&vm.info.qmp_sock)?;
+        qmp.execute("cont", serde_json::json!({}))?;
+    }
+    let caps = control.capabilities();
+    ensure!(
+        caps.runtime == VmRuntimeStatus::Running,
+        "guest did not resume"
+    );
+    caps.require(Capability::FirmwareEnforcement)?;
+    fs::write(
+        artifacts.join("running-runtime.json"),
+        serde_json::to_vec_pretty(&caps)?,
     )?;
     Ok(())
 }
@@ -295,7 +436,7 @@ fn unsigned_control(
     fs::write(artifacts.join("unsigned.efi"), &payload)?;
     let source = artifacts.join("unsigned.img");
     fs::write(&source, fat_disk(&payload))?;
-    let run = |secure| -> Result<()> {
+    let run = |secure| -> Result<serde_json::Value> {
         let label = if secure {
             "unsigned-on"
         } else {
@@ -347,11 +488,30 @@ fn unsigned_control(
                 &serde_json::json!({"payload_sha256": security::hash(&payload), "secure_boot_required": secure, "elapsed_seconds": start.elapsed().as_secs_f64(), "evidence": if secure { "firmware rejection" } else { "serial execution marker" }}),
             )?,
         )?;
+        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(
+            security::bundle_path(ws, &fixture.spec)?.join("bundle.json"),
+        )?)?;
+        fs::write(
+            artifacts.join(format!("{label}-firmware.json")),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
         fixture.cleanup()?;
-        Ok(())
+        Ok(manifest)
     };
     // The positive control first proves that this exact PE file is executable.
-    let result = run(false).and_then(|()| run(true));
+    let result = (|| -> Result<()> {
+        let off = run(false)?;
+        let on = run(true)?;
+        ensure!(
+            off["code_sha256"] == on["code_sha256"]
+                && off["vars_template_sha256"] == on["vars_template_sha256"]
+                && off["vars_initial_sha256"] != on["vars_initial_sha256"]
+                && off["sb_disabled_byte"].is_number()
+                && on["sb_disabled_byte"].is_null(),
+            "control firmware differed beyond the explicit SB enable switch"
+        );
+        Ok(())
+    })();
     fs::remove_file(source)?;
     result
 }
