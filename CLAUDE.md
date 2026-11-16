@@ -1155,6 +1155,14 @@ weakened. WSL removal and native Windows providers belong to later tooling PRs.
 
 ## Windows: run everything in WSL2
 
+The T2 infrastructure commands are native Windows exceptions: run `cargo xtask
+runtime fetch|status|update|self-check` and `cargo xtask builder
+up|status|down|update|self-check` in PowerShell. The persistent per-user Gen2
+builder, pinned acquisition, SSH identity, owned cleanup and update recovery are
+documented in [Windows builder tooling](docs/tooling/windows-builder.md).
+Build/test routing below remains unchanged until the remote-executor layer
+lands. Never remove a ready shared builder as ordinary checkout cleanup.
+
 podman, bcvk and QEMU are Linux-only. On Windows the stack lives in the
 `FedoraLinux-45` WSL2 distro (nested virtualization gives it `/dev/kvm`).
 Run xtask there, from the checkout's directory (WSL translates the cwd):
@@ -2093,15 +2101,6 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
    be deleted, and so can `ilex-installer-base`.
 
 ## Conventions
-
-- Native Windows infrastructure is available through `cargo xtask runtime
-  fetch|status|update|self-check` and `cargo xtask builder
-  up|status|down|update|self-check`. These commands do not invoke WSL. The
-  persistent per-user Gen2 builder, pinned acquisition, SSH identity, owned
-  cleanup and update recovery are documented in
-  [Windows builder tooling](docs/tooling/windows-builder.md). Build/test routing
-  remains unchanged until the remote-executor layer lands. Never remove a ready
-  shared builder as ordinary checkout cleanup.
 
 - `packages.toml` belongs to the base and stays within its 128 MiB growth
   budget; desktop-wide dependencies belong in `shells/packages.toml`. Both

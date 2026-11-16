@@ -1,7 +1,7 @@
 # T2 validation — 2026-11-16
 
 Host: Windows x86_64, existing non-elevated Hyper-V Administrators token.
-Checkout branch: `tooling/02-runtime-builder`, based on T1 `a0e65a6`.
+Checkout branch: `tooling/02-runtime-builder`, rebased on T1 `b34be7c`.
 No WSL commands, Windows feature changes, new switches, system installs,
 registry publication or release creation were used.
 
@@ -25,6 +25,9 @@ registry publication or release creation were used.
   fixture, queried running status with correlated loopback QMP, quit it and
   activated the runtime. This proves host runtime initialization; it is not the
   T4 actual-ilex rendering/input qualification.
+- Helper lifetime recovery was exercised by terminating a waiting xtask after
+  verifying that no VM journal existed. Its PowerShell child exited automatically
+  when the owning Windows Job Object closed. No broad process kill was used.
 - The Fedora signed CHECKSUM validates in process against the pinned Fedora 45
   key; the downloaded 606,732,288-byte Cloud image matches its pinned SHA256.
 - An actual Gen2 creation exposed a PowerShell/.NET null-backup-name issue in
