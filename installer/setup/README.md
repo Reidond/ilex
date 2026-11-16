@@ -24,3 +24,11 @@ Keep future installer enrollment/completion helpers below `installer/` so
 their bytes enter the installer fingerprint automatically. If a helper is
 shared from another source directory, add that directory to
 `INSTALLER_INPUTS` in `crates/xtask/src/iso.rs` before using it.
+
+The pre-Anaconda chooser's separate `/run/ilex-installer/choice` record is
+schema 1 with `composition` only. It is written atomically and validated
+against the generated catalogue again by `apply`. Kickstarts may still write
+a plain composition tag. Future profile/security fields require explicit
+validation in both producer and consumer; the chooser handles no passwords,
+passphrases or recovery material. None belong in this choice record, URLs or
+the generated catalogue.

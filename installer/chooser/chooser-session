@@ -1,0 +1,39 @@
+#!/bin/bash
+# A failed chooser falls through to Anaconda and its usual detection path.
+set -u
+umask 077
+run=/run/ilex-installer
+mkdir -p -m 0700 "$run"
+rm -f "$run/url"
+# Preserve an explicit pre-answer; apply validates it again.
+[ ! -e "$run/choice" ] || exit 0
+server= kiosk=
+cleanup() {
+    trap - EXIT TERM INT
+    [ -z "$server" ] || kill "$server" 2>/dev/null || :
+    [ -z "$kiosk" ] || kill "$kiosk" 2>/dev/null || :
+    wait 2>/dev/null || :
+    rm -f "$run/url"
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+checks=()
+# Opt-in e2e credential, delivered through SMBIOS by the VM harness. The
+# probes reject requests only: they cannot select a composition or submit.
+if [ "$(cat /run/credentials/@system/ilex.chooser.self-check 2>/dev/null)" = 1 ]; then
+    checks+=(--self-check)
+fi
+python3 -I -S /usr/libexec/ilex-installer/ilex-installer-choice serve "${checks[@]}" > "$run/url" &
+server=$!
+for ((attempt=0; attempt<100; attempt++)); do
+    [ ! -s "$run/url" ] || break
+    kill -0 "$server" 2>/dev/null || exit 0
+    sleep 0.1
+done
+[ -s "$run/url" ] || exit 0
+/usr/libexec/anaconda/run-in-new-session --user root --service anaconda \
+    --session-type wayland --session-class user --vt 6 \
+    /usr/libexec/ilex-installer/chooser-kiosk "$server" &
+kiosk=$!
+wait -n "$server" "$kiosk" || :
+exit 0

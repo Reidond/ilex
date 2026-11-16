@@ -189,12 +189,13 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 fn release_notes(fingerprint: &str, sha256: &str, table: &installer::Table) -> String {
     let mut notes = format!(
-        "Network installer for ilex. Write `{ISO_NAME}.iso` to a USB stick and boot it: Anaconda's web interface \
-         asks for the disk and a maintenance/recovery administrator account, then installs the detected machine's signed composition over the network \
+        "Network installer for ilex. Write `{ISO_NAME}.iso` to a USB stick and boot it: the first screen \
+         shows the detected machine and lets you choose the machine configuration and desktop. Press Enter to accept the defaults. \
+         Anaconda's web interface then asks for the disk and a maintenance/recovery administrator account and installs the chosen signed composition over the network \
          (a wired connection is needed) and the machine updates itself from there.\n\n\
          SHA-256 of `{ISO_NAME}.iso`: `{sha256}`\n\n{FINGERPRINT_LINE}{fingerprint}\n"
     );
-    notes.push_str(&format!("\nDefault: `{}`. Override with `ilex.composition=<tag>` at boot.\n\nOffered compositions:\n", table.default));
+    notes.push_str(&format!("\nDefault: `{}`. Override with `ilex.composition=<tag>` at boot. The chooser is skipped for this override and for kickstart, text and remote installs.\n\nOffered compositions:\n", table.default));
     for entry in &table.compositions {
         notes.push_str(&format!(
             "- `{}`: {}\n",

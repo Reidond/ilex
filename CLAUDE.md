@@ -143,9 +143,13 @@ cargo xtask info               # resource identity, selection and available conf
   image, rather than a phase-0-only fixture workaround.
 - `iso::` is opt-in and slow: `cargo xtask test iso::` builds the network
   installer (`ILEX_ISO=<path>` reuses one with `compositions.json` beside it).
-  `welcome`, `detect`, `detect_board` and `kernel_argument` boot Anaconda's web
-  installer and check its actual `%pre` selection over serial. The kernel
-  trial changes GRUB in a private ISO copy; installation uses the untouched ISO.
+  `welcome` accepts the unknown machine's chooser default with Enter;
+  `chooser` boots the MSI identity, checks rejected HTTP requests inside the
+  VM, then selects generic with Shift+Tab, arrows and Tab before Enter.
+  Both check the actual `%pre` choice over serial. `detect_board` checks the
+  chooser's default using only the baseboard identity. `kernel_argument`
+  edits GRUB with real key input on the untouched ISO and asserts the chooser
+  was skipped; the OEMDRV `install` trial also asserts that it was skipped.
   `install` installs onto a blank disk and checks the exact registry digest,
   enforcing origin from first boot, sigpolicy's already-verified journal,
   `bootc upgrade --check`, setup handoff, system `running`, no failed units
@@ -159,7 +163,9 @@ cargo xtask info               # resource identity, selection and available conf
   and exact booted/tracked comparisons are mandatory for the install trial.
   `ILEX_ISO_TARGET`, when supplied, must agree with the ISO catalogue.
   Screenshots and serial logs land in `<state dir>/artifacts/iso/`: the settled
-  web welcome (`02-welcome.png` has the detected composition), graphical
+  unknown-machine chooser (`01-chooser.png`), detected/changed choices
+  (`03-chooser-detected.png`, `04-chooser-generic.png`), web welcome
+  (`02-welcome.png` after accepting the chooser), graphical
   unattended progress (`06-installing.png`) and first boot (`07-gdm.png`).
   Welcome timing recognises the web page's blue header and light content;
   progress capture keeps light, nonblank pages (progress hides the header).
@@ -533,7 +539,8 @@ drivers. This configuration has no overlay or kernel arguments. GNOME chooses
 150% scaling for this display unless the person has saved another choice.
 
 CI publishes the signed `:ms-7c35.gnome` image. The installer recognises this
-PC and installs that composition directly. Its two independent match tables
+PC and preselects that composition; choose another machine or desktop on its
+first screen. Its two independent match tables
 use vendor `Micro-Star International Co., Ltd.` with system model `MS-7C35`
 or board model `MEG X570 UNIFY (MS-7C35)`. The values came from Windows CIM's
 SMBIOS tables on 2026-11-15; Linux DMI values have not yet been measured on
@@ -1228,8 +1235,41 @@ defaults), then DMI detection. An unknown override fails with the offered tags;
 no match, conflict or unavailable default shell list falls back to the default.
 The helper prints `ILEX-COMPOSITION`, generates a validated `bootc` include
 and updates the installer's os-release, which the web interface shows in its
-title and the review screen's **Operating system** line. A graphical machine
-and desktop chooser is later work.
+title and the review screen's **Operating system** line.
+
+For a local graphical install, the first screen shows the detected computer,
+machine configurations and published desktop lists. The detected machine and
+the default desktop list are preselected (generic when nothing matches).
+Desktop lists unavailable for a machine are disabled. Tab/Shift+Tab move
+between groups and Continue, arrows select within a group, and Enter continues.
+The screen closes, then Anaconda starts on the same VT: choose language,
+network/time, storage and account, and review the chosen operating system
+before writing the disk. To revise the machine or desktop after continuing,
+restart the installer. On the MSI PC, choose **Any x86-64 machine** to install
+generic instead.
+
+`ilex-installer-chooser.service`, before both Anaconda startup units, runs
+`/usr/libexec/ilex-installer/chooser-session`: a Python standard-library server
+on IPv4 loopback only, a fresh GNOME Kiosk Wayland session on VT 6 and Firefox
+with Anaconda's own profile. The page uses the bundled WebUI stylesheet, with
+a small CSS fallback. Three exact token-prefixed routes serve the page, CSS
+and form; no request supplies a filesystem path or a command. A random port,
+per-session 128-bit token, Host/Origin checks, CSP and a strict 4 KiB form
+limit protect the root server. Only a machine/ordered-desktop pair in the
+validated generated table can be selected. The server atomically writes
+`/run/ilex-installer/choice` as schema-1 JSON (`schema`, `composition`) and
+exits on its first valid submission; `apply` revalidates it. Plain tag files
+remain accepted for kickstarts. This extensible record contains no profile
+choice, passwords, passphrases or recovery material. The chooser never collects
+them; neither its URLs nor the generated table contain them.
+
+The chooser is skipped for `ilex.composition=`, `inst.ks`, `inst.text`,
+`inst.cmdline`, `inst.webui.remote`, `inst.rdp`, or an OEMDRV kickstart found at
+`/run/install/ks.cfg`. Kiosk/server failure falls through to detection; `%pre`
+waits for an activating chooser before reading its answer. The private URL
+file is removed during session cleanup, and both browser and compositor close
+before Anaconda starts. `ILEX-CHOOSER default=… offered=…` on serial records
+the offered defaults without logging the capability URL.
 
 On **Create account**, create a separate **maintenance/recovery administrator**
 and keep its credentials for administration and recovery. This is a traditional

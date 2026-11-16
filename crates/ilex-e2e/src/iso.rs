@@ -1,4 +1,4 @@
-//! Opt-in ISO e2e tier: actual DMI/override selection in Anaconda's web interface,
+//! Opt-in ISO e2e tier: DMI/override selection through the local chooser,
 //! then installation and first boot of the exact produced ISO. The catalogue
 //! beside the ISO determines the expected source/target; registry resolution,
 //! digest and origin enforcement assertions are mandatory for installation.
@@ -19,7 +19,7 @@ use libtest_mimic::{Failed, Trial};
 use crate::common;
 use crate::disk::vmtest::{self, Report};
 
-/// Anaconda's welcome screen has to come up this soon after the ISO boots.
+/// The chooser/Anaconda page has to come up this soon after the ISO boots.
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(300);
 /// Partitioning, pulling the image from the registry and
 /// installing the bootloader.
@@ -77,7 +77,7 @@ pub fn trials() -> Vec<Trial> {
     let mut trials = Vec::new();
     for (name, machine, board_only, kernel) in [
         ("welcome", None, false, false),
-        ("detect", Some("ms-7c35"), false, false),
+        ("chooser", Some("ms-7c35"), false, false),
         ("detect_board", Some("ms-7c35"), true, false),
         ("kernel_argument", Some("ms-7c35"), false, true),
     ] {
@@ -167,7 +167,7 @@ fn smbios(
     Ok(structures)
 }
 
-/// Exercise the actual initramfs/Anaconda %pre path; no registry is needed.
+/// Exercise the chooser and actual initramfs/Anaconda %pre path; no registry is needed.
 fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: bool) -> Result<()> {
     let ws = common::workspace()?;
     let iso = iso_path()?;
@@ -175,48 +175,73 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     let work = ws.state_dir().join(format!("iso-{name}"));
     fs::create_dir_all(&work)?;
     let artifacts = qemu::artifact_dir(&ws, "iso")?;
-    let expected = selection(&table, machine, kernel.then_some(table.default.as_str()))?;
-    let boot_iso = if kernel {
-        kernel_iso(&iso, &work, &table.default)?
+    let detected = selection(&table, machine, None)?;
+    let expected = if kernel || name == "chooser" {
+        table.default.clone()
     } else {
-        iso.clone()
+        detected.clone()
     };
     let disk = work.join("blank.qcow2");
     blank_disk(&disk)?;
     let mut config = VmConfig::new(format!("iso-{name}"), &disk);
     config.memory = INSTALLER_MEMORY.into();
     config.vcpus = 4;
-    config.cdrom = Some(boot_iso);
+    config.cdrom = Some(iso.clone());
     config.smbios = smbios(&table, machine, board_only)?;
+    if name == "chooser" {
+        config
+            .smbios
+            .push("type=11,value=io.systemd.credential:ilex.chooser.self-check=1".into());
+    }
     let mut vm = Vm::boot(&ws, &config)?;
     let ctl = Vmctl::from_info(vm.info.clone());
     let serial = vm.info.dir.join("serial.log");
+    if kernel {
+        wait_serial(&mut vm, &serial, "Press enter to boot")?;
+        kernel_argument(&iso, &work, &table.default, &ctl, &artifacts)?;
+    } else {
+        let wanted = format!("ILEX-CHOOSER default={detected} offered=");
+        wait_serial(&mut vm, &serial, &wanted)?;
+        wait_welcome(&mut vm, &ctl, &artifacts)?;
+        if name == "detect_board" {
+            fs::write(
+                artifacts.join("detect_board-serial.txt"),
+                fs::read(&serial)?,
+            )?;
+            return Ok(());
+        }
+        ctl.save_screenshot(&artifacts.join(if name == "chooser" {
+            "03-chooser-detected.png"
+        } else {
+            "01-chooser.png"
+        }))?;
+        if name == "chooser" {
+            wait_serial(&mut vm, &serial, "ILEX-CHOOSER-CHECK OK")?;
+            for key in ["shift+tab", "shift+tab", "up", "tab", "tab"] {
+                ctl.key(key)?;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            ctl.save_screenshot(&artifacts.join("04-chooser-generic.png"))?;
+        }
+        ctl.key("Return")?;
+    }
     let reason = if kernel {
         "chosen at boot"
-    } else if machine.is_some() {
-        "detected"
     } else {
-        "no machine configuration matches this computer"
+        "chosen in the installer"
     };
     let wanted = format!("ILEX-COMPOSITION {expected} ({reason})");
-    let started = Instant::now();
-    loop {
-        let console = fs::read_to_string(&serial).unwrap_or_default();
-        if console.contains(&wanted) {
-            fs::write(artifacts.join(format!("{name}-serial.txt")), &console)?;
-            break;
-        }
-        if started.elapsed() > WELCOME_TIMEOUT || vm.exited()?.is_some() {
-            bail!("missing {wanted}; serial: {console}");
-        }
-        std::thread::sleep(Duration::from_secs(2));
+    wait_serial(&mut vm, &serial, &wanted)?;
+    let console = fs::read_to_string(&serial)?;
+    if kernel && console.contains("ILEX-CHOOSER") {
+        bail!("kernel override did not skip the chooser: {console}");
     }
+    fs::write(artifacts.join(format!("{name}-serial.txt")), console)?;
     wait_welcome(&mut vm, &ctl, &artifacts)?;
-    let screenshot = match name {
-        "welcome" => "01-welcome.png",
-        "detect" => "02-welcome.png",
-        "detect_board" => "03-board-detected.png",
-        _ => "05-kernel-argument.png",
+    let screenshot = if name == "welcome" {
+        "02-welcome.png"
+    } else {
+        "chooser-welcome.png"
     };
     ctl.save_screenshot(&artifacts.join(screenshot))?;
     println!(
@@ -226,9 +251,32 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     Ok(())
 }
 
-/// Test-only ISO copy with a kernel argument in GRUB. The installation trial
-/// always boots the untouched produced ISO. This needs no GUI input backend.
-fn kernel_iso(iso: &Path, work: &Path, tag: &str) -> Result<PathBuf> {
+fn wait_serial(vm: &mut Vm, serial: &Path, wanted: &str) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let console = fs::read_to_string(serial).unwrap_or_default();
+        if console.contains(wanted) {
+            return Ok(());
+        }
+        if console.contains("ILEX-CHOOSER-CHECK FAILED:") {
+            bail!("chooser HTTP self-check failed; serial: {console}");
+        }
+        if started.elapsed() > WELCOME_TIMEOUT || vm.exited()?.is_some() {
+            bail!("missing {wanted}; serial: {console}");
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+/// Edit the produced ISO's GRUB entry with actual keyboard input. Read its
+/// generated config to find the linux line; never modify or repack the ISO.
+fn kernel_argument(
+    iso: &Path,
+    work: &Path,
+    tag: &str,
+    ctl: &Vmctl,
+    artifacts: &Path,
+) -> Result<()> {
     installer::validate_tag(tag)?;
     let grub = work.join("grub.cfg");
     cmd::run(
@@ -239,38 +287,32 @@ fn kernel_iso(iso: &Path, work: &Path, tag: &str) -> Result<PathBuf> {
             .arg(&grub),
     )?;
     let original = fs::read_to_string(&grub)?;
-    let mut changed = false;
-    let edited = original
+    let entry = original
         .lines()
-        .map(|line| {
-            if line.trim_start().starts_with("linux ") || line.trim_start().starts_with("linuxefi ")
-            {
-                changed = true;
-                format!("{line} ilex.composition=invalid-first-choice ilex.composition={tag}\n")
-            } else {
-                format!("{line}\n")
-            }
+        .skip_while(|l| !l.trim_start().starts_with("menuentry "))
+        .skip(1);
+    let line = entry
+        .take_while(|l| l.trim() != "}")
+        .position(|l| {
+            l.trim_start().starts_with("linux ") || l.trim_start().starts_with("linuxefi ")
         })
-        .collect::<String>();
-    if !changed {
-        bail!("no linux line in ISO's GRUB configuration");
+        .context("no linux line in ISO's first GRUB entry")?;
+    // The caller waited for GRUB's serial menu prompt, within its ten-second
+    // countdown. All editing is through the virtual keyboard.
+    ctl.key("up")?; // Stop the menu countdown.
+    ctl.key("e")?;
+    ctl.key("ctrl+home")?;
+    // GRUB inserts a setparams line at the start of the entry editor.
+    for _ in 0..=line {
+        ctl.key("down")?;
     }
-    fs::write(&grub, edited)?;
-    let output = work.join("kernel-argument.iso");
-    if output.exists() {
-        fs::remove_file(&output)?;
-    }
-    cmd::run(
-        Command::new("xorriso")
-            .arg("-indev")
-            .arg(iso)
-            .arg("-outdev")
-            .arg(&output)
-            .args(["-boot_image", "any", "replay", "-map"])
-            .arg(&grub)
-            .arg("/EFI/BOOT/grub.cfg"),
-    )?;
-    Ok(output)
+    ctl.key("end")?;
+    ctl.type_text(&format!(
+        " ilex.composition=invalid-first-choice ilex.composition={tag}"
+    ))?;
+    ctl.save_screenshot(&artifacts.join("05-grub-edit.png"))?;
+    ctl.key("ctrl+x")?;
+    Ok(())
 }
 
 fn run() -> Result<()> {
@@ -347,7 +389,7 @@ fn iso_path() -> Result<PathBuf> {
 // 1. Anaconda welcome screen
 // ---------------------------------------------------------------------------
 
-/// Boot the ISO interactively and save Anaconda's welcome screen.
+/// Wait for a settled chooser or Anaconda page (both use WebUI's stylesheet).
 fn wait_welcome(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     let started = Instant::now();
     let mut previous = None;
@@ -370,12 +412,12 @@ fn wait_welcome(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         }
         if started.elapsed() > WELCOME_TIMEOUT {
             let _ = ctl.save_screenshot(&artifacts.join("01-anaconda-welcome-failure.png"));
-            bail!("Anaconda's welcome screen did not appear within {WELCOME_TIMEOUT:?}");
+            bail!("the installer page did not appear within {WELCOME_TIMEOUT:?}");
         }
         std::thread::sleep(Duration::from_secs(3));
     };
     println!(
-        "Anaconda web interface settled ({}x{})",
+        "Installer page settled ({}x{})",
         frame.width, frame.height
     );
     Ok(())
@@ -479,6 +521,9 @@ fn unattended_install(
             started.elapsed()
         );
         let console = fs::read_to_string(&serial).unwrap_or_default();
+        if console.contains("ILEX-CHOOSER") {
+            bail!("OEMDRV kickstart did not skip the chooser: {console}");
+        }
         let reason = if std::env::var_os("ILEX_ISO_EXPECT").is_some() {
             "chosen in the installer"
         } else if machine.is_some() {

@@ -1,13 +1,22 @@
 #!/usr/bin/python3 -I -S
-"""Select a published composition. Standard library only; no network or shell."""
+"""Select a published composition; serve the local pre-Anaconda chooser."""
 
 import argparse
+import html
+import http.client
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
 import re
+import secrets
+import socket
+import subprocess
 import sys
 import tempfile
+import threading
+import time
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 REPOSITORY = "ghcr.io/reidond/ilex"
 FIELDS = ("sys_vendor", "product_name", "board_vendor", "board_name")
@@ -43,7 +52,8 @@ def load(path):
         if not human(data["machines"][machine]["description"]):
             raise ValueError("invalid machine description")
         for shell in shells:
-            if not human(data["shells"][shell]["description"]):
+            if (not human(data["shells"][shell]["description"])
+                    or not human(data["shells"][shell]["label"])):
                 raise ValueError("invalid shell description")
     if data["default"] not in seen or not data["default"].startswith("generic."):
         raise ValueError("default must name an offered generic composition")
@@ -98,12 +108,23 @@ def atomic_write(path, text):
 
 
 def apply(data, result, args):
+    # Normally Before= orders this. Also preserve the handoff if Anaconda's
+    # startup units change: %pre must not race an activating chooser.
+    while subprocess.run(["/usr/bin/systemctl", "is-active", "ilex-installer-chooser.service"],
+                         capture_output=True, timeout=5).stdout.strip() == b"activating":
+        time.sleep(0.2)
     chosen = None
     for argument in args.cmdline.read_text(encoding="utf-8").split():
         if argument.startswith("ilex.composition="):
             chosen, result["reason"] = argument.split("=", 1)[1], "chosen at boot"
     if chosen is None and args.choice.exists():
-        chosen, result["reason"] = args.choice.read_text(encoding="utf-8").strip(), "chosen in the installer"
+        chosen = args.choice.read_text(encoding="utf-8").strip()
+        if chosen.startswith("{"):
+            record = json.loads(chosen)
+            if set(record) != {"schema", "composition"} or record["schema"] != 1:
+                raise ValueError("unsupported chooser choice record")
+            chosen = record["composition"]
+        result["reason"] = "chosen in the installer"
     chosen = result["tag"] if chosen is None else chosen
     entry = next((e for e in data["compositions"] if e["tag"] == chosen), None)
     if entry is None:
@@ -139,21 +160,314 @@ def apply(data, result, args):
             pass
 
 
+PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>ilex installation</title>
+<link rel="stylesheet" href="index.css">
+<style nonce="{nonce}">
+ body {{ margin: 0; }}
+ header {{ background: var(--pf-t--global--color--brand--default, #3c6eb4); color: #fff;
+          padding: 1rem 1.5rem; font-size: 1.5rem; font-weight: 600; }}
+ main {{ max-width: 52rem; padding: 1.5rem 2rem 7rem; }}
+ fieldset {{ border: 0; padding: 0; margin: 1.5rem 0 0; }}
+ legend {{ font-weight: 600; font-size: 1.1rem; margin-bottom: .5rem; }}
+ .pf-v6-c-radio {{ margin: .6rem 0; }}
+ .found {{ margin: .25rem 0 0; color: var(--pf-t--global--text--color--subtle, #555); }}
+ .note {{ margin-top: 2rem; color: var(--pf-t--global--text--color--subtle, #555); }}
+ footer {{ position: fixed; bottom: 0; left: 0; right: 0; padding: 1rem 2rem;
+          border-top: 1px solid #d2d2d2; background: #fff; }}
+</style></head>
+<body class="anaconda">
+<header>ilex installation</header>
+<form method="post" action="choose">
+<main>
+ <h1 class="pf-v6-c-title pf-m-xl">What to install on this computer</h1>
+ <p class="found">This computer: <strong>{identity}</strong></p>
+ <p class="found">{verdict}</p>
+ <fieldset>
+  <legend>Machine configuration</legend>
+  {machines}
+ </fieldset>
+ <fieldset>
+  <legend>Desktop</legend>
+  {shells}
+ </fieldset>
+ <p class="note">Only signed ilex images are offered. The review screen shows this choice again before anything is written to disk.</p>
+</main>
+<footer>
+ <input type="hidden" name="token" value="{token}">
+ <button class="pf-v6-c-button pf-m-primary" type="submit" autofocus>Continue</button>
+</footer>
+</form>
+<script nonce="{nonce}">
+const offered = {offered};
+function update() {{
+  const m = document.querySelector('input[name=machine]:checked').value;
+  for (const r of document.querySelectorAll('input[name=shells]')) {{
+    r.disabled = !offered.includes(m + "|" + r.value);
+    r.closest('.pf-v6-c-radio').querySelector('.unavailable').hidden = !r.disabled;
+  }}
+  const checked = document.querySelector('input[name=shells]:checked');
+  if (!checked || checked.disabled) {{
+    const first = document.querySelector('input[name=shells]:not([disabled])');
+    if (first) first.checked = true;
+  }}
+}}
+for (const r of document.querySelectorAll('input[name=machine]')) r.addEventListener('change', update);
+update();
+</script>
+</body></html>
+"""
+
+RADIO = """<div class="pf-v6-c-radio">
+   <input class="pf-v6-c-radio__input" type="radio" id="{id}" name="{name}" value="{value}"{checked}>
+   <label class="pf-v6-c-radio__label" for="{id}">{label}</label>
+   <span class="pf-v6-c-radio__description">{description}<span class="unavailable" hidden> (not published for this machine)</span></span>
+  </div>"""
+
+DONE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
+<body class="anaconda"><main><h1 class="pf-v6-c-title pf-m-xl">Starting the installer for {tag}&hellip;</h1></main></body></html>"""
+
+
+def render(table, result, token, nonce):
+    default_tag, reason = result["tag"], result["reason"]
+    seen = result["identity"]
+    default = next(c for c in table["compositions"] if c["tag"] == default_tag)
+    detected = result["matches"][0] if len(result["matches"]) == 1 else "generic"
+    vendor = seen.get("sys_vendor") or seen.get("board_vendor") or "unknown vendor"
+    model = " / ".join(v for v in (seen.get("product_name"), seen.get("board_name")) if v) or "unknown model"
+    identity = html.escape(f"{vendor}, {model}")
+    if detected != "generic":
+        verdict = f"Recognised as <strong>{html.escape(detected)}</strong>, an ilex machine configuration."
+    else:
+        verdict = html.escape(reason[0].upper() + reason[1:] + ": the generic configuration is selected.")
+    machines_in_table = []
+    for c in table["compositions"]:
+        if c["machine"] not in machines_in_table:
+            machines_in_table.append(c["machine"])
+    machines = "\n  ".join(RADIO.format(
+        id=f"m-{m}", name="machine", value=html.escape(m),
+        checked=" checked" if m == default["machine"] else "",
+        label=html.escape(table["machines"][m]["description"].split(":")[0])
+              + (" <em>(detected)</em>" if m == detected and m != "generic" else ""),
+        description=html.escape(
+            (table["machines"][m]["description"].split(":", 1)[1].strip() + " · "
+             if ":" in table["machines"][m]["description"] else "") + "configuration " + m))
+        for m in machines_in_table)
+    lists = []
+    for c in table["compositions"]:
+        if c["shells"] not in lists:
+            lists.append(c["shells"])
+    shells = "\n  ".join(RADIO.format(
+        id="s-" + "-".join(sl), name="shells", value=html.escape(",".join(sl)),
+        checked=" checked" if sl == default["shells"] else "",
+        label=html.escape(" and ".join(table["shells"][s]["label"] for s in sl))
+              + (" <em>(default at sign-in: " + html.escape(table["shells"][sl[0]]["label"]) + ")</em>" if len(sl) > 1 else ""),
+        description=html.escape("; ".join(table["shells"][s]["description"] for s in sl))) for sl in lists)
+    offered = json.dumps([c["machine"] + "|" + ",".join(c["shells"]) for c in table["compositions"]])
+    return PAGE.format(identity=identity, verdict=verdict, machines=machines, shells=shells,
+                       offered=offered, token=token, nonce=nonce)
+
+
+
+def serve(data, result, args):
+    # All paths, references and executable names are fixed. Request values are
+    # only compared with the validated table, never interpolated into a shell.
+    token, nonce = secrets.token_hex(16), secrets.token_hex(16)
+    prefix = f"/{token}/"
+    page = render(data, result, token, nonce).encode("utf-8")
+    css_path = Path("/usr/share/cockpit/anaconda-webui/index.css.gz")
+    css = css_path.read_bytes() if css_path.is_file() else b"body{font:16px sans-serif}"
+    done = False
+
+    class Handler(BaseHTTPRequestHandler):
+        # Close every connection, including rejected bodies. Bound slow clients.
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(3)
+
+        def log_message(self, *unused):
+            pass  # In particular, do not log the URL's capability token.
+
+        def send(self, code, body=b"", ctype="text/html; charset=utf-8", gzip=False):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            # Firefox serialises a navigation POST's Origin as null under
+            # no-referrer. same-origin retains it without leaking the path to
+            # other origins (and this page loads no external resources).
+            self.send_header("Referrer-Policy", "same-origin")
+            self.send_header("Content-Security-Policy",
+                             "default-src 'none'; style-src 'self' 'nonce-" + nonce
+                             + "'; script-src 'nonce-" + nonce
+                             + "'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+            if gzip:
+                self.send_header("Content-Encoding", "gzip")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                self.wfile.write(body)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def local(self):
+            # Defeat DNS rebinding and cross-origin form submission as well as
+            # relying on the unguessable path and repeated form token.
+            return (self.headers.get_all("Host") == [authority]
+                    and self.headers.get_all("Origin", [origin]) == [origin]
+                    and self.headers.get("Sec-Fetch-Site") in (None, "none", "same-origin"))
+
+        def do_GET(self):
+            if not self.local():
+                return self.send(403)
+            if self.path == prefix:
+                self.send(200, page)
+            elif self.path == prefix + "index.css":
+                self.send(200, css, "text/css", gzip=css_path.is_file())
+            else:
+                self.send(404)
+
+        def do_POST(self):
+            nonlocal done
+            if not self.local():
+                return self.send(403)
+            if self.path != prefix + "choose":
+                return self.send(404)
+            lengths = self.headers.get_all("Content-Length", [])
+            if (len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,4}", lengths[0])
+                    or not 0 < int(lengths[0]) <= 4096
+                    or self.headers.get_all("Transfer-Encoding") is not None
+                    or self.headers.get_all("Content-Type") != ["application/x-www-form-urlencoded"]):
+                return self.send(400)
+            try:
+                body = self.rfile.read(int(lengths[0]))
+                if len(body) != int(lengths[0]) or re.search(rb"%(?![0-9a-fA-F]{2})", body):
+                    return self.send(400)
+                form = parse_qs(body.decode("ascii"), keep_blank_values=True,
+                                strict_parsing=True, errors="strict", max_num_fields=3)
+            except (ValueError, UnicodeError, TimeoutError):
+                return self.send(400)
+            if set(form) != {"token", "machine", "shells"} or any(len(v) != 1 for v in form.values()):
+                return self.send(400)
+            if not secrets.compare_digest(form["token"][0].encode(), token.encode()):
+                return self.send(403)
+            entry = next((e for e in data["compositions"]
+                          if e["machine"] == form["machine"][0]
+                          and e["shells"] == form["shells"][0].split(",")), None)
+            if entry is None:
+                return self.send(400, b"not offered")
+            # Explicit schema, public composition only. Future profile/security
+            # choices can extend this record; secrets must never enter it.
+            atomic_write(args.choice, json.dumps({"schema": 1, "composition": entry["tag"]}) + "\n")
+            done = True
+            self.send(200, DONE.format(tag=html.escape(entry["tag"])).encode())
+
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        authority = f"127.0.0.1:{server.server_port}"
+        origin = "http://" + authority
+        print(origin + prefix, flush=True)  # private file, read by chooser-kiosk
+        message = (f"ILEX-CHOOSER default={result['tag']} offered="
+                   + ",".join(e["tag"] for e in data["compositions"]))
+        try:
+            with open("/dev/ttyS0", "w", encoding="utf-8") as console:
+                print(message, file=console, flush=True)
+        except OSError:
+            pass
+        if args.self_check:
+            def check():
+                with open("/dev/ttyS0", "w", encoding="utf-8") as console:
+                    try:
+                        summary = self_check(data, origin + prefix)
+                        print("ILEX-CHOOSER-CHECK OK: " + summary, file=console, flush=True)
+                    except Exception as error:
+                        print(f"ILEX-CHOOSER-CHECK FAILED: {error!r}", file=console, flush=True)
+            threading.Thread(target=check, daemon=True).start()
+        while not done:
+            server.handle_request()
+        time.sleep(1.5)  # Let Firefox paint the handoff before its session closes.
+
+
+def self_check(data, address=None):
+    """Exercise the running server in the installer VM, without choosing."""
+    url = urlsplit(address or Path("/run/ilex-installer/url").read_text().strip())
+    assert url.hostname == "127.0.0.1" and url.scheme == "http"
+    entry = data["compositions"][0]
+    form = {"token": url.path.strip("/"), "machine": entry["machine"],
+            "shells": ",".join(entry["shells"])}
+
+    def request(method, path, expected, body=None, headers=None):
+        with http.client.HTTPConnection(url.hostname, url.port, timeout=5) as client:
+            client.request(method, path, body, headers or {})
+            response = client.getresponse()
+            result = response.read()
+            assert response.status == expected, (method, path, response.status, expected)
+            if response.status == 200:
+                assert "frame-ancestors 'none'" in response.getheader("Content-Security-Policy")
+            return result
+
+    page = request("GET", url.path, 200)
+    assert b"Machine configuration" in page and b"Desktop" in page
+    request("GET", url.path + "index.css", 200)
+    for path in ("/", "/wrong/", url.path + "../etc/shadow",
+                 url.path + "%2e%2e/etc/shadow", url.path + "?x=1",
+                 "http://example.invalid" + url.path):
+        request("GET", path, 404)
+    request("GET", url.path, 403, headers={"Host": "example.invalid"})
+    request("GET", url.path, 403, headers={"Origin": "http://example.invalid"})
+    request("GET", url.path, 403, headers={"Sec-Fetch-Site": "cross-site"})
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    for changes in ({"token": "wrong"}, {"machine": "../generic"},
+                    {"machine": "generic;touch /run/ilex-injected"},
+                    {"shells": "gnome;id"}, {"shells": "gnome,unknown"}):
+        request("POST", url.path + "choose", 403 if "token" in changes else 400,
+                urlencode(form | changes), headers)
+    body = urlencode(form)
+    for bad in (body + "&machine=generic", body + "&password=forbidden", "token=%zz", "x=1", "x=" + "a" * 4096):
+        request("POST", url.path + "choose", 400, bad, headers)
+    for extra in ({"Content-Length": "-1"}, {"Content-Length": "invalid"},
+                  {"Content-Length": "4097"}, {"Transfer-Encoding": "chunked"},
+                  {"Content-Type": "text/plain"}, {"Origin": "http://example.invalid"}):
+        request("POST", url.path + "choose", 403 if "Origin" in extra else 400, body, headers | extra)
+    request("POST", url.path + "../choose", 404, body, headers)
+    assert not Path("/run/ilex-installer/choice").exists()
+    assert not Path("/run/ilex-injected").exists()
+    # The VM has a nonloopback interface. The same port must be unreachable on
+    # it, even to another local process; the listener accepts IPv4 loopback only.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.connect(("10.0.2.2", 9))
+        address = probe.getsockname()[0]
+    assert not address.startswith("127.")
+    try:
+        with socket.create_connection((address, url.port), timeout=2):
+            raise AssertionError("chooser is reachable beyond loopback")
+    except (ConnectionRefusedError, TimeoutError):
+        pass
+    return "routes, origin, framing, fields, table, injection, loopback"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("detect", "apply"))
+    parser.add_argument("command", choices=("detect", "apply", "serve", "self-check"))
     parser.add_argument("--table", type=Path, default=Path("/usr/share/ilex-installer/compositions.json"))
     parser.add_argument("--dmi-dir", type=Path, default=Path("/sys/class/dmi/id"))
     parser.add_argument("--cmdline", type=Path, default=Path("/proc/cmdline"))
     parser.add_argument("--choice", type=Path, default=Path("/run/ilex-installer/choice"))
     parser.add_argument("--output", type=Path, default=Path("/tmp/ilex-bootc.ks"))
     parser.add_argument("--os-release", type=Path, default=Path("/etc/os-release"))
+    parser.add_argument("--self-check", action="store_true", help="probe the live server (e2e VM only)")
     args = parser.parse_args()
     try:
         data = load(args.table)
         result = detect(data, args.dmi_dir)
         if args.command == "detect":
             print(json.dumps(result, sort_keys=True))
+        elif args.command == "serve":
+            serve(data, result, args)
+        elif args.command == "self-check":
+            print("ILEX-CHOOSER-CHECK OK: " + self_check(data), flush=True)
         else:
             apply(data, result, args)
     except (OSError, ValueError, KeyError, TypeError) as error:
