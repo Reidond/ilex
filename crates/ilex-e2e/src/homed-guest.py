@@ -15,6 +15,7 @@ import signal
 import subprocess as sp
 import sys
 import time
+import traceback
 
 request = json.load(sys.stdin)
 secrets = request.get("secrets", [])
@@ -178,8 +179,10 @@ def main():
         assert "Type=tty" in text, text
         return "TTY PAM activates home, suspend=off, sudo authenticates the homed password"
     if action == "password":
+        # pam_systemd_home reuses the password acquired by this login session;
+        # passwd therefore starts at the new-password prompt. The host checks
+        # both old-password rejection and a fresh login with the new password.
         tty(name, secrets[0], "passwd", [
-            (r"(?:current|old)[^\r\n]*password[^\r\n]*:", secrets[0]),
             (r"new[^\r\n]*password[^\r\n]*:", secrets[1]),
             (r"(?:retype|repeat)[^\r\n]*password[^\r\n]*:", secrets[1]),
         ])
@@ -214,16 +217,16 @@ def main():
         for size in ("3G", "2G"):
             terminal(["/usr/bin/homectl", "resize", name, size], [(r"password[^\r\n]*:", secrets[0])], optional=True)
             measured.append(sizes(name))
-            assert checksum(name) == digest
+            assert checksum(name) == digest, ("checksum changed after resize", size, measured)
         assert all(measured[1][i] > measured[0][i] for i in range(3)), measured
         assert all(measured[2][i] < measured[1][i] for i in range(3)), measured
         # A filesystem containing 32 MiB cannot shrink to 16 MiB. Failure
         # must preserve both the mapped size and data.
         code, output = terminal(["homectl", "resize", name, "16M"], [(r"password[^\r\n]*:", secrets[0])], allow_failure=True, optional=True)
-        assert code != 0, output
+        assert code != 0, ("undersize accepted", output, sizes(name), measured)
         assert re.search(r"small|minimum|space|invalid argument", output, re.I), output
-        assert sizes(name) == measured[2]
-        assert checksum(name) == digest
+        assert sizes(name) == measured[2], ("rejected shrink changed size", sizes(name), measured)
+        assert checksum(name) == digest, "rejected shrink changed data"
         return {"sizes_fs_mapper_backing": measured, "sha256": digest, "undersize_rejected": True}
     if action == "multi-home":
         create("homedother", secrets[0])
@@ -284,7 +287,8 @@ def main():
 try:
     print(json.dumps(main()))
 except Exception as error:
-    message = str(error)
+    frame = traceback.extract_tb(error.__traceback__)[-1]
+    message = f"{type(error).__name__} at {frame.name}:{frame.lineno}: {error}"
     for secret in secrets:
         message = message.replace(secret, "[redacted]")
     print(message, file=sys.stderr)

@@ -31,7 +31,10 @@ RUN curl -fsSL -o accountsservice.src.rpm \
 COPY build/accountsservice-homed.patch /src/
 RUN cd accountsservice-26.27.3 && \
     patch --batch --fuzz=0 -p1 < /src/accountsservice-homed.patch && \
-    meson setup _build --buildtype=release --prefix=/usr --libexecdir=/usr/libexec \
+    CFLAGS="$(rpm --eval '%{build_cflags}')" \
+    CXXFLAGS="$(rpm --eval '%{build_cxxflags}')" \
+    LDFLAGS="$(rpm --eval '%{build_ldflags}')" \
+    meson setup _build --buildtype=plain --prefix=/usr --libexecdir=/usr/libexec \
         --sysconfdir=/etc --localstatedir=/var -Dadmin_group=wheel \
         -Dtests=false -Dintrospection=false -Dvapi=false -Dgtk_doc=false -Ddocbook=false && \
     ninja -C _build src/accounts-daemon && \

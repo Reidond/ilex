@@ -587,6 +587,13 @@ from `systemd_homework_t` to `pidfs_t` for the fsck spawn path. D-Bus/polkit/hom
 authorize each request; SELinux remains enforcing. Reassess this small module
 when Fedora ships the corresponding caller integration.
 
+New homed filesystems also need their initial SELinux labels before user
+processes create files. A `user@` dependency labels the active home once,
+using `restorecon -R -x` without forcing security user/role/range. A root-only
+filesystem-UUID marker under `/var/lib/ilex/homed-labels` prevents later logins
+from replacing custom labels or rescanning large homes. Local passwd accounts
+are skipped, so maintenance login does not require an active homed home.
+
 AccountsService 26.27.3-2.fc45 also counts every shadow entry (60 on the
 tested desktop) against the homed generator's 50-user limit, hiding all
 homed users from GDM. `build/accountsservice-homed.patch` changes that one

@@ -23,6 +23,9 @@ fn main() -> ExitCode {
         }
         Some("--self-check") => self_check(),
         Some("home-create") => homed::create(std::env::args().skip(2).collect()),
+        // Internal user@ dependency; labels a new homed filesystem before
+        // the first user process starts. Not an account-provisioning front end.
+        Some("home-label") => homed::label(std::env::args().skip(2).collect()),
         Some("config") => match std::env::args().nth(2).as_deref() {
             None => config::run(false),
             Some("--json") => config::run(true),

@@ -1,0 +1,12 @@
+[Unit]
+Description=Initialize SELinux labels for homed filesystem of UID %i
+After=systemd-homed.service
+Before=user@%i.service
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/ilex-agent home-label %i
+StateDirectory=ilex/homed-labels
+StateDirectoryMode=0700
