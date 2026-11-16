@@ -2,6 +2,7 @@
 """Select a published composition; serve the local pre-Anaconda chooser."""
 
 import argparse
+from contextlib import closing
 import html
 import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -399,7 +400,7 @@ def self_check(data, address=None):
             "shells": ",".join(entry["shells"])}
 
     def request(method, path, expected, body=None, headers=None):
-        with http.client.HTTPConnection(url.hostname, url.port, timeout=5) as client:
+        with closing(http.client.HTTPConnection(url.hostname, url.port, timeout=5)) as client:
             client.request(method, path, body, headers or {})
             response = client.getresponse()
             result = response.read()
@@ -412,9 +413,9 @@ def self_check(data, address=None):
     assert b"Machine configuration" in page and b"Desktop" in page
     request("GET", url.path + "index.css", 200)
     for path in ("/", "/wrong/", url.path + "../etc/shadow",
-                 url.path + "%2e%2e/etc/shadow", url.path + "?x=1",
-                 "http://example.invalid" + url.path):
+                 url.path + "%2e%2e/etc/shadow", url.path + "?x=1"):
         request("GET", path, 404)
+    request("GET", "http://example.invalid" + url.path, 403)
     request("GET", url.path, 403, headers={"Host": "example.invalid"})
     request("GET", url.path, 403, headers={"Origin": "http://example.invalid"})
     request("GET", url.path, 403, headers={"Sec-Fetch-Site": "cross-site"})

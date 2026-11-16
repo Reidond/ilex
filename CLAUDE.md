@@ -150,6 +150,10 @@ cargo xtask info               # resource identity, selection and available conf
   chooser's default using only the baseboard identity. `kernel_argument`
   edits GRUB with real key input on the untouched ISO and asserts the chooser
   was skipped; the OEMDRV `install` trial also asserts that it was skipped.
+  GRUB needs 100 ms key holds; vmctl's fast desktop typing drops characters
+  there. The chooser HTTP probes are enabled only by the harness's public
+  `ilex.chooser.self-check=1` systemd credential (SMBIOS), then the person-facing
+  form is still submitted with real key events.
   `install` installs onto a blank disk and checks the exact registry digest,
   enforcing origin from first boot, sigpolicy's already-verified journal,
   `bootc upgrade --check`, setup handoff, system `running`, no failed units

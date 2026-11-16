@@ -299,19 +299,42 @@ fn kernel_argument(
         .context("no linux line in ISO's first GRUB entry")?;
     // The caller waited for GRUB's serial menu prompt, within its ten-second
     // countdown. All editing is through the virtual keyboard.
-    ctl.key("up")?; // Stop the menu countdown.
-    ctl.key("e")?;
-    ctl.key("ctrl+home")?;
-    // GRUB inserts a setparams line at the start of the entry editor.
-    for _ in 0..=line {
-        ctl.key("down")?;
+    grub_key(ctl, "up")?; // Stop the menu countdown.
+    grub_key(ctl, "e")?;
+    grub_key(ctl, "ctrl+home")?;
+    // GRUB inserts setparams and a blank line before the entry's commands.
+    for _ in 0..line + 2 {
+        grub_key(ctl, "down")?;
     }
-    ctl.key("end")?;
-    ctl.type_text(&format!(
-        " ilex.composition=invalid-first-choice ilex.composition={tag}"
-    ))?;
+    grub_key(ctl, "end")?;
+    for character in
+        format!(" ilex.composition=invalid-first-choice ilex.composition={tag}").chars()
+    {
+        let key = if character == ' ' {
+            "space".into()
+        } else {
+            character.to_string()
+        };
+        grub_key(ctl, &key)?;
+    }
+    std::thread::sleep(Duration::from_millis(500));
     ctl.save_screenshot(&artifacts.join("05-grub-edit.png"))?;
-    ctl.key("ctrl+x")?;
+    grub_key(ctl, "f10")?; // GRUB's single-key equivalent of Ctrl+X.
+    Ok(())
+}
+
+/// GRUB polls firmware input and drops the desktop typing path's 10 ms key
+/// presses. Use vmctl's QMP transport with 100 ms physical key holds and a gap.
+fn grub_key(ctl: &Vmctl, combo: &str) -> Result<()> {
+    let keys = ilex_vmctl::keys::parse_combo(combo)?
+        .into_iter()
+        .map(|key| serde_json::json!({"type": "qcode", "data": key}))
+        .collect::<Vec<_>>();
+    ilex_vmctl::qmp::Qmp::connect(&ctl.info.qmp_sock)?.execute(
+        "send-key",
+        serde_json::json!({"keys": keys, "hold-time": 100}),
+    )?;
+    std::thread::sleep(Duration::from_millis(250));
     Ok(())
 }
 
@@ -416,10 +439,7 @@ fn wait_welcome(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         }
         std::thread::sleep(Duration::from_secs(3));
     };
-    println!(
-        "Installer page settled ({}x{})",
-        frame.width, frame.height
-    );
+    println!("Installer page settled ({}x{})", frame.width, frame.height);
     Ok(())
 }
 
