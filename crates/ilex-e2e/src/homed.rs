@@ -1,5 +1,5 @@
-//! Installed-disk homed qualification, never the SELinux-disabled virtiofs VM.
-//! Profiles and encrypted-root qualification belong to subsequent tiers.
+//! Installed-disk homed and profile qualification, never the SELinux-disabled
+//! virtiofs VM. Encrypted-root qualification belongs to the security tiers.
 
 use std::io::Write;
 use std::path::Path;
