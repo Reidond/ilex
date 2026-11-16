@@ -47,6 +47,8 @@ pub struct Args {
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     cmd::require("podman")?;
     let input = ws.resolve_image(args.image.as_deref());
+    ws.ensure_state()?;
+    ws.verify_implicit_image(&input)?;
     if !image_exists(&input) {
         bail!("{input} is not in local container storage; run `cargo xtask build` first");
     }
@@ -57,6 +59,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         .as_deref()
         .map_or_else(|| input.clone(), |o| ws.resolve_image(Some(o)));
     let in_place = image == input;
+    let transaction = ilex_devkit::ownership::ImageTransaction::new(ws, &image)?;
 
     // The same value `xtask changed` computes on the un-rechunked image
     // (rechunking keeps the RPM database, and the repo trees are the same);
@@ -78,6 +81,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         *labels = serde_json::json!({});
     }
     labels[FINGERPRINT_LABEL] = serde_json::Value::String(fingerprint.clone());
+    labels["ilex.checkout-owner"] = serde_json::Value::String(ws.identity()?.owner);
     let old_id = podman_id(&input)?;
 
     // podman run … rechunk --chunkah | podman load
@@ -128,7 +132,8 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         .to_string();
 
     // Tag the rechunked image: over the input, or as its own image.
-    cmd::run(Command::new("podman").args(["tag", &new_ref, &image]))?;
+    cmd::run(Command::new("podman").args(["tag", &new_ref, transaction.temporary()]))?;
+    transaction.promote(ws)?;
     let new_id = podman_id(&image)?;
     if in_place && new_id != old_id {
         // The superseded image is now untagged; drop it if nothing uses it.
@@ -198,7 +203,7 @@ pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
 }
 
 pub use ilex_devkit::fingerprint::root_inputs;
-use ilex_devkit::fingerprint::{selection_inputs, hash_selection, hash_users, hash_inputs};
+use ilex_devkit::fingerprint::{hash_inputs, hash_selection, hash_users, selection_inputs};
 
 /// Require configuration labels even when reusing an existing fingerprint.
 fn image_selection(image: &str) -> Result<Selection> {

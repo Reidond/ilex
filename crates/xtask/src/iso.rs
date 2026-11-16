@@ -103,13 +103,14 @@ pub struct Build<'a> {
 /// Build the installer container and the ISO and return the path of the ISO;
 /// its checksum and the release notes are written next to it.
 pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
+    ws.ensure_state()?;
     let table = installer::table(&ws.root, spec.testing_tag)?;
     let out_dir = spec
         .output_dir
         .map_or_else(|| ws.state_dir().join("iso"), Path::to_path_buf);
     // Preserve existing outputs until a replacement is ready. In particular,
     // generated/ is a build context and must survive image-builder startup.
-    fs::create_dir_all(&out_dir)?;
+    ilex_devkit::ownership::ensure_directory(&out_dir, &ws.identity()?)?;
     let out_dir = std::path::absolute(&out_dir)?;
     let generated = out_dir.join("generated");
     fs::create_dir_all(&generated)?;
@@ -124,6 +125,8 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         generated.join("ilex.pub"),
     )?;
     let installer = format!("localhost/ilex-installer:{}", ws.slug);
+    let transaction = ilex_devkit::ownership::ImageTransaction::new(ws, &installer)?;
+    let (identity, source) = ws.source_identity()?;
     let context = ws.root.join("installer");
     cmd::run(
         Command::new("podman")
@@ -135,9 +138,18 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
                 "--build-context",
                 &format!("generated={}", generated.display()),
             ])
-            .args(["--tag", &installer])
+            .args(["--tag", transaction.temporary()])
+            .args([
+                "--label",
+                &format!("ilex.checkout-owner={}", identity.owner),
+            ])
             .arg(&context),
     )?;
+    anyhow::ensure!(
+        ws.source_identity()?.1.digest == source.digest,
+        "source changed during installer build; refusing promotion"
+    );
+    transaction.promote(ws)?;
 
     // image-builder turns the installer container into the ISO.
     let build_dir = out_dir.join("build");
@@ -428,14 +440,20 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
 
     // The helper is checkout-owned too: concurrent ISO builds must not retag it.
     let helper = format!("localhost/ilex-image-builder:{}", ws.slug);
+    let transaction = ilex_devkit::ownership::ImageTransaction::new(ws, &helper)?;
     let context = ws.root.join("installer").join("image-builder");
     cmd::run(
         Command::new("podman")
             .args(["build", "--network=host", "--file"])
             .arg(context.join("Containerfile"))
-            .args(["--tag", &helper])
+            .args(["--tag", transaction.temporary()])
+            .args([
+                "--label",
+                &format!("ilex.checkout-owner={}", ws.identity()?.owner),
+            ])
             .arg(&context),
     )?;
+    transaction.promote(ws)?;
 
     // It reads the installer from this host's container storage
     // and keeps osbuild's cache next to it; neither may sit on the
@@ -445,8 +463,8 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
     let storage = Path::new(&graph_root)
         .parent()
         .unwrap_or(Path::new("/var/lib/containers"));
-    let cache = Path::new("/var/cache/image-builder");
-    fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
+    let cache = ws.ensure_state()?.join("image-builder-cache");
+    fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
     let mut run = Command::new("podman");
     run.args(["run", "--rm", "--privileged", "--network=host"])
         .args(["--security-opt", "label=disable"])
@@ -456,7 +474,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
         .arg(format!("{0}:{0}", cache.display()))
         .arg("--volume")
         .arg(format!("{}:/out", out_dir.display()))
-        .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"])
+        .args(["--env", &format!("TMPDIR={}/tmp", cache.display())])
         .arg(&helper)
         .args([
             "sh",

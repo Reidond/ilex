@@ -144,10 +144,15 @@ fn run_ephemeral(ws: &Workspace, args: Args, image: String) -> Result<()> {
     }
     cmd::require("bcvk")?;
     let name = ws.vm_name("vm");
+    ws.ensure_state()?;
+    ws.verify_implicit_image(&image)?;
+    let _lease = ilex_devkit::ownership::vm_lease(ws, &name)?;
     let _slot = slots::acquire(&name)?;
+    ilex_devkit::bcvk::require_absent_container(&name)?;
 
     let mut bcvk = Command::new("bcvk");
     bcvk.args(["ephemeral", "run-ssh"])
+        .args(["--name", &name])
         .args(["--memory", args.memory.as_deref().unwrap_or("4G")])
         .args(["--vcpus", &args.vcpus.unwrap_or(4).to_string()])
         .arg(&image);

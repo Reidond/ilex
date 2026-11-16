@@ -22,14 +22,15 @@ cargo xtask vm --gui --print-image # inspect selection and show the image to boo
 cargo xtask info               # resource identity, selection and available configurations
 ```
 
-- The main checkout reserves the slug `main` (`localhost/ilex:main`, VMs
-  `ilex-main-*`). Linked git worktrees (Claude, T3, or made anywhere with
-  `git worktree add`) use git's worktree name: the directory name unless git
-  had to number it to make it unique. Short, valid lowercase names stay
-  unchanged; long or unusual names, and the reserved name `main`, get a
-  bounded readable part joined to a hash suffix with `--` (at most 48
-  characters, using 16 hex digits of SHA-256 of the original git name).
-  Plain slugs never contain `--`, so they cannot equal a hashed slug.
+- Every ordinary checkout uses a bounded readable name plus `--` and 32 hex
+  digits of SHA-256 of its canonical owner (at most 48 characters). The owner
+  includes both the canonical common Git directory and checkout path, so two
+  clones' primary checkouts, same-named linked worktrees, and reused worktree
+  names at new paths allocate different names. Receipts fence even a hash collision.
+  `main` (`localhost/ilex:main`, VMs `ilex-main-*`) is reserved for the actual
+  primary checkout explicitly declared by local Git `ilex.canonicalCheckout`
+  as its absolute canonical path. Merely having a `.git` directory cannot
+  prove that a clone is the canonical repository; undeclared clones use hashes.
   The same slug selects `localhost/ilex:wt-<slug>`, VMs `ilex-<slug>-*`,
   and runtime and state directories. Never use another checkout's image or VMs.
 - `build`, `test`, `vm` and `disk` accept repeatable `--shell <name>`: the
@@ -60,7 +61,8 @@ cargo xtask info               # resource identity, selection and available conf
   Filters are substrings and
   several run their union (`xtask test ephemeral:: upgrade::`); arguments after
   `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
-- Reusing an implicit image compares all three selection labels with the current
+- Reusing an implicit image first requires `ilex.checkout-owner` to match the
+  canonical checkout owner, then compares all three selection labels with the current
   manifests and flags. `test` rebuilds a stale selection; `vm` and `disk` refuse
   it and print the selection it was built for and the build command to run.
   Explicit image references are compared only when `--shell`, `--machine`,
@@ -77,7 +79,9 @@ cargo xtask info               # resource identity, selection and available conf
   `ILEX_UPGRADE_FROM=<ref>` names an older one (CI: the installer composition, or legacy `:latest` until its first publication);
   with `CI` set and no `ILEX_UPGRADE_FROM` the tier is skipped. v2 is the
   candidate plus a marker layer, tagged `<image tag>-upgrade`, never the
-  checkout's own tag. The VM uses `uefi-insecure` firmware: Secure Boot needs
+  checkout's own tag. Upgrade fixture aliases include a process/time suffix;
+  an explicit legacy v1 remains unmodified and is never implicitly adopted.
+  The VM uses `uefi-insecure` firmware: Secure Boot needs
   SMM, which KVM can't do under WSL2's nested virtualization.
   On v2 the same VM checks signature enforcement: v2's `ilex-sigpolicy.service`
   left the containers-storage origin alone at boot; the origin is pointed at
@@ -886,28 +890,49 @@ The `ilex-devkit` facade preserves the Linux/WSL API, handoff and viewer.
 cargo xtask info --json                 # identity, source manifest, paths, capabilities
 cargo xtask info --capabilities
 cargo xtask doctor --self-check --json  # disposable real Git checkouts; no images/VMs
+cargo xtask doctor --self-check-build --json # Linux: actual gated Podman builds and ownership rejection
 cargo xtask doctor --arch aarch64        # explicit rejection on the current Linux backend
 cargo xtask doctor --require firmware_enforcement # fails: ordinary defaults are nonsecure
 ilex-vmctl capabilities --json          # attach to a running VM; MCP: capabilities
 ```
 
-Only Git's actual main checkout gets `main`. Linked T3/Claude/conventional
-worktrees use Git's unique worktree name. Unsafe, long and reserved names get a
-bounded hash suffix; unknown/missing Git metadata gets a hashed checkout name,
-never `main`. The canonical native checkout path plus common Git directory
+Only an explicitly declared canonical primary checkout gets `main` (see the
+allocation policy above). All other primary/linked/T3 checkouts include their
+canonical owner hash, even for short, valid Git worktree names; missing Git
+metadata can never acquire `main` and cannot authorize mutations.
+The canonical native checkout path plus common Git directory
 produce a stable UUIDv8 owner. Windows and its WSL mount resolve to that same
 identity. A copied checkout must carry its original identity explicitly when a
 future remote executor stages it; it must not rediscover ownership from a copy.
 
 Local image builds pass typed requests to the Linux executor. A source manifest
 covers Git modes, working bytes, untracked inputs and tracked deletions; it
-excludes Git internals, target/state and private key/environment inputs, and
-rejects escaping symlinks. Two inventories and a post-build check detect source
-changes. Image labels `ilex.checkout-owner`, `ilex.source-digest` and
+excludes root Git internals and target/state. Private-named `.env`/`*.key`
+source entries and ignored files inside build input directories are refused
+before their contents are read, rather than silently omitted while Podman
+copies them. Escaping symlinks are rejected. Two inventories and a post-build
+check detect source changes. Builds write a job-specific temporary tag and
+promote only after validation; source changes and inventory failures remove
+only that alias and preserve an earlier accepted final image.
+Image labels `ilex.checkout-owner`, `ilex.source-digest` and
 `ilex.architecture` record provenance; `<state dir>/jobs/<job hash>/` retains
 request/result JSON with the immutable image ID and local executor identity.
 This is local provenance, not the remote source-transfer implementation (T3).
 Rechunk/ISO/tool orchestration retains its compatibility path.
+
+State/runtime roots carry `.ilex-owner.json` schema/owner receipts, and disk
+cache outputs carry `<filename>.ilex-owner`. Receipt checks precede reuse or
+replacement, including tools/keys and bcvk paths. Named VM launches hold an
+exclusive lifetime lease, refuse any pre-existing container/domain, and remove
+only the recorded created container ID/domain UUID. A stale resource requires
+its owner to inspect and explicitly remove it; launch no longer force-replaces
+by name. Immutable image-content caches internal to bcvk remain shared.
+Unlabelled legacy tags and nonempty unlabelled state/disk caches fail visibly
+with `unlabelled legacy ...; refusing adoption`. Nothing is auto-relabeled,
+deleted or migrated. Old hashless resources remain untouched: build into the
+new namespace, or explicitly inspect and migrate only resources you own.
+Build output flags (`--tag`, `--manifest`, `--output`, `--iidfile`) are reserved
+for the executor; use xtask `--tag` to choose the final output.
 
 VM metadata includes schema, owner, run, architecture and PID creation identity.
 Unknown versions and foreign owner records are rejected before replacement;

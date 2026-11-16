@@ -147,6 +147,10 @@ pub fn build(
     if image == base {
         bail!("machine output must differ from its base image");
     }
+    ws.verify_implicit_image(base)?;
+    crate::ownership::validate_build_args(podman_args)?;
+    let transaction = crate::ownership::ImageTransaction::new(ws, &image)?;
+    let (owner, source) = ws.source_identity()?;
     let base_machine = image_machine(base)?;
     if base_machine != "generic" {
         bail!(
@@ -180,7 +184,7 @@ pub fn build(
             "--file",
             "machines/Containerfile",
             "--tag",
-            &image,
+            transaction.temporary(),
         ])
         .args([
             "--build-arg",
@@ -205,7 +209,13 @@ pub fn build(
         ])
         .args(["--unsetlabel", "ilex.fingerprint"])
         .args(podman_args)
+        .args(["--label", &format!("ilex.checkout-owner={}", owner.owner)])
+        .args(["--label", &format!("ilex.source-digest={}", source.digest)])
         .arg("build");
     cmd::run(build.stdout(std::io::stderr()))?;
-    Ok(image)
+    anyhow::ensure!(
+        ws.source_identity()?.1.digest == source.digest,
+        "source changed during machine build; refusing promotion"
+    );
+    transaction.promote(ws)
 }

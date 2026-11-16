@@ -80,6 +80,7 @@ fn boot() -> Result<ToolVm> {
 fn test_tool(ws: &Workspace) -> Result<tool::Built> {
     static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = BUILDING.lock().unwrap_or_else(PoisonError::into_inner);
+    ws.ensure_state()?;
     let mut built = tool::built(ws, TOOL);
     let rebuild = std::env::var_os("ILEX_TOOL_REBUILD").is_some_and(|v| !v.is_empty());
     if rebuild || !built.image.is_file() || !built.certificate.is_file() {

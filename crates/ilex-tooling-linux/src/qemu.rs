@@ -107,15 +107,19 @@ pub fn default_disk_path(ws: &Workspace, image: &str, format: DiskFormat) -> Pat
             }
         })
         .collect();
-    ws.state_dir()
-        .join("disks")
-        .join(format!("{safe}.{}", format.extension()))
+    ws.state_dir().join("disks").join(format!(
+        "{safe}-{}.{}",
+        &ilex_tooling_core::digest(image.as_bytes())[7..23],
+        format.extension()
+    ))
 }
 
 /// Write (or refresh) the disk for `spec` with `bcvk to-disk` and return its
 /// path. bcvk records what a disk was built from and skips the install when
 /// the image hasn't changed, so calling this before every boot is cheap.
 pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
+    ws.ensure_state()?;
+    ws.verify_implicit_image(&spec.image)?;
     crate::provider::require_arch(ilex_tooling_core::Architecture::X86_64)?;
     cmd::require("bcvk")?;
     let out = spec
@@ -141,6 +145,7 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
         .with_context(|| format!("opening {}", lock_path.display()))?;
     lock.lock()
         .with_context(|| format!("locking {}", lock_path.display()))?;
+    crate::ownership::claim_file(ws, &out)?;
 
     let mut bcvk = Command::new("bcvk");
     bcvk.args(["to-disk", "--format", spec.format.name()])
@@ -165,6 +170,7 @@ pub struct TestKey {
 
 /// The checkout's test key (`<state dir>/ssh/id_ed25519`), created on first use.
 pub fn test_key(ws: &Workspace) -> Result<TestKey> {
+    ws.ensure_state()?;
     let private = ws.state_dir().join("ssh").join("id_ed25519");
     let public_path = private.with_extension("pub");
     if !(private.is_file() && public_path.is_file()) {
@@ -435,6 +441,7 @@ pub struct Vm {
     overlay: Option<PathBuf>,
     // Last field: freed only after QEMU is gone.
     _slot: VmSlot,
+    _lease: fs::File,
 }
 
 impl Vm {
@@ -457,6 +464,9 @@ impl Vm {
             );
         }
         let name = ws.vm_name(&config.purpose);
+        ws.ensure_state()?;
+        let lease = crate::ownership::vm_lease(ws, &name)?;
+        let slot = slots::acquire(&name)?;
         let dir = ws.runtime_dir().join(&config.purpose);
         if dir.join(INFO_FILE).exists() {
             let old = VmInfo::read(&dir)?;
@@ -470,7 +480,6 @@ impl Vm {
                 old.pid
             );
         }
-        let slot = slots::acquire(&name)?;
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -480,6 +489,10 @@ impl Vm {
             Some(persistent) => std::path::absolute(persistent)?,
             None => dir.join("OVMF_VARS.fd"),
         };
+        if config.efi_vars.is_some() && !vars.starts_with(ws.state_dir()) {
+            if let Some(parent) = vars.parent() { fs::create_dir_all(parent)?; }
+            crate::ownership::claim_file(ws, &vars)?;
+        }
         if config.efi_vars.is_none() || !vars.exists() {
             if let Some(parent) = vars.parent() {
                 fs::create_dir_all(parent)?;
@@ -495,6 +508,11 @@ impl Vm {
                 "disk image {} not found (write it with `cargo xtask disk`)",
                 base_disk.display()
             );
+        }
+        for writable in config.extra_disks.iter().chain((!config.snapshot).then_some(&base_disk)) {
+            if crate::provider::require_owned_path(&ws.state_dir(), writable).is_err() {
+                crate::ownership::claim_file(ws, writable)?;
+            }
         }
         let (drive_file, drive_format, overlay) = if config.snapshot {
             let overlay = ws
@@ -700,6 +718,7 @@ impl Vm {
             child,
             overlay,
             _slot: slot,
+            _lease: lease,
         })
     }
 
@@ -918,6 +937,7 @@ pub fn base64(data: &[u8]) -> String {
 /// (CI points this at the directory it uploads) or
 /// `<state dir>/artifacts/<tier>`. Created if missing.
 pub fn artifact_dir(ws: &Workspace, tier: &str) -> Result<PathBuf> {
+    ws.ensure_state()?;
     let base = match std::env::var_os("ILEX_ARTIFACTS").filter(|d| !d.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => ws.state_dir().join("artifacts"),

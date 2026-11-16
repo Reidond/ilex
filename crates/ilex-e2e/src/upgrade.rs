@@ -422,7 +422,13 @@ fn prepare_v1(ws: &Workspace, candidate: &str) -> Result<(String, String)> {
         }
         None => candidate.to_string(),
     };
-    let installed = format!("{}-upgrade", ws.image_ref());
+    // v1 may deliberately be an external, unlabelled legacy image. This is
+    // an explicit fixture alias, never an implicitly reusable checkout image.
+    // Allocate once per run and never overwrite another run's alias.
+    ws.ensure_state()?;
+    ws.verify_implicit_image(candidate)?;
+    let installed = format!("{}-upgrade-{}-{}", ws.image_ref(), std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos());
+    anyhow::ensure!(!bcvk::image_exists(&installed), "upgrade fixture alias already exists; refusing replacement");
     cmd::run(Command::new("podman").args(["tag", &source, &installed]))?;
     Ok((source, installed))
 }

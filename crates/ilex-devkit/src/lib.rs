@@ -2,6 +2,7 @@
 //! Native Windows hosting arrives in later PRs; the WSL handoff/viewer stay.
 pub use ilex_tooling_core as core;
 pub use ilex_tooling_linux::fingerprint;
+pub use ilex_tooling_linux::ownership;
 pub use ilex_tooling_linux::{
     IMAGE_REPO, Workspace, bcvk, cmd, config, executor, git, image, installer, machine, provider,
     qemu, qmp, slots, source, tool, viewer, workspace,

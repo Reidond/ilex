@@ -52,6 +52,7 @@ pub fn built(ws: &Workspace, name: &str) -> Built {
 
 /// Build the tool `name` from the commands of `packages`.
 pub fn build(ws: &Workspace, name: &str, packages: &[String]) -> Result<Built> {
+    ws.ensure_state()?;
     cmd::require("podman")?;
     let valid = |s: &str| {
         !s.is_empty()

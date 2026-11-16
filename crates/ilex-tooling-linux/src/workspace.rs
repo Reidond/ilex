@@ -1,9 +1,7 @@
 //! Which checkout are we in, and what does it own?
 //!
-//! The main checkout owns `localhost/ilex:main` and VMs named `ilex-main-*`.
-//! A linked git worktree (including Claude Code and T3 worktrees) owns
-//! `localhost/ilex:wt-<slug>` and VMs named `ilex-<slug>-*`, so parallel
-//! sessions never overwrite each other's images or VMs.
+//! Canonical owners get bounded, owner-qualified resource names. Only an
+//! explicitly declared canonical primary checkout reserves the `main` name.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -26,7 +24,7 @@ pub struct Workspace {
     pub root: PathBuf,
     /// `main` for the main checkout, a bounded worktree identity otherwise.
     pub slug: String,
-    /// Git's unique, unsanitised name for a linked worktree.
+    /// Git's repository-local, unsanitised name for a linked worktree.
     pub worktree: Option<String>,
 }
 
@@ -66,10 +64,16 @@ impl Workspace {
             (!root.join(".git").is_dir())
                 .then(|| format!("checkout-{}", &digest(native_path(&root).as_bytes())[7..23]))
         });
-        let slug = match &worktree {
-            Some(name) => ilex_tooling_core::identity::slug(name),
-            None => "main".to_string(),
-        };
+        let slug = allocation(&root, worktree.as_deref())
+            .unwrap_or_else(|_| {
+                CheckoutIdentity::new(
+                    digest(native_path(&root).as_bytes()),
+                    native_path(&root),
+                    "checkout",
+                    false,
+                )
+            })
+            .slug;
         Self {
             root,
             slug,
@@ -80,18 +84,10 @@ impl Workspace {
     /// Native identity survives Windows-to-WSL handoff. The Linux executor
     /// never derives a second owner from the translated mount path.
     pub fn identity(&self) -> Result<CheckoutIdentity> {
-        let common = crate::cmd::output(git::git(&self.root).args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ]))?;
-        let common = std::fs::canonicalize(&common).unwrap_or_else(|_| PathBuf::from(common));
-        let repository_id = digest(native_path(&common).as_bytes());
-        let mut identity = CheckoutIdentity::new(
-            repository_id,
-            native_path(&self.root),
-            self.worktree.as_deref().unwrap_or("main"),
-            self.worktree.is_none(),
+        let mut identity = allocation(&self.root, worktree_name(&self.root).as_deref())?;
+        anyhow::ensure!(
+            self.slug == identity.slug,
+            "checkout resource namespace is stale or belongs to another owner; rediscover this checkout with the current tooling"
         );
         identity.source_revision = git::revision(&self.root)?;
         Ok(identity)
@@ -111,9 +107,10 @@ impl Workspace {
 
     /// Tag part of this checkout's image: `main` or `wt-<slug>`.
     pub fn image_tag(&self) -> String {
-        match &self.worktree {
-            Some(_) => format!("wt-{}", self.slug),
-            None => "main".to_string(),
+        if self.slug == "main" {
+            "main".into()
+        } else {
+            format!("wt-{}", self.slug)
         }
     }
 
@@ -176,6 +173,66 @@ impl Workspace {
     pub fn state_dir(&self) -> PathBuf {
         state_root().join(&self.slug)
     }
+
+    /// Mutating/reusing state requires a matching receipt. Never import legacy
+    /// nonempty state by its path or by the display name alone.
+    pub fn ensure_state(&self) -> Result<PathBuf> {
+        let path = self.state_dir();
+        crate::ownership::ensure_directory(&path, &self.identity()?)?;
+        Ok(path)
+    }
+
+    pub fn ensure_runtime(&self) -> Result<PathBuf> {
+        let path = self.runtime_dir();
+        crate::ownership::ensure_directory(&path, &self.identity()?)?;
+        Ok(path)
+    }
+
+    pub fn is_implicit_image(&self, image: &str) -> bool {
+        let own = self.image_ref();
+        image == own
+            || image.strip_prefix(&own).is_some_and(|s| s.starts_with('.'))
+    }
+
+    pub fn verify_implicit_image(&self, image: &str) -> Result<()> {
+        if self.is_implicit_image(image) {
+            crate::ownership::require_image(self, image)?;
+        }
+        Ok(())
+    }
+}
+
+fn allocation(root: &Path, worktree: Option<&str>) -> Result<CheckoutIdentity> {
+    let common = crate::cmd::probe(git::git(root).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ]))
+    .context("identifying the canonical Git repository")?;
+    let common = std::fs::canonicalize(&common).unwrap_or_else(|_| PathBuf::from(common));
+    // A clone cannot infer that it is THE canonical repository. Only a local
+    // declaration matching Git's actual primary checkout can reserve `main`.
+    let canonical = crate::cmd::probe(git::git(root).args([
+        "config",
+        "--local",
+        "--get",
+        "ilex.canonicalCheckout",
+    ]));
+    let is_main = worktree.is_none()
+        && root.join(".git").is_dir()
+        && canonical.is_some_and(|p| {
+            let path = std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(p));
+            native_path(&path) == native_path(root)
+        });
+    let name = worktree
+        .or_else(|| root.file_name().and_then(|s| s.to_str()))
+        .unwrap_or("checkout");
+    Ok(CheckoutIdentity::new(
+        digest(native_path(&common).as_bytes()),
+        native_path(root),
+        name,
+        is_main,
+    ))
 }
 
 /// Image tags have a 128-byte limit. A maximum-length worktree tag uses 51

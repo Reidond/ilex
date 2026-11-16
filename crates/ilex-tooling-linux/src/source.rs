@@ -32,6 +32,29 @@ pub fn manifest(ws: &Workspace) -> Result<SourceManifest> {
 }
 
 fn inventory(ws: &Workspace) -> Result<SourceManifest> {
+    // These additional build contexts include ignored files in Podman COPY.
+    let ignored = git_bytes(
+        &ws.root,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            "rootfs",
+            "crates",
+            "build",
+            "shells",
+            "design-systems",
+            "machines",
+            "installer",
+        ],
+    )?;
+    ensure!(
+        ignored.is_empty(),
+        "ignored files exist in build inputs; remove them before building (source inventory cannot attest them)"
+    );
     let before = git_bytes(
         &ws.root,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -76,18 +99,21 @@ fn inventory(ws: &Workspace) -> Result<SourceManifest> {
             "unsafe source path {relative:?}"
         );
         // No source discovery follows private state, Git internals or credentials.
-        if path.components().any(|c| {
+        if path.components().take(1).any(|c| {
             matches!(
                 c.as_os_str().to_str(),
                 Some(".git" | "target" | ".ilex-state")
             )
-        }) || path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s == ".env" || s.ends_with(".key"))
-        {
+        }) {
             continue;
         }
+        ensure!(
+            !path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s == ".env" || s.ends_with(".key")),
+            "private-named source input {relative}; remove it before building; it cannot be silently omitted from provenance"
+        );
         let absolute = ws.root.join(path);
         let parent = absolute.parent().context("source file has no parent")?;
         let parent = parent

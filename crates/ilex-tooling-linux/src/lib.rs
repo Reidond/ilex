@@ -8,6 +8,7 @@ pub mod fingerprint;
 pub mod git;
 pub mod image;
 pub mod machine;
+pub mod ownership;
 pub mod provider;
 pub mod qemu;
 pub mod qmp;

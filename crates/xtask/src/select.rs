@@ -19,6 +19,7 @@ pub struct Args {
 }
 
 pub struct Resolved {
+    workspace: Workspace,
     pub image: String,
     /// This checkout's own tag, even when `image` is an explicit reference.
     pub implicit_image: String,
@@ -35,7 +36,12 @@ pub struct Resolved {
 
 impl Args {
     /// An explicit build output can shorten an otherwise overlong variant.
-    pub fn resolve(&self, ws: &Workspace, image: Option<&str>, output: Option<&str>) -> Result<Resolved> {
+    pub fn resolve(
+        &self,
+        ws: &Workspace,
+        image: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<Resolved> {
         let image_is_explicit = image.is_some();
         let requested = self.requested_shells()?;
         let requested_machine = self.requested_machine()?;
@@ -75,8 +81,14 @@ impl Args {
         ilex_devkit::config::validate_machine_name(&machine)?;
         let available = ilex_devkit::config::available(&ws.root, "machines")?;
         if !available.contains(&machine) {
-            bail!("unknown machine `{machine}`; available machines: {}",
-                available.iter().map(|name| format!("{name:?}")).collect::<Vec<_>>().join(", "));
+            bail!(
+                "unknown machine `{machine}`; available machines: {}",
+                available
+                    .iter()
+                    .map(|name| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         let selection = selection.map(|mut selection| {
             selection.machine = machine.clone();
@@ -94,15 +106,24 @@ impl Args {
                 .filter(|_| variant)
                 .map(|s| s.shells.as_slice()),
         );
-        let implicit_image = if machine == "generic" { implicit_base.clone() } else {
+        let implicit_image = if machine == "generic" {
+            implicit_base.clone()
+        } else {
             format!("{implicit_base}.m-{machine}")
         };
-        let base_image = image.map(|image| ws.resolve_image(Some(image))).unwrap_or(implicit_base);
+        let base_image = image
+            .map(|image| ws.resolve_image(Some(image)))
+            .unwrap_or(implicit_base);
         let image = image
             .map(|image| ws.resolve_image(Some(image)))
             .unwrap_or_else(|| implicit_image.clone());
-        check_tag_length(&output.map(|tag| ws.resolve_image(Some(tag))).unwrap_or_else(|| image.clone()))?;
+        check_tag_length(
+            &output
+                .map(|tag| ws.resolve_image(Some(tag)))
+                .unwrap_or_else(|| image.clone()),
+        )?;
         Ok(Resolved {
+            workspace: ws.clone(),
             image,
             implicit_image,
             base_image,
@@ -116,7 +137,9 @@ impl Args {
     }
 
     pub fn requested_machine(&self) -> Result<Option<String>> {
-        if let Some(name) = &self.machine { return Ok(Some(name.clone())); }
+        if let Some(name) = &self.machine {
+            return Ok(Some(name.clone()));
+        }
         match std::env::var("ILEX_MACHINE") {
             Ok(value) if !value.is_empty() => Ok(Some(value)),
             Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
@@ -152,7 +175,17 @@ impl Resolved {
     }
 
     fn mismatch_for(&self, image: &str, base: bool) -> Result<Option<String>> {
-        if !(if base { self.check_base_selection } else { self.check_selection }) {
+        self.workspace.ensure_state()?;
+        if crate::build::image_exists(image)
+            && (!self.explicit_image || self.workspace.is_implicit_image(image))
+        {
+            ilex_devkit::ownership::require_image(&self.workspace, image)?;
+        }
+        if !(if base {
+            self.check_base_selection
+        } else {
+            self.check_selection
+        }) {
             return Ok(None);
         }
         if !crate::build::image_exists(image) {
@@ -185,7 +218,9 @@ impl Resolved {
             Err(error) => format!("an unknown configuration ({error:#})"),
         };
         if actual.is_ok_and(|mut actual| {
-            if base { actual.machine = requested.machine.clone(); }
+            if base {
+                actual.machine = requested.machine.clone();
+            }
             actual == *requested
         }) {
             return Ok(None);
@@ -193,7 +228,10 @@ impl Resolved {
         let hint = if self.explicit_image {
             format!("build or pull {image} for the requested configuration")
         } else {
-            format!("run `{}` and use {}", self.build_command, self.implicit_image)
+            format!(
+                "run `{}` and use {}",
+                self.build_command, self.implicit_image
+            )
         };
         Ok(Some(format!(
             "image {image} was built for {built_for}; requested {}; {hint}",
@@ -215,5 +253,4 @@ impl Resolved {
         }
         Ok(())
     }
-
 }

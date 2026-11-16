@@ -119,6 +119,10 @@ impl BuildExecutor for LocalBuildExecutor {
                 "this local contract executor implements image builds; use the compatibility disk/ISO/tool commands for other operations"
             );
         };
+        crate::ownership::validate_build_args(&options.podman_args)?;
+        let transaction = crate::ownership::ImageTransaction::new(&self.ws, &options.output)?;
+        // Waiting for another writer can outlive the staged source inventory.
+        self.stage(request)?;
         let probe = self.probe()?;
         let dir = self.job_dir(&request.job);
         fs::create_dir_all(&dir)?;
@@ -127,12 +131,17 @@ impl BuildExecutor for LocalBuildExecutor {
             dir.join("request.json"),
             serde_json::to_vec_pretty(request)?,
         )?;
-        let image = crate::image::build(&self.ws, request, options)?;
+        let mut temporary = options.clone();
+        temporary.output = transaction.temporary().into();
+        let image = crate::image::build(&self.ws, request, &temporary)?;
         let after = crate::source::manifest(&self.ws)?;
         ensure!(
-            after.digest == request.source.digest,
+            after.digest == request.source.digest && after.revision == request.source.revision,
             "source changed while Podman was building; result has not been accepted; rebuild from stable input"
         );
+        let immutable_id = crate::bcvk::image_id(&image)?;
+        let registry_digest = Some(crate::image::image_digest(&image)?).filter(|s| !s.is_empty());
+        let image = transaction.promote(&self.ws)?;
         let result = BuildResult {
             schema: SCHEMA_VERSION,
             job: request.job.clone(),
@@ -141,9 +150,8 @@ impl BuildExecutor for LocalBuildExecutor {
             image: Some(ImageIdentity {
                 executor_id: probe.executor_id.clone(),
                 local_reference: image.clone(),
-                immutable_id: crate::bcvk::image_id(&image)?,
-                registry_digest: Some(crate::image::image_digest(&image)?)
-                    .filter(|s| !s.is_empty()),
+                immutable_id,
+                registry_digest,
                 architecture: request.guest_arch,
             }),
             executor_id: probe.executor_id,
@@ -155,6 +163,7 @@ impl BuildExecutor for LocalBuildExecutor {
         Ok(result)
     }
     fn inspect(&self, job: &str) -> Result<BuildResult> {
+        self.ws.ensure_state()?;
         let result: BuildResult =
             serde_json::from_slice(&fs::read(self.job_dir(job).join("result.json"))?)?;
         check_version(result.schema)?;
@@ -167,6 +176,8 @@ impl BuildExecutor for LocalBuildExecutor {
     }
     fn export(&self, image: &ImageIdentity, output: &Path) -> Result<ArtifactLocation> {
         crate::require_linux()?;
+        self.ws.ensure_state()?;
+        crate::ownership::require_image(&self.ws, &image.immutable_id)?;
         ensure!(
             image.executor_id == self.executor_id(),
             "image belongs to a different executor"
@@ -192,6 +203,7 @@ impl BuildExecutor for LocalBuildExecutor {
         Ok(artifact)
     }
     fn fetch(&self, artifact: &ArtifactLocation, output: &Path) -> Result<()> {
+        self.ws.ensure_state()?;
         ensure!(
             artifact.executor_id == self.executor_id(),
             "artifact belongs to a different executor"

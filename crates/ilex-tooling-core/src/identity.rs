@@ -46,8 +46,12 @@ impl CheckoutIdentity {
         Self {
             repository_id,
             checkout_id,
+            slug: if is_main {
+                "main".into()
+            } else {
+                resource_slug(name, &owner)
+            },
             owner,
-            slug: if is_main { "main".into() } else { slug(name) },
             is_main,
             source_revision: String::new(),
             snapshot_digest: None,
@@ -62,6 +66,15 @@ impl CheckoutIdentity {
         );
         Ok(())
     }
+}
+
+/// Resource names include canonical ownership, not Git's repository-local
+/// worktree name alone. Ownership receipts still reject a hash collision.
+pub fn resource_slug(name: &str, owner: &str) -> String {
+    let readable = slug(name);
+    let readable = readable[..readable.len().min(MAX_SLUG_LEN - 34)].trim_end_matches('-');
+    let hash = digest(owner.as_bytes());
+    format!("{readable}--{}", &hash[7..39])
 }
 
 /// Keep Git's unique short lowercase names stable. Changed, reserved and long

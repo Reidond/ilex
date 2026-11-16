@@ -11,12 +11,16 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+mod build;
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
     /// Create two disposable Git checkouts, including a T3-shaped worktree
     #[arg(long)]
     pub self_check: bool,
+    /// Linux: actual Podman builds, source races and ownership rejection
+    #[arg(long)]
+    pub self_check_build: bool,
     #[arg(long)]
     pub json: bool,
     /// Require a capability, e.g. firmware_enforcement, persistent_tpm, screenshot
@@ -28,6 +32,11 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    let builds = if args.self_check_build {
+        Some(build::run(ws)?)
+    } else {
+        None
+    };
     let capabilities = ilex_devkit::provider::capabilities("none", (1280, 800));
     if let Some(feature) = args.require {
         let feature: Capability = serde_json::from_value(serde_json::Value::String(feature))?;
@@ -50,7 +59,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": core::SCHEMA_VERSION, "identity": ws.identity()?,
-                "capabilities": capabilities, "self_check": evidence,
+                "capabilities": capabilities, "self_check": evidence, "build_self_check": builds,
             }))?
         );
     } else {
@@ -62,6 +71,9 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&capabilities)?);
         if let Some(evidence) = evidence {
             println!("{}", serde_json::to_string_pretty(&evidence)?);
+        }
+        if let Some(builds) = builds {
+            println!("{}", serde_json::to_string_pretty(&builds)?);
         }
     }
     Ok(())
@@ -114,6 +126,44 @@ fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
     )?;
     let a = Workspace::from_root(main.clone());
     let b = Workspace::from_root(linked.clone());
+    let other = dir.join("second clone");
+    cmd::run(
+        Command::new("git")
+            .args(["clone", "--quiet", "--no-hardlinks"])
+            .arg(&main)
+            .arg(&other),
+    )?;
+    let other_linked = dir.join("other/.t3/worktrees/ilex/main");
+    cmd::run(
+        git::git(&other)
+            .args(["worktree", "add", "--quiet", "--detach"])
+            .arg(&other_linked)
+            .arg("HEAD"),
+    )?;
+    let c = Workspace::from_root(other_linked);
+    let other_main = Workspace::from_root(other);
+    ensure!(
+        a.slug != "main" && other_main.slug != "main",
+        "ordinary clone claimed canonical main"
+    );
+    ensure!(
+        a.image_ref() != other_main.image_ref(),
+        "two clones' primary checkouts collide"
+    );
+    ensure!(
+        b.worktree == c.worktree && b.slug != c.slug && b.identity()?.owner != c.identity()?.owner,
+        "same-named linked worktrees across clones collide"
+    );
+    ensure!(
+        b.vm_prefix() != c.vm_prefix() && b.state_dir() != c.state_dir(),
+        "same-name VM/state allocation collides"
+    );
+    cmd::run(
+        git::git(&main)
+            .args(["config", "--local", "ilex.canonicalCheckout"])
+            .arg(&main),
+    )?;
+    let a = Workspace::from_root(main.clone());
     let (clean, clean_source) = b.source_identity()?;
     let tracked = linked.join("image.toml");
     let mut bytes = fs::read(&tracked)?;
@@ -175,10 +225,43 @@ fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
         .unwrap_err()
         .to_string();
     let result = serde_json::json!({"result": "passed", "main": main_identity, "t3": dirty,
+        "second_clone": c.identity()?, "same_worktree_name": b.worktree,
+        "second_primary": other_main.identity()?,
         "main_image": a.image_ref(), "t3_image": b.image_ref(), "clean_digest": clean_source.digest,
         "dirty_digest": source.digest, "unsupported_capability": rejection,
         "foreign_owner_rejected": true, "unknown_schema_rejected": true,
         "cleanup": "fixture removed on return; no image or VM created"});
+    let relocated = dir.join("relocated/main");
+    fs::create_dir_all(relocated.parent().unwrap())?;
+    cmd::run(
+        git::git(&main)
+            .args(["worktree", "move"])
+            .arg(&linked)
+            .arg(&relocated),
+    )?;
+    let moved = Workspace::from_root(relocated);
+    ensure!(
+        moved.worktree == b.worktree
+            && moved.slug != b.slug
+            && moved.identity()?.owner != dirty.owner,
+        "reused worktree name at another canonical path collides"
+    );
+    let state = dir.join("owned-state");
+    ilex_devkit::ownership::ensure_directory(&state, &dirty)?;
+    ensure!(
+        ilex_devkit::ownership::ensure_directory(&state, &c.identity()?).is_err(),
+        "foreign tool/disk state adopted"
+    );
+    let legacy = dir.join("legacy-state");
+    fs::create_dir(&legacy)?;
+    fs::write(legacy.join("cached-tool.raw"), b"unlabelled")?;
+    ensure!(
+        ilex_devkit::ownership::ensure_directory(&legacy, &dirty).is_err(),
+        "unlabelled state adopted"
+    );
+    let mut result = result;
+    result["relocated_worktree"] = serde_json::to_value(moved.identity()?)?;
+    result["foreign_and_unlabelled_state_rejected"] = true.into();
     // Ensure the source checkout remains readable; no source mutation above.
     let _ = git::head_sha(&ws.root)?;
     fs::remove_dir_all(&dir)?;

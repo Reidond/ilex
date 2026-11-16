@@ -98,7 +98,15 @@ pub fn build(
             &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display()),
         ]);
     }
-    build.args(&options.podman_args).arg(".");
+    crate::ownership::validate_build_args(&options.podman_args)?;
+    build
+        .args(&options.podman_args)
+        .args([
+            "--label",
+            &format!("ilex.checkout-owner={}", identity.owner),
+        ])
+        .args(["--label", &format!("ilex.source-digest={}", source.digest)])
+        .arg(".");
     cmd::run(build.stdout(std::io::stderr()))?;
     if let Some(base_size) = base_size {
         let size = image_size(&image)?;

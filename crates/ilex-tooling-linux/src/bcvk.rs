@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::cmd;
 use crate::slots::{self, VmSlot};
@@ -121,12 +121,69 @@ fn snapshot(buf: &Buf) -> String {
 
 /// Force-remove a container (running or not); quiet, never fails.
 pub fn podman_rm(name: &str) {
+    let Ok(ws) = crate::Workspace::discover() else {
+        return;
+    };
+    if !name.starts_with(&ws.vm_prefix()) || ws.ensure_runtime().is_err() {
+        return;
+    }
+    let Some(owner) = cmd::probe(Command::new("podman").args(["container", "inspect", "--format", "{{index .Config.Labels \"ilex.checkout-owner\"}}", name])) else {
+        return;
+    };
+    if !ws.identity().is_ok_and(|id| id.owner == owner) {
+        return;
+    }
+    if let Some(id) = cmd::probe(Command::new("podman").args(["container", "inspect", "--format", "{{.Id}}", name])) { remove_container(&id); }
+}
+
+fn remove_container(id: &str) {
     let _ = Command::new("podman")
-        .args(["rm", "--force", "--time", "0", "--ignore", name])
+        .args(["rm", "--force", "--time", "0", "--ignore", id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+pub fn require_absent_container(name: &str) -> Result<()> {
+    let out = Command::new("podman")
+        .args(["container", "exists", name])
+        .status()?;
+    ensure!(
+        out.code() == Some(1),
+        "container {name} exists or cannot be inspected; refusing name-based adoption/replacement; inspect and remove only your own stale resource explicitly"
+    );
+    Ok(())
+}
+
+fn validate_vm_args(args: &[String]) -> Result<()> {
+    for arg in args {
+        ensure!(
+            !["--name", "--replace", "--connect"]
+                .iter()
+                .any(|flag| arg == flag || arg.starts_with(&format!("{flag}=")))
+                && arg != "-R"
+                && arg != "-c",
+            "VM ownership/connection flags are reserved: {arg}"
+        );
+    }
+    Ok(())
+}
+
+fn domain_id(name: &str) -> Result<Option<String>> {
+    let out = Command::new("virsh")
+        .env("LC_ALL", "C")
+        .args(["domuuid", name])
+        .output()?;
+    if out.status.success() {
+        return Ok(Some(String::from_utf8(out.stdout)?.trim().into()));
+    }
+    ensure!(
+        String::from_utf8_lossy(&out.stderr).contains("failed to get domain"),
+        "cannot inspect libvirt domain {name}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(None)
 }
 
 /// True if `image` exists in local container storage.
@@ -186,24 +243,33 @@ pub struct EphemeralVm {
     name: String,
     image: String,
     slot: VmSlot,
+    container: Option<String>,
+    _lease: std::fs::File,
 }
 
 impl EphemeralVm {
     /// Take a VM slot (waiting if the machine is full), boot `image` as
     /// container `name`, and wait until SSH answers. A leftover container of
-    /// the same name from a killed run is replaced.
+    /// the same name is refused until its owner explicitly removes it.
     pub fn boot(name: &str, image: &str, opts: &EphemeralOpts) -> Result<Self> {
         crate::provider::require_arch(ilex_tooling_core::Architecture::X86_64)?;
         cmd::require("podman")?;
         cmd::require("bcvk")?;
-        podman_rm(name);
+        let ws = crate::Workspace::discover()?;
+        ws.ensure_state()?;
+        ws.verify_implicit_image(image)?;
+        validate_vm_args(&opts.extra_args)?;
+        let lease = crate::ownership::vm_lease(&ws, name)?;
         let slot = slots::acquire(name)?;
+        require_absent_container(name)?;
         // Build the guard first: from here on any early return or panic
         // removes whatever `bcvk ephemeral run` managed to create.
-        let vm = Self {
+        let mut vm = Self {
             name: name.to_string(),
             image: image.to_string(),
             slot,
+            container: None,
+            _lease: lease,
         };
 
         let mut run = Command::new("bcvk");
@@ -213,7 +279,19 @@ impl EphemeralVm {
             .args(["--vcpus", &opts.vcpus.to_string()])
             .args(&opts.extra_args)
             .arg(image);
-        cmd::run(&mut run).with_context(|| format!("starting ephemeral VM {name}"))?;
+        let started = cmd::run(&mut run);
+        vm.container = cmd::probe(Command::new("podman").args([
+            "container",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            name,
+        ]));
+        started.with_context(|| format!("starting ephemeral VM {name}"))?;
+        ensure!(
+            vm.container.is_some(),
+            "bcvk did not create an identifiable container"
+        );
 
         vm.wait_ssh(opts.boot_timeout)?;
         Ok(vm)
@@ -285,7 +363,9 @@ impl EphemeralVm {
 
 impl Drop for EphemeralVm {
     fn drop(&mut self) {
-        podman_rm(&self.name);
+        if let Some(id) = &self.container {
+            remove_container(id);
+        }
     }
 }
 
@@ -329,26 +409,38 @@ impl Default for LibvirtOpts {
 pub struct LibvirtVm {
     name: String,
     slot: VmSlot,
+    uuid: Option<String>,
+    _lease: std::fs::File,
 }
 
 impl LibvirtVm {
     /// Take a VM slot, install `image` to a fresh disk (bcvk caches the
     /// installed base disk per image, so only the first install is slow),
     /// boot it and wait for SSH. A leftover domain of the same name is
-    /// replaced.
+    /// refused until its owner explicitly removes it.
     pub fn boot(name: &str, image: &str, opts: &LibvirtOpts) -> Result<Self> {
         crate::provider::require_arch(ilex_tooling_core::Architecture::X86_64)?;
         cmd::require("bcvk")?;
+        let ws = crate::Workspace::discover()?;
+        ws.ensure_state()?;
+        ws.verify_implicit_image(image)?;
+        validate_vm_args(&opts.extra_args)?;
+        let lease = crate::ownership::vm_lease(&ws, name)?;
         let slot = slots::acquire(name)?;
+        ensure!(
+            domain_id(name)?.is_none(),
+            "libvirt domain {name} already exists; refusing unproven name-based replacement; inspect/remove only your own stale domain explicitly"
+        );
         // Guard first: a failed install or boot below still removes the domain.
-        let vm = Self {
+        let mut vm = Self {
             name: name.to_string(),
             slot,
+            uuid: None,
+            _lease: lease,
         };
-        vm.remove();
 
         let mut run = Command::new("bcvk");
-        run.args(["libvirt", "run", "--detach", "--replace"])
+        run.args(["libvirt", "run", "--detach"])
             .args(["--name", name])
             .args(["--memory", &opts.memory])
             .args(["--cpus", &opts.cpus.to_string()])
@@ -363,7 +455,13 @@ impl LibvirtVm {
             run.arg("--platform-console-log").arg(platform);
         }
         run.args(&opts.extra_args).arg(image);
-        cmd::run(&mut run).with_context(|| format!("installing libvirt VM {name}"))?;
+        let started = cmd::run(&mut run);
+        vm.uuid = domain_id(name)?;
+        started.with_context(|| format!("installing libvirt VM {name}"))?;
+        ensure!(
+            vm.uuid.is_some(),
+            "bcvk did not create an identifiable domain"
+        );
 
         if let Err(err) = vm.wait_ssh(opts.boot_timeout) {
             // The domain is removed on drop: keep what its consoles said.
@@ -461,6 +559,12 @@ impl LibvirtVm {
     /// Stop (even a paused domain, which `bcvk libvirt rm --force` refuses to
     /// delete) and remove the domain with its disk. Quiet, never fails.
     fn remove(&self) {
+        let Some(uuid) = &self.uuid else {
+            return;
+        };
+        if domain_id(&self.name).ok().flatten().as_ref() != Some(uuid) {
+            return;
+        }
         let quiet = |c: &mut Command| {
             let _ = c
                 .stdin(Stdio::null())
@@ -468,8 +572,10 @@ impl LibvirtVm {
                 .stderr(Stdio::null())
                 .status();
         };
-        quiet(Command::new("virsh").args(["destroy", &self.name]));
-        quiet(Command::new("bcvk").args(["libvirt", "rm", "--force", &self.name]));
+        quiet(Command::new("virsh").args(["destroy", uuid]));
+        if domain_id(&self.name).ok().flatten().as_ref() == Some(uuid) {
+            quiet(Command::new("bcvk").args(["libvirt", "rm", "--force", &self.name]));
+        }
     }
 }
 
