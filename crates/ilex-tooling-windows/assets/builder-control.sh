@@ -26,6 +26,6 @@ for key,name in [("provision","provision.sh"),("control","builder-control.sh"),(
     with open(path+".partial","w") as f: f.write(p[key]); f.flush(); os.fsync(f.fileno())
     os.replace(path+".partial",path)
 '
-          dnf --setopt=max_parallel_downloads=10 upgrade -y
+          dnf --setopt=gpgcheck=1 --setopt=max_parallel_downloads=10 upgrade -y
           /bin/bash /var/lib/ilex-builder/provision.sh "$(cat /var/lib/ilex-builder/revision)";;
 esac

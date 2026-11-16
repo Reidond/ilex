@@ -159,12 +159,26 @@ fn safe_name(name: &str) -> Result<()> {
             !part.is_empty() && part != "." && part != ".." && !part.ends_with(['.', ' ']),
             "unsafe archive component: {name}"
         );
-        let stem = part.split('.').next().unwrap().to_ascii_uppercase();
+        let stem = part
+            .split('.')
+            .next()
+            .unwrap()
+            .trim_end_matches(' ')
+            .to_ascii_uppercase();
+        let port = stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"));
+        let device_port = port.is_some_and(|p| {
+            matches!(
+                p,
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
         ensure!(
-            !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                && !(stem.len() == 4
-                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                    && stem.as_bytes()[3].is_ascii_digit()),
+            !matches!(
+                stem.as_str(),
+                "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+            ) && !device_port,
             "Windows device path in archive"
         );
     }

@@ -2,25 +2,28 @@
 # Root-only, repeatable provisioning. Fedora repositories retain gpgcheck=1.
 set -euo pipefail
 revision=$1
-mkdir -p /var/lib/ilex-builder
+mkdir -p /var/lib/ilex-builder /usr/local/libexec
 exec > >(tee -a /var/lib/ilex-builder/provision.log) 2>&1
 exec 9>/run/lock/ilex-builder-provision.lock
 flock -n 9
-dnf --setopt=max_parallel_downloads=10 install -y \
-  podman cargo rust gcc gcc-c++ git qemu-kvm qemu-img libvirt-daemon-kvm \
+dnf --setopt=gpgcheck=1 --setopt=max_parallel_downloads=10 install -y \
+  podman skopeo cargo rust gcc gcc-c++ git qemu-kvm qemu-img libvirt-daemon-kvm \
   libvirt-client virtiofsd passt edk2-ovmf swtpm swtpm-tools tpm2-tools \
   python3-pyyaml hyperv-daemons openssl-devel pkgconf-pkg-config systemd-devel \
   gnu-efi-devel efibootmgr sbsigntools image-builder btrfs-progs xfsprogs \
-  erofs-utils squashfs-tools policycoreutils-devel cpio zstd
-# Fedora 45 currently ships the required generic-iso implementation in updates-testing.
-if ! image-builder --version | grep -Eq '\b(89|9[0-9]|[1-9][0-9]{2,})\.'; then
-    dnf --enablerepo=updates-testing upgrade -y image-builder
-fi
-python3 - <<'PY'
-import re, subprocess
-s=subprocess.check_output(['image-builder','--version'],text=True)
-assert int(re.search(r'\b(\d+)',s).group(1)) >= 89, s
+  erofs-utils squashfs-tools policycoreutils-devel cpio zstd dracut util-linux
+# Prefer stable; use the approved testing channel only below the ISO minimum.
+image_builder_ready() { python3 - <<'PY'
+import subprocess
+s=subprocess.check_output(['image-builder','version'],text=True)
+v=next(line.split(':',1)[1].strip() for line in s.splitlines() if line.startswith('version:'))
+assert int(v.split('.')[0]) >= 89, s
 PY
+}
+if ! image_builder_ready; then
+    dnf --setopt=gpgcheck=1 --enablerepo=updates-testing upgrade -y image-builder
+fi
+image_builder_ready
 if ! mountpoint -q /var/lib/ilex-data; then
     # The owned VM has one 40 GiB OS disk and one dedicated 240 GiB data disk.
     # No wildcard write: select one disk with the recorded serial and expected size.
