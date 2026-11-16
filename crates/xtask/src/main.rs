@@ -5,13 +5,15 @@
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ilex_devkit::{Workspace, config, slots};
+use ilex_devkit::Workspace;
 
 mod build;
 mod changed;
 mod disk;
+mod doctor;
+mod info;
 mod iso;
 mod prepare_publish;
 mod publish;
@@ -56,14 +58,9 @@ enum Cmd {
     /// Build a drupe tool image from Fedora packages (`cargo xtask tool strace`)
     Tool(tool::Args),
     /// Show this checkout's slug, image, VM names and state directories
-    Info {
-        /// Validated TSV: tag, kind, parent (- for roots), machine, shells (comma-separated, - for none)
-        #[arg(long, conflicts_with = "installer")]
-        publications: bool,
-        /// Print the installer's published composition tag
-        #[arg(long)]
-        installer: bool,
-    },
+    Info(info::Args),
+    /// Probe the backend; --self-check exercises owned checkout fixtures
+    Doctor(doctor::Args),
 }
 
 fn main() -> ExitCode {
@@ -87,10 +84,10 @@ fn run(cmd: Cmd) -> Result<()> {
             // Reject invalid selection before building the native viewer or
             // handing over to WSL. GUI prediction inspects Linux image labels.
             let resolved = args.resolve(&ws)?;
-            if cfg!(windows) {
-                wsl::forward(&ws.root, args.gui && !args.print_image)
-            } else {
-                vm::run(&ws, args, resolved)
+            match ilex_devkit::host_backend() {
+                ilex_devkit::HostBackend::WslCompatibility => wsl::forward(&ws.root, args.gui && !args.print_image),
+                ilex_devkit::HostBackend::Linux => vm::run(&ws, args, resolved),
+                ilex_devkit::HostBackend::Unsupported => anyhow::bail!("no VM backend implemented for this host"),
             }
         }
         Cmd::Disk(args) => disk::run(&ws, args),
@@ -100,112 +97,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::PreparePublish(args) => prepare_publish::run(&ws, args),
         Cmd::Iso(args) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
-        Cmd::Info {
-            publications: true, ..
-        } => {
-            for row in config::publications(&ws.root)? {
-                println!(
-                    "{}\t{}\t{}\t{}\t{}",
-                    row.tag,
-                    row.kind,
-                    row.parent.as_deref().unwrap_or("-"),
-                    row.machine,
-                    if row.shells.is_empty() {
-                        "-".into()
-                    } else {
-                        row.shells.join(",")
-                    }
-                );
-            }
-            Ok(())
-        }
-        Cmd::Info {
-            installer: true, ..
-        } => {
-            println!("{}", config::installer(&ws.root)?);
-            Ok(())
-        }
-        Cmd::Info { .. } => {
-            let publications = config::publications(&ws.root)?;
-            let installer = config::installer(&ws.root)?;
-            let resolved = select::Args::default().resolve(&ws, None, None)?;
-            println!("root:        {}", ws.root.display());
-            println!("slug:        {}", ws.slug);
-            println!("image:       {}", resolved.image);
-            println!("vm prefix:   {}", ws.vm_prefix());
-            println!("runtime dir: {}", ws.runtime_dir().display());
-            println!("state dir:   {}", ws.state_dir().display());
-            println!("vm slots:    {}", slots::max_slots());
-            let selection = resolved.selection.context(
-                "reading image.toml for info; run `cargo xtask build` for manifest diagnostics",
-            )?;
-            let summary = format!("selection:   {}", selection.summary());
-            println!("{}", terminal_text(&summary));
-            println!("installer:   {installer}");
-            let table = ilex_devkit::installer::table(&ws.root, None)?;
-            println!("installer table:");
-            for entry in &table.compositions {
-                println!(
-                    "  {}: machine={} shells={}",
-                    entry.tag,
-                    entry.machine,
-                    entry.shells.join(",")
-                );
-            }
-            for (name, machine) in &table.machines {
-                for rule in &machine.matches {
-                    println!("  {name} match: {rule:?}");
-                }
-            }
-            println!("publications (tag, kind, parent, machine, shells):");
-            for row in publications {
-                println!(
-                    "  {}\t{}\t{}\t{}\t{}",
-                    row.tag,
-                    row.kind,
-                    row.parent.as_deref().unwrap_or("-"),
-                    row.machine,
-                    if row.shells.is_empty() {
-                        "-".into()
-                    } else {
-                        row.shells.join(",")
-                    }
-                );
-            }
-            for (directory, file) in [
-                ("shells", "shell.toml"),
-                ("machines", "machine.toml"),
-            ] {
-                println!("{directory} available:");
-                for name in config::available(&ws.root, directory)? {
-                    match config::manifest(&ws.root.join(directory).join(&name).join(file)) {
-                        Ok(manifest) => {
-                            let description = manifest
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            println!("  {}: {}", terminal_text(&name), terminal_text(description));
-                        }
-                        Err(error) => {
-                            eprintln!("{}", terminal_text(&format!("  {name}: {error:#}")))
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
+        Cmd::Info(args) => info::run(&ws, args),
+        Cmd::Doctor(args) => doctor::run(&ws, args),
     }
-}
-
-/// `info` can inspect an unbuilt manifest, before compose has validated it.
-fn terminal_text(text: &str) -> String {
-    text.chars()
-        .map(|ch| {
-            if ch.is_control() {
-                format!("\\u{{{:x}}}", ch as u32)
-            } else {
-                ch.to_string()
-            }
-        })
-        .collect()
 }

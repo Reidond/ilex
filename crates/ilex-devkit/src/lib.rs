@@ -1,22 +1,26 @@
-//! Shared host-side plumbing for ilex's tooling: `xtask`, the `ilex-e2e`
-//! harness and `ilex-vmctl` all agree on the checkout's slug, the image tag
-//! and VM names derived from it, where per-worktree state lives, and the
-//! machine-wide VM slot cap.
+//! Compatibility facade for the portable contracts and existing Linux/WSL paths.
+//! Native Windows hosting arrives in later PRs; the WSL handoff/viewer stay.
+pub use ilex_tooling_core as core;
+pub use ilex_tooling_linux::fingerprint;
+pub use ilex_tooling_linux::{
+    IMAGE_REPO, Workspace, bcvk, cmd, config, executor, git, image, installer, machine, provider,
+    qemu, qmp, slots, source, tool, viewer, workspace,
+};
+#[cfg(target_os = "linux")]
+pub use ilex_tooling_linux::{display, vdagent};
 
-pub mod bcvk;
-pub mod cmd;
-pub mod config;
-pub mod git;
-pub mod installer;
-pub mod machine;
-pub mod qemu;
-#[cfg(unix)]
-pub mod display;
-pub mod slots;
-pub mod tool;
-#[cfg(unix)]
-pub mod vdagent;
-pub mod viewer;
-pub mod workspace;
-
-pub use workspace::{IMAGE_REPO, Workspace};
+#[derive(Debug, Clone, Copy)]
+pub enum HostBackend {
+    Linux,
+    WslCompatibility,
+    Unsupported,
+}
+pub fn host_backend() -> HostBackend {
+    if cfg!(target_os = "linux") {
+        HostBackend::Linux
+    } else if cfg!(target_os = "windows") {
+        HostBackend::WslCompatibility
+    } else {
+        HostBackend::Unsupported
+    }
+}

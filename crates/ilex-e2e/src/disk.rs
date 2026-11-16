@@ -34,7 +34,28 @@ fn run() -> Result<()> {
     report.check("root filesystem matches the install config", root_filesystem(&vm));
     report.check("first-boot units succeeded", first_boot_units(&vm));
     report.check("bootc booted from the installed image", bootc_status(&vm));
+    report.check("portable control and capability rejection", contracts(&ws, &vm));
     report.finish()
+}
+
+fn contracts(ws: &ilex_devkit::Workspace, vm: &Vm) -> Result<()> {
+    use ilex_devkit::core::{Capability, Input, Requirement, VmControl, VmProvider};
+    let control = ilex_vmctl::Vmctl::attach(ws, Some("disk"))?;
+    let frame = VmControl::capture(&control)?;
+    anyhow::ensure!(frame.vm.owner == ws.identity()?.owner && frame.vm.run == vm.info.run, "control attached to a different checkout/run");
+    anyhow::ensure!(frame.pixels.len() == frame.width as usize * frame.height as usize * 3, "capture has invalid RGB dimensions");
+    VmControl::key(&control, &Input::PhysicalKey { code: 0x2a, down: true })?;
+    VmControl::key(&control, &Input::PhysicalKey { code: 0x2a, down: false })?;
+    let caps = control.capabilities();
+    caps.require(Capability::Screenshot)?;
+    println!("     owner={} run={} capture={}x{} generation={}", frame.vm.owner, frame.vm.run, frame.width, frame.height, frame.generation);
+    let mut spec = ilex_devkit::provider::spec(ws, &VmConfig::new("unsupported-contract", "unused.qcow2"))?;
+    spec.secure_boot = Requirement::Required;
+    let provider = ilex_devkit::provider::LinuxProvider::new(ws.clone())?;
+    let error = provider.validate(&spec).expect_err("ordinary backend must reject secure boot");
+    println!("     unsupported capability rejected before mutation: {error:#}");
+    anyhow::ensure!(!ws.runtime_dir().join("unsupported-contract").exists(), "unsupported capability mutated runtime state");
+    Ok(())
 }
 
 fn boot_mount(vm: &Vm) -> Result<()> {

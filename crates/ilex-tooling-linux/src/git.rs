@@ -37,14 +37,19 @@ pub fn short_sha(root: &Path) -> Result<String> {
 
 /// True when tracked files differ from `HEAD` or untracked files exist.
 pub fn is_dirty(root: &Path) -> Result<bool> {
-    let status = cmd::output(git(root).args(["status", "--porcelain", "--untracked-files=normal"]))?;
+    let status =
+        cmd::output(git(root).args(["status", "--porcelain", "--untracked-files=normal"]))?;
     Ok(!status.is_empty())
 }
 
 /// `<sha>` or `<sha>-dirty`, for `org.opencontainers.image.revision`.
 pub fn revision(root: &Path) -> Result<String> {
     let sha = head_sha(root)?;
-    Ok(if is_dirty(root)? { format!("{sha}-dirty") } else { sha })
+    Ok(if is_dirty(root)? {
+        format!("{sha}-dirty")
+    } else {
+        sha
+    })
 }
 
 /// Git tree hash of `path` (relative to the repo root) at `HEAD`.
@@ -74,5 +79,8 @@ fn translate_windows_path(p: &str) -> Option<PathBuf> {
         return None;
     }
     let drive = (b[0] as char).to_ascii_lowercase();
-    Some(PathBuf::from(format!("/mnt/{drive}{}", p[2..].replace('\\', "/"))))
+    Some(PathBuf::from(format!(
+        "/mnt/{drive}{}",
+        p[2..].replace('\\', "/")
+    )))
 }

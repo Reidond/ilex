@@ -193,6 +193,7 @@ impl EphemeralVm {
     /// container `name`, and wait until SSH answers. A leftover container of
     /// the same name from a killed run is replaced.
     pub fn boot(name: &str, image: &str, opts: &EphemeralOpts) -> Result<Self> {
+        crate::provider::require_arch(ilex_tooling_core::Architecture::X86_64)?;
         cmd::require("podman")?;
         cmd::require("bcvk")?;
         podman_rm(name);
@@ -336,6 +337,7 @@ impl LibvirtVm {
     /// boot it and wait for SSH. A leftover domain of the same name is
     /// replaced.
     pub fn boot(name: &str, image: &str, opts: &LibvirtOpts) -> Result<Self> {
+        crate::provider::require_arch(ilex_tooling_core::Architecture::X86_64)?;
         cmd::require("bcvk")?;
         let slot = slots::acquire(name)?;
         // Guard first: a failed install or boot below still removes the domain.

@@ -35,8 +35,8 @@ const INSTALLER_INPUTS: &[&str] = &[
     "build/compose.py",
     "installer",
     "crates/xtask/src/iso.rs",
-    "crates/ilex-devkit/src/installer.rs",
-    "crates/ilex-devkit/src/config.rs",
+    "crates/ilex-tooling-core/src/installer.rs",
+    "crates/ilex-tooling-core/src/config.rs",
     // Future enrollment helpers live under installer/ and are covered above.
     "rootfs/etc/containers/registries.d/ilex.yaml",
     "rootfs/etc/pki/containers/ilex.pub",

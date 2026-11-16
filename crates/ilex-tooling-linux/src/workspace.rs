@@ -9,7 +9,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
+use ilex_tooling_core::{CheckoutIdentity, digest};
 
 use crate::git;
 
@@ -19,8 +19,6 @@ pub const IMAGE_REPO: &str = "localhost/ilex";
 // `/run/user/0/ilex-vm/<slug>/graphical/vdagent.sock` adds 43 bytes to the
 // slug: 48 leaves 16 bytes spare below Linux's 107-byte socket path limit.
 // `ilex-<slug>-ephemeral` also fits the 63-character hostname budget.
-const MAX_SLUG_LEN: usize = 48;
-const HASH_HEX_LEN: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
@@ -53,13 +51,62 @@ impl Workspace {
     }
 
     pub fn from_root(root: PathBuf) -> Self {
-        let root = std::path::absolute(&root).unwrap_or(root);
-        let worktree = worktree_name(&root);
+        let root = std::fs::canonicalize(&root)
+            .or_else(|_| std::path::absolute(&root))
+            .unwrap_or(root);
+        #[cfg(windows)]
+        let root = PathBuf::from(
+            root.to_string_lossy()
+                .strip_prefix(r"\\?\")
+                .unwrap_or(&root.to_string_lossy()),
+        );
+        let worktree = worktree_name(&root).or_else(|| {
+            // Unknown gitfiles and missing metadata must never acquire main's
+            // namespace. Only a real main checkout has a .git directory.
+            (!root.join(".git").is_dir())
+                .then(|| format!("checkout-{}", &digest(native_path(&root).as_bytes())[7..23]))
+        });
         let slug = match &worktree {
-            Some(name) => sanitize(name),
+            Some(name) => ilex_tooling_core::identity::slug(name),
             None => "main".to_string(),
         };
-        Self { root, slug, worktree }
+        Self {
+            root,
+            slug,
+            worktree,
+        }
+    }
+
+    /// Native identity survives Windows-to-WSL handoff. The Linux executor
+    /// never derives a second owner from the translated mount path.
+    pub fn identity(&self) -> Result<CheckoutIdentity> {
+        let common = crate::cmd::output(git::git(&self.root).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ]))?;
+        let common = std::fs::canonicalize(&common).unwrap_or_else(|_| PathBuf::from(common));
+        let repository_id = digest(native_path(&common).as_bytes());
+        let mut identity = CheckoutIdentity::new(
+            repository_id,
+            native_path(&self.root),
+            self.worktree.as_deref().unwrap_or("main"),
+            self.worktree.is_none(),
+        );
+        identity.source_revision = git::revision(&self.root)?;
+        Ok(identity)
+    }
+
+    pub fn source_identity(&self) -> Result<(CheckoutIdentity, ilex_tooling_core::SourceManifest)> {
+        let source = crate::source::manifest(self)?;
+        let mut identity = self.identity()?;
+        identity.source_revision = if source.dirty {
+            format!("{}-dirty", source.revision)
+        } else {
+            source.revision.clone()
+        };
+        identity.snapshot_digest = Some(source.digest.clone());
+        Ok((identity, source))
     }
 
     /// Tag part of this checkout's image: `main` or `wt-<slug>`.
@@ -140,7 +187,10 @@ pub fn check_tag_length(image: &str) -> Result<()> {
         && let Some((_, tag)) = image.rsplit('/').next().unwrap_or(image).rsplit_once(':')
         && tag.len() > 128
     {
-        bail!("image tag is {} bytes, exceeding the 128-byte limit; use a shorter selection or explicit image tag", tag.len());
+        bail!(
+            "image tag is {} bytes, exceeding the 128-byte limit; use a shorter selection or explicit image tag",
+            tag.len()
+        );
     }
     Ok(())
 }
@@ -151,7 +201,7 @@ pub fn vm_runtime_root() -> PathBuf {
     if let Some(dir) = env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir).join("ilex-vm");
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
         if let Ok(meta) = std::fs::metadata("/proc/self") {
@@ -188,32 +238,20 @@ fn worktree_name(root: &Path) -> Option<String> {
     (parts.next()? == "worktrees").then(|| name.to_string())
 }
 
-/// Keep short, valid names stable. Hash the original git name when changing
-/// it, shortening it, or escaping the main checkout's reserved identity.
-/// Plain slugs have no double dashes; hashed slugs use `--` before the hash,
-/// so the two forms cannot overlap. Both are bounded ASCII without leading
-/// or trailing dashes.
-fn sanitize(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for c in name.chars() {
-        let c = c.to_ascii_lowercase();
-        if c.is_ascii_alphanumeric() {
-            out.push(c);
-        } else if !out.ends_with('-') {
-            out.push('-');
+/// Canonical native path key. WSL translation belongs to this compatibility
+/// backend, never to core. Windows path identity is case-insensitive.
+fn native_path(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let path = path.strip_prefix("//?/").unwrap_or(&path);
+    if let Some(rest) = path.strip_prefix("/mnt/") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'/' {
+            return format!("{}:/{}", &rest[..1], &rest[2..]).to_ascii_lowercase();
         }
     }
-    let out = out.trim_matches('-');
-    let out = match out {
-        "" => "wt",
-        "main" => "wt-main",
-        out => out,
-    };
-    if out == name && out.len() <= MAX_SLUG_LEN {
-        return out.to_string();
+    if path.as_bytes().get(1) == Some(&b':') {
+        path.to_ascii_lowercase()
+    } else {
+        path.to_string()
     }
-    let readable_len = out.len().min(MAX_SLUG_LEN - 2 - HASH_HEX_LEN);
-    let readable = out[..readable_len].trim_end_matches('-');
-    let hash = format!("{:x}", Sha256::digest(name.as_bytes()));
-    format!("{readable}--{}", &hash[..HASH_HEX_LEN])
 }

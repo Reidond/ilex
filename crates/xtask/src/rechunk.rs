@@ -20,25 +20,11 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use ilex_devkit::{Workspace, cmd, config::Selection, git};
+use ilex_devkit::{Workspace, cmd, config::Selection};
 use sha2::{Digest, Sha256};
 
 use crate::build::{BASE_IMAGE, image_exists};
 use crate::registry::FINGERPRINT_LABEL;
-
-/// Repo paths whose content ends up in the image. `Cargo.toml`/`Cargo.lock`
-/// pin the dependencies of the shipped binaries.
-const INPUTS: &[&str] = &[
-    "users",
-    "rootfs",
-    "crates",
-    "Containerfile",
-    "packages.toml",
-    "Cargo.toml",
-    "Cargo.lock",
-    "build",
-    "machines/generic",
-];
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
@@ -175,7 +161,7 @@ pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
 }
 
 /// Content fingerprint of `image`: `sha256:<hex>` over the sorted `rpm -qa`
-/// output of the image and the git tree hashes of [`INPUTS`] at `HEAD`.
+/// output of the image and the git tree hashes of the image inputs at `HEAD`.
 pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     let selection = image_selection(image)?;
     let inputs = selection_inputs(&selection);
@@ -211,79 +197,8 @@ pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     Ok(format!("sha256:{}", hex(&hash.finalize())))
 }
 
-/// Early root cache key: selected source trees plus both freshly pulled build
-/// images. The full RPM/content fingerprint still decides publication after a
-/// cache miss. Missing keys on older publications deliberately force a build.
-pub fn root_inputs(ws: &Workspace, selection: &Selection) -> Result<String> {
-    let mut hash = Sha256::new();
-    hash.update(b"ilex-root-inputs v1\n");
-    hash_selection(&mut hash, selection);
-    hash_users(ws, &mut hash)?;
-    for image in [crate::build::BASE_IMAGE, crate::build::BUILDER_IMAGE] {
-        let digest = cmd::output(Command::new("podman").args([
-            "image",
-            "inspect",
-            "--format",
-            "{{.Digest}}",
-            image,
-        ]))?;
-        if !crate::registry::is_digest(&digest) {
-            bail!("invalid upstream digest for {image}: {digest}");
-        }
-        hash.update(format!("upstream {image} {digest}\n"));
-    }
-    hash_inputs(ws, &mut hash, selection_inputs(selection))?;
-    Ok(format!("sha256:{}", hex(&hash.finalize())))
-}
-
-fn selection_inputs(selection: &Selection) -> Vec<String> {
-    let mut inputs: Vec<String> = INPUTS.iter().map(|s| s.to_string()).collect();
-    if !selection.shells.is_empty() {
-        inputs.push("shells/packages.toml".into());
-    }
-    if selection.machine != "generic" {
-        inputs.extend([
-            format!("machines/{}", selection.machine),
-            "machines/Containerfile".into(),
-        ]);
-    }
-    inputs.extend(selection.shells.iter().map(|name| format!("shells/{name}")));
-    inputs
-}
-
-fn hash_selection(hash: &mut Sha256, selection: &Selection) {
-    for (key, value) in selection.labels() {
-        hash.update(format!("selection {key}={value}\n"));
-    }
-}
-
-// User selection affects the public catalogue, never the three OCI selection
-// labels or publication names. Hash it separately so changing only the list
-// cannot reuse a root with a different catalogue.
-fn hash_users(ws: &Workspace, hash: &mut Sha256) -> Result<()> {
-    let manifest = ilex_devkit::config::manifest(&ws.root.join("image.toml"))?;
-    let users = manifest
-        .get("users")
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "[]".into());
-    hash.update(format!("users {users}\n"));
-    Ok(())
-}
-
-fn hash_inputs(ws: &Workspace, hash: &mut Sha256, inputs: Vec<String>) -> Result<()> {
-    for path in inputs {
-        let tree = git::tree_hash(&ws.root, &path).with_context(|| format!("hashing {path}"))?;
-        eprintln!("  {path}: {tree}");
-        hash.update(format!("tree {path} {tree}\n"));
-    }
-    if git::is_dirty(&ws.root)? {
-        // Only HEAD's trees are hashed; make a dirty build's fingerprint
-        // differ from the clean one so it can never match a published image.
-        eprintln!("xtask: warning: working tree is dirty; the fingerprint covers HEAD only");
-        hash.update(b"dirty\n");
-    }
-    Ok(())
-}
+pub use ilex_devkit::fingerprint::root_inputs;
+use ilex_devkit::fingerprint::{selection_inputs, hash_selection, hash_users, hash_inputs};
 
 /// Require configuration labels even when reusing an existing fingerprint.
 fn image_selection(image: &str) -> Result<Selection> {

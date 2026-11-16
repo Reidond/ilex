@@ -873,6 +873,54 @@ restored vs compiled.
 - To bump kache, change the version in the URL and the sha256 in the
   Containerfile (`gh release view vX.Y.Z -R kunobi-ninja/kache --json assets`).
 
+## Tooling contracts (T1)
+
+`ilex-tooling-core` defines architecture, checkout/source identity, selection,
+build requests/results, disk artifacts, VM specs/handles, capabilities, RGB
+frames/input and versioned state/remote envelopes. It has no platform path or
+hypervisor policy. Host and guest architectures are separate. The current Linux
+backend qualifies native x86_64 only; unsupported requests fail before launch.
+The `ilex-devkit` facade preserves the Linux/WSL API, handoff and viewer.
+
+```sh
+cargo xtask info --json                 # identity, source manifest, paths, capabilities
+cargo xtask info --capabilities
+cargo xtask doctor --self-check --json  # disposable real Git checkouts; no images/VMs
+cargo xtask doctor --arch aarch64        # explicit rejection on the current Linux backend
+cargo xtask doctor --require firmware_enforcement # fails: ordinary defaults are nonsecure
+ilex-vmctl capabilities --json          # attach to a running VM; MCP: capabilities
+```
+
+Only Git's actual main checkout gets `main`. Linked T3/Claude/conventional
+worktrees use Git's unique worktree name. Unsafe, long and reserved names get a
+bounded hash suffix; unknown/missing Git metadata gets a hashed checkout name,
+never `main`. The canonical native checkout path plus common Git directory
+produce a stable UUIDv8 owner. Windows and its WSL mount resolve to that same
+identity. A copied checkout must carry its original identity explicitly when a
+future remote executor stages it; it must not rediscover ownership from a copy.
+
+Local image builds pass typed requests to the Linux executor. A source manifest
+covers Git modes, working bytes, untracked inputs and tracked deletions; it
+excludes Git internals, target/state and private key/environment inputs, and
+rejects escaping symlinks. Two inventories and a post-build check detect source
+changes. Image labels `ilex.checkout-owner`, `ilex.source-digest` and
+`ilex.architecture` record provenance; `<state dir>/jobs/<job hash>/` retains
+request/result JSON with the immutable image ID and local executor identity.
+This is local provenance, not the remote source-transfer implementation (T3).
+Rechunk/ISO/tool orchestration retains its compatibility path.
+
+VM metadata includes schema, owner, run, architecture and PID creation identity.
+Unknown versions and foreign owner records are rejected before replacement;
+stop an old VM through its owning launcher before updating tooling and relaunch
+with the current version. Never adopt an old `main` image for a worktree.
+QMP uses the portable protocol over Linux Unix sockets, with IDs, bounded
+messages and per-command deadlines. Frame contracts include VM identity,
+timestamp, viewport and resize generation; stale pointer mappings fail. The
+existing CLI/MCP screenshot coordinates stay in framebuffer/downscaled pixels.
+Firmware enforcement, persistent TPM and suspend remain explicitly unavailable
+or unqualified for ordinary Linux defaults; no security capability is silently
+weakened. WSL removal and native Windows providers belong to later tooling PRs.
+
 ## Windows: run everything in WSL2
 
 podman, bcvk and QEMU are Linux-only. On Windows the stack lives in the
@@ -967,7 +1015,7 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
 
 `cargo xtask vm --gui` in WSL doesn't open a Linux window; the VM's window is
 `ilex-viewer.exe` (`crates/ilex-viewer`), a native Windows program, fed by a
-display bridge in `xtask vm` (`crates/ilex-devkit/src/display.rs`, protocol
+display bridge in `xtask vm` (`crates/ilex-tooling-linux/src/display.rs`, protocol
 in `viewer.rs`):
 
 - QEMU draws into a private Xvfb (`-display gtk,gl=on,show-menubar=off`;
@@ -1839,9 +1887,10 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   name Fedora packages or comps IDs; only excludes accept DNF globs.
 - `bootc container lint --fatal-warnings` runs last in the build: clean up
   what it flags in the same `RUN` step that created it.
-- Shared host-side plumbing (slug, paths, VM slots, git) lives in
-  `crates/ilex-devkit`; each `xtask` subcommand is its own module with its
-  own `clap::Args`.
+- Portable contracts and selection live in `crates/ilex-tooling-core`; QMP
+  framing and keyboard mapping in `crates/ilex-tooling-qmp`; Linux execution,
+  paths and slots in `crates/ilex-tooling-linux`. `ilex-devkit` is the
+  compatibility facade. Each `xtask` subcommand has its own module and Args.
 - Shell out to the packaged `bcvk` CLI, not the `bcvk-qemu` library.
 - Text files use LF (`.gitattributes`), except token exports, whose bytes are
   preserved exactly; scripts shipped in `rootfs/`

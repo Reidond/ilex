@@ -30,7 +30,12 @@ latest screenshot. It works before login (firmware, GRUB, GDM). Use SSH, not pix
 /// Serve MCP on stdin/stdout until stdin closes. `ws` is `None` when no
 /// checkout could be found; tools then explain how to fix that.
 pub fn serve(ws: Option<Workspace>, default_vm: Option<String>) -> Result<()> {
-    let mut server = Server { ws, default_vm, last_scale: None };
+    let mut server = Server {
+        ws,
+        default_vm,
+        last_scale: None,
+        last_view: None,
+    };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -38,7 +43,9 @@ pub fn serve(ws: Option<Workspace>, default_vm: Option<String>) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let Some(response) = server.handle_line(&line) else { continue };
+        let Some(response) = server.handle_line(&line) else {
+            continue;
+        };
         writeln!(stdout, "{response}")?;
         stdout.flush()?;
     }
@@ -50,6 +57,7 @@ struct Server {
     default_vm: Option<String>,
     /// Screen pixels per screenshot pixel, from the last screenshot returned.
     last_scale: Option<f64>,
+    last_view: Option<(ilex_devkit::core::VmHandle, u32, u32)>,
 }
 
 impl Server {
@@ -57,7 +65,11 @@ impl Server {
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                return Some(error_response(Value::Null, -32700, &format!("parse error: {e}")));
+                return Some(error_response(
+                    Value::Null,
+                    -32700,
+                    &format!("parse error: {e}"),
+                ));
             }
         };
         let id = msg.get("id").cloned();
@@ -89,7 +101,11 @@ impl Server {
 
     fn workspace(&self, args: &Value) -> Result<Workspace> {
         if let Some(slug) = args["slug"].as_str() {
-            return Ok(Workspace { root: Default::default(), slug: slug.to_string(), worktree: None });
+            return Ok(Workspace {
+                root: Default::default(),
+                slug: slug.to_string(),
+                worktree: None,
+            });
         }
         match &self.ws {
             Some(ws) => Ok(ws.clone()),
@@ -107,10 +123,19 @@ impl Server {
     /// Screen pixels per screenshot pixel; takes a screenshot to find out
     /// when none was returned yet.
     fn scale(&mut self, vm: &Vmctl) -> Result<f64> {
+        let f = vm.screenshot()?;
+        let current = (vm.handle(), f.width, f.height);
+        if self.last_view.as_ref().is_some_and(|old| old != &current) {
+            self.last_scale = None;
+            self.last_view = None;
+            bail!(
+                "VM or framebuffer changed; take a new screenshot before using screenshot coordinates"
+            );
+        }
+        self.last_view = Some(current);
         if let Some(s) = self.last_scale {
             return Ok(s);
         }
-        let f = vm.screenshot()?;
         let s = f.width.max(f.height) as f64 / f.width.max(f.height).min(DEFAULT_MAX_EDGE) as f64;
         self.last_scale = Some(s);
         Ok(s)
@@ -120,12 +145,22 @@ impl Server {
     fn point(&mut self, vm: &Vmctl, args: &Value) -> Result<(u32, u32)> {
         let x = args["x"].as_f64().context("`x` is required")?;
         let y = args["y"].as_f64().context("`y` is required")?;
-        let scale = if args["space"].as_str() == Some("screen") { 1.0 } else { self.scale(vm)? };
-        Ok(((x * scale).round().max(0.0) as u32, (y * scale).round().max(0.0) as u32))
+        let scale = if args["space"].as_str() == Some("screen") {
+            1.0
+        } else {
+            self.scale(vm)?
+        };
+        Ok((
+            (x * scale).round().max(0.0) as u32,
+            (y * scale).round().max(0.0) as u32,
+        ))
     }
 
     fn run_tool(&mut self, name: &str, args: &Value) -> Result<Vec<Value>> {
         match name {
+            "capabilities" => Ok(vec![text(&serde_json::to_string_pretty(
+                &self.vm(args)?.capabilities(),
+            )?)]),
             "vm_list" => {
                 let ws = self.workspace(args)?;
                 let vms = qemu::running_vms(&ws);
@@ -156,7 +191,9 @@ impl Server {
                 let max_edge = if args["full"].as_bool() == Some(true) {
                     0
                 } else {
-                    args["max_edge"].as_u64().map_or(DEFAULT_MAX_EDGE, |n| n as u32)
+                    args["max_edge"]
+                        .as_u64()
+                        .map_or(DEFAULT_MAX_EDGE, |n| n as u32)
                 };
                 self.screenshot_result(&vm, max_edge)
             }
@@ -164,9 +201,16 @@ impl Server {
                 let vm = self.vm(args)?;
                 let (x, y) = self.point(&vm, args)?;
                 let button = Button::parse(args["button"].as_str().unwrap_or("left"))?;
-                let count = if args["double"].as_bool() == Some(true) { 2 } else { 1 };
+                let count = if args["double"].as_bool() == Some(true) {
+                    2
+                } else {
+                    1
+                };
                 vm.click(x, y, button, count)?;
-                Ok(vec![text(&format!("clicked {} at screen ({x}, {y})", args["button"].as_str().unwrap_or("left")))])
+                Ok(vec![text(&format!(
+                    "clicked {} at screen ({x}, {y})",
+                    args["button"].as_str().unwrap_or("left")
+                ))])
             }
             "scroll" => {
                 let vm = self.vm(args)?;
@@ -178,13 +222,18 @@ impl Server {
                 };
                 let amount = args["amount"].as_u64().unwrap_or(3) as u32;
                 vm.scroll(x, y, up, amount)?;
-                Ok(vec![text(&format!("scrolled {amount} at screen ({x}, {y})"))])
+                Ok(vec![text(&format!(
+                    "scrolled {amount} at screen ({x}, {y})"
+                ))])
             }
             "type_text" => {
                 let vm = self.vm(args)?;
                 let t = args["text"].as_str().context("`text` is required")?;
                 vm.type_text(t)?;
-                Ok(vec![text(&format!("typed {} characters", t.chars().count()))])
+                Ok(vec![text(&format!(
+                    "typed {} characters",
+                    t.chars().count()
+                ))])
             }
             "key" => {
                 let vm = self.vm(args)?;
@@ -200,10 +249,15 @@ impl Server {
                     stable: args["stable_secs"].as_f64().map(Duration::from_secs_f64),
                     size: args["size"].as_str().map(crate::parse_size).transpose()?,
                 };
-                let timeout = Duration::from_secs_f64(args["timeout_secs"].as_f64().unwrap_or(120.0));
+                let timeout =
+                    Duration::from_secs_f64(args["timeout_secs"].as_f64().unwrap_or(120.0));
                 let started = std::time::Instant::now();
                 let (png, frame) = vm.wait_screen(&cond, timeout)?;
-                let mut out = vec![text(&format!("screen ready after {:.1}s", started.elapsed().as_secs_f64()))];
+                self.last_view = Some((vm.handle(), frame.width, frame.height));
+                let mut out = vec![text(&format!(
+                    "screen ready after {:.1}s",
+                    started.elapsed().as_secs_f64()
+                ))];
                 out.extend(self.image_content(&frame, &png, DEFAULT_MAX_EDGE)?);
                 Ok(out)
             }
@@ -214,23 +268,37 @@ impl Server {
     fn screenshot_result(&mut self, vm: &Vmctl, max_edge: u32) -> Result<Vec<Value>> {
         let png = vm.screenshot_png()?;
         let frame = crate::Frame::decode(&png)?;
+        self.last_view = Some((vm.handle(), frame.width, frame.height));
         self.image_content(&frame, &png, max_edge)
     }
 
     /// Image content for `frame`, shrunk to `max_edge` (0 = as is); records
     /// the scale for later clicks.
-    fn image_content(&mut self, frame: &crate::Frame, png: &[u8], max_edge: u32) -> Result<Vec<Value>> {
+    fn image_content(
+        &mut self,
+        frame: &crate::Frame,
+        png: &[u8],
+        max_edge: u32,
+    ) -> Result<Vec<Value>> {
         let small = frame.downscale(max_edge);
         let scale = frame.width as f64 / small.width as f64;
         self.last_scale = Some(scale);
-        let data = if small.width == frame.width { png.to_vec() } else { small.encode_png()? };
+        let data = if small.width == frame.width {
+            png.to_vec()
+        } else {
+            small.encode_png()?
+        };
         let note = format!(
             "Screen is {}x{}; this image is {}x{}. click/scroll x,y are in this image's pixels{}.",
             frame.width,
             frame.height,
             small.width,
             small.height,
-            if frame.is_blank() { ". The screen is blank." } else { "" }
+            if frame.is_blank() {
+                ". The screen is blank."
+            } else {
+                ""
+            }
         );
         Ok(vec![
             json!({ "type": "image", "data": base64(&data), "mimeType": "image/png" }),
@@ -253,7 +321,11 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 
 fn initialize_result(params: &Value) -> Value {
     let requested = params["protocolVersion"].as_str().unwrap_or("");
-    let version = if PROTOCOL_VERSIONS.contains(&requested) { requested } else { PROTOCOL_VERSIONS[0] };
+    let version = if PROTOCOL_VERSIONS.contains(&requested) {
+        requested
+    } else {
+        PROTOCOL_VERSIONS[0]
+    };
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
@@ -279,6 +351,11 @@ fn tool_definitions() -> Value {
         props
     };
     json!([
+        {
+            "name": "capabilities",
+            "description": "Report the selected VM's screenshot, input and lifecycle capabilities, with unavailable reasons.",
+            "inputSchema": { "type": "object", "properties": { "vm": vm, "slug": slug } }
+        },
         {
             "name": "vm_list",
             "description": "List the running VMs of this checkout, with their SSH command lines.",

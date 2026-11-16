@@ -77,7 +77,7 @@ fn hash_tree(hash: &mut Sha256, root: &Path, path: &Path) -> Result<()> {
             .replace('\\', "/")
             .as_bytes(),
     );
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
         hash.update(meta.permissions().mode().to_le_bytes());
@@ -114,7 +114,7 @@ pub fn inputs(ws: &Workspace, directory: &Path, podman_args: &[String]) -> Resul
         "build/compose.py",
         "build/image_tree.py",
         "build/install-packages.sh",
-        "crates/ilex-devkit/src/machine.rs",
+        "crates/ilex-tooling-linux/src/machine.rs",
     ] {
         hash_tree(&mut inputs, &ws.root, &ws.root.join(relative))?;
     }
@@ -199,7 +199,10 @@ pub fn build(
             &format!("ilex.machine-key={key}"),
         ])
         .args(["--label", &format!("ilex.machine-inputs={inputs}")])
-        .args(["--label", &format!("org.opencontainers.image.revision={revision}")])
+        .args([
+            "--label",
+            &format!("org.opencontainers.image.revision={revision}"),
+        ])
         .args(["--unsetlabel", "ilex.fingerprint"])
         .args(podman_args)
         .arg("build");

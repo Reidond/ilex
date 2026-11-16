@@ -9,6 +9,9 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+ilex-tooling-core = { path = "crates/ilex-tooling-core" }
+ilex-tooling-qmp = { path = "crates/ilex-tooling-qmp" }
+ilex-tooling-linux = { path = "crates/ilex-tooling-linux" }
 ilex-devkit = { path = "crates/ilex-devkit" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -24,6 +27,9 @@ strip = true
 # frame through the display bridge (ilex-devkit) and ilex-viewer: unoptimized,
 # that managed 6 frames/s. Dependencies compile once, so optimize them too.
 [profile.dev.package.ilex-devkit]
+opt-level = 3
+
+[profile.dev.package.ilex-tooling-linux]
 opt-level = 3
 
 [profile.dev.package.ilex-viewer]

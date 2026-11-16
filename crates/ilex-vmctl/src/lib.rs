@@ -72,13 +72,21 @@ pub struct WaitCond {
 
 /// Parse `3840x2160`.
 pub fn parse_size(s: &str) -> Result<(u32, u32)> {
-    let (w, h) = s.split_once(['x', 'X']).with_context(|| format!("size `{s}` is not WIDTHxHEIGHT"))?;
-    Ok((w.trim().parse().context("width")?, h.trim().parse().context("height")?))
+    let (w, h) = s
+        .split_once(['x', 'X'])
+        .with_context(|| format!("size `{s}` is not WIDTHxHEIGHT"))?;
+    Ok((
+        w.trim().parse().context("width")?,
+        h.trim().parse().context("height")?,
+    ))
 }
 
 impl WaitCond {
     pub fn nonblank() -> Self {
-        Self { nonblank: true, ..Self::default() }
+        Self {
+            nonblank: true,
+            ..Self::default()
+        }
     }
 
     /// With nothing asked for, wait for a non-blank screen.
@@ -95,19 +103,59 @@ impl WaitCond {
 #[derive(Debug, Clone)]
 pub struct Vmctl {
     pub info: VmInfo,
+    mapping: std::sync::Arc<std::sync::Mutex<FrameMapping>>,
+}
+
+#[derive(Debug, Default)]
+struct FrameMapping {
+    size: (u32, u32),
+    generation: u64,
 }
 
 impl Vmctl {
     /// Attach to the checkout's VM named `purpose`, or its only running VM.
     pub fn attach(ws: &Workspace, purpose: Option<&str>) -> Result<Vmctl> {
-        Ok(Vmctl { info: qemu::find_vm(ws, purpose)? })
+        Ok(Self::from_info(qemu::find_vm(ws, purpose)?))
     }
 
     pub fn from_info(info: VmInfo) -> Vmctl {
-        Vmctl { info }
+        Vmctl {
+            info,
+            mapping: Default::default(),
+        }
+    }
+
+    pub fn capabilities(&self) -> ilex_tooling_core::VmCapabilities {
+        let mut caps = ilex_devkit::provider::capabilities(
+            &self.info.display,
+            (self.info.width, self.info.height),
+        );
+        caps.vm_id = Some(format!("{}:{}", self.info.pid, self.info.process_start));
+        caps.screenshot_dimensions = self
+            .mapping
+            .lock()
+            .ok()
+            .and_then(|mapping| (mapping.size.0 > 0).then_some(mapping.size));
+        caps
+    }
+
+    pub fn handle(&self) -> ilex_tooling_core::VmHandle {
+        ilex_tooling_core::VmHandle {
+            schema: self.info.schema,
+            owner: self.info.owner.clone(),
+            run: self.info.run.clone(),
+            provider: "linux-qemu-kvm".into(),
+            opaque_id: format!("{}:{}", self.info.pid, self.info.process_start),
+            guest_arch: self.info.architecture,
+        }
     }
 
     fn qmp(&self) -> Result<Qmp> {
+        ilex_tooling_core::check_version(self.info.schema)?;
+        anyhow::ensure!(
+            self.info.is_running(),
+            "VM process identity no longer matches; attach again"
+        );
         Qmp::connect(&self.info.qmp_sock)
     }
 
@@ -116,6 +164,9 @@ impl Vmctl {
     /// The framebuffer as PNG bytes: as QEMU wrote it, or, for a VM behind
     /// the display bridge (`xtask vm --gui` in WSL), from the bridge.
     pub fn screenshot_png(&self) -> Result<Vec<u8>> {
+        ilex_tooling_core::check_version(self.info.schema)?;
+        self.capabilities()
+            .require(ilex_tooling_core::Capability::Screenshot)?;
         if self.info.display == "viewer" {
             return self.bridge_screenshot()?.encode_png();
         }
@@ -127,9 +178,13 @@ impl Vmctl {
                 self.info.name
             );
         }
-        let file = self.info.dir.join(format!("screendump-{}.png", std::process::id()));
+        let file = self
+            .info
+            .dir
+            .join(format!("screendump-{}.png", std::process::id()));
         let result = (|| {
-            self.qmp()?.execute("screendump", json!({ "filename": file, "format": "png" }))?;
+            self.qmp()?
+                .execute("screendump", json!({ "filename": file, "format": "png" }))?;
             std::fs::read(&file).with_context(|| format!("reading {}", file.display()))
         })();
         let _ = std::fs::remove_file(&file);
@@ -138,23 +193,32 @@ impl Vmctl {
 
     /// The display bridge's current frame (`screen.sock`: `u32` width, `u32`
     /// height, BGRX pixels).
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn bridge_screenshot(&self) -> Result<Frame> {
         use std::io::Read;
         let path = self.info.dir.join("screen.sock");
-        let mut stream = std::os::unix::net::UnixStream::connect(&path)
-            .with_context(|| format!("connecting to {} (is the display bridge running?)", path.display()))?;
+        let mut stream = std::os::unix::net::UnixStream::connect(&path).with_context(|| {
+            format!(
+                "connecting to {} (is the display bridge running?)",
+                path.display()
+            )
+        })?;
         let mut head = [0u8; 8];
         stream.read_exact(&mut head)?;
         let width = u32::from_le_bytes(head[..4].try_into().unwrap());
         let height = u32::from_le_bytes(head[4..].try_into().unwrap());
         let mut bgrx = vec![0u8; width as usize * height as usize * 4];
         stream.read_exact(&mut bgrx).context("reading the frame")?;
-        let rgb = bgrx.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
+        let rgb = bgrx
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| [p[2], p[1], p[0]])
+            .collect();
         Ok(Frame { width, height, rgb })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     fn bridge_screenshot(&self) -> Result<Frame> {
         bail!("the display bridge's socket is a unix socket: run ilex-vmctl inside WSL")
     }
@@ -264,7 +328,11 @@ impl Vmctl {
 
     /// Type `text` on a US keyboard. `\n` presses Return.
     pub fn type_text(&self, text: &str) -> Result<()> {
-        let strokes = text.chars().map(keys::stroke_for_char).collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(text.len() <= 64 * 1024, "text input exceeds 64 KiB");
+        let strokes = text
+            .chars()
+            .map(keys::stroke_for_char)
+            .collect::<Result<Vec<_>>>()?;
         let mut qmp = self.qmp()?;
         for s in strokes {
             let mut down = Vec::new();
@@ -306,22 +374,168 @@ fn send_events(qmp: &mut Qmp, events: Vec<Value>) -> Result<()> {
     Ok(())
 }
 
-fn key_event(qcode: &str, down: bool) -> Value {
-    json!({ "type": "key", "data": { "down": down, "key": { "type": "qcode", "data": qcode } } })
+pub use ilex_tooling_qmp::{absolute_events as abs_events, button_event as btn_event, key_event};
+
+impl ilex_tooling_core::VmControl for Vmctl {
+    fn capabilities(&self) -> Result<ilex_tooling_core::VmCapabilities> {
+        Ok(self.capabilities())
+    }
+    fn capture(&self) -> Result<ilex_tooling_core::Frame> {
+        use ilex_tooling_core::{CoordinateSpace, Viewport};
+        let image = self.screenshot()?;
+        let mut mapping = self
+            .mapping
+            .lock()
+            .map_err(|_| anyhow::anyhow!("frame mapping poisoned"))?;
+        if mapping.size != (image.width, image.height) {
+            mapping.size = (image.width, image.height);
+            mapping.generation = mapping
+                .generation
+                .checked_add(1)
+                .context("frame generation exhausted")?;
+        }
+        Ok(ilex_tooling_core::Frame {
+            vm: self.handle(),
+            captured_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis()
+                .try_into()?,
+            generation: mapping.generation,
+            width: image.width,
+            height: image.height,
+            viewport: Viewport {
+                x: 0,
+                y: 0,
+                width: image.width,
+                height: image.height,
+            },
+            coordinate_space: CoordinateSpace::FramebufferPixels,
+            pixels: image.rgb,
+        })
+    }
+    fn key(&self, input: &ilex_tooling_core::Input) -> Result<()> {
+        use ilex_tooling_core::Input;
+        use ilex_tooling_qmp::physical_key_event;
+        input.validate()?;
+        match input {
+            Input::Text { text, layout, .. } => {
+                anyhow::ensure!(
+                    layout == "us",
+                    "Linux QMP text input requires layout us; Unicode is unsupported"
+                );
+                // Validate before sending anything; errors never disclose text.
+                anyhow::ensure!(
+                    text.chars().all(|c| keys::stroke_for_char(c).is_ok()),
+                    "text is not representable on the declared US keyboard"
+                );
+                self.type_text(text)
+            }
+            Input::PhysicalKey { code, down } => {
+                send_events(&mut self.qmp()?, vec![physical_key_event(*code, *down)])
+            }
+            Input::Chord { codes } => {
+                let mut qmp = self.qmp()?;
+                let down = send_events(
+                    &mut qmp,
+                    codes.iter().map(|&c| physical_key_event(c, true)).collect(),
+                );
+                thread::sleep(Duration::from_millis(30));
+                let up = send_events(
+                    &mut qmp,
+                    codes
+                        .iter()
+                        .rev()
+                        .map(|&c| physical_key_event(c, false))
+                        .collect(),
+                );
+                down.and(up)
+            }
+        }
+    }
+    fn pointer(
+        &self,
+        frame: &ilex_tooling_core::Frame,
+        generation: u64,
+        x: u32,
+        y: u32,
+    ) -> Result<()> {
+        let current = ilex_tooling_core::VmControl::capture(self)?;
+        frame.validate_pointer(&current.vm, generation, x, y)?;
+        anyhow::ensure!(
+            current.generation == generation
+                && (current.width, current.height) == (frame.width, frame.height),
+            "framebuffer resized; capture again before pointer input"
+        );
+        send_events(
+            &mut self.qmp()?,
+            abs_events(x, y, current.width, current.height),
+        )
+    }
+    fn serial(&self) -> Result<Vec<u8>> {
+        Ok(std::fs::read(self.info.dir.join("serial.log"))?)
+    }
+    fn guest_exec(&self, argv: &[String]) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            !argv.is_empty() && argv.iter().all(|a| !a.contains('\0')),
+            "invalid guest argv"
+        );
+        let line = argv
+            .iter()
+            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let out = std::process::Command::new("ssh")
+            .args(SSH_OPTIONS)
+            .args(["-p", &self.info.ssh_port.to_string(), "-i"])
+            .arg(&self.info.ssh_key)
+            .arg("root@127.0.0.1")
+            .arg(line)
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "guest command failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(out.stdout)
+    }
+    fn upload(&self, local: &Path, guest: &str) -> Result<()> {
+        transfer(self, local, guest, false)
+    }
+    fn download(&self, guest: &str, local: &Path) -> Result<()> {
+        transfer(self, local, guest, true)
+    }
 }
 
-fn btn_event(button: &str, down: bool) -> Value {
-    json!({ "type": "btn", "data": { "down": down, "button": button } })
-}
+const SSH_OPTIONS: &[&str] = &[
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "LogLevel=ERROR",
+    "-o",
+    "IdentitiesOnly=yes",
+];
 
-/// QEMU's absolute axes run 0..=0x7fff across the screen.
-fn abs_events(x: u32, y: u32, width: u32, height: u32) -> Vec<Value> {
-    let scale = |v: u32, size: u32| -> u32 {
-        let max = size.saturating_sub(1).max(1) as u64;
-        ((v.min(size.saturating_sub(1)) as u64 * 0x7fff + max / 2) / max) as u32
-    };
-    vec![
-        json!({ "type": "abs", "data": { "axis": "x", "value": scale(x, width) } }),
-        json!({ "type": "abs", "data": { "axis": "y", "value": scale(y, height) } }),
-    ]
+fn transfer(vm: &Vmctl, local: &Path, guest: &str, download: bool) -> Result<()> {
+    anyhow::ensure!(
+        guest.starts_with('/')
+            && guest
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
+        "guest transfer path must be an absolute simple path"
+    );
+    let remote = format!("root@127.0.0.1:{guest}");
+    let local = std::path::absolute(local)?;
+    let mut command = std::process::Command::new("scp");
+    command
+        .args(SSH_OPTIONS)
+        .args(["-P", &vm.info.ssh_port.to_string(), "-i"])
+        .arg(&vm.info.ssh_key);
+    if download {
+        command.arg(remote).arg(local);
+    } else {
+        command.arg(local).arg(remote);
+    }
+    ilex_devkit::cmd::run(&mut command)
 }

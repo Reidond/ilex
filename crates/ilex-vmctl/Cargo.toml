@@ -15,6 +15,8 @@ name = "ilex-vmctl"
 path = "src/main.rs"
 
 [dependencies]
+ilex-tooling-core.workspace = true
+ilex-tooling-qmp.workspace = true
 ilex-devkit.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }

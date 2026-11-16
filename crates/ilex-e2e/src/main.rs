@@ -12,7 +12,7 @@ use libtest_mimic::{Arguments, Trial};
 
 mod common;
 // Fixtures preserve Unix modes and symlinks; these tiers run in WSL on Windows.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod config;
 mod disk;
 mod ephemeral;
@@ -36,7 +36,7 @@ fn main() {
     if filters.iter().any(|f| f.contains("homed")) {
         trials.extend(homed::trials());
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     if !std::env::var_os("CI").is_some_and(|v| !v.is_empty()) && filters.iter().any(|f| f.contains("config")) {
         trials.extend(config::trials());
     }

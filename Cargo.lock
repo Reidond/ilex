@@ -697,13 +697,8 @@ dependencies = [
 name = "ilex-devkit"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "memmap2",
- "serde",
- "serde_json",
- "sha2",
- "toml",
- "x11rb",
+ "ilex-tooling-core",
+ "ilex-tooling-linux",
 ]
 
 [[package]]
@@ -716,6 +711,40 @@ dependencies = [
  "libtest-mimic",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "ilex-tooling-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
+name = "ilex-tooling-linux"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ilex-tooling-core",
+ "ilex-tooling-qmp",
+ "memmap2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+ "x11rb",
+]
+
+[[package]]
+name = "ilex-tooling-qmp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
 ]
 
 [[package]]
@@ -737,6 +766,8 @@ dependencies = [
  "anyhow",
  "clap",
  "ilex-devkit",
+ "ilex-tooling-core",
+ "ilex-tooling-qmp",
  "png",
  "serde_json",
 ]

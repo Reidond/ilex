@@ -86,7 +86,12 @@ pub struct DiskSpec {
 
 impl DiskSpec {
     pub fn new(image: impl Into<String>) -> Self {
-        Self { image: image.into(), format: DiskFormat::Qcow2, size: "30G".into(), out: None }
+        Self {
+            image: image.into(),
+            format: DiskFormat::Qcow2,
+            size: "30G".into(),
+            out: None,
+        }
     }
 }
 
@@ -94,17 +99,29 @@ impl DiskSpec {
 pub fn default_disk_path(ws: &Workspace, image: &str, format: DiskFormat) -> PathBuf {
     let safe: String = image
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    ws.state_dir().join("disks").join(format!("{safe}.{}", format.extension()))
+    ws.state_dir()
+        .join("disks")
+        .join(format!("{safe}.{}", format.extension()))
 }
 
 /// Write (or refresh) the disk for `spec` with `bcvk to-disk` and return its
 /// path. bcvk records what a disk was built from and skips the install when
 /// the image hasn't changed, so calling this before every boot is cheap.
 pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
+    crate::provider::require_arch(ilex_tooling_core::Architecture::X86_64)?;
     cmd::require("bcvk")?;
-    let out = spec.out.clone().unwrap_or_else(|| default_disk_path(ws, &spec.image, spec.format));
+    let out = spec
+        .out
+        .clone()
+        .unwrap_or_else(|| default_disk_path(ws, &spec.image, spec.format));
     if let Some(dir) = out.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -112,7 +129,9 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
     // time, the rest wait and then find it up to date.
     let lock_path = out.with_file_name(format!(
         "{}.lock",
-        out.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+        out.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
     ));
     let lock = OpenOptions::new()
         .create(true)
@@ -120,7 +139,8 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("opening {}", lock_path.display()))?;
-    lock.lock().with_context(|| format!("locking {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("locking {}", lock_path.display()))?;
 
     let mut bcvk = Command::new("bcvk");
     bcvk.args(["to-disk", "--format", spec.format.name()])
@@ -173,6 +193,13 @@ pub fn test_key(ws: &Workspace) -> Result<TestKey> {
 /// The published description of a running VM: `<runtime dir>/<purpose>/vm.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmInfo {
+    #[serde(default)]
+    pub schema: u32,
+    pub owner: String,
+    pub run: String,
+    pub architecture: ilex_tooling_core::Architecture,
+    /// Linux process start ticks; PID alone can refer to an unrelated process.
+    pub process_start: String,
     pub name: String,
     pub purpose: String,
     /// PID of the `qemu-system-x86_64` process.
@@ -205,16 +232,18 @@ impl VmInfo {
     /// Read `<dir>/vm.toml`.
     pub fn read(dir: &Path) -> Result<Self> {
         let path = dir.join(INFO_FILE);
-        let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let mut info: VmInfo =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        ilex_tooling_core::check_version(info.schema)?;
         info.dir = dir.to_path_buf();
         Ok(info)
     }
 
     /// Is the QEMU process still there?
     pub fn is_running(&self) -> bool {
-        process_alive(self.pid)
+        crate::provider::process_start(self.pid).is_ok_and(|start| start == self.process_start)
     }
 
     /// `ssh` arguments to reach this VM as root, ready for display.
@@ -228,17 +257,18 @@ impl VmInfo {
     }
 }
 
-fn process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
-}
-
 /// Every VM of this checkout whose QEMU is still running, sorted by purpose.
 pub fn running_vms(ws: &Workspace) -> Vec<VmInfo> {
-    let Ok(entries) = fs::read_dir(ws.runtime_dir()) else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(ws.runtime_dir()) else {
+        return Vec::new();
+    };
     let mut vms: Vec<VmInfo> = entries
         .flatten()
         .filter(|e| e.path().is_dir())
         .filter_map(|e| VmInfo::read(&e.path()).ok())
+        .filter(|info| {
+            ws.root.as_os_str().is_empty() || ws.identity().is_ok_and(|id| id.owner == info.owner)
+        })
         .filter(VmInfo::is_running)
         .collect();
     vms.sort_by(|a, b| a.purpose.cmp(&b.purpose));
@@ -251,14 +281,24 @@ pub fn find_vm(ws: &Workspace, purpose: Option<&str>) -> Result<VmInfo> {
     let vms = running_vms(ws);
     match purpose {
         Some(p) => vms.into_iter().find(|v| v.purpose == p).with_context(|| {
-            format!("no running `{p}` VM for `{}` (boot one with `cargo xtask vm --gui`)", ws.slug)
+            format!(
+                "no running `{p}` VM for `{}` (boot one with `cargo xtask vm --gui`)",
+                ws.slug
+            )
         }),
         None => match vms.len() {
-            0 => bail!("no VM running for `{}` (boot one with `cargo xtask vm --gui`)", ws.slug),
+            0 => bail!(
+                "no VM running for `{}` (boot one with `cargo xtask vm --gui`)",
+                ws.slug
+            ),
             1 => Ok(vms.into_iter().next().unwrap()),
             _ => {
                 let names: Vec<_> = vms.iter().map(|v| v.purpose.as_str()).collect();
-                bail!("several VMs are running for `{}` ({}); pick one with --vm", ws.slug, names.join(", "))
+                bail!(
+                    "several VMs are running for `{}` ({}); pick one with --vm",
+                    ws.slug,
+                    names.join(", ")
+                )
             }
         },
     }
@@ -269,11 +309,16 @@ pub fn find_vm(ws: &Workspace, purpose: Option<&str>) -> Result<VmInfo> {
 // ---------------------------------------------------------------------------
 
 const SSH_OPTS: &[&str] = &[
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
-    "-o", "LogLevel=ERROR",
-    "-o", "IdentitiesOnly=yes",
-    "-o", "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "LogLevel=ERROR",
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "BatchMode=yes",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,7 +339,10 @@ pub enum Display {
 pub fn host_gl() -> bool {
     Path::new("/dev/dxg").exists()
         || fs::read_dir("/dev/dri")
-            .map(|dir| dir.flatten().any(|e| e.file_name().to_string_lossy().starts_with("renderD")))
+            .map(|dir| {
+                dir.flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+            })
             .unwrap_or(false)
 }
 
@@ -366,7 +414,13 @@ impl VmConfig {
 
     /// The plan's graphical test machine: 8 GiB, 4 vCPUs, 3840x2160.
     pub fn graphical(purpose: impl Into<String>, disk: impl Into<PathBuf>) -> Self {
-        Self { memory: "8G".into(), vcpus: 4, width: 3840, height: 2160, ..Self::new(purpose, disk) }
+        Self {
+            memory: "8G".into(),
+            vcpus: 4,
+            width: 3840,
+            height: 2160,
+            ..Self::new(purpose, disk)
+        }
     }
 }
 
@@ -385,19 +439,36 @@ impl Vm {
     /// Take a VM slot (waiting if none is free) and start QEMU. Returns as
     /// soon as QEMU is up; use [`Vm::wait_ssh`] to wait for the guest.
     pub fn boot(ws: &Workspace, config: &VmConfig) -> Result<Vm> {
+        let spec = crate::provider::validate_config(ws, config)?;
+        Self::boot_validated(ws, config, spec)
+    }
+
+    pub(crate) fn boot_validated(
+        ws: &Workspace,
+        config: &VmConfig,
+        spec: ilex_tooling_core::VmSpec,
+    ) -> Result<Vm> {
         cmd::require("qemu-system-x86_64")?;
         if !Path::new("/dev/kvm").exists() {
-            bail!("/dev/kvm not found: booting VMs needs KVM (on Windows, run inside WSL2 with nested virtualization)");
+            bail!(
+                "/dev/kvm not found: booting VMs needs KVM (on Windows, run inside WSL2 with nested virtualization)"
+            );
         }
         let name = ws.vm_name(&config.purpose);
-        let slot = slots::acquire(&name)?;
-
         let dir = ws.runtime_dir().join(&config.purpose);
-        if let Ok(old) = VmInfo::read(&dir)
-            && old.is_running()
-        {
-            bail!("{name} is already running (pid {}); stop it first (kill {})", old.pid, old.pid);
+        if dir.join(INFO_FILE).exists() {
+            let old = VmInfo::read(&dir)?;
+            anyhow::ensure!(
+                old.owner == spec.owner,
+                "{name} metadata belongs to another checkout; refusing to replace it"
+            );
+            anyhow::ensure!(
+                !old.is_running(),
+                "{name} is already running (pid {}); stop its owning launcher first",
+                old.pid
+            );
         }
+        let slot = slots::acquire(&name)?;
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -418,10 +489,16 @@ impl Vm {
         let base_disk = std::path::absolute(&config.disk)
             .with_context(|| format!("resolving {}", config.disk.display()))?;
         if !base_disk.is_file() {
-            bail!("disk image {} not found (write it with `cargo xtask disk`)", base_disk.display());
+            bail!(
+                "disk image {} not found (write it with `cargo xtask disk`)",
+                base_disk.display()
+            );
         }
         let (drive_file, drive_format, overlay) = if config.snapshot {
-            let overlay = ws.state_dir().join("overlays").join(format!("{name}.qcow2"));
+            let overlay = ws
+                .state_dir()
+                .join("overlays")
+                .join(format!("{name}.qcow2"));
             fs::create_dir_all(overlay.parent().unwrap())?;
             let _ = fs::remove_file(&overlay);
             cmd::require("qemu-img")?;
@@ -435,7 +512,11 @@ impl Vm {
             )?;
             (overlay.clone(), "qcow2", Some(overlay))
         } else {
-            (base_disk.clone(), DiskFormat::from_path(&base_disk).name(), None)
+            (
+                base_disk.clone(),
+                DiskFormat::from_path(&base_disk).name(),
+                None,
+            )
         };
 
         let ssh_port = free_port()?;
@@ -450,18 +531,31 @@ impl Vm {
             .args(["-accel", "kvm", "-machine", "q35", "-cpu", "host"])
             .args(["-smp", &config.vcpus.to_string(), "-m", &config.memory])
             .arg("-drive")
-            .arg(format!("if=pflash,format=raw,unit=0,readonly=on,file={}", ovmf_code.display()))
+            .arg(format!(
+                "if=pflash,format=raw,unit=0,readonly=on,file={}",
+                ovmf_code.display()
+            ))
             .arg("-drive")
-            .arg(format!("if=pflash,format=raw,unit=1,file={}", vars.display()))
+            .arg(format!(
+                "if=pflash,format=raw,unit=1,file={}",
+                vars.display()
+            ))
             .arg("-drive")
-            .arg(format!("if=virtio,format={drive_format},file={}", drive_file.display()));
+            .arg(format!(
+                "if=virtio,format={drive_format},file={}",
+                drive_file.display()
+            ));
         if let Some(iso) = &config.cdrom {
-            qemu.arg("-drive")
-                .arg(format!("media=cdrom,readonly=on,file={}", std::path::absolute(iso)?.display()));
+            qemu.arg("-drive").arg(format!(
+                "media=cdrom,readonly=on,file={}",
+                std::path::absolute(iso)?.display()
+            ));
         }
         for extra in &config.extra_disks {
-            qemu.arg("-drive")
-                .arg(format!("if=virtio,format=raw,file={}", std::path::absolute(extra)?.display()));
+            qemu.arg("-drive").arg(format!(
+                "if=virtio,format=raw,file={}",
+                std::path::absolute(extra)?.display()
+            ));
         }
         let gl = config.gl && config.display != Display::None;
         let vga = if gl { "virtio-vga-gl" } else { "virtio-vga" };
@@ -510,18 +604,37 @@ impl Vm {
                 gui_env(&mut qemu, gl);
             }
             Display::Viewer => {
-                let x = config.x_display.as_deref().context("Display::Viewer needs VmConfig::x_display")?;
-                qemu.args(["-display", if gl { "gtk,gl=on,show-menubar=off" } else { "gtk,show-menubar=off" }])
-                    .arg("-qmp")
-                    .arg(format!("unix:{},server=on,wait=off", dir.join("input.sock").display()))
-                    // The guest's SPICE agent port, for the bridge's clipboard
-                    // sharing (crate::vdagent).
-                    .args(["-device", "virtio-serial-pci", "-chardev"])
-                    .arg(format!("socket,id=vdagent,path={},server=on,wait=off", dir.join("vdagent.sock").display()))
-                    .args(["-device", "virtserialport,chardev=vdagent,name=com.redhat.spice.0"])
-                    .env("DISPLAY", x)
-                    .env("GDK_BACKEND", "x11")
-                    .env_remove("WAYLAND_DISPLAY");
+                let x = config
+                    .x_display
+                    .as_deref()
+                    .context("Display::Viewer needs VmConfig::x_display")?;
+                qemu.args([
+                    "-display",
+                    if gl {
+                        "gtk,gl=on,show-menubar=off"
+                    } else {
+                        "gtk,show-menubar=off"
+                    },
+                ])
+                .arg("-qmp")
+                .arg(format!(
+                    "unix:{},server=on,wait=off",
+                    dir.join("input.sock").display()
+                ))
+                // The guest's SPICE agent port, for the bridge's clipboard
+                // sharing (crate::vdagent).
+                .args(["-device", "virtio-serial-pci", "-chardev"])
+                .arg(format!(
+                    "socket,id=vdagent,path={},server=on,wait=off",
+                    dir.join("vdagent.sock").display()
+                ))
+                .args([
+                    "-device",
+                    "virtserialport,chardev=vdagent,name=com.redhat.spice.0",
+                ])
+                .env("DISPLAY", x)
+                .env("GDK_BACKEND", "x11")
+                .env_remove("WAYLAND_DISPLAY");
             }
         }
 
@@ -551,6 +664,11 @@ impl Vm {
         }
 
         let info = VmInfo {
+            schema: ilex_tooling_core::SCHEMA_VERSION,
+            owner: spec.owner,
+            run: spec.run,
+            architecture: spec.guest_arch,
+            process_start: crate::provider::process_start(child.id())?,
             name,
             purpose: config.purpose.clone(),
             pid: child.id(),
@@ -574,7 +692,12 @@ impl Vm {
             let _ = child.wait();
             return Err(e);
         }
-        Ok(Vm { info, child, overlay, _slot: slot })
+        Ok(Vm {
+            info,
+            child,
+            overlay,
+            _slot: slot,
+        })
     }
 
     /// Has QEMU exited? (A guest that powers off ends the process.)
@@ -627,7 +750,10 @@ impl Vm {
         let started = Instant::now();
         loop {
             if let Some(status) = self.exited()? {
-                bail!("qemu exited with {status} while waiting for SSH ({})", self.info.dir.display());
+                bail!(
+                    "qemu exited with {status} while waiting for SSH ({})",
+                    self.info.dir.display()
+                );
             }
             if self.ssh("true").is_ok_and(|o| o.status.success()) {
                 return Ok(());
@@ -662,7 +788,10 @@ impl Vm {
                 return Ok(());
             }
             if started.elapsed() > timeout {
-                bail!("{} did not come back from a reboot within {timeout:?}", self.info.name);
+                bail!(
+                    "{} did not come back from a reboot within {timeout:?}",
+                    self.info.name
+                );
             }
             thread::sleep(Duration::from_secs(2));
         }
@@ -713,7 +842,9 @@ fn gui_env(qemu: &mut Command, gl: bool) {
     const WSLG_X11: &str = "/mnt/wslg/.X11-unix/X0";
     if gl && Path::new(WSLG_WAYLAND).exists() {
         // libwayland takes an absolute WAYLAND_DISPLAY as the socket path.
-        qemu.env("GDK_BACKEND", "wayland").env("WAYLAND_DISPLAY", WSLG_WAYLAND).env_remove("DISPLAY");
+        qemu.env("GDK_BACKEND", "wayland")
+            .env("WAYLAND_DISPLAY", WSLG_WAYLAND)
+            .env_remove("DISPLAY");
         return;
     }
     let have_display = std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
@@ -733,7 +864,10 @@ fn free_port() -> Result<u16> {
 
 /// OVMF firmware code and a matching variable store template.
 fn find_ovmf() -> Result<(PathBuf, PathBuf)> {
-    if let (Some(code), Some(vars)) = (std::env::var_os("ILEX_OVMF_CODE"), std::env::var_os("ILEX_OVMF_VARS")) {
+    if let (Some(code), Some(vars)) = (
+        std::env::var_os("ILEX_OVMF_CODE"),
+        std::env::var_os("ILEX_OVMF_VARS"),
+    ) {
         return Ok((code.into(), vars.into()));
     }
     const DIRS: &[&str] = &[
@@ -743,8 +877,10 @@ fn find_ovmf() -> Result<(PathBuf, PathBuf)> {
         "/usr/share/OVMF",
         "/usr/share/qemu",
     ];
-    const PAIRS: &[(&str, &str)] =
-        &[("OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd"), ("OVMF_CODE.fd", "OVMF_VARS.fd")];
+    const PAIRS: &[(&str, &str)] = &[
+        ("OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd"),
+        ("OVMF_CODE.fd", "OVMF_VARS.fd"),
+    ];
     for dir in DIRS {
         for (code, vars) in PAIRS {
             let (code, vars) = (Path::new(dir).join(code), Path::new(dir).join(vars));

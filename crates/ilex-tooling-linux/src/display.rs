@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -834,7 +834,7 @@ fn serve_viewer(
                     }
                 }
                 ToBridge::Quit => {
-                    let _ = qmp.execute("quit", json!({}));
+                    let _ = qmp.0.execute("quit", json!({}));
                     return Ok(());
                 }
             }
@@ -875,49 +875,14 @@ fn abs_events(x: u32, y: u32, width: u32, height: u32) -> Vec<Value> {
 
 /// A QMP connection held for the viewer's lifetime (its own socket, so it
 /// never blocks `ilex-vmctl`).
-struct Qmp {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
-}
-
+struct Qmp(crate::qmp::Qmp);
 impl Qmp {
-    fn connect(path: &Path) -> Result<Qmp> {
-        let stream = UnixStream::connect(path)
-            .with_context(|| format!("connecting to {}", path.display()))?;
-        let mut qmp = Qmp {
-            reader: BufReader::new(stream.try_clone()?),
-            writer: stream,
-        };
-        qmp.read_message()?;
-        qmp.execute("qmp_capabilities", json!({}))?;
-        Ok(qmp)
+    fn connect(path: &Path) -> Result<Self> {
+        Ok(Self(crate::qmp::Qmp::connect(path)?))
     }
-
-    fn read_message(&mut self) -> Result<Value> {
-        let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
-            bail!("QMP closed");
-        }
-        Ok(serde_json::from_str(&line)?)
-    }
-
-    fn execute(&mut self, command: &str, arguments: Value) -> Result<Value> {
-        let msg = json!({ "execute": command, "arguments": arguments });
-        self.writer.write_all(format!("{msg}\n").as_bytes())?;
-        loop {
-            let reply = self.read_message()?;
-            if let Some(ret) = reply.get("return") {
-                return Ok(ret.clone());
-            }
-            if let Some(err) = reply.get("error") {
-                bail!("QMP {command}: {err}");
-            }
-            // An asynchronous event: skip.
-        }
-    }
-
     fn input(&mut self, events: Vec<Value>) -> Result<()> {
-        self.execute("input-send-event", json!({ "events": events }))
+        self.0
+            .execute("input-send-event", json!({"events": events}))
             .map(|_| ())
     }
 }

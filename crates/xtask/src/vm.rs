@@ -23,26 +23,26 @@
 //! On Windows, `cargo xtask vm` builds the viewer and hands itself to WSL
 //! ([`crate::wsl`]).
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
-use std::process::Command;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::process::Child;
-#[cfg(unix)]
+use std::process::Command;
+#[cfg(target_os = "linux")]
 use std::thread;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::{Result, bail};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use ilex_devkit::display::{Bridge, Xvfb};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use ilex_devkit::qemu::{self, Display, Vm, VmConfig};
 use ilex_devkit::{Workspace, cmd, slots};
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use crate::disk;
 
 #[derive(clap::Args, Debug)]
@@ -91,14 +91,24 @@ fn viewer_image(ws: &Workspace, resolved: &crate::select::Resolved, build: bool)
     let machine = ilex_devkit::machine::image_machine_label(&resolved.image)?;
     if machine.as_deref() == Some("generic") {
         if build {
-            ilex_devkit::machine::build(ws, &resolved.image, &ws.root.join("machines/vm"), None, &[])
+            ilex_devkit::machine::build(
+                ws,
+                &resolved.image,
+                &ws.root.join("machines/vm"),
+                None,
+                &[],
+            )
         } else {
             ilex_devkit::machine::image_ref(ws, &resolved.image, "vm")
         }
     } else {
         if machine.as_deref() != Some("vm") {
-            let description = machine.map_or_else(|| "unlabelled".into(), |name| format!("machine `{name}`"));
-            eprintln!("viewer clipboard needs machine `vm`; booting {description} image {} as it is", resolved.image);
+            let description =
+                machine.map_or_else(|| "unlabelled".into(), |name| format!("machine `{name}`"));
+            eprintln!(
+                "viewer clipboard needs machine `vm`; booting {description} image {} as it is",
+                resolved.image
+            );
         }
         Ok(resolved.image.clone())
     }
@@ -106,20 +116,22 @@ fn viewer_image(ws: &Workspace, resolved: &crate::select::Resolved, build: bool)
 
 pub fn run(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Result<()> {
     if args.print_image {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let viewer = args.gui && in_wsl();
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "linux"))]
         let viewer = args.gui && cfg!(windows);
         let image = if viewer {
             viewer_image(ws, &resolved, false)?
-        } else { resolved.image };
+        } else {
+            resolved.image
+        };
         println!("{image}");
         return Ok(());
     }
     if args.disk || args.gui {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         return run_disk(ws, args, resolved);
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "linux"))]
         bail!("--disk/--gui run in WSL2 (see CLAUDE.md)");
     }
     resolved.require_match()?;
@@ -145,7 +157,7 @@ fn run_ephemeral(ws: &Workspace, args: Args, image: String) -> Result<()> {
     cmd::run(&mut bcvk)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Result<()> {
     let viewer = args.gui && in_wsl();
     // `ILEX_DISK` boots a ready-made disk (same override the e2e tiers honour).
@@ -181,19 +193,27 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
 
     let mut vm = Vm::boot(ws, &config)?;
     let info = vm.info.clone();
-    eprintln!("{} booted ({}x{}, {} vCPUs, qemu pid {})", info.name, info.width, info.height, config.vcpus, info.pid);
+    eprintln!(
+        "{} booted ({}x{}, {} vCPUs, qemu pid {})",
+        info.name, info.width, info.height, config.vcpus, info.pid
+    );
     eprintln!("  ssh:    {}", info.ssh_command_line());
     if config.gl {
         eprintln!("  gpu:    virgl (the host renders the guest's OpenGL)");
     }
     match config.display {
-        Display::Viewer => eprintln!("  vmctl:  ilex-vmctl screenshot   (frames from the display bridge, input over QMP)"),
+        Display::Viewer => eprintln!(
+            "  vmctl:  ilex-vmctl screenshot   (frames from the display bridge, input over QMP)"
+        ),
         Display::Gtk if config.gl => eprintln!(
             "  vmctl:  input only (QMP {}): QEMU can't take screenshots of virgl output",
             info.qmp_sock.display()
         ),
         _ => {
-            eprintln!("  vmctl:  ilex-vmctl screenshot   (QMP {})", info.qmp_sock.display());
+            eprintln!(
+                "  vmctl:  ilex-vmctl screenshot   (QMP {})",
+                info.qmp_sock.display()
+            );
             eprintln!("  vnc:    unix socket {}", info.vnc_sock.display());
         }
     }
@@ -203,14 +223,22 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
     if let Some(x) = &xvfb {
         let bridge = Bridge::start(x, &info.dir).context("starting the display bridge")?;
         let ep = &bridge.endpoint;
-        let viewer_args =
-            ["--connect".to_string(), ep.addr.to_string(), "--token".into(), ep.token.clone(), "--title".into(), info.name.clone()];
+        let viewer_args = [
+            "--connect".to_string(),
+            ep.addr.to_string(),
+            "--token".into(),
+            ep.token.clone(),
+            "--title".into(),
+            info.name.clone(),
+        ];
         // `cargo xtask vm` on Windows reads this line and starts the window.
         eprintln!("{VIEWER_LINE}{}", viewer_args.join(" "));
         if std::env::var_os("ILEX_VIEWER_ON_WINDOWS").is_none() {
             match viewer_exe(ws).map(|exe| spawn_viewer(&exe, &viewer_args)) {
                 Some(Ok(child)) => viewer_proc = Some(child),
-                Some(Err(e)) => eprintln!("  window: {e:#}; run `cargo xtask vm --gui` from Windows instead"),
+                Some(Err(e)) => {
+                    eprintln!("  window: {e:#}; run `cargo xtask vm --gui` from Windows instead")
+                }
                 None => eprintln!(
                     "  window: run `cargo xtask vm --gui` from Windows, or there: ilex-viewer.exe {}",
                     viewer_args.join(" ")
@@ -262,9 +290,10 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
 }
 
 /// Is this Linux the WSL2 distro of a Windows machine?
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn in_wsl() -> bool {
-    std::env::var_os("WSL_DISTRO_NAME").is_some() || Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+    std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
 }
 
 /// The stderr line that carries the viewer's arguments to `cargo xtask vm`
@@ -272,22 +301,28 @@ fn in_wsl() -> bool {
 pub const VIEWER_LINE: &str = "ilex-viewer: ";
 
 /// `ilex-viewer.exe` in the checkout's Windows target directory.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn viewer_exe(ws: &Workspace) -> Option<PathBuf> {
-    ["debug", "release"].map(|p| ws.root.join("target").join(p).join("ilex-viewer.exe")).into_iter().find(|p| p.is_file())
+    ["debug", "release"]
+        .map(|p| ws.root.join("target").join(p).join("ilex-viewer.exe"))
+        .into_iter()
+        .find(|p| p.is_file())
 }
 
 /// Start the Windows program from WSL through interop. (That needs the
 /// execute bit, which this repo's WSL setup leaves off for `/mnt/c` files,
 /// hence the Windows side starting it normally.)
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn spawn_viewer(exe: &Path, args: &[String]) -> Result<Child> {
-    Command::new(exe).args(args).spawn().with_context(|| format!("starting {}", exe.display()))
+    Command::new(exe)
+        .args(args)
+        .spawn()
+        .with_context(|| format!("starting {}", exe.display()))
 }
 
 /// Half the host's threads, at least 4 and at most 8: GNOME under virgl and
 /// the window's frame copies want more than the tests' 4.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn gui_vcpus() -> u32 {
     let threads = thread::available_parallelism().map_or(8, |n| n.get() as u32);
     (threads / 2).clamp(4, 8)

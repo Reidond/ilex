@@ -54,7 +54,9 @@ pub fn built(ws: &Workspace, name: &str) -> Built {
 pub fn build(ws: &Workspace, name: &str, packages: &[String]) -> Result<Built> {
     cmd::require("podman")?;
     let valid = |s: &str| {
-        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
     };
     if !valid(name) {
         bail!("tool name `{name}` must be [A-Za-z0-9._+-]");
@@ -70,13 +72,19 @@ pub fn build(ws: &Workspace, name: &str, packages: &[String]) -> Result<Built> {
     }
 
     let mut run = Command::new("podman");
-    run.args(["run", "--rm", "--interactive", "--security-opt", "label=disable"])
-        .args(["--env", &format!("NAME={name}")])
-        .args(["--env", &format!("PACKAGES={}", packages.join(" "))])
-        .args(["--volume", &format!("{}:/out", images.display())])
-        .args(["--volume", &format!("{}:/keys", keys.display())])
-        .args([BUILDER_IMAGE, "bash", "-s"])
-        .stdin(Stdio::piped());
+    run.args([
+        "run",
+        "--rm",
+        "--interactive",
+        "--security-opt",
+        "label=disable",
+    ])
+    .args(["--env", &format!("NAME={name}")])
+    .args(["--env", &format!("PACKAGES={}", packages.join(" "))])
+    .args(["--volume", &format!("{}:/out", images.display())])
+    .args(["--volume", &format!("{}:/keys", keys.display())])
+    .args([BUILDER_IMAGE, "bash", "-s"])
+    .stdin(Stdio::piped());
     let line = cmd::display(&run);
     eprintln!("$ {line} < tool-build.sh");
     let mut child = run.spawn().with_context(|| format!("spawning `{line}`"))?;
@@ -86,7 +94,9 @@ pub fn build(ws: &Workspace, name: &str, packages: &[String]) -> Result<Built> {
         .expect("piped stdin")
         .write_all(SCRIPT.as_bytes())
         .context("sending tool-build.sh to the container")?;
-    let status = child.wait().with_context(|| format!("waiting for `{line}`"))?;
+    let status = child
+        .wait()
+        .with_context(|| format!("waiting for `{line}`"))?;
     if !status.success() {
         bail!("building the tool image `{name}` failed with {status}");
     }

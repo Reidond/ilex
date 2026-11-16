@@ -15,7 +15,11 @@ use ilex_devkit::qemu;
 use ilex_vmctl::{Button, Vmctl, WaitCond, mcp};
 
 #[derive(Parser)]
-#[command(name = "ilex-vmctl", version, about = "Screenshots and input for ilex VMs (QMP)")]
+#[command(
+    name = "ilex-vmctl",
+    version,
+    about = "Screenshots and input for ilex VMs (QMP)"
+)]
 struct Cli {
     /// Worktree slug of the VM to attach to (default: the checkout you are in; see `cargo xtask info`)
     #[arg(long, global = true, env = "ILEX_VM_SLUG")]
@@ -31,6 +35,11 @@ struct Cli {
 enum Cmd {
     /// List the running VMs of the checkout
     List,
+    /// Show this VM's actual screenshot, input and lifecycle capabilities
+    Capabilities {
+        #[arg(long)]
+        json: bool,
+    },
     /// Save a screenshot (PNG)
     Screenshot {
         /// Where to write it
@@ -110,8 +119,13 @@ fn main() -> ExitCode {
 
 fn workspace(slug: &Option<String>) -> Result<Workspace> {
     match slug {
-        Some(slug) => Ok(Workspace { root: PathBuf::new(), slug: slug.clone(), worktree: None }),
-        None => Workspace::discover().context("pass --slug (see `cargo xtask info`) or run inside the checkout"),
+        Some(slug) => Ok(Workspace {
+            root: PathBuf::new(),
+            slug: slug.clone(),
+            worktree: None,
+        }),
+        None => Workspace::discover()
+            .context("pass --slug (see `cargo xtask info`) or run inside the checkout"),
     }
 }
 
@@ -129,20 +143,44 @@ fn run(cli: Cli) -> Result<()> {
             println!("no VM running for `{}`", ws.slug);
         }
         for v in vms {
-            println!("{}\t{}\tpid {}\t{}x{} {}\t{}", v.purpose, v.name, v.pid, v.width, v.height, v.display, v.ssh_command_line());
+            println!(
+                "{}\t{}\tpid {}\t{}x{} {}\t{}",
+                v.purpose,
+                v.name,
+                v.pid,
+                v.width,
+                v.height,
+                v.display,
+                v.ssh_command_line()
+            );
         }
         return Ok(());
     }
     let vm = Vmctl::attach(&ws, cli.vm.as_deref())?;
     match cli.cmd {
         Cmd::List | Cmd::Mcp => unreachable!(),
+        Cmd::Capabilities { json } => {
+            let capabilities = vm.capabilities();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&capabilities)?);
+            } else {
+                println!(
+                    "{}: {}",
+                    vm.info.name,
+                    serde_json::to_string_pretty(&capabilities)?
+                );
+            }
+        }
         Cmd::Screenshot { out } => {
             let frame = vm.save_screenshot(&out)?;
             println!("{} ({}x{})", out.display(), frame.width, frame.height);
         }
-        Cmd::Click { x, y, button, double } => {
-            vm.click(x, y, Button::parse(&button)?, if double { 2 } else { 1 })?
-        }
+        Cmd::Click {
+            x,
+            y,
+            button,
+            double,
+        } => vm.click(x, y, Button::parse(&button)?, if double { 2 } else { 1 })?,
         Cmd::Move { x, y } => vm.move_to(x, y)?,
         Cmd::Scroll { x, y, amount, up } => vm.scroll(x, y, up, amount)?,
         Cmd::Type { text, enter } => {
@@ -152,15 +190,32 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Key { combo } => vm.key(&combo)?,
-        Cmd::WaitScreen { timeout, nonblank, changed, stable, size, out } => {
+        Cmd::WaitScreen {
+            timeout,
+            nonblank,
+            changed,
+            stable,
+            size,
+            out,
+        } => {
             let size = size.as_deref().map(ilex_vmctl::parse_size).transpose()?;
-            let cond = WaitCond { nonblank, changed, stable: stable.map(Duration::from_secs_f64), size };
+            let cond = WaitCond {
+                nonblank,
+                changed,
+                stable: stable.map(Duration::from_secs_f64),
+                size,
+            };
             let started = std::time::Instant::now();
             let (png, frame) = vm.wait_screen(&cond, Duration::from_secs_f64(timeout))?;
             if let Some(out) = out {
                 std::fs::write(&out, &png)?;
             }
-            println!("screen ready after {:.1}s ({}x{})", started.elapsed().as_secs_f64(), frame.width, frame.height);
+            println!(
+                "screen ready after {:.1}s ({}x{})",
+                started.elapsed().as_secs_f64(),
+                frame.width,
+                frame.height
+            );
         }
     }
     Ok(())

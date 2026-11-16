@@ -34,7 +34,13 @@ pub fn disk(ws: &Workspace) -> Result<PathBuf> {
 
 /// Boot `config` and wait for SSH.
 pub fn boot(ws: &Workspace, config: VmConfig) -> Result<Vm> {
-    let mut vm = Vm::boot(ws, &config)?;
+    use ilex_devkit::core::VmProvider;
+    let provider = ilex_devkit::provider::LinuxProvider::new(ws.clone())?;
+    let spec = ilex_devkit::provider::spec(ws, &config)?;
+    let mut fixture = provider.create(spec)?;
+    let handle = provider.start(&mut fixture)?;
+    let mut vm = fixture.into_legacy_vm()?;
+    anyhow::ensure!(vm.info.run == handle.run && vm.info.owner == handle.owner, "provider and fixture ownership disagree");
     vm.wait_ssh(BOOT_TIMEOUT).with_context(|| format!("booting {}", vm.info.name))?;
     println!("{} is up: {}", vm.info.name, vm.info.ssh_command_line());
     Ok(vm)

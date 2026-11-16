@@ -18,7 +18,10 @@ pub fn display(cmd: &Command) -> String {
 
 fn quote(arg: &OsStr) -> String {
     let a = arg.to_string_lossy();
-    if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+%".contains(c)) {
+    if !a.is_empty()
+        && a.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+%".contains(c))
+    {
         a.into_owned()
     } else {
         format!("'{}'", a.replace('\'', r"'\''"))
@@ -55,7 +58,11 @@ pub fn output(cmd: &mut Command) -> Result<String> {
 /// Like [`output`] but quiet and returning `None` on failure — for probes
 /// such as "does this image exist?".
 pub fn probe(cmd: &mut Command) -> Option<String> {
-    let out = cmd.stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let out = cmd
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -75,7 +82,9 @@ pub fn require(tool: &str) -> Result<()> {
 }
 
 fn which(tool: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else { return false };
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
     std::env::split_paths(&path).any(|dir| {
         let p = dir.join(tool);
         p.is_file() || (cfg!(windows) && p.with_extension("exe").is_file())

@@ -27,7 +27,10 @@ pub struct VmSlot {
 
 /// Number of machine-wide VM slots.
 pub fn max_slots() -> usize {
-    if let Some(n) = std::env::var("ILEX_VM_SLOTS").ok().and_then(|v| v.parse().ok()) {
+    if let Some(n) = std::env::var("ILEX_VM_SLOTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         return std::cmp::max(1, n);
     }
     let gib = mem_total_gib().unwrap_or(16);
@@ -51,7 +54,10 @@ pub fn acquire(owner: &str) -> Result<VmSlot> {
             }
         }
         if !announced {
-            eprintln!("ilex: all {n} VM slots are busy (see {}), waiting...", dir.display());
+            eprintln!(
+                "ilex: all {n} VM slots are busy (see {}), waiting...",
+                dir.display()
+            );
             announced = true;
         }
         thread::sleep(Duration::from_secs(2));
@@ -83,7 +89,11 @@ fn try_slot(dir: &std::path::Path, index: usize, owner: &str) -> Result<Option<V
         Ok(()) => {
             file.set_len(0)?;
             writeln!(file, "{owner} pid={}", std::process::id())?;
-            Ok(Some(VmSlot { _file: file, index, path }))
+            Ok(Some(VmSlot {
+                _file: file,
+                index,
+                path,
+            }))
         }
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(e)) => {
