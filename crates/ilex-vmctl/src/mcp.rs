@@ -35,6 +35,7 @@ pub fn serve(ws: Option<Workspace>, default_vm: Option<String>) -> Result<()> {
         default_vm,
         last_scale: None,
         last_view: None,
+        mapping_invalidated: false,
     };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
@@ -58,6 +59,7 @@ struct Server {
     /// Screen pixels per screenshot pixel, from the last screenshot returned.
     last_scale: Option<f64>,
     last_view: Option<(ilex_devkit::core::VmHandle, u32, u32)>,
+    mapping_invalidated: bool,
 }
 
 impl Server {
@@ -123,11 +125,16 @@ impl Server {
     /// Screen pixels per screenshot pixel; takes a screenshot to find out
     /// when none was returned yet.
     fn scale(&mut self, vm: &Vmctl) -> Result<f64> {
+        if self.mapping_invalidated {
+            bail!(
+                "take a new screenshot before using screenshot coordinates after a resize or VM change"
+            );
+        }
         let f = vm.screenshot()?;
         let current = (vm.handle(), f.width, f.height);
         if self.last_view.as_ref().is_some_and(|old| old != &current) {
             self.last_scale = None;
-            self.last_view = None;
+            self.mapping_invalidated = true;
             bail!(
                 "VM or framebuffer changed; take a new screenshot before using screenshot coordinates"
             );
@@ -253,12 +260,12 @@ impl Server {
                     Duration::from_secs_f64(args["timeout_secs"].as_f64().unwrap_or(120.0));
                 let started = std::time::Instant::now();
                 let (png, frame) = vm.wait_screen(&cond, timeout)?;
-                self.last_view = Some((vm.handle(), frame.width, frame.height));
                 let mut out = vec![text(&format!(
                     "screen ready after {:.1}s",
                     started.elapsed().as_secs_f64()
                 ))];
                 out.extend(self.image_content(&frame, &png, DEFAULT_MAX_EDGE)?);
+                self.last_view = Some((vm.handle(), frame.width, frame.height));
                 Ok(out)
             }
             other => bail!("unknown tool `{other}`"),
@@ -268,8 +275,9 @@ impl Server {
     fn screenshot_result(&mut self, vm: &Vmctl, max_edge: u32) -> Result<Vec<Value>> {
         let png = vm.screenshot_png()?;
         let frame = crate::Frame::decode(&png)?;
+        let content = self.image_content(&frame, &png, max_edge)?;
         self.last_view = Some((vm.handle(), frame.width, frame.height));
-        self.image_content(&frame, &png, max_edge)
+        Ok(content)
     }
 
     /// Image content for `frame`, shrunk to `max_edge` (0 = as is); records
@@ -282,12 +290,13 @@ impl Server {
     ) -> Result<Vec<Value>> {
         let small = frame.downscale(max_edge);
         let scale = frame.width as f64 / small.width as f64;
-        self.last_scale = Some(scale);
         let data = if small.width == frame.width {
             png.to_vec()
         } else {
             small.encode_png()?
         };
+        self.last_scale = Some(scale);
+        self.mapping_invalidated = false;
         let note = format!(
             "Screen is {}x{}; this image is {}x{}. click/scroll x,y are in this image's pixels{}.",
             frame.width,
