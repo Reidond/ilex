@@ -1334,8 +1334,10 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   (`installer/interactive-defaults.ks`) installs `registry:ghcr.io/reidond/ilex:<selected tag>`
   (`--source-imgref`; pykickstart requires the transport) and tracks
   `ghcr.io/reidond/ilex:<selected tag>` (`--target-imgref`). The installer drops GPU
-  firmware and Vulkan drivers before it builds its initramfs. `xtask iso` fails if the ISO
-  reaches 2 GiB.
+  firmware and Vulkan drivers before it builds its initramfs. The local web ISO
+  measured 1,953,595,392 bytes (1.82 GiB) and 694 seconds to build on 2026-11-16
+  (`--testing-tag latest`); `firefox-langpacks` remains installed. `xtask iso`
+  fails if the ISO reaches 2 GiB.
 - The installer base is not cached between runs (an `ilex-installer-base`
   package was tried, and saved ~11 of 22 minutes per build): the weekly rebuild
   exists to pick up Fedora and Anaconda fixes, which a cached base would pin,

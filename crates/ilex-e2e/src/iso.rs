@@ -50,7 +50,9 @@ const KICKSTART: &str = r#"# Test-only: unattended answers for what interactive-
 graphical
 lang en_US.UTF-8
 keyboard us
-timezone UTC --utc
+# WebUI 90 requires a Region/City entry from Anaconda's timezone catalogue;
+# bare UTC is valid for the backend but leaves the web review incomplete.
+timezone Etc/UTC --utc
 rootpw --lock
 zerombr
 clearpart --all --initlabel
