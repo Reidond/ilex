@@ -193,7 +193,9 @@ def main():
         activate(name, secrets[0])
         return {"sizes": sizes(name), "sha256": checksum(name)}
     if action == "tty":
-        text = tty(name, secrets[0], "test \"$SYSTEMD_HOME\" = 1 && test \"$SYSTEMD_HOME_SUSPEND\" = 0 && test -r ~/e2e-data && ls -Zd ~/ ~/e2e-data && loginctl show-session self -p Type -p Name && sudo -k && sudo -p ILEX-'SUDO:' id -u", [(r"ILEX-SUDO:", secrets[0])])
+        # ls -Z can show '?' for the idmapped mount root; stat reads its
+        # effective context correctly (including the initial defcontext).
+        text = tty(name, secrets[0], "test \"$SYSTEMD_HOME\" = 1 && test \"$SYSTEMD_HOME_SUSPEND\" = 0 && test -r ~/e2e-data && stat -c '%C %n' ~ ~/e2e-data && loginctl show-session self -p Type -p Name && sudo -k && sudo -p ILEX-'SUDO:' id -u", [(r"ILEX-SUDO:", secrets[0])])
         assert re.search(r"\r?\n0\r?\n", text), text
         assert "Type=tty" in text, text
         assert "Name=" + name in text, text
