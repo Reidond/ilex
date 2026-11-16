@@ -2,9 +2,9 @@
 //!
 //! The image ships a `policy.json` that demands a cosign signature for
 //! `ghcr.io/reidond/ilex` (plus `registries.d` and the public key). Unverified
-//! pulls still apply that policy; origin enforcement additionally requires a
-//! non-permissive policy default. A machine installed from the ISO, or switched
-//! with a plain `bootc switch`, tracks ghcr *unverified*: kickstart's `bootc`
+//! pulls still apply that policy; origin enforcement also refuses a singleton
+//! insecureAcceptAnything default in the selected policy. An ISO install, or a
+//! plain `bootc switch`, tracks ghcr *unverified*: kickstart's `bootc`
 //! command has no way to pass `--enforce-container-sigpolicy`.
 //!
 //! `ilex-agent enforce-sigpolicy`, run at every boot by `ilex-sigpolicy.service`,
@@ -16,9 +16,12 @@
 //! images in containers-storage, other registries, machines already
 //! enforcing) is left alone, so running it again is always safe.
 
-use std::fs;
+use std::env;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use serde::Deserialize;
 use serde_json::Value;
 
 /// Run under `unshare --mount` with the image reference as `$1`.
@@ -29,30 +32,72 @@ const SWITCH_SCRIPT: &str = concat!(
 
 /// The repository whose images are signed with the key in `policy.json`.
 pub const REPOSITORY: &str = "ghcr.io/reidond/ilex";
-const POLICY: &str = "/etc/containers/policy.json";
 
-/// Enforcing origins cannot pull at all with a permissive system default,
-/// even when their repository has a signature requirement of its own.
-pub fn check_policy() -> Result<(), String> {
-    let bytes = fs::read(POLICY).map_err(|e| format!("reading {POLICY}: {e}"))?;
-    let policy = serde_json::from_slice(&bytes).map_err(|e| format!("parsing {POLICY}: {e}"))?;
-    check_default(&policy)
+/// Match the resolver in Fedora 45's bootc 1.17.1 and 1.17.4 source RPMs:
+/// crates/ostree-ext/src/container/skopeo.rs::resolve_policy_path. bootc opens
+/// all paths relative to /, including relative environment overrides.
+fn open_policy() -> Result<(PathBuf, File), String> {
+    let rooted = |path| Path::new("/").join(path);
+    if let Some(path) = env::var_os("CONTAINERS_POLICY_JSON").filter(|p| !p.is_empty()) {
+        let path = rooted(path);
+        let file = File::open(&path)
+            .map_err(|e| format!("opening CONTAINERS_POLICY_JSON={}: {e}", path.display()))?;
+        return Ok((path, file));
+    }
+    let config = env::var_os("XDG_CONFIG_HOME")
+        .map(rooted)
+        .or_else(|| env::var_os("HOME").map(|home| rooted(home).join(".config")));
+    let user = config.map(|path| path.join("containers/policy.json"));
+    for path in user.into_iter().chain([
+        PathBuf::from("/etc/containers/policy.json"),
+        PathBuf::from("/usr/share/containers/policy.json"),
+    ]) {
+        // Like bootc, fall through on any open error for non-override paths.
+        if let Ok(file) = File::open(&path) {
+            return Ok((path, file));
+        }
+    }
+    Err(
+        "no containers policy.json found in CONTAINERS_POLICY_JSON, user config or system paths"
+            .into(),
+    )
 }
 
-fn check_default(policy: &Value) -> Result<(), String> {
-    let requirements = policy["default"]
-        .as_array()
-        .filter(|requirements| !requirements.is_empty())
-        .ok_or_else(|| format!("{POLICY}: missing or empty default policy"))?;
-    if requirements
-        .iter()
-        .any(|requirement| requirement["type"] == "insecureAcceptAnything")
-    {
+/// Enforcing origins cannot pull with a singleton insecureAcceptAnything
+/// default in the selected policy, even with a repository signature rule.
+pub fn check_policy() -> Result<(), String> {
+    let (path, file) = open_policy()?;
+    let policy: ContainerPolicy =
+        serde_json::from_reader(file).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+    if policy.is_default_insecure() {
         return Err(format!(
-            "{POLICY}: default contains insecureAcceptAnything; refusing enforcement because bootc would refuse every update"
+            "{}: default is insecureAcceptAnything; refusing enforcement because bootc would refuse every update",
+            path.display()
         ));
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct PolicyEntry {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct ContainerPolicy {
+    default: Option<Vec<PolicyEntry>>,
+}
+
+impl ContainerPolicy {
+    /// Mirror bootc's predicate: requirements are ANDed, so only a singleton
+    /// insecureAcceptAnything default triggers its enforcing-pull ban.
+    fn is_default_insecure(&self) -> bool {
+        matches!(
+            self.default.as_deref(),
+            Some([requirement]) if requirement.kind == "insecureAcceptAnything"
+        )
+    }
 }
 
 /// What to do about the booted deployment.
@@ -290,22 +335,31 @@ pub fn check_decisions() -> Result<(), String> {
             return Err(format!("{name}: decided {got:?}, expected {want:?}"));
         }
     }
-    for (policy, safe) in [
-        (r#"{"default":[{"type":"reject"}]}"#, true),
+    for (policy, insecure) in [
+        (r#"{"default":[{"type":"reject"}]}"#, false),
         (
             r#"{"default":[{"type":"sigstoreSigned","keyPath":"/etc/pki/containers/ilex.pub"}]}"#,
-            true,
+            false,
         ),
-        (r#"{"default":[{"type":"insecureAcceptAnything"}]}"#, false),
+        (r#"{"default":[{"type":"insecureAcceptAnything"}]}"#, true),
         (
             r#"{"default":[{"type":"reject"},{"type":"insecureAcceptAnything"}]}"#,
             false,
         ),
+        (
+            r#"{"default":[{"type":"insecureAcceptAnything"},{"type":"sigstoreSigned","keyPath":"/etc/pki/containers/ilex.pub"}]}"#,
+            false,
+        ),
+        (
+            r#"{"default":[{"type":"insecureAcceptAnything"},{"type":"insecureAcceptAnything"}]}"#,
+            false,
+        ),
         (r#"{"default":[]}"#, false),
+        (r#"{"default":null}"#, false),
         (r#"{}"#, false),
     ] {
-        let value = serde_json::from_str(policy).map_err(|e| e.to_string())?;
-        if check_default(&value).is_ok() != safe {
+        let value: ContainerPolicy = serde_json::from_str(policy).map_err(|e| e.to_string())?;
+        if value.is_default_insecure() != insecure {
             return Err(format!("unexpected enforcement safety for {policy}"));
         }
     }

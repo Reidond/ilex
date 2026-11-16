@@ -505,40 +505,9 @@ fn check_sigpolicy(vm: &LibvirtVm, installed: &str) -> Result<()> {
         "the in-place switch changed the booted digest".to_string()
     })?;
 
-    // A locally retained permissive policy must fail before the agent changes
-    // the origin. Restore the shipped policy even if either refusal fails.
-    step("sigpolicy: unsafe default must refuse enforcement, including dry run");
-    let refusal = vm
-        .ssh(
-            r#"set -eu
-policy=/etc/containers/policy.json
-backup=$(mktemp /run/ilex-e2e-policy.XXXXXX)
-cp "$policy" "$backup"
-trap 'cp "$backup" "$policy"; rm -f "$backup"' EXIT
-python3 - <<'PY'
-import json
-from pathlib import Path
-path = Path('/etc/containers/policy.json')
-policy = json.loads(path.read_text())
-policy['default'] = [{'type': 'insecureAcceptAnything'}]
-path.write_text(json.dumps(policy) + '\n')
-PY
-for mode in apply dry-run; do
-    flag=
-    if [ "$mode" = dry-run ]; then flag=--dry-run; fi
-    if output=$(ilex-agent enforce-sigpolicy $flag 2>&1); then
-        echo "unsafe policy unexpectedly accepted ($mode): $output"
-        exit 1
-    fi
-    printf '%s\n' "$output"
-    printf '%s\n' "$output" | grep -F 'default contains insecureAcceptAnything'
-done
-"#,
-        )?
-        .ok("refusing an unsafe policy default before switching")?;
-    eprintln!("{}", refusal.stdout.trim_end());
+    check_policy_overrides(vm)?;
     ensure(booted(vm)? == unverified, || {
-        "refusing an unsafe policy default changed the origin".into()
+        "checking policy overrides changed the origin".into()
     })?;
 
     step("sigpolicy: rebooting, the unit must enforce at boot");
@@ -599,6 +568,84 @@ done
         "bootc upgrade --check changed the deployment or staged an update".into()
     })?;
     step("enforcing registry check verified");
+    Ok(())
+}
+
+/// Check the same policy precedence and singleton-default rule as packaged
+/// bootc, using real files and the agent in this installed VM. The shipped
+/// /etc policy stays safe while root's higher-priority policies are unsafe.
+fn check_policy_overrides(vm: &LibvirtVm) -> Result<()> {
+    step("sigpolicy: higher-priority unsafe policies must refuse enforcement, including dry run");
+    let result = vm.ssh(r#"set -eu
+fixture=$(mktemp -d /run/ilex-e2e-policy.XXXXXX)
+user_policy=/root/.config/containers/policy.json
+if test -e "$user_policy" || test -L "$user_policy"; then
+    cp -a "$user_policy" "$fixture/saved-user"
+fi
+cleanup() {
+    rm -f "$user_policy"
+    if test -e "$fixture/saved-user" || test -L "$fixture/saved-user"; then
+        cp -a "$fixture/saved-user" "$user_policy"
+    fi
+    rm -rf "$fixture"
+}
+trap cleanup EXIT
+mkdir -p /root/.config/containers "$fixture/xdg/containers"
+python3 - "$fixture" "$user_policy" <<'PY'
+import copy
+import json
+import sys
+from pathlib import Path
+fixture, user = map(Path, sys.argv[1:])
+base = json.loads(Path('/etc/containers/policy.json').read_text())
+assert base['default'] == [{'type': 'reject'}]
+unsafe = copy.deepcopy(base)
+unsafe['default'] = [{'type': 'insecureAcceptAnything'}]
+conjunction = copy.deepcopy(base)
+conjunction['default'].append({'type': 'insecureAcceptAnything'})
+for path, policy in [(fixture / 'safe.json', base),
+                     (fixture / 'unsafe.json', unsafe),
+                     (fixture / 'conjunction.json', conjunction),
+                     (fixture / 'xdg/containers/policy.json', base),
+                     (user, unsafe)]:
+    path.write_text(json.dumps(policy) + '\n')
+PY
+refuse() {
+    expected=$1; shift
+    for mode in apply dry-run; do
+        flag=
+        if [ "$mode" = dry-run ]; then flag=--dry-run; fi
+        if output=$("$@" ilex-agent enforce-sigpolicy $flag 2>&1); then
+            echo "unsafe policy unexpectedly accepted ($mode): $output"
+            exit 1
+        fi
+        printf '%s\n' "$output"
+        printf '%s\n' "$output" | grep -Fq "$expected: default is insecureAcceptAnything"
+    done
+}
+allow() {
+    output=$("$@" ilex-agent enforce-sigpolicy --dry-run)
+    printf '%s\n' "$output" | grep -Fq 'would enforce signatures'
+}
+refuse "$user_policy" env -u CONTAINERS_POLICY_JSON -u XDG_CONFIG_HOME HOME=/root
+refuse "$user_policy" env -u XDG_CONFIG_HOME HOME=/root CONTAINERS_POLICY_JSON=
+allow env HOME=/root CONTAINERS_POLICY_JSON="$fixture/safe.json"
+refuse "$fixture/unsafe.json" env HOME=/root XDG_CONFIG_HOME="$fixture/xdg" CONTAINERS_POLICY_JSON="$fixture/unsafe.json"
+refuse "$fixture/unsafe.json" env HOME=/root CONTAINERS_POLICY_JSON="${fixture#/}/unsafe.json"
+allow env HOME=/root CONTAINERS_POLICY_JSON="$fixture/conjunction.json"
+allow env -u CONTAINERS_POLICY_JSON HOME=/root XDG_CONFIG_HOME="$fixture/xdg"
+cp "$fixture/unsafe.json" "$fixture/xdg/containers/policy.json"
+refuse "$fixture/xdg/containers/policy.json" env -u CONTAINERS_POLICY_JSON HOME=/root XDG_CONFIG_HOME="$fixture/xdg"
+rm "$fixture/xdg/containers/policy.json"
+allow env -u CONTAINERS_POLICY_JSON HOME=/root XDG_CONFIG_HOME="$fixture/xdg"
+if output=$(env HOME=/root CONTAINERS_POLICY_JSON="$fixture/missing.json" ilex-agent enforce-sigpolicy --dry-run 2>&1); then
+    echo 'missing explicit policy unexpectedly fell through'
+    exit 1
+fi
+printf '%s\n' "$output" | grep -Fq "opening CONTAINERS_POLICY_JSON=$fixture/missing.json"
+"#)?.ok("checking effective policy refusal and precedence")?;
+    eprintln!("{}", result.stdout.trim_end());
+    step("policy override precedence and conjunctive defaults verified");
     Ok(())
 }
 

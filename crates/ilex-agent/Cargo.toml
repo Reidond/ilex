@@ -8,4 +8,5 @@ publish.workspace = true
 
 # Few dependencies on purpose: this is what the image's builder stage compiles.
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true

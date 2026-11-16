@@ -198,6 +198,7 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         || "ilex must require its sigstore signature and matching repository identity".into(),
     )?;
     for transport in [
+        "atomic",
         "docker",
         "containers-storage",
         "dir",

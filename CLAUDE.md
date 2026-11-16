@@ -83,11 +83,13 @@ cargo xtask info               # resource identity, selection and available conf
   left the containers-storage origin alone at boot; the origin is pointed at
   the installer composition unverified (the state an ISO install leaves),
   and after a reboot the unit must have added the enforcement (a second run
-  is a no-op). The agent must refuse an `insecureAcceptAnything` default
-  before changing the origin, including in dry-run mode. After enforcement,
-  `bootc upgrade --check` must fetch and verify the tracked image without
-  staging an update; only an unreachable ghcr skips that check, with a printed
-  reason. Before the installer's composition is first published, CI explicitly
+  is a no-op). The agent must refuse a singleton `insecureAcceptAnything`
+  default in the effective policy before changing the origin, including in
+  dry-run mode. The VM exercises unsafe root-user, XDG and environment-override
+  policies while `/etc` stays safe, their precedence and a conjunctive default.
+  After enforcement, `bootc upgrade --check` must fetch and verify the tracked
+  image without staging an update; only an unreachable ghcr skips that check,
+  with a printed reason. Before the installer's composition is first published, CI explicitly
   sets `ILEX_SIGPOLICY_LEGACY=1` to check signed legacy `:latest` instead (the
   same absence check that selects legacy v1); local runs can opt in too.
   Then the rollback to v1. One VM, one install: installing is
@@ -1102,14 +1104,54 @@ Signatures use cosign **v2** key-pair legacy `.sig` tags; bootc/containers-image
 cannot use keyless or cosign v3's default format. Policy and the public key live
 in `rootfs/etc/containers/{policy.json,registries.d/ilex.yaml}` and
 `rootfs/etc/pki/containers/ilex.pub`. The policy's default is `reject`: bootc's
-import library refuses every enforcing pull when the default is
-`insecureAcceptAnything`, even if a repository has its own signature rule.
-Each current transport (`docker`, `containers-storage`, `dir`, `docker-archive`,
-`docker-daemon`, `oci`, `oci-archive`, `sif`, `tarball`) explicitly accepts
-images through its empty scope. The more specific ilex and existing Red Hat
+import library refuses every enforcing pull when the effective policy's default
+is exactly one `insecureAcceptAnything` entry, even if a repository has its own
+signature rule. Requirements in an array are ANDed: adding that entry alongside
+a signature requirement or `reject` does not trigger bootc's singleton check.
+The explicit transport allowlist covers Fedora 45's `atomic` (deprecated
+OpenShift), `docker`, `containers-storage`, `dir`, `docker-archive`,
+`docker-daemon`, `oci`, `oci-archive`, `sif` and `tarball` transports through
+their empty scopes. The more specific ilex and existing Red Hat
 registry signature requirements still take precedence. Other podman, toolbox,
 Flatpak OCI and bootc pulls keep their previous behaviour. A future transport
 must be listed explicitly before it can be used.
+
+The agent follows the policy lookup in Fedora 45's packaged bootc 1.17.1 and
+1.17.4 (`crates/ostree-ext/src/container/skopeo.rs`): a non-empty
+`CONTAINERS_POLICY_JSON` override, then
+`$XDG_CONFIG_HOME/containers/policy.json` (or `$HOME/.config/containers/policy.json`
+when XDG is unset), then `/etc/containers/policy.json`, then
+`/usr/share/containers/policy.json`. An explicit override that cannot be opened
+is an error; other candidates fall through on open errors. Paths are resolved
+from `/`, including relative environment values. Diagnostics name the selected
+policy. Check the environment used by the root updater as well as an interactive
+root shell; `/root/.config/containers/policy.json` can override a fixed `/etc`.
+
+**Recovering an existing machine.** An already enforcing machine with the old
+singleton default cannot fetch this fix. Back up its effective policy, edit
+that default to `[{"type":"reject"}]`, and merge the explicit empty-scope
+transport allowances from `rootfs/etc/containers/policy.json` into missing
+scopes. Preserve every existing local scope, empty-scope rule, signing key and
+signature requirement. For a machine using the system policy:
+
+```sh
+sudo cp -a /etc/containers/policy.json /etc/containers/policy.json.before-ilex-repair
+sudoedit /etc/containers/policy.json
+sudo systemctl restart ilex-sigpolicy.service
+sudo bootc upgrade --check
+sudo bootc upgrade
+```
+
+If a higher-priority policy is selected, back up and repair that file instead.
+Keep origin enforcement enabled throughout. On upgrade, OSTree replaces an
+unchanged old `/etc` policy with the new default, but retains a locally edited
+policy as a whole; it does not merge individual JSON keys. Compare that retained
+file with the new shipped policy and merge the default and missing transport
+allowances while keeping local rules. The agent's guard reports a retained
+singleton insecure default when that policy is selected. The containers-storage
+migration test covers an unchanged `/etc` policy; it does not establish
+automatic recovery of an already blocked registry client.
+
 Verify a published composition with
 `cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true
 ghcr.io/reidond/ilex:generic.gnome`. The private key is a repository secret; losing
@@ -1247,8 +1289,8 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   registry}` with no `signature` (a plain `bootc switch` leaves the same state).
   Unverified pulls still apply `policy.json`: signed ilex images are accepted
   and unsigned ones rejected while that policy is present. Origin enforcement
-  additionally insists on a non-permissive system policy. The image adds this
-  itself:
+  additionally refuses a singleton insecure default in the selected policy.
+  The image adds this itself:
   `ilex-sigpolicy.service` (enabled by the preset, `ConditionPathExists=
   /run/ostree-booted`, ordered before the updater) runs `ilex-agent
   enforce-sigpolicy` at every boot. When the booted deployment tracks
@@ -1260,8 +1302,9 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   images or transports (test images in containers-storage, other registries,
   `ghcr.io/reidond/ilex-iso`) and machines that already verify, so there is
   nothing to run by hand; `ilex-agent enforce-sigpolicy --dry-run` shows what
-  it would do. Before enforcing, the agent refuses an `insecureAcceptAnything`
-  policy default with a non-zero exit and an explanation: changing the origin
+  it would do. Before enforcing, the agent resolves bootc's effective policy
+  and refuses a singleton `insecureAcceptAnything` default with a non-zero
+  exit and an explanation naming that file: changing the origin
   with that default would stop updates. The agent's self-check checks it too.
   `/sysroot` is mounted read-only on a running system and bootc
   doesn't remount it for `--mutate-in-place` ("Writing origin: Read-only file
