@@ -1,9 +1,12 @@
 """Executed through a real password-authenticated TTY, as its homed user."""
 import argparse
+import contextlib
 import hashlib
+import io
 import importlib.util
 import json
 import os
+import pwd
 from pathlib import Path
 import subprocess
 
@@ -27,13 +30,24 @@ def fixture(root, code, apps=False):
     module.ROOT = root
     args = argparse.Namespace(name="reidond", selected=False, shell=None, install_apps=apps)
     try:
-        result = module.apply(args)
+        if apps:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = module.apply(args)
+            assert any(c.startswith('app ') for c in json.loads(output.getvalue())['conflicts'])
+        else:
+            result = module.apply(args)
     except (ValueError, OSError):
         result = 2
     assert result == code, (root, result, code)
 
 
 assert os.getuid() != 0 and os.environ.get("SYSTEMD_HOME") == "1"
+record = json.loads(subprocess.check_output(['homectl', 'inspect', pwd.getpwuid(os.getuid()).pw_name, '--json=short'], text=True))
+print('homed profile admission:', {key: record.get(key) for key in ('userName', 'uid', 'homeDirectory', 'storage')},
+      'states:', [v.get('state') for v in record.get('status', {}).values()],
+      'NSS:', pwd.getpwuid(os.getuid()).pw_dir, 'mount:', os.path.ismount(pwd.getpwuid(os.getuid()).pw_dir),
+      'binding UIDs:', [v.get('uid') for v in record.get('binding', {}).values()])
 cli("--selected")
 assert not state.exists()
 welcome.parent.mkdir(parents=True, exist_ok=True)
@@ -43,7 +57,7 @@ assert welcome.read_text() == "preexisting user file\n"
 welcome.unlink()
 cli("reidond")
 original = welcome.read_bytes()
-gnome = bool(json.loads(Path('/usr/share/ilex/image.json').read_text())['shells'])
+gnome = json.loads(Path('/usr/share/ilex/image.json').read_text())['default-shell'] == 'gnome'
 if gnome:
     assert subprocess.check_output(['dconf', 'read', '/org/gnome/desktop/interface/clock-show-weekday'], text=True).strip() == 'true'
 assert json.loads(state.read_text())["files"][".config/ilex/welcome.txt"] == hashlib.sha256(original).hexdigest()

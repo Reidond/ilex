@@ -202,7 +202,7 @@ cargo xtask info               # resource identity, selection and available conf
 - Publishing (`xtask publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
 
-## Configurations: shells, design systems, machines
+## Configurations: shells, design systems, machines and users
 
 `image.toml` names the installed shells and design systems and one default of
 each when its list is non-empty. `packages.toml` is the base's package list,
@@ -240,6 +240,7 @@ enabled globally without a shell: no session means no notification is attempted.
 | Shell | per image, in `image.toml` | per image, `default-shell` | at sign-in, from the greeter's sessions |
 | Design system | per image, in `image.toml` | per image, `default-design-system` | planned (M1): state in their home, read by a shell; not built |
 | Machine configuration | per composition tag (`generic.gnome`, `ms-7c35.gnome`) | installer DMI match, otherwise `generic` | installer kernel override; later `bootc switch` |
+| User profile | public catalogue in every image | no selection | explicit apply after authenticating into a daily home |
 
 ### Compositions
 
@@ -728,6 +729,14 @@ profile revision, or changed content without a revision bump declines updates
 left in place. The per-user `ilex-profile.service` reapplies only an already
 selected profile on login, without app installation; no selection is a no-op.
 There are no root-run profile hooks. Installer choice/provisioning UX is PR 22.
+
+`cargo xtask test ephemeral::user_profiles homed::profiles -- --test-threads 1`
+checks catalogue/schema/path/registry rejection in a booted image and profile
+application through PR 20's real creation/TTY path in an enforcing installed
+guest. The latter uses 2 GiB and no UI automation, tests user-edit/deletion and
+link preservation, future-state/rollback refusal, opt-in app failure, and a
+successful relogin while the older image's user service declines newer state.
+On a GNOME image it also checks scoped dconf updates and user-setting conflicts.
 
 ## Build sharing: kache
 

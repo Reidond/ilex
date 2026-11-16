@@ -167,9 +167,12 @@ def active_home():
         raise ValueError("run profile apply as the authenticated home user, without sudo")
     account = pwd.getpwuid(uid)
     record = json.loads(run("/usr/bin/homectl", "inspect", account.pw_name, "--json=short"))
-    if (record.get("userName") != account.pw_name or record.get("uid") != uid
-        or record.get("homeDirectory") != account.pw_dir or record.get("storage") != "luks"
-        or not any(s.get("state") == "active" for s in record.get("status", {}).values())
+    machine = read_image("/etc/machine-id").decode("ascii").strip()
+    binding = record.get("binding", {}).get(machine, {})
+    if (record.get("userName") != account.pw_name or record.get("uid", binding.get("uid")) != uid
+        or record.get("homeDirectory", binding.get("homeDirectory")) != account.pw_dir
+        or record.get("storage", binding.get("storage")) != "luks"
+        or record.get("status", {}).get(machine, {}).get("state") != "active"
         or not os.path.ismount(account.pw_dir)):
         raise ValueError("profile application requires the caller's active LUKS homed home")
     # /home is the image's intentional /var/home alias, not profile data.

@@ -107,6 +107,12 @@ with tempfile.TemporaryDirectory(prefix="ilex-profiles-") as temporary:
             pass
         else:
             raise AssertionError("noncanonical path accepted")
+    try:
+        compose.selected("fixture", "users", ["sample", "sample"])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("duplicate catalogue ID accepted")
 
     reset()
     homefile(".config/ilex/public.txt")
