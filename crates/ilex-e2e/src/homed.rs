@@ -26,7 +26,72 @@ pub fn trials() -> Vec<Trial> {
         common::trial("homed::allocation", allocation),
         common::trial("homed::crash_grow", || resize_crash("grow")),
         common::trial("homed::crash_shrink", || resize_crash("shrink")),
+        common::trial("homed::profiles", profiles),
     ]
+}
+
+fn profiles() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "homed/profiles")?;
+    let disk = vmtest::disk(&ws)?;
+    let mut config = VmConfig::new("profiles", disk);
+    config.memory = "2G".into();
+    let mut vm = vmtest::boot(&ws, config)?;
+    let result = (|| {
+        vm.ssh_ok("test \"$(getenforce)\" = Enforcing; ! ilex-agent profile apply reidond; ilex-agent profile list")?;
+        vm.ssh_ok(&format!(
+            "printf %s {} | base64 -d > /run/ilex-profiles-user.py",
+            qemu::base64(include_str!("profiles-user-guest.py").as_bytes())
+        ))?;
+        // Read-only, root-owned profile variants model a later signed image.
+        // Only the e2e harness redirects the production module's image root;
+        // the shipped command accepts no alternate source/home option.
+        vm.ssh_ok(r#"python3 - <<'PY'
+import hashlib, json, pathlib, shutil
+source = pathlib.Path('/usr/share/ilex')
+for name, text in [('v2', 'profile revision two\n'), ('rewritten-v2', 'rewritten without revision bump\n')]:
+    root = pathlib.Path('/run/ilex-profile-' + name)
+    shutil.copytree(source / 'users', root / 'users')
+    shutil.copy(source / 'image.json', root / 'image.json')
+    leaf = root / 'users/reidond/home/.config/ilex/welcome.txt'
+    leaf.write_text(text)
+    added = leaf.with_name('added.txt')
+    added.write_text('new public file\n')
+    manifest = root / 'users/reidond/user.json'
+    data = json.loads(manifest.read_text())
+    data['revision'] = 2
+    data['settings'] = {'gnome': {'color-scheme': 'default', 'clock-show-weekday': False}}
+    data['files'] = {'.config/ilex/' + p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in [leaf, added]}
+    data['apps'] = {'flatpaks': [{'id': 'org.example.IlexMissing', 'remote': 'flathub'}]}
+    manifest.write_text(json.dumps(data))
+    catalogue = {'schema': 1, 'profiles': [{'id': 'reidond', 'schema': 1, 'revision': 2, 'sha256': hashlib.sha256(manifest.read_bytes()).hexdigest()}]}
+    (root / 'users.json').write_text(json.dumps(catalogue))
+PY"#)?;
+        let secret = password()?;
+        guest(
+            &vm,
+            json!({"action":"create", "name":"profiletest", "secrets":[secret]}),
+        )?;
+        guest(
+            &vm,
+            json!({"action":"profiles", "name":"profiletest", "secrets":[secret]}),
+        )?;
+        vm.wait_for(
+            "profile user's home is released",
+            "! mountpoint -q /home/profiletest",
+            WAIT,
+        )?;
+        guest(
+            &vm,
+            json!({"action":"profile-relogin", "name":"profiletest", "secrets":[secret]}),
+        )?;
+        guest(&vm, json!({"action":"secret-audit", "secrets":[secret]}))?;
+        Ok(())
+    })();
+    if let Ok(journal) = vm.ssh_ok("journalctl --no-pager -u systemd-homed -u 'user@*' -n 200") {
+        qemu::write_artifact(&artifacts, "journal.txt", &journal)?;
+    }
+    finish(result, audit(&vm, &artifacts))
 }
 
 fn password() -> Result<String> {

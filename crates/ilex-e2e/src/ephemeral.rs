@@ -54,7 +54,33 @@ pub fn trials() -> Vec<Trial> {
         }),
         trial("ephemeral::sigpolicy_noop", || GROUP.run(sigpolicy_noop)),
         trial("ephemeral::configuration", || GROUP.run(configuration)),
+        trial("ephemeral::user_profiles", || GROUP.run(user_profiles)),
     ]
+}
+
+fn user_profiles(vm: &EphemeralVm) -> Result<()> {
+    use ilex_devkit::qemu::base64;
+    vm.ssh("mkdir -p /run/ilex-profiles-build")?
+        .ok("profile fixture directory")?;
+    for (name, source) in [
+        ("compose.py", include_str!("../../../build/compose.py")),
+        (
+            "image_tree.py",
+            include_str!("../../../build/image_tree.py"),
+        ),
+        ("check.py", include_str!("profiles-build-guest.py")),
+    ] {
+        vm.ssh(&format!(
+            "printf %s {} | base64 -d > /run/ilex-profiles-build/{name}",
+            base64(source.as_bytes())
+        ))?
+        .ok("profile build fixture")?;
+    }
+    let result = vm
+        .ssh("timeout 120 python3 -I -S /run/ilex-profiles-build/check.py")?
+        .ok("public profile regressions")?;
+    println!("     {}", result.stdout);
+    Ok(())
 }
 
 /// systemd finished booting and nothing is degraded.

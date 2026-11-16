@@ -166,6 +166,12 @@ def checksum(name):
 def main():
     action = request["action"]
     name = request.get("name", "homedtest")
+    if action == "profiles":
+        tty(name, secrets[0], "python3 -I -S /run/ilex-profiles-user.py")
+        return "password-authenticated profile application and safety regressions passed"
+    if action == "profile-relogin":
+        tty(name, secrets[0], "test -r ~/.local/state/ilex/profile.json && test -r ~/.config/ilex/welcome.txt")
+        return "login succeeds with a newer profile state on an older image"
     if action == "maintenance":
         run("useradd", "--create-home", "--groups", "wheel", "--shell", "/bin/bash", "ilexmaint")
         run("chpasswd", input="ilexmaint:" + secrets[0] + "\n")
