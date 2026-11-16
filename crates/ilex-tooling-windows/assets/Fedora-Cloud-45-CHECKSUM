@@ -1,0 +1,33 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+# Fedora-Cloud-Base-AmazonEC2-45-1.4.x86_64.raw.xz: 604092132 bytes
+SHA256 (Fedora-Cloud-Base-AmazonEC2-45-1.4.x86_64.raw.xz) = e55e78f53fa7647505d564394538fcf3319ba4bae7d93f5d4ae32052b3b6f8a0
+# Fedora-Cloud-Base-Azure-45-1.4.x86_64.vhdfixed.xz: 639339252 bytes
+SHA256 (Fedora-Cloud-Base-Azure-45-1.4.x86_64.vhdfixed.xz) = 4576d9d26b4351bb38e9fe2e414a9609a1f96b24045670f021850f1deb7e5dae
+# Fedora-Cloud-Base-GCE-45-1.4.x86_64.tar.gz: 599496500 bytes
+SHA256 (Fedora-Cloud-Base-GCE-45-1.4.x86_64.tar.gz) = 07ae69853e7d448112e8e3d0178a20f863650f38e28ac228815eec69e96c4883
+# Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2: 606732288 bytes
+SHA256 (Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2) = 50bdc5e70f6a24f540932d15411c1c6ae9fcfa40fb990d876d83c5cc823b2ad0
+# Fedora-Cloud-Base-UEFI-UKI-45-1.4.x86_64.qcow2: 662634496 bytes
+SHA256 (Fedora-Cloud-Base-UEFI-UKI-45-1.4.x86_64.qcow2) = b8da44c0c57fa3e98cf2e4c85b6ca8b93365e1ed9e05ddd996bbc9a3a116a491
+# Fedora-Cloud-Base-Vagrant-VirtualBox-45-1.4.x86_64.vagrant.virtualbox.box: 808595722 bytes
+SHA256 (Fedora-Cloud-Base-Vagrant-VirtualBox-45-1.4.x86_64.vagrant.virtualbox.box) = 19635c83a2b4f78b9cc04ac57aee9677f96ea5cb4f88938b9374b82d92c0bfa8
+# Fedora-Cloud-Base-Vagrant-libvirt-45-1.4.x86_64.vagrant.libvirt.box: 824369175 bytes
+SHA256 (Fedora-Cloud-Base-Vagrant-libvirt-45-1.4.x86_64.vagrant.libvirt.box) = 9eb98dd1f3459a76415893a710168ad71eb03cbd08fbc3482f24fefa8f97be31
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCAAdFiEET1CmEUzVxpdqfxF5ZVpLAvV3hh4FAmrllG4ACgkQZVpLAvV3
+hh5oaQ/9Gpk2WQM2w8aLvrpEoIpD7lCXk/t3fAW5xrGoAuTr1KWPbnrjWObDuhfs
+R4tbSXA3FvVyxUQ1z8GZXyfFD61azoYtBnCL4CayuJjmFrtMVGBbsuEsRm3pQSud
+QajzH1K7kiyXmQzJz1obUuqCZvBuhv3Jplvi+fOb2/hD9RbCPIcrDg1Cjh7tvSS0
+QZgcVFq9Q/qlwRyf4OqXLUaao557qMZH6n0z8R/Zq4PsQvOgDYtWsNbkeZax2N1G
+CFr3cSYiTjp+WhYSGxvJnt6NoKmxD87BY0sgzNuGX3ZNvWRwYM82usLDXab6Mg3f
+yZgzv/KFmrDg7hrW6oFcZGt9OBwh/qytUY/MZdeBp0ZRJc3yYhYb7xZqn4+uDfmh
+0CglvwOGtSxFamg2pooSV+iYGTA/cCzxhe2MizHTXjEMUCOsalIzsvhW9MN4jvyq
+rH4iONPEJDo9p/yFLuOFDk27Q9KIYYihojxMWbH86lkxeeshIpIm5inl1+bmraf8
+V4/OAhtxxnOYDPdZjS443H/pgVczltZXWoXGrNOHKdonRyURDvf48kAIudyxf94G
+zBz75qRdrNEksdGqsnu/2sJOGWqIiFz/Nhe7twc3AoCvr2e5anz6QINQCBNyxUGN
+A2SKi9zjWkiecfx6ddDE+V3W8A/QiqszrNZRtJ7w/bAzGs0ozjA=
+=UwRO
+-----END PGP SIGNATURE-----

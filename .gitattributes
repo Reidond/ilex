@@ -4,3 +4,4 @@
 design/*/tokens.json -text
 *.png binary
 *.qcow2 binary
+*.gpg binary

@@ -1,0 +1,22 @@
+[package]
+name = "ilex-tooling-windows"
+description = "Owned Windows runtimes and Hyper-V builder provisioning"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ilex-tooling-core.workspace = true
+ilex-tooling-qmp.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sha2 = "0.10"
+tar = "0.4"
+zstd = "0.13"
+fs2 = "0.4"
+pgp = { version = "0.21.1", default-features = false }
+

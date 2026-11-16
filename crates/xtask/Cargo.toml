@@ -13,3 +13,4 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+ilex-tooling-windows = { path = "../ilex-tooling-windows" }

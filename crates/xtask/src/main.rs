@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use ilex_devkit::Workspace;
 
 mod build;
+mod builder;
 mod changed;
 mod disk;
 mod doctor;
@@ -20,6 +21,7 @@ mod prepare_publish;
 mod publish;
 mod rechunk;
 mod registry;
+mod runtime;
 mod select;
 mod security;
 mod test;
@@ -39,6 +41,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Provision and maintain the native Windows Hyper-V Fedora builder
+    Builder(builder::Args),
+    /// Fetch or inspect the pinned per-user portable Windows QEMU runtime
+    Runtime(runtime::Args),
     /// podman build, tagged with this checkout's slug, labels included
     Build(build::Args),
     /// Split the image into reproducible chunks and add the `ilex.fingerprint` label
@@ -82,6 +88,12 @@ fn main() -> ExitCode {
 
 fn run(cmd: Cmd) -> Result<()> {
     if let Cmd::Identity(args) = &cmd { return identity::run(args); }
+    // Infrastructure commands work outside a checkout and never discover WSL.
+    let cmd = match cmd {
+        Cmd::Builder(args) => return builder::run(args),
+        Cmd::Runtime(args) => return runtime::run(args),
+        other => other,
+    };
     let ws = Workspace::discover()?;
     match cmd {
         Cmd::Build(args) => build::run(&ws, args),
@@ -108,5 +120,6 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Doctor(args) => doctor::run(&ws, args),
         Cmd::Identity(args) => identity::run(&args),
         Cmd::Security(args) => security::run(&ws, args),
+        Cmd::Builder(_) | Cmd::Runtime(_) => unreachable!("handled before workspace discovery"),
     }
 }

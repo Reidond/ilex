@@ -2094,6 +2094,15 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 
 ## Conventions
 
+- Native Windows infrastructure is available through `cargo xtask runtime
+  fetch|status|update|self-check` and `cargo xtask builder
+  up|status|down|update|self-check`. These commands do not invoke WSL. The
+  persistent per-user Gen2 builder, pinned acquisition, SSH identity, owned
+  cleanup and update recovery are documented in
+  [Windows builder tooling](docs/tooling/windows-builder.md). Build/test routing
+  remains unchanged until the remote-executor layer lands. Never remove a ready
+  shared builder as ordinary checkout cleanup.
+
 - `packages.toml` belongs to the base and stays within its 128 MiB growth
   budget; desktop-wide dependencies belong in `shells/packages.toml`. Both
   transactions precede ilex files, configuration and overlays.
