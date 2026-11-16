@@ -626,7 +626,9 @@ check cannot reserve space against simultaneous writers. Automatic resize,
 rebalancing and online/offline discard are off initially, avoiding sparse
 overcommit. Budget concurrently active homes and keep a system reserve.
 Use `homectl resize <name> <size>` for supported online resizing; never
-truncate a `.home` file. Automatic resize/rebalancing require separate
+truncate a `.home` file. Homed can clamp requests to btrfs's safe minimum or
+available backing capacity, so verify actual sizes even after a successful
+exit. Automatic resize/rebalancing require separate
 qualification before being adopted as defaults.
 
 Created accounts join `ilex-homed` (and `wheel` only with `--admin`). SSH

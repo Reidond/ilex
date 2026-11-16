@@ -174,9 +174,10 @@ def main():
         activate(name, secrets[0])
         return {"sizes": sizes(name), "sha256": checksum(name)}
     if action == "tty":
-        text = tty(name, secrets[0], "test \"$SYSTEMD_HOME\" = 1 && test \"$SYSTEMD_HOME_SUSPEND\" = 0 && test -r ~/e2e-data && loginctl show-session self -p Type && sudo -k && sudo -p ILEX-SUDO: id -u", [(r"ILEX-SUDO:", secrets[0])])
+        text = tty(name, secrets[0], "test \"$SYSTEMD_HOME\" = 1 && test \"$SYSTEMD_HOME_SUSPEND\" = 0 && test -r ~/e2e-data && ls -Zd ~ ~/e2e-data && loginctl show-session self -p Type && sudo -k && sudo -p ILEX-SUDO: id -u", [(r"ILEX-SUDO:", secrets[0])])
         assert re.search(r"\r?\n0\r?\n", text), text
         assert "Type=tty" in text, text
+        assert ":user_home_dir_t:" in text and ":user_home_t:" in text, text
         return "TTY PAM activates home, suspend=off, sudo authenticates the homed password"
     if action == "password":
         # pam_systemd_home reuses the password acquired by this login session;
@@ -220,14 +221,19 @@ def main():
             assert checksum(name) == digest, ("checksum changed after resize", size, measured)
         assert all(measured[1][i] > measured[0][i] for i in range(3)), measured
         assert all(measured[2][i] < measured[1][i] for i in range(3)), measured
-        # A filesystem containing 32 MiB cannot shrink to 16 MiB. Failure
-        # must preserve both the mapped size and data.
+        # Homed may clamp a request below btrfs's safe minimum rather than
+        # reject it. Check the actual dimensions and data in either case.
         code, output = terminal(["homectl", "resize", name, "16M"], [(r"password[^\r\n]*:", secrets[0])], allow_failure=True, optional=True)
-        assert code != 0, ("undersize accepted", output, sizes(name), measured)
-        assert re.search(r"small|minimum|space|invalid argument", output, re.I), output
-        assert sizes(name) == measured[2], ("rejected shrink changed size", sizes(name), measured)
-        assert checksum(name) == digest, "rejected shrink changed data"
-        return {"sizes_fs_mapper_backing": measured, "sha256": digest, "undersize_rejected": True}
+        minimum = sizes(name)
+        if code == 0:
+            assert minimum[0] > 32 * 1024 * 1024, ("unsafe shrink", minimum)
+        else:
+            assert re.search(r"small|minimum|space|invalid argument", output, re.I), output
+            assert minimum == measured[2], ("rejected shrink changed size", minimum, measured)
+        assert checksum(name) == digest, "undersize request changed data"
+        terminal(["homectl", "resize", name, "2G"], [(r"password[^\r\n]*:", secrets[0])], optional=True)
+        assert sizes(name) == measured[2], ("size not restored", sizes(name), measured)
+        return {"sizes_fs_mapper_backing": measured, "sha256": digest, "undersize_sizes": minimum, "undersize_data_preserved": True}
     if action == "multi-home":
         create("homedother", secrets[0])
         activate("homedother", secrets[0])
@@ -255,9 +261,12 @@ def main():
             assert sp.run(["getent", "passwd", "homedfull"], capture_output=True).returncode != 0
             assert not os.path.exists("/var/home/homedfull.home")
             code, output = terminal(["homectl", "resize", name, "3G"], [(r"password[^\r\n]*:", secrets[0])], allow_failure=True, optional=True)
-            assert code != 0, "growth unexpectedly succeeded on full outer storage"
-            assert re.search(r"space|allocat|disk full", output, re.I), output
-            assert sizes(name) == before
+            limited = sizes(name)
+            # Like undersize requests, homed can safely clamp growth to the
+            # backing filesystem's available capacity and return success.
+            assert limited[2] < 3 * 1024 * 1024 * 1024, ("growth reached requested size on full storage", before, limited, output)
+            if code != 0:
+                assert re.search(r"space|allocat|disk full", output, re.I), output
             assert checksum(name) == digest
             assert checksum("homedother") == other_digest
             assert run("getent", "passwd", "ilexmaint").startswith("ilexmaint:")
@@ -266,10 +275,10 @@ def main():
             os.unlink("/var/home/e2e-fill")
             os.sync()
         terminal(["homectl", "resize", name, "3G"], [(r"password[^\r\n]*:", secrets[0])], optional=True)
-        assert sizes(name)[0] > before[0]
+        assert sizes(name)[0] > limited[0]
         assert checksum(name) == digest
         assert checksum("homedother") == other_digest
-        return {"enospc_preserved_size_and_data": True, "recovered_sizes": sizes(name), "sha256": digest}
+        return {"enospc_data_preserved": True, "limited_sizes": limited, "recovered_sizes": sizes(name), "sha256": digest}
     if action == "secret-audit":
         journal = run("journalctl", "--no-pager", "-o", "cat")
         assert not any(secret in journal for secret in secrets), "credential appeared in journal"

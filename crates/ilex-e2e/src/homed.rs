@@ -261,7 +261,7 @@ fn lifecycle() -> Result<()> {
     if result.is_err() {
         let _ = ctl.save_screenshot(&artifacts.join("failure.png"));
         let _ = evidence(&vm, &artifacts);
-        let journal = vm.ssh_ok("journalctl --no-pager -u systemd-homed -u gdm -u sshd -n 500");
+        let journal = vm.ssh_ok("journalctl --no-pager -u systemd-homed -u 'ilex-homed-label@*' -u 'user@*' -u gdm -u sshd -n 500");
         if let Ok(journal) = journal {
             let _ = qemu::write_artifact(&artifacts, "failure-journal.txt", &journal);
         }
