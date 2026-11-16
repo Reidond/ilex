@@ -2,7 +2,7 @@
 //!
 //! The image ships a `policy.json` that demands a cosign signature for
 //! `ghcr.io/reidond/ilex` (plus `registries.d` and the public key). Unverified
-//! pulls still apply that policy; origin enforcement also refuses a singleton
+//! pulls still apply that policy; container-policy origins also refuse a singleton
 //! insecureAcceptAnything default in the selected policy. An ISO install, or a
 //! plain `bootc switch`, tracks ghcr *unverified*: kickstart's `bootc`
 //! command has no way to pass `--enforce-container-sigpolicy`.
@@ -63,7 +63,7 @@ fn open_policy() -> Result<(PathBuf, File), String> {
     )
 }
 
-/// Enforcing origins cannot pull with a singleton insecureAcceptAnything
+/// Container-policy origins cannot pull with a singleton insecureAcceptAnything
 /// default in the selected policy, even with a repository signature rule.
 pub fn check_policy() -> Result<(), String> {
     let (path, file) = open_policy()?;
@@ -107,9 +107,11 @@ pub enum Decision {
     NoDeployment,
     /// Tracks something that isn't `REPOSITORY` over the registry transport.
     Foreign(String),
-    /// Tracks `REPOSITORY` and already verifies (container policy or an ostree
-    /// remote that someone chose on purpose).
+    /// Tracks `REPOSITORY` and already verifies against container policy.
     Enforced,
+    /// Already uses another verification source, e.g. an OSTree remote.
+    /// Leave it alone without consulting container policy.
+    VerifiedElsewhere,
     /// Tracks `REPOSITORY` with no verification: switch this reference in
     /// place with enforcement on.
     Enforce(String),
@@ -139,7 +141,8 @@ pub fn decide(status: &Value) -> Decision {
     match &reference["signature"] {
         Value::Null => Decision::Enforce(image.to_string()),
         Value::String(s) if s == "insecure" => Decision::Enforce(image.to_string()),
-        _ => Decision::Enforced,
+        Value::String(s) if s == "containerPolicy" => Decision::Enforced,
+        _ => Decision::VerifiedElsewhere,
     }
 }
 
@@ -164,17 +167,22 @@ pub fn run(dry_run: bool) -> ExitCode {
 }
 
 fn enforce(dry_run: bool) -> Result<(), String> {
-    match decide(&bootc_status()?) {
+    let decision = decide(&bootc_status()?);
+    check_policy_for(&decision, check_policy)?;
+    match decision {
         Decision::NoDeployment => {
             println!("no booted deployment (not an installed bootc system): nothing to do");
         }
         Decision::Foreign(why) => println!("not an ilex registry image ({why}): nothing to do"),
+        Decision::VerifiedElsewhere => {
+            println!(
+                "{REPOSITORY} already uses another signature verification source: nothing to do"
+            );
+        }
         Decision::Enforced => {
-            check_policy()?;
             println!("{REPOSITORY} is already verified against policy.json");
         }
         Decision::Enforce(image) => {
-            check_policy()?;
             if dry_run {
                 println!("would enforce signatures for {image} (dry run)");
                 return Ok(());
@@ -205,6 +213,19 @@ fn enforce(dry_run: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// bootc applies its insecure-default ban only to ContainerPolicy. Check
+/// existing container-policy origins and origins about to become one, before
+/// either the apply or dry-run branch. The self-check injects a rejecting guard.
+fn check_policy_for(
+    decision: &Decision,
+    check: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match decision {
+        Decision::Enforced | Decision::Enforce(_) => check(),
+        _ => Ok(()),
+    }
 }
 
 fn bootc_status() -> Result<Value, String> {
@@ -287,7 +308,7 @@ pub fn check_decisions() -> Result<(), String> {
                 "registry",
                 Some("{\"ostreeRemote\":\"r\"}"),
             )),
-            Enforced,
+            VerifiedElsewhere,
         ),
         (
             "local test image",
@@ -333,6 +354,19 @@ pub fn check_decisions() -> Result<(), String> {
         };
         if !same {
             return Err(format!("{name}: decided {got:?}, expected {want:?}"));
+        }
+        // In particular, OSTree-remote verification must remain a successful
+        // no-op even when the effective container policy would be rejected.
+        let needs_policy = matches!(want, Enforced | Enforce(_));
+        let mut consulted = false;
+        let result = check_policy_for(&got, || {
+            consulted = true;
+            Err("self-check: singleton insecureAcceptAnything default".into())
+        });
+        if consulted != needs_policy || result.is_err() != needs_policy {
+            return Err(format!(
+                "{name}: incorrect container-policy guard selection"
+            ));
         }
     }
     for (policy, insecure) in [

@@ -1104,7 +1104,7 @@ Signatures use cosign **v2** key-pair legacy `.sig` tags; bootc/containers-image
 cannot use keyless or cosign v3's default format. Policy and the public key live
 in `rootfs/etc/containers/{policy.json,registries.d/ilex.yaml}` and
 `rootfs/etc/pki/containers/ilex.pub`. The policy's default is `reject`: bootc's
-import library refuses every enforcing pull when the effective policy's default
+import library refuses container-policy pulls when the effective policy's default
 is exactly one `insecureAcceptAnything` entry, even if a repository has its own
 signature rule. Requirements in an array are ANDed: adding that entry alongside
 a signature requirement or `reject` does not trigger bootc's singleton check.
@@ -1289,7 +1289,8 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   registry}` with no `signature` (a plain `bootc switch` leaves the same state).
   Unverified pulls still apply `policy.json`: signed ilex images are accepted
   and unsigned ones rejected while that policy is present. Origin enforcement
-  additionally refuses a singleton insecure default in the selected policy.
+  via `containerPolicy` additionally refuses a singleton insecure default in
+  the selected policy. OSTree-remote verification does not apply that ban.
   The image adds this itself:
   `ilex-sigpolicy.service` (enabled by the preset, `ConditionPathExists=
   /run/ostree-booted`, ordered before the updater) runs `ilex-agent
@@ -1302,8 +1303,10 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   images or transports (test images in containers-storage, other registries,
   `ghcr.io/reidond/ilex-iso`) and machines that already verify, so there is
   nothing to run by hand; `ilex-agent enforce-sigpolicy --dry-run` shows what
-  it would do. Before enforcing, the agent resolves bootc's effective policy
-  and refuses a singleton `insecureAcceptAnything` default with a non-zero
+  it would do. An OSTree-remote-verified origin is a successful no-op without
+  consulting container policy, including in dry-run mode. For container-policy
+  origins, and before adding that enforcement, the agent resolves bootc's
+  effective policy and refuses a singleton `insecureAcceptAnything` default with a non-zero
   exit and an explanation naming that file: changing the origin
   with that default would stop updates. The agent's self-check checks it too.
   `/sysroot` is mounted read-only on a running system and bootc
