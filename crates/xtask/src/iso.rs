@@ -409,9 +409,13 @@ fn host_image_builder() -> Option<u32> {
 /// shares this host's container storage, so a dev machine with an older
 /// image-builder (or none) works the same.
 fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<()> {
-    let build_args = |out: &str| -> Vec<String> {
+    let cache = ws.ensure_state()?.join("image-builder-cache");
+    fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
+    let build_args = |out: &str, cache_path: &str| -> Vec<String> {
         [
             "build",
+            "--cache",
+            cache_path,
             "--bootc-ref",
             installer,
             // image-builder wants a default root filesystem for the installer
@@ -430,7 +434,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
 
     if host_image_builder().is_some_and(|v| v >= MIN_IMAGE_BUILDER) {
         return cmd::run(
-            Command::new("image-builder").args(build_args(&out_dir.to_string_lossy())),
+            Command::new("image-builder").args(build_args(&out_dir.to_string_lossy(), &cache.to_string_lossy())),
         );
     }
     eprintln!(
@@ -463,18 +467,16 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
     let storage = Path::new(&graph_root)
         .parent()
         .unwrap_or(Path::new("/var/lib/containers"));
-    let cache = ws.ensure_state()?.join("image-builder-cache");
-    fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
     let mut run = Command::new("podman");
     run.args(["run", "--rm", "--privileged", "--network=host"])
         .args(["--security-opt", "label=disable"])
         .arg("--volume")
         .arg(format!("{0}:{0}", storage.display()))
         .arg("--volume")
-        .arg(format!("{0}:{0}", cache.display()))
+        .arg(format!("{}:/var/cache/image-builder", cache.display()))
         .arg("--volume")
         .arg(format!("{}:/out", out_dir.display()))
-        .args(["--env", &format!("TMPDIR={}/tmp", cache.display())])
+        .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"])
         .arg(&helper)
         .args([
             "sh",
@@ -482,7 +484,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
             "mkdir -p \"$TMPDIR\" && exec image-builder \"$@\"",
             "image-builder",
         ])
-        .args(build_args("/out"));
+        .args(build_args("/out", "/var/cache/image-builder"));
     cmd::run(&mut run)
 }
 
