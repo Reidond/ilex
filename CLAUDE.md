@@ -1025,15 +1025,23 @@ that exact digest; its own first-publish/absent-swap and parent-current guards
 allow, then tested ID/config/revision checks precede sign/verify and tag moves.
 ISO is due because its fingerprint changed and builds in parallel into the
 `installer-iso` artifact. `installer-release` waits for successful build/upgrade
-and actual publication (`published=true`), then verifies `generic.gnome`'s
+and actual default-composition publication (`published=true`), but does not
+wait for `machines`: that job is not in its `needs`. On the first publication,
+`generic.gnome` can be signed while `ms-7c35.gnome` is still being built/signed.
+The all-composition guard runs before cosign; any missing offered tag or
+signature tag, including the default's, makes `installer-target.sh` return
+`available=false` successfully. Installation and release are skipped, the ISO
+remains due, and the next full main run/nightly retries.
+Once all offered tags/signature tags exist, the job verifies `generic.gnome`'s
 resolved digest with the committed public key, installs that exact ISO with
 `iso::`, and verifies the same tag/digest/signature again before the independent
-installer ancestry guard and release. Thus the first installation test runs
-after this run creates the signed composition, before any new latest release.
+installer ancestry guard and release. The first installation test therefore
+waits for the full offered inventory, possibly until a later run.
 An unchanged root permits the intentionally skipped publish job; a publication
-guard skip, failure or failed image test prevents installer release. An absent
-target warns green; a missing/invalid signature or failed installation fails
-red. The ISO remains an artifact and the previous release stays latest.
+guard skip, failure or failed image test prevents installer release. Missing
+tags/signature tags before installation defer green; registry errors, a present
+but invalid default signature or failed installation fail red. The ISO remains
+an artifact and the previous release stays latest.
 CI also publishes `base`: its own absent snapshot, capability check and ephemeral
 boot permit `base_sha-…`, signature/verification, then `base` and
 `base_YYYYMMDD`. It has no upgrade tier or v1-disk dispatch. Healthy lines are
@@ -1231,16 +1239,25 @@ makes an ISO due. There are no `--source`/`--target` overrides; local
 in both the catalogue and release notes. It is forbidden in CI.
 The release job has `packages: read`, logs in using the job token and a private
 auth file shared by skopeo and cosign, and installs cosign v2 through the same
-pinned cosign-installer action as publication. It resolves the installer's tag
-and verifies the immutable `<repository>@<digest>` with
+pinned cosign-installer action as publication. Before default-target cosign
+verification, `cargo xtask iso --check-registry` checks every offered tag and
+its digest's legacy cosign signature tag. Explicit manifest/name absence for
+any tag or signature tag, including the default's signature tag, exits 3;
+`installer-target.sh` then sets `available=false` and exits successfully,
+skipping installation and release. This can happen on the first publication
+because `installer-release` does not wait for `machines`. The still-due ISO is
+retried on the next full main run/nightly. Denied/transport errors exit 1 and
+fail the job. This is a presence guard, not cryptographic verification of every
+offered tag.
+
+Once that guard passes, the job resolves the default tag and verifies the
+immutable `<repository>@<digest>` with
 `cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true`.
-Explicit manifest/name absence warns green with no release; denied/transport
-errors and missing, damaged or wrong-key signatures fail red for the default.
-Before and after this gate, `cargo xtask iso --check-registry` checks every
-offered tag and its digest's legacy cosign signature tag: missing tags/signature
-tags exit 3 (warn and defer release); registry errors exit 1. This is a presence
-guard, not cryptographic verification of every offered tag. The installer
-itself requires the ilex signature for whichever image it installs.
+A present but damaged or wrong-key default signature fails red at verification;
+it does not take the missing-signature-tag deferral path. The installer itself
+requires the ilex signature for whichever image it installs. The inventory is
+checked again before release; disappearance after a successful installation
+is an error rather than a deferral.
 
 The job prepares KVM/QEMU/libvirt with `vm-prep.sh`, restores its apt package
 cache, checks disk space and the ISO checksum, then runs
