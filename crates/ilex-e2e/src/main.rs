@@ -17,6 +17,7 @@ mod config;
 mod disk;
 mod ephemeral;
 mod graphical;
+mod homed;
 mod iso;
 mod tool;
 mod upgrade;
@@ -31,6 +32,10 @@ fn main() {
     trials.extend(upgrade::trials());
     trials.extend(graphical::trials());
     trials.extend(tool::trials());
+    // Installed, enforcing SELinux homes are an explicit, slow qualification.
+    if filters.iter().any(|f| f.contains("homed")) {
+        trials.extend(homed::trials());
+    }
     #[cfg(unix)]
     if !std::env::var_os("CI").is_some_and(|v| !v.is_empty()) && filters.iter().any(|f| f.contains("config")) {
         trials.extend(config::trials());

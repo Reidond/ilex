@@ -9,6 +9,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 mod config;
+mod homed;
 mod sigpolicy;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -21,6 +22,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--self-check") => self_check(),
+        Some("home-create") => homed::create(std::env::args().skip(2).collect()),
         Some("config") => match std::env::args().nth(2).as_deref() {
             None => config::run(false),
             Some("--json") => config::run(true),
@@ -40,7 +42,8 @@ fn main() -> ExitCode {
         None | Some("--help" | "-h") => {
             println!(
                 "ilex-agent {VERSION}\n\n\
-                 Usage: ilex-agent [--self-check | --version | config [--json] | enforce-sigpolicy [--dry-run]]"
+                 Usage: ilex-agent [--self-check | --version | config [--json] | enforce-sigpolicy [--dry-run]]\n\
+                 \x20      ilex-agent home-create NAME --disk-size=GiB [--admin] [--real-name=NAME]"
             );
             ExitCode::SUCCESS
         }

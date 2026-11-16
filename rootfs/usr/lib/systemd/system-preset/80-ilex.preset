@@ -7,3 +7,6 @@ enable ilex-sigpolicy.service
 
 # Mount the installed drupe tool images at boot.
 enable drupe.service
+
+# Password-encrypted daily homes coexist with the local maintenance account.
+enable systemd-homed.service

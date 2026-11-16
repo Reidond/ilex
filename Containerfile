@@ -107,11 +107,16 @@ RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose
 # directory everywhere else; drupe-enter is setuid root because it makes that
 # namespace and mount (and nothing else: see crates/drupe/src/enter.rs);
 # drupe.service mounts the installed images at boot.
+# Authselect's image checksum belongs in its supported vendor location;
+# /var/lib/authselect/checksum is mutable state and cannot ship in bootc.
 RUN chmod 0755 /usr/libexec/ilex/update-notify && \
     mkdir /app && \
     chmod 4755 /usr/libexec/drupe/drupe-enter && \
     systemctl set-default "$(python3 -I -S -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
-    systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service && \
+    systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service systemd-homed.service && \
+    authselect enable-feature with-systemd-homed && \
+    mv /var/lib/authselect/checksum /usr/share/authselect/checksum && \
+    authselect check && \
     if [ "$(systemctl get-default)" = graphical.target ]; then \
         systemctl --global enable ilex-update-notify.path ilex-update-notify.service; \
     fi && \

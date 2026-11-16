@@ -569,6 +569,60 @@ SMBIOS tables on 2026-11-15; Linux DMI values have not yet been measured on
 the physical PC. `ilex.composition=generic.gnome` at boot explicitly chooses
 generic instead.
 
+## Password-encrypted daily homes
+
+The base includes homed (`systemd-udev` and `systemd-pam` in Fedora 45) and
+btrfs-progs, enables the homed service,
+and enables Fedora authselect's `with-systemd-homed` feature before overlays.
+NSS continues to resolve both local and homed identities through `systemd`.
+Do not edit generated PAM files. Home suspension is off (the packaged PAM
+module's default); screen lock does not evict the home key. Lingering is not
+enabled. Root encryption and TPM enrollment are separate work.
+
+Keep Anaconda's distinctly named local wheel administrator for maintenance.
+Create the daily account locally from that account:
+
+```sh
+sudo ilex-agent home-create alice --disk-size=20 --real-name='Alice'
+# Add --admin only when this daily account should have password-authenticated sudo.
+```
+
+`homectl` prompts twice for the password and creates/signs the complete account
+in one operation. No password is accepted in this command's arguments or
+inherited `PASSWORD`/`NEWPASSWORD` variables. Usernames/UIDs already present
+in NSS are rejected by homed; existing accounts/homes are never converted.
+The machine generates its own homed signing key at runtime. Back it and the
+home's LUKS header up privately; never commit/export private records or keys.
+
+The creation path explicitly uses `--storage=luks --fs-type=btrfs`, with
+`/var/home/<name>.home` mounted at `/home/<name>` through Fedora's `/home`
+alias. Sizes are GiB capacities, not outer filesystem quotas. Creation checks
+for 2 GiB of spare backing space beyond the requested size; this admission
+check cannot reserve space against simultaneous writers. Automatic resize,
+rebalancing and online/offline discard are off initially, avoiding sparse
+overcommit. Budget concurrently active homes and keep a system reserve.
+Use `homectl resize <name> <size>` for supported online resizing; never
+truncate a `.home` file. Automatic resize/rebalancing require separate
+qualification before being adopted as defaults.
+
+Created accounts join `ilex-homed` (and `wheel` only with `--admin`). SSH
+allows `root`/`wheel` for maintenance and denies `ilex-homed`, even for an
+active administrative home with an authorized key. Keep that marker group
+when administering these accounts with homectl. No SSH password/bootstrap
+flow for daily homes is supported. Local maintenance login remains available
+when a daily home cannot be unlocked. Profiles and firstboot UI are later work.
+
+`cargo xtask test homed::` is opt-in and uses the installed-disk QEMU/bcvk
+backend, never the SELinux-disabled ephemeral guest. `homed::lifecycle`
+checks enforcing SELinux, authselect/NSS, inactive discovery in AccountsService
+and GDM, password login/logout, TTY, password change, sudo, maintenance recovery
+and SSH denial. `homed::allocation` uses disposable outer btrfs storage to
+check online 2 → 3 → 2 GiB resizing, filesystem/mapper/backing sizes, checksums,
+two active homes and ENOSPC/recovery without filling the system filesystem.
+Both audit authentication/home AVCs and retain nonsecret evidence under
+`<state dir>/artifacts/homed/`. This tier qualifies homed integration, not
+encrypted root, Secure Boot or the future Windows security backend.
+
 ## Build sharing: kache
 
 Image builds compile through [kache](https://github.com/kunobi-ninja/kache), a
