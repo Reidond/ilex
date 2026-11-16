@@ -333,14 +333,37 @@ fn qualification_contract(fixture: &mut Fixture, artifacts: &Path) -> Result<()>
         artifacts.join("qualified-profile.json"),
         serde_json::to_vec_pretty(&caps)?,
     )?;
-    for label in ["six-gib", "different-vcpus"] {
+    for label in ["different-memory", "different-vcpus"] {
         let mut other = regular.clone();
-        if label == "six-gib" {
-            other.resources.memory_bytes = 6 * 1024 * 1024 * 1024;
-        } else {
-            other.resources.vcpus += 1;
-        }
-        let caps = fixture.provider.probe(&other)?;
+        // Profiles qualified by earlier runs are valid evidence, not negative
+        // fixtures. Search relative to this measured profile without assuming
+        // that any particular RAM size or CPU count has never been measured.
+        let caps = loop {
+            if label == "different-memory" {
+                other.resources.memory_bytes = other
+                    .resources
+                    .memory_bytes
+                    .checked_add(1024 * 1024)
+                    .ok_or_else(|| anyhow::anyhow!("no larger memory profile is representable"))?;
+            } else {
+                other.resources.vcpus =
+                    other.resources.vcpus.checked_add(1).ok_or_else(|| {
+                        anyhow::anyhow!("no larger vCPU profile is representable")
+                    })?;
+            }
+            let caps = fixture.provider.probe(&other)?;
+            if caps
+                .qualification
+                .as_ref()
+                .is_some_and(|q| q.outcome == QualificationStatus::Unknown)
+            {
+                break caps;
+            }
+        };
+        ensure!(
+            other.resources != regular.resources,
+            "negative profile matches the measured profile"
+        );
         caps.require_provisioning(Capability::FirmwareEnforcement)?;
         ensure!(
             caps.require(Capability::FirmwareEnforcement).is_err()
@@ -445,7 +468,7 @@ fn unsigned_control(
         let mut fixture = Fixture::new(
             ws,
             &source,
-            &format!("security-{label}"),
+            &format!("security-efi-{}", if secure { "on" } else { "off" }),
             accelerator,
             secure,
             false,
