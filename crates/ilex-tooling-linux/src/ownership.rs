@@ -91,6 +91,9 @@ pub fn require_image(ws: &Workspace, image: &str) -> Result<()> {
 }
 
 pub fn check_output(ws: &Workspace, image: &str) -> Result<()> {
+    let reserved = ["localhost/ilex:main", "localhost/ilex-installer:main", "localhost/ilex-image-builder:main"];
+    ensure!(!reserved.iter().any(|main| image == *main || image.strip_prefix(main).is_some_and(|suffix| suffix.starts_with('.')))
+        || ws.identity()?.is_main, "main image namespace is reserved for the declared canonical primary checkout");
     if crate::bcvk::image_exists(image) {
         require_image(ws, image)?;
     }

@@ -256,6 +256,7 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
         ownership::vm_lease(b, &a.vm_name("foreign")).is_err(),
         "bcvk name from another checkout accepted"
     );
+    ensure!(ownership::check_output(b, "localhost/ilex:main").is_err(), "noncanonical checkout can allocate reserved main output");
     let disk = root.join("legacy-cache.qcow2");
     fs::write(&disk, b"unlabelled")?;
     ensure!(
