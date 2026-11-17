@@ -11,6 +11,7 @@ import os
 import queue
 import selectors
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -134,20 +135,31 @@ def display_info(target=None):
 
 def hypr_environment():
     environment = dict(os.environ)
-    for entry in os.scandir('/proc'):
-        if not entry.name.isdigit():
-            continue
+    # The compositor sets these variables after exec, so /proc/PID/environ
+    # need not contain them. Use hyprctl's instance/Wayland-socket discovery,
+    # and qualify its PID and socket against this admitted user's lifetime.
+    result = subprocess.run(['hyprctl', '-j', 'instances'], env=environment,
+                            capture_output=True, timeout=2, check=True)
+    candidates = []
+    runtime = f'/run/user/{os.getuid()}'
+    for instance in json.loads(result.stdout):
         try:
-            if os.stat(entry.path).st_uid != os.getuid() or open(entry.path + '/comm').read().strip() != 'Hyprland':
+            pid = int(instance['pid'])
+            process = f'/proc/{pid}'
+            if os.stat(process).st_uid != os.getuid() or open(process + '/comm').read().strip() != 'Hyprland':
                 continue
-            values = dict(part.split('=', 1) for part in open(entry.path + '/environ', 'rb').read().decode().split('\0') if '=' in part)
-            for key in ['WAYLAND_DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE']:
-                if key in values:
-                    environment[key] = values[key]
-            return environment
-        except (OSError, UnicodeError):
+            signature, socket = instance['instance'], instance['wl_socket']
+            if not all(isinstance(value, str) and value and '/' not in value and value not in ['.', '..'] for value in [signature, socket]):
+                continue
+            node = os.stat(f'{runtime}/{socket}', follow_symlinks=False)
+            if node.st_uid == os.getuid() and stat.S_ISSOCK(node.st_mode):
+                candidates.append((signature, socket))
+        except (OSError, ValueError, KeyError):
             continue
-    raise ValueError('no live Hyprland session')
+    if len(candidates) != 1:
+        raise ValueError('no unambiguous live Hyprland session')
+    environment['HYPRLAND_INSTANCE_SIGNATURE'], environment['WAYLAND_DISPLAY'] = candidates[0]
+    return environment
 
 
 def supervise():
@@ -167,16 +179,24 @@ def supervise():
     relay_thread = None
     selected = None
     last_attempt = 0
+    def stop_child():
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
     try:
         while not ending.is_set():
             current = active_session()
             if child is not None and (current != selected or child.poll() is not None):
-                child.terminate()
-                try:
-                    child.wait(2)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait()
+                stop_child()
                 if relay_thread is not None:
                     relay_thread.join(2)
                 child = None
@@ -221,14 +241,8 @@ def supervise():
                     except BrokenPipeError:
                         break
     finally:
-        if child is not None and child.poll() is None:
-            # Child session/helpers have their own process group.
-            os.killpg(child.pid, signal.SIGTERM)
-            try:
-                child.wait(2)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
+        if child is not None:
+            stop_child()
 
 
 def session():
@@ -250,6 +264,17 @@ def session():
     interface = dest + '.Session'
     path = None
     watcher = None
+    copy_owner = None
+
+    def stop_helper(process):
+        if process is None:
+            return
+        process.terminate()
+        try:
+            process.wait(1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
     def allowed():
         if not enabled or active_session() != selected:
@@ -404,7 +429,7 @@ def session():
     threading.Thread(target=reader, daemon=True).start()
 
     def tick():
-        nonlocal enabled, content, host_sequence, selection_epoch
+        nonlocal enabled, content, host_sequence, selection_epoch, copy_owner
         try:
             if ending.is_set() or not allowed():
                 enabled = False
@@ -426,7 +451,12 @@ def session():
                 if path is not None:
                     call('SetSelection', GLib.Variant('(a{sv})', ({'mime-types': GLib.Variant('as', ['text/plain;charset=utf-8', 'text/plain'])},)))
                 else:
-                    subprocess.run(['wl-copy', '--type', 'text/plain;charset=utf-8'], input=content, timeout=2, check=True, stderr=subprocess.DEVNULL)
+                    stop_helper(copy_owner)
+                    # Keep the Wayland selection owner in this session's
+                    # process group, so lock/EOF cannot leave a daemon behind.
+                    copy_owner = subprocess.Popen(['wl-copy', '--foreground', '--type', 'text/plain;charset=utf-8'], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    pipe_io(os.dup(copy_owner.stdin.fileno()), content)
+                    copy_owner.stdin.close()
             return True
         except (GLib.Error, OSError, ValueError, subprocess.SubprocessError):
             loop.quit()
@@ -443,8 +473,8 @@ def session():
                 call('Stop')
             except GLib.Error:
                 pass
-        if watcher is not None:
-            watcher.terminate()
+        stop_helper(watcher)
+        stop_helper(copy_owner)
         emit({'op': 'inactive', 'schema': 1})
 
 
@@ -465,6 +495,6 @@ if __name__ == '__main__':
             if not all(1 <= n <= 16384 for n in target):
                 raise ValueError('display size limit')
             display_info(target)
-    except (EOFError, OSError, ValueError, GLib.Error):
+    except (EOFError, OSError, ValueError, GLib.Error, subprocess.SubprocessError):
         # Never put exception text (possibly containing clipboard data) in logs.
         raise SystemExit(1)

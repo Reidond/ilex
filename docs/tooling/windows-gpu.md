@@ -93,6 +93,9 @@ the owned QEMU firmware channel, and its public access credential through
 systemd's SMBIOS credential mechanism. SSH requires that exact host key;
 neither first-contact acceptance nor disabled host verification is used.
 Run-specific host identity is independent of the persistent disk's identity.
+The earlier `bcvk to-disk` installer boot has no native firmware identity and
+uses a volatile `/run` host key. Native clients still require the launch's
+exact firmware-delivered key, so that installer key cannot satisfy their pin.
 
 The native Windows `AddClipboardFormatListener` and the active guest user's
 helper exchange length-framed UTF-8 JSON over that SSH connection. Text is

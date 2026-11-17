@@ -248,12 +248,7 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
             "started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
         }))?,
     )?;
-    wait(ws, &transport, &job, &job_dir, false)?;
-    if matches!(&job.command, Command::Disk(a) if a.development) {
-        delivered_disk(ws, &job_dir).map(Some)
-    } else {
-        Ok(None)
-    }
+    wait(ws, &transport, &job, &job_dir, false)
 }
 
 pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
@@ -356,7 +351,7 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
             )?;
             let transport = Transport::connect()?;
             transport::install_cancel_handler()?;
-            wait(ws, &transport, &job, &dir, false)
+            wait(ws, &transport, &job, &dir, false).map(|_| ())
         }
     }
 }
@@ -392,7 +387,13 @@ fn validate(ws: &Workspace, command: &Command) -> Result<()> {
     Ok(())
 }
 
-fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bool) -> Result<()> {
+fn wait(
+    ws: &Workspace,
+    transport: &Transport,
+    job: &Job,
+    dir: &Path,
+    cancel: bool,
+) -> Result<Option<PathBuf>> {
     use super::receive;
     use ilex_tooling_windows::received::{self, Directory};
     let owner = &job.snapshot.identity.owner;
@@ -595,6 +596,11 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
         }
         .into());
     }
+    if matches!(&job.command, Command::Disk(a) if a.development) {
+        let disk = delivered_disk(ws, dir)?;
+        println!("{}", disk.display());
+        return Ok(Some(disk));
+    }
     if paths && let Some(basename) = primary_name {
         received::relative(&basename)?;
         let prefix = match job.command {
@@ -615,7 +621,7 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
         .context("primary output was not delivered")?;
         println!("{}", location.display());
     }
-    Ok(())
+    Ok(None)
 }
 
 struct OutputClaims {
