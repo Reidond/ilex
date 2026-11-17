@@ -1,7 +1,8 @@
 # T2 validation — 2026-11-16/17
 
 Host: Windows x86_64, existing non-elevated Hyper-V Administrators token.
-Checkout branch: `tooling/02-runtime-builder`, rebased on T1 `b34be7c`.
+Checkout branch: `tooling/02-runtime-builder`, rebased with `gh stack rebase` on
+T1 `1c82e48`, including the image-builder cache and automatic primary claim fixes.
 No WSL commands, Windows feature changes, new switches, system installs,
 registry publication or release creation were used.
 
@@ -41,10 +42,13 @@ registry publication or release creation were used.
 
 The 4 GiB/four-vCPU validation profile waits for at least **18 GiB available**:
 4 GiB fixed builder RAM plus 12 GiB host reserve and 2 GiB margin. The owner
-authorized two-minute polling for up to about three hours while other sessions'
+authorized capacity polling for up to about three hours while other sessions'
 WSL VM load varies. No other VM or WSL resource is stopped or changed. The
 default 16 GiB/eight-vCPU profile needs 30 GiB available and is checked if capacity
 appears in the same window.
+Initial polling was every two minutes; it was shortened to 30 seconds after
+brief qualifying memory peaks disappeared between checks. The reserve and
+original maintenance wait deadline were preserved.
 
 Both resource profiles passed. The following results are from this
 implementation's VM, not the earlier research VM:
@@ -70,7 +74,7 @@ Validated VM UUID: `d8a13170-bd38-4dba-bf12-fe6e67fa0202`; creation run:
 `6f99c09a-772b-452b-9cdf-4870ede77b64`. Address discovery used this exact VM's
 Default Switch KVP/NIC and exact-MAC neighbor lookup.
 
-Recorded packages: Podman **6.1.3-1.fc45**, QEMU **11.1.3-1.fc45**, libvirt
+The updated development VM recorded Podman **6.1.3-1.fc45**, QEMU **11.1.3-1.fc45**, libvirt
 **12.6.0-4.fc45**, Rust/Cargo **1.99.1-2.fc45**, image-builder **89.0.0-1.fc45**,
 Hyper-V daemons **6.10-4.fc45**, kernels **7.2.11-300.fc45** and
 **7.3.4-300.fc45**. Full RPM manifest SHA256:
@@ -110,6 +114,8 @@ access to create differencing VHDX files. Disks now live under `builder/disks`
 with an inheritable grant only for the exact owned VM SID. Seed and SSH keys
 remain outside that grant. Existing owned disks migrated while off with no
 checkpoints; the next real checkpoint succeeded without elevation.
+An ACL inspection confirmed that the exact VM SID has the disk-directory grant
+and no grant on the builder root or maintenance client key.
 
 The forced rollback probe applied provisioning revision
 `bd4c9f446aace5bc0dfe662766855c7b3ead121918b2755638b60f50d64e1c78`, then deliberately
@@ -119,8 +125,21 @@ the same data UUID and actual nested boot passed afterward. Journal state was
 `ready`/`rolled-back`. Elapsed **316.92 s** includes memory polling, update and
 recovery. Explicit acceptance removed that retained recovery point.
 
-Normal update and explicit rollback after successful verification are being
-qualified before this evidence is finalized.
+Normal update then applied revision
+`b9a0f1c5e2585927d1bdddc17fe304aa5da912f7f155b7672ff5a8b2ec24a27e`, rebooted and
+passed nested smoke. Both running builder and nested kernel reported
+**7.3.4-300.fc45.x86_64**. Checkpoint
+`9a4ec62d-0290-4b93-aea9-3a13ee440ea2` separately recorded the old recipe revision.
+Explicit `rollback` restored that distinct old revision and passed pinned SSH,
+data UUID and nested boot checks. Explicit acceptance removed the checkpoint.
+
+Interrupted-update recovery was also exercised: the waiting parent was stopped
+only after confirming the owned VM was off and guest updating had not started.
+Journal state remained `updating`, checkpoint
+`45897800-1ccb-4ef7-a578-0e5319cb221c` remained recorded, and `builder rollback
+--wait-for-memory-seconds ...` recovered and smoke-tested the original recipe.
+New updates now wait for memory before creating the maintenance transaction;
+rollback supports the same bounded capacity wait.
 
 Reproducible active commands (the rollback probe intentionally returns failure
 only after recovery passes):
@@ -138,6 +157,8 @@ cargo xtask builder update --rollback-probe --wait-for-memory-seconds 10800
 cargo xtask builder status --json
 cargo xtask builder accept-update
 cargo xtask builder update --wait-for-memory-seconds 10800
+cargo xtask builder rollback --wait-for-memory-seconds 10800
+cargo xtask builder accept-update
 ```
 
 Build/test command execution and actual ilex desktop qualification remain T3/T4.
@@ -150,11 +171,52 @@ Operational logs and the owned resource journal are under
 
 At the first check, publish workflow run **43927637994** for T1 was queued.
 No T2 branch workflow was dispatched while the shared publishing queue was busy.
-The final PR records whether a branch run could be dispatched later.
+When the queue cleared, T2 branch test run
+[44098798793](https://github.com/Reidond/ilex/actions/runs/44098798793) was dispatched
+on pre-rebase head `b2b4ea2`. **Build passed; upgrade failed** before updating to
+the candidate. The published v1 image
+`sha256:f68e8dda514e1a0c9dbc35d9e6f531ad03283355315315c3fe8823d880077126`
+reported an active `/boot` autofs mount, and the shipped boot-mount protection
+assertion failed. This digest is outside the fixture's two explicit legacy
+exceptions. T2 does not change that Linux fixture or relax its assertion.
+
+After rebasing onto the T1 follow-up, T1 run
+[44102368753](https://github.com/Reidond/ilex/actions/runs/44102368753) was in
+progress at handoff preparation. The current T2 head still needs a fresh Linux
+branch run; the final PR records the latest queue/dispatch state. The Windows
+acceptance above passed independently; CI is not recorded as green.
 
 ## Retained infrastructure
 
-The design expects one ready builder, `ilex-builder-3ccbf5231e80`, to persist as
-shared per-user infrastructure. Incomplete development builders are removed by
-their exact journal identity. The final validation entry records whether a ready
-builder was left running/off, or whether no task-created builder remains.
+After update qualification, development VM
+`d8a13170-bd38-4dba-bf12-fe6e67fa0202` was shut down gracefully, its accepted
+checkpoints were removed, and an exact-UUID/owner/run/data-UUID development
+cleanup removed its disks/config/identities. No name-based cleanup was used.
+
+A final fresh bootstrap created VM **`b521170d-a2e0-4791-8b3e-71819084203d`**,
+name **`ilex-builder-3ccbf5231e80`**, with new disks/seed/client/host identities and
+data UUID **`3c09e083-3b2b-4ab0-bf23-e96b1dc57322`**. It reused checksum-verified
+host runtime/Fedora downloads. Provisioning needed no repairs or resume recipe;
+cloud-init finished at **165.22 s**, and `builder up` returned ready at
+**203.17 s** including creation/conversion/provisioning/smoke. This is a fresh VM
+bootstrap with a warm host download cache, not an all-downloads-cold benchmark.
+
+Fresh `builder --self-check` passed real nested userspace boot, pinned identity,
+four CPUs and fixed 4 GiB RAM. Its Fedora Cloud kernel and nested kernel were
+**7.2.11-300.fc45.x86_64**; bootstrap installs dependencies, while explicit
+`update` performs the full system upgrade tested above. Other recorded tool
+versions match the development VM. Fresh RPM manifest SHA256:
+`82e77a2cb4b59e0bfa7cee18cb3c90b141efed9ab0ccc06113fdaad6157e9c66`.
+Provisioning revision:
+`b9a0f1c5e2585927d1bdddc17fe304aa5da912f7f155b7672ff5a8b2ec24a27e`.
+
+The final seed/seed-key directory/ISO are gone. The exact new VM SID has disk
+access and no builder-root/client-key grant. Exact retired UUID checks confirmed
+that the interrupted and development VMs listed above are absent. The design
+retains this one ready builder as shared per-user infrastructure. Final graceful
+stop/restart, pinned identity and nested self-check passed. It is left **off**,
+phase **ready**, **4 GiB/four vCPUs**, with **zero checkpoints**, two non-sparse,
+uncompressed, unencrypted VHDX files, Gen2 Secure Boot on and vTPM enabled. It
+consumes no running VM RAM. The default remains 16 GiB/eight vCPUs; restore it
+with `builder up --memory-gib 16 --cpus 8 --wait-for-memory-seconds 10800` when
+30 GiB host capacity is available.
