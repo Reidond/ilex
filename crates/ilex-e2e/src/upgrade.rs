@@ -51,10 +51,7 @@ const ETC_EDITED: &str = "/etc/motd";
 const ETC_EDIT: &str = "ilex-e2e local edit";
 
 const REBOOT_TIMEOUT: Duration = Duration::from_secs(600);
-// The one immutable pre-fix image used by CI's first-publication fallback.
-// Its own finalizer runs before v2 can supply the shipped protection.
-const LEGACY_V1_DIGEST: &str =
-    "sha256:4499cbcfac1f862b1db805b9f67e03e8d948a9a09c69db0bdbd574de21aefe96";
+const ILEX_REPOSITORY: &str = "ghcr.io/reidond/ilex";
 
 pub fn trials() -> Vec<Trial> {
     const NAME: &str = "upgrade::upgrade_and_rollback";
@@ -118,6 +115,15 @@ fn status(vm: &LibvirtVm) -> Result<Status> {
 fn upgrade_and_rollback() -> Result<()> {
     let ws = common::workspace()?;
     let candidate = common::image()?;
+    if !prepare_only() {
+        // Never let v1 compatibility hide a regression in the image under
+        // test, including when ILEX_UPGRADE_FROM names that same image.
+        cmd::run(Command::new("podman").args([
+            "run", "--rm", "--network=none", "--read-only", "--entrypoint", "sh",
+            &candidate, "-ec",
+            "test -f /usr/lib/systemd/system/boot.automount && test ! -s /usr/lib/systemd/system/boot.automount",
+        ])).context("candidate must ship the boot.automount mask")?;
+    }
     let (v1_source, installed) = prepare_v1(&ws, &candidate)?;
     let token = unique_token();
 
@@ -131,8 +137,9 @@ fn upgrade_and_rollback() -> Result<()> {
     ensure(v1.staged.is_none(), || {
         format!("v1 has a staged deployment: {:?}", v1.staged)
     })?;
-    if upgrade_from().is_some() && v1.booted.digest == LEGACY_V1_DIGEST {
-        // Compatibility only for this pre-fix published deployment. Repair
+    let legacy_v1 = legacy_v1_without_boot_mask(&ws, &vm, &v1_source, &installed, &v1.booted)?;
+    if legacy_v1 {
+        // Compatibility only for this signed, unprotected v1. Repair
         // its running mount before staging; /run vanishes at reboot, so v2
         // must pass the shipped-mask assertion without this assistance.
         step("legacy v1 compatibility: runtime-mask boot.automount and restore boot.mount");
@@ -231,7 +238,7 @@ fn upgrade_and_rollback() -> Result<()> {
     ensure(back.booted == v1.booted, || {
         format!("booted {:?}, expected v1 {:?}", back.booted, v1.booted)
     })?;
-    if v1.booted.digest != LEGACY_V1_DIGEST {
+    if !legacy_v1 {
         check_boot_mount(&vm, "v1 after rollback")?;
     }
     ensure(!path_exists(&vm, MARKER_USR)?, || {
@@ -245,6 +252,65 @@ fn upgrade_and_rollback() -> Result<()> {
     })?;
     step("upgrade and rollback verified");
     Ok(())
+}
+
+/// Inspect the immutable /usr of the actual booted v1, rather than infer
+/// content from a revision label or a digest list that nightly builds outgrow.
+/// A malformed/nonempty vendor unit is a failure, not legacy compatibility.
+fn legacy_v1_without_boot_mask(
+    ws: &Workspace,
+    vm: &LibvirtVm,
+    source: &str,
+    installed: &str,
+    booted: &Deployment,
+) -> Result<bool> {
+    if upgrade_from().is_none()
+        || !(source.starts_with(&format!("{ILEX_REPOSITORY}:"))
+            || source.starts_with(&format!("{ILEX_REPOSITORY}@sha256:")))
+    {
+        return Ok(false);
+    }
+    let content = vm.ssh(
+        "if test -e /usr/lib/systemd/system/boot.automount || test -L /usr/lib/systemd/system/boot.automount; then echo present; else echo absent; fi",
+    )?.ok("inspecting v1's shipped boot.automount")?;
+    if content.out() != "absent" {
+        return Ok(false);
+    }
+    // Bind verification to the local image actually installed, not a tag
+    // that may have moved since the pull or an unrelated signed deployment.
+    let digest = cmd::output(Command::new("podman").args([
+        "image",
+        "inspect",
+        "--format",
+        "{{.Digest}}",
+        installed,
+    ]))?;
+    ensure(
+        digest
+            .strip_prefix("sha256:")
+            .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            && booted.digest == digest,
+        || {
+            format!(
+                "legacy v1 booted {}, expected installed digest {digest}",
+                booted.digest
+            )
+        },
+    )?;
+    cmd::run(
+        Command::new("cosign")
+            .args(["verify", "--key"])
+            .arg(ws.root.join("rootfs/etc/pki/containers/ilex.pub"))
+            .args([
+                "--insecure-ignore-tlog=true",
+                &format!("{ILEX_REPOSITORY}@{digest}"),
+            ]),
+    )
+    .context("verifying the explicitly selected unprotected v1")?;
+    step(&format!(
+        "signed explicit v1 {digest} has no shipped boot.automount unit"
+    ));
+    Ok(true)
 }
 
 fn check_boot_mount(vm: &LibvirtVm, phase: &str) -> Result<()> {
@@ -263,7 +329,8 @@ fn boot_diagnostics(vm: &LibvirtVm, phase: &str, failed: bool) {
     // Read mountinfo rather than stat /boot: observing an autofs path can
     // activate it and change the shutdown behaviour being investigated.
     let mut script = String::from(concat!(
-        "date --iso-8601=seconds; uname -r; cat /proc/cmdline; cat /etc/fstab; ",
+        "date --iso-8601=seconds; uname -r; cat /proc/cmdline; ",
+        "if test -e /etc/fstab; then cat /etc/fstab; else echo '/etc/fstab absent (GPT discovery still enabled)'; fi; ",
         "grep ' /boot ' /proc/1/mountinfo; ",
         "systemctl show boot.mount boot.automount ostree-finalize-staged-hold.service ",
         "-p Id -p LoadState -p ActiveState -p SubState -p Where -p What -p Options -p TimeoutIdleUSec"

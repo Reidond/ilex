@@ -329,6 +329,11 @@ jobs:
       # The VM stack and a pull of v1, then v1's disk (from the cache, or
       # installed) booted once with ILEX_UPGRADE_PREPARE=1, so the test boots
       # v1 in seconds. Its consoles land in vm-logs.
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: steps.from.outputs.exists == 'true'
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
       - name: VM stack and v1's disk (background)
         if: steps.from.outputs.exists == 'true'
         env:
@@ -668,6 +673,11 @@ jobs:
           path: ${{ runner.temp }}/apt-debs
           key: ${{ env.APT_DEBS }}
           restore-keys: ${{ env.APT_DEBS }}
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: steps.cached.outputs.cache-hit != 'true'
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Install v1 to a disk
         id: install

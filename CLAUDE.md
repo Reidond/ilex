@@ -106,18 +106,29 @@ cargo xtask info               # resource identity, selection and available conf
   `upgrade::` require the shipped vendor mask, an active real `/boot`, no
   autofs at `/boot`, no runtime mask and no global GPT opt-out. Upgrade checks
   again on v2 after its policy reboot and on a protected v1 after rollback.
-  Only the explicitly selected, immutable legacy v1
-  `sha256:4499cbcfac1f862b1db805b9f67e03e8d948a9a09c69db0bdbd574de21aefe96`
-  has both boot units stopped, then receives a runtime `boot.automount` mask
+  Compatibility applies only to an explicit `ILEX_UPGRADE_FROM` in
+  `ghcr.io/reidond/ilex` whose booted `/usr` has no vendor `boot.automount`
+  (neither a file nor a symlink). The booted digest must equal the locally
+  installed image's manifest digest and verify with cosign v2 and the checked-in
+  ilex public key. Content is authoritative: nightly rebuilds change digests,
+  and revision labels/ancestry cannot prove which files an image contains.
+  An existing malformed/nonempty unit fails the normal assertions.
+  Only that signed, unprotected v1 has both boot units stopped, then receives a runtime `boot.automount` mask
   and a started `boot.mount` before staging, because its own old finalizer
   runs before v2 can supply the fix. Stopping the bind first is necessary:
   masking an active automount alone can leave dead autofs pinned underneath.
-  This is compatibility for an old shipped defect, not protection supplied to
-  the image under test: `/run` disappears at reboot and v2 must pass the normal
-  assertions. A different unprotected v1 fails rather than silently receiving
-  a repair. Legacy rollback still checks the exact original digest. CI's
+  Before any repair, a full run checks that the candidate ships the mask,
+  including when `ILEX_UPGRADE_FROM` selects the candidate itself. `/run`
+  disappears at reboot and both v2 checks still require the shipped mask with
+  no runtime assistance. Prepare-only runs inspect/verify v1 without needing
+  the not-yet-built candidate. Legacy rollback still checks the exact original
+  deployment; only a v1 that qualified for repair skips the shipped-mask check
+  after rollback. CI installs cosign before preparation and testing. CI's
   `v1-disk-boot-mask-<bcvk>-<digest>` profile uses the shared
   `.github/v1-disk-key.sh` and never restores the old kernel-argument profile.
+  An absent `/etc/fstab` is valid on a direct-to-disk install: GPT discovery
+  still runs and can generate the conflicting automount. Its absence in the
+  diagnostics is not the shipped-mask assertion failure.
   Logs retain command line and mount state, plus prior finalization journal
   on failure. The defect predates the stack: fix it with the common shipped
   image, rather than a phase-0-only fixture workaround.
@@ -977,7 +988,11 @@ Today legacy `latest` exists with revision on main; `generic.gnome` and
 `ms-7c35.gnome` are absent. In this PR, build records `generic.gnome=-`, stages
 `candidate.generic.gnome` by ID/config and boots it. Upgrade logs the legacy
 fallback, with `own=-`, `exists=true`, v1 equal to legacy latest's digest, and
-tests that staged digest. Root ancestry logs `published=-` / `first-publish`;
+tests that staged digest. The upgrade job verifies this explicit v1's signature
+and inspects its booted `/usr`; if the vendor unit is absent, only v1 receives
+the transient repair. This also covers the first post-merge main run when the
+old workflow's nightly has republished `latest` at another digest. The staged
+candidate and v2 must still ship the mask. Root ancestry logs `published=-` / `first-publish`;
 swap logs `expected=- current=-; allow`. The publisher checks composition and
 revision, copies `generic.gnome_sha-…`, signs/verifies, then creates
 `generic.gnome` and `generic.gnome_YYYYMMDD`, logging `published=true` and
