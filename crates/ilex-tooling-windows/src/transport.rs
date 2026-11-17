@@ -15,6 +15,8 @@ use std::{
 };
 
 static CANCEL: AtomicBool = AtomicBool::new(false);
+/// Artifact fetches return up to 64 MiB, independently of 4 MiB source chunks.
+pub const MAX_REPLY_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 unsafe extern "system" fn console_event(event: u32) -> i32 {
     if event == 0 || event == 1 {
         CANCEL.store(true, Ordering::SeqCst);
@@ -220,7 +222,10 @@ impl Transport {
         let stderr = child.stderr.take().context("SSH stderr")?;
         let out = thread::spawn(move || {
             let mut b = Vec::new();
-            stdout.take(80 * 1024 * 1024).read_to_end(&mut b).map(|_| b)
+            stdout
+                .take((32 * 1024 * 1024 + MAX_REPLY_PAYLOAD_BYTES + 1) as u64)
+                .read_to_end(&mut b)
+                .map(|_| b)
         });
         let err = thread::spawn(move || {
             let mut b = Vec::new();
@@ -272,7 +277,7 @@ impl Transport {
         );
         let data = bytes[newline + 1..].to_vec();
         ensure!(
-            data.len() <= ilex_tooling_core::CHUNK_BYTES,
+            data.len() <= MAX_REPLY_PAYLOAD_BYTES,
             "builder reply payload size limit"
         );
         ensure!(

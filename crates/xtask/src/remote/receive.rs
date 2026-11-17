@@ -183,7 +183,7 @@ pub fn collect(
             let data = chunk(&artifact.path, offset)?;
             ensure!(
                 !data.is_empty()
-                    && data.len() <= ilex_devkit::core::CHUNK_BYTES
+                    && data.len() <= transport::MAX_REPLY_PAYLOAD_BYTES
                     && data.len() as u64 <= artifact.bytes - offset,
                 "artifact chunk exceeds declared size"
             );
@@ -327,6 +327,34 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
         .is_err(),
         "accepted oversized chunk"
     );
+    // The builder fetch protocol predates source chunking: a real fetch can
+    // return 64 MiB. Exercise multiple blocks across that boundary so bounded
+    // downloads continue to deliver disks/ISOs larger than a source chunk.
+    let large_bytes = vec![0x5au8; transport::MAX_REPLY_PAYLOAD_BYTES + 1024 * 1024];
+    let large_artifact = json!({"path":"artifacts/large.raw","sha256":ilex_devkit::core::digest(&large_bytes),"bytes":large_bytes.len()});
+    let mut large_blocks = 0;
+    collect(&directory, &json!([large_artifact]), |_, offset| {
+        large_blocks += 1;
+        let start = usize::try_from(offset)?;
+        let end = large_bytes
+            .len()
+            .min(start + transport::MAX_REPLY_PAYLOAD_BYTES);
+        Ok(large_bytes[start..end].to_vec())
+    })?;
+    ensure!(
+        large_blocks == 2,
+        "large artifact did not cross fetch blocks"
+    );
+    let oversized = directory.child("oversized")?;
+    ensure!(
+        collect(&oversized, &json!([large_artifact]), |_, _| Ok(vec![
+            0;
+            transport::MAX_REPLY_PAYLOAD_BYTES
+                + 1
+        ]))
+        .is_err(),
+        "accepted fetch payload over the protocol limit"
+    );
     let link = directory.path.join("artifacts/junction");
     let status = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:ILEX_CHECK_LINK -Target $env:ILEX_CHECK_TARGET | Out-Null"])
         .env("ILEX_CHECK_LINK", &link).env("ILEX_CHECK_TARGET", &control).status()?;
@@ -381,10 +409,11 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"invalid_manifests_refused":refused,"complete_manifest_validation":true,"positive_receive":true,"native_append_stream":true,"atomic_existing_replacement":true,"chunk_limit":true,"count_and_aggregate_limits":true,"log_and_metadata_limits":true,"duplicate_case_and_directory_aliases":true,"receiver_junction_refused":true,"in_place_reparse_race":reparse_race,"hardlink_refused":true,"held_directory_cannot_be_replaced":true,"control_sentinel_unchanged":true,"handle_rename":true,"explicit_state_output_refused":true,"root":root})
+            &json!({"invalid_manifests_refused":refused,"complete_manifest_validation":true,"positive_receive":true,"native_append_stream":true,"atomic_existing_replacement":true,"chunk_limit":true,"fetch_payload_limit_bytes":transport::MAX_REPLY_PAYLOAD_BYTES,"large_artifact_bytes":large_bytes.len(),"large_artifact_blocks":large_blocks,"oversized_fetch_refused":true,"count_and_aggregate_limits":true,"log_and_metadata_limits":true,"duplicate_case_and_directory_aliases":true,"receiver_junction_refused":true,"in_place_reparse_race":reparse_race,"hardlink_refused":true,"held_directory_cannot_be_replaced":true,"control_sentinel_unchanged":true,"handle_rename":true,"explicit_state_output_refused":true,"root":root})
         )?
     );
     drop(original);
+    drop(oversized);
     drop(overrun);
     drop(directory);
     let resolved = fs::canonicalize(&root)?;
