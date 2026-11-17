@@ -36,6 +36,9 @@ cargo xtask info               # resource identity, selection and available conf
   native Linux uses `/var/lib/ilex-tooling/main-claims`. Claims and releases are
   immutable, atomically published records. A missing checkout's claim is
   released only by the explicit command below. `canonicalCheckout` is no longer used.
+  If machine-wide state is inaccessible to an unprivileged process, it keeps
+  its owner-qualified namespace; metadata/build commands still work without
+  sudo or setup. It can use `main` only after that claim can be established or read.
   The same slug selects `localhost/ilex:wt-<slug>` and VMs `ilex-<slug>-*`.
   State/runtime paths stay owner-qualified even for `main` (`main--<owner hash>`),
   so registering main never adopts old unreceipted directories or keys.

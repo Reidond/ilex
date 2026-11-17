@@ -247,7 +247,23 @@ fn allocation(root: &Path, worktree: Option<&str>) -> Result<CheckoutIdentity> {
             "primary",
             false,
         );
-        let allocated = crate::main_claim::MainClaims::system()?.allocate(candidate, primary)?;
+        let allocated =
+            match crate::main_claim::MainClaims::system()?.allocate(candidate.clone(), primary) {
+                Ok(allocated) => allocated,
+                // Metadata/build commands also run unprivileged (including CI).
+                // Without access to machine state, keep the collision-safe owner
+                // namespace. Never guess main or require a privilege prompt.
+                Err(error)
+                    if error.chain().any(|cause| {
+                        cause
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+                    }) =>
+                {
+                    candidate
+                }
+                Err(error) => return Err(error),
+            };
         is_main =
             worktree.is_none() && native_path(root) == allocated.checkout_id && allocated.is_main;
     }
