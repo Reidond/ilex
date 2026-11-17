@@ -42,27 +42,22 @@ fn image() -> Result<Value> {
             }
         }
     }
-    for (key, default) in [
-        ("shells", "default-shell"),
-        ("design-systems", "default-design-system"),
-    ] {
-        let entries = list(&value, key).map_err(|e| format!("{IMAGE}: {e}"))?;
-        let names = entries
-            .iter()
-            .map(|v| string(v, "name"))
-            .collect::<Result<Vec<_>>>()?;
-        let valid = if names.is_empty() {
-            value.get(default).is_some_and(Value::is_null)
-        } else {
-            value[default]
-                .as_str()
-                .is_some_and(|name| names.contains(&name))
-        };
-        if !valid {
-            return Err(format!(
-                "{IMAGE}: `{default}` must name an entry in `{key}`, or be null when empty"
-            ));
-        }
+    let names = list(&value, "shells")
+        .map_err(|e| format!("{IMAGE}: {e}"))?
+        .iter()
+        .map(|v| string(v, "name"))
+        .collect::<Result<Vec<_>>>()?;
+    let valid = if names.is_empty() {
+        value.get("default-shell").is_some_and(Value::is_null)
+    } else {
+        value["default-shell"]
+            .as_str()
+            .is_some_and(|name| names.contains(&name))
+    };
+    if !valid {
+        return Err(format!(
+            "{IMAGE}: `default-shell` must name an entry in `shells`, or be null when empty"
+        ));
     }
     Ok(value)
 }
@@ -101,34 +96,28 @@ fn print(json_output: bool) -> Result<()> {
             string(&machine, "name")?,
             string(&machine, "description")?
         );
-        for (label, key, default) in [
-            ("shells", "shells", "default-shell"),
-            ("design systems", "design-systems", "default-design-system"),
-        ] {
-            let entries = list(&image, key)?
-                .iter()
-                .map(|entry| {
-                    let name = string(entry, "name")?;
-                    Ok(format!(
-                        "{name}{}",
-                        if image[default].as_str() == Some(name) {
-                            " (default)"
-                        } else {
-                            ""
-                        }
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            println!(
-                "{:<17}{}",
-                format!("{label}:"),
-                if entries.is_empty() {
-                    "(none)".into()
-                } else {
-                    entries.join(", ")
-                }
-            );
-        }
+        let entries = list(&image, "shells")?
+            .iter()
+            .map(|entry| {
+                let name = string(entry, "name")?;
+                Ok(format!(
+                    "{name}{}",
+                    if image["default-shell"].as_str() == Some(name) {
+                        " (default)"
+                    } else {
+                        ""
+                    }
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!(
+            "shells:          {}",
+            if entries.is_empty() {
+                "(none)".into()
+            } else {
+                entries.join(", ")
+            }
+        );
     }
     Ok(())
 }
@@ -191,18 +180,6 @@ pub fn check_greeter() -> Result<()> {
             actual.display()
         ))
     }
-}
-
-pub fn check_tokens() -> Result<()> {
-    for design in list(&image()?, "design-systems")? {
-        let path = string(design, "tokens")?;
-        let text = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        let tokens: Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-        if !tokens.is_object() {
-            return Err(format!("{path}: tokens must be a JSON object"));
-        }
-    }
-    Ok(())
 }
 
 pub fn check_packages() -> Result<()> {

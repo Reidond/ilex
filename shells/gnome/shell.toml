@@ -12,7 +12,3 @@ compositor = "gnome-shell"
 
 [greeter]
 unit = "gdm.service"
-
-[theme]
-# GNOME draws itself with Adwaita and reads no design system outputs.
-targets = []

@@ -6,11 +6,6 @@ users = ["andriishafar"]
 shells = ["gnome"]
 default-shell = "gnome"
 
-# Design systems, installed in every composition that has a shell.
-# The base has none.
-design-systems = ["ilex"]
-default-design-system = "ilex"
-
 # The installer's default composition: what the ISO installs on a computer no
 # machine configuration matches. Its shell list is the one the installer gives
 # a machine it recognises (<machine>.<these shells>). Also what the upgrade

@@ -80,7 +80,6 @@ impl Args {
         }
         let selection = selection.map(|mut selection| {
             selection.machine = machine.clone();
-            selection.without_shell_designs();
             selection
         });
         if let Some(selection) = &selection {

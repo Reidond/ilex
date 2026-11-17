@@ -174,7 +174,6 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             for (directory, file) in [
                 ("shells", "shell.toml"),
-                ("design-systems", "design-system.toml"),
                 ("machines", "machine.toml"),
             ] {
                 println!("{directory} available:");

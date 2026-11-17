@@ -170,7 +170,7 @@ class Tree:
     def add_overlay(self, source, label, staging_path=None):
         with Tree(source, label) as tree:
             entries = list(tree.entries())
-            # Report the offending leaf, including the tokens.json exploit path.
+            # Report the offending leaf rather than its parent directory.
             for path, mode in sorted(entries, key=lambda entry: stat.S_ISDIR(entry[1])):
                 if reserved(path):
                     error(label, path, f"/{RESERVED} is reserved for generated files")

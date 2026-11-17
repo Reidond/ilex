@@ -278,36 +278,32 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
     ensure(names("shells")? == selection.shells, || {
         "shells differ from image labels".into()
     })?;
-    ensure(names("design-systems")? == selection.design_systems, || {
-        "design systems differ from image labels".into()
-    })?;
-    let out = vm
-        .ssh(
-            "if test -d /usr/share/ilex/design-systems; then \
-             find /usr/share/ilex/design-systems -mindepth 1 -maxdepth 1 \
-             -type d -printf '%f\\0'; \
-             else test ! -e /usr/share/ilex/design-systems; fi",
-        )?
-        .ok("listing installed design system directories")?;
-    let mut directories: Vec<_> = out.stdout.split_terminator('\0').collect();
-    directories.sort_unstable();
-    let mut expected: Vec<_> = selection.design_systems.iter().map(String::as_str).collect();
-    expected.sort_unstable();
-    ensure(directories == expected, || {
-        format!(
-            "design system directories differ from image selection: \
-             found {directories:?}, expected {expected:?}"
-        )
-    })?;
-    println!("     design system directories match selection: {directories:?}");
-    for (key, expected) in [
-        ("default-shell", &selection.default_shell),
-        ("default-design-system", &selection.default_design_system),
-    ] {
-        ensure(image[key] == serde_json::to_value(expected)?, || {
-            format!("{key} differs from image label")
+    let labels = ilex_devkit::cmd::output(std::process::Command::new("podman").args([
+        "image",
+        "inspect",
+        "--format",
+        "{{json .Config.Labels}}",
+        vm.image(),
+    ]))?;
+    let labels: Value = serde_json::from_str(&labels)?;
+    for key in ["design-systems", "default-design-system"] {
+        ensure(image.get(key).is_none(), || {
+            format!("image.json must not contain {key}")
+        })?;
+        ensure(labels.get(format!("ilex.{key}")).is_none(), || {
+            format!("image must not have an ilex.{key} label")
         })?;
     }
+    vm.ssh(
+        "test ! -e /usr/share/ilex/design-systems && \
+         test ! -L /usr/share/ilex/design-systems",
+    )?
+    .ok("design system directory must not be installed")?;
+    println!("     design system directory, metadata and labels absent");
+    ensure(
+        image["default-shell"] == serde_json::to_value(&selection.default_shell)?,
+        || "default-shell differs from image label".into(),
+    )?;
     ensure(
         guest["machine"]["name"].as_str() == Some(&selection.machine),
         || "machine differs from image label".into(),
@@ -369,12 +365,10 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
             println!("     bare base: sessions, display manager and desktop apps absent");
         }
         vm.ssh(
-            "test ! -e /usr/share/ilex/design-systems && \
-             test ! -L /usr/share/ilex/design-systems && \
-             test ! -L /etc/systemd/user/default.target.wants/ilex-update-notify.path && \
+            "test ! -L /etc/systemd/user/default.target.wants/ilex-update-notify.path && \
              test ! -L /etc/systemd/user/graphical-session.target.wants/ilex-update-notify.service"
-        )?.ok("shell-free image has no design systems or enabled notifier")?;
-        println!("     no shell: design systems and notifier enablement absent");
+        )?.ok("shell-free image has no enabled notifier")?;
+        println!("     no shell: notifier enablement absent");
     } else {
         vm.ssh(
             "test -L /etc/systemd/user/default.target.wants/ilex-update-notify.path && \
@@ -392,7 +386,7 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
             common::quote(&format!("/usr/bin/{compositor}"))
         ))?
         .ok("shell session and compositor")?;
-        // Compare all declared manifest fields, including packages and theme.
+        // Compare all declared manifest fields, including packages.
         let declared = serde_json::to_value(&manifest)?;
         for (key, value) in declared
             .as_object()
@@ -411,24 +405,6 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         if overlay.is_dir() {
             check_overlay(vm, &overlay, &overlay)?;
         }
-    }
-    for (index, name) in selection.design_systems.iter().enumerate() {
-        let manifest = common::manifest("design-systems", name, "design-system.toml")?;
-        let source = manifest
-            .get("tokens")
-            .and_then(|v| v.as_str())
-            .unwrap_or("tokens.json");
-        let path = common::workspace()?
-            .root
-            .join("design-systems")
-            .join(name)
-            .join(source);
-        let destination = format!("/usr/share/ilex/design-systems/{name}/tokens.json");
-        ensure(
-            image["design-systems"][index]["tokens"] == destination,
-            || format!("design system {name}: tokens path differs"),
-        )?;
-        check_file(vm, &path, &destination)?;
     }
     ensure(guest["machine"].get("publish").is_none(), || {
         "machine.json must not contain publish; publications belong in image.toml".into()

@@ -248,12 +248,6 @@ fn selection_inputs(selection: &Selection) -> Vec<String> {
         ]);
     }
     inputs.extend(selection.shells.iter().map(|name| format!("shells/{name}")));
-    inputs.extend(
-        selection
-            .design_systems
-            .iter()
-            .map(|name| format!("design-systems/{name}")),
-    );
     inputs
 }
 
@@ -263,7 +257,7 @@ fn hash_selection(hash: &mut Sha256, selection: &Selection) {
     }
 }
 
-// User selection affects the public catalogue, never the five OCI selection
+// User selection affects the public catalogue, never the three OCI selection
 // labels or publication names. Hash it separately so changing only the list
 // cannot reuse a root with a different catalogue.
 fn hash_users(ws: &Workspace, hash: &mut Sha256) -> Result<()> {

@@ -2,8 +2,8 @@
 
 Personal Fedora bootc image: a small base (fedora-bootc, ilex's own files and
 drupe's signed-image runtime),
-an ordered list of shells (GNOME by default, with desktop apps and design
-systems), then one machine configuration. One `Containerfile` builds each root
+an ordered list of shells (GNOME by default, with desktop apps), then one
+machine configuration. One `Containerfile` builds each root
 image: base packages, shells' packages in their own transaction and image layer,
 then ilex files and configuration, overlays, lint. A machine is one derived
 layer on that root. Rust tooling, e2e-only tests on QEMU via bcvk.
@@ -36,8 +36,8 @@ cargo xtask info               # resource identity, selection and available conf
   first shell is the default. Flags override `ILEX_SHELLS` (comma-separated),
   which overrides `image.toml`; an empty environment variable uses the manifest.
   `none` alone selects the small base (`multi-user.target`), without desktop
-  apps, enabled update notifications or design systems. Duplicates and unknown
-  names fail before podman starts. With shells, design systems come from `image.toml`.
+  apps or enabled update notifications. Duplicates and unknown
+  names fail before podman starts.
   A shell list or default different from the manifest adds `.s-<shell>` for
   each shell in order, or `.s-none` for none, to `main` or `wt-<slug>`.
   Slugs can contain `--` but never dots, so variants cannot collide with another
@@ -60,7 +60,7 @@ cargo xtask info               # resource identity, selection and available conf
   Filters are substrings and
   several run their union (`xtask test ephemeral:: upgrade::`); arguments after
   `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
-- Reusing an implicit image compares all five selection labels with the current
+- Reusing an implicit image compares all three selection labels with the current
   manifests and flags. `test` rebuilds a stale selection; `vm` and `disk` refuse
   it and print the selection it was built for and the build command to run.
   Explicit image references are compared only when `--shell`, `--machine`,
@@ -240,10 +240,10 @@ launcher and MCP migration arrive with K2. On non-Linux hosts machine commands
 explain that they require an ilex machine; help/completions still work. A dev
 build on an ilex host hands machine commands to `/usr/bin/ilexctl`.
 
-## Configurations: shells, design systems, machines and users
+## Configurations: shells, machines and users
 
-`image.toml` names the installed shells and design systems and one default of
-each when its list is non-empty. `packages.toml` is the base's package list,
+`image.toml` names the installed shells and one default when the list is
+non-empty. `packages.toml` is the base's package list,
 installed first in every root image; `systemd-container` supplies the
 `systemd-dissect` command Drupe needs even without a shell. `shells/packages.toml`
 contains Firefox, Flatpak, libnotify and the PackageKit excludes, installed only
@@ -276,7 +276,6 @@ enabled globally without a shell: no session means no notification is attempted.
 | --- | --- | --- | --- |
 | Base | every image: fedora-bootc, ilex plumbing, `packages.toml` | always present | not selectable independently of ilex |
 | Shell | per image, in `image.toml` | per image, `default-shell` | at sign-in, from the greeter's sessions |
-| Design system | per image, in `image.toml` | per image, `default-design-system` | planned (M1): state in their home, read by a shell; not built |
 | Machine configuration | per composition tag (`generic.gnome`, `ms-7c35.gnome`) | installer DMI match, otherwise `generic` | installer kernel override; later `bootc switch` |
 | User profile | public catalogue in every image | no selection | explicit apply after authenticating into a daily home |
 
@@ -296,7 +295,7 @@ Published tags describe their contents: `base` for generic without shells,
 `<machine>.<shell>[.<shell>...]`. Every tag `X` has `X_YYYYMMDD` and
 `X_sha-<7 hex>` companions; roots stage unsigned as `candidate.X`. All derived
 tags, including the longest suffix, must fit 128 bytes. The default shell must
-be first for an image to have a published tag. The five selection labels are
+be first for an image to have a published tag. The three selection labels are
 the authority for the image's name. Publications add no image label or file.
 
 | Composition | Local tag (`T` is this checkout's tag) | Publication tag | Build | Rechunk |
@@ -314,8 +313,7 @@ machine name, comma-separated shells (`-` for none). All roots precede layers.
 `ilex_devkit::config::publications` exposes these five fields for CI, plus
 machine descriptions/match rules and shell descriptions for the installer
 catalogue. Its `selection`
-field resolves all five expected labels from the same manifest snapshot,
-including both design fields (cleared without shells).
+field resolves all three expected labels from the same manifest snapshot.
 `cargo xtask info --installer` prints the validated installer tag.
 
 CI builds and publishes every root, including `base`, and its listed machine
@@ -379,36 +377,18 @@ first). URLs, paths, `.rpm` filenames, options and xargs quoting are rejected.
 transaction enables `localpkg_gpgcheck=1`. Human-facing manifest strings reject
 all C0, C1 and DEL control characters.
 
-Design systems ship only in images with a shell; the bare base records empty
-lists and null defaults and has no design-system directory or tokens.
-They are data in `design-systems/<name>/`: `design-system.toml`
-names the directory, describes it and names a JSON object token file (default
-`tokens.json`). For `ilex`, this is the export of the owner's Claude
-design-system artifact titled "ilex". Change values in that artifact and
-replace `tokens.json` with the whole new export; never edit it by hand.
-A hand-written design system's values are edited in its token file. Nothing
-else in the repository repeats a token value. The image ships unchanged bytes
-at `/usr/share/ilex/design-systems/<name>/tokens.json`, as recorded in
-`image.json`. Token files are stored exactly as exported: `.gitattributes`
-disables text conversion for `design-systems/*/tokens.json`, preserving their
-original line endings on commit and checkout.
-The first and default design system is `ilex`: Breeze frames,
-Adwaita interiors and holly green, with light and dark tokens.
+The future ilex shell owns its design: tokens, colors and other visual choices
+belong to its code, and its components read their own tokens. Keep that code
+generic so a future design is a token change inside the shell. Compositions
+do not choose or install a design system, and shells declare no theme targets.
+GNOME continues to draw itself with Adwaita.
 
-`default-design-system` is recorded in `image.json` and the
-`ilex.default-design-system` image label; nothing reads it yet. A shell will
-use it when the person has chosen nothing, or their chosen design system is
-no longer installed in the image. Per-user selection is planned for M1;
-neither its state format nor its reader is built.
-
-To add another design system, drop in a directory with `design-system.toml`
-(`name` equal to the directory name, `description`, optional `tokens`) and its
-token file, then add the name to `design-systems` in `image.toml`. Set
-`default-design-system` there to choose the image's default, and rebuild the
-image; no code changes are needed. A shell asks for generated outputs with
-`[theme] targets`. None does yet: targets must be empty until the M1 generator
-defines them, and nothing renders these tokens today. Fonts and wallpapers
-are not part of a design system directory yet.
+`design/ilex/` holds source material for that shell, not an installed component
+or an image/installer input. It includes the owner's complete Claude export
+titled "ilex": Breeze frames, Adwaita interiors and holly green, with light and
+dark tokens. Change values in that artifact and replace `tokens.json` with the
+whole export; never edit it by hand. `.gitattributes` disables text conversion
+for `design/*/tokens.json`, preserving its exact bytes and original line endings.
 
 Machines live in `machines/<name>/machine.toml`; `generic` is the base image
 with no packages or overlay. Add a machine by creating one
@@ -507,28 +487,29 @@ set the configuration labels: build with `cargo xtask build` to test or rechunk
 the result.
 `cargo xtask info` honours `ILEX_SHELLS`, listing the resolved image, selection
 and available configurations; builds
-record them in the five `ilex.shells`, `ilex.default-shell`,
-`ilex.design-systems`, `ilex.default-design-system` and `ilex.machine` labels.
+record them in the three `ilex.shells`, `ilex.default-shell` and `ilex.machine`
+labels.
 The fingerprint covers the selected manifests, overlays and build scripts;
 old images without configuration labels must be rebuilt.
 Fingerprint v3 includes `shells/packages.toml` only with a shell, and excludes
-`image.toml`: the five selection labels already cover its resolved selection.
-An edit to an unselected shell or design system does not change the base's
+`image.toml`: the three selection labels already cover its resolved selection.
+An edit to an unselected shell or to `design/` does not change the base's
 fingerprint. An agent or `rootfs/` edit reruns no package transaction.
 
 The image records schema 1 JSON in `/usr/share/ilex/image.json` and
-`/usr/share/ilex/machine.json`, and selected design systems' tokens under
-`/usr/share/ilex/design-systems/<name>/tokens.json`. `ilexctl system config` prints
-the selection; `ilexctl system config --json` returns both documents. The agent's
-self-check validates the configuration, sessions, greeter, target, tokens and
+`/usr/share/ilex/machine.json`. `ilexctl system config` prints
+the selection; `ilexctl system config --json` returns both documents. The system
+self-check validates the configuration, sessions, greeter, target and
 machine packages, plus the literal non-group entries of `packages.install` and
 `shell-packages.install` recorded in `image.json`. With no shell, the empty
-shell-package/session/token checks pass and the target must be `multi-user.target`;
+shell-package/session checks pass and the target must be `multi-user.target`;
 the OS, bootc, install config, signature policy and drupe checks still run.
 `ephemeral::configuration` compares both package lists with the checkout,
-alongside labels, overlays and token hashes. A shell-free generic base must have
+alongside labels and overlays, and requires design-system metadata, labels and
+the `/usr/share/ilex/design-systems` directory to be absent from every image.
+A shell-free generic base must have
 no sessions, display manager, Firefox or Flatpak; a machine may add those packages.
-Every shell-free image must omit design systems and globally enabled notifier
+Every shell-free image must omit globally enabled notifier
 units. Images with a shell must enable both notifier units and have none of the
 literal packages excluded by `shells/packages.toml` installed, even through the
 base or machine transaction. Tmpfiles are per transaction: `ilex-var.conf` for base
@@ -1277,9 +1258,9 @@ An individual ancestry/snapshot skip continues to later rows and is recorded in
 the inventory and summary. A moved parent fails with both digests. A whole-job
 retry plans/builds/tests again; it never replays only an old signing step.
 
-`publish --as` requires a listed composition and recomputes its tag from all five
-selection labels against the row's complete declared selection, including both
-design fields. Matching the tag spelling alone is insufficient. Roots accept `--stage` or `--digest --tested-fingerprint`; layers require
+`publish --as` requires a listed composition and recomputes its tag from all three
+selection labels against the row's complete declared selection. Matching the
+tag spelling alone is insufficient. Roots accept `--stage` or `--digest --tested-fingerprint`; layers require
 `--tested-image-id`. A layer must still have that ID and the independently
 recomputed fingerprint label. Publication builds nothing. Every signed image
 must carry exactly this run's clean 40-hex `GITHUB_SHA` revision; a layer checks
@@ -1290,7 +1271,7 @@ recomputes the root fingerprint, checks the clean CI revision and reports both
 build/test jobs; the root signer compares the staged config's fingerprint with
 `--tested-fingerprint` without pulling/executing the root. Each fingerprint must
 be a SHA-256 digest. The layer publisher independently resolves its declared
-published parent, verifies all five parent labels, current machine inputs/key
+published parent, verifies all three parent labels, current machine inputs/key
 and exactly the parent's filesystem diff IDs plus one layer. CI's ancestry,
 snapshot and parent-still-current guards remain necessary too. The resolved
 parent must also verify against the same permitted public key before signing

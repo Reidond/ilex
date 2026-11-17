@@ -44,7 +44,6 @@ const CHECKS: &[Check] = &[
     ),
     ("base packages installed", config::check_base_packages),
     ("shell packages installed", config::check_shell_packages),
-    ("design systems have their tokens", config::check_tokens),
     ("machine configuration readable", config::check_machine),
     ("machine packages installed", config::check_packages),
     ("bootc is installed", || in_path("bootc")),

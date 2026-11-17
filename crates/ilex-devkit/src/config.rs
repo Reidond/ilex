@@ -6,23 +6,15 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-/// The image's composition, also recorded in its five configuration labels.
+/// The image's composition, also recorded in its three configuration labels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Selection {
     pub shells: Vec<String>,
     pub default_shell: Option<String>,
-    pub design_systems: Vec<String>,
-    pub default_design_system: Option<String>,
     pub machine: String,
 }
 
-pub const LABELS: [&str; 5] = [
-    "ilex.shells",
-    "ilex.default-shell",
-    "ilex.design-systems",
-    "ilex.default-design-system",
-    "ilex.machine",
-];
+pub const LABELS: [&str; 3] = ["ilex.shells", "ilex.default-shell", "ilex.machine"];
 
 impl Selection {
     pub fn read(root: &Path) -> Result<Self> {
@@ -34,18 +26,8 @@ impl Selection {
         Ok(Self {
             shells: string_list(image, "shells")?,
             default_shell: optional_string(image, "default-shell")?,
-            design_systems: string_list(image, "design-systems")?,
-            default_design_system: optional_string(image, "default-design-system")?,
             machine: "generic".into(),
         })
-    }
-
-    /// Design systems serve sessions; the bare base carries none.
-    pub fn without_shell_designs(&mut self) {
-        if self.shells.is_empty() {
-            self.design_systems.clear();
-            self.default_design_system = None;
-        }
     }
 
     pub fn labels(&self) -> BTreeMap<String, String> {
@@ -55,8 +37,6 @@ impl Selection {
             .zip([
                 self.shells.join(","),
                 self.default_shell.clone().unwrap_or_default(),
-                self.design_systems.join(","),
-                self.default_design_system.clone().unwrap_or_default(),
                 self.machine.clone(),
             ])
             .collect()
@@ -65,11 +45,9 @@ impl Selection {
     /// Diagnostics can describe a manifest before compose has validated it.
     pub fn summary(&self) -> String {
         format!(
-            "shells=[{}] default-shell={} design-systems=[{}] default-design-system={} machine={}",
+            "shells=[{}] default-shell={} machine={}",
             self.shells.join(","),
             self.default_shell.as_deref().unwrap_or("none"),
-            self.design_systems.join(","),
-            self.default_design_system.as_deref().unwrap_or("none"),
             self.machine
         )
         .escape_debug()
@@ -123,35 +101,17 @@ impl Selection {
         let selected = Self {
             shells: list("ilex.shells")?,
             default_shell: optional("ilex.default-shell")?,
-            design_systems: list("ilex.design-systems")?,
-            default_design_system: optional("ilex.default-design-system")?,
             machine: get("ilex.machine")?.clone(),
         };
         validate_name(&selected.machine)?;
-        if selected.shells.is_empty() && !selected.design_systems.is_empty() {
-            bail!("an image without shells cannot have design systems; rebuild the base");
-        }
         if selected.shells.iter().any(|name| name == "none") {
             bail!("ilex.shells: `none` is a selection, not a shell name");
         }
-        for (key, default, names) in [
-            (
-                "ilex.default-shell",
-                &selected.default_shell,
-                &selected.shells,
-            ),
-            (
-                "ilex.default-design-system",
-                &selected.default_design_system,
-                &selected.design_systems,
-            ),
-        ] {
-            if !match default {
-                Some(name) => names.contains(name),
-                None => names.is_empty(),
-            } {
-                bail!("{key} must name a member of its non-empty list");
-            }
+        if !match &selected.default_shell {
+            Some(name) => selected.shells.contains(name),
+            None => selected.shells.is_empty(),
+        } {
+            bail!("ilex.default-shell must name a member of its non-empty list");
         }
         Ok(selected)
     }
@@ -340,22 +300,11 @@ pub fn published_tag(selection: &Selection) -> Option<String> {
     if selection.default_shell.as_ref() != selection.shells.first() {
         return None;
     }
-    for names in [&selection.shells, &selection.design_systems] {
-        for (index, name) in names.iter().enumerate() {
-            validate_name(name).ok()?;
-            if names[..index].contains(name) {
-                return None;
-            }
+    for (index, name) in selection.shells.iter().enumerate() {
+        validate_name(name).ok()?;
+        if name == "none" || selection.shells[..index].contains(name) {
+            return None;
         }
-    }
-    if selection.shells.iter().any(|name| name == "none")
-        || (selection.shells.is_empty() && !selection.design_systems.is_empty())
-        || !match &selection.default_design_system {
-            Some(name) => selection.design_systems.contains(name),
-            None => selection.design_systems.is_empty(),
-        }
-    {
-        return None;
     }
     let tag = if selection.shells.is_empty() && selection.machine == "generic" {
         "base".into()
@@ -376,8 +325,6 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
         if ![
             "shells",
             "default-shell",
-            "design-systems",
-            "default-design-system",
             "users",
             "installer",
             "publish",
@@ -405,29 +352,11 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
     }
     let defaults = Selection::from_manifest(&image)?;
     defaults.validate_shells(root)?;
-    for (index, name) in defaults.design_systems.iter().enumerate() {
-        validate_name(name)?;
-        if defaults.design_systems[..index].contains(name) {
-            bail!("image.toml: design-systems contains duplicate `{name}`");
-        }
-        if !root.join("design-systems").join(name).is_dir() {
-            bail!("image.toml: design system `{name}` has no directory");
-        }
-    }
-    for (key, default, names) in [
-        ("default-shell", &defaults.default_shell, &defaults.shells),
-        (
-            "default-design-system",
-            &defaults.default_design_system,
-            &defaults.design_systems,
-        ),
-    ] {
-        if !match default {
-            Some(name) => names.contains(name),
-            None => names.is_empty(),
-        } {
-            bail!("image.toml: {key} must name a member of its non-empty list");
-        }
+    if !match &defaults.default_shell {
+        Some(name) => defaults.shells.contains(name),
+        None => defaults.shells.is_empty(),
+    } {
+        bail!("image.toml: default-shell must name a member of its non-empty list");
     }
     let mut rows = vec![Publication {
         tag: "base".into(),
@@ -441,8 +370,6 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
         selection: Selection {
             shells: vec![],
             default_shell: None,
-            design_systems: vec![],
-            default_design_system: None,
             machine: "generic".into(),
         },
     }];
@@ -482,7 +409,6 @@ pub fn publications(root: &Path) -> Result<Vec<Publication>> {
         let mut selected = defaults.clone();
         selected.shells = shells.clone();
         selected.default_shell = shells.first().cloned();
-        selected.without_shell_designs();
         selected.validate_shells(root)?;
         let parent = if shells.is_empty() {
             "base".into()

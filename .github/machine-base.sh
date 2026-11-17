@@ -18,9 +18,7 @@ case ${1:-} in
         jq -e '(.config.Labels // {}) | type == "object"' <<<"$config" >/dev/null || fail "invalid base labels for $base"
         jq -e '.config.Labels | .["ilex.machine"] == "generic" and
             (.["ilex.shells"] | type == "string") and
-            (.["ilex.default-shell"] | type == "string") and
-            (.["ilex.design-systems"] | type == "string") and
-            (.["ilex.default-design-system"] | type == "string")' <<<"$config" >/dev/null ||
+            (.["ilex.default-shell"] | type == "string")' <<<"$config" >/dev/null ||
             fail "$base has missing/incompatible root configuration labels"
         echo "base_id=$id"
         ;;
