@@ -5,26 +5,37 @@ use ilex_devkit::{config::Selection, core::VmControl, security};
 use serde_json::Value;
 use std::{fs, path::Path};
 
+fn probe_deadline() -> u64 {
+    if std::env::var("ILEX_SECURITY_ACCELERATOR").as_deref() == Ok("tcg") {
+        300
+    } else {
+        60
+    }
+}
+
 fn exec(control: &impl VmControl, script: &str) -> Result<Vec<u8>> {
     // VmControl returns successful stdout. Preserve both diagnostic streams
     // and the exit code even when an assertion fails inside the guest.
     let wrapper = r#"import json, subprocess, sys
 try:
-    p = subprocess.run(['sh', '-eu', '-c', sys.argv[1]], capture_output=True, timeout=60)
+    p = subprocess.run(['sh', '-eu', '-c', sys.argv[2]], capture_output=True, timeout=int(sys.argv[1]))
     print(json.dumps({'code': p.returncode, 'stdout': p.stdout.decode(errors='replace'), 'stderr': p.stderr.decode(errors='replace')}))
-except subprocess.TimeoutExpired:
-    print(json.dumps({'code': 124, 'stdout': '', 'stderr': 'guest probe exceeded 60 seconds'}))
+except subprocess.TimeoutExpired as error:
+    print(json.dumps({'code': 124, 'stdout': (error.stdout or b'').decode(errors='replace'), 'stderr': (error.stderr or b'').decode(errors='replace') + '\nguest probe exceeded ' + sys.argv[1] + ' seconds'}))
 "#;
+    let deadline = probe_deadline().to_string();
+    let outer_deadline = format!("{}s", probe_deadline() + 5);
     let bytes = control.guest_exec(
         &[
             "timeout",
             "--kill-after=5s",
-            "65s",
+            &outer_deadline,
             "python3",
             "-I",
             "-S",
             "-c",
             wrapper,
+            &deadline,
             script,
         ]
         .map(str::to_owned),
@@ -187,6 +198,14 @@ PY"#,
 /// module under lockdown. Actual GPU rendering and physical firmware stay a
 /// separate ms-7c35 qualification.
 pub fn amdgpu(control: &impl VmControl, artifacts: &Path) -> Result<()> {
+    fs::write(
+        artifacts.join("amdgpu-deadline.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "accelerator":std::env::var("ILEX_SECURITY_ACCELERATOR").unwrap_or_else(|_| "kvm".into()),
+            "deadline_seconds":probe_deadline(),
+            "assertions":"unchanged; RPM metadata, signed module, alias and lockdown load"
+        }))?,
+    )?;
     let script = r#"
 kernel=$(uname -r)
 printf 'kernel=%s\n' "$kernel"

@@ -79,7 +79,12 @@ keeps its separate 2 GiB limit.
 
 Run only from this checkout's namespace. First build/qualify the exact 6 GiB,
 two-vCPU profile; WSL nested KVM's smaller passing profiles do not qualify the
-installer. Explicit TCG is the local large-guest alternative:
+installer. Explicit TCG is the local large-guest alternative.
+
+The PR 17 guest probes retain a 60-second KVM deadline and allow 300 seconds
+under explicit TCG for RPM queries and signed-module loading. The selected
+deadline is retained in `amdgpu-deadline.json`; assertions and boot deadlines
+remain mandatory, and timeouts stay unqualified.
 
 ```sh
 cargo xtask build --shell none
