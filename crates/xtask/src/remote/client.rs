@@ -32,27 +32,34 @@ type Rpc<'a> = TransferOperation<'a, Job>;
 
 fn job_uuid() -> Result<String> {
     // Windows supplies the random UUID; never derive a run ID from PID/time alone.
+    #[repr(C)]
+    struct Guid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
     #[link(name = "ole32")]
     unsafe extern "system" {
-        fn CoCreateGuid(value: *mut [u8; 16]) -> i32;
+        fn CoCreateGuid(value: *mut Guid) -> i32;
     }
-    let mut value = [0u8; 16];
+    let mut value = Guid {
+        data1: 0,
+        data2: 0,
+        data3: 0,
+        data4: [0; 8],
+    };
     ensure!(
         unsafe { CoCreateGuid(&mut value) } == 0,
         "allocating job UUID"
     );
-    // GUID's first three fields are little-endian on Windows.
-    value[..4].reverse();
-    value[4..6].reverse();
-    value[6..8].reverse();
-    let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
+    let tail: String = value.data4[2..]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     Ok(format!(
-        "{}-{}-{}-{}-{}",
-        &hex[..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..]
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{tail}",
+        value.data1, value.data2, value.data3, value.data4[0], value.data4[1]
     ))
 }
 
