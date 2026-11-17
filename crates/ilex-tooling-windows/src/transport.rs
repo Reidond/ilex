@@ -72,13 +72,30 @@ pub struct Transport {
 }
 impl Transport {
     pub fn connect() -> Result<Self> {
-        let reply = builder::run(
-            builder::Operation::Up,
-            builder::Options {
-                wait_for_memory_seconds: 10800,
-                ..Default::default()
-            },
-        )?;
+        let deadline = Instant::now() + Duration::from_secs(10800);
+        let mut announced = false;
+        let reply = loop {
+            let result = builder::run(
+                builder::Operation::Up,
+                builder::Options {
+                    wait_for_memory_seconds: deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_secs() as u32,
+                    ..Default::default()
+                },
+            );
+            match result {
+                Ok(reply) => break reply,
+                Err(error) if installation_busy(&error) && Instant::now() < deadline => {
+                    if !announced {
+                        eprintln!("ilex: waiting for the shared builder installation lock");
+                        announced = true;
+                    }
+                    thread::sleep(Duration::from_secs(2));
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let endpoint: BuilderEndpoint = serde_json::from_value(reply["endpoint"].clone())
             .context("builder did not return an authenticated endpoint")?;
         ilex_tooling_core::check_version(endpoint.schema)?;
@@ -90,7 +107,17 @@ impl Transport {
     }
     pub fn register<Job: serde::Serialize>(&self, request: &Job) -> Result<Value> {
         // Maintenance holds the same installation lock from idle probe to shutdown.
-        let _guard = host::lock(&host::root()?.join("builder/host.lock"))?;
+        let deadline = Instant::now() + Duration::from_secs(10800);
+        let _guard = loop {
+            ensure!(!cancelled(), "cancelled before remote job registration");
+            match host::lock(&host::root()?.join("builder/host.lock")) {
+                Ok(guard) => break guard,
+                Err(error) if installation_busy(&error) && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_secs(2))
+                }
+                Err(error) => return Err(error),
+            }
+        };
         self.rpc(TransferOperation::Submit { request }, &[])
             .map(|r| r.0)
     }
@@ -208,4 +235,13 @@ impl Transport {
         );
         Ok((reply["value"].clone(), data))
     }
+}
+
+fn installation_busy(error: &anyhow::Error) -> bool {
+    error.to_string().contains("installation lock")
+        && error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.raw_os_error() == Some(33))
+        })
 }
