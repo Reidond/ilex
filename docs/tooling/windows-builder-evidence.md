@@ -2,7 +2,8 @@
 
 Host: Windows x86_64, existing non-elevated Hyper-V Administrators token.
 Checkout branch: `tooling/02-runtime-builder`, rebased with `gh stack rebase` on
-T1 `1c82e48`, including the image-builder cache and automatic primary claim fixes.
+T1 `37eb731`, including the phase0 CI fix, image-builder cache and automatic
+primary claim fixes.
 No WSL commands, Windows feature changes, new switches, system installs,
 registry publication or release creation were used.
 
@@ -223,9 +224,9 @@ with `builder up --memory-gib 16 --cpus 8 --wait-for-memory-seconds 10800` when
 
 ## Review follow-up — exact interruption boundaries
 
-Review `5940511608` covered head `1ece404`. The four P2 changes retain T1 base
-`1c82e48`; the owner requested waiting for T1 to carry the phase0 CI fix before
-another rebase. No unit tests were added or run.
+Review `5940511608` covered head `1ece404`. The four P2 fixes were first qualified
+on T1 `1c82e48`, then rebased onto `37eb7319d553da579495e5c47606ecceedd03f3a`
+after the owner confirmed its phase0 CI fix. No unit tests were added or run.
 
 Reproduction on native Windows, with the retained ready builder off:
 
@@ -260,7 +261,7 @@ maintenance SSH key remains guest-root authority, as clarified in the usage doc.
    resource run and an ordinary ready record with empty Notes both failed closed.
 3. **Cleanup after unregister:** passed. The same disposable Gen2 fixture exited
    immediately after `Remove-VM`, leaving phase `deleting` and its validated
-   path manifest while seed keys/disks still exist. Retry must finish those
+   path manifest while seed keys/disks still existed. Retry finished those
    paths with the exact UUID absent. An outside path and a new separately owned
    replacement UUID using the same name were rejected before deletion. The
    replacement survived the guard check and was then removed using its own
@@ -276,6 +277,21 @@ maintenance SSH key remains guest-root authority, as clarified in the usage doc.
    isolated runtime fixture was removed. An initial positive run exceeded the
    old five-second QMP budget; the bounded 30-second budget passed.
 
+Final allocation/deletion fixture UUID:
+`ee5a90e1-b8cd-4fac-be88-41b0007052eb`; protected replacement UUID:
+`f035d7a1-86ce-49f4-a2cc-f2900f313e72`. Both were removed by exact recorded
+identity. The final production-helper SHA256 was
+`8ecc1cd60651b0e1da678d4eaa76fdf0655ae3aeb136c27a8029454b097f93ad`, identical
+across the rebase. Resource observations use a fresh helper process after child
+mutations, rather than reuse a parent Hyper-V settings object. Status now reports
+`actual_resources` alongside the journal, making such drift observable.
+
+Post-rebase locked clippy, runtime checksum/archive self-check and fresh-install
+activation self-check passed. No T2 changes conflicted: gh-stack initially tried
+replaying inherited phase0 history, so that attempt was aborted, only T2's ten
+commits were replayed with GPG signing, and `gh stack rebase` then refreshed the
+stack successfully. The Windows recovery helper carried across byte-for-byte.
+
 Locked native check/clippy and all PowerShell parsers passed. Local result files
 are under `C:/Users/reido/Documents/ilex-tooling-t2-2026-11-17-review/`; they contain
 resource identities and booleans, not seed/private-key bytes.
@@ -284,5 +300,6 @@ resource identities and booleans, not seed/private-key bytes.
 reviewed head `1ece404`, completed **failure**: `build` passed and
 `upgrade::upgrade_and_rollback` failed `checking shipped boot mount protection`
 on the published v1 before candidate update, with active `/boot` autofs. This
-does not qualify the newer review-fix head. The Linux assertion is unchanged;
-the owner is coordinating its carried-up phase0/T1 fix.
+does not qualify the newer review-fix head. The newer phase0/T1 fix is now
+included through the rebase. The final PR records the latest shared CI queue
+check and whether a fresh branch run was dispatched.
