@@ -22,6 +22,7 @@ pub enum Operation {
     Down,
     Update,
     SelfCheck,
+    RecoverySelfCheck,
     CleanupIncomplete,
     Rollback,
     AcceptUpdate,
@@ -118,22 +119,22 @@ pub fn run(operation: Operation, options: Options) -> Result<Value> {
     secure_dir(&root()?)?;
     secure_dir(&base)?;
     let _guard = lock(&base.join("host.lock"))?;
-    let qemu = if matches!(operation, Operation::Up) {
+    let qemu = if matches!(operation, Operation::Up | Operation::RecoverySelfCheck) {
         Some(runtime::fetch()?)
     } else {
         None
     };
     let image = base.join("Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2");
-    if matches!(operation, Operation::Up) {
+    if matches!(operation, Operation::Up | Operation::RecoverySelfCheck) {
         ensure!(
             fs2::available_space(&base)? >= 45 * 1024 * 1024 * 1024,
             "builder bootstrap requires 45 GiB free including the 30 GiB reserve"
         );
         download(IMAGE_URL, &image, IMAGE_SHA, 606732288)?;
     }
-    let script = base.join("builder.ps1");
+    let helper = base.join("builder.ps1");
     // Fixed reviewed scripts, with parameter data in a versioned request file.
-    fs::write(&script, include_str!("../assets/builder.ps1"))?;
+    fs::write(&helper, include_str!("../assets/builder.ps1"))?;
     fs::write(
         base.join("provision.sh"),
         include_str!("../assets/provision.sh"),
@@ -143,11 +144,23 @@ pub fn run(operation: Operation, options: Options) -> Result<Value> {
         include_str!("../assets/builder-control.sh"),
     )?;
     fs::write(base.join("smoke.sh"), include_str!("../assets/smoke.sh"))?;
+    let checks = root()?.join("builder-checks");
+    let script = if matches!(operation, Operation::RecoverySelfCheck) {
+        secure_dir(&checks)?;
+        let script = base.join("builder-recovery-check.ps1");
+        fs::write(
+            &script,
+            include_str!("../assets/builder-recovery-check.ps1"),
+        )?;
+        script
+    } else {
+        helper.clone()
+    };
     let request = base.join("request.json");
     atomic(
         &request,
         &serde_json::to_vec(
-            &json!({"schema":1,"operation":operation,"root":base,"runtime":qemu,"image":image,"revision":revision(),"options":options}),
+            &json!({"schema":1,"operation":operation,"root":base,"runtime":qemu,"image":image,"revision":revision(),"options":options,"helper":helper,"checks":checks}),
         )?,
     )?;
     let output = output_owned(&mut powershell(&script, &request), Stdio::inherit())?;

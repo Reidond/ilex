@@ -143,10 +143,6 @@ pub fn fetch() -> Result<PathBuf> {
         path.display()
     );
     fs::rename(&staging, &path)?;
-    let pointer = base.join("active.json");
-    if !pointer.exists() {
-        atomic(&pointer, &serde_json::to_vec(&path)?)?;
-    }
     Ok(path)
 }
 fn safe_name(name: &str) -> Result<()> {
@@ -317,6 +313,53 @@ pub fn update() -> Result<PathBuf> {
     atomic(&pointer, &serde_json::to_vec(&path)?)?;
     Ok(path)
 }
+/// Exercise a real failed first update, then successful GPU activation in a
+/// fresh per-process LOCALAPPDATA. The caller supplies its xtask executable.
+pub fn activation_self_check(xtask: &Path) -> Result<serde_json::Value> {
+    let candidate = fetch()?;
+    let base = root()?.join("runtimes");
+    let _guard = lock(&base.join("install.lock"))?;
+    let pointer = base.join("active.json");
+    let before = fs::read(&pointer).ok();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let fixture = base.join(format!(
+        "activation-check-{}-{nonce}.partial",
+        std::process::id()
+    ));
+    fs::create_dir(&fixture)?;
+    let result = (|| -> Result<serde_json::Value> {
+        let script = fixture.join("check.ps1");
+        let request = fixture.join("request.json");
+        fs::write(
+            &script,
+            include_str!("../assets/runtime-activation-check.ps1"),
+        )?;
+        fs::write(
+            &request,
+            serde_json::to_vec(&serde_json::json!({
+                "schema":1,"fixture":fixture,"archives":base.join("archives"),
+            "xtask":xtask,"candidate_name":candidate.file_name().and_then(|n| n.to_str()).context("non-UTF8 runtime name")?
+            }))?,
+        )?;
+        let output = output_owned(&mut powershell(&script, &request), Stdio::inherit())?;
+        ensure!(
+            output.status.success(),
+            "runtime activation self-check failed"
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    })();
+    remove_owned_tree(&fixture, &base)?;
+    ensure!(
+        fs::read(pointer).ok() == before,
+        "normal runtime pointer changed during isolated check"
+    );
+    let mut value = result?;
+    value["normal_pointer_unchanged"] = true.into();
+    value["fixture_removed"] = true.into();
+    Ok(value)
+}
 fn gpu_smoke(path: &Path) -> Result<()> {
     let available = available_memory()?;
     ensure!(
@@ -378,9 +421,14 @@ fn gpu_smoke(path: &Path) -> Result<()> {
         };
         let mut client = ilex_tooling_qmp::Client::connect(
             TcpTransport(BufReader::new(stream)),
-            Duration::from_secs(5),
-        )?;
-        let identity = client.execute("query-name", serde_json::json!({}))?;
+            // A first SDL/GL launch can compile driver shaders before QEMU's
+            // main loop services QMP. Keep all I/O bounded on a busy host.
+            Duration::from_secs(30),
+        )
+        .context("GPU fixture QMP handshake")?;
+        let identity = client
+            .execute("query-name", serde_json::json!({}))
+            .context("GPU fixture QMP identity")?;
         ensure!(
             identity["name"] == fixture_name,
             "QMP fixture identity mismatch; refusing VM control"

@@ -34,6 +34,11 @@ enum Operation {
     /// Boot real nested KVM userspace and report the pinned identity/revision
     #[command(name = "self-check", long_flag = "self-check")]
     SelfCheck,
+    /// Interrupt real host operations at recovery boundaries; retains the ready VM off
+    RecoverySelfCheck {
+        #[arg(long, default_value_t = 10800)]
+        wait_for_memory_seconds: u32,
+    },
     /// Remove only journal-owned resources from an incomplete bootstrap
     CleanupIncomplete,
     /// Restore and smoke-test the exact retained recovery checkpoint
@@ -71,6 +76,12 @@ pub fn run(args: Args) -> Result<()> {
                 Op::Update
             }
             Operation::SelfCheck => Op::SelfCheck,
+            Operation::RecoverySelfCheck {
+                wait_for_memory_seconds,
+            } => {
+                options.wait_for_memory_seconds = wait_for_memory_seconds;
+                Op::RecoverySelfCheck
+            }
             Operation::CleanupIncomplete => Op::CleanupIncomplete,
             Operation::Rollback {
                 wait_for_memory_seconds,

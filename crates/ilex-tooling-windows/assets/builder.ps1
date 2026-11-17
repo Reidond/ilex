@@ -53,23 +53,6 @@ public sealed class IlexSerialCapture : IDisposable {
  public void Dispose() {stopping=true;var pipe=active;if(pipe!=null)pipe.Dispose();thread.Join(2000);}
 }
 '@
-if(Test-Path -LiteralPath $journal) {
-    $j=Get-Content -LiteralPath $journal -Raw -Encoding UTF8 | ConvertFrom-Json
-    if($j.schema -ne 1 -or $j.owner -ne $owner -or $j.name -ne $name -or $j.root -ne $root) {throw 'Builder journal identity/version mismatch; no mutation performed'}
-}
-if($r.operation -ne 'status' -and (Test-Path -LiteralPath "$journal.partial") -and $j) {
-    # A flushed rename candidate can survive a host/process interruption. Recover
-    # it only when its UUID/resource and the pre-existing creation intent agree.
-    $candidate=Get-Content -LiteralPath "$journal.partial" -Raw -Encoding UTF8 | ConvertFrom-Json
-    if($candidate.schema -ne 1 -or $candidate.owner -ne $owner -or $candidate.root -ne $root -or $candidate.name -ne $name -or $candidate.run -ne $j.run) {throw 'Interrupted journal candidate identity mismatch'}
-    if($candidate.vm_id) {
-        Import-Module Hyper-V
-        $candidateVm=Get-VM -Id ([guid]$candidate.vm_id)
-        if($candidate.resource.opaque_id -ne $candidate.vm_id -or $candidate.resource.owner -ne $owner -or $candidateVm.Notes -ne $candidate.notes) {throw 'Interrupted journal candidate VM ownership mismatch'}
-    }
-    [IlexAtomicFile]::Replace("$journal.partial",$journal)
-    $j=$candidate
-}
 function Write-Journal {
     $bytes=[Text.Encoding]::UTF8.GetBytes(($script:j | ConvertTo-Json -Depth 15))
     $tmp="$journal.partial"
@@ -82,15 +65,47 @@ function Native([string]$exe,[string[]]$arguments) {
     & $exe @arguments | ForEach-Object {[Console]::Error.WriteLine($_)}
     if($LASTEXITCODE -ne 0) {throw "$exe failed ($LASTEXITCODE)"}
 }
-function Owned-VM {
-    if(!$script:j -or !$script:j.vm_id) {return $null}
-    if($j.resource.schema -ne 1 -or $j.resource.owner -ne $owner -or $j.resource.run -ne $j.run -or $j.resource.opaque_id -ne $j.vm_id) {throw 'OwnedResource journal identity mismatch'}
-    $vm=Get-VM -Id ([guid]$script:j.vm_id) -ErrorAction SilentlyContinue
-    if(!$vm) {throw "Owned VM UUID $($script:j.vm_id) is missing; refusing name-based adoption"}
-    $notesPending=$j.phase -eq 'allocated' -and [string]::IsNullOrEmpty($vm.Notes)
-    if((!$notesPending -and $vm.Notes -ne $script:j.notes) -or $vm.Name -ne $name) {throw 'VM ownership Notes/UUID/name mismatch; refusing mutation'}
-    if([IO.Path]::GetFullPath($vm.ConfigurationLocation) -notlike "$root\config*") {throw 'Owned VM configuration path mismatch'}
+function Assert-JournalIdentity($record) {
+    if($record.schema -ne 1 -or $record.owner -ne $owner -or $record.name -ne $name -or $record.root -ne $root -or $record.notes -ne "ilex-builder schema=1 owner=$owner run=$($record.run)") {throw 'Builder journal identity/version mismatch; no mutation performed'}
+    $null=[guid]::Parse($record.run)
+    if($record.phase -notin @('preparing','allocated','creating','provisioning','ready','deleting')) {throw 'Unknown builder journal phase'}
+    if($record.vm_id) {
+        $null=[guid]::Parse($record.vm_id)
+        $resource=$record.resource
+        if($resource.schema -ne 1 -or $resource.owner -ne $owner -or $resource.run -ne $record.run -or $resource.provider -ne 'hyperv-builder' -or $resource.opaque_id -ne $record.vm_id -or $resource.created_unix_ms -le 0) {throw 'OwnedResource journal identity mismatch'}
+        $paths=@($resource.paths | ForEach-Object {Assert-Path $_})
+        $modern=@((Join-Path $root 'disks'),(Join-Path $root 'config'))
+        $legacy=@((Join-Path $root 'os.vhdx'),(Join-Path $root 'data.vhdx'),(Join-Path $root 'config'))
+        if(!(($paths.Count -eq 2 -and !(Compare-Object $paths $modern)) -or ($paths.Count -eq 3 -and !(Compare-Object $paths $legacy)))) {throw 'OwnedResource paths differ from the builder creation layout'}
+    } elseif($record.resource -or $record.phase -notin @('preparing','deleting')) {throw 'Journal phase requires an exact VM UUID'}
+    if($record.phase -eq 'deleting') {Assert-CleanupManifest $record}
+}
+function Resolve-OwnedVM($record,[bool]$allowDeleted=$false) {
+    Assert-JournalIdentity $record
+    if(!$record.vm_id) {return $null}
+    $vm=Get-VM -Id ([guid]$record.vm_id) -ErrorAction SilentlyContinue
+    if(!$vm) {
+        if($allowDeleted -and $record.phase -eq 'deleting') {
+            if(Get-VM -Name $name -ErrorAction SilentlyContinue) {throw 'Builder name was reused by a different UUID; refusing cleanup of replacement resources'}
+            return $null
+        }
+        throw "Owned VM UUID $($record.vm_id) is missing; refusing name-based adoption"
+    }
+    $allocated=$record.phase -eq 'allocated' -or ($record.phase -eq 'deleting' -and $record.cleanup_from_phase -eq 'allocated')
+    $notesPending=$allocated -and [string]::IsNullOrEmpty($vm.Notes)
+    if((!$notesPending -and $vm.Notes -ne $record.notes) -or $vm.Name -ne $name -or $vm.Generation -ne 2) {throw 'VM ownership Notes/UUID/name/generation mismatch; refusing mutation'}
+    $config=Assert-Path $vm.ConfigurationLocation
+    $configRoot=Join-Path $root 'config'
+    if($config -ne $configRoot -and !$config.StartsWith($configRoot+'\',[StringComparison]::OrdinalIgnoreCase)) {throw 'Owned VM configuration path mismatch'}
+    foreach($drive in (Get-VMHardDiskDrive -VM $vm)) {
+        $path=Assert-Path $drive.Path
+        if([IO.Path]::GetDirectoryName($path) -ne (Join-Path $root 'disks') -and $path -notin @((Join-Path $root 'os.vhdx'),(Join-Path $root 'data.vhdx'))) {throw 'Owned VM disk path mismatch'}
+    }
     return $vm
+}
+function Owned-VM {
+    if(!$script:j) {return $null}
+    return Resolve-OwnedVM $script:j ($r.operation -in @('status','cleanup-incomplete'))
 }
 function Assert-Path([string]$path) {
     $absolute=[IO.Path]::GetFullPath($path)
@@ -111,6 +126,34 @@ function Remove-Owned([string]$path) {
         Get-ChildItem -LiteralPath $absolute -Recurse -Force | ForEach-Object {$null=Assert-Path $_.FullName}
         Remove-Item -LiteralPath $absolute -Recurse -Force
     }
+}
+function Cleanup-Paths {
+    return @('seed','seed-keys','seed.iso','identity','identity.pub','known_hosts','config','disks','os.vhdx','data.vhdx') | ForEach-Object {Assert-Path (Join-Path $root $_)}
+}
+function Assert-CleanupManifest($record) {
+    if($record.cleanup_from_phase -notin @('preparing','allocated','creating','provisioning')) {throw 'Invalid cleanup origin phase'}
+    $paths=@($record.cleanup_paths)
+    if($paths.Count -ne 10 -or (Compare-Object $paths @(Cleanup-Paths))) {throw 'Cleanup paths differ from the previously authorized creation layout'}
+    foreach($path in $paths) {
+        $null=Assert-Path $path
+        if(Test-Path -LiteralPath $path) {Get-ChildItem -LiteralPath $path -Recurse -Force | ForEach-Object {$null=Assert-Path $_.FullName}}
+    }
+}
+function Read-Journal {
+    if(Test-Path -LiteralPath $journal) {
+        $script:j=Get-Content -LiteralPath $journal -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-JournalIdentity $j
+    }
+    if($r.operation -eq 'status' -or !(Test-Path -LiteralPath "$journal.partial") -or !$j) {return}
+    $candidate=Get-Content -LiteralPath "$journal.partial" -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-JournalIdentity $candidate
+    if($candidate.run -ne $j.run -or $candidate.notes -ne $j.notes -or ($j.vm_id -and $candidate.vm_id -ne $j.vm_id)) {throw 'Interrupted journal candidate identity mismatch'}
+    if(!$j.vm_id -and $candidate.vm_id) {
+        if($j.phase -ne 'preparing' -or $candidate.phase -ne 'allocated' -or $candidate.revision -ne $j.revision -or $candidate.memory_bytes -ne $j.memory_bytes -or $candidate.cpus -ne $j.cpus) {throw 'Allocated journal candidate differs from its creation intent'}
+    }
+    if($candidate.vm_id) {$null=Resolve-OwnedVM $candidate ($r.operation -eq 'cleanup-incomplete')}
+    [IlexAtomicFile]::Replace("$journal.partial",$journal)
+    $script:j=$candidate
 }
 function Ensure-DiskStorage {
     $vm=Owned-VM
@@ -243,8 +286,22 @@ function Wait-Idle {
 }
 function Start-Owned {
     $vm=Owned-VM
-    if($vm.State -eq 'Off') {Ensure-DiskStorage;Preflight ([long]$j.memory_bytes);Start-VM -VM $vm | Out-Null}
+    $memory=Assert-Resources $vm
+    if($vm.State -eq 'Off') {
+        Ensure-DiskStorage
+        Preflight $memory
+        # Recheck after a potentially long wait, before allocating any host RAM.
+        $null=Assert-Resources (Owned-VM)
+        Start-VM -VM $vm | Out-Null
+    }
     elseif($vm.State -ne 'Running') {throw "Unsupported builder state: $($vm.State)"}
+}
+function Assert-Resources($vm) {
+    if(!$vm) {throw 'No owned VM to admit'}
+    $memory=Get-VMMemory -VM $vm
+    $processor=Get-VMProcessor -VM $vm
+    if($memory.DynamicMemoryEnabled -or $memory.Startup -ne $j.memory_bytes -or $processor.Count -ne $j.cpus -or !$processor.ExposeVirtualizationExtensions) {throw "Actual VM resources differ from journal (possibly interrupted resize); no VM was started. While off, repair explicitly with builder up --memory-gib $([long]$j.memory_bytes/1GB) --cpus $($j.cpus)."}
+    return [long]$memory.Startup
 }
 function Key([string]$file) {
     Native (Get-Command ssh-keygen.exe).Source @('-q','-t','ed25519','-N','""','-f',$file)
@@ -312,6 +369,7 @@ function Reply {
 }
 try {
     Import-Module Hyper-V -ErrorAction Stop
+    Read-Journal
     if($r.operation -eq 'status') {Reply;exit 0}
     if($r.operation -eq 'up') {
         if($j -and $j.update_phase -eq 'updating') {throw 'Interrupted update requires builder rollback before up'}
@@ -357,10 +415,13 @@ try {
             $requestedCpus=[int]$j.cpus
             if($r.options.memory_gib){$requestedMemory=[long]$r.options.memory_gib*1GB}
             if($r.options.cpus){$requestedCpus=[int]$r.options.cpus}
-            if($requestedMemory -ne $j.memory_bytes -or $requestedCpus -ne $j.cpus) {
+            $actualMemory=Get-VMMemory -VM (Owned-VM)
+            $actualProcessor=Get-VMProcessor -VM (Owned-VM)
+            if($requestedMemory -ne $j.memory_bytes -or $requestedCpus -ne $j.cpus -or $actualMemory.Startup -ne $requestedMemory -or $actualMemory.DynamicMemoryEnabled -or $actualProcessor.Count -ne $requestedCpus -or !$actualProcessor.ExposeVirtualizationExtensions) {
                 if((Owned-VM).State -ne 'Off' -or $j.checkpoint_id) {throw 'Resource changes require builder down and no retained recovery checkpoint'}
                 if($requestedMemory -lt 4GB -or $requestedMemory -gt 32GB -or $requestedCpus -lt 2 -or $requestedCpus -gt [Environment]::ProcessorCount) {throw 'Invalid builder resources'}
-                Preflight $requestedMemory
+                # Changing an off VM's configuration allocates no RAM. Actual
+                # resources are reconciled and admitted by Start-Owned below.
                 Set-VMMemory -VM (Owned-VM) -DynamicMemoryEnabled $false -StartupBytes $requestedMemory
                 Set-VMProcessor -VM (Owned-VM) -Count $requestedCpus -ExposeVirtualizationExtensions $true
                 $j.memory_bytes=$requestedMemory;$j.cpus=$requestedCpus;Write-Journal
@@ -384,9 +445,17 @@ try {
         if(!$j) {Reply;exit 0}
         if($j.phase -eq 'ready') {throw 'Ready builder is persistent infrastructure; cleanup-incomplete cannot destroy it'}
         $vm=Owned-VM
+        if($j.phase -ne 'deleting') {
+            if(!$vm -and (Get-VM -Name $name -ErrorAction SilentlyContinue)) {throw 'Unjournaled VM exists; UUID authorization unavailable, refusing cleanup'}
+            $j | Add-Member -NotePropertyName cleanup_from_phase -NotePropertyValue $j.phase -Force
+            $j | Add-Member -NotePropertyName cleanup_paths -NotePropertyValue @(Cleanup-Paths) -Force
+            Assert-CleanupManifest $j
+            $j.phase='deleting';Write-Journal
+        }
+        Assert-CleanupManifest $j
         if($vm) {if($vm.State -ne 'Off'){Stop-VM -VM $vm -TurnOff -Confirm:$false};Remove-VM -VM $vm -Force}
         elseif(Get-VM -Name $name -ErrorAction SilentlyContinue) {throw 'Unjournaled VM exists; UUID authorization unavailable, refusing cleanup'}
-        foreach($p in @('seed','seed-keys','seed.iso','identity','identity.pub','known_hosts','config','disks','os.vhdx','data.vhdx')) {Remove-Owned (Join-Path $root $p)}
+        foreach($path in $j.cleanup_paths) {Remove-Owned $path}
         Remove-Item -LiteralPath $journal;$j=$null
     } elseif($r.operation -eq 'accept-update') {
         if(!$j -or !$j.checkpoint_id -or $j.update_phase -notin @('verified','rolled-back')) {throw 'No verified/rolled-back recovery checkpoint to accept'}
@@ -398,9 +467,8 @@ try {
     } elseif($r.operation -eq 'self-check') {
         $vm=Owned-VM
         if(!$vm -or $vm.State -ne 'Running') {throw 'Run builder up before the active self-check'}
-        $memory=Get-VMMemory -VM $vm
-        $processor=Get-VMProcessor -VM $vm
-        if($memory.DynamicMemoryEnabled -or $memory.Startup -ne $j.memory_bytes -or !$processor.ExposeVirtualizationExtensions -or $vm.AutomaticCheckpointsEnabled) {throw 'Fixed-memory/nested/checkpoint configuration drift'}
+        $null=Assert-Resources $vm
+        if($vm.AutomaticCheckpointsEnabled) {throw 'Automatic checkpoint configuration drift'}
         $probe=Guest 'smoke'
         if($probe.revision -ne $r.revision) {throw 'Provisioning revision differs; run builder update before self-check'}
         if(!$probe.nested_kvm_boot) {throw 'Nested KVM VM did not boot userspace'}

@@ -20,4 +20,3 @@ zstd = "0.13"
 fs2 = "0.4"
 pgp = { version = "0.21.1", default-features = false }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }
-

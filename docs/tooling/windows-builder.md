@@ -8,10 +8,12 @@ Use native PowerShell; neither command calls WSL. Linux hosts keep local tooling
 cargo xtask runtime fetch
 cargo xtask runtime status
 cargo xtask runtime self-check
+cargo xtask runtime activation-self-check
 cargo xtask runtime update
 cargo xtask builder up
 cargo xtask builder status --json
 cargo xtask builder self-check
+cargo xtask builder recovery-self-check --wait-for-memory-seconds 10800
 cargo xtask builder down
 cargo xtask builder update
 ```
@@ -44,6 +46,8 @@ load before `ready.json` is flushed and the directory is renamed. An OS file
 lock serializes installation and is released after a crash. The next fetch
 cleans unpublished extraction and reuses checksum-verified archives. Each child
 uses a private DLL/PATH search; the parent environment is untouched.
+`fetch` acquires a ready runtime without writing activation pointers. Only
+`update` activates it, after successful GPU smoke, including the first install.
 Helper processes belong to an unnamed Windows Job Object with kill-on-close;
 an interrupted xtask cannot leave downloads or provisioning PowerShell running.
 The persistent Hyper-V VM belongs to the journal rather than the helper job.
@@ -98,6 +102,11 @@ The wait polls live available memory every 30 seconds without touching other
 VMs. The minimum is 4 GiB. Explicit resource changes require the builder to be
 off and no retained checkpoint; `builder up --memory-gib 16` restores the default
 memory profile. Status is read-only, including when no installation exists.
+Before every start, actual fixed RAM, CPU count and nested-extension settings
+must match the journal, with a second check after the memory wait. An interrupted
+resize fails closed. While off, explicit resource options repair the mismatch
+even when the requested values already match the journal. Configuration changes
+allocate no RAM; admission uses the verified actual startup memory.
 
 ## Provisioning and SSH
 
@@ -126,6 +135,10 @@ with job operations and must hold `/run/lock/ilex-builder-jobs.lock` for active
 jobs and use `ilex-job-*.service` units. Job registration must also take the
 installation's host `host.lock`, so it cannot race maintenance between the idle
 probe and shutdown. Updates wait for idle; shutdown refuses active jobs.
+Treat the maintenance key as **guest-root authority**: its update operation
+accepts replacement scripts. The sender-supplied hash checks framing integrity,
+not recipe trust. The forced command constrains transport operations, not the
+authority of a key holder; T3 must preserve that trust boundary.
 
 The recipe installs rootful Podman, Rust/Cargo, the packaged bcvk CLI v0.22.0
 (SHA256 checked), QEMU/KVM, libvirt, OVMF, swtpm, Hyper-V KVP and ISO dependencies.
@@ -149,6 +162,12 @@ resources after checking exact UUID/Notes and all filesystem paths. It refuses a
 ready builder. If interruption occurred in the tiny gap between Hyper-V returning
 the UUID and recording it, an unjournaled VM fails closed for manual inspection;
 the tool cannot safely authorize name-only deletion.
+Before unregistering an incomplete VM, cleanup durably records `deleting`, its
+origin phase and a validated fixed path manifest. Retry can finish those paths
+after the UUID is absent; a different VM reusing the name blocks cleanup and is
+never adopted or removed. A flushed `allocated` candidate with empty VM Notes
+can recover only when the full prior creation intent, UUID/resource, generation,
+configuration and disk paths agree. Ordinary ready records still require Notes.
 If cloud-init completed but the host was interrupted before marking readiness,
 `up` authenticates the recorded guest and completes its smoke/seed cleanup. An
 unfinished provisioning recipe with an older revision can resume through the
@@ -169,6 +188,22 @@ Bootstrap/update logs and the last SSH diagnostic are retained in the builder
 state directory. `builder status --json` exposes provisioning/update phase,
 recovery UUID, owned paths and resource settings. A ready builder is intentionally
 persistent shared infrastructure; ordinary command cleanup does not destroy it.
+
+`builder recovery-self-check` requires that ready builder off and checkpoint-free.
+It interrupts real RAM/CPU changes before journal commit, rejects restart on
+drift and restores the original profile without starting it. Disposable isolated
+Gen2 fixtures exercise the allocated-candidate and post-unregister boundaries,
+including wrong-run, ready-Notes, path and replacement-UUID rejection. Instrumented
+copies add only identity salting, abrupt exits and a start witness; the recovery
+logic is the embedded production helper. All fixture UUIDs/paths are recorded,
+and successful checks remove them. No existing builder disk or key is replaced.
+
+`runtime activation-self-check` uses fresh private process-local state and copies
+the checksum-verified compressed cache. It forces a real SDL initialization
+failure and requires no active/previous pointer, then boots WHPX/SDL/GL and
+requires first activation. Its runtime fixture is removed and normal pointers
+remain unchanged. GPU fixture QMP I/O remains bounded, allowing 30 seconds for
+first-launch GL initialization on a busy host.
 
 See `windows-builder-evidence.md` for the exact validation run and outstanding
 acceptance gates. No unit-test suite is introduced.
