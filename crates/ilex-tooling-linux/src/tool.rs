@@ -84,8 +84,9 @@ pub fn build(ws: &Workspace, name: &str, packages: &[String]) -> Result<Built> {
     .args(["--env", &format!("PACKAGES={}", packages.join(" "))])
     .args(["--volume", &format!("{}:/out", images.display())])
     .args(["--volume", &format!("{}:/keys", keys.display())])
-    .args([BUILDER_IMAGE, "bash", "-s"])
     .stdin(Stdio::piped());
+    crate::ownership::remote_container_args(ws, &mut run)?;
+    run.args([BUILDER_IMAGE, "bash", "-s"]);
     let line = cmd::display(&run);
     eprintln!("$ {line} < tool-build.sh");
     let mut child = run.spawn().with_context(|| format!("spawning `{line}`"))?;

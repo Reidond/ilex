@@ -362,6 +362,7 @@ impl ImageTransaction {
             !crate::bcvk::image_exists(&temporary),
             "temporary image alias already exists"
         );
+        record_remote_resource(ws, "image_alias", &temporary, final_ref)?;
         Ok(Self {
             final_ref: final_ref.into(),
             temporary,
@@ -484,6 +485,40 @@ pub fn record_remote_resource(ws: &Workspace, provider: &str, id: &str, name: &s
         }))?,
     )?;
     fs::rename(temporary, path)?;
+    Ok(())
+}
+
+/// Detached conmon/container processes can outlive their Podman CLI. A CID
+/// written by Podman plus job/owner labels fences cancellation cleanup.
+pub fn remote_container_args(ws: &Workspace, command: &mut Command) -> Result<()> {
+    let Some(directory) = std::env::var_os("ILEX_JOB_RESOURCE_DIR") else {
+        return Ok(());
+    };
+    let directory = std::path::PathBuf::from(directory);
+    let job = directory
+        .parent()
+        .and_then(|p| p.file_name())
+        .context("remote job path missing")?
+        .to_string_lossy();
+    let owner = ws.identity()?.owner;
+    let key = digest(
+        format!(
+            "{}:{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        )
+        .as_bytes(),
+    );
+    fs::create_dir_all(&directory)?;
+    command
+        .arg("--cidfile")
+        .arg(directory.join(format!("{}.cid", &key[7..])))
+        .args([
+            "--label",
+            &format!("ilex.remote-job={job}"),
+            "--label",
+            &format!("ilex.checkout-owner={owner}"),
+        ]);
     Ok(())
 }
 

@@ -37,6 +37,13 @@ pub struct Job {
     pub inputs: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Debug)]
+pub struct Failure { pub code: u8, pub message: String }
+impl std::fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str(&self.message) }
+}
+impl std::error::Error for Failure {}
+
 #[derive(clap::Args)]
 pub struct Args {
     #[command(subcommand)]
@@ -70,7 +77,7 @@ pub fn route(ws: &Workspace, cmd: crate::Cmd) -> Result<Option<crate::Cmd>> {
             crate::Cmd::Build(a) => Command::Build(a),
             crate::Cmd::Rechunk(a) => Command::Rechunk(a),
             crate::Cmd::Disk(a) => Command::Disk(a),
-            crate::Cmd::Iso(a) if !a.due && !a.check_registry => Command::Iso(a),
+            crate::Cmd::Iso(a) if !a.due => Command::Iso(a),
             crate::Cmd::Tool(a) => Command::Tool(a),
             crate::Cmd::Test(a) => Command::Test(a),
             other => return Ok(Some(other)),

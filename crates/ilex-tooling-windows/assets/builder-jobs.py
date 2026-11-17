@@ -420,8 +420,26 @@ def cleanup_resources(path, spec):
             subprocess.run(['virsh', 'destroy', identity], env=ENV, capture_output=True)
             assert checked(['virsh', 'domuuid', name]).decode().strip() == identity, 'domain UUID changed'
             checked(['bcvk', 'libvirt', 'rm', '--force', name])
+        elif resource['provider'] == 'image_alias':
+            assert re.fullmatch('localhost/ilex-job:[0-9a-f]{64}', identity), 'invalid temporary image allocation'
+            result = subprocess.run(['podman', 'image', 'inspect', identity], env=ENV, capture_output=True)
+            if result.returncode:
+                continue
+            image = json.loads(result.stdout)[0]
+            assert image['Labels']['ilex.checkout-owner'] == spec['snapshot']['identity']['owner'], 'temporary image owner changed'
+            checked(['podman', 'untag', identity, identity])
         else:
             raise ValueError('unknown resource provider')
+    for cid in sorted((path / 'resources').glob('*.cid')):
+        identity = cid.read_text().strip()
+        assert re.fullmatch('[0-9a-f]{64}', identity), 'invalid Podman-created CID'
+        result = subprocess.run(['podman', 'container', 'inspect', identity], env=ENV, capture_output=True)
+        if result.returncode:
+            continue
+        container = json.loads(result.stdout)[0]
+        labels = container['Config']['Labels']
+        assert container['Id'] == identity and labels['ilex.remote-job'] == spec['job'] and labels['ilex.checkout-owner'] == spec['snapshot']['identity']['owner'], 'foreign job container'
+        checked(['podman', 'rm', '--force', '--time', '5', identity])
 
 
 def execute(owner, job):

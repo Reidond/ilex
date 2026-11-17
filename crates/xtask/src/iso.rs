@@ -498,8 +498,9 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
         .arg(format!("{}:/var/cache/image-builder", cache.display()))
         .arg("--volume")
         .arg(format!("{}:/out", out_dir.display()))
-        .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"])
-        .arg(&helper)
+        .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"]);
+    ilex_devkit::ownership::remote_container_args(ws, &mut run)?;
+    run.arg(&helper)
         .args([
             "sh",
             "-c",

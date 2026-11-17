@@ -264,10 +264,8 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
             .map(|m| m.len())
             .unwrap_or(0);
     }
-    let paths = matches!(
-        job.command,
-        Command::Disk(_) | Command::Iso(_) | Command::Tool(_)
-    );
+    let paths = matches!(job.command, Command::Disk(_) | Command::Tool(_))
+        || matches!(&job.command, Command::Iso(a) if !a.check_registry && !a.due);
     let result = loop {
         if (cancel || transport::cancelled()) && !cancelled {
             transport.rpc(
@@ -425,13 +423,12 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
         )?;
     }
     eprintln!("ilex: job {} evidence: {}", job.job, dir.display());
-    ensure!(
-        result["exit_code"] == 0,
-        "remote job {} exited {}; artifacts retrieved to {}",
-        job.job,
-        result["exit_code"],
-        ws.state_dir().display()
-    );
+    let code = result["exit_code"].as_i64().context("missing remote exit code")?;
+    if code != 0 {
+        let code = if code < 0 { 128 - code } else { code };
+        return Err(super::Failure { code: u8::try_from(code).unwrap_or(1), message: format!(
+            "remote job {} exited {code}; artifacts retrieved to {}", job.job, ws.state_dir().display()) }.into());
+    }
     if paths {
         let stdout = fs::read_to_string(dir.join("stdout.log"))?;
         if let Some(path) = stdout.lines().last() {

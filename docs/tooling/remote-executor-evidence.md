@@ -10,6 +10,10 @@ Owned builder UUID: `b521170d-a2e0-4791-8b3e-71819084203d`.
   `--all-targets -- -D warnings` passed during implementation.
 - The corresponding Linux clippy command passed in the existing WSL environment
   with a task-specific target directory. No distro/profile change was made.
+- Full `cargo clippy --workspace --all-targets -- -D warnings` passed on Windows
+  and Linux. The existing Linux `doctor --self-check-build --json` also passed
+  real Podman builds, source-race rejection, accepted-image preservation and
+  foreign-owner rejection. Its disposable fixtures were cleaned up.
 - `remote snapshot` inventoried a real disposable Git clone named `checkout with
   spaces`, including a staged deletion of `README.md`, executable
   `build/compose.py`, an untracked spaced filename with exact LF bytes and a
@@ -24,6 +28,28 @@ Owned builder UUID: `b521170d-a2e0-4791-8b3e-71819084203d`.
   access. An escaping symlink-file input was also rejected.
 - An explicit `security::firmware` filter failed natively with the T5 harness
   diagnostic before starting a job.
+- Two independently materialized checkouts were inspected by the Linux xtask
+  binary with their source contexts. Each returned its exact original Windows
+  identity and digest; their image references and state paths differed. Neither
+  acquired `main`. This validates context propagation, not concurrent VM jobs.
+- On clean head `394213525a5d9f6462001b2273acf9b8c755946c`, native snapshot
+  inspection recorded 1,460,299 source bytes in 189 content chunks, with digest
+  `sha256:01bd554dbe7a877665a2b6d397d157b6c874051060ac8ec85ec089a4e17d9eee`.
+  Two local staging runs took 2.874 and 1.940 seconds. These are local snapshot
+  timings, not SSH transfer/build timings or a builder-versus-WSL comparison.
+- The WSL compatibility path built this checkout's default GNOME image twice.
+  Its owned tag was
+  `localhost/ilex:wt-t3-6df5d392-09--5e71b6a1e2f3ac8624d5f377beb67a3b`;
+  the first accepted image ID was
+  `adf3ffaba430453dc776859ea81f8a608bcc48857bca7827f3cf7b226845c4e7`.
+  The first invocation took 161.352 seconds (process creation to final log
+  write); the repeat took 59.554 seconds (wall clock). Shared WSL caches were
+  retained, other sessions were active and nothing was pruned. This is a
+  checkout-first/warm baseline, not a cold-store benchmark or a speed ratio.
+- WSL `cargo xtask test ephemeral:: -- --test-threads 1` passed all nine tests
+  against that checkout's image: 97.28 seconds in the harness, 106.486 seconds
+  for the command. This is Linux/WSL regression evidence; it does not qualify
+  the Hyper-V executor.
 
 ## Builder admission and remaining gates
 
@@ -31,7 +57,7 @@ T2 left the exact owned builder off at 4 GiB/four CPUs. The tooling's `builder
 up --memory-gib 16 --cpus 8 --wait-for-memory-seconds 10800` configured the test
 profile and waited for capacity. The subsequent recipe update also waits for
 30 GiB available (16 GiB fixed allocation plus the unchanged 14 GiB reserve).
-Available host memory during implementation was approximately 14–16 GiB. No
+Available host memory during implementation was approximately 14–21 GiB. No
 other VM was stopped or changed and the reserve was not reduced.
 
 The full owned-builder build/rechunk/disk/tool/ISO/tier matrix, live Ctrl-C and
@@ -43,4 +69,6 @@ ratio or successful tier run is claimed here.
 
 At 16:15 UTC `publish.yml` run `44118969608` on
 `phase0/17-security-probes` was in progress. No competing branch workflow was
-dispatched at that point.
+dispatched at that point. It later completed, leaving the queue clear. The
+existing workflow stages candidate images in ghcr even for branch dispatches;
+no run was dispatched under this task's no-new-registry-push constraint.

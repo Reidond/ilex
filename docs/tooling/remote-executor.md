@@ -27,7 +27,9 @@ cargo xtask remote cancel --job <UUID>
 cargo xtask info --json
 ```
 
-`iso --due` and `iso --check-registry` are read-only native operations. The ISO
+`iso --due` is a read-only native operation. `iso --check-registry` uses the
+builder's registry tools and preserves its exit status, including exit 3 for a
+missing publication. The ISO
 remains a network installer; `--testing-tag latest` tests the explicitly labelled
 published legacy payload. No remote operation publishes an image or release.
 `security::`, `homed::` and the native security harness belong to T5. Explicit

@@ -93,7 +93,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     chunk
         .args(["run", "--rm", "--log-driver=passthrough"])
         .arg(format!("--mount=type=image,src={input},dest=/chunkah"))
-        .args(["--env", "CHUNKAH_CONFIG_STR", BASE_IMAGE])
+        .args(["--env", "CHUNKAH_CONFIG_STR"]);
+    ilex_devkit::ownership::remote_container_args(ws, &mut chunk)?;
+    chunk
+        .arg(BASE_IMAGE)
         .args(["/usr/libexec/bootc-base-imagectl", "rechunk", "--chunkah"]);
     if let Some(n) = args.max_layers {
         chunk.arg(format!("--max-layers={n}"));
