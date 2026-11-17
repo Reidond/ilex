@@ -697,7 +697,7 @@ Optional `settings.toml` accepts `[gnome]` with `color-scheme` (`default`,
 `prefer-dark`, `prefer-light`), boolean `clock-show-weekday`, and `clock-format`
 (`12h`, `24h`). No command strings or arbitrary dconf paths are accepted.
 Optional `apps.toml` accepts `[[flatpaks]]` entries with an application `id`
-and `remote = "flathub"`. Apps install only on explicit `--install-apps`,
+and `remote = "flathub"`. Apps install/update only on explicit `--install-apps`,
 using an already configured user remote; failures can be retried after login.
 No network operation runs automatically or gates authentication.
 

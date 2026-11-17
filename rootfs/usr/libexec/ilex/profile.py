@@ -262,7 +262,7 @@ def apply(args):
         if args.install_apps:
             for app in data["apps"]["flatpaks"]:
                 try:
-                    run("/usr/bin/flatpak", "--user", "install", "--noninteractive", "--", app["remote"], app["id"])
+                    run("/usr/bin/flatpak", "--user", "install", "--app", "--or-update", "--noninteractive", "--", app["remote"], app["id"])
                 except (OSError, ValueError, subprocess.TimeoutExpired):
                     conflicts.append(f"app {app['id']} (unavailable; retry explicitly)")
         print(json.dumps({"profile": name, "revision": entry["revision"], "conflicts": conflicts}))
@@ -283,7 +283,7 @@ def main():
     selection.add_argument("name", nargs="?")
     selection.add_argument("--selected", action="store_true")
     command.add_argument("--shell", choices=["gnome"])
-    command.add_argument("--install-apps", action="store_true", help="opt in to user Flatpaks from an already configured flathub remote")
+    command.add_argument("--install-apps", action="store_true", help="opt in to installing/updating user apps from an already configured flathub remote")
     args = parser.parse_args()
     if args.command in {"list", "check"}:
         data = catalogue()
