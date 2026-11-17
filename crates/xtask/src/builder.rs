@@ -37,7 +37,10 @@ enum Operation {
     /// Remove only journal-owned resources from an incomplete bootstrap
     CleanupIncomplete,
     /// Restore and smoke-test the exact retained recovery checkpoint
-    Rollback,
+    Rollback {
+        #[arg(long, default_value_t = 0)]
+        wait_for_memory_seconds: u32,
+    },
     /// Explicitly discard the retained update recovery checkpoint
     AcceptUpdate,
 }
@@ -69,7 +72,12 @@ pub fn run(args: Args) -> Result<()> {
             }
             Operation::SelfCheck => Op::SelfCheck,
             Operation::CleanupIncomplete => Op::CleanupIncomplete,
-            Operation::Rollback => Op::Rollback,
+            Operation::Rollback {
+                wait_for_memory_seconds,
+            } => {
+                options.wait_for_memory_seconds = wait_for_memory_seconds;
+                Op::Rollback
+            }
             Operation::AcceptUpdate => Op::AcceptUpdate,
         };
         println!(

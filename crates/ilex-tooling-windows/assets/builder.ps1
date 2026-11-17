@@ -148,7 +148,7 @@ function Preflight([long]$memory) {
     while($available -lt ($memory+14GB)) {
         if([DateTime]::UtcNow -ge $memoryDeadline) {throw "Insufficient available memory: $([math]::Round($available/1GB,1)) GiB; builder needs $($memory/1GB) GiB plus 14 GiB host reserve. No VM was started."}
         Say "Waiting for host capacity: $([math]::Round($available/1GB,1)) GiB available, $(($memory+14GB)/1GB) GiB required"
-        Start-Sleep -Seconds 120
+        Start-Sleep -Seconds 30
         $available=[long](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1KB
     }
     Check-DiskSpace
@@ -430,12 +430,12 @@ try {
             $j.update_phase='rolled-back';Write-Journal
         } else {
             if($j.update_phase -eq 'updating') {throw 'Interrupted update: run builder rollback before another update'}
+            if($j.checkpoint_id) {throw 'Recovery checkpoint retained; accept it with builder accept-update before updating again'}
             $vm=Owned-VM
             if($vm.State -eq 'Running'){Wait-Idle;Stop-Owned}
             elseif($vm.State -ne 'Off'){throw "Unsupported builder state for update: $($vm.State)"}
             Ensure-DiskStorage
-            Check-DiskSpace
-            if($j.checkpoint_id) {throw 'Recovery checkpoint retained; accept it with builder accept-update before updating again'}
+            Preflight ([long]$j.memory_bytes)
             $vm=Owned-VM
             Set-VM -VM $vm -CheckpointType Standard
             $snap=Checkpoint-VM -VM $vm -SnapshotName "ilex-builder-before-$([guid]::NewGuid())" -Passthru
