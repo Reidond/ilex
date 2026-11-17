@@ -723,24 +723,48 @@ username; its identity suggestions remain metadata for setup. Apply refuses
 root, an inactive/non-LUKS home, or a caller/home UID mismatch. It uses NSS,
 not `$HOME`, and writes with owned no-follow directory descriptors. Nothing
 imports or rewrites `.identity`, `.identity-blob`, keyrings or credentials.
+
+Threat model: profile apply defends against malicious/malformed profile content
+and links or configuration redirects present before apply. It does not prevent
+a concurrently malicious process of the same user, which already has that
+user's full write access. The checks below detect changes; they are not an
+authenticated writer protocol or a security boundary against another process
+of the same UID.
+
 External settings/app writers run in bubblewrap with a read-only host, masked
 homes and runtime, a clean environment, and only no-follow-opened home
 subdirectories bound writable. A systemd user drop-in confines the session's
 actual dconf writer for homed accounts, retaining its bus, cache and desktop
 notifications. Local maintenance accounts retain Fedora's writer. Profile
 clients use a canonical dconf/session environment, refuse activation overrides,
-and verify the bus writer belongs to the confined unit. Runtime IPC remains in
+and verify the bus writer belongs to the confined unit. They re-check the bus
+ID, unique writer connection, PID and unit after settings operations. A changed
+or unverifiable writer/bus reports an error and retains the previous managed
+setting values; detection cannot undo writes already made by a malicious
+replacement. Runtime IPC remains in
 the user's owned runtime directory. Symlinked dconf directories/databases are
 conflicts.
 
 `~/.local/state/ilex/profile.json` stores schema, profile revision/digest and
 managed file/setting hashes or values. Missing files are seeded atomically;
-updates replace only the last managed contents. Existing files, edits,
+updates use Linux `renameat2(RENAME_EXCHANGE)` and verify the displaced contents
+against the last managed digest. An intervening save is exchanged back and
+reported as a conflict. If rollback races with another save or deletion, keep
+displaced edits at the reported `.ilex-profile-*` recovery path in the same
+directory; never silently delete an unverified version. Unsupported exchange
+operations fail without falling back to an unchecked replacement. Existing files, edits,
 deletions, symlink/hardlink paths and explicitly set desktop settings are
 preserved and reported as conflicts (exit 1).
 Setting resets count as edits: reapply writes only an initially absent setting,
 or a changed profile value whose current override still equals the last
 managed value. An unchanged managed setting is not rewritten.
+For changed settings, read/compare/write each key back to back, with a final
+pre-write read and post-write read. An observed intervening reset/save is left
+untouched, or the later user value is retained, and reported as a conflict.
+Dconf has no compare-and-swap: an edit in the remaining final-read/write window
+can still be overwritten without detection. Settings preservation is therefore
+best-effort, not transactional; do not claim all concurrent settings edits are
+recoverable.
 Invalid/newer state, a newer profile revision, or changed content without a
 revision bump declines updates
 (exit 2). Never lower a revision during rollback. Removed profile files are
@@ -760,6 +784,9 @@ On a GNOME image it also checks scoped dconf updates, reset preservation,
 dconf directory/leaf links outside the encrypted home, inherited environment
 redirects and user-setting conflicts. The compiler regression rejects sparse
 512 MiB templates and all three manifests under a 128 MiB address-space limit.
+Real-homed interleaving regressions use other processes of the same user to
+save after the file comparison, save again during rollback, reset a setting
+after comparison or during its write, and restart the checked dconf writer.
 Measured 2026-11-17: the shell-free image is 1,977.84 MiB against Fedora
 bootc's 1,917.62 MiB, a 60.22 MiB increase within the unchanged 128 MiB budget.
 

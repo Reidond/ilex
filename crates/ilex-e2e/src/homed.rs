@@ -43,6 +43,10 @@ fn profiles() -> Result<()> {
             "printf %s {} | base64 -d > /run/ilex-profiles-user.py",
             qemu::base64(include_str!("profiles-user-guest.py").as_bytes())
         ))?;
+        vm.ssh_ok(&format!(
+            "printf %s {} | base64 -d > /run/ilex-profiles-races.py",
+            qemu::base64(include_str!("profiles-races-guest.py").as_bytes())
+        ))?;
         // Read-only, root-owned profile variants model a later signed image.
         // Only the e2e harness redirects the production module's image root;
         // the shipped command accepts no alternate source/home option.

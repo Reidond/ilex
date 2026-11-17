@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import pwd
+import runpy
 from pathlib import Path
 import subprocess
 import tempfile
@@ -92,7 +93,7 @@ if gnome:
     override.parent.rmdir()
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
     # Deliberate inherited redirects are neutralised by the writer's clean
-    # environment and private bus, not propagated to the session's service.
+    # canonical client/service contexts, not propagated to the session's writer.
     redirected = dict(os.environ, XDG_CONFIG_HOME=external.name, XDG_DATA_HOME=external.name,
                       XDG_CACHE_HOME=external.name, DCONF_PROFILE=str(sentinel_db),
                       GSETTINGS_BACKEND="keyfile", DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent")
@@ -201,4 +202,5 @@ if gnome:
         saved_flatpak.rename(flatpak_dir)
     external.cleanup()
 assert sentinel.read_text() == "outside sentinel\n"
+runpy.run_path("/run/ilex-profiles-races.py", init_globals={"profile": module, "gnome": gnome})
 print("profile apply, rollback, edits/deletions, symlinks/hardlinks and offline apps: passed")

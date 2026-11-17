@@ -1,11 +1,17 @@
 """Apply public image profiles only as the owner of an authenticated homed home.
 
 No hooks, record imports, chown, arbitrary settings paths or shell evaluation.
-All home traversal is relative to pinned, owned, no-follow directory FDs.
+Profile content is untrusted; existing links/redirects are rejected or neutralised.
+Home traversal uses pinned, owned, no-follow directory FDs. A concurrently
+malicious process of the same UID already has the user's full write access and
+is outside the prevention threat model. Writer replacement is detected, not
+prevented by an authenticated writer protocol. Ordinary concurrent file saves
+are checked at exchange; settings updates are best-effort because dconf has no CAS.
 """
 
 import argparse
 from contextlib import ExitStack, contextmanager
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -20,6 +26,23 @@ import uuid
 ROOT = "/usr/share/ilex"
 STATE = ".local/state/ilex/profile.json"
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+RENAME_EXCHANGE = 2
+_renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+_renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+_renameat2.restype = ctypes.c_int
+
+
+def exchange(fd, source, destination):
+    if _renameat2(fd, os.fsencode(source), fd, os.fsencode(destination), RENAME_EXCHANGE):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+class FileConflict(ValueError):
+    def __init__(self, recovery=None):
+        self.recovery = recovery
+        super().__init__("file changed while applying profile" +
+                         (f"; displaced edits retained at {recovery}" if recovery else ""))
 
 
 def digest(data):
@@ -69,22 +92,26 @@ class Home:
         finally:
             os.close(fd)
 
+    def read_at(self, fd, name):
+        source = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        with os.fdopen(source, "rb") as stream:
+            self.owned(stream.fileno())
+            value = stream.read(1048577)
+            if len(value) > 1048576:
+                raise ValueError("profile file is too large")
+            return value
+
     def read(self, path):
         try:
             with self.parent(path) as (fd, name):
-                source = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
-                with os.fdopen(source, "rb") as stream:
-                    self.owned(stream.fileno())
-                    value = stream.read(1048577)
-                    if len(value) > 1048576:
-                        raise ValueError("profile file is too large")
-                    return value
+                return self.read_at(fd, name)
         except FileNotFoundError:
             return None
 
     def write(self, path, data, expected):
         with self.parent(path, create=True) as (fd, name):
             temporary = f".ilex-profile-{uuid.uuid4().hex}"
+            cleanup = True
             try:
                 target = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
                 with os.fdopen(target, "wb") as stream:
@@ -95,17 +122,40 @@ class Home:
                 # semantics; existing unmanaged files can never be adopted.
                 current = self.read(path)
                 if (digest(current) if current is not None else None) != expected:
-                    raise ValueError("file changed while applying profile")
+                    raise FileConflict()
                 if expected is None:
                     os.link(temporary, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
                 else:
-                    os.rename(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+                    # Exchange is the replacement point: inspect the version
+                    # actually displaced, not just an earlier pathname read.
+                    exchange(fd, temporary, name)
+                    cleanup = False  # Never discard an unverified displaced file.
+                    try:
+                        matches = digest(self.read_at(fd, temporary)) == expected
+                    except (OSError, ValueError):
+                        matches = False
+                    if not matches:
+                        recovery = "/".join([*parts(path)[:-1], temporary])
+                        try:
+                            exchange(fd, temporary, name)
+                        except OSError:
+                            raise FileConflict(recovery) from None
+                        # Another save during rollback must survive too. Keep
+                        # that version at the recovery name instead of unlinking.
+                        try:
+                            cleanup = digest(self.read_at(fd, temporary)) == digest(data)
+                        except (OSError, ValueError):
+                            cleanup = False
+                        os.fsync(fd)
+                        raise FileConflict(None if cleanup else recovery)
+                    cleanup = True
                 os.fsync(fd)
             finally:
-                try:
-                    os.unlink(temporary, dir_fd=fd)
-                except FileNotFoundError:
-                    pass
+                if cleanup:
+                    try:
+                        os.unlink(temporary, dir_fd=fd)
+                    except FileNotFoundError:
+                        pass
 
 
 def run(*args, **options):
@@ -121,8 +171,9 @@ def confined(home, directories, command, network=False, runtime=None, replace=Fa
 
     A path check alone cannot constrain the session's existing dconf service.
     Mask homes/runtime and clear inherited XDG/dconf/D-Bus redirects.
-    Even a concurrent symlink swap cannot write outside the
-    explicitly bound directory in the authenticated home; the rest is RO.
+    The normal writer's filesystem access is anchored here. This does not
+    prevent a malicious same-UID process from replacing that writer or using
+    the user's IPC services to write elsewhere (see the module threat model).
     """
     with ExitStack() as opened:
         arguments = ["/usr/bin/bwrap", "--die-with-parent", "--unshare-all"]
@@ -270,44 +321,73 @@ def settings_worker(data, previous, conflicts, environment):
                 continue
             if key in previous and variant == previous[key]:
                 continue
+            # Desktop clients do not take our profile lock. Re-read next to
+            # the write: an intervening reset/save needs no restoration if we
+            # leave it untouched. No dconf CAS exists for the remaining window.
+            before_write = run("/usr/bin/dconf", "read", path, env=environment)
+            if before_write != current:
+                conflicts.append(f"settings.gnome.{key} (changed before write)")
+                continue
             run("/usr/bin/gsettings", "set", "org.gnome.desktop.interface", key, variant, env=environment)
-            managed[key] = run("/usr/bin/dconf", "read", path, env=environment)
+            after_write = run("/usr/bin/dconf", "read", path, env=environment)
+            if after_write != variant:
+                # A later user value wins; never overwrite it with our rollback.
+                conflicts.append(f"settings.gnome.{key} (changed during write)")
+                continue
+            managed[key] = variant
         except (ValueError, OSError, subprocess.TimeoutExpired):
             conflicts.append(f"settings.gnome.{key} (unavailable; retry after login)")
     return managed
+
+
+def writer_identity(home, environment, start=False):
+    home.read(".config/dconf/user")
+    def unit_value(property_name):
+        return run("/usr/bin/systemctl", "--user", "show", "dconf.service", "--value",
+                   "--property=" + property_name, env=environment)
+    dropins = unit_value("DropInPaths").split()
+    if (unit_value("FragmentPath") != "/usr/lib/systemd/user/dconf.service"
+        or "/usr/lib/systemd/user/dconf.service.d/50-ilex-home.conf" not in dropins
+        or any(not path.startswith("/usr/lib/systemd/user/") for path in dropins)
+        or not unit_value("ExecStart").startswith("{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S /usr/libexec/ilex/dconf-service.py ; ")):
+        raise ValueError("dconf writer activation is overridden")
+    if start:
+        run("/usr/bin/systemctl", "--user", "start", "dconf.service", env=environment)
+    bus = ("/usr/bin/busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus")
+    bus_id = run(*bus, "GetId", env=environment)
+    connection = run(*bus, "GetNameOwner", "s", "ca.desrt.dconf", env=environment)
+    if not re.fullmatch(r's ":[0-9]+\.[0-9]+"', connection):
+        raise ValueError("cannot identify dconf connection")
+    unique = json.loads(connection[2:])
+    owner = run(*bus, "GetConnectionUnixProcessID", "s", unique, env=environment)
+    if not re.fullmatch(r"u [1-9][0-9]*", owner):
+        raise ValueError("cannot identify dconf writer")
+    group = unit_value("ControlGroup")
+    membership = read_image(f"/proc/{owner.split()[1]}/cgroup").decode().splitlines()
+    if not group or not any(line.split(":", 2)[-1] == group for line in membership):
+        raise ValueError("session dconf writer is outside the confined service")
+    return bus_id, unique, owner, group
 
 
 def settings(home, data, previous, shell, conflicts):
     if shell != "gnome" or not data.get("gnome"):
         return dict(previous)
     try:
-        # Canonical client context; the shipped dconf.service confines the
-        # single session writer itself, including the check/use race.
-        home.read(".config/dconf/user")
         environment = {"HOME": home.path, "XDG_CONFIG_HOME": home.path + "/.config",
                        "XDG_RUNTIME_DIR": f"/run/user/{home.owner}", "GSETTINGS_BACKEND": "dconf",
                        "DCONF_PROFILE": "/usr/libexec/ilex/dconf-profile",
                        "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{home.owner}/bus"}
-        # Refuse a user override that removes the confined activation path.
-        def unit_value(property_name):
-            return run("/usr/bin/systemctl", "--user", "show", "dconf.service", "--value",
-                       "--property=" + property_name, env=environment)
-        dropins = unit_value("DropInPaths").split()
-        if (unit_value("FragmentPath") != "/usr/lib/systemd/user/dconf.service"
-            or "/usr/lib/systemd/user/dconf.service.d/50-ilex-home.conf" not in dropins
-            or any(not path.startswith("/usr/lib/systemd/user/") for path in dropins)
-            or not unit_value("ExecStart").startswith("{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S /usr/libexec/ilex/dconf-service.py ; ")):
-            raise ValueError("dconf writer activation is overridden")
-        run("/usr/bin/systemctl", "--user", "start", "dconf.service", env=environment)
-        owner = run("/usr/bin/busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
-                    "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", "ca.desrt.dconf", env=environment)
-        if not re.fullmatch(r"u [1-9][0-9]*", owner):
-            raise ValueError("cannot identify dconf writer")
-        group = unit_value("ControlGroup")
-        membership = read_image(f"/proc/{owner.split()[1]}/cgroup").decode().splitlines()
-        if not group or not any(line.split(":", 2)[-1] == group for line in membership):
-            raise ValueError("session dconf writer is outside the confined service")
-        return settings_worker(data, previous, conflicts, environment)
+        before = writer_identity(home, environment, start=True)
+        managed = settings_worker(data, previous, conflicts, environment)
+        # Detection, not prevention against an already fully privileged same-UID
+        # process. Do not claim success or adopt managed values after a switch.
+        try:
+            if writer_identity(home, environment) != before:
+                raise ValueError("writer identity changed")
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            conflicts.append("settings.gnome (writer or bus changed during apply)")
+            return dict(previous)
+        return managed
     except (ValueError, OSError, subprocess.TimeoutExpired):
         conflicts.append("settings.gnome (unsafe storage or unavailable writer; retry after login)")
         return dict(previous)
@@ -363,6 +443,8 @@ def apply(args):
                 if current_hash != expected:
                     home.write(path, read_image(f"{ROOT}/users/{name}/home/{path}"), current_hash)
                 managed[path] = expected
+            except FileConflict as error:
+                conflicts.append(f"{path} ({error})")
             except (OSError, ValueError):
                 conflicts.append(path)
         setting_hashes = settings(home, data["settings"], old.get("settings", {}) if old else {}, shell, conflicts)
