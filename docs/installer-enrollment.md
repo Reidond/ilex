@@ -105,7 +105,9 @@ it does not claim that a public GHCR composition or released ISO was tested.
 The fixture requires direct TPM evidence on the first installed boot, no
 password input, matching/replayed ISO and installed PCR 7, encrypted mount
 topology, crypttab/kargs, SELinux enforcing, no failed units, a cold restart
-and a separate no-TPM passphrase fallback. `ilex-enroll --self-check` in the
+and a separate no-TPM passphrase fallback. That guest also retries local
+completion, records passphrase-only mode and proves that recovery acknowledgement
+and all slots/tokens are retained. `ilex-enroll --self-check` in the
 booted guest creates one disposable loopback LUKS2 volume and exercises real
 inherited-FD authentication, recovery, retained passphrase and wrong-password
 rejection. There are no unit tests.

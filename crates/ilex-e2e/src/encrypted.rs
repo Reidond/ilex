@@ -360,6 +360,60 @@ fn no_tpm(
         evidence["method"] == "unknown",
         "fallback was incorrectly labeled as TPM unlock"
     );
+    // Reuse acknowledged recovery during a local completion retry with no
+    // TPM. This must defer to passphrase-only mode without generating a key
+    // or changing any slot/token. No credential enters SSH, argv or a unit.
+    let before = guest_json(
+        vm,
+        artifacts,
+        "no-tpm-enrollment-before.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    ensure!(
+        before["recovery"]["acknowledged"] == true,
+        "recovery acknowledgement missing"
+    );
+    let uuid = before["uuid"]
+        .as_str()
+        .context("missing no-TPM root UUID")?;
+    ensure!(
+        uuid.len() == 36 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
+        "invalid no-TPM root UUID"
+    );
+    let token_command = format!("ilex-enroll status --json --device /dev/disk/by-uuid/{uuid}");
+    let tokens_before = guest_json(vm, artifacts, "no-tpm-tokens-before.json", &token_command)?;
+    vm.ssh_ok("chvt 8; systemd-run --quiet --remain-after-exit --unit=ilex-enroll-no-tpm-completion /usr/bin/ilex-enroll complete --root / --tty /dev/tty8")?;
+    vm.ssh_ok("timeout 60 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
+    ctl.type_text(std::str::from_utf8(passphrase)?)?;
+    ctl.key("ret")?;
+    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
+    ctl.save_screenshot(&artifacts.join("no-tpm-passphrase-only.png"))?;
+    ctl.key("ret")?;
+    vm.ssh_ok("set -eu; timeout 30 sh -c 'until test \"$(systemctl show -p SubState --value ilex-enroll-no-tpm-completion)\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value ilex-enroll-no-tpm-completion)\" = success; systemctl stop ilex-enroll-no-tpm-completion")?;
+    let after = guest_json(
+        vm,
+        artifacts,
+        "no-tpm-enrollment.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    let setup = guest_json(
+        vm,
+        artifacts,
+        "no-tpm-setup.json",
+        "cat /etc/ilex/setup.json",
+    )?;
+    ensure!(
+        after["state"] == "unavailable"
+            && after["reason"] == "no-tpm"
+            && after["recovery"] == before["recovery"]
+            && setup["security"]["tpm"]["status"] == "passphrase-only",
+        "no-TPM completion did not preserve passphrase-only mode"
+    );
+    let tokens_after = guest_json(vm, artifacts, "no-tpm-tokens.json", &token_command)?;
+    ensure!(
+        tokens_after == tokens_before,
+        "no-TPM completion changed LUKS slots/tokens"
+    );
     vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; ilex-enroll layout --root /; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
     fixture.logs(artifacts, "no-tpm")?;
     poweroff(&mut fixture)
