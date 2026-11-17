@@ -95,6 +95,12 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
     }
     .map(std::path::absolute)
     .transpose()?;
+    let _outputs = claim_outputs(
+        ws,
+        disk_out.as_deref(),
+        archive_out.as_deref(),
+        iso_out.as_deref(),
+    )?;
     let mut staged = source::stage(ws)?;
     let mut inputs = BTreeMap::new();
     if matches!(command, Command::Test(_))
@@ -240,6 +246,14 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
             let dir = root.join("jobs").join(id);
             let job: Job = serde_json::from_slice(&fs::read(dir.join("request.json"))?)?;
             ws.identity()?.authorize(&job.snapshot.identity.owner)?;
+            let destinations: Value =
+                serde_json::from_slice(&fs::read(dir.join("destinations.json"))?)?;
+            let _outputs = claim_outputs(
+                ws,
+                destinations["disk"].as_str().map(Path::new),
+                destinations["archive"].as_str().map(Path::new),
+                destinations["iso"].as_str().map(Path::new),
+            )?;
             let transport = Transport::connect()?;
             transport::install_cancel_handler()?;
             wait(ws, &transport, &job, &dir, cancel)
@@ -499,6 +513,39 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
         }
     }
     Ok(())
+}
+
+fn claim_outputs(
+    ws: &Workspace,
+    disk: Option<&Path>,
+    archive: Option<&Path>,
+    iso: Option<&Path>,
+) -> Result<Vec<fs::File>> {
+    let mut guards = Vec::new();
+    for path in [disk, archive].into_iter().flatten() {
+        guards.push(claim_output_file(ws, path)?);
+    }
+    if let Some(directory) = iso {
+        reject_reparse(directory)?;
+        reject_reparse(&directory.join(".ilex-owner.json"))?;
+        ilex_devkit::ownership::ensure_directory(directory, &ws.identity()?)?;
+    }
+    Ok(guards)
+}
+
+fn claim_output_file(ws: &Workspace, path: &Path) -> Result<fs::File> {
+    reject_reparse(path)?;
+    let name = path
+        .file_name()
+        .context("output filename missing")?
+        .to_string_lossy();
+    let receipt = path.with_file_name(format!("{name}.ilex-owner"));
+    let lock = path.with_file_name(format!("{name}.ilex-output.lock"));
+    reject_reparse(&receipt)?;
+    reject_reparse(&lock)?;
+    let guard = ilex_devkit::ownership::lock(&lock)?;
+    ilex_devkit::ownership::claim_file(ws, path)?;
+    Ok(guard)
 }
 
 fn safe_join(root: &Path, name: &str) -> Result<PathBuf> {
