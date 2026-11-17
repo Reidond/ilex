@@ -299,9 +299,10 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
                 id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
                 "invalid job ID"
             );
-            let dir = root.join("jobs").join(id);
+            let dir = root.join("jobs").join(&id);
             let control = ilex_tooling_windows::received::Directory::open(&dir)?;
             let job: Job = control_json(&control, "request.json")?;
+            ensure!(job.job == id, "local job identity mismatch");
             ws.identity()?.authorize(&job.snapshot.identity.owner)?;
             let destinations: Value = control_json(&control, "destinations.json")?;
             let _outputs = claim_outputs(
@@ -349,12 +350,16 @@ fn validate(ws: &Workspace, command: &Command) -> Result<()> {
     Ok(())
 }
 
-fn wait(_ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bool) -> Result<()> {
+fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bool) -> Result<()> {
     use super::receive;
     use ilex_tooling_windows::received::{self, Directory};
     let owner = &job.snapshot.identity.owner;
+    ensure!(
+        dir.file_name().and_then(|s| s.to_str()) == Some(job.job.as_str()),
+        "job/control identity mismatch"
+    );
     let control = Directory::open(dir)?;
-    let received = control.child("received")?;
+    let received = Directory::open(&ws.state_dir().join("remote/received").join(&job.job))?;
     let logs = received.child("logs")?;
     let mut cancelled = false;
     let mut offset = [0u64; 2];

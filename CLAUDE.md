@@ -1216,8 +1216,8 @@ stops the builder. Logs and frozen artifacts return even after failure.
 
 Windows control files stay in `<state dir>/remote/jobs/<UUID>/`. All builder
 data, including job request/context copies and results, is untrusted and goes
-only under that job's `received/`: streamed logs in `logs/`, each collection in
-a fresh UUID directory. `delivered.json` maps logical artifact names to those
+only under the separate `<state dir>/remote/received/<UUID>/`: streamed logs in
+`logs/`, each collection in a fresh UUID directory. `delivered.json` maps logical artifact names to those
 received files; disk metadata remapped for Windows is `disk.windows.json` in
 the collection directory. No manifest path addresses checkout state. The entire
 manifest is checked before writes: fixed prefixes/job filenames, strict Windows
