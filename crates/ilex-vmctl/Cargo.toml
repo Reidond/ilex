@@ -22,3 +22,6 @@ anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 serde_json.workspace = true
 png = "0.18"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+ilex-tooling-windows.workspace = true

@@ -309,10 +309,36 @@ function Start-Owned {
     $memory=Assert-Resources $vm
     if($vm.State -eq 'Off') {
         Ensure-DiskStorage
-        Preflight $memory
-        # Recheck after a potentially long wait, before allocating any host RAM.
-        $null=Assert-Resources (Owned-VM)
-        Start-VM -VM $vm | Out-Null
+        # Same byte-range lock as native QEMU's fs2 admission. Hold it only
+        # across the final live check and fixed-memory allocation, never while
+        # waiting for capacity (a smaller native guest may fit in the meantime).
+        $admission=Join-Path ([IO.Directory]::GetParent($root).FullName) 'admission'
+        [IO.Directory]::CreateDirectory($admission)|Out-Null
+        do {
+            $guard=[IO.File]::Open((Join-Path $admission 'host.lock'),'OpenOrCreate','ReadWrite','ReadWrite')
+            $acquired=$false
+            try {
+                try {$guard.Lock(0,[long]::MaxValue);$acquired=$true}
+                catch [IO.IOException] {if(($_.Exception.HResult -band 0xffff) -ne 33){throw}}
+                if($acquired) {
+                    $latest=Owned-VM
+                    if($latest.State -eq 'Running'){return}
+                    if($latest.State -ne 'Off'){throw "Unsupported builder state: $($latest.State)"}
+                    $null=Assert-Resources $latest
+                    $available=[long](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1KB
+                    if($available -ge ($memory+14GB)) {
+                        Check-DiskSpace
+                        Start-VM -VM $latest | Out-Null
+                        $live=Owned-VM
+                        if($live.State -ne 'Running' -or $live.MemoryAssigned -lt $memory){throw 'Builder did not commit its fixed RAM before admission release'}
+                        return
+                    }
+                }
+            } finally {if($acquired){$guard.Unlock(0,[long]::MaxValue)};$guard.Dispose()}
+            if([DateTime]::UtcNow -ge $memoryDeadline){throw 'Builder memory admission timed out; RAM and 14 GiB reserve unchanged'}
+            Say 'Waiting for shared host admission: fixed builder RAM plus 14 GiB reserve'
+            Start-Sleep -Seconds 120
+        } while($true)
     }
     elseif($vm.State -ne 'Running') {throw "Unsupported builder state: $($vm.State)"}
 }

@@ -6,24 +6,45 @@
 //! (`cargo xtask test ephemeral:: upgrade::`). The image under test comes in
 //! through `ILEX_IMAGE` (default: this checkout's `localhost/ilex:<tag>`).
 
+#[cfg(target_os = "linux")]
 use std::panic::{self, AssertUnwindSafe};
 
+#[cfg(target_os = "linux")]
 use libtest_mimic::{Arguments, Trial};
 
-mod common;
+#[cfg(target_os = "linux")]
 mod apps;
+#[cfg(target_os = "linux")]
+mod common;
 // Fixtures preserve Unix modes and symlinks; these tiers run in WSL on Windows.
 #[cfg(target_os = "linux")]
 mod config;
+#[cfg(target_os = "linux")]
 mod disk;
+#[cfg(target_os = "linux")]
 mod ephemeral;
+#[cfg(target_os = "linux")]
 mod graphical;
+#[cfg(target_os = "linux")]
 mod homed;
+#[cfg(target_os = "linux")]
 mod iso;
+#[cfg(target_os = "linux")]
 mod security;
+#[cfg(target_os = "linux")]
 mod tool;
+#[cfg(target_os = "linux")]
 mod upgrade;
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!(
+        "legacy e2e fixtures require Linux; on Windows use cargo xtask test to run them in the builder (native security harness follows in T5)"
+    );
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "linux")]
 fn main() {
     let (filters, rest) = split_filters(std::env::args().skip(1));
     let args = Arguments::from_iter(std::iter::once("e2e".to_string()).chain(rest));
@@ -96,6 +117,7 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn matches(args: &Arguments, trial: &Trial, filter: &str) -> bool {
     if args.exact {
         trial.name() == filter
@@ -106,6 +128,7 @@ fn matches(args: &Arguments, trial: &Trial, filter: &str) -> bool {
 
 /// Split the command line into positional name filters and everything else
 /// (flags and their values), which goes to libtest-mimic.
+#[cfg(target_os = "linux")]
 fn split_filters(args: impl Iterator<Item = String>) -> (Vec<String>, Vec<String>) {
     const TAKES_VALUE: &[&str] = &[
         "--test-threads",

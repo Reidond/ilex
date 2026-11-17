@@ -11,6 +11,24 @@ mod receive;
 #[cfg(target_os = "windows")]
 mod source;
 
+#[cfg(target_os = "windows")]
+pub fn development_disk(
+    ws: &Workspace,
+    selection: crate::select::Args,
+    image: Option<String>,
+) -> Result<std::path::PathBuf> {
+    client::execute(
+        ws,
+        Command::Disk(crate::disk::Args {
+            selection,
+            image,
+            development: true,
+            ..Default::default()
+        }),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("development disk was not delivered"))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(
     tag = "operation",
@@ -114,7 +132,7 @@ pub fn route(ws: &Workspace, cmd: crate::Cmd) -> Result<Option<crate::Cmd>> {
             crate::Cmd::Test(a) => Command::Test(a),
             other => return Ok(Some(other)),
         };
-        client::execute(ws, remote)?;
+        let _ = client::execute(ws, remote)?;
         Ok(None)
     }
     #[cfg(not(target_os = "windows"))]

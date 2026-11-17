@@ -2,11 +2,19 @@
 #[cfg(target_os = "windows")]
 pub mod builder;
 #[cfg(target_os = "windows")]
+pub mod capture;
+#[cfg(target_os = "windows")]
 mod host;
+#[cfg(target_os = "windows")]
+pub mod qemu;
+#[cfg(target_os = "windows")]
+pub mod qmp;
 #[cfg(target_os = "windows")]
 pub mod received;
 #[cfg(target_os = "windows")]
 pub mod runtime;
+#[cfg(target_os = "windows")]
+pub mod session;
 #[cfg(target_os = "windows")]
 pub mod transport;
 

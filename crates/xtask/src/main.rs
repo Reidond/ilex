@@ -13,6 +13,7 @@ mod build;
 mod builder;
 mod apps;
 mod changed;
+mod dev_image;
 mod disk;
 mod doctor;
 mod identity;
@@ -30,6 +31,8 @@ mod security;
 mod test;
 mod tool;
 mod vm;
+#[cfg(target_os = "windows")]
+mod vm_windows;
 mod wsl;
 
 #[derive(Parser)]
@@ -123,8 +126,12 @@ fn run(cmd: Cmd) -> Result<()> {
             // Reject invalid selection before building the native viewer or
             // handing over to WSL. GUI prediction inspects Linux image labels.
             let resolved = args.resolve(&ws)?;
+            #[cfg(target_os = "windows")]
+            if args.gui || args.disk {
+                return vm_windows::run(&ws, args, resolved);
+            }
             match ilex_devkit::host_backend() {
-                ilex_devkit::HostBackend::WslCompatibility => {
+                ilex_devkit::HostBackend::Windows => {
                     wsl::forward(&ws.root, args.gui && !args.print_image)
                 }
                 ilex_devkit::HostBackend::Linux => vm::run(&ws, args, resolved),

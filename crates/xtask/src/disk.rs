@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ilex_devkit::Workspace;
 use ilex_devkit::qemu::{self, DiskFormat, DiskSpec};
 
@@ -61,6 +61,10 @@ pub struct Args {
     /// Virtual disk size
     #[arg(long, default_value = DEFAULT_SIZE)]
     pub size: String,
+    /// Private development composition (pinned SSH and session integration); never published
+    #[arg(long)]
+    #[serde(default)]
+    pub development: bool,
 }
 
 /// The command line's defaults, for `xtask vm --disk`, which writes its disk
@@ -75,6 +79,7 @@ impl Default for Args {
             image: None,
             out: None,
             size: DEFAULT_SIZE.into(),
+            development: false,
         }
     }
 }
@@ -84,6 +89,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         return check::run(ws);
     }
     let path = ensure(ws, &args)?;
+    write_metadata(ws, &args, &path)?;
     println!("{}", path.display());
     Ok(())
 }
@@ -93,7 +99,12 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 pub fn ensure(ws: &Workspace, args: &Args) -> Result<PathBuf> {
     let resolved = args.selection.resolve(ws, args.image.as_deref(), None)?;
     resolved.require_match()?;
-    ensure_image(ws, args, &resolved.image)
+    let image = if args.development {
+        crate::dev_image::ensure(ws, &resolved.image)?
+    } else {
+        resolved.image
+    };
+    ensure_image(ws, args, &image)
 }
 
 /// `vm` checked its resolved base already; do not read selection again for
@@ -109,4 +120,78 @@ pub fn ensure_image(ws: &Workspace, args: &Args, image: &str) -> Result<PathBuf>
     let path = qemu::ensure_disk(ws, &spec)?;
     eprintln!("disk for {image}: {}", path.display());
     Ok(path)
+}
+
+/// Authenticated installed-disk manifest, shared by local and remote delivery.
+pub fn write_metadata(ws: &Workspace, a: &Args, disk: &std::path::Path) -> Result<()> {
+    let resolved = a.selection.resolve(ws, a.image.as_deref(), None)?;
+    let image = if a.development {
+        crate::dev_image::reference(ws, &resolved.image)
+    } else {
+        resolved.image
+    };
+    let info = ilex_devkit::cmd::output(
+        std::process::Command::new("qemu-img")
+            .args(["info", "--output=json"])
+            .arg(disk),
+    )?;
+    let info: serde_json::Value = serde_json::from_str(&info)?;
+    let format = match a.format {
+        crate::disk::Format::Qcow2 => "qcow2",
+        crate::disk::Format::Raw => "raw",
+    };
+    ensure!(
+        info["format"] == format && info["virtual-size"].as_u64().is_some_and(|s| s > 0),
+        "installed disk format/size mismatch"
+    );
+    ensure!(
+        info["backing-filename"].is_null(),
+        "installed base disk must be standalone"
+    );
+    use ilex_devkit::core::{self, BuildExecutor};
+    let executor = ilex_devkit::executor::LocalBuildExecutor::new(ws.clone())?
+        .probe()?
+        .executor_id;
+    let checksum = hash_file(disk)?;
+    let metadata = core::DiskArtifact {
+    schema: 1, architecture: core::Architecture::X86_64,
+    format: if a.format == crate::disk::Format::Qcow2 { core::DiskFormat::Qcow2 } else { core::DiskFormat::Raw },
+    virtual_bytes: info["virtual-size"].as_u64().unwrap(),
+    allocated_bytes: info["actual-size"].as_u64().context("disk allocation size missing")?,
+    sector_bytes: 512,
+    image: core::ImageIdentity { executor_id: executor.clone(), local_reference: image.clone(),
+        immutable_id: ilex_devkit::bcvk::image_id(&image)?,
+        registry_digest: Some(ilex_devkit::image::image_digest(&image)?).filter(|s| !s.is_empty()),
+        architecture: core::Architecture::X86_64 },
+    install_recipe_hash: core::digest(serde_json::to_vec(&serde_json::json!({"bcvk":"0.22.0","format":format,"size":a.size,"firmware":"uefi"}))?.as_slice()),
+    firmware: core::Firmware::Uefi,
+    // The base remains unenrolled. The existing QEMU fixture injects
+    // its public key through systemd credentials at each test boot.
+    provisioning_hash: if a.development { core::digest(b"ilex-dev-session-v1;fwcfg-host-key") } else { core::digest(b"unenrolled-base;qemu-systemd-ssh-credentials-v1") },
+    location: core::ArtifactLocation { executor_id: executor, path: disk.to_path_buf(), sha256: checksum },
+};
+    std::fs::write(
+        disk.with_file_name(format!(
+            "{}.disk.json",
+            disk.file_name().unwrap().to_string_lossy()
+        )),
+        serde_json::to_vec_pretty(&metadata)?,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn hash_file(path: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut hash = Sha256::new();
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = [0; 128 * 1024];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(format!("sha256:{:x}", hash.finalize()))
 }

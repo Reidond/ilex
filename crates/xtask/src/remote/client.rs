@@ -69,7 +69,42 @@ fn state(ws: &Workspace) -> Result<PathBuf> {
     Ok(root)
 }
 
-pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
+fn delivered_disk(ws: &Workspace, directory: &Path) -> Result<PathBuf> {
+    use ilex_tooling_windows::received::Directory;
+    let control = Directory::open(directory)?;
+    let collection: Value = control_json(&control, "collection.json")?;
+    let identity = ws.identity()?;
+    let job = directory.file_name().context("missing local job ID")?;
+    ensure!(
+        collection["schema"] == 1
+            && collection["owner"] == identity.owner
+            && collection["exit_code"] == 0,
+        "invalid disk collection identity"
+    );
+    let received = PathBuf::from(
+        collection["received"]
+            .as_str()
+            .context("missing disk collection path")?,
+    );
+    ensure!(
+        received.parent() == Some(ws.state_dir().join("remote/received").join(job).as_path()),
+        "disk collection escaped its job"
+    );
+    let attempt = Directory::open(&received)?;
+    let artifact: ilex_devkit::core::DiskArtifact =
+        serde_json::from_value(control_json(&attempt, "disk.windows.json")?)?;
+    let relative = artifact
+        .location
+        .path
+        .strip_prefix(&received)?
+        .to_str()
+        .context("invalid disk path")?
+        .replace('\\', "/");
+    let _held = attempt.read(&relative)?;
+    ilex_tooling_windows::qemu::cache_delivered_disk(artifact, &identity, &ws.state_dir())
+}
+
+pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> {
     let root = state(ws)?;
     let _checkout_lock = ilex_devkit::ownership::lock(&root.join("client.lock"))?;
     validate(ws, &command)?;
@@ -213,7 +248,12 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
             "started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
         }))?,
     )?;
-    wait(ws, &transport, &job, &job_dir, false)
+    wait(ws, &transport, &job, &job_dir, false)?;
+    if matches!(&job.command, Command::Disk(a) if a.development) {
+        delivered_disk(ws, &job_dir).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
@@ -241,7 +281,8 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
                 allocation_image,
                 fingerprint_image,
             },
-        ),
+        )
+        .map(|_| ()),
         Operation::SelfCheckReceiver => super::receive::self_check(ws),
         Operation::Export { image, out } => execute(
             ws,
@@ -249,7 +290,8 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
                 image,
                 output: Some(out),
             },
-        ),
+        )
+        .map(|_| ()),
         Operation::Cancel { job } => {
             // Sending a cancellation must not wait for the client's collection
             // lock. The live client collects; an absent client can resume later.

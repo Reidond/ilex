@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilex_devkit::Workspace;
-use ilex_devkit::qemu;
+use ilex_vmctl::backend as qemu;
 use ilex_vmctl::{Button, Vmctl, WaitCond, mcp};
 
 #[derive(Parser)]
@@ -35,6 +35,10 @@ struct Cli {
 enum Cmd {
     /// List the running VMs of the checkout
     List,
+    /// Inspect the actual guest compositor mode (native development SSH)
+    Display,
+    /// Exercise live QMP and two fresh captures; never boots a VM
+    SelfCheck,
     /// Show this VM's actual screenshot, input and lifecycle capabilities
     Capabilities {
         #[arg(long)]
@@ -159,6 +163,33 @@ fn run(cli: Cli) -> Result<()> {
     let vm = Vmctl::attach(&ws, cli.vm.as_deref())?;
     match cli.cmd {
         Cmd::List | Cmd::Mcp => unreachable!(),
+        Cmd::Display => {
+            #[cfg(target_os = "windows")]
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ilex_tooling_windows::session::display_info(
+                    &vm.info, None
+                )?)?
+            );
+            #[cfg(not(target_os = "windows"))]
+            anyhow::bail!("display mode inspection is provided by the native Windows dev session");
+        }
+        Cmd::SelfCheck => {
+            use ilex_devkit::core::VmControl;
+            let first = vm.capture()?;
+            std::thread::sleep(Duration::from_millis(100));
+            let second = vm.capture()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"schema":1,"vm":vm.handle(),"qmp":vm.status()?,"first_timestamp_ms":first.captured_unix_ms,"second_timestamp_ms":second.captured_unix_ms,"size":[second.width,second.height],"generation":second.generation,"coordinate_space":second.coordinate_space,"fresh":second.captured_unix_ms > first.captured_unix_ms,"capabilities":vm.capabilities()})
+                )?
+            );
+            anyhow::ensure!(
+                second.captured_unix_ms > first.captured_unix_ms,
+                "capture timestamps did not advance"
+            );
+        }
         Cmd::Capabilities { json } => {
             let capabilities = vm.capabilities();
             if json {

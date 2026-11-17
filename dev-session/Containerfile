@@ -1,0 +1,15 @@
+ARG BASE
+FROM ${BASE}
+# Only disk --development composes this add-only overlay. It runs no package
+# transaction on top of production overlays. GNOME supplies python3-gobject;
+# the optional Hyprland research composition supplies its own wl-clipboard.
+LABEL ilex.development="true"
+COPY --from=tooling image_tree.py /tmp/ilex-dev/install-files.py
+COPY provision-ssh /tmp/ilex-dev/overlays/session/usr/libexec/ilex-dev-provision-ssh
+COPY session.py /tmp/ilex-dev/overlays/session/usr/libexec/ilex-dev-session
+COPY sshd.conf /tmp/ilex-dev/overlays/session/etc/ssh/sshd_config.d/00-ilex-dev.conf
+COPY sshd.service.conf /tmp/ilex-dev/overlays/session/usr/lib/systemd/system/sshd.service.d/ilex-dev.conf
+RUN chmod 0755 /tmp/ilex-dev/overlays/session/usr/libexec/* \
+    && printf '[{"name":"development-session","directory":"overlays/session"}]\n' > /tmp/ilex-dev/overlays.json
+RUN python3 -I -S /tmp/ilex-dev/install-files.py --payload /tmp/ilex-dev --phase overlays --append-overlays --remove-payload
+RUN bootc container lint --fatal-warnings

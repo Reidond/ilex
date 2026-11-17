@@ -11,6 +11,7 @@
 //! The CLI (`main.rs`) and the MCP server ([`mcp`]) are thin wrappers; the
 //! e2e `graphical::` tier uses the same library.
 
+pub mod backend;
 pub mod image;
 pub mod keys;
 pub mod mcp;
@@ -21,8 +22,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use backend::{self as qemu, VmInfo};
 use ilex_devkit::Workspace;
-use ilex_devkit::qemu::{self, VmInfo};
 use serde_json::{Value, json};
 
 pub use image::Frame;
@@ -110,6 +111,11 @@ pub struct Vmctl {
 struct FrameMapping {
     size: (u32, u32),
     generation: u64,
+    captured_unix_ms: Option<u64>,
+    #[cfg(target_os = "windows")]
+    source_ticks: Option<i64>,
+    #[cfg(target_os = "windows")]
+    screenshot_source: Option<String>,
 }
 
 impl Vmctl {
@@ -126,6 +132,9 @@ impl Vmctl {
     }
 
     pub fn capabilities(&self) -> ilex_tooling_core::VmCapabilities {
+        #[cfg(target_os = "windows")]
+        let mut caps = self.info.capabilities();
+        #[cfg(not(target_os = "windows"))]
         let mut caps = ilex_devkit::provider::capabilities(
             if self.info.display == "viewer" && self.info.gpu {
                 "viewer-gl"
@@ -135,32 +144,51 @@ impl Vmctl {
             (self.info.width, self.info.height),
         );
         caps.vm_id = Some(format!("{}:{}", self.info.pid, self.info.process_start));
-        // Provisioning is separate from profile evidence and current QMP state.
-        if self.info.accelerator == ilex_tooling_core::Accelerator::Tcg {
-            caps.provider = "linux-qemu-tcg".into();
-            caps.features.insert(ilex_tooling_core::Capability::Start, ilex_tooling_core::CapabilityStatus::Available);
+        #[cfg(target_os = "linux")]
+        {
+            use ilex_tooling_core::{Accelerator, Capability, CapabilityStatus};
+
+            // Provisioning is separate from profile evidence and current QMP state.
+            if self.info.accelerator == Accelerator::Tcg {
+                caps.provider = "linux-qemu-tcg".into();
+                caps.features.insert(Capability::Start, CapabilityStatus::Available);
+            }
+            if self.info.secure_boot {
+                caps.provisioning.insert(Capability::FirmwareEnforcement, CapabilityStatus::Available);
+            }
+            if self.info.persistent_tpm {
+                caps.provisioning.insert(Capability::PersistentTpm, CapabilityStatus::Available);
+            }
+            ilex_devkit::qualification::runtime(&self.info, &mut caps);
         }
-        if self.info.secure_boot {
-            caps.provisioning.insert(ilex_tooling_core::Capability::FirmwareEnforcement, ilex_tooling_core::CapabilityStatus::Available);
-        }
-        if self.info.persistent_tpm {
-            caps.provisioning.insert(ilex_tooling_core::Capability::PersistentTpm, ilex_tooling_core::CapabilityStatus::Available);
-        }
-        ilex_devkit::qualification::runtime(&self.info, &mut caps);
         caps.screenshot_dimensions = self
             .mapping
             .lock()
             .ok()
             .and_then(|mapping| (mapping.size.0 > 0).then_some(mapping.size));
+        #[cfg(target_os = "windows")]
+        if let Ok(mapping) = self.mapping.lock()
+            && let Some(source) = &mapping.screenshot_source
+        {
+            caps.screenshot_source = Some(source.clone());
+        }
         caps
     }
 
     pub fn handle(&self) -> ilex_tooling_core::VmHandle {
+        #[cfg(target_os = "windows")]
+        let provider = "windows-qemu-whpx";
+        #[cfg(not(target_os = "windows"))]
+        let provider = if self.info.accelerator == ilex_tooling_core::Accelerator::Tcg {
+            "linux-qemu-tcg"
+        } else {
+            "linux-qemu-kvm"
+        };
         ilex_tooling_core::VmHandle {
             schema: self.info.schema,
             owner: self.info.owner.clone(),
             run: self.info.run.clone(),
-            provider: if self.info.accelerator == ilex_tooling_core::Accelerator::Tcg { "linux-qemu-tcg" } else { "linux-qemu-kvm" }.into(),
+            provider: provider.into(),
             opaque_id: format!("{}:{}", self.info.pid, self.info.process_start),
             guest_arch: self.info.architecture,
         }
@@ -172,7 +200,24 @@ impl Vmctl {
             self.info.is_running(),
             "VM process identity no longer matches; attach again"
         );
+        #[cfg(target_os = "windows")]
+        {
+            self.info.validate()?;
+            Qmp::connect_serialized(
+                &self.info.qmp_endpoint,
+                &self.info.dir.join("qmp-client.lock"),
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
         Qmp::connect(&self.info.qmp_sock)
+    }
+
+    /// Read-only live QMP diagnostic, using the same serialized transport as input.
+    pub fn status(&self) -> Result<Value> {
+        self.qmp()?.execute("query-status", json!({}))
+    }
+    pub fn view_generation(&self) -> u64 {
+        self.mapping.lock().map_or(0, |mapping| mapping.generation)
     }
 
     // ----- screen -----
@@ -183,6 +228,34 @@ impl Vmctl {
         ilex_tooling_core::check_version(self.info.schema)?;
         self.capabilities()
             .require(ilex_tooling_core::Capability::Screenshot)?;
+        #[cfg(target_os = "windows")]
+        if self.info.hwnd != 0 {
+            self.info.validate()?;
+            let captured = ilex_tooling_windows::capture::capture(&self.info)?;
+            let mut mapping = self
+                .mapping
+                .lock()
+                .map_err(|_| anyhow::anyhow!("frame mapping poisoned"))?;
+            anyhow::ensure!(
+                mapping
+                    .source_ticks
+                    .is_none_or(|ticks| captured.source_ticks > ticks),
+                "capture did not produce a new compositor frame"
+            );
+            mapping.source_ticks = Some(captured.source_ticks);
+            mapping.screenshot_source = Some(captured.source.into());
+            mapping.generation = captured.generation;
+            mapping.captured_unix_ms = Some(captured.timestamp_ms);
+            if mapping.size != (captured.width, captured.height) {
+                mapping.size = (captured.width, captured.height);
+            }
+            return Frame {
+                width: captured.width,
+                height: captured.height,
+                rgb: captured.rgb,
+            }
+            .encode_png();
+        }
         if self.info.display == "viewer" {
             return self.bridge_screenshot()?.encode_png();
         }
@@ -251,6 +324,20 @@ impl Vmctl {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(path, &png).with_context(|| format!("writing {}", path.display()))?;
+        #[cfg(target_os = "windows")]
+        {
+            let source = self.capabilities().screenshot_source;
+            let mapping = self
+                .mapping
+                .lock()
+                .map_err(|_| anyhow::anyhow!("frame mapping poisoned"))?;
+            std::fs::write(
+                path.with_extension("frame.json"),
+                serde_json::to_vec_pretty(
+                    &json!({"schema":1,"vm":self.handle(),"captured_unix_ms":mapping.captured_unix_ms,"source_ticks":mapping.source_ticks,"generation":mapping.generation,"client_size":mapping.size,"source":source}),
+                )?,
+            )?;
+        }
         Frame::decode(&png)
     }
 
@@ -300,16 +387,43 @@ impl Vmctl {
 
     // ----- pointer -----
 
+    /// SDL can letterbox while the guest is still changing modes. Its human
+    /// input path knows that viewport; QMP input must wait for pixel parity.
+    fn input_size(&self) -> Result<(u32, u32)> {
+        let size = self.screen_size()?;
+        #[cfg(target_os = "windows")]
+        if self.info.hwnd != 0 {
+            let actual = ilex_tooling_windows::session::display_info(&self.info, None).context(
+                "guest mode unavailable; use keyboard input until the display session is ready",
+            )?;
+            let wanted = json!([size.0, size.1]);
+            let matched = actual["monitors"].as_array().is_some_and(|monitors| {
+                monitors.iter().any(|m| {
+                    m["current"]
+                        .as_array()
+                        .is_some_and(|modes| modes.contains(&wanted))
+                })
+            });
+            anyhow::ensure!(
+                matched,
+                "guest mode has not acknowledged {}x{} client pixels; capture/wait after resize before pointer input",
+                size.0,
+                size.1
+            );
+        }
+        Ok(size)
+    }
+
     /// Absolute pointer move to screen pixel (x, y).
     pub fn move_to(&self, x: u32, y: u32) -> Result<()> {
-        let (w, h) = self.screen_size()?;
+        let (w, h) = self.input_size()?;
         let mut qmp = self.qmp()?;
         send_events(&mut qmp, abs_events(x, y, w, h))
     }
 
     /// Move to (x, y) and click `button` `count` times (2 = double click).
     pub fn click(&self, x: u32, y: u32, button: Button, count: u32) -> Result<()> {
-        let (w, h) = self.screen_size()?;
+        let (w, h) = self.input_size()?;
         let mut qmp = self.qmp()?;
         send_events(&mut qmp, abs_events(x, y, w, h))?;
         // Let the compositor see the pointer arrive before the button.
@@ -327,7 +441,7 @@ impl Vmctl {
 
     /// Scroll the wheel at (x, y): `amount` notches `up` or down.
     pub fn scroll(&self, x: u32, y: u32, up: bool, amount: u32) -> Result<()> {
-        let (w, h) = self.screen_size()?;
+        let (w, h) = self.input_size()?;
         let mut qmp = self.qmp()?;
         send_events(&mut qmp, abs_events(x, y, w, h))?;
         thread::sleep(Duration::from_millis(120));
@@ -412,10 +526,12 @@ impl ilex_tooling_core::VmControl for Vmctl {
         }
         Ok(ilex_tooling_core::Frame {
             vm: self.handle(),
-            captured_unix_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis()
-                .try_into()?,
+            captured_unix_ms: mapping.captured_unix_ms.unwrap_or(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?,
+            ),
             generation: mapping.generation,
             width: image.width,
             height: image.height,
@@ -425,7 +541,11 @@ impl ilex_tooling_core::VmControl for Vmctl {
                 width: image.width,
                 height: image.height,
             },
-            coordinate_space: CoordinateSpace::FramebufferPixels,
+            coordinate_space: if cfg!(target_os = "windows") {
+                CoordinateSpace::ClientPixels
+            } else {
+                CoordinateSpace::FramebufferPixels
+            },
             pixels: image.rgb,
         })
     }
@@ -476,6 +596,11 @@ impl ilex_tooling_core::VmControl for Vmctl {
         y: u32,
     ) -> Result<()> {
         let current = ilex_tooling_core::VmControl::capture(self)?;
+        let input_size = self.input_size()?;
+        anyhow::ensure!(
+            input_size == (current.width, current.height),
+            "display changed while validating pointer coordinates; capture again"
+        );
         frame.validate_pointer(&current.vm, generation, x, y)?;
         anyhow::ensure!(
             current.generation == generation
@@ -505,6 +630,9 @@ impl ilex_tooling_core::VmControl for Vmctl {
             .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
             .collect::<Vec<_>>()
             .join(" ");
+        #[cfg(target_os = "windows")]
+        let out = self.info.ssh().arg(line).output()?;
+        #[cfg(not(target_os = "windows"))]
         let out = std::process::Command::new("ssh")
             .args(SSH_OPTIONS)
             .args(["-p", &self.info.ssh_port.to_string(), "-i"])
@@ -527,6 +655,7 @@ impl ilex_tooling_core::VmControl for Vmctl {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 const SSH_OPTIONS: &[&str] = &[
     "-o",
     "StrictHostKeyChecking=no",
@@ -548,7 +677,14 @@ fn transfer(vm: &Vmctl, local: &Path, guest: &str, download: bool) -> Result<()>
     );
     let remote = format!("root@127.0.0.1:{guest}");
     let local = std::path::absolute(local)?;
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        vm.info.validate()?;
+        vm.info.scp()
+    };
+    #[cfg(not(target_os = "windows"))]
     let mut command = std::process::Command::new("scp");
+    #[cfg(not(target_os = "windows"))]
     command
         .args(SSH_OPTIONS)
         .args(["-P", &vm.info.ssh_port.to_string(), "-i"])

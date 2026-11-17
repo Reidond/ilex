@@ -73,6 +73,21 @@ pub fn lock(path: &Path) -> Result<File> {
         .context("another ilex operation holds the installation lock")?;
     Ok(f)
 }
+pub fn try_lock(path: &Path) -> Result<Option<File>> {
+    match lock(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error)
+            if error.chain().any(|cause| {
+                cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    io.kind() == std::io::ErrorKind::WouldBlock || io.raw_os_error() == Some(33)
+                })
+            }) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
 pub fn command_ok(cmd: &mut Command) -> Result<()> {
     let (_job, mut child) = spawn_owned(cmd)?;
     let status = child.wait()?;

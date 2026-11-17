@@ -170,6 +170,9 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
         .as_ref()
         .map_or(spec.image.as_str(), |alias| alias.reference());
     let mut bcvk = Command::new("bcvk");
+    // Installation boots a real VM too. Share the same slots as tests instead
+    // of allocating it outside the cap on a busy WSL/native Linux host.
+    let _install_slot = slots::acquire(&format!("{}disk-install", ws.vm_prefix()))?;
     bcvk.args(["to-disk", "--format", spec.format.name()])
         .args(["--disk-size", &spec.size])
         .arg(source)
@@ -543,7 +546,9 @@ impl Vm {
             None => dir.join("OVMF_VARS.fd"),
         };
         if config.efi_vars.is_some() && !vars.starts_with(ws.state_dir()) {
-            if let Some(parent) = vars.parent() { fs::create_dir_all(parent)?; }
+            if let Some(parent) = vars.parent() {
+                fs::create_dir_all(parent)?;
+            }
             crate::ownership::claim_file(ws, &vars)?;
         }
         if security.is_none() && (config.efi_vars.is_none() || !vars.exists()) {
@@ -562,7 +567,11 @@ impl Vm {
                 base_disk.display()
             );
         }
-        for writable in config.extra_disks.iter().chain((!config.snapshot).then_some(&base_disk)) {
+        for writable in config
+            .extra_disks
+            .iter()
+            .chain((!config.snapshot).then_some(&base_disk))
+        {
             if crate::provider::require_owned_path(&ws.state_dir(), writable).is_err() {
                 crate::ownership::claim_file(ws, writable)?;
             }
@@ -701,8 +710,10 @@ impl Vm {
             .arg("-qmp")
             .arg(format!("unix:{},server=on,wait=off", qmp_sock.display()));
         if config.secondary_serial {
-            qemu.arg("-serial")
-                .arg(format!("file:{}", dir.join("serial-secondary.log").display()));
+            qemu.arg("-serial").arg(format!(
+                "file:{}",
+                dir.join("serial-secondary.log").display()
+            ));
         }
         if config.isolated_ssh {
             qemu.arg("-netdev").arg(format!("user,id=management,restrict=on,net=10.0.3.0/24,hostfwd=tcp:127.0.0.1:{ssh_port}-:22"))

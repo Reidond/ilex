@@ -58,7 +58,7 @@ pub struct Args {
     /// Boot the installed disk image (UEFI, 4K virtio-vga) instead of an ephemeral VM
     #[arg(long)]
     pub disk: bool,
-    /// Like --disk, plus a window (in WSL: ilex-viewer.exe, a native Windows window)
+    /// Installed disk plus a native SDL/WHPX window on Windows (GTK on Linux)
     #[arg(long)]
     pub gui: bool,
     /// With --gui: no virgl, the guest renders on its CPUs (default: virgl when the host has a GPU)
@@ -70,7 +70,7 @@ pub struct Args {
     /// Disable the apps timer in a GUI VM
     #[arg(long)]
     pub no_apps: bool,
-    /// With --disk/--gui: write changes to the disk instead of a throwaway overlay
+    /// With --disk/--gui: retain changes (Windows keeps a writable overlay and firmware)
     #[arg(long)]
     pub persist: bool,
     /// Guest memory, e.g. `4G` (default 4G ephemeral, 8G for --disk/--gui)
@@ -79,6 +79,9 @@ pub struct Args {
     /// Guest vCPUs (default 4; for --gui half the host's threads, 4 to 8)
     #[arg(long)]
     pub vcpus: Option<u32>,
+    /// Separate owned development fixture/overlay (default gui or vm)
+    #[arg(long)]
+    pub purpose: Option<String>,
     /// Command to run over SSH instead of an interactive shell
     #[arg(last = true)]
     pub command: Vec<String>,
@@ -149,7 +152,15 @@ fn run_ephemeral(ws: &Workspace, args: Args, image: String) -> Result<()> {
         bail!("--persist only applies to --disk/--gui");
     }
     cmd::require("bcvk")?;
-    let name = ws.vm_name("vm");
+    let purpose = args.purpose.as_deref().unwrap_or("vm");
+    anyhow::ensure!(
+        !purpose.is_empty()
+            && purpose
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        "invalid VM purpose"
+    );
+    let name = ws.vm_name(purpose);
     ws.ensure_state()?;
     ws.verify_implicit_image(&image)?;
     let _lease = ilex_devkit::ownership::vm_lease(ws, &name)?;
@@ -187,7 +198,10 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
 
     let xvfb = if viewer { Some(Xvfb::start()?) } else { None };
 
-    let purpose = if args.gui { "gui" } else { "vm" };
+    let purpose = args
+        .purpose
+        .as_deref()
+        .unwrap_or(if args.gui { "gui" } else { "vm" });
     let mut config = VmConfig::graphical(purpose, disk);
     config.snapshot = !args.persist;
     config.apps = args.apps || (args.gui && !args.no_apps);

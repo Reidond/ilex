@@ -1,0 +1,470 @@
+#!/usr/bin/python3 -I
+"""Development-only session adapter. Bounded frames, no clipboard logging.
+
+Root supervises the current unlocked local Wayland user. Clipboard access runs
+as that user, never at GDM. The SSH EOF/lifetime owns the entire helper tree.
+GNOME 51's private Mutter API is probed before use, not treated as stable ABI.
+"""
+import gi
+import json
+import os
+import queue
+import selectors
+import signal
+import struct
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from gi.repository import Gio, GLib
+
+MAX_TEXT = 256 * 1024
+MAX_FRAME = 2 * 1024 * 1024  # JSON escaping can expand a valid bounded UTF-8 string
+HELPER = os.path.realpath(__file__)
+output_lock = threading.Lock()
+ending = threading.Event()
+
+
+def emit(value):
+    data = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    if len(data) > MAX_FRAME:
+        raise ValueError('frame limit')
+    with output_lock:
+        sys.stdout.buffer.write(struct.pack('!I', len(data)) + data)
+        sys.stdout.buffer.flush()
+
+
+def frames(stream):
+    descriptor = stream.fileno()
+    def exact(count, deadline=None):
+        data = bytearray()
+        while len(data) < count:
+            if ending.is_set():
+                raise EOFError()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ValueError('frame deadline')
+            with selectors.DefaultSelector() as poll:
+                poll.register(descriptor, selectors.EVENT_READ)
+                if not poll.select(.1):
+                    continue
+            part = os.read(descriptor, count - len(data))
+            if not part:
+                raise EOFError()
+            data.extend(part)
+        return bytes(data)
+    while True:
+        first = exact(1)
+        deadline = time.monotonic() + 2
+        size = struct.unpack('!I', first + exact(3, deadline))[0]
+        if not 0 < size <= MAX_FRAME:
+            raise ValueError('frame limit')
+        value = json.loads(exact(size, deadline).decode('utf-8'))
+        if not isinstance(value, dict):
+            raise ValueError('invalid frame')
+        if 'text' in value and (not isinstance(value['text'], str) or len(value['text'].encode('utf-8')) > MAX_TEXT or '\0' in value['text']):
+            raise ValueError('text limit')
+        yield value
+
+
+system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+
+
+def dbus(connection, dest, path, interface, method, args=None, timeout=2000):
+    return connection.call_sync(dest, path, interface, method, args, None,
+                                Gio.DBusCallFlags.NONE, timeout, None)
+
+
+def active_session():
+    sessions = dbus(system, 'org.freedesktop.login1', '/org/freedesktop/login1',
+                    'org.freedesktop.login1.Manager', 'ListSessions').unpack()[0]
+    for sid, uid, user, seat, path in sessions:
+        if uid < 1000 or not seat:
+            continue
+        props = dbus(system, 'org.freedesktop.login1', path, 'org.freedesktop.DBus.Properties',
+                     'GetAll', GLib.Variant('(s)', ('org.freedesktop.login1.Session',))).unpack()[0]
+        if props.get('Active') and props.get('Type') == 'wayland' and props.get('Class') == 'user' and not props.get('LockedHint'):
+            return sid, uid, user
+    return None
+
+
+def display_info(target=None):
+    # Read-only mode inspection is also useful at GDM; clipboard admission
+    # remains restricted to unlocked user sessions above.
+    if os.getuid() == 0:
+        sessions = dbus(system, 'org.freedesktop.login1', '/org/freedesktop/login1',
+                        'org.freedesktop.login1.Manager', 'ListSessions').unpack()[0]
+        for sid, uid, user, seat, path in sessions:
+            props = dbus(system, 'org.freedesktop.login1', path, 'org.freedesktop.DBus.Properties',
+                         'GetAll', GLib.Variant('(s)', ('org.freedesktop.login1.Session',))).unpack()[0]
+            if seat and props.get('Active') and props.get('Type') == 'wayland':
+                return subprocess.run(['runuser', '-u', user, '--', 'env',
+                    f'XDG_RUNTIME_DIR=/run/user/{uid}', f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus',
+                    HELPER] + (['--display-info'] if target is None else ['--resize', str(target[0]), str(target[1])]), check=True).returncode
+        raise ValueError('no active display session')
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    try:
+        state = dbus(bus, 'org.gnome.Mutter.DisplayConfig', '/org/gnome/Mutter/DisplayConfig',
+                     'org.gnome.Mutter.DisplayConfig', 'GetCurrentState').unpack()
+        monitors = []
+        for identity, modes, properties in state[1]:
+            current = [mode for mode in modes if mode[-1].get('is-current')]
+            preferred = [mode for mode in modes if mode[-1].get('is-preferred')]
+            monitors.append({'name': identity[0], 'current': [list(m[1:3]) for m in current],
+                             'preferred': [list(m[1:3]) for m in preferred]})
+        reply = {'schema': 1, 'backend': 'mutter', 'monitors': monitors}
+    except GLib.Error:
+        environment = hypr_environment()
+        result = subprocess.run(['hyprctl', '-j', 'monitors'], env=environment, capture_output=True, timeout=2, check=True)
+        monitors = json.loads(result.stdout)
+        if target is not None and len(monitors) == 1:
+            monitor = monitors[0]
+            prefix = f'{target[0]}x{target[1]}@'
+            mode = next((m for m in monitor['availableModes'] if m.startswith(prefix)), None)
+            if mode and (monitor['width'], monitor['height']) != target:
+                subprocess.run(['hyprctl', 'keyword', 'monitor', f"{monitor['name']},{mode.removesuffix('Hz')},auto,1"], env=environment, capture_output=True, check=True, timeout=2)
+                monitors = json.loads(subprocess.run(['hyprctl', '-j', 'monitors'], env=environment, capture_output=True, check=True, timeout=2).stdout)
+        reply = {'schema': 1, 'backend': 'hyprland', 'monitors':
+            [{'name': m['name'], 'current': [[m['width'], m['height']]], 'available': m['availableModes']} for m in monitors]}
+    if target is not None:
+        reply['target'] = list(target)
+        reply['acknowledged'] = any(list(target) in m['current'] for m in reply['monitors'])
+    print(json.dumps(reply), flush=True)
+
+
+def hypr_environment():
+    environment = dict(os.environ)
+    for entry in os.scandir('/proc'):
+        if not entry.name.isdigit():
+            continue
+        try:
+            if os.stat(entry.path).st_uid != os.getuid() or open(entry.path + '/comm').read().strip() != 'Hyprland':
+                continue
+            values = dict(part.split('=', 1) for part in open(entry.path + '/environ', 'rb').read().decode().split('\0') if '=' in part)
+            for key in ['WAYLAND_DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE']:
+                if key in values:
+                    environment[key] = values[key]
+            return environment
+        except (OSError, UnicodeError):
+            continue
+    raise ValueError('no live Hyprland session')
+
+
+def supervise():
+    # No shell expansion or log of incoming data. A bounded queue breaks SSH
+    # backpressure instead of growing memory while a session is unavailable.
+    incoming = queue.Queue(8)
+    def reader():
+        try:
+            for value in frames(sys.stdin.buffer):
+                incoming.put(value, timeout=2)
+        except (EOFError, ValueError, OSError, queue.Full):
+            pass
+        finally:
+            ending.set()
+    threading.Thread(target=reader, daemon=True).start()
+    child = None
+    relay_thread = None
+    selected = None
+    last_attempt = 0
+    try:
+        while not ending.is_set():
+            current = active_session()
+            if child is not None and (current != selected or child.poll() is not None):
+                child.terminate()
+                try:
+                    child.wait(2)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+                if relay_thread is not None:
+                    relay_thread.join(2)
+                child = None
+                emit({'op': 'inactive', 'schema': 1})
+            if current is not None and child is None and time.monotonic() - last_attempt >= 1:
+                selected = current
+                sid, uid, user = current
+                last_attempt = time.monotonic()
+                child = subprocess.Popen(['runuser', '-u', user, '--', 'env',
+                    f'XDG_RUNTIME_DIR=/run/user/{uid}', f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus',
+                    f'XDG_SESSION_ID={sid}', HELPER, '--session'],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                def relay(stream):
+                    try:
+                        for message in frames(stream):
+                            emit(message)
+                    except (EOFError, OSError, ValueError):
+                        pass
+                relay_thread = threading.Thread(target=relay, args=(child.stdout,), daemon=True)
+                relay_thread.start()
+            try:
+                value = incoming.get(timeout=.2)
+            except queue.Empty:
+                continue
+            if child is not None:
+                # One bounded writer, killed on cancellation/lock. PIPE_BUF is
+                # not assumed to fit a clipboard message.
+                data = json.dumps(value, ensure_ascii=False).encode('utf-8')
+                os.set_blocking(child.stdin.fileno(), False)
+                payload = memoryview(struct.pack('!I', len(data)) + data)
+                deadline = time.monotonic() + 2
+                while payload:
+                    if ending.is_set() or active_session() != selected or time.monotonic() > deadline:
+                        child.terminate()
+                        break
+                    try:
+                        written = os.write(child.stdin.fileno(), payload)
+                        payload = payload[written:]
+                    except BlockingIOError:
+                        time.sleep(.01)
+                    except BrokenPipeError:
+                        break
+    finally:
+        if child is not None and child.poll() is None:
+            # Child session/helpers have their own process group.
+            os.killpg(child.pid, signal.SIGTERM)
+            try:
+                child.wait(2)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+
+
+def session():
+    selected = active_session()
+    if selected is None or selected[1] != os.getuid():
+        return
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    generation = str(uuid.uuid4())
+    loop = GLib.MainLoop()
+    content = b''
+    host_sequence = 0
+    guest_sequence = 0
+    transferring = False
+    selection_epoch = 0
+    incoming = queue.Queue(8)
+    outgoing = queue.Queue(8)
+    enabled = True
+    dest = 'org.gnome.Mutter.RemoteDesktop'
+    interface = dest + '.Session'
+    path = None
+    watcher = None
+
+    def allowed():
+        if not enabled or active_session() != selected:
+            return False
+        if path is not None:
+            return not dbus(bus, 'org.gnome.ScreenSaver', '/org/gnome/ScreenSaver',
+                            'org.gnome.ScreenSaver', 'GetActive').unpack()[0]
+        return True
+
+    def call(method, args=None):
+        return dbus(bus, dest, path, interface, method, args)
+
+    def fdcall(method, args):
+        reply, fds = bus.call_with_unix_fd_list_sync(dest, path, interface, method, args,
+                          None, Gio.DBusCallFlags.NONE, 2000, None, None)
+        return fds.get(reply.unpack()[0])
+
+    def pipe_io(fd, data=None):
+        os.set_blocking(fd, False)
+        deadline = time.monotonic() + 2
+        result = bytearray()
+        remaining = memoryview(data) if data is not None else None
+        try:
+            with selectors.DefaultSelector() as poll:
+                poll.register(fd, selectors.EVENT_WRITE if data is not None else selectors.EVENT_READ)
+                while time.monotonic() < deadline and not ending.is_set():
+                    if not poll.select(.05):
+                        continue
+                    if data is None:
+                        part = os.read(fd, min(65536, MAX_TEXT + 1 - len(result)))
+                        if not part:
+                            return bytes(result)
+                        result.extend(part)
+                        if len(result) > MAX_TEXT:
+                            raise ValueError('selection exceeds limit')
+                    else:
+                        remaining = remaining[os.write(fd, remaining):]
+                        if not remaining:
+                            return True
+            raise TimeoutError()
+        finally:
+            os.close(fd)
+
+    def send_text(data):
+        nonlocal guest_sequence, content
+        if not allowed() or len(data) > MAX_TEXT:
+            return
+        text = data.decode('utf-8')
+        if '\0' in text or data == content:
+            return
+        content = data
+        guest_sequence += 1
+        emit({'op': 'text', 'schema': 1, 'generation': generation,
+              'origin': 'guest', 'sequence': guest_sequence, 'text': text})
+
+    def read_selection():
+        nonlocal transferring
+        if transferring or not allowed():
+            return
+        transferring = True
+        epoch = selection_epoch
+        try:
+            fd = fdcall('SelectionRead', GLib.Variant('(s)', ('text/plain;charset=utf-8',)))
+        except GLib.Error:
+            transferring = False
+            return
+        def worker():
+            try:
+                data = pipe_io(fd)
+                GLib.idle_add(deliver, data)
+            except (OSError, ValueError, TimeoutError):
+                GLib.idle_add(deliver, None)
+        def deliver(data):
+            nonlocal transferring
+            transferring = False
+            if data is not None and epoch == selection_epoch:
+                send_text(data)
+            return False
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_signal(conn, sender, obj, iface, name, args):
+        nonlocal selection_epoch
+        if name == 'Closed':
+            loop.quit()
+        elif name == 'SelectionOwnerChanged':
+            selection_epoch += 1
+            options = args.unpack()[0]
+            if not options.get('session-is-owner') and any(t in options.get('mime-types', []) for t in ['text/plain;charset=utf-8', 'text/plain']):
+                read_selection()
+        elif name == 'SelectionTransfer':
+            mime, serial = args.unpack()
+            if not allowed():
+                call('SelectionWriteDone', GLib.Variant('(ub)', (serial, False)))
+                return
+            fd = fdcall('SelectionWrite', GLib.Variant('(u)', (serial,)))
+            data = content
+            def write():
+                try:
+                    pipe_io(fd, data)
+                    success = True
+                except (OSError, TimeoutError):
+                    success = False
+                def done():
+                    if allowed():
+                        call('SelectionWriteDone', GLib.Variant('(ub)', (serial, success)))
+                    return False
+                GLib.idle_add(done)
+            threading.Thread(target=write, daemon=True).start()
+
+    # Detect the compositor from this user's live session, not a root-created
+    # XWayland clipboard owner. The API's current GNOME major is intentional.
+    try:
+        version = dbus(bus, 'org.gnome.Shell', '/org/gnome/Shell', 'org.freedesktop.DBus.Properties',
+                       'Get', GLib.Variant('(ss)', ('org.gnome.Shell', 'ShellVersion'))).unpack()[0]
+        if not str(version).startswith('51.'):
+            raise ValueError('unsupported Mutter version')
+        path = dbus(bus, dest, '/org/gnome/Mutter/RemoteDesktop', dest, 'CreateSession').unpack()[0]
+        xml = dbus(bus, dest, path, 'org.freedesktop.DBus.Introspectable', 'Introspect').unpack()[0]
+        for method in ['EnableClipboard', 'SetSelection', 'SelectionRead', 'SelectionWrite', 'SelectionWriteDone']:
+            if f'name="{method}"' not in xml:
+                raise ValueError('Mutter clipboard capability missing')
+        if not allowed():
+            return
+        bus.signal_subscribe(dest, interface, None, path, None, Gio.DBusSignalFlags.NONE, on_signal)
+        call('EnableClipboard', GLib.Variant('(a{sv})', ({},)))
+        call('Start')
+        backend = 'mutter-51'
+    except GLib.Error:
+        path = None
+        # wl-clipboard watch is only accepted on a compositor supporting data
+        # control; GNOME never falls back to polling/stealing X11 selections.
+        backend = 'hyprland-data-control'
+        # Resolve the live compositor environment from its process, same UID.
+        os.environ.update(hypr_environment())
+        watcher = subprocess.Popen(['wl-paste', '--type', 'text', '--watch', HELPER, '--selection'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        def watch():
+            try:
+                for value in frames(watcher.stdout):
+                    outgoing.put(value['text'].encode('utf-8'), timeout=1)
+            except (EOFError, OSError, ValueError, queue.Full):
+                pass
+        threading.Thread(target=watch, daemon=True).start()
+
+    def reader():
+        try:
+            for value in frames(sys.stdin.buffer):
+                incoming.put(value, timeout=1)
+        except (EOFError, OSError, ValueError, queue.Full):
+            pass
+        finally:
+            ending.set()
+    threading.Thread(target=reader, daemon=True).start()
+
+    def tick():
+        nonlocal enabled, content, host_sequence, selection_epoch
+        try:
+            if ending.is_set() or not allowed():
+                enabled = False
+                content = b''
+                loop.quit()
+                return False
+            while not outgoing.empty():
+                send_text(outgoing.get_nowait())
+            while not incoming.empty():
+                value = incoming.get_nowait()
+                if value.get('schema') != 1 or value.get('generation') != generation or value.get('origin') != 'host' or value.get('op') != 'set':
+                    continue
+                sequence = value.get('sequence')
+                if not isinstance(sequence, int) or not host_sequence < sequence < 2**63:
+                    continue
+                host_sequence = sequence
+                selection_epoch += 1
+                content = value['text'].encode('utf-8')
+                if path is not None:
+                    call('SetSelection', GLib.Variant('(a{sv})', ({'mime-types': GLib.Variant('as', ['text/plain;charset=utf-8', 'text/plain'])},)))
+                else:
+                    subprocess.run(['wl-copy', '--type', 'text/plain;charset=utf-8'], input=content, timeout=2, check=True, stderr=subprocess.DEVNULL)
+            return True
+        except (GLib.Error, OSError, ValueError, subprocess.SubprocessError):
+            loop.quit()
+            return False
+    GLib.timeout_add(100, tick)
+    emit({'op': 'ready', 'schema': 1, 'generation': generation, 'backend': backend})
+    try:
+        loop.run()
+    finally:
+        enabled = False
+        content = b''
+        if path is not None:
+            try:
+                call('Stop')
+            except GLib.Error:
+                pass
+        if watcher is not None:
+            watcher.terminate()
+        emit({'op': 'inactive', 'schema': 1})
+
+
+if __name__ == '__main__':
+    try:
+        if sys.argv[1:] == ['--supervise'] and os.getuid() == 0:
+            supervise()
+        elif sys.argv[1:] == ['--session'] and os.getuid() != 0:
+            session()
+        elif sys.argv[1:] == ['--selection'] and os.getuid() != 0:
+            data = sys.stdin.buffer.read(MAX_TEXT + 1)
+            if len(data) <= MAX_TEXT:
+                emit({'text': data.decode('utf-8')})
+        elif sys.argv[1:] == ['--display-info']:
+            display_info()
+        elif len(sys.argv) == 4 and sys.argv[1] == '--resize':
+            target = tuple(int(n) for n in sys.argv[2:])
+            if not all(1 <= n <= 16384 for n in target):
+                raise ValueError('display size limit')
+            display_info(target)
+    except (EOFError, OSError, ValueError, GLib.Error):
+        # Never put exception text (possibly containing clipboard data) in logs.
+        raise SystemExit(1)

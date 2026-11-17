@@ -150,10 +150,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 &pinned,
                 inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
             )?;
-            let parent = require_layer_parent(ws, &pinned, &inspect, &publication, &repository, &auth)?;
-            verify(ws, &parent, &auth, args.verification_key.as_deref()).context(
-                "verifying the declared published parent before signing its layer",
-            )?;
+            let parent =
+                require_layer_parent(ws, &pinned, &inspect, &publication, &repository, &auth)?;
+            verify(ws, &parent, &auth, args.verification_key.as_deref())
+                .context("verifying the declared published parent before signing its layer")?;
             let computed = rechunk::fingerprint(ws, &pinned)?;
             let label = local_fingerprint(&pinned)?;
             require_fingerprint(&pinned, &label)?;
@@ -333,6 +333,9 @@ fn require_composition(
     labels: &std::collections::BTreeMap<String, String>,
     row: &config::Publication,
 ) -> Result<()> {
+    if labels.contains_key("ilex.development") {
+        bail!("{image} is a development composition and must never be published");
+    }
     let expected = row.selection.labels();
     for key in config::LABELS {
         let actual = labels.get(key).map(String::as_str).unwrap_or("(missing)");

@@ -1,0 +1,19 @@
+#!/usr/bin/python3 -I
+import os
+import subprocess
+from pathlib import Path
+
+# A development image cannot accidentally use a generated, unpinned key.
+source = Path('/sys/firmware/qemu_fw_cfg/by_name/opt/ilex/ssh-host-key/raw')
+if not source.exists():
+    subprocess.run(['/usr/sbin/modprobe', 'qemu_fw_cfg'], check=True)
+key = source.read_bytes()
+if not 1 <= len(key) <= 4096 or not key.startswith(b'-----BEGIN OPENSSH PRIVATE KEY-----'):
+    raise SystemExit('missing or invalid development host identity')
+os.makedirs('/run/ilex-dev', mode=0o700, exist_ok=True)
+subprocess.run(['/usr/bin/chcon', '-t', 'sshd_var_run_t', '/run/ilex-dev'], check=True)
+fd = os.open('/run/ilex-dev/ssh_host_ed25519_key', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, 'wb') as stream:
+    stream.write(key)
+# This is a disposable guest's /run, never the host or production image.
+subprocess.run(['/usr/bin/chcon', '-t', 'sshd_key_t', '/run/ilex-dev/ssh_host_ed25519_key'], check=True)

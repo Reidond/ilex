@@ -594,7 +594,7 @@ another machine prints that the viewer's clipboard needs machine `vm`.
 An explicit older image without an `ilex.machine` label also boots unchanged
 with that clipboard message. It is still refused as a machine-layer base.
 `--print-image` inspects labels to apply this same decision without building or
-booting. On Windows it forwards that inspection to WSL without starting a viewer.
+booting. Native Windows inspection resolves the development image without starting a VM.
 The implicit tag is `<checkout tag>[.s-<shell>...].m-<machine>`. A layer built
 on an explicit base, including a digest or another repository's image, always
 gets a local tag in this checkout's namespace: `<checkout tag>.b-<16 hex SHA-256
@@ -1412,7 +1412,16 @@ and Linux `doctor --self-check-fingerprint <owned-image> --json` report actual
 root/rechunk fingerprints for same-tree comparisons. Acceptance logs and
 measurements belong in the PR body.
 
-The existing interactive `vm` compatibility path still uses the
+Windows `cargo xtask vm --gui` and `vm --disk` now run native QEMU/WHPX;
+`--gui` uses the pinned portable SDL/virgl runtime, an immutable disk delivered
+by the T3 builder and a writable overlay. Native Windows `ilex-vmctl` and MCP
+attach directly, including exact-HWND virgl screenshots. Clipboard is an
+unpublished development overlay, supervised over pinned SSH only during an
+unlocked user session. Right-Ctrl+G escapes SDL grab. See
+[Windows GPU development](docs/tooling/windows-gpu.md) for lifecycle, memory,
+resolution, capture limitations and acceptance commands.
+
+The existing ephemeral `vm` compatibility path still uses the
 `FedoraLinux-45` WSL2 distro (nested virtualization gives it `/dev/kvm`).
 The previous direct WSL commands remain available (WSL translates the cwd):
 
@@ -1430,7 +1439,7 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
   `cargo clippy --workspace --all-targets` works on Windows and Linux; the
   `config::` fixtures that create Unix modes and symlinks are compiled on Unix
   and run in WSL on Windows.
-- `cargo xtask vm` is the exception: run it on Windows itself (PowerShell or
+- Without `--gui`/`--disk`, run `cargo xtask vm` on Windows itself (PowerShell or
   Git Bash, in the checkout). It hands itself to the distro (`wsl.exe -d
   FedoraLinux-45 -u root --cd <checkout> -e bash -lc 'cargo xtask vm …'`;
   `ILEX_WSL_DISTRO` names another). With `--gui` it first builds
@@ -1453,14 +1462,17 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 `cargo xtask disk` writes the installed qcow2 (`bcvk to-disk`); `cargo xtask
 vm --disk` boots it headless on the graphical test machine (UEFI, 4K
 `virtio-vga`), and `--gui` adds a window for a human (in WSL the native
-Windows viewer below, elsewhere a GTK window). Every disk-booted VM (also the
+SDL/WHPX window on Windows, a GTK window on Linux, or the compatibility viewer
+when launched explicitly inside WSL). Linux disk-booted VMs (also the
 `disk::` and `graphical::` tests) publishes `qmp.sock`, `vnc.sock` and
 `vm.toml` in
-`$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; `ilex-vmctl` attaches to them by slug
+`$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; native Windows publishes private
+`vm.json` with independent loopback QMP endpoints and PID/HWND identity in the
+runtime directory printed by `xtask info`. `ilex-vmctl` attaches by slug
 (from the checkout you are in, or `--slug`) and never starts or stops VMs.
 
 ```sh
-cargo install --path crates/ilex-vmctl   # once per machine (inside WSL on Windows)
+cargo install --path crates/ilex-vmctl   # native Windows or Linux
 ilex-vmctl list
 ilex-vmctl screenshot -o shot.png        # read the PNG to see the screen
 ilex-vmctl wait-screen --stable 3        # not blank, then unchanged for 3s
@@ -1474,7 +1486,7 @@ and `click` takes coordinates in that downscaled image:
 
 ```sh
 claude mcp add --transport stdio ilex-vm -- ilex-vmctl mcp
-# Windows host (the server must run inside WSL, in the worktree's directory):
+# Explicit WSL compatibility VMs (run that controller inside WSL):
 claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e bash -lc 'ilex-vmctl mcp'
 ```
 
@@ -1500,9 +1512,10 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
   (`screen.sock`, `vm.toml` says `display = "viewer"`); a GL GTK window on a
   Linux desktop (`display = "gtk-gl"`) takes vmctl input but no screenshots.
 
-## The VM window on Windows
+## The WSL compatibility window
 
-`cargo xtask vm --gui` in WSL doesn't open a Linux window; the VM's window is
+Explicit `cargo xtask vm --gui` in WSL keeps its compatibility path until T7.
+It doesn't open a Linux window; the VM's window is
 `ilex-viewer.exe` (`crates/ilex-viewer`), a native Windows program, fed by a
 display bridge in `xtask vm` (`crates/ilex-tooling-linux/src/display.rs`, protocol
 in `viewer.rs`):

@@ -13,9 +13,10 @@
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
+use crate::backend as qemu;
 use anyhow::{Context, Result, bail};
 use ilex_devkit::Workspace;
-use ilex_devkit::qemu::{self, base64};
+use ilex_devkit::qemu::base64;
 use serde_json::{Value, json};
 
 use crate::{Button, Vmctl, WaitCond};
@@ -58,7 +59,7 @@ struct Server {
     default_vm: Option<String>,
     /// Screen pixels per screenshot pixel, from the last screenshot returned.
     last_scale: Option<f64>,
-    last_view: Option<(ilex_devkit::core::VmHandle, u32, u32)>,
+    last_view: Option<(ilex_devkit::core::VmHandle, u32, u32, u64)>,
     mapping_invalidated: bool,
 }
 
@@ -131,7 +132,7 @@ impl Server {
             );
         }
         let f = vm.screenshot()?;
-        let current = (vm.handle(), f.width, f.height);
+        let current = (vm.handle(), f.width, f.height, vm.view_generation());
         if self.last_view.as_ref().is_some_and(|old| old != &current) {
             self.last_scale = None;
             self.mapping_invalidated = true;
@@ -265,7 +266,8 @@ impl Server {
                     started.elapsed().as_secs_f64()
                 ))];
                 out.extend(self.image_content(&frame, &png, DEFAULT_MAX_EDGE)?);
-                self.last_view = Some((vm.handle(), frame.width, frame.height));
+                self.last_view =
+                    Some((vm.handle(), frame.width, frame.height, vm.view_generation()));
                 Ok(out)
             }
             other => bail!("unknown tool `{other}`"),
@@ -276,7 +278,7 @@ impl Server {
         let png = vm.screenshot_png()?;
         let frame = crate::Frame::decode(&png)?;
         let content = self.image_content(&frame, &png, max_edge)?;
-        self.last_view = Some((vm.handle(), frame.width, frame.height));
+        self.last_view = Some((vm.handle(), frame.width, frame.height, vm.view_generation()));
         Ok(content)
     }
 

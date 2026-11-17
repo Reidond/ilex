@@ -308,7 +308,7 @@ def prepare(root, replay):
                     (os.rmdir if stat.S_ISDIR(info["mode"]) else os.unlink)(name, dir_fd=fd)
 
 
-def install(payload, root, phase="all", base=False, remove_payload=False, inherited=None):
+def install(payload, root, phase="all", base=False, remove_payload=False, inherited=None, append_overlays=False):
     try:
         staging_path = Path(os.path.abspath(payload)).relative_to(Path(os.path.abspath(root))).as_posix()
     except ValueError:
@@ -329,7 +329,13 @@ def install(payload, root, phase="all", base=False, remove_payload=False, inheri
                         error("generated files", path, "machine replacement requires an unchanged registered generated file")
                     record(image, path, data)
         if phase != "generated":
-            provenance = []
+            # Private development overlays add files without rerunning package
+            # transactions or replacing a machine. Preserve verified provenance.
+            provenance = json.loads(image.read(PROVENANCE)) if append_overlays else []
+            if append_overlays:
+                registered, _ = registry(image)
+                if PROVENANCE not in registered:
+                    error("development overlay", PROVENANCE, "missing registered provenance")
             for source in ([inherited] if inherited else []) + [payload]:
                 with Tree(source, "overlay staging") as staged:
                     overlays = json.loads(staged.read("overlays.json"))
@@ -355,13 +361,16 @@ if __name__ == "__main__":
     parser.add_argument("--remove-payload", action="store_true")
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--inherited", type=Path)
+    parser.add_argument("--append-overlays", action="store_true")
     args = parser.parse_args()
     if args.base and args.phase == "overlays":
         parser.error("--base requires generated-file installation")
+    if args.append_overlays and (args.phase != "overlays" or args.inherited or args.prepare):
+        parser.error("--append-overlays requires --phase overlays without prepare/inherited")
     try:
         if args.prepare:
             prepare(args.root, args.payload)
         else:
-            install(args.payload, args.root, args.phase, args.base, args.remove_payload, args.inherited)
+            install(args.payload, args.root, args.phase, args.base, args.remove_payload, args.inherited, args.append_overlays)
     except (OSError, ValueError, KeyError) as exc:
         sys.exit(f"install-files: {exc}")
