@@ -72,7 +72,7 @@ fn state(ws: &Workspace) -> Result<PathBuf> {
 pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
     let root = state(ws)?;
     let _checkout_lock = ilex_devkit::ownership::lock(&root.join("client.lock"))?;
-    validate(&command)?;
+    validate(ws, &command)?;
     let started = Instant::now();
     let disk_out = if let Command::Disk(a) = &mut command {
         a.out.take()
@@ -247,7 +247,12 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
     }
 }
 
-fn validate(command: &Command) -> Result<()> {
+fn validate(ws: &Workspace, command: &Command) -> Result<()> {
+    if let Command::Iso(args) = command {
+        // CI is deliberately absent from the remote environment. Apply the
+        // existing local-only testing-tag rule before crossing that boundary.
+        ilex_devkit::installer::table(&ws.root, args.testing_tag.as_deref())?;
+    }
     if let Command::Test(args) = command {
         let native: Vec<_> = args
             .filters
