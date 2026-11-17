@@ -745,16 +745,37 @@ replacement. Runtime IPC remains in
 the user's owned runtime directory. Symlinked dconf directories/databases are
 conflicts.
 
-`~/.local/state/ilex/profile.json` stores schema, profile revision/digest and
-managed file/setting hashes or values. Missing files are seeded atomically;
+`~/.local/state/ilex/profile.json` schema 2 stores profile revision/digest,
+managed file/setting hashes or values and the backup index. Schema 1 migrates
+on apply; older helpers decline schema 2 instead of dropping recovery tracking.
+Missing files are seeded atomically;
 updates use Linux `renameat2(RENAME_EXCHANGE)` and verify the displaced contents
 against the last managed digest. An intervening save is exchanged back and
-reported as a conflict. If rollback races with another save or deletion, keep
-displaced edits at the reported `.ilex-profile-*` recovery path in the same
-directory; never silently delete an unverified version. Unsupported exchange
+reported as a conflict. Every exchanged-out inode, including a rollback version
+and replaced `profile.json`, is moved rather than copied into a user-owned,
+no-follow-opened directory on the same filesystem:
+`~/.local/state/ilex/profile-backups/<UTC-timestamp>/`. The state records each
+backup's original path and verified digest. An editor holding an old descriptor
+can finish saving into that retained inode. Apply checks the backups at the end
+and again on the next apply; a changed/unreadable/missing version reports a
+conflict naming its backup path. A write after the final check is detected on
+the next apply, while the backup already preserves the edit. If moving a version
+fails, the error names its retained `.ilex-profile-*` path instead. Unsupported exchange
 operations fail without falling back to an unchecked replacement. Existing files, edits,
 deletions, symlink/hardlink paths and explicitly set desktop settings are
 preserved and reported as conflicts (exit 1).
+
+Apply never prunes backups. It prints a one-line notice above 50 MiB; ordinary
+unchanged applies create no new state snapshot or backup directory. Inspect
+sizes and proposed deletions with `ilex-agent profile prune-backups` (dry run).
+`--keep 5` retains the five newest backup applies; it still only lists by default.
+After closing editors and reviewing/recovering any changed versions, explicitly
+run `ilex-agent profile prune-backups --keep 5 --execute` to delete older ones.
+`--execute` without `--keep` removes all listed applies. Cleanup requires the
+authenticated homed user, rejects links/untracked files, and preserves its own
+previous-state snapshot in a new backup apply in addition to the requested N.
+There is no safe automatic age/count policy for an editor's outstanding fd:
+explicit cleanup can discard late writes, so close editors before executing it.
 Setting resets count as edits: reapply writes only an initially absent setting,
 or a changed profile value whose current override still equals the last
 managed value. An unchanged managed setting is not rewritten.
@@ -787,6 +808,10 @@ redirects and user-setting conflicts. The compiler regression rejects sparse
 Real-homed interleaving regressions use other processes of the same user to
 save after the file comparison, save again during rollback, reset a setting
 after comparison or during its write, and restart the checked dconf writer.
+They also hold an old file descriptor across exchange and save after verification
+or after apply returns, checking retained Btrfs backup content and end/next-apply
+conflicts. Cleanup coverage checks dry-run sizes, explicit keep-N removal,
+symlink refusal, retained state snapshots, no automatic pruning and the size notice.
 Measured 2026-11-17: the shell-free image is 1,977.84 MiB against Fedora
 bootc's 1,917.62 MiB, a 60.23 MiB increase within the unchanged 128 MiB budget.
 

@@ -5,13 +5,14 @@ Profile content is untrusted; existing links/redirects are rejected or neutralis
 Home traversal uses pinned, owned, no-follow directory FDs. A concurrently
 malicious process of the same UID already has the user's full write access and
 is outside the prevention threat model. Writer replacement is detected, not
-prevented by an authenticated writer protocol. Ordinary concurrent file saves
-are checked at exchange; settings updates are best-effort because dconf has no CAS.
+prevented by an authenticated writer protocol. Displaced file inodes are kept
+for late editor writes; settings updates are best-effort because dconf has no CAS.
 """
 
 import argparse
 from contextlib import ExitStack, contextmanager
 import ctypes
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -25,6 +26,9 @@ import uuid
 
 ROOT = "/usr/share/ilex"
 STATE = ".local/state/ilex/profile.json"
+STATE_SCHEMA = 2
+BACKUPS = ".local/state/ilex/profile-backups"
+BACKUP_NOTICE_BYTES = 50 * 1024 * 1024
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 RENAME_EXCHANGE = 2
 _renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
@@ -64,6 +68,7 @@ class Home:
         self.owner = owner
         self.fd = os.open(path, DIR)
         self.owned(self.fd, directory=True)
+        self.backups = Backups(self)
 
     def owned(self, fd, directory=False):
         meta = os.fstat(fd)
@@ -108,8 +113,14 @@ class Home:
         except FileNotFoundError:
             return None
 
-    def write(self, path, data, expected):
-        with self.parent(path, create=True) as (fd, name):
+    def write(self, path, data, expected, backup=None):
+        with ExitStack() as opened:
+            fd, name = opened.enter_context(self.parent(path, create=True))
+            if expected is not None:
+                backup = backup or self.backups.reserve(path, expected)
+                backup_fd, backup_name = opened.enter_context(self.parent(backup, create=True))
+                if os.fstat(backup_fd).st_dev != os.fstat(fd).st_dev:
+                    raise ValueError("profile backups must be on the replaced file's filesystem")
             temporary = f".ilex-profile-{uuid.uuid4().hex}"
             cleanup = True
             try:
@@ -129,33 +140,184 @@ class Home:
                     # Exchange is the replacement point: inspect the version
                     # actually displaced, not just an earlier pathname read.
                     exchange(fd, temporary, name)
-                    cleanup = False  # Never discard an unverified displaced file.
+                    cleanup = False  # An editor may still hold this inode open.
                     try:
-                        matches = digest(self.read_at(fd, temporary)) == expected
+                        verified = digest(self.read_at(fd, temporary))
                     except (OSError, ValueError):
-                        matches = False
+                        verified = None
+                    matches = verified == expected
                     if not matches:
-                        recovery = "/".join([*parts(path)[:-1], temporary])
                         try:
                             exchange(fd, temporary, name)
                         except OSError:
-                            raise FileConflict(recovery) from None
-                        # Another save during rollback must survive too. Keep
-                        # that version at the recovery name instead of unlinking.
-                        try:
-                            cleanup = digest(self.read_at(fd, temporary)) == digest(data)
-                        except (OSError, ValueError):
-                            cleanup = False
+                            pass  # Still preserve the version we could not restore.
+                        else:
+                            try:
+                                verified = digest(self.read_at(fd, temporary))
+                            except (OSError, ValueError):
+                                verified = None
+                    # Never unlink ANY exchanged-out inode, even after a matching
+                    # read or rollback. A normal editor can finish an in-place
+                    # save through an fd long after that read returned its bytes.
+                    try:
+                        os.rename(temporary, backup_name, src_dir_fd=fd, dst_dir_fd=backup_fd)
+                    except OSError:
+                        self.backups.entries.pop(backup, None)
+                        raise FileConflict("/".join([*parts(path)[:-1], temporary])) from None
+                    self.backups.entries[backup] = {"source": path, "sha256": verified}
+                    os.fsync(backup_fd)
+                    if not matches:
                         os.fsync(fd)
-                        raise FileConflict(None if cleanup else recovery)
-                    cleanup = True
+                        raise FileConflict(backup)
                 os.fsync(fd)
             finally:
                 if cleanup:
+                    if backup is not None:
+                        self.backups.entries.pop(backup, None)
                     try:
                         os.unlink(temporary, dir_fd=fd)
                     except FileNotFoundError:
                         pass
+
+
+class Backups:
+    """Retain original inodes, not copies, until explicit user cleanup."""
+
+    def __init__(self, home, entries=None):
+        self.home = home
+        self.entries = dict(entries or {})
+        self.directory = None
+        for path, record in self.entries.items():
+            components = parts(path)
+            if (len(components) != 6 or "/".join(components[:4]) != BACKUPS
+                or not re.fullmatch(r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{8}", components[4])
+                or not re.fullmatch(r"[0-9a-f]{32}-[^/]+", components[5])):
+                raise ValueError("invalid profile backup path")
+            parts(record["source"])
+            if record["sha256"] is not None and not re.fullmatch(r"[0-9a-f]{64}", record["sha256"]):
+                raise ValueError("invalid profile backup digest")
+
+    def reserve(self, source, expected):
+        if self.directory is None:
+            # Exclusive creation prevents colliding with an older apply. Every
+            # ancestor is pinned, no-follow and user-owned, just like targets.
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            directory = f"{BACKUPS}/{stamp}-{uuid.uuid4().hex[:8]}"
+            with self.home.parent(directory, create=True) as (fd, leaf):
+                os.mkdir(leaf, 0o700, dir_fd=fd)
+                os.fsync(fd)
+            self.directory = directory
+        path = f"{self.directory}/{uuid.uuid4().hex}-{parts(source)[-1][:128]}"
+        self.entries[path] = {"source": source, "sha256": expected}
+        return path
+
+    def check(self, conflicts):
+        total = 0
+        for path, record in self.entries.items():
+            try:
+                with self.home.parent(path) as (fd, leaf):
+                    # Metadata-only size accounting also covers a late write
+                    # larger than the bounded content reader permits.
+                    target = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+                    try:
+                        total += self.home.owned(target).st_size
+                    finally:
+                        os.close(target)
+                    changed = digest(self.home.read_at(fd, leaf)) != record["sha256"]
+            except (OSError, ValueError):
+                changed = True
+            if changed:
+                conflict = f"{record['source']} (backup changed or unavailable: {path})"
+                if conflict not in conflicts:
+                    conflicts.append(conflict)
+        return total
+
+
+def save_state(home, new, old_raw):
+    # An unchanged apply creates neither a state snapshot nor an empty backup
+    # directory. State replacements themselves retain their old inode too.
+    new["schema"] = STATE_SCHEMA
+    new["backups"] = home.backups.entries
+    raw = (json.dumps(new, sort_keys=True, indent=2) + "\n").encode()
+    if raw != old_raw:
+        expected = digest(old_raw) if old_raw is not None else None
+        backup = home.backups.reserve(STATE, expected) if old_raw is not None else None
+        raw = (json.dumps(new, sort_keys=True, indent=2) + "\n").encode()
+        home.write(STATE, raw, expected, backup=backup)
+
+
+def backup_notice(size):
+    if size > BACKUP_NOTICE_BYTES:
+        print(f"ilex profile: backups use {size / (1024 * 1024):.1f} MiB; review with ilex-agent profile prune-backups (dry run)", file=sys.stderr)
+
+
+def prune_backups(args):
+    """Only an explicit --execute may discard a retained inode.
+
+    The user must close editors first: an outstanding fd can still write a
+    backup after any check. Apply never invokes this operation automatically.
+    """
+    if args.keep < 0:
+        raise ValueError("--keep must be non-negative")
+    home = active_home()
+    try:
+        # No state/directory creation during a dry run.
+        if home.read(STATE) is None:
+            print(json.dumps({"dry_run": not args.execute, "applies": [], "bytes": 0}))
+            return 0
+        with home.parent(STATE) as (lock, _):
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            raw = home.read(STATE)
+            state = json.loads(raw)
+            if state.get("schema") not in (1, STATE_SCHEMA) or type(state.get("revision")) is not int:
+                raise ValueError("unsupported profile state; declining cleanup")
+            home.backups = Backups(home, state.get("backups", {}))
+            groups = {}
+            for path in home.backups.entries:
+                groups.setdefault(path.rsplit("/", 1)[0], []).append(path)
+            newest = sorted(groups, reverse=True)
+            selected = set(newest[args.keep:])
+            listing = []
+            # Preflight all deletions without following links or recursively
+            # deleting unknown files. Pinned directory FDs survive renames.
+            with ExitStack() as opened:
+                removals = []
+                for directory in newest:
+                    fd, _ = opened.enter_context(home.parent(directory + "/.anchor"))
+                    paths = groups[directory]
+                    names = {parts(path)[-1] for path in paths}
+                    if set(os.listdir(fd)) != names:
+                        raise ValueError(f"backup directory has untracked files; inspect manually: {directory}")
+                    size = 0
+                    for name in names:
+                        source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+                        try:
+                            size += home.owned(source).st_size
+                        finally:
+                            os.close(source)
+                    listing.append({"path": directory, "bytes": size, "remove": directory in selected})
+                    if directory in selected:
+                        removals.append((directory, fd, names, paths))
+                if args.execute and removals:
+                    for _, _, _, paths in removals:
+                        for path in paths:
+                            del home.backups.entries[path]
+                    # Preserve the previous state inode and record the cleanup's
+                    # own snapshot before unlinking the explicitly selected data.
+                    save_state(home, state, raw)
+                    for directory, fd, names, _ in removals:
+                        for name in names:
+                            os.unlink(name, dir_fd=fd)
+                        os.fsync(fd)
+                        with home.parent(directory) as (parent, name):
+                            os.rmdir(name, dir_fd=parent)
+                            os.fsync(parent)
+            print(json.dumps({"dry_run": not args.execute, "applies": listing,
+                              "bytes": sum(item["bytes"] for item in listing),
+                              "state_backup": home.backups.directory}))
+            return 0
+    finally:
+        os.close(home.fd)
 
 
 def run(*args, **options):
@@ -403,7 +565,7 @@ def apply(args):
         fcntl.flock(lock, fcntl.LOCK_EX)
         old_raw = home.read(STATE)
         old = json.loads(old_raw) if old_raw is not None else None
-        if old is not None and (old.get("schema") != 1 or type(old.get("revision")) is not int):
+        if old is not None and (old.get("schema") not in (1, STATE_SCHEMA) or type(old.get("revision")) is not int):
             raise ValueError("unsupported profile state; declining changes")
         if args.selected:
             if old is None:
@@ -427,8 +589,10 @@ def apply(args):
                 raise ValueError("home profile is newer than this image; declining downgrade")
             if old["revision"] == entry["revision"] and old.get("digest") != entry["sha256"]:
                 raise ValueError("profile changed without increasing its revision; declining changes")
+        home.backups = Backups(home, old.get("backups", {}) if old else {})
         managed = dict(old.get("files", {})) if old else {}
         conflicts = []
+        home.backups.check(conflicts)
         for path, expected in data["files"].items():
             try:
                 current = home.read(path)
@@ -448,9 +612,9 @@ def apply(args):
             except (OSError, ValueError):
                 conflicts.append(path)
         setting_hashes = settings(home, data["settings"], old.get("settings", {}) if old else {}, shell, conflicts)
-        new = {"schema": 1, "profile": name, "revision": entry["revision"], "digest": entry["sha256"],
+        new = {"schema": STATE_SCHEMA, "profile": name, "revision": entry["revision"], "digest": entry["sha256"],
                "files": managed, "settings": setting_hashes}
-        home.write(STATE, (json.dumps(new, sort_keys=True, indent=2) + "\n").encode(), digest(old_raw) if old_raw is not None else None)
+        save_state(home, new, old_raw)
         if args.install_apps:
             for app in data["apps"]["flatpaks"]:
                 try:
@@ -459,6 +623,7 @@ def apply(args):
                     ], network=True)
                 except (OSError, ValueError, subprocess.TimeoutExpired):
                     conflicts.append(f"app {app['id']} (unavailable; retry explicitly)")
+        backup_notice(home.backups.check(conflicts))
         print(json.dumps({"profile": name, "revision": entry["revision"], "conflicts": conflicts}))
         return 1 if conflicts else 0
     finally:
@@ -472,6 +637,9 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list")
     commands.add_parser("check")
+    cleanup = commands.add_parser("prune-backups", help="list backup sizes; close editors before explicit cleanup")
+    cleanup.add_argument("--keep", type=int, default=0, metavar="N", help="keep the newest N backup applies (default: 0)")
+    cleanup.add_argument("--execute", action="store_true", help="delete listed backups; default is a dry run (close editors first)")
     command = commands.add_parser("apply")
     selection = command.add_mutually_exclusive_group()
     selection.add_argument("name", nargs="?")
@@ -485,6 +653,8 @@ def main():
             profile(entry["id"])
         print(json.dumps(data))
         return 0
+    if args.command == "prune-backups":
+        return prune_backups(args)
     # Ordinary maintenance/system users have no selected profile. In
     # particular, don't create state directories just because user@ started.
     if args.selected and not os.path.lexists(os.path.join(pwd.getpwuid(os.getuid()).pw_dir, STATE)):

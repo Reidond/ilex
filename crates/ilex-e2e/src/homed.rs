@@ -38,7 +38,7 @@ fn profiles() -> Result<()> {
     config.memory = "2G".into();
     let mut vm = vmtest::boot(&ws, config)?;
     let result = (|| {
-        vm.ssh_ok("test \"$(getenforce)\" = Enforcing; ! ilex-agent profile apply andriishafar; ilex-agent profile list")?;
+        vm.ssh_ok("test \"$(getenforce)\" = Enforcing && ! ilex-agent profile apply andriishafar && ! ilex-agent profile prune-backups && ilex-agent profile list")?;
         vm.ssh_ok(&format!(
             "printf %s {} | base64 -d > /run/ilex-profiles-user.py",
             qemu::base64(include_str!("profiles-user-guest.py").as_bytes())

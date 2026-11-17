@@ -48,7 +48,8 @@ fn main() -> ExitCode {
                 "ilex-agent {VERSION}\n\n\
                  Usage: ilex-agent [--self-check | --version | config [--json] | enforce-sigpolicy [--dry-run]]\n\
                  \x20      ilex-agent home-create NAME --disk-size=GiB [--admin] [--real-name=NAME]\n\
-                 \x20      ilex-agent profile list | apply [ID | --selected] [--shell gnome] [--install-apps]"
+                 \x20      ilex-agent profile list | apply [ID | --selected] [--shell gnome] [--install-apps]\n\
+                 \x20      ilex-agent profile prune-backups [--keep N] [--execute]"
             );
             ExitCode::SUCCESS
         }

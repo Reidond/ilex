@@ -202,5 +202,11 @@ if gnome:
         saved_flatpak.rename(flatpak_dir)
     external.cleanup()
 assert sentinel.read_text() == "outside sentinel\n"
+legacy = json.loads(state.read_bytes())
+legacy["schema"] = 1
+state.write_text(json.dumps(legacy))
+fixture("/run/ilex-profile-v2", 1)
+assert json.loads(state.read_bytes())["schema"] == 2
+assert json.loads(state.read_bytes())["files"] == legacy["files"]
 runpy.run_path("/run/ilex-profiles-races.py", init_globals={"profile": module, "gnome": gnome})
 print("profile apply, rollback, edits/deletions, symlinks/hardlinks and offline apps: passed")
