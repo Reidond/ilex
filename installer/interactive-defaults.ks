@@ -113,3 +113,11 @@ if [ "$result" -ne 0 ]; then
 fi
 exit 0
 %end
+
+# End-of-install enrollment runs after setup.json, target configuration and
+# the Flatpak preload's private namespace has exited. Enrollment sees the
+# installer's own mounts, including the unlocked target root and its devices.
+# Secrets never pass through this script or Anaconda's script log.
+%post --nochroot --erroronfail
+/usr/libexec/ilex-installer/complete-enrollment
+%end

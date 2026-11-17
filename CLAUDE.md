@@ -226,6 +226,15 @@ cargo xtask info               # resource identity, selection and available conf
 
 ## Linux security qualification
 
+Phase 0 PR 18 adds the reusable `ilex-enroll` library/CLI, Anaconda's local
+end-of-install recovery/enrollment step and generic initramfs unlock plumbing.
+The implementation and exact-ISO gates are in
+[`docs/installer-enrollment.md`](docs/installer-enrollment.md). Enrollment
+stays pending until a later boot supplies direct method evidence; PR 19 owns
+verification/repair. `security::encrypted_install` requires T6 qualification
+for its exact 6 GiB/two-vCPU profile and tests a disposable signed local
+candidate. It must not be reported as a passing released-image install.
+
 PR 17's consumer checks and backend requirements are documented in
 [`docs/security-probes.md`](docs/security-probes.md). Guest probes also require
 kernel lockdown, the selected manifest digest and all three ilex composition

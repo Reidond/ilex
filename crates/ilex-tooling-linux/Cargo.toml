@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ilex-enroll = { path = "../ilex-enroll" }
 ilex-tooling-core.workspace = true
 ilex-tooling-qmp.workspace = true
 anyhow.workspace = true

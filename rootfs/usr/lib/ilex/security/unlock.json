@@ -1,0 +1,1 @@
+{"schema":1,"policy":"pcr7-sha256","evidence":"/run/ilex/root-unlock.json","method":"cryptsetup-token-only-v1"}

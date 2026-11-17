@@ -1,0 +1,13 @@
+#!/bin/bash
+check() { require_binaries ilex-enroll cryptsetup lsblk findmnt || return 1; return 0; }
+depends() { echo "systemd-cryptsetup crypt tpm2-tss"; }
+install() {
+    inst_multiple /usr/bin/ilex-enroll /usr/sbin/cryptsetup /usr/bin/lsblk /usr/bin/findmnt /usr/bin/true
+    # Keep the original only inside this initramfs; the image's systemd binary
+    # and ordinary installed-system cryptsetup services stay untouched.
+    inst /usr/lib/systemd/systemd-cryptsetup /usr/libexec/ilex/systemd-cryptsetup-original
+    rm -f "$initdir/usr/lib/systemd/systemd-cryptsetup"
+    inst_simple "$moddir/cryptsetup-wrapper.sh" /usr/lib/systemd/systemd-cryptsetup
+    inst_hook pre-pivot 90 "$moddir/record-root.sh"
+    inst_libdir_file 'cryptsetup/libcryptsetup-token-systemd-tpm2.so'
+}

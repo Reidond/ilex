@@ -948,6 +948,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ilex-enroll"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "ilex-tooling-core"
 version = "0.1.0"
 dependencies = [
@@ -963,6 +976,7 @@ name = "ilex-tooling-linux"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ilex-enroll",
  "ilex-tooling-core",
  "ilex-tooling-qmp",
  "serde",

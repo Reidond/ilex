@@ -34,6 +34,7 @@ fn run() -> Result<()> {
     report.check("root filesystem matches the install config", root_filesystem(&vm));
     report.check("first-boot units succeeded", first_boot_units(&vm));
     report.check("bootc booted from the installed image", bootc_status(&vm));
+    report.check("LUKS2 private recovery and retained passphrase", vm.ssh_ok("timeout 120 ilex-enroll --self-check").map(|_| ()));
     report.check("portable control and capability rejection", contracts(&ws, &vm));
     report.finish()
 }

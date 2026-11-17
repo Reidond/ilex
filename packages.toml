@@ -23,3 +23,8 @@ install = ["systemd-udev", "systemd-pam", "btrfs-progs", "policycoreutils"]
 # A shell-free deployment must still reconcile /var after a bootc switch:
 # remove the previous shell's preinstalls, preserving manual apps and data.
 install = ["flatpak"]
+
+[security]
+# Executables/token plugin are owned by systemd-udev on Fedora 45. Do not use
+# the nonexistent systemd-cryptsetup RPM or rely on a desktop dependency.
+install = ["cryptsetup", "tpm2-tss", "systemd-udev", "dracut", "kbd"]

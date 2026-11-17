@@ -88,7 +88,7 @@ if [ -f /kache-host/index.db ]; then
     export KACHE_READONLY_STORE=/kache-host
 fi
 cargo build --release --locked -p ilexctl --no-default-features
-cargo build --release --locked -p drupe
+cargo build --release --locked -p drupe -p ilex-enroll
 kache daemon stop || true
 kache stats --last-build --root /src
 install -Dm755 target/release/ilexctl /out/usr/bin/ilexctl
@@ -102,6 +102,7 @@ for shell in bash zsh fish; do
     target/release/ilexctl completion "$shell" > "/out$completion"
     chmod 0644 "/out$completion"
 done
+install -Dm755 target/release/ilex-enroll /out/usr/bin/ilex-enroll
 install -Dm755 target/release/drupe /out/usr/bin/drupe
 install -Dm755 target/release/drupe-enter /out/usr/libexec/drupe/drupe-enter
 EOF
@@ -151,7 +152,7 @@ RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose
 # drupe.service mounts the installed images at boot.
 # Authselect's image checksum belongs in its supported vendor location;
 # /var/lib/authselect/checksum is mutable state and cannot ship in bootc.
-RUN chmod 0755 /usr/libexec/ilex/update-notify && \
+RUN chmod 0755 /usr/libexec/ilex/update-notify /usr/lib/dracut/modules.d/91ilex-unlock/*.sh && \
     mkdir /app && \
     chmod 4755 /usr/libexec/drupe/drupe-enter && \
     systemctl set-default "$(python3 -I -S -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
@@ -185,6 +186,13 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify && \
             exit 1; \
         fi; \
     done
+
+# Generic unlock support must travel with every deployment, including updates.
+# This runs before overlay replay and never sees a machine TPM or credential.
+RUN kernel=$(kernel-install list --json=short | python3 -c 'import json,sys; print(next(k["version"] for k in json.load(sys.stdin) if k["has_kernel"]))') && \
+    DRACUT_NO_XATTR=1 dracut --force --zstd --reproducible --no-hostonly \
+        "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}" && \
+    lsinitrd "/usr/lib/modules/${kernel}/initramfs.img" | grep -q ilex-enroll
 
 # The final mutation applies additions against the real image and removes its
 # own staging in the same interpreter. Only bootc lint runs after overlays.

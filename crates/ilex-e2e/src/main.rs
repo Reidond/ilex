@@ -34,6 +34,8 @@ mod security;
 #[cfg(target_os = "windows")]
 mod security_windows;
 #[cfg(target_os = "linux")]
+mod encrypted;
+#[cfg(target_os = "linux")]
 mod tool;
 #[cfg(target_os = "linux")]
 mod upgrade;
@@ -93,6 +95,8 @@ fn main() {
     // Security is opt-in, but an explicitly selected unqualified host fails.
     if filters.iter().any(|f| f.contains("security")) {
         trials.extend(security::trials());
+        #[cfg(target_os = "linux")]
+        trials.extend(encrypted::trials());
     }
 
     // libtest-mimic takes a single filter; accept several and run the union.

@@ -37,7 +37,9 @@ const INSTALLER_INPUTS: &[&str] = &[
     "crates/xtask/src/iso.rs",
     "crates/ilex-tooling-core/src/installer.rs",
     "crates/ilex-tooling-core/src/config.rs",
-    // Future enrollment helpers live under installer/ and are covered above.
+    "crates/ilex-enroll",
+    "Cargo.toml",
+    "Cargo.lock",
     "rootfs/etc/containers/registries.d/ilex.yaml",
     "rootfs/etc/pki/containers/ilex.pub",
 ];
@@ -124,6 +126,13 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         ws.root.join("rootfs/etc/pki/containers/ilex.pub"),
         generated.join("ilex.pub"),
     )?;
+    // The installer has its own small Rust build stage; no dependency on a
+    // previously built OS image and no host binary copied into the ISO.
+    for file in ["Cargo.toml", "Cargo.lock"] {
+        fs::copy(ws.root.join(file), generated.join(file))?;
+    }
+    // Workspace members must be visible for --locked workspace resolution.
+    copy_sources(&ws.root.join("crates"), &generated.join("crates"))?;
     let installer = format!("localhost/ilex-installer:{}", ws.slug);
     let transaction = ilex_devkit::ownership::ImageTransaction::new(ws, &installer)?;
     let (identity, source) = ws.source_identity()?;
@@ -192,6 +201,22 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         );
     }
     Ok(iso)
+}
+
+fn copy_sources(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_sources(&entry.path(), &target.join(entry.file_name()))?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), target.join(entry.file_name()))?;
+        } else {
+            bail!("unsupported file in installer Rust source");
+        }
+    }
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> Result<String> {

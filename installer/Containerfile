@@ -7,7 +7,18 @@
 # https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/
 # Assemble the small installer configuration on scratch: each COPY here avoids
 # committing the full Anaconda root, and table changes do not rebuild dracut.
+FROM quay.io/fedora/fedora:45 AS enrollment-build
+RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
+    dnf -y install --setopt=keepcache=1 cargo gcc
+WORKDIR /src
+COPY --from=generated Cargo.toml Cargo.lock ./
+COPY --from=generated crates/ crates/
+RUN --mount=type=cache,id=ilex-cargo,target=/root/.cargo/registry \
+    cargo build --release --locked -p ilex-enroll && \
+    install -Dm755 target/release/ilex-enroll /out/usr/bin/ilex-enroll
+
 FROM scratch AS installer-config
+COPY --from=enrollment-build /out/ /
 COPY --from=generated iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 COPY --from=generated compositions.json /usr/share/ilex-installer/compositions.json
 COPY --from=generated ilex.yaml /etc/containers/registries.d/ilex.yaml
@@ -22,6 +33,7 @@ COPY chooser/ilex-installer-chooser.service /usr/lib/systemd/system/
 COPY chooser/anaconda-chooser.conf /usr/lib/systemd/system/anaconda.service.d/10-ilex-chooser.conf
 COPY chooser/anaconda-chooser.conf /usr/lib/systemd/system/anaconda-direct.service.d/10-ilex-chooser.conf
 COPY interactive-defaults.ks /usr/share/anaconda/interactive-defaults.ks
+COPY --chmod=0755 anaconda-enroll/complete /usr/libexec/ilex-installer/complete-enrollment
 
 FROM quay.io/fedora/fedora-bootc:45
 LABEL org.opencontainers.image.source="https://github.com/Reidond/ilex"
@@ -48,6 +60,7 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
         jq \
         xorrisofs \
         squashfs-tools && \
+    dnf -y install --setopt=keepcache=1 cryptsetup tpm2-tss kbd && \
     ! rpm -q anaconda-gui && ! rpm -q slitherer && \
     mkdir -p /boot/efi && cp -ra /usr/lib/efi/*/*/EFI /boot/efi
 
@@ -121,5 +134,7 @@ EOT
 # Anaconda still asks for the disk, the user and everything else.
 COPY --from=installer-config / /
 RUN mkdir -p /usr/lib/systemd/system/anaconda.target.wants && \
+    ln -s /dev/null /etc/systemd/system/anaconda-shell@tty6.service && \
+    ln -s /dev/null /etc/systemd/system/getty@tty6.service && \
     ln -s ../ilex-installer-chooser.service \
         /usr/lib/systemd/system/anaconda.target.wants/ilex-installer-chooser.service

@@ -70,6 +70,10 @@ on:
         type: choice
         options: [probe, kvm, tcg]
         default: probe
+      encrypted_install:
+        description: Run the exact encrypted ISO install, recovery privacy and no-TPM fallback gate
+        type: boolean
+        default: false
 
 # A v1-disk run has a group of its own (per branch: each has its cache scope):
 # publish runs never wait for it, and a newer :generic.gnome supersedes the disk it
@@ -265,7 +269,15 @@ jobs:
         env:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
           ILEX_SECURITY_ACCELERATOR: ${{ inputs.security_accelerator || 'probe' }}
+          ILEX_SECURITY_MEMORY: ${{ inputs.encrypted_install && '6G' || '4G' }}
         run: bash .github/security-tier.sh
+
+      - name: Exact encrypted installer qualification
+        if: inputs.encrypted_install
+        timeout-minutes: 180
+        env:
+          ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
+        run: bash .github/encrypted-tier.sh
 
       - name: Report unchanged security tier as unqualified
         if: steps.changed.outputs.changed != 'true' && !inputs.test
@@ -294,6 +306,15 @@ jobs:
           APPS_RESULT: ${{ steps.apps.outcome || 'skipped' }}
         run: |
           echo "Installed-system Flatpak qualification (apps input): $APPS_RESULT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep encrypted installer public evidence
+        if: always() && inputs.encrypted_install
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-installer-evidence
+          path: ${{ runner.temp }}/security-artifacts/encrypted-install
+          if-no-files-found: error
+          retention-days: 3
 
       # Keep the installer staging step early: upgrade starts while other roots
       # build/rechunk/boot. A job output is committed only after all tests pass.
