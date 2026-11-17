@@ -99,7 +99,8 @@ retains its qualification independently. Do not promote 2 GiB evidence to
 The declared RX 9070 XT (`1002:7550`) uses Fedora's in-tree `amdgpu`; the
 machine manifest adds userspace gaming packages and no out-of-tree driver.
 The image-level assertion records `modinfo`, the owning RPM and firmware RPM,
-requires `intree=Y`, a module signer and the GPU's PCI alias, then actually
+requires `intree=Y`, a module signer and kmod resolving the GPU's display
+modalias to amdgpu (including wildcard aliases for IP discovery), then actually
 loads `amdgpu` while the guest is under lockdown and checks there is no
 unsigned-module taint. Unexpected akmod/kmod driver packages or files in the
 external module directories require a separate signing review and fail it.

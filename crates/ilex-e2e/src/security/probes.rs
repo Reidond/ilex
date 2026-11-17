@@ -204,10 +204,17 @@ pub fn amdgpu(control: &impl VmControl, artifacts: &Path) -> Result<()> {
 kernel=$(uname -r)
 printf 'kernel=%s\n' "$kernel"
 rpm -q kernel-core kernel-modules-core amd-gpu-firmware
-modinfo amdgpu
+for field in filename intree signer sig_id vermagic; do
+    printf '%s: ' "$field"
+    modinfo -F "$field" amdgpu
+done
 test "$(modinfo -F intree amdgpu)" = Y
 test -n "$(modinfo -F signer amdgpu)"
-modinfo -F alias amdgpu | grep -i 'pci:v00001002d00007550'
+# New GPUs use amdgpu's wildcard display-class aliases and IP discovery.
+# Ask kmod to match a VGA modalias rather than requiring a literal device ID.
+modalias=pci:v00001002d00007550sv00000000sd00000000bc03sc00i00
+printf 'RX 9070 XT display modalias: %s\n' "$modalias"
+modprobe --resolve-alias "$modalias" | grep -Fx amdgpu
 rpm -qf "$(modinfo -n amdgpu)"
 # kmod-libs/devel are Fedora's module-loader libraries, not external drivers.
 if rpm -qa --qf '%{NAME}\n' | grep -Eiv '^kmod-(libs|devel)$' | grep -Ei '(^akmod|^kmod-|nvidia.*(kmod|driver))'; then
