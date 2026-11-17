@@ -703,7 +703,9 @@ No network operation runs automatically or gates authentication.
 
 Initial `home/` files are deliberately restricted to `.gitignore`,
 `.editorconfig`, `.config/git/ignore` and `.config/ilex/<name>.txt|toml|json`.
-Only small, non-executable UTF-8 regular files are supported. Symlinks,
+Each profile TOML manifest and initial file is limited to 64 KiB, checked on
+the opened descriptor before allocation and enforced again by a bounded read.
+Only non-executable UTF-8 regular files are supported. Symlinks,
 special files, traversal, credentials, identity/keyring paths and login hooks
 are refused. Extend these allowlists by review. The composer reads every
 profile input through no-follow directory descriptors and stages canonical
@@ -718,13 +720,23 @@ username; its identity suggestions remain metadata for setup. Apply refuses
 root, an inactive/non-LUKS home, or a caller/home UID mismatch. It uses NSS,
 not `$HOME`, and writes with owned no-follow directory descriptors. Nothing
 imports or rewrites `.identity`, `.identity-blob`, keyrings or credentials.
+External settings/app writers run in bubblewrap with a read-only host, masked
+homes and runtime, a clean environment, and only no-follow-opened home
+subdirectories bound writable. GNOME uses its own dconf profile and private
+session bus (`dbus-daemon`); the existing session's redirected writer is never
+used. Symlinked dconf directories/databases are conflicts. Running desktop
+components may need a new session to observe these settings changes.
 
 `~/.local/state/ilex/profile.json` stores schema, profile revision/digest and
 managed file/setting hashes or values. Missing files are seeded atomically;
 updates replace only the last managed contents. Existing files, edits,
 deletions, symlink/hardlink paths and explicitly set desktop settings are
-preserved and reported as conflicts (exit 1). Invalid/newer state, a newer
-profile revision, or changed content without a revision bump declines updates
+preserved and reported as conflicts (exit 1).
+Setting resets count as edits: reapply writes only an initially absent setting,
+or a changed profile value whose current override still equals the last
+managed value. An unchanged managed setting is not rewritten.
+Invalid/newer state, a newer profile revision, or changed content without a
+revision bump declines updates
 (exit 2). Never lower a revision during rollback. Removed profile files are
 left in place. The per-user `ilex-profile.service` reapplies only an already
 selected profile on login, without app installation; no selection is a no-op.
@@ -736,7 +748,10 @@ application through PR 20's real creation/TTY path in an enforcing installed
 guest. The latter uses 2 GiB and no UI automation, tests user-edit/deletion and
 link preservation, future-state/rollback refusal, opt-in app failure, and a
 successful relogin while the older image's user service declines newer state.
-On a GNOME image it also checks scoped dconf updates and user-setting conflicts.
+On a GNOME image it also checks scoped dconf updates, reset preservation,
+dconf directory/leaf links outside the encrypted home, inherited environment
+redirects and user-setting conflicts. The compiler regression rejects sparse
+512 MiB templates and all three manifests under a 128 MiB address-space limit.
 Measured 2026-11-17: the shell-free image is 1,977.83 MiB against Fedora
 bootc's 1,917.62 MiB, a 60.21 MiB increase within the unchanged 128 MiB budget.
 

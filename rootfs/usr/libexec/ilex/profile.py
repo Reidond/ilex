@@ -5,7 +5,7 @@ All home traversal is relative to pinned, owned, no-follow directory FDs.
 """
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import json
@@ -20,6 +20,13 @@ import uuid
 ROOT = "/usr/share/ilex"
 STATE = ".local/state/ilex/profile.json"
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+SETTINGS_WORKER = """import json, runpy, sys
+module = runpy.run_path('/usr/libexec/ilex/profile.py', run_name='ilex_settings_worker')
+request = json.loads(sys.stdin.read(1048577))
+conflicts = []
+managed = module['settings_worker'](request['data'], request['previous'], conflicts)
+print(json.dumps({'managed': managed, 'conflicts': conflicts}))
+"""
 
 
 def digest(data):
@@ -37,6 +44,7 @@ def parts(path):
 
 class Home:
     def __init__(self, path, owner):
+        self.path = path
         self.owner = owner
         self.fd = os.open(path, DIR)
         self.owned(self.fd, directory=True)
@@ -107,12 +115,45 @@ class Home:
                     pass
 
 
-def run(*args):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=120, check=False)
+def run(*args, **options):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=120, check=False, **options)
     if result.returncode:
         # Do not echo subprocess output or user configuration into the journal.
         raise ValueError(f"{os.path.basename(args[0])} failed (exit {result.returncode})")
     return result.stdout.strip()
+
+
+def confined(home, directories, command, payload=None, network=False):
+    """External writers see only pinned home subdirectories as writable.
+
+    A path check alone cannot constrain the session's existing dconf service.
+    Mask homes/runtime, clear inherited XDG/dconf/D-Bus redirects and use a
+    private bus. Even a concurrent symlink swap cannot write outside the
+    explicitly bound directory in the authenticated home; the rest is RO.
+    """
+    with ExitStack() as opened:
+        arguments = ["/usr/bin/bwrap", "--die-with-parent", "--unshare-all"]
+        if network:
+            arguments.append("--share-net")
+        arguments += ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+                      "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/var/home",
+                      "--dir", home.path, "--dir", f"/run/user/{home.owner}", "--clearenv"]
+        for key, value in {"PATH": "/usr/bin:/usr/sbin", "HOME": home.path,
+                           "XDG_CONFIG_HOME": home.path + "/.config",
+                           "XDG_DATA_HOME": home.path + "/.local/share",
+                           "XDG_CACHE_HOME": home.path + "/.cache",
+                           "XDG_RUNTIME_DIR": f"/run/user/{home.owner}",
+                           "GSETTINGS_BACKEND": "dconf",
+                           "DCONF_PROFILE": "/usr/libexec/ilex/dconf-profile"}.items():
+            arguments += ["--setenv", key, value]
+        descriptors = []
+        for directory in directories:
+            fd, _ = opened.enter_context(home.parent(directory + "/.anchor", create=True))
+            descriptors.append(fd)
+            arguments += ["--dir", home.path + "/" + directory,
+                          "--bind-fd", str(fd), home.path + "/" + directory]
+        arguments += ["--chdir", home.path, "--", *command]
+        return run(*arguments, pass_fds=descriptors, input=payload)
 
 
 def read_image(path):
@@ -126,9 +167,15 @@ def read_image(path):
             fd = child
         leaf = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
         with os.fdopen(leaf, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            meta = os.fstat(stream.fileno())
+            if not stat.S_ISREG(meta.st_mode):
                 raise ValueError("image profile must be a regular file")
-            return stream.read()
+            if meta.st_size > 1048576:
+                raise ValueError("image profile is too large")
+            value = stream.read(1048577)
+            if len(value) > 1048576:
+                raise ValueError("image profile is too large")
+            return value
     finally:
         os.close(fd)
 
@@ -182,10 +229,8 @@ def active_home():
     return Home(path, uid)
 
 
-def settings(data, previous, shell, conflicts):
+def settings_worker(data, previous, conflicts):
     managed = dict(previous)
-    if shell != "gnome":
-        return managed
     for key, value in data.get("gnome", {}).items():
         if key not in {"color-scheme", "clock-show-weekday", "clock-format"}:
             raise ValueError("unsupported GNOME setting")
@@ -193,14 +238,34 @@ def settings(data, previous, shell, conflicts):
         path = f"/org/gnome/desktop/interface/{key}"
         try:
             current = run("/usr/bin/dconf", "read", path)
-            if current and current != previous.get(key):
+            if (key in previous and current != previous[key]) or (key not in previous and current):
                 conflicts.append(f"settings.gnome.{key}")
+                continue
+            if key in previous and variant == previous[key]:
                 continue
             run("/usr/bin/gsettings", "set", "org.gnome.desktop.interface", key, variant)
             managed[key] = run("/usr/bin/dconf", "read", path)
         except (ValueError, OSError, subprocess.TimeoutExpired):
             conflicts.append(f"settings.gnome.{key} (unavailable; retry after login)")
     return managed
+
+
+def settings(home, data, previous, shell, conflicts):
+    if shell != "gnome" or not data.get("gnome"):
+        return dict(previous)
+    try:
+        # Reject redirected databases before launching any writer. The
+        # namespace also closes the check/use race and contains service writes.
+        home.read(".config/dconf/user")
+        result = json.loads(confined(home, [".config/dconf"], [
+            "/usr/bin/dbus-run-session", "--", "/usr/bin/python3", "-I", "-S",
+            "-c", SETTINGS_WORKER,
+        ], json.dumps({"data": data, "previous": previous})))
+        conflicts.extend(result["conflicts"])
+        return result["managed"]
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        conflicts.append("settings.gnome (unsafe storage or unavailable writer; retry after login)")
+        return dict(previous)
 
 
 def apply(args):
@@ -255,14 +320,16 @@ def apply(args):
                 managed[path] = expected
             except (OSError, ValueError):
                 conflicts.append(path)
-        setting_hashes = settings(data["settings"], old.get("settings", {}) if old else {}, shell, conflicts)
+        setting_hashes = settings(home, data["settings"], old.get("settings", {}) if old else {}, shell, conflicts)
         new = {"schema": 1, "profile": name, "revision": entry["revision"], "digest": entry["sha256"],
                "files": managed, "settings": setting_hashes}
         home.write(STATE, (json.dumps(new, sort_keys=True, indent=2) + "\n").encode(), digest(old_raw) if old_raw is not None else None)
         if args.install_apps:
             for app in data["apps"]["flatpaks"]:
                 try:
-                    run("/usr/bin/flatpak", "--user", "install", "--app", "--or-update", "--noninteractive", "--", app["remote"], app["id"])
+                    confined(home, [".config/flatpak", ".local/share/flatpak", ".cache/flatpak"], [
+                        "/usr/bin/flatpak", "--user", "install", "--app", "--or-update", "--noninteractive", "--", app["remote"], app["id"],
+                    ], network=True)
                 except (OSError, ValueError, subprocess.TimeoutExpired):
                     conflicts.append(f"app {app['id']} (unavailable; retry explicitly)")
         print(json.dumps({"profile": name, "revision": entry["revision"], "conflicts": conflicts}))

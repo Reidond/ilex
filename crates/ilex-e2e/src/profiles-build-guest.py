@@ -89,6 +89,34 @@ with tempfile.TemporaryDirectory(prefix="ilex-profiles-") as temporary:
     refused(lambda: (user / "settings.toml").symlink_to("/etc/passwd"))
     refused(lambda: os.mkfifo(user / "apps.toml"))
 
+    # A full read of any of these sparse 512 MiB inputs would raise
+    # MemoryError under this child's 128 MiB address-space limit. Require the
+    # opened-FD size rejection, including all optional public manifests.
+    for oversized in ("user.toml", "settings.toml", "apps.toml", "home/.config/ilex/public.txt"):
+        reset()
+        destination = user / oversized
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as stream:
+            stream.truncate(512 * 1024 * 1024)
+        script = '''import resource, sys
+from pathlib import Path
+resource.setrlimit(resource.RLIMIT_AS, (128 * 1024 * 1024,) * 2)
+sys.path.insert(0, '/run/ilex-profiles-build')
+import compose
+from image_tree import Tree
+try:
+    with Tree(Path(sys.argv[2]), 'oversized regression', create=True) as generated:
+        compose.user_profiles(Path(sys.argv[1]), ['sample'], generated)
+except ValueError as error:
+    assert 'must be at most 65536 bytes' in str(error), str(error)
+else:
+    raise AssertionError('oversized profile input accepted')
+'''
+        result = subprocess.run([sys.executable, "-I", "-S", "-c", script, str(ctx), str(Path(temporary, "oversized-out"))],
+                                capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, (oversized, result.stdout, result.stderr)
+    print("512 MiB sparse manifests/templates rejected under a 128 MiB memory limit: passed")
+
     reset()
     homefile(".config/ilex/public.txt")
     (user / "home/.config/ilex/public.txt").unlink()

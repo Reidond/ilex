@@ -15,6 +15,8 @@ import tomllib
 
 from image_tree import Tree, json_bytes, parts
 
+PROFILE_INPUT_LIMIT = 65536  # Each public TOML manifest and initial dotfile.
+
 
 def fail(path, key, message):
     text = f"{path}: `{key}` {message}"
@@ -260,7 +262,7 @@ def user_profiles(ctx, names, generated):
             path = f"{prefix}/user.toml"
 
             def manifest(leaf, optional=False):
-                raw = source.read(f"{prefix}/{leaf}", optional=optional)
+                raw = source.read(f"{prefix}/{leaf}", optional=optional, max_bytes=PROFILE_INPUT_LIMIT)
                 if raw is None:
                     return {}
                 try:
@@ -347,9 +349,7 @@ def user_profiles(ctx, names, generated):
                     # Windows /mnt checkouts have synthetic mode bits; regular
                     # files there are non-executable with the supported mount.
                     fail(path, relative, "executable dotfiles are forbidden")
-                raw = source.read(entry)
-                if len(raw) > 65536:
-                    fail(path, relative, "must be at most 64 KiB")
+                raw = source.read(entry, max_bytes=PROFILE_INPUT_LIMIT)
                 try:
                     text = raw.decode("utf-8")
                 except UnicodeError:

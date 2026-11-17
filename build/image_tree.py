@@ -105,7 +105,7 @@ class Tree:
                 if stat.S_ISDIR(mode):
                     yield from self.entries(path)
 
-    def read(self, path, optional=False):
+    def read(self, path, optional=False, max_bytes=None):
         try:
             with self.parent(path) as (fd, name):
                 try:
@@ -115,9 +115,17 @@ class Tree:
                 except OSError as exc:
                     error(self.label, path, f"cannot read a regular file without following symlinks: {exc}")
                 with os.fdopen(source, "rb") as stream:
-                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    meta = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(meta.st_mode):
                         error(self.label, path, "must be a regular file")
-                    return stream.read()
+                    if max_bytes is None:
+                        return stream.read()
+                    if meta.st_size > max_bytes:
+                        error(self.label, path, f"must be at most {max_bytes} bytes")
+                    value = stream.read(max_bytes + 1)
+                    if len(value) > max_bytes:
+                        error(self.label, path, f"must be at most {max_bytes} bytes")
+                    return value
         except FileNotFoundError:
             if optional:
                 return None
