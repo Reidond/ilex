@@ -1442,13 +1442,11 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 - Without `--gui`/`--disk`, run `cargo xtask vm` on Windows itself (PowerShell or
   Git Bash, in the checkout). It hands itself to the distro (`wsl.exe -d
   FedoraLinux-45 -u root --cd <checkout> -e bash -lc 'cargo xtask vm …'`;
-  `ILEX_WSL_DISTRO` names another). With `--gui` it first builds
-  `ilex-viewer.exe` (the VM's window, see "The VM window on Windows") and
-  starts it when the WSL side prints its `ilex-viewer: --connect …` line.
-  WSL can't start it itself: `/mnt/c` is mounted with `fmask=133`, so no
-  `.exe` there has the execute bit interop needs.
-  `ILEX_SHELLS` and `ILEX_MACHINE` reach WSL through `WSLENV`, including without `--gui`.
-  Selection is validated natively before building the viewer or entering WSL.
+  `ILEX_WSL_DISTRO` names another). `--gui` and `--disk` use the native
+  provider documented above. Direct graphical commands inside WSL retain
+  their compatibility viewer; see "The WSL compatibility window" below.
+  `ILEX_SHELLS` and `ILEX_MACHINE` reach the ephemeral WSL path through `WSLENV`.
+  Selection is validated natively before entering WSL.
 - Nothing here uses WSLg any more. It is unreliable on this machine: on most
   starts of WSL 2.7 it fails to open its shared memory with Windows
   (`/mnt/wslg/weston.log`: `rdp_allocate_shared_memory: Failed to open …`,
@@ -1459,12 +1457,11 @@ wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
 
 ## Driving VMs with ilex-vmctl
 
-`cargo xtask disk` writes the installed qcow2 (`bcvk to-disk`); `cargo xtask
-vm --disk` boots it headless on the graphical test machine (UEFI, 4K
-`virtio-vga`), and `--gui` adds a window for a human (in WSL the native
-SDL/WHPX window on Windows, a GTK window on Linux, or the compatibility viewer
-when launched explicitly inside WSL). Linux disk-booted VMs (also the
-`disk::` and `graphical::` tests) publishes `qmp.sock`, `vnc.sock` and
+`cargo xtask disk` writes the installed qcow2 (`bcvk to-disk`). On Windows,
+`vm --disk` boots a native headless WHPX VM and `--gui` selects SDL/virgl.
+Linux `vm --disk` uses the graphical test machine (UEFI, 4K `virtio-vga`);
+`--gui` adds GTK on a Linux desktop or the compatibility viewer inside WSL.
+Linux disk-booted VMs (also the `disk::` and `graphical::` tests) publish `qmp.sock`, `vnc.sock` and
 `vm.toml` in
 `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; native Windows publishes private
 `vm.json` with independent loopback QMP endpoints and PID/HWND identity in the
@@ -1476,7 +1473,7 @@ cargo install --path crates/ilex-vmctl   # native Windows or Linux
 ilex-vmctl list
 ilex-vmctl screenshot -o shot.png        # read the PNG to see the screen
 ilex-vmctl wait-screen --stable 3        # not blank, then unchanged for 3s
-ilex-vmctl click 1920 1080               # framebuffer pixels (3840x2160)
+ilex-vmctl click 640 400                 # screenshot pixels; cropped client pixels on Windows
 ilex-vmctl type 'hunter2' --enter        # US layout; ilex-vmctl key ctrl+alt+t
 ```
 
@@ -1502,7 +1499,7 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
   when the image's default shell is not `gnome`, including `--shell none`.
 - The SSH test key and the throwaway disk overlays live in the state dir;
   `cargo xtask vm --disk` prints the exact `ssh` command line.
-- `--gui` gives the guest a GPU when the host has one (`/dev/dxg` in WSL, a
+- On Linux/WSL, `--gui` gives the guest a GPU when the host has one (`/dev/dxg` in WSL, a
   DRM render node elsewhere; `--no-gl` opts out): `virtio-vga-gl` with
   `-display gtk,gl=on`, so virglrenderer renders the guest's OpenGL on the
   host (in WSL through Mesa's D3D12 driver on the Windows GPU), and half the

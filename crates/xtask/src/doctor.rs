@@ -45,7 +45,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     } else {
         None
     };
-    let capabilities = ilex_devkit::provider::capabilities("none", (1280, 800));
+    let capabilities = crate::info::capabilities(ws)?;
     if let Some(feature) = args.require {
         let feature: Capability = serde_json::from_value(serde_json::Value::String(feature))?;
         capabilities.require(feature)?;

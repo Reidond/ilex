@@ -13,7 +13,7 @@ pub struct Args {
     /// Versioned identity, source digest, paths and capabilities
     #[arg(long)]
     pub json: bool,
-    /// Include the ordinary Linux VM's capability report
+    /// Include this host's VM capability report
     #[arg(long)]
     pub capabilities: bool,
 }
@@ -27,20 +27,14 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 "source": source, "image": ws.image_ref(), "runtime_dir": ws.runtime_dir(),
                 "state_dir": ws.state_dir(), "backend": format!("{:?}", ilex_devkit::host_backend()),
                 "host_arch": ilex_devkit::core::Architecture::host()?,
-                "capabilities": ilex_devkit::provider::capabilities("none", (1280, 800)),
+                "capabilities": capabilities(ws)?,
                 "build_executor": executor_info(ws)?
             }))?
         );
         return Ok(());
     }
     if args.capabilities {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&ilex_devkit::provider::capabilities(
-                "none",
-                (1280, 800)
-            ))?
-        );
+        println!("{}", serde_json::to_string_pretty(&capabilities(ws)?)?);
     }
     match args {
         Args {
@@ -141,6 +135,26 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+pub(crate) fn capabilities(ws: &Workspace) -> Result<ilex_devkit::core::VmCapabilities> {
+    #[cfg(target_os = "windows")]
+    {
+        let vms =
+            ilex_tooling_windows::qemu::running_vms(&ws.runtime_dir(), Some(&ws.identity()?.owner));
+        match vms.as_slice() {
+            [vm] => Ok(vm.capabilities()),
+            [] => Ok(ilex_tooling_windows::qemu::idle_capabilities()),
+            _ => anyhow::bail!(
+                "several native VMs are running; use ilex-vmctl --vm <purpose> capabilities"
+            ),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = ws;
+        Ok(ilex_devkit::provider::capabilities("none", (1280, 800)))
     }
 }
 

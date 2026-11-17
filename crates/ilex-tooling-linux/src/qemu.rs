@@ -173,7 +173,14 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
     // Installation boots a real VM too. Share the same slots as tests instead
     // of allocating it outside the cap on a busy WSL/native Linux host.
     let _install_slot = slots::acquire(&format!("{}disk-install", ws.vm_prefix()))?;
+    let logs = ws
+        .ensure_runtime()?
+        .join(format!("disk-install-{}", std::process::id()));
+    fs::create_dir_all(&logs)?;
     bcvk.args(["to-disk", "--format", spec.format.name()])
+        .arg("--console")
+        .arg("--log-dir")
+        .arg(format!("journal,console={}", logs.display()))
         .args(["--disk-size", &spec.size])
         .arg(source)
         .arg(&out);

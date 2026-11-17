@@ -264,6 +264,53 @@ pub fn running_vms(root: &Path, owner: Option<&str>) -> Vec<VmInfo> {
     vms.sort_by(|a, b| a.purpose.cmp(&b.purpose));
     vms
 }
+
+/// Capability diagnostics must not report Linux/WSL as the Windows provider,
+/// or claim session/capture availability before an owned launch exists.
+pub fn idle_capabilities() -> VmCapabilities {
+    use Capability::*;
+    use CapabilityStatus::*;
+    let mut features = BTreeMap::new();
+    for feature in [
+        Start,
+        Stop,
+        Destroy,
+        PrebootKeyboard,
+        SessionKeyboard,
+        SessionPointer,
+        Serial,
+        Screenshot,
+        GpuRendering,
+        Clipboard,
+    ] {
+        features.insert(feature, NotYetQualified("no owned native VM running; launch cargo xtask vm --gui, then inspect its capabilities".into()));
+    }
+    features.insert(
+        PrebootPointer,
+        NotYetQualified("use firmware keyboard navigation".into()),
+    );
+    for feature in [FirmwareEnforcement, PersistentTpm, Suspend] {
+        features.insert(
+            feature,
+            Unavailable(
+                "WHPX development profile is nonsecure; Gen2 security is a separate provider"
+                    .into(),
+            ),
+        );
+    }
+    VmCapabilities {
+        schema: 1,
+        provider: "windows-qemu-whpx".into(),
+        vm_id: None,
+        phase: BootPhase::Unknown,
+        features,
+        screenshot_source: None,
+        screenshot_dimensions: None,
+        text_layout: Some(
+            "US physical keyboard; ASCII text only (Unicode via dev clipboard)".into(),
+        ),
+    }
+}
 pub struct Config {
     pub identity: CheckoutIdentity,
     pub runtime_dir: PathBuf,
