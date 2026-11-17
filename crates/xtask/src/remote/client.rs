@@ -443,6 +443,7 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
         );
         artifact.location.path = disk.clone();
         artifact.location.executor_id = format!("windows-owner:{}", job.snapshot.identity.owner);
+        artifact.allocated_bytes = transport::allocated_bytes(disk)?;
         fs::write(
             disk.with_file_name(format!(
                 "{}.disk.json",

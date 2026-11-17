@@ -45,6 +45,28 @@ pub fn available_space(path: &std::path::Path) -> Result<u64> {
     Ok(fs2::available_space(ancestor)?)
 }
 
+pub fn allocated_bytes(path: &std::path::Path) -> Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+    };
+    let file = std::fs::File::open(path)?;
+    let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    ensure!(
+        unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle().cast(),
+                FileStandardInfo,
+                (&mut info as *mut FILE_STANDARD_INFO).cast(),
+                std::mem::size_of_val(&info) as u32,
+            )
+        } != 0,
+        "reading downloaded disk allocation: {}",
+        std::io::Error::last_os_error()
+    );
+    Ok(u64::try_from(info.AllocationSize)?)
+}
+
 pub struct Transport {
     pub endpoint: BuilderEndpoint,
 }
