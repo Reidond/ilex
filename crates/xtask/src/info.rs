@@ -160,7 +160,7 @@ fn executor_info(ws: &Workspace) -> Result<serde_json::Value> {
                     ws.state_dir()
                         .join("remote/jobs")
                         .join(id)
-                        .join("result.json"),
+                        .join("collection.json"),
                 )
                 .ok()
             })

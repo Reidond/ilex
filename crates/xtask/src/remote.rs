@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 #[cfg(target_os = "windows")]
 mod client;
 #[cfg(target_os = "windows")]
+mod receive;
+#[cfg(target_os = "windows")]
 mod source;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,6 +31,10 @@ pub enum Command {
     },
     SelfCheck {
         hold_seconds: u64,
+        #[serde(default)]
+        allocation_image: Option<String>,
+        #[serde(default)]
+        fingerprint_image: Option<String>,
     },
 }
 
@@ -76,7 +82,7 @@ pub enum Operation {
         #[arg(long)]
         job: Option<String>,
     },
-    /// Cancel only this checkout's selected remote job, then retrieve evidence
+    /// Request cancellation immediately; the original client or resume collects evidence
     Cancel {
         #[arg(long)]
         job: Option<String>,
@@ -85,7 +91,15 @@ pub enum Operation {
     SelfCheck {
         #[arg(long, default_value_t = 0)]
         hold_seconds: u64,
+        /// Pause a real detached ephemeral allocation before its CID receipt
+        #[arg(long)]
+        allocation_image: Option<String>,
+        /// Report actual root/rechunk fingerprints for a native/remote comparison
+        #[arg(long)]
+        fingerprint_image: Option<String>,
     },
+    /// Exercise the Windows untrusted-artifact receiver without a builder
+    SelfCheckReceiver,
 }
 
 pub fn route(ws: &Workspace, cmd: crate::Cmd) -> Result<Option<crate::Cmd>> {

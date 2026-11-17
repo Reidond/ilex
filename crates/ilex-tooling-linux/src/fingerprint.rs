@@ -80,10 +80,20 @@ pub fn hash_users(ws: &Workspace, hash: &mut Sha256) -> Result<()> {
 }
 
 pub fn hash_inputs(ws: &Workspace, hash: &mut Sha256, inputs: Vec<String>) -> Result<()> {
-    if let Some(context) = crate::source::remote_context(&ws.root)? {
-        crate::source::verify_materialized(&ws.root, &context.source)?;
-        // Cover selected working bytes, modes, links and deletions, rather than HEAD-only trees.
-        for entry in &context.source.entries {
+    let source = crate::source::manifest(ws)?;
+    // Preserve the published clean-tree encoding in both executors. The shallow
+    // snapshot includes the original HEAD tree, so its Git object IDs are equal.
+    for path in &inputs {
+        let tree = git::tree_hash(&ws.root, path).with_context(|| format!("hashing {path}"))?;
+        eprintln!("  {path}: {tree}");
+        hash.update(format!("tree {path} {tree}\n"));
+    }
+    if source.dirty {
+        hash.update(b"dirty\n");
+        hash.update(b"working-inputs v1\n");
+        // The same canonical manifest encoding covers dirty working bytes,
+        // modes, links and deletions on native Linux and in a remote snapshot.
+        for entry in &source.entries {
             if inputs
                 .iter()
                 .any(|p| entry.path == *p || entry.path.starts_with(&format!("{p}/")))
@@ -92,18 +102,6 @@ pub fn hash_inputs(ws: &Workspace, hash: &mut Sha256, inputs: Vec<String>) -> Re
                 hash.update(b"\n");
             }
         }
-        return Ok(());
-    }
-    for path in inputs {
-        let tree = git::tree_hash(&ws.root, &path).with_context(|| format!("hashing {path}"))?;
-        eprintln!("  {path}: {tree}");
-        hash.update(format!("tree {path} {tree}\n"));
-    }
-    if git::is_dirty(&ws.root)? {
-        // Only HEAD's trees are hashed; make a dirty build's fingerprint
-        // differ from the clean one so it can never match a published image.
-        eprintln!("xtask: warning: working tree is dirty; the fingerprint covers HEAD only");
-        hash.update(b"dirty\n");
     }
     Ok(())
 }

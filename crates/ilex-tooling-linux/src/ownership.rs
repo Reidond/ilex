@@ -477,14 +477,15 @@ pub fn record_remote_resource(ws: &Workspace, provider: &str, id: &str, name: &s
     fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{}.json", &key[7..]));
     let temporary = path.with_extension("partial");
-    fs::write(
-        &temporary,
-        serde_json::to_vec(&serde_json::json!({
-            "schema": 1, "owner": context.identity.owner, "provider": provider,
-            "id": id, "name": name, "source_digest": context.source.digest,
-        }))?,
-    )?;
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(&serde_json::to_vec(&serde_json::json!({
+        "schema": 1, "owner": context.identity.owner, "provider": provider,
+        "id": id, "name": name, "source_digest": context.source.digest,
+    }))?)?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(temporary, path)?;
+    fs::File::open(directory)?.sync_all()?;
     Ok(())
 }
 
@@ -519,6 +520,39 @@ pub fn remote_container_args(ws: &Workspace, command: &mut Command) -> Result<()
             "--label",
             &format!("ilex.checkout-owner={owner}"),
         ]);
+    Ok(())
+}
+
+/// bcvk has no CID-file option. Journal a unique allocation label before it can
+/// create a detached container; cleanup discovers the exact CID by that nonce.
+pub fn remote_ephemeral_args(ws: &Workspace, name: &str, command: &mut Command) -> Result<()> {
+    let Some(directory) = std::env::var_os("ILEX_JOB_RESOURCE_DIR") else {
+        return Ok(());
+    };
+    let directory = std::path::PathBuf::from(directory);
+    let job = directory
+        .parent()
+        .and_then(|p| p.file_name())
+        .context("remote job path missing")?
+        .to_string_lossy();
+    let nonce = digest(
+        format!(
+            "{job}:{name}:{}:{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        )
+        .as_bytes(),
+    );
+    let nonce = &nonce[7..];
+    record_remote_resource(ws, "podman_nonce", nonce, name)?;
+    command.args([
+        "--label",
+        &format!("ilex.remote-allocation={nonce}"),
+        "--label",
+        &format!("ilex.remote-job={job}"),
+        "--label",
+        &format!("ilex.checkout-owner={}", ws.identity()?.owner),
+    ]);
     Ok(())
 }
 

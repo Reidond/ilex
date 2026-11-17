@@ -4,6 +4,8 @@ pub mod builder;
 #[cfg(target_os = "windows")]
 mod host;
 #[cfg(target_os = "windows")]
+pub mod received;
+#[cfg(target_os = "windows")]
 pub mod runtime;
 #[cfg(target_os = "windows")]
 pub mod transport;

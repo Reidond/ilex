@@ -173,15 +173,10 @@ pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
 pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     let selection = image_selection(image)?;
     let inputs = selection_inputs(&selection);
-    let rpm = cmd::output(Command::new("podman").args([
-        "run",
-        "--rm",
-        "--network=none",
-        "--entrypoint",
-        "rpm",
-        image,
-        "-qa",
-    ]))?;
+    let mut rpm_command = Command::new("podman");
+    rpm_command.args(["run", "--rm", "--network=none", "--entrypoint", "rpm"]);
+    ilex_devkit::ownership::remote_container_args(ws, &mut rpm_command)?;
+    let rpm = cmd::output(rpm_command.args([image, "-qa"]))?;
     let mut packages: Vec<&str> = rpm
         .lines()
         .map(str::trim)
@@ -209,7 +204,7 @@ pub use ilex_devkit::fingerprint::root_inputs;
 use ilex_devkit::fingerprint::{hash_inputs, hash_selection, hash_users, selection_inputs};
 
 /// Require configuration labels even when reusing an existing fingerprint.
-fn image_selection(image: &str) -> Result<Selection> {
+pub(crate) fn image_selection(image: &str) -> Result<Selection> {
     let text = cmd::output(Command::new("podman").args([
         "image",
         "inspect",

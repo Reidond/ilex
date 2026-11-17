@@ -300,9 +300,34 @@ impl EphemeralVm {
             .args(["--name", name])
             .args(["--memory", &opts.memory])
             .args(["--vcpus", &opts.vcpus.to_string()])
-            .args(&opts.extra_args)
-            .arg(image);
+            .args(&opts.extra_args);
+        crate::ownership::remote_ephemeral_args(&ws, name, &mut run)?;
+        run.arg(image);
         let started = cmd::run(&mut run);
+        if started.is_ok() && std::env::var_os("ILEX_SELFCHECK_ALLOCATION_PAUSE").is_some() {
+            ensure!(
+                std::env::var_os("ILEX_JOB_RESOURCE_DIR").is_some(),
+                "allocation fault injection requires a remote job"
+            );
+            let proof = cmd::output(Command::new("podman").args([
+                "container",
+                "inspect",
+                "--format",
+                "{{.Id}}|{{index .Config.Labels \"ilex.remote-allocation\"}}",
+                name,
+            ]))?;
+            let (cid, nonce) = proof
+                .split_once('|')
+                .context("allocation self-check identity missing")?;
+            ensure!(
+                cid.len() == 64 && nonce.len() == 64,
+                "allocation self-check nonce missing"
+            );
+            eprintln!(
+                "ilex: self-check allocation created before CID receipt: name={name} cid={cid} nonce={nonce}"
+            );
+            thread::sleep(Duration::from_secs(3600));
+        }
         // A failed CLI may have lost a name race to an unrelated launcher.
         // Never turn its current occupant into our cleanup guard on failure.
         started.with_context(|| format!("starting ephemeral VM {name}; inspect any partial resource explicitly before retrying"))?;

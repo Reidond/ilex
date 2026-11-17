@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -30,7 +30,7 @@ const ENVIRONMENT: &[&str] = &[
 ];
 type Rpc<'a> = TransferOperation<'a, Job>;
 
-fn job_uuid() -> Result<String> {
+pub(super) fn job_uuid() -> Result<String> {
     // Windows supplies the random UUID; never derive a run ID from PID/time alone.
     #[repr(C)]
     struct Guid {
@@ -95,11 +95,15 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
     }
     .map(std::path::absolute)
     .transpose()?;
+    let artifacts_out = std::env::var_os("ILEX_ARTIFACTS")
+        .map(std::path::absolute)
+        .transpose()?;
     let _outputs = claim_outputs(
         ws,
         disk_out.as_deref(),
         archive_out.as_deref(),
         iso_out.as_deref(),
+        artifacts_out.as_deref(),
     )?;
     let mut staged = source::stage(ws)?;
     let mut inputs = BTreeMap::new();
@@ -134,7 +138,7 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
     fs::write(
         job_dir.join("destinations.json"),
         serde_json::to_vec(
-            &json!({"disk":disk_out,"iso":iso_out,"archive":archive_out,"artifacts":std::env::var_os("ILEX_ARTIFACTS").map(PathBuf::from)}),
+            &json!({"disk":disk_out,"iso":iso_out,"archive":archive_out,"artifacts":artifacts_out}),
         )?,
     )?;
     // Save before submit: a lost reply never loses the idempotent job identity.
@@ -213,7 +217,6 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
 }
 
 pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
-    let cancel = matches!(operation, Operation::Cancel { .. });
     match operation {
         Operation::Snapshot => {
             let root = state(ws)?;
@@ -227,7 +230,19 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
             );
             Ok(())
         }
-        Operation::SelfCheck { hold_seconds } => execute(ws, Command::SelfCheck { hold_seconds }),
+        Operation::SelfCheck {
+            hold_seconds,
+            allocation_image,
+            fingerprint_image,
+        } => execute(
+            ws,
+            Command::SelfCheck {
+                hold_seconds,
+                allocation_image,
+                fingerprint_image,
+            },
+        ),
+        Operation::SelfCheckReceiver => super::receive::self_check(ws),
         Operation::Export { image, out } => execute(
             ws,
             Command::Export {
@@ -235,28 +250,70 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
                 output: Some(out),
             },
         ),
-        Operation::Resume { job } | Operation::Cancel { job } => {
+        Operation::Cancel { job } => {
+            // Sending a cancellation must not wait for the client's collection
+            // lock. The live client collects; an absent client can resume later.
+            let root = state(ws)?;
+            let id = match job {
+                Some(id) => id,
+                None => fs::read_to_string(root.join("last-job"))?,
+            };
+            ensure!(
+                id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
+                "invalid job ID"
+            );
+            let control =
+                ilex_tooling_windows::received::Directory::open(&root.join("jobs").join(&id))?;
+            let mut bytes = Vec::new();
+            control
+                .read("request.json")?
+                .file
+                .take(32 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            ensure!(bytes.len() <= 32 * 1024 * 1024, "local request size limit");
+            let job: Job = serde_json::from_slice(&bytes)?;
+            ensure!(job.job == id, "local job identity mismatch");
+            ws.identity()?.authorize(&job.snapshot.identity.owner)?;
+            let transport = Transport::existing(control_json(&control, "endpoint.json")?)?;
+            transport.rpc(
+                Rpc::Cancel {
+                    owner: &job.snapshot.identity.owner,
+                    job: &job.job,
+                },
+                &[],
+            )?;
+            eprintln!(
+                "ilex: cancellation requested for {}; the running client collects evidence, or use remote resume",
+                job.job
+            );
+            Ok(())
+        }
+        Operation::Resume { job } => {
             let root = state(ws)?;
             let _guard = ilex_devkit::ownership::lock(&root.join("client.lock"))?;
-            let id = job.unwrap_or(fs::read_to_string(root.join("last-job"))?);
+            let id = match job {
+                Some(id) => id,
+                None => fs::read_to_string(root.join("last-job"))?,
+            };
             ensure!(
                 id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
                 "invalid job ID"
             );
             let dir = root.join("jobs").join(id);
-            let job: Job = serde_json::from_slice(&fs::read(dir.join("request.json"))?)?;
+            let control = ilex_tooling_windows::received::Directory::open(&dir)?;
+            let job: Job = control_json(&control, "request.json")?;
             ws.identity()?.authorize(&job.snapshot.identity.owner)?;
-            let destinations: Value =
-                serde_json::from_slice(&fs::read(dir.join("destinations.json"))?)?;
+            let destinations: Value = control_json(&control, "destinations.json")?;
             let _outputs = claim_outputs(
                 ws,
                 destinations["disk"].as_str().map(Path::new),
                 destinations["archive"].as_str().map(Path::new),
                 destinations["iso"].as_str().map(Path::new),
+                destinations["artifacts"].as_str().map(Path::new),
             )?;
             let transport = Transport::connect()?;
             transport::install_cancel_handler()?;
-            wait(ws, &transport, &job, &dir, cancel)
+            wait(ws, &transport, &job, &dir, false)
         }
     }
 }
@@ -292,15 +349,18 @@ fn validate(ws: &Workspace, command: &Command) -> Result<()> {
     Ok(())
 }
 
-fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bool) -> Result<()> {
+fn wait(_ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bool) -> Result<()> {
+    use super::receive;
+    use ilex_tooling_windows::received::{self, Directory};
     let owner = &job.snapshot.identity.owner;
+    let control = Directory::open(dir)?;
+    let received = control.child("received")?;
+    let logs = received.child("logs")?;
     let mut cancelled = false;
     let mut offset = [0u64; 2];
-    // Resume streams only bytes not already durably saved on Windows.
     for (i, name) in ["stdout", "stderr"].iter().enumerate() {
-        offset[i] = fs::metadata(dir.join(format!("{name}.log")))
-            .map(|m| m.len())
-            .unwrap_or(0);
+        offset[i] = logs.append(&format!("{name}.log"))?.file.metadata()?.len();
+        ensure!(offset[i] <= receive::MAX_LOG, "saved log size limit");
     }
     let paths = matches!(
         job.command,
@@ -319,9 +379,15 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
             eprintln!("ilex: cancelled job {}; builder remains running", job.job);
         }
         let status = transport.rpc(Rpc::Status { owner, job: &job.job }, &[])
-            .with_context(|| format!("job {} retained; reconnect with `cargo xtask remote resume --job {}`; logs at {}", job.job, job.job, dir.display()))?.0;
+            .with_context(|| format!("job {} retained; reconnect with `cargo xtask remote resume --job {}`; logs at {}", job.job, job.job, logs.path.display()))?.0;
         for (i, name) in ["stdout", "stderr"].iter().enumerate() {
-            let end = status["logs"][*name].as_u64().unwrap_or(0);
+            let end = status["logs"][*name]
+                .as_u64()
+                .context("invalid remote log size")?;
+            ensure!(
+                end <= receive::MAX_LOG && end >= offset[i],
+                "remote log size/truncation limit"
+            );
             while offset[i] < end {
                 let (reply, bytes) = transport.rpc(
                     Rpc::Fetch {
@@ -333,14 +399,14 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
                     &[],
                 )?;
                 ensure!(
-                    !bytes.is_empty() && reply["sha256"] == digest(&bytes),
-                    "log transfer checksum mismatch"
+                    !bytes.is_empty()
+                        && bytes.len() as u64 <= end - offset[i]
+                        && reply["sha256"] == digest(&bytes),
+                    "log transfer checksum/size mismatch"
                 );
-                let mut file = fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(dir.join(format!("{name}.log")))?;
-                file.write_all(&bytes)?;
+                let mut file = logs.append(&format!("{name}.log"))?;
+                file.file.write_all(&bytes)?;
+                file.file.sync_all()?;
                 if i == 0 && !paths {
                     std::io::stdout().write_all(&bytes)?;
                 } else {
@@ -361,120 +427,116 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
             && result["source_digest"] == job.snapshot.source.digest,
         "remote result identity mismatch"
     );
-    fs::write(dir.join("result.json"), serde_json::to_vec_pretty(&result)?)?;
-    // Collect even when the Linux command or cancellation failed.
-    let destinations: Value = serde_json::from_slice(&fs::read(dir.join("destinations.json"))?)?;
-    let mut delivered = BTreeMap::new();
-    let primary_name = fs::read_to_string(dir.join("stdout.log"))
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .last()
-                .map(|line| line.rsplit('/').next().unwrap_or(line).to_owned())
-        });
-    for artifact in result["artifacts"]
-        .as_array()
-        .context("remote artifact manifest")?
-    {
-        let name = artifact["path"].as_str().context("artifact has no path")?;
-        let destination = if let Some(tail) = name.strip_prefix("job/") {
-            safe_join(dir, tail)?
-        } else if name.starts_with("disks/")
-            && matches!(
-                Path::new(name).extension().and_then(|e| e.to_str()),
-                Some("qcow2" | "raw")
-            )
-        {
-            let hash = artifact["sha256"]
-                .as_str()
-                .context("disk checksum missing")?;
-            ensure!(
-                hash.len() == 71
-                    && hash.starts_with("sha256:")
-                    && hash[7..].bytes().all(|b| b.is_ascii_hexdigit()),
-                "invalid disk checksum"
-            );
-            let destination = ws.state_dir().join("disks").join(format!(
-                "{}.{}",
-                &hash[7..],
-                Path::new(name).extension().unwrap().to_string_lossy()
-            ));
-            reject_reparse(&destination)?;
-            fs::create_dir_all(destination.parent().unwrap())?;
-            ilex_devkit::ownership::claim_file(ws, &destination)?;
-            destination
-        } else {
-            safe_join(&ws.state_dir(), name)?
-        };
-        fetch(transport, job, artifact, &destination)?;
-        delivered.insert(name.to_owned(), destination.clone());
+    let code = result["exit_code"]
+        .as_i64()
+        .context("missing remote exit code")?;
+    ensure!((-127..=255).contains(&code), "invalid remote exit code");
+    // Validate the complete untrusted manifest before writing any artifact.
+    receive::manifest(&result["artifacts"])?;
+    let result_bytes = serde_json::to_vec_pretty(&result)?;
+    ensure!(
+        result_bytes.len() <= 32 * 1024 * 1024,
+        "remote result size limit"
+    );
+    let attempt = received.child(&job_uuid()?)?;
+    attempt.write_new("result.json", &result_bytes)?;
+    let destinations: Value = control_json(&control, "destinations.json")?;
+    let primary_name = {
+        let mut stdout = Vec::new();
+        logs.read("stdout.log")?.file.read_to_end(&mut stdout)?;
+        String::from_utf8_lossy(&stdout)
+            .lines()
+            .last()
+            .map(|line| line.rsplit('/').next().unwrap_or(line).to_owned())
+    };
+    let delivered = receive::collect(&attempt, &result["artifacts"], |path, offset| {
+        let (reply, bytes) = transport.rpc(
+            Rpc::Fetch {
+                owner,
+                job: &job.job,
+                path,
+                offset,
+            },
+            &[],
+        )?;
+        ensure!(
+            reply["sha256"] == digest(&bytes),
+            "artifact chunk checksum mismatch"
+        );
+        Ok(bytes)
+    })?;
+    // Only locally authored destinations can request an export. Directory
+    // exports receive a fresh per-job directory; remote names never address
+    // checkout state or control metadata, even for a logical job/* artifact.
+    for (name, destination) in &delivered {
         if name.starts_with("exports/")
             && primary_name
                 .as_ref()
-                .is_some_and(|base| name == format!("exports/{base}"))
+                .is_some_and(|base| name == &format!("exports/{base}"))
             && let Some(out) = destinations["archive"].as_str()
         {
-            copy_atomic(&destination, Path::new(out))?;
+            copy_atomic(destination, Path::new(out))?;
         }
-        if let Some(tail) = name.strip_prefix("artifacts/")
-            && let Some(root) = destinations["artifacts"].as_str()
-        {
-            copy_atomic(&destination, &safe_join(Path::new(root), tail)?)?;
-        }
-        if let Some(tail) = name.strip_prefix("iso/")
-            && let Some(root) = destinations["iso"].as_str()
-        {
-            copy_atomic(&destination, &safe_join(Path::new(root), tail)?)?;
+        for prefix in ["artifacts", "iso"] {
+            if let Some(tail) = name.strip_prefix(&format!("{prefix}/"))
+                && let Some(root) = destinations[prefix].as_str()
+            {
+                let root = Directory::open(Path::new(root))?.child(&job.job)?;
+                copy_atomic(destination, &root.path.join(tail))?;
+            }
         }
         if name.starts_with("disks/")
             && primary_name
                 .as_ref()
-                .is_some_and(|base| name == format!("disks/{base}"))
+                .is_some_and(|base| name == &format!("disks/{base}"))
             && matches!(
                 destination.extension().and_then(|e| e.to_str()),
                 Some("qcow2" | "raw")
             )
             && let Some(out) = destinations["disk"].as_str()
         {
-            copy_atomic(&destination, Path::new(out))?;
+            copy_atomic(destination, Path::new(out))?;
         }
-        eprintln!(
-            "ilex: artifact {} ({})",
-            destination.display(),
-            artifact["sha256"]
-        );
+        eprintln!("ilex: artifact {}", destination.display());
     }
-    fs::write(
-        dir.join("delivered.json"),
-        serde_json::to_vec_pretty(&delivered)?,
-    )?;
+    let mut map = control.create(&format!("delivered-{}.partial", job_uuid()?))?;
+    map.file
+        .write_all(&serde_json::to_vec_pretty(&delivered)?)?;
+    map.file.sync_all()?;
+    received::rename(&map, "delivered.json")?;
     if matches!(job.command, Command::Disk(_))
         && let Some(base) = primary_name.as_ref()
         && let Some(disk) = delivered.get(&format!("disks/{base}"))
         && let Some(metadata) = delivered.get(&format!("disks/{base}.disk.json"))
     {
-        let mut artifact: ilex_devkit::core::DiskArtifact =
-            serde_json::from_slice(&fs::read(metadata)?)?;
+        let relative = metadata
+            .strip_prefix(&attempt.path)?
+            .to_str()
+            .context("disk metadata path")?
+            .replace('\\', "/");
+        let mut bytes = Vec::new();
+        attempt
+            .read(&relative)?
+            .file
+            .take(32 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 32 * 1024 * 1024, "disk metadata size limit");
+        let mut artifact: ilex_devkit::core::DiskArtifact = serde_json::from_slice(&bytes)?;
         ilex_devkit::core::check_version(artifact.schema)?;
         ensure!(
             artifact.location.sha256 == hash_file(disk)?,
             "installed disk metadata checksum mismatch"
         );
         artifact.location.path = disk.clone();
-        artifact.location.executor_id = format!("windows-owner:{}", job.snapshot.identity.owner);
+        artifact.location.executor_id = format!("windows-owner:{}", owner);
         artifact.allocated_bytes = transport::allocated_bytes(disk)?;
-        fs::write(
-            disk.with_file_name(format!(
-                "{}.disk.json",
-                disk.file_name().unwrap().to_string_lossy()
-            )),
-            serde_json::to_vec_pretty(&artifact)?,
-        )?;
+        attempt.write_new("disk.windows.json", &serde_json::to_vec_pretty(&artifact)?)?;
     }
-    eprintln!("ilex: job {} evidence: {}", job.job, dir.display());
-    let code = result["exit_code"]
-        .as_i64()
-        .context("missing remote exit code")?;
+    eprintln!("ilex: job {} evidence: {}", job.job, attempt.path.display());
+    let mut receipt = control.create(&format!("collection-{}.partial", job_uuid()?))?;
+    receipt.file.write_all(&serde_json::to_vec(&json!({"schema":1,"job":job.job,"owner":owner,"source_digest":job.snapshot.source.digest,"exit_code":code,"received":attempt.path}))?)?;
+    receipt.file.sync_all()?;
+    received::rename(&receipt, "collection.json")?;
     if code != 0 {
         let code = if code < 0 { 128 - code } else { code };
         return Err(super::Failure {
@@ -482,55 +544,96 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
             message: format!(
                 "remote job {} exited {code}; artifacts retrieved to {}",
                 job.job,
-                ws.state_dir().display()
+                attempt.path.display()
             ),
         }
         .into());
     }
-    if paths {
-        let stdout = fs::read_to_string(dir.join("stdout.log"))?;
-        if let Some(path) = stdout.lines().last() {
-            let basename = path.rsplit('/').next().context("remote output basename")?;
-            let location = match job.command {
-                Command::Disk(_) => destinations["disk"]
-                    .as_str()
-                    .map(PathBuf::from)
-                    .or_else(|| delivered.get(&format!("disks/{basename}")).cloned())
-                    .context("installed disk was not delivered")?,
-                Command::Iso(_) => destinations["iso"]
-                    .as_str()
-                    .map(PathBuf::from)
-                    .unwrap_or(ws.state_dir().join("iso"))
-                    .join(basename),
-                Command::Export { .. } => destinations["archive"]
-                    .as_str()
-                    .map(PathBuf::from)
-                    .or_else(|| delivered.get(&format!("exports/{basename}")).cloned())
-                    .context("image archive was not delivered")?,
-                _ => ws.state_dir().join("tools/images").join(basename),
-            };
-            println!("{}", location.display());
+    if paths && let Some(basename) = primary_name {
+        received::relative(&basename)?;
+        let prefix = match job.command {
+            Command::Disk(_) => "disks",
+            Command::Iso(_) => "iso",
+            Command::Export { .. } => "exports",
+            _ => "tools/images",
+        };
+        let location = match job.command {
+            Command::Disk(_) => destinations["disk"].as_str().map(PathBuf::from),
+            Command::Export { .. } => destinations["archive"].as_str().map(PathBuf::from),
+            Command::Iso(_) => destinations["iso"]
+                .as_str()
+                .map(|p| Path::new(p).join(&job.job).join(&basename)),
+            _ => None,
         }
+        .or_else(|| delivered.get(&format!("{prefix}/{basename}")).cloned())
+        .context("primary output was not delivered")?;
+        println!("{}", location.display());
     }
     Ok(())
 }
 
+struct OutputClaims {
+    _files: Vec<fs::File>,
+    _directories: Vec<ilex_tooling_windows::received::Directory>,
+}
 fn claim_outputs(
     ws: &Workspace,
     disk: Option<&Path>,
     archive: Option<&Path>,
     iso: Option<&Path>,
-) -> Result<Vec<fs::File>> {
+    artifacts: Option<&Path>,
+) -> Result<OutputClaims> {
     let mut guards = Vec::new();
+    let mut directories = Vec::new();
     for path in [disk, archive].into_iter().flatten() {
+        let directory = ilex_tooling_windows::received::Directory::open(
+            path.parent().context("output parent missing")?,
+        )?;
+        protect_output(
+            ws,
+            &directory
+                .path
+                .join(path.file_name().context("output filename missing")?),
+        )?;
+        directories.push(directory);
         guards.push(claim_output_file(ws, path)?);
     }
-    if let Some(directory) = iso {
+    for directory in [iso, artifacts].into_iter().flatten() {
+        let guard = ilex_tooling_windows::received::Directory::open(directory)?;
+        protect_output(ws, &guard.path)?;
         reject_reparse(directory)?;
         reject_reparse(&directory.join(".ilex-owner.json"))?;
         ilex_devkit::ownership::ensure_directory(directory, &ws.identity()?)?;
+        directories.push(guard);
     }
-    Ok(guards)
+    Ok(OutputClaims {
+        _files: guards,
+        _directories: directories,
+    })
+}
+
+pub(super) fn protect_output(ws: &Workspace, path: &Path) -> Result<()> {
+    let parent = path.parent().context("output has no parent")?;
+    let canonical = if path.is_dir() {
+        fs::canonicalize(path)?
+    } else {
+        fs::canonicalize(parent)?.join(path.file_name().context("output filename")?)
+    };
+    let mut protected = vec![ws.ensure_state()?];
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        protected.push(PathBuf::from(local).join("ilex"));
+    }
+    let candidate = canonical.to_string_lossy().to_ascii_lowercase();
+    for root in protected {
+        let root = fs::canonicalize(root)?
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        ensure!(
+            candidate != root && !candidate.starts_with(&(root + "\\")),
+            "explicit output cannot address tooling state/control paths"
+        );
+    }
+    Ok(())
 }
 
 fn claim_output_file(ws: &Workspace, path: &Path) -> Result<fs::File> {
@@ -539,6 +642,7 @@ fn claim_output_file(ws: &Workspace, path: &Path) -> Result<fs::File> {
         .file_name()
         .context("output filename missing")?
         .to_string_lossy();
+    ilex_tooling_windows::received::relative(&name)?;
     let receipt = path.with_file_name(format!("{name}.ilex-owner"));
     let lock = path.with_file_name(format!("{name}.ilex-output.lock"));
     reject_reparse(&receipt)?;
@@ -548,156 +652,94 @@ fn claim_output_file(ws: &Workspace, path: &Path) -> Result<fs::File> {
     Ok(guard)
 }
 
-fn safe_join(root: &Path, name: &str) -> Result<PathBuf> {
-    ensure!(
-        !name.contains(['\\', ':'])
-            && !Path::new(name).is_absolute()
-            && Path::new(name)
-                .components()
-                .all(|p| matches!(p, Component::Normal(_))),
-        "unsafe artifact path"
-    );
-    for part in name.split('/') {
-        let stem = part.split('.').next().unwrap_or("").to_ascii_lowercase();
-        ensure!(
-            !part.ends_with([' ', '.'])
-                && !matches!(
-                    stem.as_str(),
-                    "con"
-                        | "prn"
-                        | "aux"
-                        | "nul"
-                        | "com1"
-                        | "com2"
-                        | "com3"
-                        | "com4"
-                        | "com5"
-                        | "com6"
-                        | "com7"
-                        | "com8"
-                        | "com9"
-                        | "lpt1"
-                        | "lpt2"
-                        | "lpt3"
-                        | "lpt4"
-                        | "lpt5"
-                        | "lpt6"
-                        | "lpt7"
-                        | "lpt8"
-                        | "lpt9"
-                ),
-            "invalid Windows artifact name"
-        );
-    }
-    let output = root.join(name);
-    reject_reparse(&output)?;
-    Ok(output)
-}
 fn reject_reparse(path: &Path) -> Result<()> {
     use std::os::windows::fs::MetadataExt;
     for ancestor in path.ancestors() {
-        if let Ok(meta) = fs::symlink_metadata(ancestor) {
-            ensure!(
+        match fs::symlink_metadata(ancestor) {
+            Ok(meta) => ensure!(
                 meta.file_attributes() & 0x400 == 0,
                 "reparse point in output path: {}",
                 ancestor.display()
-            );
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
     }
     Ok(())
 }
 fn hash_file(path: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    let mut f = fs::File::open(path)?;
-    let mut b = [0; 128 * 1024];
-    loop {
-        let n = f.read(&mut b)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&b[..n]);
-    }
-    Ok(format!("sha256:{:x}", h.finalize()))
-}
-fn fetch(transport: &Transport, job: &Job, artifact: &Value, destination: &Path) -> Result<()> {
-    let bytes = artifact["bytes"]
-        .as_u64()
-        .context("invalid artifact size")?;
-    let hash = artifact["sha256"]
-        .as_str()
-        .context("invalid artifact hash")?;
-    if destination.is_file()
-        && fs::metadata(destination)?.len() == bytes
-        && hash_file(destination)? == hash
-    {
-        return Ok(());
-    }
-    ensure!(
-        transport::available_space(destination)? >= bytes + 30 * 1024 * 1024 * 1024,
-        "artifact transfer requires its size plus 30 GiB free on Windows"
-    );
-    reject_reparse(destination)?;
-    fs::create_dir_all(destination.parent().context("output parent missing")?)?;
-    let temporary = destination.with_file_name(format!(
-        "{}.{}.partial",
-        destination.file_name().unwrap().to_string_lossy(),
-        job.job
-    ));
-    reject_reparse(&temporary)?;
-    let mut f = fs::File::create(&temporary)?;
-    let mut offset = 0u64;
-    while offset < bytes {
-        let (reply, data) = transport.rpc(
-            Rpc::Fetch {
-                owner: &job.snapshot.identity.owner,
-                job: &job.job,
-                path: artifact["path"].as_str().context("artifact path missing")?,
-                offset,
-            },
-            &[],
-        )?;
-        ensure!(
-            !data.is_empty() && reply["sha256"] == digest(&data),
-            "artifact chunk mismatch"
-        );
-        f.write_all(&data)?;
-        offset += data.len() as u64;
-    }
-    f.sync_all()?;
-    drop(f);
-    ensure!(
-        offset == bytes && hash_file(&temporary)? == hash,
-        "artifact checksum mismatch; partial retained"
-    );
-    fs::rename(temporary, destination)?;
-    Ok(())
+    use ilex_tooling_windows::received::{self, Directory};
+    let parent = Directory::open(path.parent().context("artifact parent missing")?)?;
+    let mut input = parent.read(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .context("artifact name")?,
+    )?;
+    received::sha256(&mut input.file)
 }
 fn copy_atomic(source: &Path, destination: &Path) -> Result<()> {
-    if std::path::absolute(source)? == std::path::absolute(destination)? {
-        return Ok(());
-    }
-    reject_reparse(destination)?;
-    ensure!(
-        transport::available_space(destination)?
-            >= fs::metadata(source)?.len() + 30 * 1024 * 1024 * 1024,
-        "explicit output requires its size plus 30 GiB free"
-    );
-    fs::create_dir_all(
+    use ilex_tooling_windows::received::{self, Directory};
+    let parent = Directory::open(source.parent().context("artifact parent missing")?)?;
+    let mut source = parent.read(
+        source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("artifact name")?,
+    )?;
+    let hash = received::sha256(&mut source.file)?;
+    let destination_parent = Directory::open(
         destination
             .parent()
             .context("explicit output has no parent")?,
     )?;
-    let partial = destination.with_file_name(format!(
-        "{}.partial",
-        destination.file_name().unwrap().to_string_lossy()
-    ));
-    reject_reparse(&partial)?;
-    fs::copy(source, &partial)?;
+    let name = destination
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("output name")?;
+    received::relative(name)?;
+    match destination_parent.read(name) {
+        Ok(mut old) => {
+            if received::sha256(&mut old.file)? == hash {
+                return Ok(());
+            }
+        }
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {}
+        Err(error) => return Err(error),
+    }
     ensure!(
-        hash_file(&partial)? == hash_file(source)?,
+        transport::available_space(destination)?
+            >= source.file.metadata()?.len() + 30 * 1024 * 1024 * 1024,
+        "explicit output requires its size plus 30 GiB free"
+    );
+    let mut output = destination_parent.create(&format!("ilex-output-{}.partial", job_uuid()?))?;
+    use std::io::{Seek, SeekFrom};
+    source.file.seek(SeekFrom::Start(0))?;
+    std::io::copy(&mut source.file, &mut output.file)?;
+    output.file.sync_all()?;
+    ensure!(
+        received::sha256(&mut output.file)? == hash,
         "output copy checksum mismatch"
     );
-    fs::rename(partial, destination)?;
+    received::rename(&output, name)?;
     Ok(())
+}
+
+fn control_json<T: serde::de::DeserializeOwned>(
+    directory: &ilex_tooling_windows::received::Directory,
+    name: &str,
+) -> Result<T> {
+    let mut bytes = Vec::new();
+    directory
+        .read(name)?
+        .file
+        .take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 32 * 1024 * 1024,
+        "local control metadata size limit"
+    );
+    Ok(serde_json::from_slice(&bytes)?)
 }

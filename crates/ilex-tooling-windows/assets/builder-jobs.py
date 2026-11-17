@@ -387,14 +387,22 @@ def artifact_inventory(path, state, include_state=True):
     roots = [(path, 'job'), (state / 'artifacts', 'artifacts'), (state / 'iso', 'iso'),
              (state / 'disks', 'disks'), (state / 'tools/images', 'tools/images'),
              (state / 'tools/keys', 'tools/keys'), (state / 'jobs', 'jobs'), (state / 'exports', 'exports')]
+    operation = read_json(path / 'request.json')['command']['operation']
+    outputs = {'build': {'jobs'}, 'rechunk': {'jobs'}, 'disk': {'disks'},
+               'iso': {'iso'}, 'tool': {'tools/images', 'tools/keys'},
+               'export': {'exports'}, 'self_check': set()}
     for root, prefix in roots:
         if not include_state and prefix != 'job':
+            continue
+        if operation in outputs and prefix != 'job' and prefix not in outputs[operation] and not (prefix == 'artifacts' and operation != 'self_check'):
             continue
         if not root.is_dir():
             continue
         for file in sorted(root.rglob('*')):
             if not file.is_file() or file.is_symlink() or private(file.relative_to(root)) or file.name.endswith(('.partial', '.lock')):
                 continue
+            if any(part.lower().startswith('.ilex') or part.lower().endswith('.ilex-owner') for part in file.relative_to(root).parts):
+                continue  # allocation receipts are control data, never exports
             if prefix == 'job' and (file.parent != path or file.name not in {'stdout.log', 'stderr.log', 'state.json', 'request.json', 'context.json', 'image.json'}):
                 continue
             if prefix == 'iso' and file.suffix not in {'.iso', '.sha256', '.json', '.md'}:
@@ -472,6 +480,18 @@ def cleanup_resources(path, spec):
             container = json.loads(checked(['podman', 'container', 'inspect', identity]))[0]
             assert container['Id'] == identity and container['Name'].lstrip('/') == name, 'container allocation changed'
             checked(['podman', 'rm', '--force', '--time', '5', identity])
+        elif resource['provider'] == 'podman_nonce':
+            assert re.fullmatch('[0-9a-f]{64}', identity), 'invalid container allocation nonce'
+            inventory = checked(['podman', 'ps', '--all', '--no-trunc', '--filter',
+                                 'label=ilex.remote-allocation=' + identity, '--format', '{{.ID}}']).decode().splitlines()
+            assert len(inventory) <= 1, 'ambiguous container allocation'
+            for cid in inventory:
+                assert re.fullmatch('[0-9a-f]{64}', cid), 'invalid container ID'
+                container = json.loads(checked(['podman', 'container', 'inspect', cid]))[0]
+                labels = container['Config']['Labels']
+                assert container['Id'] == cid and container['Name'].lstrip('/') == name, 'container allocation changed'
+                assert labels['ilex.remote-allocation'] == identity and labels['ilex.remote-job'] == spec['job'] and labels['ilex.checkout-owner'] == spec['snapshot']['identity']['owner'], 'foreign partial container allocation'
+                checked(['podman', 'rm', '--force', '--time', '5', cid])
         elif resource['provider'] == 'libvirt':
             remove_libvirt(identity, name)
         elif resource['provider'] == 'libvirt_nonce':

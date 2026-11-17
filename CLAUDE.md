@@ -1057,8 +1057,8 @@ canonical owner hash, even for short, valid Git worktree names; missing Git
 metadata can never acquire `main` and cannot authorize mutations.
 The canonical native checkout path plus common Git directory
 produce a stable UUIDv8 owner. Windows and its WSL mount resolve to that same
-identity. A copied checkout must carry its original identity explicitly when a
-future remote executor stages it; it must not rediscover ownership from a copy.
+identity. A remote snapshot carries that original identity explicitly; it must
+not rediscover ownership from its builder-side directory.
 
 Local image builds pass typed requests to the Linux executor. A source manifest
 covers Git modes, working bytes, untracked inputs and tracked deletions; it
@@ -1072,8 +1072,9 @@ only that alias and preserve an earlier accepted final image.
 Image labels `ilex.checkout-owner`, `ilex.source-digest` and
 `ilex.architecture` record provenance; `<state dir>/jobs/<job hash>/` retains
 request/result JSON with the immutable image ID and local executor identity.
-This is local provenance, not the remote source-transfer implementation (T3).
-Rechunk/ISO/tool orchestration retains its compatibility path.
+The remote executor preserves this provenance across source transfer.
+Machine cache hits also require current owner/source labels, so documentation
+changes refresh provenance even when the base and machine content are unchanged.
 
 Immutable-ID disk inputs use a versioned local alias because bcvk's inner
 transport cannot parse `sha256:...` as a local image ID. The shared ownership
@@ -1161,12 +1162,83 @@ up|status|down|update|self-check` in PowerShell. The persistent per-user Gen2
 builder, pinned acquisition, SSH identity, owned cleanup and update recovery are
 documented in [Windows builder tooling](docs/tooling/windows-builder.md).
 T3 also routes native Windows `build`, `test`, `disk`, `iso`, `tool` and `rechunk`
-to that builder automatically. See [remote execution](docs/tooling/remote-executor.md)
-for source snapshots, ownership, logs/artifact delivery, cancellation and resume.
-Use `cargo xtask remote snapshot` to inspect source without starting it, and
-`remote self-check` for a real nested KVM boot through the job path. Native
-security tiers require T5. Never remove a ready shared builder as ordinary
+to that builder automatically, calling idempotent `builder up` as needed.
+Install a changed controller with `builder update`; a recipe mismatch fails
+rather than executing an older controller. Accept its verified update with
+`builder accept-update`. Native security/homed tiers require T5; explicit native
+filters fail before submission. Existing legacy filter unions and trailing
+harness arguments run in Linux. Never remove the shared builder as ordinary
 checkout cleanup.
+
+```powershell
+cargo xtask builder up --memory-gib 16 --cpus 8 --wait-for-memory-seconds 10800
+cargo xtask builder update --wait-for-memory-seconds 10800
+cargo xtask build
+cargo xtask test ephemeral:: disk:: upgrade:: graphical:: tool:: -- --test-threads 1
+cargo xtask remote snapshot
+cargo xtask remote self-check
+cargo xtask remote resume --job <UUID>
+cargo xtask remote cancel --job <UUID>
+cargo xtask remote export --image <owned-image> --out 'C:\outputs\ilex.oci.tar'
+cargo xtask remote self-check-receiver
+```
+
+Snapshots inventory HEAD/index names, dirty working bytes and nonignored
+untracked inputs, including deletions, executable modes and Git's Windows
+symlink-file representation. LF-attributed CRLF text, credential-named inputs,
+ignored build inputs, escaping links/reparse parents, submodules and unresolved
+conflicts fail before transfer. SHA-256 chunks are at most 4 MiB; Linux verifies
+and atomically materializes them. A shallow original-HEAD pack carries no user
+Git configuration, hooks or parent history. Owner, slug, revision/dirty flag and
+source digest come from Windows; the copy cannot become `main`. Both executors
+retain the existing clean Git-tree fingerprint encoding and use the same
+versioned working-input encoding when dirty.
+
+Pinned, argument-free SSH carries finite versioned requests and typed command
+fields. Only explicit image/selection, legacy test and ISO assertion controls
+are forwarded. Host PATH/HOME/state, agents, CI and registry/signing credentials
+are not. Podman, kache and Cargo caches remain in the builder. Cargo outputs are
+separate by owner, architecture/toolchain and immutable snapshot. OCI export
+uses an archive and adds no registry push.
+
+Jobs take owner leases and memory/CPU-weighted guest slots. Admission preserves
+the 14 GiB host reserve and waits up to three hours for capacity. Detached
+containers have prelaunch allocation nonces or Podman CID files; libvirt has a
+prelaunch nonce and exact domain UUID. Cleanup checks identities, fails closed
+on lookup errors, and retains an unreconciled lease after cleanup failure.
+Console logs use libvirt's labelled log tree before artifact collection.
+
+Ctrl-C cancels only the job's systemd cgroup. `remote cancel` sends an
+owner-validated cancellation independently of the running client's lock and
+returns its acknowledgement; the original client collects evidence, or use
+`remote resume`. Dropped SSH/client loss leaves the job running. Neither path
+stops the builder. Logs and frozen artifacts return even after failure.
+
+Windows control files stay in `<state dir>/remote/jobs/<UUID>/`. All builder
+data, including job request/context copies and results, is untrusted and goes
+only under that job's `received/`: streamed logs in `logs/`, each collection in
+a fresh UUID directory. `delivered.json` maps logical artifact names to those
+received files; disk metadata remapped for Windows is `disk.windows.json` in
+the collection directory. No manifest path addresses checkout state. The entire
+manifest is checked before writes: fixed prefixes/job filenames, strict Windows
+names, regular files, case/path uniqueness, 8,192 files, 128 GiB per file and
+256 GiB total. Logs are bounded at 256 MiB each and metadata at 32 MiB.
+No-follow handles reject reparse points/hard links and hold ancestors against
+replacement. Checksums and declared sizes are verified through the opened files.
+
+Explicit disk/archive files require owner receipts and output locks. Explicit
+ISO/`ILEX_ARTIFACTS` directories require owner receipts and receive a per-job
+UUID subdirectory; they cannot target tooling state/control paths. Resume
+revalidates claims. Output copies are published atomically by file handle;
+commands print the delivered path. `iso --due` stays a native read-only command;
+registry checks retain their exit codes. The installer remains a network ISO.
+
+For fault checks, `remote self-check --allocation-image <owned-image>` pauses a
+real ephemeral launch after container creation and before its CID receipt, for a
+second terminal to cancel. `remote self-check --fingerprint-image <owned-image>`
+and Linux `doctor --self-check-fingerprint <owned-image> --json` report actual
+root/rechunk fingerprints for same-tree comparisons. Acceptance logs and
+measurements belong in the PR body.
 
 The existing interactive `vm` compatibility path still uses the
 `FedoraLinux-45` WSL2 distro (nested virtualization gives it `/dev/kvm`).

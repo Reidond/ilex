@@ -21,6 +21,9 @@ pub struct Args {
     /// Linux: actual Podman builds, source races and ownership rejection
     #[arg(long)]
     pub self_check_build: bool,
+    /// Report real local image/source fingerprints for a same-tree comparison
+    #[arg(long)]
+    pub self_check_fingerprint: Option<String>,
     #[arg(long)]
     pub json: bool,
     /// Require a capability, e.g. firmware_enforcement, persistent_tpm, screenshot
@@ -32,6 +35,11 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    let fingerprints = args
+        .self_check_fingerprint
+        .as_deref()
+        .map(|image| fingerprint_report(ws, image))
+        .transpose()?;
     let builds = if args.self_check_build {
         Some(build::run(ws)?)
     } else {
@@ -60,6 +68,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": core::SCHEMA_VERSION, "identity": ws.identity()?,
                 "capabilities": capabilities, "self_check": evidence, "build_self_check": builds,
+                "fingerprint_self_check": fingerprints,
             }))?
         );
     } else {
@@ -75,8 +84,49 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         if let Some(builds) = builds {
             println!("{}", serde_json::to_string_pretty(&builds)?);
         }
+        if let Some(fingerprints) = fingerprints {
+            println!("{}", serde_json::to_string_pretty(&fingerprints)?);
+        }
     }
     Ok(())
+}
+
+pub(crate) fn fingerprint_report(ws: &Workspace, image: &str) -> Result<serde_json::Value> {
+    ensure!(
+        cfg!(target_os = "linux"),
+        "fingerprint self-check requires Linux"
+    );
+    let selection = crate::rechunk::image_selection(image)?;
+    let source = ilex_devkit::source::manifest(ws)?;
+    let root = ilex_devkit::fingerprint::root_inputs(ws, &selection)?;
+    let rechunk = crate::rechunk::fingerprint(ws, image)?;
+    // Independently reproduce the pre-T3 encoding for a clean source.
+    let clean_legacy = if !source.dirty {
+        use sha2::{Digest, Sha256};
+        let mut legacy = Sha256::new();
+        let mut current = Sha256::new();
+        for path in ilex_devkit::fingerprint::selection_inputs(&selection) {
+            legacy.update(format!(
+                "tree {path} {}\n",
+                git::tree_hash(&ws.root, &path)?
+            ));
+        }
+        ilex_devkit::fingerprint::hash_inputs(
+            ws,
+            &mut current,
+            ilex_devkit::fingerprint::selection_inputs(&selection),
+        )?;
+        ensure!(
+            legacy.finalize() == current.finalize(),
+            "clean source encoding changed"
+        );
+        true
+    } else {
+        false
+    };
+    Ok(
+        serde_json::json!({"source_digest":source.digest,"dirty":source.dirty,"revision":source.revision,"selection":selection,"image_id":ilex_devkit::bcvk::image_id(image)?,"root_inputs":root,"rechunk_fingerprint":rechunk,"clean_legacy_encoding_matches":clean_legacy}),
+    )
 }
 
 struct Fixture(PathBuf);

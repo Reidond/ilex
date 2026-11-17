@@ -165,11 +165,11 @@ pub fn build(
         "image",
         "inspect",
         "--format",
-        "{{index .Labels \"ilex.machine-key\"}}|{{index .Labels \"ilex.machine\"}}",
+        "{{index .Labels \"ilex.machine-key\"}}|{{index .Labels \"ilex.machine\"}}|{{index .Labels \"ilex.checkout-owner\"}}|{{index .Labels \"ilex.source-digest\"}}",
         &image,
     ]));
     if !transaction.needs_legacy_rebuild()
-        && current.as_deref() == Some(&format!("{key}|{name}"))
+        && current.as_deref() == Some(&format!("{key}|{name}|{}|{}", owner.owner, source.digest))
         && podman_args.is_empty()
     {
         eprintln!("machine {name} layer is up to date: {image}");

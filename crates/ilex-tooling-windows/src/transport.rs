@@ -50,12 +50,18 @@ pub fn allocated_bytes(path: &std::path::Path) -> Result<u64> {
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
     };
-    let file = std::fs::File::open(path)?;
+    let directory =
+        crate::received::Directory::open(path.parent().context("disk parent missing")?)?;
+    let file = directory.read(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .context("disk filename")?,
+    )?;
     let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
     ensure!(
         unsafe {
             GetFileInformationByHandleEx(
-                file.as_raw_handle().cast(),
+                file.file.as_raw_handle().cast(),
                 FileStandardInfo,
                 (&mut info as *mut FILE_STANDARD_INFO).cast(),
                 std::mem::size_of_val(&info) as u32,
@@ -71,6 +77,38 @@ pub struct Transport {
     pub endpoint: BuilderEndpoint,
 }
 impl Transport {
+    /// Reuse an already authenticated job endpoint without starting the builder
+    /// or taking its maintenance lock. T2's read-only, fail-closed UUID lookup
+    /// validates that this is still the same running allocation; SSH stays pinned.
+    pub fn existing(mut endpoint: BuilderEndpoint) -> Result<Self> {
+        ilex_tooling_core::check_version(endpoint.schema)?;
+        let status = builder::run(builder::Operation::Status, Default::default())?;
+        ensure!(
+            status["state"] == "Running"
+                && status["vm_id"] == endpoint.vm_id
+                && status["owner"] == endpoint.owner
+                && status["name"] == endpoint.host_key_alias
+                && status["journal"]["revision"] == endpoint.provisioning_revision,
+            "saved job endpoint no longer belongs to the running builder"
+        );
+        let root =
+            std::path::PathBuf::from(status["root"].as_str().context("builder root missing")?);
+        ensure!(
+            endpoint.user == "ilex"
+                && endpoint.identity_file == root.join("identity")
+                && endpoint.known_hosts_file == root.join("known_hosts"),
+            "saved job endpoint authority mismatch"
+        );
+        endpoint.address = status["addresses"]
+            .as_array()
+            .context("builder addresses missing")?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|v| v.parse::<std::net::Ipv4Addr>().is_ok())
+            .context("running builder has no IPv4 address")?
+            .to_owned();
+        Ok(Self { endpoint })
+    }
     pub fn connect() -> Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(10800);
         let mut announced = false;
@@ -219,6 +257,10 @@ impl Transport {
                 String::from_utf8_lossy(&diagnostic)
             )
         })?;
+        ensure!(
+            newline <= 32 * 1024 * 1024,
+            "builder reply metadata size limit"
+        );
         let reply: Value =
             serde_json::from_slice(&bytes[..newline]).context("invalid builder protocol frame")?;
         ensure!(reply["schema"] == 1, "builder protocol version mismatch");
@@ -229,6 +271,10 @@ impl Transport {
             String::from_utf8_lossy(&diagnostic)
         );
         let data = bytes[newline + 1..].to_vec();
+        ensure!(
+            data.len() <= ilex_tooling_core::CHUNK_BYTES,
+            "builder reply payload size limit"
+        );
         ensure!(
             reply["payload_bytes"].as_u64() == Some(data.len() as u64),
             "truncated builder reply"

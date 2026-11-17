@@ -140,8 +140,34 @@ pub fn run(args: Args) -> Result<()> {
             println!("{}", archive.display());
             Ok(())
         }
-        Command::SelfCheck { hold_seconds } => {
+        Command::SelfCheck {
+            hold_seconds,
+            allocation_image,
+            fingerprint_image,
+        } => {
             use std::process::Command;
+            if let Some(image) = fingerprint_image {
+                ilex_devkit::ownership::require_image(&ws, &image)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&crate::doctor::fingerprint_report(&ws, &image)?)?
+                );
+                return Ok(());
+            }
+            if let Some(image) = allocation_image {
+                ilex_devkit::ownership::require_image(&ws, &image)?;
+                // An explicit fault exercise, never an environment forwarded
+                // from Windows. Pause at the old unjournaled allocation gap.
+                unsafe {
+                    std::env::set_var("ILEX_SELFCHECK_ALLOCATION_PAUSE", "1");
+                }
+                let _vm = ilex_devkit::bcvk::EphemeralVm::boot(
+                    &ws.vm_name("allocation-self-check"),
+                    &image,
+                    &Default::default(),
+                )?;
+                anyhow::bail!("allocation self-check unexpectedly passed its cancellation gate");
+            }
             ilex_devkit::cmd::run(Command::new("flock").args([
                 "--wait",
                 "10800",
