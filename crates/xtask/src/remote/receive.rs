@@ -77,7 +77,8 @@ pub fn manifest(value: &Value) -> Result<Vec<Artifact>> {
             }
             "tools" => {
                 parts.len() == 3
-                    && ((parts[1] == "images" && leaf.ends_with(".raw"))
+                    && ((parts[1] == "images"
+                        && (leaf.ends_with(".raw") || leaf.ends_with(".crt")))
                         || (parts[1] == "keys" && leaf.ends_with(".crt")))
             }
             "jobs" => {
@@ -276,6 +277,8 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
         );
     }
     collect(&directory, &json!([good]), |_, _| Ok(bytes.to_vec()))?;
+    let certificate = json!({"path":"tools/images/drupe.crt","sha256":ilex_devkit::core::digest(bytes),"bytes":bytes.len()});
+    collect(&directory, &json!([certificate]), |_, _| Ok(bytes.to_vec()))?;
     ensure!(
         fs::read(directory.path.join("artifacts/valid.log"))? == bytes,
         "positive receiver mismatch"
@@ -339,6 +342,12 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
     drop(original);
     drop(overrun);
     drop(directory);
-    fs::remove_dir_all(&root)?;
+    let resolved = fs::canonicalize(&root)?;
+    let temporary = fs::canonicalize(std::env::temp_dir())?;
+    ensure!(
+        resolved.parent() == Some(temporary.as_path()) && resolved.file_name() == root.file_name(),
+        "self-check cleanup target escaped its temporary directory"
+    );
+    fs::remove_dir_all(resolved)?;
     Ok(())
 }
