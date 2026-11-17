@@ -772,8 +772,16 @@ sizes and proposed deletions with `ilex-agent profile prune-backups` (dry run).
 After closing editors and reviewing/recovering any changed versions, explicitly
 run `ilex-agent profile prune-backups --keep 5 --execute` to delete older ones.
 `--execute` without `--keep` removes all listed applies. Cleanup requires the
-authenticated homed user, rejects links/untracked files, and preserves its own
+authenticated homed user, rejects links/unsafe file types, and preserves its own
 previous-state snapshot in a new backup apply in addition to the requested N.
+Cleanup inventories the on-disk backup tree as well as the index. Dry runs list
+unrecorded files as `orphans` and already absent recorded files as `missing`;
+orphan files are also reported by apply and included in size accounting. Explicit
+cleanup can remove orphans even without `profile.json`. It unlinks each selected
+file through a pinned directory descriptor, confirms absence and syncs deletion
+before dropping that record. A partial failure retains survivor records; a
+retry tolerates already removed files/directories and finishes the cleanup.
+If the index write is interrupted, the older records remain safe to reconcile.
 There is no safe automatic age/count policy for an editor's outstanding fd:
 explicit cleanup can discard late writes, so close editors before executing it.
 Setting resets count as edits: reapply writes only an initially absent setting,
@@ -812,6 +820,9 @@ They also hold an old file descriptor across exchange and save after verificatio
 or after apply returns, checking retained Btrfs backup content and end/next-apply
 conflicts. Cleanup coverage checks dry-run sizes, explicit keep-N removal,
 symlink refusal, retained state snapshots, no automatic pruning and the size notice.
+They inject mid-prune and state-write failures, reproduce EACCES on an owned
+0500 backup directory, and verify survivor indexing, retry, orphan discovery and
+cleanup with missing files/directories or no profile state.
 Measured 2026-11-17: the shell-free image is 1,977.85 MiB against Fedora
 bootc's 1,917.62 MiB, a 60.24 MiB increase within the unchanged 128 MiB budget.
 

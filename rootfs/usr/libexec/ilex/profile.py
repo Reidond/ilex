@@ -29,6 +29,7 @@ STATE = ".local/state/ilex/profile.json"
 STATE_SCHEMA = 2
 BACKUPS = ".local/state/ilex/profile-backups"
 BACKUP_NOTICE_BYTES = 50 * 1024 * 1024
+BACKUP_APPLY = r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{8}"
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 RENAME_EXCHANGE = 2
 _renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
@@ -190,7 +191,7 @@ class Backups:
         for path, record in self.entries.items():
             components = parts(path)
             if (len(components) != 6 or "/".join(components[:4]) != BACKUPS
-                or not re.fullmatch(r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{8}", components[4])
+                or not re.fullmatch(BACKUP_APPLY, components[4])
                 or not re.fullmatch(r"[0-9a-f]{32}-[^/]+", components[5])):
                 raise ValueError("invalid profile backup path")
             parts(record["source"])
@@ -211,25 +212,69 @@ class Backups:
         self.entries[path] = {"source": source, "sha256": expected}
         return path
 
+    @contextmanager
+    def inventory(self):
+        """Reconcile the index with disk, including missing files and orphans.
+
+        Only timestamp directories and owned regular leaf files are admitted;
+        no recursive traversal or symlink following, including untracked data.
+        Keep directory FDs pinned through inspection and explicit deletion.
+        """
+        groups = {}
+        for path in self.entries:
+            directory, leaf = path.rsplit("/", 1)
+            groups.setdefault(directory, {"fd": None, "files": {}, "records": set()})["records"].add(leaf)
+        with ExitStack() as opened:
+            try:
+                root, _ = opened.enter_context(self.home.parent(BACKUPS + "/.anchor"))
+            except FileNotFoundError:
+                root = None
+            if root is not None:
+                for stamp in sorted(os.listdir(root)):
+                    if not re.fullmatch(BACKUP_APPLY, stamp):
+                        raise ValueError(f"unexpected backup directory; inspect manually: {BACKUPS}/{stamp}")
+                    try:
+                        fd = os.open(stamp, DIR, dir_fd=root)
+                    except FileNotFoundError:
+                        continue
+                    opened.callback(os.close, fd)
+                    self.home.owned(fd, directory=True)
+                    directory = BACKUPS + "/" + stamp
+                    group = groups.setdefault(directory, {"fd": None, "files": {}, "records": set()})
+                    group["fd"] = fd
+                    for leaf in os.listdir(fd):
+                        parts(leaf)
+                        try:
+                            source = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+                        except FileNotFoundError:
+                            continue
+                        try:
+                            group["files"][leaf] = self.home.owned(source).st_size
+                        finally:
+                            os.close(source)
+            yield root, groups
+
     def check(self, conflicts):
         total = 0
-        for path, record in self.entries.items():
-            try:
-                with self.home.parent(path) as (fd, leaf):
-                    # Metadata-only size accounting also covers a late write
-                    # larger than the bounded content reader permits.
-                    target = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+        with self.inventory() as (_, groups):
+            for directory, group in groups.items():
+                total += sum(group["files"].values())
+                for leaf in group["files"].keys() - group["records"]:
+                    conflict = f"orphan backup (untracked; inspect or prune: {directory}/{leaf})"
+                    if conflict not in conflicts:
+                        conflicts.append(conflict)
+                for leaf in group["records"]:
+                    path = directory + "/" + leaf
+                    record = self.entries[path]
                     try:
-                        total += self.home.owned(target).st_size
-                    finally:
-                        os.close(target)
-                    changed = digest(self.home.read_at(fd, leaf)) != record["sha256"]
-            except (OSError, ValueError):
-                changed = True
-            if changed:
-                conflict = f"{record['source']} (backup changed or unavailable: {path})"
-                if conflict not in conflicts:
-                    conflicts.append(conflict)
+                        changed = (leaf not in group["files"] or
+                                   digest(self.home.read_at(group["fd"], leaf)) != record["sha256"])
+                    except (OSError, ValueError):
+                        changed = True
+                    if changed:
+                        conflict = f"{record['source']} (backup changed or unavailable: {path})"
+                        if conflict not in conflicts:
+                            conflicts.append(conflict)
         return total
 
 
@@ -261,57 +306,71 @@ def prune_backups(args):
         raise ValueError("--keep must be non-negative")
     home = active_home()
     try:
-        # No state/directory creation during a dry run.
-        if home.read(STATE) is None:
+        # No state/directory creation during a dry run. The parent can exist
+        # without profile.json after an interrupted initial state replacement.
+        opened = ExitStack()
+        try:
+            lock, _ = opened.enter_context(home.parent(STATE))
+        except FileNotFoundError:
+            opened.close()
             print(json.dumps({"dry_run": not args.execute, "applies": [], "bytes": 0}))
             return 0
-        with home.parent(STATE) as (lock, _):
+        with opened:
             fcntl.flock(lock, fcntl.LOCK_EX)
             raw = home.read(STATE)
-            state = json.loads(raw)
-            if state.get("schema") not in (1, STATE_SCHEMA) or type(state.get("revision")) is not int:
+            state = json.loads(raw) if raw is not None else None
+            if state is not None and (state.get("schema") not in (1, STATE_SCHEMA) or type(state.get("revision")) is not int):
                 raise ValueError("unsupported profile state; declining cleanup")
-            home.backups = Backups(home, state.get("backups", {}))
-            groups = {}
-            for path in home.backups.entries:
-                groups.setdefault(path.rsplit("/", 1)[0], []).append(path)
-            newest = sorted(groups, reverse=True)
-            selected = set(newest[args.keep:])
+            home.backups = Backups(home, state.get("backups", {}) if state else {})
+            previous = dict(home.backups.entries)
             listing = []
-            # Preflight all deletions without following links or recursively
-            # deleting unknown files. Pinned directory FDs survive renames.
-            with ExitStack() as opened:
-                removals = []
+            # Inventory preflights both recorded and orphaned files without
+            # following links. Missing files/dirs are normal on a retry.
+            with home.backups.inventory() as (root, groups):
+                newest = sorted(groups, reverse=True)
+                selected = set(newest[args.keep:])
                 for directory in newest:
-                    fd, _ = opened.enter_context(home.parent(directory + "/.anchor"))
-                    paths = groups[directory]
-                    names = {parts(path)[-1] for path in paths}
-                    if set(os.listdir(fd)) != names:
-                        raise ValueError(f"backup directory has untracked files; inspect manually: {directory}")
-                    size = 0
-                    for name in names:
-                        source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
-                        try:
-                            size += home.owned(source).st_size
-                        finally:
-                            os.close(source)
-                    listing.append({"path": directory, "bytes": size, "remove": directory in selected})
-                    if directory in selected:
-                        removals.append((directory, fd, names, paths))
-                if args.execute and removals:
-                    for _, _, _, paths in removals:
-                        for path in paths:
-                            del home.backups.entries[path]
-                    # Preserve the previous state inode and record the cleanup's
-                    # own snapshot before unlinking the explicitly selected data.
-                    save_state(home, state, raw)
-                    for directory, fd, names, _ in removals:
-                        for name in names:
-                            os.unlink(name, dir_fd=fd)
-                        os.fsync(fd)
-                        with home.parent(directory) as (parent, name):
-                            os.rmdir(name, dir_fd=parent)
-                            os.fsync(parent)
+                    group = groups[directory]
+                    listing.append({"path": directory, "bytes": sum(group["files"].values()),
+                                    "remove": directory in selected,
+                                    "orphans": sorted(group["files"].keys() - group["records"]),
+                                    "missing": sorted(group["records"] - group["files"].keys())})
+                if args.execute:
+                    try:
+                        for directory in newest:
+                            if directory not in selected:
+                                continue
+                            group = groups[directory]
+                            fd = group["fd"]
+                            for leaf in sorted(group["records"] | group["files"].keys()):
+                                if fd is not None:
+                                    try:
+                                        os.unlink(leaf, dir_fd=fd)
+                                    except FileNotFoundError:
+                                        pass  # Already unlinked before interruption.
+                                    try:
+                                        os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+                                    except FileNotFoundError:
+                                        pass
+                                    else:
+                                        raise ValueError(f"backup still exists after cleanup: {directory}/{leaf}")
+                                    # Commit deletion before forgetting its record.
+                                    os.fsync(fd)
+                                home.backups.entries.pop(directory + "/" + leaf, None)
+                            if fd is not None:
+                                try:
+                                    os.rmdir(parts(directory)[-1], dir_fd=root)
+                                except FileNotFoundError:
+                                    pass
+                                os.fsync(root)
+                    finally:
+                        # On partial failure persist only confirmed deletions.
+                        # If this write/interruption fails, the old index still
+                        # records survivors and retries tolerate stale entries.
+                        # Its own snapshot can become an orphan on interruption;
+                        # inventory discovers and reports that version next time.
+                        if state is not None and home.backups.entries != previous:
+                            save_state(home, state, raw)
             print(json.dumps({"dry_run": not args.execute, "applies": listing,
                               "bytes": sum(item["bytes"] for item in listing),
                               "state_backup": home.backups.directory}))

@@ -7,6 +7,7 @@ operations. The gates wrap, rather than replace, the shipped implementations.
 import os
 import argparse
 import contextlib
+import errno
 import io
 import json
 from pathlib import Path
@@ -241,6 +242,98 @@ with open(sys.argv[1], 'r+b') as stream:
     assert (home / executed["state_backup"]).is_dir()
     cleanup("--execute")  # Explicit fixture cleanup, including the sparse edit.
     print("profile backup notice, no automatic pruning, dry run, keep-N and no-follow cleanup: passed")
+
+    original_unlink = profile.os.unlink
+    original_save_state = profile.save_state
+    for interrupted_state in (False, True):
+        # Two retained files in one apply directory ensure the failure lands
+        # after one real unlink, rather than merely rejecting bad permissions.
+        raw = state_path.read_bytes()
+        state = json.loads(raw)
+        verified.backups = profile.Backups(verified, state["backups"])
+        extra = verified.backups.reserve(relative, profile.digest(b"retained before cleanup\n"))
+        (home / extra).write_bytes(b"retained before cleanup\n")
+        profile.save_state(verified, state, raw)
+        before = json.loads(state_path.read_bytes())["backups"]
+        protected = (home / extra).parent
+        protected.chmod(0o500)
+        try:
+            # The reviewer's exact EACCES case must leave survivors indexed.
+            cleanup("--execute", code=2)
+            assert all(path in json.loads(state_path.read_bytes())["backups"] for path in before)
+        finally:
+            protected.chmod(0o700)
+
+        deleted = []
+        attempts = []
+        def fail_mid_prune(path, *args, **kwargs):
+            parent = kwargs.get("dir_fd")
+            if parent is not None and (verified.path + "/" + profile.BACKUPS + "/") in os.readlink(f"/proc/self/fd/{parent}"):
+                attempts.append(path)
+                if len(attempts) == 2:
+                    raise OSError(errno.EIO, "injected mid-prune failure")
+                directory = os.readlink(f"/proc/self/fd/{parent}")
+                original_unlink(path, *args, **kwargs)
+                deleted.append(str(Path(directory) / path))
+                return
+            return original_unlink(path, *args, **kwargs)
+        def fail_state_write(*args, **kwargs):
+            raise OSError(errno.EIO, "injected interruption before cleanup state write")
+        profile.os.unlink = fail_mid_prune
+        if interrupted_state:
+            profile.save_state = fail_state_write
+        try:
+            try:
+                profile.prune_backups(argparse.Namespace(keep=0, execute=True))
+            except OSError as error:
+                assert error.errno == errno.EIO
+            else:
+                raise AssertionError("injected prune failure was ignored")
+        finally:
+            profile.os.unlink = original_unlink
+            profile.save_state = original_save_state
+        assert len(deleted) == 1 and not Path(deleted[0]).exists(), deleted
+        after = json.loads(state_path.read_bytes())["backups"]
+        survivors = [path for path in before if (home / path).exists()]
+        assert survivors and all(path in after for path in survivors), (survivors, after)
+        if interrupted_state:
+            assert after == before  # Old index tolerates already removed files.
+            assert any(group["missing"] for group in cleanup()["applies"])
+
+        # Reconcile a real unindexed file as well as stale records. A link at
+        # the same orphan path must be rejected without touching its referent.
+        orphan = (home / survivors[0]).parent / "orphan-recovered.txt"
+        orphan.symlink_to(sentinel)
+        try:
+            cleanup("--execute", code=2)
+            assert sentinel.read_text() == "outside sentinel\n"
+        finally:
+            orphan.unlink()
+        orphan.write_text("unindexed retained version\n")
+        dry = cleanup()
+        assert any(orphan.name in group["orphans"] for group in dry["applies"]), dry
+        result, report = apply_profile()
+        assert result == 1 and any("orphan backup" in c and orphan.name in c for c in report["conflicts"]), report
+        cleanup("--execute")
+        assert not orphan.exists()
+        assert not any((home / path).exists() for path in before)
+        current = json.loads(state_path.read_bytes())["backups"]
+        assert current and all((home / path).is_file() for path in current)
+        assert not any(group["missing"] or group["orphans"] for group in cleanup()["applies"])
+
+    # An interrupted state replacement may leave only orphaned backup files.
+    # Discover/clean them without seeding a new profile state during cleanup.
+    saved_state = state_path.with_name("profile-before-orphan-cleanup.json")
+    state_path.rename(saved_state)
+    try:
+        assert any(group["orphans"] for group in cleanup()["applies"])
+        cleanup("--execute")
+        assert not state_path.exists() and cleanup()["applies"] == []
+    finally:
+        saved_state.rename(state_path)
+    cleanup("--execute")  # Reconcile records whose entire directory is gone.
+    assert not any(group["missing"] or group["orphans"] for group in cleanup()["applies"])
+    print("real homed prune EACCES/mid-unlink/state-write failures, survivor indexing, orphan discovery and retries: passed")
 
     if gnome:
         key = "/org/gnome/desktop/interface/clock-show-weekday"
