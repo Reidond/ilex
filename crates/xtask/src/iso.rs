@@ -433,8 +433,22 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
     };
 
     if host_image_builder().is_some_and(|v| v >= MIN_IMAGE_BUILDER) {
+        // Keep the native path equivalent without installing a host wrapper.
+        let bin = ws.ensure_state()?.join("image-builder-bin");
+        fs::create_dir_all(&bin)?;
+        let wrapper = bin.join("osbuild");
+        fs::copy(ws.root.join("installer/image-builder/osbuild-cache"), &wrapper)?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+        }
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
         return cmd::run(
-            Command::new("image-builder").args(build_args(&out_dir.to_string_lossy(), &cache.to_string_lossy())),
+            Command::new("image-builder")
+                .env("PATH", std::env::join_paths(paths)?)
+                .args(build_args(&out_dir.to_string_lossy(), &cache.join("store").to_string_lossy())),
         );
     }
     eprintln!(
@@ -484,7 +498,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
             "mkdir -p \"$TMPDIR\" && exec image-builder \"$@\"",
             "image-builder",
         ])
-        .args(build_args("/out", "/var/cache/image-builder"));
+        .args(build_args("/out", "/var/cache/image-builder/store"));
     cmd::run(&mut run)
 }
 

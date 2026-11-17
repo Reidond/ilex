@@ -968,6 +968,10 @@ rebuild them in the new state rather than importing unknown keys. Production
 signing keys and image signatures are not changed. The ISO helper mounts its
 owned host cache at `/var/cache/image-builder`, including the persistent
 `store/` and `tmp/` directories; repeated ISO builds reuse that host store.
+The tooling supplies an osbuild wrapper that checkpoints `build` and `os-tree`:
+image-builder 89 otherwise does not retain these intermediate trees. The
+native path prepends an owned wrapper directory for that command only; no
+system executable or host configuration is replaced.
 
 Old hashless images, VMs, runtime directories, disk caches and development keys
 stay where they were. A new launcher refuses an existing bcvk name. For optional

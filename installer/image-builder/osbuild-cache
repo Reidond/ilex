@@ -1,0 +1,4 @@
+#!/bin/sh
+# image-builder 89 does not expose osbuild's checkpoint flags. Preserve the
+# expensive build root and deployed OS tree in this checkout's mounted store.
+exec /usr/bin/osbuild --checkpoint build --checkpoint os-tree "$@"
