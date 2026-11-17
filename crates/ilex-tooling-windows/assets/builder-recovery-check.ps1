@@ -56,15 +56,19 @@ function Retained-VM {
     return $vm
 }
 function Assert-RetainedProfile {
-    $vm=Retained-VM
+    $null=Retained-VM
     $j=Get-Content -LiteralPath (Join-Path $root 'journal.json') -Raw -Encoding UTF8|ConvertFrom-Json
-    $actualMemory=Get-VMMemory -VM $vm
-    $actualProcessor=Get-VMProcessor -VM $vm
-    $profileOK=$actualMemory.Startup -eq $baseline.memory_bytes -and !$actualMemory.DynamicMemoryEnabled -and $actualProcessor.Count -eq $baseline.cpus -and $actualProcessor.ExposeVirtualizationExtensions
-    Check $profileOK "Retained resource profile was not restored: RAM=$($actualMemory.Startup)/$($baseline.memory_bytes), dynamic=$($actualMemory.DynamicMemoryEnabled), CPUs=$($actualProcessor.Count)/$($baseline.cpus), nested=$($actualProcessor.ExposeVirtualizationExtensions)"
+    $fresh=Invoke-Helper $production 'status' $root @{}
+    Expected $fresh 0
+    $actual=($fresh.Out|ConvertFrom-Json).actual_resources
+    $profileOK=$actual.memory_bytes -eq $baseline.memory_bytes -and !$actual.dynamic_memory -and $actual.cpus -eq $baseline.cpus -and $actual.nested
+    Check $profileOK "Retained resource profile was not restored: RAM=$($actual.memory_bytes)/$($baseline.memory_bytes), CPUs=$($actual.cpus)/$($baseline.cpus)"
     Check ($j.memory_bytes -eq $baseline.memory_bytes -and $j.cpus -eq $baseline.cpus -and $j.data_uuid -eq $baseline.data_uuid -and $j.revision -eq $baseline.revision) 'Retained journal/data/provisioning identity changed'
     Check ((Get-FileHash -LiteralPath (Join-Path $root 'known_hosts')).Hash -eq $knownHostsHash) 'Retained SSH pin changed'
 }
+# Authorize through the full production validator before the restoration
+# finally block is allowed to perform any native mutation on this UUID.
+Expected (Invoke-Helper $production 'status' $root @{}) 0
 Assert-RetainedProfile
 try {
     # Only identity salting and abrupt-exit/start-witness instrumentation differ
@@ -75,7 +79,10 @@ try {
     $memoryStep='Set-VMMemory -VM (Owned-VM) -DynamicMemoryEnabled $false -StartupBytes $requestedMemory'
     $memoryCrash=Replace-Once $noStart $memoryStep ($memoryStep+"`n                [Environment]::Exit(86)")
     Expected (Invoke-Helper $memoryCrash 'up' $root @{memory_gib=$otherMemory;cpus=$baseline.cpus;wait_for_memory_seconds=0}) 86
-    Check ((Get-VMMemory -VM (Retained-VM)).Startup -eq ([long]$otherMemory*1GB)) 'Memory interruption missed the post-Set-VMMemory boundary'
+    $fresh=Invoke-Helper $production 'status' $root @{}
+    Expected $fresh 0
+    $actual=($fresh.Out|ConvertFrom-Json).actual_resources
+    Check ($actual.memory_bytes -eq ([long]$otherMemory*1GB)) "Memory interruption missed the post-Set-VMMemory boundary: actual=$($actual.memory_bytes), expected=$([long]$otherMemory*1GB)"
     Expected (Invoke-Helper $noStart 'up' $root @{wait_for_memory_seconds=0}) 1 'Actual VM resources differ from journal'
     Expected (Invoke-Helper $repair 'up' $root @{memory_gib=([long]$baseline.memory_bytes/1GB);cpus=$baseline.cpus;wait_for_memory_seconds=0}) 86
     Assert-RetainedProfile

@@ -363,7 +363,11 @@ function Reply {
     $reply=[ordered]@{schema=1;name=$name;owner=$owner;state='absent';provisioning_revision=$r.revision;root=$root}
     if($j) {$reply.journal=$j}
     if($script:probe) {$reply.probe=$script:probe}
-    if($vm) {$reply.state=[string]$vm.State;$reply.vm_id=[string]$vm.Id;$reply.addresses=@(Addresses $vm)}
+    if($vm) {
+        $reply.state=[string]$vm.State;$reply.vm_id=[string]$vm.Id;$reply.addresses=@(Addresses $vm)
+        $memory=Get-VMMemory -VM $vm;$processor=Get-VMProcessor -VM $vm
+        $reply.actual_resources=@{memory_bytes=[long]$memory.Startup;cpus=[int]$processor.Count;dynamic_memory=[bool]$memory.DynamicMemoryEnabled;nested=[bool]$processor.ExposeVirtualizationExtensions}
+    }
     if($script:address) {$reply.endpoint=@{schema=1;vm_id=$j.vm_id;owner=$owner;address=$script:address;user='ilex';identity_file=(Join-Path $root 'identity');known_hosts_file=(Join-Path $root 'known_hosts');host_key_alias=$name;provisioning_revision=$j.revision}}
     return ($reply | ConvertTo-Json -Depth 18)
 }

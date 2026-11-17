@@ -220,3 +220,69 @@ uncompressed, unencrypted VHDX files, Gen2 Secure Boot on and vTPM enabled. It
 consumes no running VM RAM. The default remains 16 GiB/eight vCPUs; restore it
 with `builder up --memory-gib 16 --cpus 8 --wait-for-memory-seconds 10800` when
 30 GiB host capacity is available.
+
+## Review follow-up — exact interruption boundaries
+
+Review `5940511608` covered head `1ece404`. The four P2 changes retain T1 base
+`1c82e48`; the owner requested waiting for T1 to carry the phase0 CI fix before
+another rebase. No unit tests were added or run.
+
+Reproduction on native Windows, with the retained ready builder off:
+
+```powershell
+cargo check -p xtask --locked
+cargo clippy -p xtask --locked -- -D warnings
+cargo xtask builder recovery-self-check --wait-for-memory-seconds 10800
+cargo xtask runtime activation-self-check
+```
+
+The recovery command uses instrumented copies of the embedded production helper:
+one identity salt for the disposable fixture, exact single-match abrupt-exit
+anchors, and a start witness that prevents accidental startup during negative
+admission checks. The production recovery/admission logic is unchanged in those
+copies. The real installation lock covers the retained builder checks. The
+maintenance SSH key remains guest-root authority, as clarified in the usage doc.
+
+1. **Interrupted RAM/CPU resize:** the real retained UUID
+   `b521170d-a2e0-4791-8b3e-71819084203d` was off at 4 GiB/four CPUs. Abrupt exit
+   immediately after `Set-VMMemory` left actual startup RAM at 16 GiB while the
+   journal still recorded 4 GiB. Ordinary `up` rejected resource drift before
+   admission or the start witness. Explicit original options repaired actual
+   settings even though they already matched the journal; interruption after
+   journal commit kept it off. A separate interruption after `Set-VMProcessor`
+   before journal commit exercised CPU drift and the same repair. The UUID,
+   data UUID, provisioning revision and SSH pin stayed unchanged. The original
+   4 GiB/four-CPU profile was restored without starting the VM.
+2. **Allocated candidate:** passed. The command exited immediately after flushing
+   `journal.json.partial` in phase `allocated`, before rename and before VM
+   Notes were written. It then recovered against the complete prior
+   creation intent, UUID/resource and actual configuration/disk paths. A wrong
+   resource run and an ordinary ready record with empty Notes both failed closed.
+3. **Cleanup after unregister:** passed. The same disposable Gen2 fixture exited
+   immediately after `Remove-VM`, leaving phase `deleting` and its validated
+   path manifest while seed keys/disks still exist. Retry must finish those
+   paths with the exact UUID absent. An outside path and a new separately owned
+   replacement UUID using the same name were rejected before deletion. The
+   replacement survived the guard check and was then removed using its own
+   creation UUID/Notes. All fixture resources and keys were removed. These
+   allocation/deletion cases waited until the host exceeded 18 GiB available;
+   the 14 GiB reserve was never reduced.
+4. **First runtime update:** passed in a fresh process-local `LOCALAPPDATA`,
+   using copied checksum-verified compressed archives and fresh extraction.
+   An unavailable SDL video driver caused real QEMU SDL initialization failure
+   after readiness, leaving both `active.json` and `previous.json` absent.
+   A subsequent actual WHPX/SDL/GL firmware smoke created the first active
+   pointer; the normal installation's pointer stayed unchanged and the entire
+   isolated runtime fixture was removed. An initial positive run exceeded the
+   old five-second QMP budget; the bounded 30-second budget passed.
+
+Locked native check/clippy and all PowerShell parsers passed. Local result files
+are under `C:/Users/reido/Documents/ilex-tooling-t2-2026-11-17-review/`; they contain
+resource identities and booleans, not seed/private-key bytes.
+
+[Run 44105654095](https://github.com/Reidond/ilex/actions/runs/44105654095), on
+reviewed head `1ece404`, completed **failure**: `build` passed and
+`upgrade::upgrade_and_rollback` failed `checking shipped boot mount protection`
+on the published v1 before candidate update, with active `/boot` autofs. This
+does not qualify the newer review-fix head. The Linux assertion is unchanged;
+the owner is coordinating its carried-up phase0/T1 fix.

@@ -421,8 +421,8 @@ fn gpu_smoke(path: &Path) -> Result<()> {
         };
         let mut client = ilex_tooling_qmp::Client::connect(
             TcpTransport(BufReader::new(stream)),
-            // A first SDL/GL launch can compile driver shaders before QEMU's
-            // main loop services QMP. Keep all I/O bounded on a busy host.
+            // Allow cold SDL/GL initialization to reach QEMU's main loop on a
+            // busy host, while keeping every I/O operation bounded.
             Duration::from_secs(30),
         )
         .context("GPU fixture QMP handshake")?;
