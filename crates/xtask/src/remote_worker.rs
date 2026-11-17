@@ -113,7 +113,12 @@ pub fn run(args: Args) -> Result<()> {
         Command::Test(a) => crate::test::run(&ws, a),
         Command::SelfCheck { hold_seconds } => {
             use std::process::Command;
-            ilex_devkit::cmd::run(&mut Command::new("/usr/local/libexec/ilex-builder-smoke"))?;
+            ilex_devkit::cmd::run(Command::new("flock").args([
+                "--wait",
+                "10800",
+                "/run/lock/ilex-remote-smoke-admission.lock",
+                "/usr/local/libexec/ilex-builder-smoke",
+            ]))?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({

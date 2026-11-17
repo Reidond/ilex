@@ -61,9 +61,10 @@ def relative(value):
 
 
 def private(path):
-    return any(p in {'.git', '.ssh', '.gnupg', '.env', 'ilex-secrets', 'credentials'}
+    return any(p in {'.git', '.ssh', '.gnupg', '.env', 'ilex-secrets', 'credentials',
+                     '.aws', '.azure', '.docker', '.kube', '.netrc', '_netrc', '.npmrc', '.pypirc', '.git-credentials', 'auth.json'}
                or p.endswith(('.key', '.pem', '.p12', '.pfx')) or p.startswith('.env.')
-               for p in Path(path).parts)
+               for p in (part.lower() for part in Path(path).parts))
 
 
 @contextlib.contextmanager
@@ -258,6 +259,19 @@ def materialize(snapshot):
 
 def verify_source(root, source):
     assert root.is_dir() and not root.is_symlink(), 'snapshot root is not a real directory'
+    assert (root / '.git').is_dir() and not (root / '.git').is_symlink(), 'snapshot Git metadata was replaced'
+    expected = {e['path'] for e in source['entries'] if e['kind']['kind'] != 'deleted'}
+    directories = {str(parent) for path in expected for parent in PurePosixPath(path).parents if str(parent) != '.'}
+    for directory, children, files in os.walk(root, followlinks=False):
+        directory = Path(directory)
+        if directory == root:
+            children[:] = [name for name in children if name != '.git']
+        for name in children:
+            path = directory / name
+            relative_path = path.relative_to(root).as_posix()
+            assert relative_path in (expected if path.is_symlink() else directories), 'unexpected source directory/link'
+        for name in files:
+            assert (directory / name).relative_to(root).as_posix() in expected, 'unexpected source file'
     for entry in source['entries']:
         path = root / entry['path']
         for parent in path.parents:
@@ -338,7 +352,7 @@ def submit(spec):
 def capacity(spec):
     # One full build/test at a time on 16 GiB; smaller tool jobs may share.
     kind = spec['command']['operation']
-    weight = {'tool': 4, 'self_check': 1, 'disk': 10, 'rechunk': 8}.get(kind, 12) * 1024**3
+    weight = {'tool': 4, 'self_check': 4, 'disk': 10, 'rechunk': 8}.get(kind, 12) * 1024**3
     total = int(next(l.split()[1] for l in Path('/proc/meminfo').read_text().splitlines() if l.startswith('MemTotal:'))) * 1024
     assert weight <= total - 2 * 1024**3, 'builder is too small for this operation; use builder up --memory-gib 16 while off'
     cap = min(4, max(1, total // (8 * 1024**3)))

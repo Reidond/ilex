@@ -56,6 +56,24 @@ impl Staged {
 pub fn stage(ws: &Workspace) -> Result<Staged> {
     let (identity, source) = ws.source_identity()?;
     source.validate()?;
+    let excluded = git::git(&ws.root)
+        .args([
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--",
+            ".claude",
+            ".t3",
+            "target",
+            ".ilex-state",
+        ])
+        .output()?;
+    ensure!(
+        excluded.status.success() && excluded.stdout.is_empty(),
+        "HEAD tracks excluded state/cache paths; refusing to include their contents in the source object pack"
+    );
     let cache = ws.ensure_state()?.join("remote/chunks");
     fs::create_dir_all(&cache)?;
     let mut staged = Staged {

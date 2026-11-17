@@ -49,13 +49,45 @@ pub fn remote_context(root: &Path) -> Result<Option<ilex_tooling_core::SnapshotC
 
 pub fn verify_materialized(root: &Path, source: &SourceManifest) -> Result<()> {
     source.validate()?;
-    let others = git_bytes(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for path in others.split(|b| *b == 0).filter(|b| !b.is_empty()) {
-        let name = std::str::from_utf8(path)?;
-        ensure!(
-            source.entries.iter().any(|e| e.path == name),
-            "new source input appeared after staging: {name}"
-        );
+    let git_metadata = fs::symlink_metadata(root.join(".git"))?;
+    ensure!(
+        git_metadata.is_dir() && !git_metadata.is_symlink(),
+        "snapshot Git metadata was replaced"
+    );
+    let expected: std::collections::BTreeSet<_> = source
+        .entries
+        .iter()
+        .filter(|e| !matches!(e.kind, SourceEntryKind::Deleted))
+        .map(|e| e.path.as_str())
+        .collect();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if directory == root && entry.file_name() == ".git" {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.is_dir() && !meta.is_symlink() {
+                ensure!(
+                    expected
+                        .iter()
+                        .any(|p| p.starts_with(&format!("{relative}/"))),
+                    "new source directory appeared after staging: {relative}"
+                );
+                directories.push(path);
+            } else {
+                ensure!(
+                    expected.contains(relative.as_str()),
+                    "new source input appeared after staging: {relative}"
+                );
+            }
+        }
     }
     for entry in &source.entries {
         let path = root.join(&entry.path);
@@ -208,13 +240,7 @@ fn inventory(ws: &Workspace) -> Result<SourceManifest> {
         ensure!(
             !path
                 .components()
-                .any(|p| p.as_os_str().to_str().is_some_and(|s| matches!(
-                    s,
-                    ".env" | ".ssh" | ".gnupg" | "ilex-secrets" | "credentials"
-                ) || s.starts_with(".env.")
-                    || [".key", ".pem", ".p12", ".pfx"]
-                        .iter()
-                        .any(|e| s.ends_with(e)))),
+                .any(|p| p.as_os_str().to_str().is_some_and(private_name)),
             "private-named source input {relative}; remove it before building; it cannot be silently omitted from provenance"
         );
         let absolute = ws.root.join(path);
@@ -336,6 +362,31 @@ fn is_reparse(meta: &fs::Metadata) -> bool {
         let _ = meta;
         false
     }
+}
+
+fn private_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        ".env"
+            | ".ssh"
+            | ".gnupg"
+            | "ilex-secrets"
+            | "credentials"
+            | ".aws"
+            | ".azure"
+            | ".docker"
+            | ".kube"
+            | ".netrc"
+            | "_netrc"
+            | ".npmrc"
+            | ".pypirc"
+            | ".git-credentials"
+            | "auth.json"
+    ) || name.starts_with(".env.")
+        || [".key", ".pem", ".p12", ".pfx"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
 }
 
 fn executable(meta: &fs::Metadata, mode: Option<&str>) -> bool {

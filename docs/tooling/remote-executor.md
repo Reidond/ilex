@@ -52,6 +52,8 @@ escaping the checkout fail. Submodules and unresolved index conflicts fail.
 The transport does not copy the Windows worktree's `.git` pointer, hooks, config,
 credentials or parent history. A small Git object pack carries only the original
 HEAD commit and its tree; Linux imports it with that original shallow boundary.
+Tracked state/cache directories at HEAD are refused before making that pack,
+so an excluded directory cannot enter the transfer through Git objects.
 
 Files use SHA-256 chunks of at most 4 MiB. Missing chunks travel in bounded binary
 batches; unchanged chunks stay in the builder. Linux rechecks every chunk and

@@ -28,6 +28,10 @@ Owned builder UUID: `b521170d-a2e0-4791-8b3e-71819084203d`.
   removed. This checks source staging, not a builder image-build acceptance run.
 - CRLF in an LF-attributed untracked text file was rejected before builder
   access. An escaping symlink-file input was also rejected.
+- A credential-named `.npmrc` was rejected before copying. After materializing
+  each checkout, adding an ignored `target/ignored-input` made the real Linux
+  `info --json` command fail source verification; removing it restored the
+  snapshot. Cached snapshots cannot admit new ignored input silently.
 - An explicit `security::firmware` filter failed natively with the T5 harness
   diagnostic before starting a job.
 - Two independently materialized checkouts were inspected by the Linux xtask
