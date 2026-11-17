@@ -156,15 +156,14 @@ pub fn run(args: Args) -> Result<()> {
             }
             if let Some(image) = allocation_image {
                 ilex_devkit::ownership::require_image(&ws, &image)?;
-                // An explicit fault exercise, never an environment forwarded
-                // from Windows. Pause at the old unjournaled allocation gap.
-                unsafe {
-                    std::env::set_var("ILEX_SELFCHECK_ALLOCATION_PAUSE", "1");
-                }
+                let opts = ilex_devkit::bcvk::EphemeralOpts {
+                    allocation_self_check: true,
+                    ..Default::default()
+                };
                 let _vm = ilex_devkit::bcvk::EphemeralVm::boot(
                     &ws.vm_name("allocation-self-check"),
                     &image,
-                    &Default::default(),
+                    &opts,
                 )?;
                 anyhow::bail!("allocation self-check unexpectedly passed its cancellation gate");
             }

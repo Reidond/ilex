@@ -245,6 +245,8 @@ pub struct EphemeralOpts {
     pub extra_args: Vec<String>,
     /// How long to wait for the guest to accept SSH.
     pub boot_timeout: Duration,
+    /// Remote self-check only: pause after allocation, before the CID receipt.
+    pub allocation_self_check: bool,
 }
 
 impl Default for EphemeralOpts {
@@ -254,6 +256,7 @@ impl Default for EphemeralOpts {
             vcpus: 4,
             extra_args: Vec::new(),
             boot_timeout: Duration::from_secs(600),
+            allocation_self_check: false,
         }
     }
 }
@@ -282,6 +285,10 @@ impl EphemeralVm {
         ws.ensure_state()?;
         ws.verify_implicit_image(image)?;
         validate_vm_args(&opts.extra_args)?;
+        ensure!(
+            !opts.allocation_self_check || std::env::var_os("ILEX_JOB_RESOURCE_DIR").is_some(),
+            "allocation fault injection requires a remote job"
+        );
         let lease = crate::ownership::vm_lease(&ws, name)?;
         let slot = slots::acquire(name)?;
         require_absent_container(name)?;
@@ -304,11 +311,7 @@ impl EphemeralVm {
         crate::ownership::remote_ephemeral_args(&ws, name, &mut run)?;
         run.arg(image);
         let started = cmd::run(&mut run);
-        if started.is_ok() && std::env::var_os("ILEX_SELFCHECK_ALLOCATION_PAUSE").is_some() {
-            ensure!(
-                std::env::var_os("ILEX_JOB_RESOURCE_DIR").is_some(),
-                "allocation fault injection requires a remote job"
-            );
+        if started.is_ok() && opts.allocation_self_check {
             let proof = cmd::output(Command::new("podman").args([
                 "container",
                 "inspect",
