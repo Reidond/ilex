@@ -189,10 +189,17 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify /usr/lib/dracut/modules.d/91ilex-
 
 # Generic unlock support must travel with every deployment, including updates.
 # This runs before overlay replay and never sees a machine TPM or credential.
-RUN kernel=$(kernel-install list --json=short | python3 -c 'import json,sys; print(next(k["version"] for k in json.load(sys.stdin) if k["has_kernel"]))') && \
+RUN mkdir -p "$(realpath /root)" && \
+    kernel=$(kernel-install list --json=short | python3 -c 'import json,sys; print(next(k["version"] for k in json.load(sys.stdin) if k["has_kernel"]))') && \
     DRACUT_NO_XATTR=1 dracut --force --zstd --reproducible --no-hostonly \
         "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}" && \
-    lsinitrd "/usr/lib/modules/${kernel}/initramfs.img" | grep -q ilex-enroll
+    lsinitrd "/usr/lib/modules/${kernel}/initramfs.img" > /tmp/ilex-initramfs-list && \
+    for required in ilex-enroll systemd-cryptsetup-original libcryptsetup-token-systemd-tpm2.so libtss2-esys libcrypto.so; do \
+        grep -Fq "$required" /tmp/ilex-initramfs-list || exit 1; \
+    done && \
+    modinfo -k "${kernel}" tpm_crb >/dev/null && \
+    modinfo -k "${kernel}" tpm_tis >/dev/null && \
+    rm /tmp/ilex-initramfs-list && rmdir "$(realpath /root)"
 
 # The final mutation applies additions against the real image and removes its
 # own staging in the same interpreter. Only bootc lint runs after overlays.

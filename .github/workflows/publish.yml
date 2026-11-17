@@ -272,6 +272,16 @@ jobs:
           ILEX_SECURITY_MEMORY: ${{ inputs.encrypted_install && '6G' || '4G' }}
         run: bash .github/security-tier.sh
 
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: inputs.encrypted_install
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Build exact ISO for encrypted candidate gate
+        if: inputs.encrypted_install
+        timeout-minutes: 40
+        run: bash .github/encrypted-iso.sh
+
       - name: Exact encrypted installer qualification
         if: inputs.encrypted_install
         timeout-minutes: 180
