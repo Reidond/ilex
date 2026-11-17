@@ -111,6 +111,35 @@ pub fn run(args: Args) -> Result<()> {
         Command::Iso(a) => crate::iso::run(&ws, a),
         Command::Tool(a) => crate::tool::run(&ws, a),
         Command::Test(a) => crate::test::run(&ws, a),
+        Command::Export { image, output } => {
+            ensure!(output.is_none(), "export destination must stay on Windows");
+            let image = ws.resolve_image(image.as_deref());
+            ilex_devkit::ownership::require_image(&ws, &image)?;
+            let immutable = ilex_devkit::bcvk::image_id(&image)?;
+            let directory = ws.ensure_state()?.join("exports");
+            std::fs::create_dir_all(&directory)?;
+            let temporary = directory.join(format!("{}.partial", job.job));
+            ilex_devkit::cmd::run(
+                std::process::Command::new("podman")
+                    .args(["save", "--format", "oci-archive", "--output"])
+                    .arg(&temporary)
+                    .arg(&immutable),
+            )?;
+            let checksum = hash_file(&temporary)?;
+            let archive = directory.join(format!("{}.oci.tar", &checksum[7..]));
+            if archive.exists() {
+                ensure!(
+                    hash_file(&archive)? == checksum,
+                    "archive cache checksum mismatch"
+                );
+                std::fs::remove_file(&temporary)?;
+            } else {
+                std::fs::rename(&temporary, &archive)?;
+            }
+            std::fs::write(archive.with_extension("sha256"), format!("{checksum}\n"))?;
+            println!("{}", archive.display());
+            Ok(())
+        }
         Command::SelfCheck { hold_seconds } => {
             use std::process::Command;
             ilex_devkit::cmd::run(Command::new("flock").args([

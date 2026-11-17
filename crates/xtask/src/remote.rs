@@ -23,7 +23,13 @@ pub enum Command {
     Iso(crate::iso::Args),
     Tool(crate::tool::Args),
     Test(crate::test::Args),
-    SelfCheck { hold_seconds: u64 },
+    Export {
+        image: Option<String>,
+        output: Option<std::path::PathBuf>,
+    },
+    SelfCheck {
+        hold_seconds: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,9 +44,14 @@ pub struct Job {
 }
 
 #[derive(Debug)]
-pub struct Failure { pub code: u8, pub message: String }
+pub struct Failure {
+    pub code: u8,
+    pub message: String,
+}
 impl std::fmt::Display for Failure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str(&self.message) }
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
 }
 impl std::error::Error for Failure {}
 
@@ -53,6 +64,13 @@ pub struct Args {
 pub enum Operation {
     /// Inspect exact source chunks without starting the builder
     Snapshot,
+    /// Explicitly export this checkout's image to an OCI archive (no registry)
+    Export {
+        #[arg(long)]
+        image: Option<String>,
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
     /// Reconnect, stream logs and retrieve outputs for an interrupted client
     Resume {
         #[arg(long)]

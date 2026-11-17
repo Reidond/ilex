@@ -57,18 +57,9 @@ pub fn stage(ws: &Workspace) -> Result<Staged> {
     let (identity, source) = ws.source_identity()?;
     source.validate()?;
     let excluded = git::git(&ws.root)
-        .args([
-            "ls-tree",
-            "-r",
-            "--name-only",
-            "-z",
-            "HEAD",
-            "--",
-            ".claude",
-            ".t3",
-            "target",
-            ".ilex-state",
-        ])
+        .args(["ls-tree", "-r", "--name-only", "-z"])
+        .arg(&source.revision)
+        .args(["--", ".claude", ".t3", "target", ".ilex-state"])
         .output()?;
     ensure!(
         excluded.status.success() && excluded.stdout.is_empty(),
@@ -121,13 +112,8 @@ pub fn stage(ws: &Workspace) -> Result<Staged> {
     if !bundle.exists() {
         let temporary = bundle.with_extension(format!("{}.partial", std::process::id()));
         let objects = git::git(&ws.root)
-            .args([
-                "rev-list",
-                "--objects",
-                "--no-object-names",
-                "--no-walk",
-                "HEAD",
-            ])
+            .args(["rev-list", "--objects", "--no-object-names", "--no-walk"])
+            .arg(&staged.snapshot.source.revision)
             .output()?;
         ensure!(objects.status.success(), "enumerating HEAD objects");
         let mut pack = git::git(&ws.root)

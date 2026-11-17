@@ -56,6 +56,13 @@ Owned builder UUID: `b521170d-a2e0-4791-8b3e-71819084203d`.
   against that checkout's image: 97.28 seconds in the harness, 106.486 seconds
   for the command. This is Linux/WSL regression evidence; it does not qualify
   the Hyper-V executor.
+- The Linux remote worker exported the owned image without a registry. The
+  2,196,876,800-byte OCI archive's manifest named the exact image configuration
+  `adf3ffaba430453dc776859ea81f8a608bcc48857bca7827f3cf7b226845c4e7`;
+  its archive hash was
+  `d65ed32939561ae6dcbe2fc86bc426f910c8d3338511d7bdb2da0606f0b195c6`.
+  The task's temporary export/materialization directory was removed. This
+  verifies export generation, not pinned-SSH delivery.
 
 ## Builder admission and remaining gates
 

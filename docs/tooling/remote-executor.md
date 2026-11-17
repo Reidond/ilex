@@ -4,6 +4,8 @@ Run `cargo xtask build`, `test`, `disk`, `iso`, `tool` and `rechunk` directly in
 PowerShell. These commands stage the selected Windows checkout, call the T2
 builder's idempotent `up`, and execute Linux tooling there. Native Linux commands
 remain local. `vm` and its existing WSL/viewer path are retained for T4/T7.
+For that compatibility path, build in WSL first: it uses WSL's image store.
+The builder and WSL stores remain separate.
 
 Install a changed builder recipe with `cargo xtask builder update`; a recipe
 mismatch fails rather than running a different controller. The update retains
@@ -20,6 +22,7 @@ cargo xtask disk --out 'C:\output with spaces\ilex.qcow2'
 cargo xtask tool strace
 cargo xtask iso --testing-tag latest
 cargo xtask remote snapshot
+cargo xtask remote export --image <owned-image> --out 'C:\outputs\ilex.oci.tar'
 cargo xtask remote self-check
 cargo xtask remote self-check --hold-seconds 120 # Ctrl-C cancellation exercise
 cargo xtask remote resume                     # reconnect to this checkout's last job
@@ -139,6 +142,7 @@ The state receipt also fences `main`. It contains:
 - `remote/jobs/<UUID>`: request, endpoint metadata, transfer measurements, streamed
   logs, result and a `delivered.json` map;
 - `artifacts`, `iso`, `tools/images`, public certificates and build manifests;
+- `exports`: OCI archives requested explicitly with `remote export`;
 - `disks/<SHA256>.qcow2|raw`: immutable downloaded disk parents with ownership
   receipts. Explicit `--out` also receives a verified atomic copy.
 

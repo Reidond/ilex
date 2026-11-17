@@ -321,7 +321,7 @@ def running(unit):
 
 
 def submit(spec):
-    assert spec['schema'] == 1 and spec['command']['operation'] in {'build', 'rechunk', 'disk', 'iso', 'tool', 'test', 'self_check'}, 'unsupported job schema/operation'
+    assert spec['schema'] == 1 and spec['command']['operation'] in {'build', 'rechunk', 'disk', 'iso', 'tool', 'test', 'export', 'self_check'}, 'unsupported job schema/operation'
     assert set(spec['environment']) <= ALLOWED_ENV, 'environment not allowlisted'
     assert all(isinstance(v, str) and len(v) < 16384 and '\x00' not in v for v in spec['environment'].values()), 'invalid environment value'
     snapshot = spec['snapshot']
@@ -339,6 +339,7 @@ def submit(spec):
         atomic(path / 'state.json', encode({'state': 'queued', 'exit_code': None}))
         try:
             checked(['systemd-run', '--quiet', '--unit=' + service(spec['job']),
+                     '--description=ilex-job schema=1 owner=' + owner + ' job=' + spec['job'],
                      '--property=Type=exec', '--property=KillMode=control-group',
                      '--property=TimeoutStopSec=45', '--property=SendSIGKILL=yes',
                      '/usr/bin/python3', '-I', '-S', '/usr/local/libexec/ilex-builder-jobs',
@@ -352,7 +353,7 @@ def submit(spec):
 def capacity(spec):
     # One full build/test at a time on 16 GiB; smaller tool jobs may share.
     kind = spec['command']['operation']
-    weight = {'tool': 4, 'self_check': 4, 'disk': 10, 'rechunk': 8}.get(kind, 12) * 1024**3
+    weight = {'tool': 4, 'self_check': 4, 'export': 4, 'disk': 10, 'rechunk': 8}.get(kind, 12) * 1024**3
     total = int(next(l.split()[1] for l in Path('/proc/meminfo').read_text().splitlines() if l.startswith('MemTotal:'))) * 1024
     assert weight <= total - 2 * 1024**3, 'builder is too small for this operation; use builder up --memory-gib 16 while off'
     cap = min(4, max(1, total // (8 * 1024**3)))
@@ -376,7 +377,7 @@ def artifact_inventory(path, state, include_state=True):
     artifacts = []
     roots = [(path, 'job'), (state / 'artifacts', 'artifacts'), (state / 'iso', 'iso'),
              (state / 'disks', 'disks'), (state / 'tools/images', 'tools/images'),
-             (state / 'tools/keys', 'tools/keys'), (state / 'jobs', 'jobs')]
+             (state / 'tools/keys', 'tools/keys'), (state / 'jobs', 'jobs'), (state / 'exports', 'exports')]
     for root, prefix in roots:
         if not include_state and prefix != 'job':
             continue
@@ -582,7 +583,9 @@ def request(frame, payload):
     if op in {'status', 'cancel', 'fetch'}:
         path, spec = load_job(frame)
         if op == 'cancel':
-            if running(service(frame['job'])):
+            if not (path / 'result.json').exists() and running(service(frame['job'])):
+                description = checked(['systemctl', 'show', '-p', 'Description', '--value', service(frame['job'])]).decode().strip()
+                assert description == 'ilex-job schema=1 owner=' + frame['owner'] + ' job=' + frame['job'], 'job unit ownership changed'
                 # Signal only this unit. The wrapper freezes outputs and writes
                 # its result before exiting; no maintenance/VM-stop operation.
                 checked(['systemctl', 'kill', '--signal=SIGTERM', '--kill-whom=all', service(frame['job'])])
@@ -604,7 +607,7 @@ def request(frame, payload):
             assert tail in {'stdout.log', 'stderr.log', 'state.json', 'request.json', 'context.json', 'result.json', 'image.json'}, 'unsupported job artifact'
             target = path / tail
         else:
-            assert prefix in {'artifacts', 'iso', 'disks', 'tools', 'jobs'} and not private(tail), 'unsupported output artifact'
+            assert prefix in {'artifacts', 'iso', 'disks', 'tools', 'jobs', 'exports'} and not private(tail), 'unsupported output artifact'
             result = read_json(path / 'result.json')
             assert any(a['path'] == name for a in result['artifacts']), 'artifact is not in the immutable job result'
             target = path / 'exports' / name

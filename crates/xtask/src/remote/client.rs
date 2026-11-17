@@ -81,13 +81,18 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
     }
     .map(std::path::absolute)
     .transpose()?;
+    let archive_out = if let Command::Export { output, .. } = &mut command {
+        output.take()
+    } else {
+        None
+    }
+    .map(std::path::absolute)
+    .transpose()?;
     let mut staged = source::stage(ws)?;
     let mut inputs = BTreeMap::new();
-    if let Some(iso) = std::env::var_os("ILEX_ISO").filter(|s| !s.is_empty()) {
-        ensure!(
-            matches!(command, Command::Test(_)),
-            "ILEX_ISO is meaningful only for tests"
-        );
+    if matches!(command, Command::Test(_))
+        && let Some(iso) = std::env::var_os("ILEX_ISO").filter(|s| !s.is_empty())
+    {
         let iso = PathBuf::from(iso);
         inputs.insert("iso".into(), staged.file(&iso)?);
         inputs.insert(
@@ -116,7 +121,7 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<()> {
     fs::write(
         job_dir.join("destinations.json"),
         serde_json::to_vec(
-            &json!({"disk":disk_out,"iso":iso_out,"artifacts":std::env::var_os("ILEX_ARTIFACTS").map(PathBuf::from)}),
+            &json!({"disk":disk_out,"iso":iso_out,"archive":archive_out,"artifacts":std::env::var_os("ILEX_ARTIFACTS").map(PathBuf::from)}),
         )?,
     )?;
     // Save before submit: a lost reply never loses the idempotent job identity.
@@ -210,6 +215,13 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
             Ok(())
         }
         Operation::SelfCheck { hold_seconds } => execute(ws, Command::SelfCheck { hold_seconds }),
+        Operation::Export { image, out } => execute(
+            ws,
+            Command::Export {
+                image,
+                output: Some(out),
+            },
+        ),
         Operation::Resume { job } | Operation::Cancel { job } => {
             let root = state(ws)?;
             let _guard = ilex_devkit::ownership::lock(&root.join("client.lock"))?;
@@ -264,8 +276,10 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
             .map(|m| m.len())
             .unwrap_or(0);
     }
-    let paths = matches!(job.command, Command::Disk(_) | Command::Tool(_))
-        || matches!(&job.command, Command::Iso(a) if !a.check_registry && !a.due);
+    let paths = matches!(
+        job.command,
+        Command::Disk(_) | Command::Tool(_) | Command::Export { .. }
+    ) || matches!(&job.command, Command::Iso(a) if !a.check_registry && !a.due);
     let result = loop {
         if (cancel || transport::cancelled()) && !cancelled {
             transport.rpc(
@@ -368,6 +382,14 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
         };
         fetch(transport, job, artifact, &destination)?;
         delivered.insert(name.to_owned(), destination.clone());
+        if name.starts_with("exports/")
+            && primary_name
+                .as_ref()
+                .is_some_and(|base| name == format!("exports/{base}"))
+            && let Some(out) = destinations["archive"].as_str()
+        {
+            copy_atomic(&destination, Path::new(out))?;
+        }
         if let Some(tail) = name.strip_prefix("artifacts/")
             && let Some(root) = destinations["artifacts"].as_str()
         {
@@ -423,11 +445,20 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
         )?;
     }
     eprintln!("ilex: job {} evidence: {}", job.job, dir.display());
-    let code = result["exit_code"].as_i64().context("missing remote exit code")?;
+    let code = result["exit_code"]
+        .as_i64()
+        .context("missing remote exit code")?;
     if code != 0 {
         let code = if code < 0 { 128 - code } else { code };
-        return Err(super::Failure { code: u8::try_from(code).unwrap_or(1), message: format!(
-            "remote job {} exited {code}; artifacts retrieved to {}", job.job, ws.state_dir().display()) }.into());
+        return Err(super::Failure {
+            code: u8::try_from(code).unwrap_or(1),
+            message: format!(
+                "remote job {} exited {code}; artifacts retrieved to {}",
+                job.job,
+                ws.state_dir().display()
+            ),
+        }
+        .into());
     }
     if paths {
         let stdout = fs::read_to_string(dir.join("stdout.log"))?;
@@ -444,6 +475,11 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
                     .map(PathBuf::from)
                     .unwrap_or(ws.state_dir().join("iso"))
                     .join(basename),
+                Command::Export { .. } => destinations["archive"]
+                    .as_str()
+                    .map(PathBuf::from)
+                    .or_else(|| delivered.get(&format!("exports/{basename}")).cloned())
+                    .context("image archive was not delivered")?,
                 _ => ws.state_dir().join("tools/images").join(basename),
             };
             println!("{}", location.display());
