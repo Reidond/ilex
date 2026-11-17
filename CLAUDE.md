@@ -812,8 +812,8 @@ They also hold an old file descriptor across exchange and save after verificatio
 or after apply returns, checking retained Btrfs backup content and end/next-apply
 conflicts. Cleanup coverage checks dry-run sizes, explicit keep-N removal,
 symlink refusal, retained state snapshots, no automatic pruning and the size notice.
-Measured 2026-11-17: the shell-free image is 1,977.84 MiB against Fedora
-bootc's 1,917.62 MiB, a 60.23 MiB increase within the unchanged 128 MiB budget.
+Measured 2026-11-17: the shell-free image is 1,977.85 MiB against Fedora
+bootc's 1,917.62 MiB, a 60.24 MiB increase within the unchanged 128 MiB budget.
 
 ## Build sharing: kache
 
