@@ -70,6 +70,10 @@ current-user/SYSTEM ACLs. The journal records schema, SID-derived owner, random
 creation run, exact VM UUID, matching Hyper-V Notes and a core `OwnedResource`
 record. Every mutation resolves the UUID and verifies those fields. A matching
 name without a matching journal is never adopted or removed.
+The `disks` subdirectory additionally grants the exact VM SID inherited access
+so Hyper-V can create recovery differencing disks. SSH identities and seed files
+remain outside that directory. Earlier development disks are moved there only
+with the journal-owned VM off and no checkpoints.
 
 Default resources are eight vCPUs and fixed 16 GiB RAM, with nested virtualization,
 Gen2 Secure Boot using MicrosoftUEFICertificateAuthority, a local key protector,
@@ -97,8 +101,9 @@ memory profile. Status is read-only, including when no installation exists.
 
 ## Provisioning and SSH
 
-IMAPI generates a NoCloud seed containing a disposable bootstrap key, a generated
-known SSH host key, and a separate restricted maintenance key. Cloud-init creates
+IMAPI generates a NoCloud seed containing disposable bootstrap and maintenance
+public keys plus the generated SSH host key. The bootstrap and maintenance
+client private keys stay outside the seed ISO. Cloud-init creates
 dedicated users and provisions the guest automatically. The host pins the supplied
 host key before its first connection, with strict checking, no user SSH config,
 no global known-hosts file, no agent forwarding and no password authentication.
@@ -144,12 +149,18 @@ resources after checking exact UUID/Notes and all filesystem paths. It refuses a
 ready builder. If interruption occurred in the tiny gap between Hyper-V returning
 the UUID and recording it, an unjournaled VM fails closed for manual inspection;
 the tool cannot safely authorize name-only deletion.
+If cloud-init completed but the host was interrupted before marking readiness,
+`up` authenticates the recorded guest and completes its smoke/seed cleanup. An
+unfinished provisioning recipe with an older revision can resume through the
+pinned finite controller; a ready builder requires explicit `update` instead.
 
 Updates stop the idle builder, create an explicit powered-off Standard checkpoint
 covering VM/OS/data/vTPM, start, update, reboot and run the nested smoke. On failure,
 restore that exact checkpoint and verify boot again. `builder update
 --rollback-probe` deliberately fails after a real package update to exercise this
 path. Interrupted updates retain `updating` and require explicit `builder rollback`.
+The checkpoint's provisioning revision is recorded separately from the active
+revision, so explicit rollback after a successful update verifies the old recipe.
 The recovery checkpoint remains until `builder accept-update` explicitly removes
 it. No data disk is attached to a second writable VM, and no prune is performed.
 

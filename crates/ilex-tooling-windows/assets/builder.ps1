@@ -112,6 +112,37 @@ function Remove-Owned([string]$path) {
         Remove-Item -LiteralPath $absolute -Recurse -Force
     }
 }
+function Ensure-DiskStorage {
+    $vm=Owned-VM
+    $storage=Assert-Path (Join-Path $root 'disks')
+    [IO.Directory]::CreateDirectory($storage)|Out-Null
+    # vmwp must create differencing VHDX files, but gets no access to the
+    # sibling seed/client identities. Do not grant the Virtual Machines group.
+    $account=New-Object Security.Principal.NTAccount('NT VIRTUAL MACHINE',([string]$vm.Id))
+    $sid=$account.Translate([Security.Principal.SecurityIdentifier])
+    $acl=[IO.Directory]::GetAccessControl($storage,[Security.AccessControl.AccessControlSections]::Access)
+    $acl.SetAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+    [IO.Directory]::SetAccessControl($storage,$acl)
+    $moves=@()
+    foreach($drive in (Get-VMHardDiskDrive -VM $vm)) {
+        foreach($file in @('os.vhdx','data.vhdx')) {
+            $legacy=Assert-Path (Join-Path $root $file)
+            if($drive.Path -eq $legacy) {
+                $destination=Assert-Path (Join-Path $storage $file)
+                $moves+=@{SourceFilePath=$legacy;DestinationFilePath=$destination}
+            }
+        }
+    }
+    if($moves.Count) {
+        if($vm.State -ne 'Off' -or @(Get-VMSnapshot -VM $vm).Count){throw 'Legacy disk migration requires the owned VM off with no checkpoints'}
+        Move-VMStorage -VM $vm -Vhds $moves
+    }
+    foreach($drive in (Get-VMHardDiskDrive -VM $vm)) {
+        $path=Assert-Path $drive.Path
+        if(![IO.Path]::GetDirectoryName($path).Equals($storage,[StringComparison]::OrdinalIgnoreCase)){throw 'Unexpected builder disk outside its owned storage directory'}
+    }
+    $j.resource.paths=@($storage,(Join-Path $root 'config'));Write-Journal
+}
 function Preflight([long]$memory) {
     $available=[long](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1KB
     while($available -lt ($memory+14GB)) {
@@ -120,6 +151,9 @@ function Preflight([long]$memory) {
         Start-Sleep -Seconds 120
         $available=[long](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1KB
     }
+    Check-DiskSpace
+}
+function Check-DiskSpace {
     $drive=Get-PSDrive -Name ([IO.Path]::GetPathRoot($root).Substring(0,1))
     if($drive.Free -lt 45GB) {throw 'Builder needs 45 GiB free (30 GiB reserve plus bootstrap/update peak)'}
 }
@@ -209,7 +243,7 @@ function Wait-Idle {
 }
 function Start-Owned {
     $vm=Owned-VM
-    if($vm.State -eq 'Off') {Preflight ([long]$j.memory_bytes);Start-VM -VM $vm | Out-Null}
+    if($vm.State -eq 'Off') {Ensure-DiskStorage;Preflight ([long]$j.memory_bytes);Start-VM -VM $vm | Out-Null}
     elseif($vm.State -ne 'Running') {throw "Unsupported builder state: $($vm.State)"}
 }
 function Key([string]$file) {
@@ -291,7 +325,8 @@ try {
             $j=[pscustomobject]@{schema=1;owner=$owner;name=$name;root=$root;run=$run;vm_id=$null;notes="ilex-builder schema=1 owner=$owner run=$run";phase='preparing';revision=$r.revision;memory_bytes=$memory;cpus=$cpus;checkpoint_id=$null;update_phase=$null;serial_pipe="\\.\pipe\$name";resource=$null;data_uuid=$null;data_filesystem='xfs'}
             Write-Journal
             Seed
-            $os=Join-Path $root 'os.vhdx';$data=Join-Path $root 'data.vhdx'
+            $storage=Assert-Path (Join-Path $root 'disks');New-Item -ItemType Directory -Path $storage|Out-Null
+            $os=Join-Path $storage 'os.vhdx';$data=Join-Path $storage 'data.vhdx'
             $savedChildPath=$env:PATH
             try {
                 $env:PATH=(Join-Path $r.runtime 'ucrt64\bin')+';'+(Join-Path $env:SystemRoot 'System32')
@@ -304,7 +339,7 @@ try {
             New-VHD -Path $data -Dynamic -SizeBytes 240GB | Out-Null
             $vm=New-VM -Name $name -Generation 2 -MemoryStartupBytes $memory -VHDPath $os -Path (Join-Path $root 'config') -SwitchName 'Default Switch'
             $j.vm_id=[string]$vm.Id
-            $j.resource=@{schema=1;owner=$owner;run=$run;provider='hyperv-builder';opaque_id=$j.vm_id;created_unix_ms=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();paths=@($os,$data,(Join-Path $root 'config'))}
+            $j.resource=@{schema=1;owner=$owner;run=$run;provider='hyperv-builder';opaque_id=$j.vm_id;created_unix_ms=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();paths=@($storage,(Join-Path $root 'config'))}
             $j.phase='allocated';Write-Journal
             Set-VM -VM $vm -Notes $j.notes -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing -AutomaticStopAction ShutDown
             $j.phase='creating';Write-Journal
@@ -351,13 +386,14 @@ try {
         $vm=Owned-VM
         if($vm) {if($vm.State -ne 'Off'){Stop-VM -VM $vm -TurnOff -Confirm:$false};Remove-VM -VM $vm -Force}
         elseif(Get-VM -Name $name -ErrorAction SilentlyContinue) {throw 'Unjournaled VM exists; UUID authorization unavailable, refusing cleanup'}
-        foreach($p in @('seed','seed-keys','seed.iso','identity','identity.pub','known_hosts','config','os.vhdx','data.vhdx')) {Remove-Owned (Join-Path $root $p)}
+        foreach($p in @('seed','seed-keys','seed.iso','identity','identity.pub','known_hosts','config','disks','os.vhdx','data.vhdx')) {Remove-Owned (Join-Path $root $p)}
         Remove-Item -LiteralPath $journal;$j=$null
     } elseif($r.operation -eq 'accept-update') {
         if(!$j -or !$j.checkpoint_id -or $j.update_phase -notin @('verified','rolled-back')) {throw 'No verified/rolled-back recovery checkpoint to accept'}
         $snapshot=Get-VMSnapshot -VM (Owned-VM) | Where-Object {$_.Id -eq [guid]$j.checkpoint_id}
         if(!$snapshot) {throw 'Exact owned checkpoint missing'}
         Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
+        $j | Add-Member -NotePropertyName checkpoint_revision -NotePropertyValue $null -Force
         $j.checkpoint_id=$null;$j.update_phase=$null;Write-Journal
     } elseif($r.operation -eq 'self-check') {
         $vm=Owned-VM
@@ -374,6 +410,11 @@ try {
         if(!$j -or $j.phase -ne 'ready') {throw 'Update/rollback requires a ready builder'}
         if($r.operation -eq 'rollback') {
             if(!$j.checkpoint_id){throw 'No owned recovery checkpoint'}
+            $recoveryRevision=$j.checkpoint_revision
+            if(!$recoveryRevision) {
+                if($j.update_phase -eq 'verified') {throw 'Recovery checkpoint revision missing; refusing an unverifiable rollback'}
+                $recoveryRevision=$j.revision
+            }
             if($j.update_phase -eq 'updating') {
                 # Explicit rollback is recovery of this exact interrupted maintenance
                 # transaction; its checkpoint was taken while all jobs were quiescent.
@@ -384,18 +425,21 @@ try {
             if(!$snapshot){throw 'Exact recovery checkpoint missing'}
             Restore-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
             Start-Owned;$probe=Guest 'smoke'
-            if(!$probe.nested_kvm_boot -or $probe.revision -ne $j.revision) {throw 'Recovery checkpoint provisioning/KVM verification failed'}
+            if(!$probe.nested_kvm_boot -or $probe.revision -ne $recoveryRevision) {throw 'Recovery checkpoint provisioning/KVM verification failed'}
+            $j.revision=$probe.revision
             $j.update_phase='rolled-back';Write-Journal
         } else {
             if($j.update_phase -eq 'updating') {throw 'Interrupted update: run builder rollback before another update'}
-            Start-Owned
-            Wait-Idle
-            Stop-Owned
-            Preflight ([long]$j.memory_bytes)
+            $vm=Owned-VM
+            if($vm.State -eq 'Running'){Wait-Idle;Stop-Owned}
+            elseif($vm.State -ne 'Off'){throw "Unsupported builder state for update: $($vm.State)"}
+            Ensure-DiskStorage
+            Check-DiskSpace
             if($j.checkpoint_id) {throw 'Recovery checkpoint retained; accept it with builder accept-update before updating again'}
             $vm=Owned-VM
             Set-VM -VM $vm -CheckpointType Standard
             $snap=Checkpoint-VM -VM $vm -SnapshotName "ilex-builder-before-$([guid]::NewGuid())" -Passthru
+            $j | Add-Member -NotePropertyName checkpoint_revision -NotePropertyValue $j.revision -Force
             $j.checkpoint_id=[string]$snap.Id;$j.update_phase='updating';Write-Journal
             $previousRevision=$j.revision
             try {

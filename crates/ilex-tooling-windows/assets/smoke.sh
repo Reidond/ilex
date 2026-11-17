@@ -40,12 +40,12 @@ grep -q ILEX_NESTED_KVM_BOOTED "$work/serial.log"
 podman info --format '{{.Host.OCIRuntime.Name}}' >&2
 /usr/local/bin/bcvk --version >&2
 qemu-system-x86_64 --version >&2
-python3 - <<'PY'
+ILEX_NESTED_KERNEL="$version" python3 - <<'PY'
 import fcntl,json,os
 fd=os.open('/dev/kvm',os.O_RDWR)
 assert fcntl.ioctl(fd,0xae00,0)==12
 record=json.load(open('/var/lib/ilex-builder/provision.json'))
 memory=int(next(line.split()[1] for line in open('/proc/meminfo') if line.startswith('MemTotal:')))*1024
-record.update(nested_kvm_boot=True,kvm_api=12,guest_memory_bytes=memory,guest_cpus=os.cpu_count(),guest_kernel=os.uname().release)
+record.update(nested_kvm_boot=True,kvm_api=12,guest_memory_bytes=memory,guest_cpus=os.cpu_count(),guest_kernel=os.uname().release,nested_kernel=os.environ['ILEX_NESTED_KERNEL'])
 print(json.dumps(record))
 PY
