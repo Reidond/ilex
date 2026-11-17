@@ -1223,8 +1223,12 @@ the collection directory. No manifest path addresses checkout state. The entire
 manifest is checked before writes: fixed prefixes/job filenames, strict Windows
 names, regular files, case/path uniqueness, 8,192 files, 128 GiB per file and
 256 GiB total. Logs are bounded at 256 MiB each and metadata at 32 MiB.
-No-follow handles reject reparse points/hard links and hold ancestors against
-replacement. Checksums and declared sizes are verified through the opened files.
+Every child open is relative to a verified directory handle with native
+no-reparse flags. Ancestors remain held against replacement; changing a tag in
+place cannot redirect a child open. Reparse points and hard links are refused.
+Checksums and declared sizes are verified through the opened files. The receiver
+self-check mutates a held directory into a junction at the child-open boundary
+and verifies that no outside entry appears.
 
 Explicit disk/archive files require owner receipts and output locks. Explicit
 ISO/`ILEX_ARTIFACTS` directories require owner receipts and receive a per-job

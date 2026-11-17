@@ -39,6 +39,26 @@ pub fn manifest(value: &Value) -> Result<Vec<Artifact>> {
             parts
                 .iter()
                 .all(|part| !part.to_ascii_lowercase().starts_with(".ilex")
+                    && !matches!(
+                        part.to_ascii_lowercase().as_str(),
+                        ".git"
+                            | ".ssh"
+                            | ".gnupg"
+                            | ".env"
+                            | ".aws"
+                            | ".azure"
+                            | ".docker"
+                            | ".kube"
+                            | ".netrc"
+                            | "_netrc"
+                            | ".npmrc"
+                            | ".pypirc"
+                            | ".git-credentials"
+                            | "auth.json"
+                            | "credentials"
+                            | "ilex-secrets"
+                    )
+                    && !part.to_ascii_lowercase().starts_with(".env.")
                     && ![
                         ".ilex-owner",
                         ".lock",
@@ -198,6 +218,8 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
     fs::create_dir(&control)?;
     let sentinel = control.join("destinations.json");
     fs::write(&sentinel, b"locally authored sentinel")?;
+    fs::create_dir(root.join("received"))?;
+    fs::hard_link(&sentinel, root.join("received/hardlink"))?;
     let directory = Directory::open(&root.join("received"))?;
     let bytes = b"verified artifact\n";
     let good = json!({"path":"artifacts/valid.log","sha256":ilex_devkit::core::digest(bytes),"bytes":bytes.len()});
@@ -217,6 +239,8 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
         "artifacts//empty",
         "iso/.ilex-owner.json",
         "job/result.json",
+        "artifacts/.git/config",
+        "artifacts/auth.json",
     ] {
         let mut evil = good.clone();
         evil["path"] = json!(path);
@@ -281,6 +305,15 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
     collect(&directory, &json!([good]), |_, _| Ok(bytes.to_vec()))?;
     let certificate = json!({"path":"tools/images/drupe.crt","sha256":ilex_devkit::core::digest(bytes),"bytes":bytes.len()});
     collect(&directory, &json!([certificate]), |_, _| Ok(bytes.to_vec()))?;
+    for value in [b"first".as_slice(), b"second".as_slice()] {
+        let mut log = directory.append("logs/stdout.log")?;
+        log.file.write_all(value)?;
+        log.file.sync_all()?;
+    }
+    ensure!(
+        fs::read(directory.path.join("logs/stdout.log"))? == b"firstsecond",
+        "native append stream mismatch"
+    );
     ensure!(
         fs::read(directory.path.join("artifacts/valid.log"))? == bytes,
         "positive receiver mismatch"
@@ -309,13 +342,14 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
         "junction redirected a receiver write"
     );
     fs::remove_dir(&link)?;
-    fs::hard_link(&sentinel, directory.path.join("hardlink"))?;
     ensure!(
         directory.append("hardlink").is_err(),
         "opened hard link for writing"
     );
-    fs::remove_file(directory.path.join("hardlink"))?;
     let held = directory.child("held")?;
+    let target = Directory::open(&control)?;
+    let reparse_race = received::self_check_reparse_race(&held, &target)?;
+    drop(target);
     ensure!(
         fs::rename(&held.path, directory.path.join("moved")).is_err(),
         "directory could be replaced while handles were held"
@@ -335,10 +369,19 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
         fs::read(directory.path.join("copy.log"))? == bytes,
         "handle rename mismatch"
     );
+    let mut replacement = directory.create("replacement.partial")?;
+    replacement.file.write_all(b"replacement\n")?;
+    replacement.file.sync_all()?;
+    received::rename(&replacement, "copy.log")?;
+    drop(replacement);
+    ensure!(
+        fs::read(directory.path.join("copy.log"))? == b"replacement\n",
+        "existing output replacement mismatch"
+    );
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"invalid_manifests_refused":refused,"complete_manifest_validation":true,"positive_receive":true,"chunk_limit":true,"count_and_aggregate_limits":true,"log_and_metadata_limits":true,"duplicate_case_and_directory_aliases":true,"receiver_junction_refused":true,"hardlink_refused":true,"held_directory_cannot_be_replaced":true,"control_sentinel_unchanged":true,"handle_rename":true,"explicit_state_output_refused":true,"root":root})
+            &json!({"invalid_manifests_refused":refused,"complete_manifest_validation":true,"positive_receive":true,"native_append_stream":true,"atomic_existing_replacement":true,"chunk_limit":true,"count_and_aggregate_limits":true,"log_and_metadata_limits":true,"duplicate_case_and_directory_aliases":true,"receiver_junction_refused":true,"in_place_reparse_race":reparse_race,"hardlink_refused":true,"held_directory_cannot_be_replaced":true,"control_sentinel_unchanged":true,"handle_rename":true,"explicit_state_output_refused":true,"root":root})
         )?
     );
     drop(original);
