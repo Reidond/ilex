@@ -511,11 +511,41 @@ fn assertions(
     Ok(())
 }
 
+fn evidence_files(directory: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            files.extend(evidence_files(&entry.path())?);
+        } else {
+            ensure!(kind.is_file(), "unsupported evidence file type");
+            files.push(entry.path());
+        }
+    }
+    Ok(files)
+}
+
+fn clear_evidence(directory: &Path) -> Result<()> {
+    // This is only the namespace returned for this checkout's encrypted tier.
+    // Remove stale evidence so a failed retry cannot inherit an earlier green.
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let ws = common::workspace()?;
-    let artifacts = qemu::artifact_dir(&ws, "encrypted-install")?;
+    let published = qemu::artifact_dir(&ws, "encrypted-install")?;
+    clear_evidence(&published)?;
     fs::write(
-        artifacts.join("result.json"),
+        published.join("result.json"),
         b"{\"qualification\":\"unqualified\",\"reason\":\"run not complete\"}\n",
     )?;
     let run = format!(
@@ -526,9 +556,13 @@ fn run() -> Result<()> {
     let work = ws.ensure_state()?.join("encrypted-fixtures").join(&run);
     fs::create_dir_all(&work)?;
     fs::set_permissions(&work, fs::Permissions::from_mode(0o700))?;
+    // Until both privacy gates pass, even failure diagnostics remain inside
+    // the private fixture directory. CI always uploads only `published`.
+    let artifacts = work.join("evidence");
+    fs::create_dir(&artifacts)?;
     let start = Instant::now();
     let mut stage = "platform";
-    let result = (|| {
+    let mut result = (|| {
         let iso = PathBuf::from(std::env::var_os("ILEX_ISO").context("ILEX_ISO required")?);
         ensure!(iso.is_file(), "exact installer ISO missing");
         let disk = work.join("root.qcow2");
@@ -634,28 +668,44 @@ fn run() -> Result<()> {
         no_tpm(&ws, &disk, &fixture.spec, &work, &artifacts, &passphrase)?;
         // Artifacts cannot contain the test passphrase. Never print a matching
         // path/line or the bytes, including on a failed assertion.
-        for entry in fs::read_dir(&artifacts)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                ensure!(
-                    !fs::read(entry.path())?
-                        .windows(passphrase.len())
-                        .any(|w| w == passphrase),
-                    "secret found in artifacts; details suppressed"
-                );
-            }
+        for path in evidence_files(&artifacts)? {
+            ensure!(
+                !fs::read(path)?
+                    .windows(passphrase.len())
+                    .any(|w| w == passphrase),
+                "secret found in artifacts; details suppressed"
+            );
         }
         let iso_hash = cmd::output(Command::new("sha256sum").arg(&iso))?;
         fs::write(artifacts.join("iso-sha256.txt"), iso_hash)?;
         Ok(())
     })();
+    if result.is_ok() {
+        let export = (|| -> Result<()> {
+            for path in evidence_files(&artifacts)? {
+                let target = published.join(path.strip_prefix(&artifacts)?);
+                fs::create_dir_all(target.parent().context("evidence has no parent")?)?;
+                fs::copy(path, target)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = export {
+            clear_evidence(&published)?;
+            stage = "evidence_export";
+            result = Err(error.context("publishing privacy-checked evidence"));
+        }
+    }
+    // Credentials, signing key, seed, disk and unverified diagnostics are never
+    // artifacts. Cleanup failure must not leave a passing result behind.
+    if let Err(error) = fs::remove_dir_all(&work) {
+        stage = "cleanup";
+        result = Err(error.into());
+    }
     fs::write(
-        artifacts.join("result.json"),
+        published.join("result.json"),
         serde_json::to_vec_pretty(
             &json!({"qualification": if result.is_ok() {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|e|format!("{e:#}")), "scope":"exact ISO, signed local candidate, first installed boot; physical hardware remains unqualified"}),
         )?,
     )?;
-    // Credentials, signing key, seed and encrypted disk are never artifacts.
-    fs::remove_dir_all(&work)?;
     result
 }
