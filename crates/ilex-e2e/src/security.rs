@@ -52,7 +52,8 @@ fn run() -> Result<()> {
         fs::write(artifacts.join("image.json"), &inspected)?;
         let inspected: serde_json::Value = serde_json::from_str(&inspected)?;
         // A cloud-image firmware pass cannot qualify the candidate ilex image.
-        let selection = common::selection()?;
+        let labels = serde_json::from_value(inspected["Config"]["Labels"].clone())?;
+        let selection = ilex_devkit::config::Selection::from_labels(&labels)?;
         let digest = inspected["Digest"].as_str().unwrap_or_default();
         ensure!(
             digest.starts_with("sha256:") && digest.len() == 71,
@@ -168,9 +169,13 @@ impl Fixture {
             root,
         })
     }
-    fn start(&mut self, deadline: Duration) -> Result<f64> {
+    fn start(&mut self, deadline: Duration, stage: &mut &'static str) -> Result<f64> {
         let start = Instant::now();
+        // Missing/denied firmware or TPM provisioning is a platform failure;
+        // only a successfully launched VM can fail guest boot assertions.
+        *stage = "platform";
         self.provider.start(&mut self.vm)?;
+        *stage = "guest_boot";
         self.vm.running_mut()?.wait_ssh(deadline)?;
         Ok(start.elapsed().as_secs_f64())
     }
@@ -258,8 +263,7 @@ fn qualify(
             "security: {accelerator:?}, {} bytes, 2 vCPUs; each boot deadline {deadline:?}",
             fixture.spec.resources.memory_bytes
         );
-        *stage = "guest_boot";
-        let first = match fixture.start(deadline) {
+        let first = match fixture.start(deadline, stage) {
             Ok(seconds) => seconds,
             Err(error) => {
                 if let Err(log_error) = fixture.logs(artifacts, "failed-start") {
@@ -315,7 +319,8 @@ fn qualify(
                 thread::sleep(Duration::from_millis(100));
             }
             fixture.provider.stop(&mut fixture.vm)?;
-            let cold = fixture.start(deadline)?;
+            let cold = fixture.start(deadline, stage)?;
+            *stage = "guest_assertions";
             measurements(
                 fixture.vm.running_mut()?,
                 artifacts,

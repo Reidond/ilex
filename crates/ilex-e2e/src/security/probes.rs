@@ -79,6 +79,9 @@ print(json.dumps({
     'tpm_resource_manager': tpmrm,
     'pcr7_sha256': read('/sys/class/tpm/tpm0/pcr-sha256/7'),
     'lockdown': read('/sys/kernel/security/lockdown'),
+    'firmware_vendor': read('/sys/class/dmi/id/bios_vendor'),
+    'firmware_version': read('/sys/class/dmi/id/bios_version'),
+    'firmware_date': read('/sys/class/dmi/id/bios_date'),
     'kernel': read('/proc/sys/kernel/osrelease'),
     'boot_id': read('/proc/sys/kernel/random/boot_id'),
     'command_line': read('/proc/cmdline')
