@@ -211,7 +211,7 @@ function Preflight([long]$memory) {
     while($available -lt ($memory+14GB)) {
         if([DateTime]::UtcNow -ge $memoryDeadline) {throw "Insufficient available memory: $([math]::Round($available/1GB,1)) GiB; builder needs $($memory/1GB) GiB plus 14 GiB host reserve. No VM was started."}
         Say "Waiting for host capacity: $([math]::Round($available/1GB,1)) GiB available, $(($memory+14GB)/1GB) GiB required"
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 120
         $available=[long](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1KB
     }
     Check-DiskSpace

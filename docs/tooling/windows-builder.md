@@ -99,7 +99,7 @@ For a constrained validation run:
 cargo xtask builder up --memory-gib 4 --cpus 4 --wait-for-memory-seconds 10800
 ```
 
-The wait polls live available memory every 30 seconds without touching other
+The wait polls live available memory every two minutes without touching other
 VMs. The minimum is 4 GiB. Explicit resource changes require the builder to be
 off and no retained checkpoint; `builder up --memory-gib 16` restores the default
 memory profile. Status is read-only, including when no installation exists.
