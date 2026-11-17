@@ -7,7 +7,8 @@ root and `/var` must have the same single encrypted ancestor, with no disk
 swap or crypttab keyfile. Unsupported or ambiguous encrypted layouts stop
 completion instead of guessing a partition.
 
-The final `%post --nochroot` starts local completion on reserved **tty6**.
+The final `%post --nochroot` starts local completion on reserved **tty8**,
+then returns to Anaconda's GUI on VT6. The helper rejects a graphics-mode VT.
 This uses the plan's explicit no-echo re-entry alternative: there is no
 Anaconda D-Bus password broker. Re-enter the disk passphrase, save the new
 recovery key offline, then privately enter that key to confirm it. Only this
@@ -20,7 +21,7 @@ qualification gate, including when supplied private unattended answers are used.
 The completion hook retains every existing slot. An interrupted recovery
 display is recorded as incomplete; normal retries refuse to generate another
 key. An administrator can explicitly rerun `ilex-enroll complete --root
-/mnt/sysroot --tty /dev/tty6 --reissue-recovery` from the installer console.
+/mnt/sysroot --tty /dev/tty8 --reissue-recovery` after switching to VT8.
 This adds a replacement before any possible later retirement of old slots;
 PR 18 never removes slots. The original passphrase always remains usable.
 

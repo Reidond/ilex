@@ -1,6 +1,7 @@
 #!/bin/sh
 # No credentials in %post, its stdout, the journal, kickstart or the chooser.
-# tty6 is reserved and has no Anaconda shell/getty. Failure preserves every
+# tty8 is reserved and has no Anaconda shell/getty; tty6 belongs to the GUI.
+# Failure preserves every
 # LUKS slot and the local maintenance account, and prevents an automatic reboot.
 set -eu
 if [ -d /mnt/sysroot/etc ]; then
@@ -10,10 +11,10 @@ else
 fi
 layout=$(/usr/bin/ilex-enroll layout --root "$target")
 [ "$layout" != null ] || exit 0
-chvt 6
-trap 'printf "\033[2J\033[3J\033[H" > /dev/tty6' EXIT HUP INT TERM
-if /usr/bin/ilex-enroll complete --root "$target" --tty /dev/tty6; then
-    chvt 1
+chvt 8
+trap 'printf "\033[2J\033[3J\033[H" > /dev/tty8' EXIT HUP INT TERM
+if /usr/bin/ilex-enroll complete --root "$target" --tty /dev/tty8; then
+    chvt 6
 else
     echo 'ilex encrypted completion failed. Passphrase retained; use tty2 to retry the local completion command.' >&2
     exit 1

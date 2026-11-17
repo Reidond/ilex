@@ -72,7 +72,7 @@ def prepare():
 
 def screen():
     try:
-        return pathlib.Path('/dev/vcs6').read_bytes()
+        return pathlib.Path('/dev/vcs8').read_bytes()
     except OSError:
         return b''
 
@@ -136,7 +136,7 @@ def drive():
                 for at in range(0, len(data), 24):
                     _, _, kind, code, value = struct.unpack('llHHi', data[at:at + 24])
                     if kind == 1 and code == 42 and value == 0:  # Shift release: no terminal characters
-                        with open('/dev/tty6', 'rb', buffering=0) as tty:
+                        with open('/dev/tty8', 'rb', buffering=0) as tty:
                             termios.tcflush(tty, termios.TCIFLUSH)
                         return
         raise RuntimeError('public screenshot handshake timed out')

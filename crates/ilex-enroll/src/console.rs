@@ -23,8 +23,8 @@ impl Console {
         // Only a virtual console is allowed: a remote Cockpit/web session and
         // serial log must never receive recovery material implicitly.
         ensure!(
-            path == Path::new("/dev/tty6"),
-            "completion requires the reserved local tty6"
+            path == Path::new("/dev/tty8"),
+            "completion requires the reserved local tty8"
         );
         let file = OpenOptions::new()
             .read(true)
@@ -32,6 +32,13 @@ impl Console {
             .custom_flags(libc::O_NOCTTY | libc::O_NOFOLLOW)
             .open(path)?;
         file.lock()?;
+        let mut mode: libc::c_int = -1;
+        // SAFETY: KDGETMODE writes one int. Refuse a console owned by a GUI;
+        // Fedora Anaconda itself runs GNOME Kiosk on VT6.
+        ensure!(
+            unsafe { libc::ioctl(file.as_raw_fd(), 0x4b3b, &mut mode) } == 0 && mode == 0,
+            "completion requires a text-mode virtual console"
+        );
         // SAFETY: tcgetattr initializes a termios for this live terminal.
         let mut settings = unsafe { std::mem::zeroed() };
         ensure!(

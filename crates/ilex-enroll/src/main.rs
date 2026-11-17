@@ -67,7 +67,7 @@ fn run() -> anyhow::Result<()> {
         Complete {
             #[arg(long, default_value = "/mnt/sysroot")]
             root: PathBuf,
-            #[arg(long, default_value = "/dev/tty6")]
+            #[arg(long, default_value = "/dev/tty8")]
             tty: PathBuf,
             /// Explicitly issue another recovery key after interrupted display.
             #[arg(long)]
