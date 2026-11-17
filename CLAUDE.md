@@ -725,8 +725,10 @@ homes and runtime, a clean environment, and only no-follow-opened home
 subdirectories bound writable. A systemd user drop-in confines the session's
 actual dconf writer for homed accounts, retaining its bus, cache and desktop
 notifications. Local maintenance accounts retain Fedora's writer. Profile
-clients use a canonical dconf/session environment and refuse activation
-overrides. Symlinked dconf directories/databases are conflicts.
+clients use a canonical dconf/session environment, refuse activation overrides,
+and verify the bus writer belongs to the confined unit. Runtime IPC remains in
+the user's owned runtime directory. Symlinked dconf directories/databases are
+conflicts.
 
 `~/.local/state/ilex/profile.json` stores schema, profile revision/digest and
 managed file/setting hashes or values. Missing files are seeded atomically;
@@ -753,7 +755,7 @@ On a GNOME image it also checks scoped dconf updates, reset preservation,
 dconf directory/leaf links outside the encrypted home, inherited environment
 redirects and user-setting conflicts. The compiler regression rejects sparse
 512 MiB templates and all three manifests under a 128 MiB address-space limit.
-Measured 2026-11-17: the shell-free image is 1,977.83 MiB against Fedora
+Measured 2026-11-17: the shell-free image is 1,977.84 MiB against Fedora
 bootc's 1,917.62 MiB, a 60.22 MiB increase within the unchanged 128 MiB budget.
 
 ## Build sharing: kache

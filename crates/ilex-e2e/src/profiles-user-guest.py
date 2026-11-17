@@ -80,6 +80,15 @@ if gnome:
     dconf_dir.rmdir()
     if saved_dconf.exists():
         saved_dconf.rename(dconf_dir)
+    override = home / ".config/systemd/user/dconf.service.d/override.conf"
+    override.parent.mkdir(parents=True)
+    override.write_text("[Service]\nExecStart=\nExecStart=/usr/libexec/dconf-service\n")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    result = cli("reidond", code=1)
+    assert any(c.startswith("settings.gnome") for c in json.loads(result.stdout)["conflicts"])
+    override.unlink()
+    override.parent.rmdir()
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
     # Deliberate inherited redirects are neutralised by the writer's clean
     # environment and private bus, not propagated to the session's service.
     redirected = dict(os.environ, XDG_CONFIG_HOME=external.name, XDG_DATA_HOME=external.name,

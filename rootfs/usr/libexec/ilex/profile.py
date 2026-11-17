@@ -298,6 +298,15 @@ def settings(home, data, previous, shell, conflicts):
             or any(not path.startswith("/usr/lib/systemd/user/") for path in dropins)
             or not unit_value("ExecStart").startswith("{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S /usr/libexec/ilex/dconf-service.py ; ")):
             raise ValueError("dconf writer activation is overridden")
+        run("/usr/bin/systemctl", "--user", "start", "dconf.service", env=environment)
+        owner = run("/usr/bin/busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", "ca.desrt.dconf", env=environment)
+        if not re.fullmatch(r"u [1-9][0-9]*", owner):
+            raise ValueError("cannot identify dconf writer")
+        group = unit_value("ControlGroup")
+        membership = read_image(f"/proc/{owner.split()[1]}/cgroup").decode().splitlines()
+        if not group or not any(line.split(":", 2)[-1] == group for line in membership):
+            raise ValueError("session dconf writer is outside the confined service")
         return settings_worker(data, previous, conflicts, environment)
     except (ValueError, OSError, subprocess.TimeoutExpired):
         conflicts.append("settings.gnome (unsafe storage or unavailable writer; retry after login)")
