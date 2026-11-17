@@ -212,8 +212,9 @@ fn maintenance_self_check(options: Options) -> Result<Value> {
     };
     let helper = work.join("builder.ps1");
     fs::write(&helper, include_str!("../assets/builder.ps1"))?;
+    let provisioning = provision();
     for (name, content) in [
-        ("provision.sh", include_str!("../assets/provision.sh")),
+        ("provision.sh", provisioning.as_str()),
         (
             "builder-control.sh",
             include_str!("../assets/builder-control.sh"),

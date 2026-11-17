@@ -1,7 +1,9 @@
 # T3 validation evidence
 
 Validation host: Windows x86_64, 2026-11-17. Base:
-`tooling/02-runtime-builder` at `da9515464945f97bed116b08afabd48917b2c26b`.
+`tooling/02-runtime-builder`, initially at
+`da9515464945f97bed116b08afabd48917b2c26b`, rebased with `gh stack rebase`
+onto `436a66efeabb32fa18f7e8967dc8d3d26af2a276` when T2 moved.
 Owned builder UUID: `b521170d-a2e0-4791-8b3e-71819084203d`.
 
 ## Completed checks
