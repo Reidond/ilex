@@ -9,10 +9,16 @@ case "$op" in probe|idle|smoke|update|job) ;; *) echo 'unsupported builder opera
 if [ "$op" = job ]; then exec /usr/bin/python3 -I -S /usr/local/libexec/ilex-builder-jobs; fi
 if [ "$op" = probe ]; then cat /var/lib/ilex-builder/provision.json; exit 0; fi
 exec 8>/run/lock/ilex-builder-jobs.lock
-if ! flock -n 8 || systemctl list-units 'ilex-job-*.service' --state=active,activating,deactivating --no-legend | grep -q .; then
-    if [ "$op" = idle ]; then printf '{"schema":1,"idle":false}\n'; exit 0; fi
-    echo 'builder has active jobs' >&2; exit 75
-fi
+busy() {
+    if [ "$op" = idle ]; then printf '{"schema":1,"idle":false,"reason":"%s"}\n' "$1"; exit 0; fi
+    echo "builder is not idle: $1" >&2; exit 75
+}
+flock -n 8 || busy lifecycle_busy
+# Failed inventories abort under set -e; they never establish absence.
+units=$(systemctl list-units 'ilex-job-*.service' --state=active,activating,deactivating,reloading --no-legend)
+[ -z "$units" ] || busy active_jobs
+leases=$(find /var/lib/ilex-data/jobs -type f -name lease.json -print -quit)
+[ -z "$leases" ] || busy unreconciled_resources
 case "$op" in
   idle) printf '{"schema":1,"idle":true}\n';;
   smoke) /usr/local/libexec/ilex-builder-smoke;;

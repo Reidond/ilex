@@ -200,6 +200,15 @@ fn domain_id(name: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+fn remote_domain_id(name: &str, nonce: &str) -> Result<String> {
+    // Never log domain XML: bcvk embeds its development SSH private key there.
+    cmd::output(Command::new("python3").args([
+        "-I", "-S", "-c",
+        "import subprocess,sys,xml.etree.ElementTree as E; r=E.fromstring(subprocess.check_output(['virsh','dumpxml',sys.argv[1]])); assert sys.argv[2] in r.findtext('.//{https://github.com/containers/bootc}label','').split(','), 'foreign libvirt allocation'; print(r.findtext('uuid'))",
+        name, nonce,
+    ]))
+}
+
 /// True if `image` exists in local container storage.
 pub fn image_exists(image: &str) -> bool {
     cmd::probe(Command::new("podman").args(["image", "exists", image])).is_some()
@@ -471,6 +480,17 @@ impl LibvirtVm {
         if opts.update_from_host {
             run.arg("--update-from-host");
         }
+        let remote_nonce = if let Some(directory) = std::env::var_os("ILEX_JOB_RESOURCE_DIR") {
+            let allocation = ilex_tooling_core::digest(
+                format!("{}:{name}", PathBuf::from(directory).display()).as_bytes(),
+            );
+            let nonce = format!("ilex-job-{}", &allocation[7..]);
+            crate::ownership::record_remote_resource(&ws, "libvirt_nonce", &nonce, name)?;
+            run.args(["--label", &nonce]);
+            Some(nonce)
+        } else {
+            None
+        };
         let logs = console_logs(name)?;
         if let Some((console, platform)) = &logs {
             run.arg("--console-log").arg(console);
@@ -479,7 +499,11 @@ impl LibvirtVm {
         run.args(&opts.extra_args).arg(image);
         let started = cmd::run(&mut run);
         started.with_context(|| format!("installing libvirt VM {name}; inspect any partial resource explicitly before retrying"))?;
-        vm.uuid = domain_id(name)?;
+        vm.uuid = if let Some(nonce) = remote_nonce {
+            Some(remote_domain_id(name, &nonce)?)
+        } else {
+            domain_id(name)?
+        };
         ensure!(
             vm.uuid.is_some(),
             "bcvk did not create an identifiable domain"
@@ -623,10 +647,24 @@ fn console_logs(name: &str) -> Result<Option<(PathBuf, PathBuf)>> {
     };
     let dir = PathBuf::from(dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    Ok(Some((
+    let logs = (
         dir.join(format!("{name}-console.log")),
         dir.join(format!("{name}-platform.log")),
-    )))
+    );
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("ILEX_JOB_RESOURCE_DIR").is_some() {
+        use std::os::unix::fs::PermissionsExt;
+        for log in [&logs.0, &logs.1] {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)?;
+            std::fs::set_permissions(log, std::fs::Permissions::from_mode(0o660))?;
+            cmd::run(Command::new("chgrp").arg("qemu").arg(log))?;
+            cmd::run(Command::new("restorecon").arg("-F").arg(log))?;
+        }
+    }
+    Ok(Some(logs))
 }
 
 /// The last `lines` lines of a log file, or why it can't be read.

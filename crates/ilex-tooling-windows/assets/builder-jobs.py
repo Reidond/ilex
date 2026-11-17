@@ -7,6 +7,7 @@ they do not sandbox executable source supplied by that key holder.
 """
 import contextlib
 import fcntl
+import grp
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import sys
 import time
 import traceback
 import uuid
+import xml.etree.ElementTree as ET
 
 BASE = Path('/var/lib/ilex-data')
 CHUNKS = BASE / 'chunks'
@@ -419,6 +421,43 @@ def artifact_inventory(path, state, include_state=True):
     return artifacts
 
 
+def remove_libvirt(identity, name):
+    ident(identity)
+    inventory = checked(['virsh', 'list', '--all', '--uuid']).decode().split()
+    if identity not in inventory:
+        return
+    assert checked(['virsh', 'domname', identity]).decode().strip() == name, 'domain allocation changed'
+    subprocess.run(['virsh', 'destroy', identity], env=ENV, capture_output=True)
+    assert checked(['virsh', 'domuuid', name]).decode().strip() == identity, 'domain UUID changed'
+    checked(['bcvk', 'libvirt', 'rm', '--force', name])
+
+
+def prepare_console_logs(owner, job):
+    # virtlogd/QEMU must not traverse private source, state or credential trees.
+    base = Path('/var/log/libvirt/qemu/ilex-jobs')
+    directory = base / owner / job
+    group = grp.getgrnam('qemu').gr_gid
+    for path in (base, base / owner, directory):
+        path.mkdir(exist_ok=True)
+        assert path.is_dir() and not path.is_symlink(), 'console directory replaced'
+        os.chown(path, 0, group)
+        path.chmod(0o770 if path == directory else 0o750)
+        checked(['restorecon', '-F', str(path)])
+    return directory
+
+
+def collect_console_logs(directory, state):
+    if directory is None:
+        return
+    target = state / 'artifacts/console'
+    target.mkdir(parents=True, exist_ok=True)
+    for source in directory.glob('*.log'):
+        assert source.is_file() and not source.is_symlink(), 'console output replaced'
+        partial = target / (source.name + '.' + uuid.uuid4().hex + '.partial')
+        checked(['cp', '--reflink=auto', '--sparse=always', '--', str(source), str(partial)])
+        os.replace(partial, target / source.name)
+
+
 def cleanup_resources(path, spec):
     for record in sorted((path / 'resources').glob('*.json')):
         resource = read_json(record)
@@ -434,14 +473,16 @@ def cleanup_resources(path, spec):
             assert container['Id'] == identity and container['Name'].lstrip('/') == name, 'container allocation changed'
             checked(['podman', 'rm', '--force', '--time', '5', identity])
         elif resource['provider'] == 'libvirt':
-            ident(identity)
-            inventory = checked(['virsh', 'list', '--all', '--uuid']).decode().split()
-            if identity not in inventory:
+            remove_libvirt(identity, name)
+        elif resource['provider'] == 'libvirt_nonce':
+            assert re.fullmatch('ilex-job-[0-9a-f]{64}', identity), 'invalid libvirt allocation nonce'
+            inventory = checked(['virsh', 'list', '--all', '--name']).decode().splitlines()
+            if name not in inventory:
                 continue
-            assert checked(['virsh', 'domname', identity]).decode().strip() == name, 'domain allocation changed'
-            subprocess.run(['virsh', 'destroy', identity], env=ENV, capture_output=True)
-            assert checked(['virsh', 'domuuid', name]).decode().strip() == identity, 'domain UUID changed'
-            checked(['bcvk', 'libvirt', 'rm', '--force', name])
+            domain = ET.fromstring(checked(['virsh', 'dumpxml', name]))
+            labels = domain.findtext('.//{https://github.com/containers/bootc}label', '').split(',')
+            assert identity in labels, 'foreign partial libvirt allocation'
+            remove_libvirt(domain.findtext('uuid'), name)
         elif resource['provider'] == 'image_alias':
             assert re.fullmatch('localhost/ilex-job:[0-9a-f]{64}', identity), 'invalid temporary image allocation'
             inventory = checked(['podman', 'images', '--all', '--format', '{{.Repository}}:{{.Tag}}']).decode().splitlines()
@@ -482,6 +523,7 @@ def execute(owner, job):
     code = 1
     guards = contextlib.ExitStack()
     admitted = False
+    console_logs = None
     try:
         guards.enter_context(lock('/run/lock/ilex-builder-jobs.lock', shared=True))
         guards.enter_context(lock(owner_dir(spec['snapshot']) / 'job.lock'))
@@ -490,11 +532,12 @@ def execute(owner, job):
             capacity(spec)
             root = snapshot_path(spec['snapshot'])
             verify_source(root, spec['snapshot']['source'])
+            console_logs = prepare_console_logs(owner, job)
             env = ENV | spec['environment'] | {
                 'ILEX_ROOT': str(root), 'ILEX_STATE_DIR': str(state.parent),
                 'ILEX_REMOTE_CONTEXT': str(path / 'context.json'),
                 'ILEX_ARTIFACTS': str(state / 'artifacts'),
-                'ILEX_VM_LOG_DIR': str(state / 'artifacts/console'),
+                'ILEX_VM_LOG_DIR': str(console_logs),
                 'ILEX_JOB_RESOURCE_DIR': str(path / 'resources'),
                 'CARGO_TARGET_DIR': str(BASE / 'cargo/targets' / owner / ('x86_64-linux-' + hashlib.sha256(checked(['rustc', '-vV'])).hexdigest()[:16])),
                 'CARGO_BUILD_JOBS': str(min(4, os.cpu_count())), 'ILEX_VM_SLOTS': '1',
@@ -527,13 +570,21 @@ def execute(owner, job):
     finally:
         # SIGTERM targets this service's cgroup, including cargo/QEMU/podman helpers.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        cleanup_error = None
         if admitted:
             try:
                 cleanup_resources(path, spec)
             except Exception as error:
+                cleanup_error = str(error)
                 with (path / 'stderr.log').open('ab') as err:
                     err.write(('owned resource cleanup failed: ' + str(error) + '\n').encode())
                 code = code or 1
+        try:
+            collect_console_logs(console_logs, state)
+        except Exception as error:
+            with (path / 'stderr.log').open('ab') as err:
+                err.write(('console collection failed: ' + str(error) + '\n').encode())
+            code = code or 1
         atomic(path / 'state.json', encode({'state': 'cancelled' if cancelled else 'complete', 'exit_code': code}))
         artifacts = artifact_inventory(path, state, include_state=admitted)
         versions = {}
@@ -548,10 +599,13 @@ def execute(owner, job):
                   'data_free_before': free_before, 'data_free_after': shutil.disk_usage(BASE).free,
                   'executor_id': 'hyperv-builder:' + read_json('/var/lib/ilex-builder/provision.json')['data_uuid'],
                   'versions': versions, 'artifacts': artifacts}
+        result['resource_cleanup_error'] = cleanup_error
+        result['resource_lease_retained'] = cleanup_error is not None
         if (path / 'image.json').is_file():
             result['image'] = read_json(path / 'image.json')
         atomic(path / 'result.json', encode(result))
-        (path / 'lease.json').unlink(missing_ok=True)
+        if cleanup_error is None:
+            (path / 'lease.json').unlink(missing_ok=True)
         guards.close()
 
 
@@ -599,6 +653,13 @@ def request(frame, payload):
             return {}, b''
         if op == 'status':
             result = read_json(path / 'result.json') if (path / 'result.json').exists() else None
+            reconciliation_error = None
+            if result and (path / 'lease.json').exists() and not running(service(frame['job'])):
+                try:
+                    cleanup_resources(path, spec)
+                    (path / 'lease.json').unlink(missing_ok=True)
+                except Exception as error:
+                    reconciliation_error = str(error)
             if not result and not running(service(frame['job'])):
                 # A power loss/cgroup kill remains observable and still exposes logs.
                 state = owner_dir(spec['snapshot']) / 'state' / spec['snapshot']['identity']['slug']
@@ -614,7 +675,8 @@ def request(frame, payload):
                           'resource_cleanup_error': cleanup_error}
                 atomic(path / 'result.json', encode(result))
             sizes = {n: (path / (n + '.log')).stat().st_size if (path / (n + '.log')).exists() else 0 for n in ('stdout', 'stderr')}
-            return {'state': read_json(path / 'state.json'), 'result': result, 'logs': sizes}, b''
+            return {'state': read_json(path / 'state.json'), 'result': result, 'logs': sizes,
+                    'resource_reconciliation_error': reconciliation_error}, b''
         name = relative(frame['path'])
         prefix, _, tail = name.partition('/')
         if prefix == 'job':
