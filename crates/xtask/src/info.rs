@@ -1,7 +1,7 @@
 //! Read-only checkout, selection and capability diagnostics.
 use crate::select;
 use anyhow::{Context, Result};
-use ilex_devkit::{Workspace, config, slots};
+use ilex_devkit::{Workspace, config};
 #[derive(clap::Args, Debug)]
 pub struct Args {
     /// Validated TSV: tag, kind, parent, machine, shells
@@ -76,7 +76,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             println!("runtime dir: {}", ws.runtime_dir().display());
             println!("state dir:   {}", ws.state_dir().display());
             println!("executor:    {}", executor_info(ws)?);
-            println!("vm slots:    {}", slots::max_slots());
+            #[cfg(target_os = "windows")]
+            println!("vm slots:    {}", ilex_tooling_windows::qemu::max_slots()?);
+            #[cfg(not(target_os = "windows"))]
+            println!("vm slots:    {}", ilex_devkit::slots::max_slots());
             let selection = resolved.selection.context(
                 "reading image.toml for info; run `cargo xtask build` for manifest diagnostics",
             )?;

@@ -40,7 +40,7 @@ def activate(application):
         now = time.monotonic()
         frames.append(now)
         if not reported:
-            print(json.dumps({'renderer': gl.glGetString(0x1F01).decode(), 'version': gl.glGetString(0x1F02).decode()}), flush=True)
+            print(json.dumps({'renderer': gl.glGetString(0x1F01).decode(), 'version': gl.glGetString(0x1F02).decode(), 'display_type': Gdk.Display.get_default().__gtype__.name}), flush=True)
             reported = True
         gl.glClearColor((math.sin(now * 2) + 1) / 2, .2, .4, 1.)
         gl.glClear(0x4000)

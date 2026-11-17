@@ -324,6 +324,15 @@ pub struct Config {
     pub persist: bool,
 }
 
+pub fn max_slots() -> Result<usize> {
+    Ok(std::env::var("ILEX_VM_SLOTS")
+        .ok()
+        .map(|s| s.parse::<usize>())
+        .transpose()?
+        .unwrap_or(4)
+        .clamp(1, 32))
+}
+
 /// Explicit migration/research input (`ILEX_DISK`), requiring a matching owner
 /// receipt and installed-disk checksum. Preserve the originating executor in
 /// image identity; only the delivered location changes to native Windows.
@@ -433,6 +442,16 @@ pub struct Vm {
     _slot: File,
     persistent: bool,
 }
+// Before Vm owns the launch, cancellation/failed admission/failed QEMU startup
+// must still remove the newly created run's private keys and ephemeral files.
+struct PendingRun(Option<PathBuf>);
+impl Drop for PendingRun {
+    fn drop(&mut self) {
+        if let Some(directory) = self.0.take() {
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+}
 impl Vm {
     pub fn boot(config: Config) -> Result<Self> {
         ensure!(
@@ -495,6 +514,23 @@ impl Vm {
             metadata.location.sha256 == format!("sha256:{}", host::hash_file(&disk)?),
             "delivered disk checksum changed"
         );
+        let inspection = host::output_owned(
+            runtime::command(&runtime, "qemu-img.exe")
+                .args(["info", "--output=json"])
+                .arg(&disk),
+            Stdio::null(),
+        )?;
+        ensure!(
+            inspection.status.success(),
+            "cannot inspect installed base disk"
+        );
+        let inspection: serde_json::Value = serde_json::from_slice(&inspection.stdout)?;
+        ensure!(
+            inspection["format"] == "qcow2"
+                && inspection["virtual-size"].as_u64() == Some(metadata.virtual_bytes)
+                && inspection["backing-filename"].is_null(),
+            "installed base must be a standalone qcow2 matching its manifest"
+        );
         let run = format!(
             "{}-{}",
             std::process::id(),
@@ -502,6 +538,12 @@ impl Vm {
         );
         let run_dir = dir.join(&run);
         fs::create_dir(&run_dir)?;
+        let resolved_run = fs::canonicalize(&run_dir)?;
+        ensure!(
+            resolved_run.parent() == Some(fs::canonicalize(&dir)?.as_path()),
+            "new run directory escaped its owned purpose"
+        );
+        let mut pending = PendingRun(Some(resolved_run));
         let key = run_dir.join("id_ed25519");
         let host_key = run_dir.join("host_ed25519");
         for path in [&key, &host_key] {
@@ -568,12 +610,7 @@ impl Vm {
         let admission_dir = host::root()?.join("admission");
         host::secure_dir(&admission_dir)?;
         let deadline = Instant::now() + Duration::from_secs(10800);
-        let limit = std::env::var("ILEX_VM_SLOTS")
-            .ok()
-            .map(|s| s.parse::<usize>())
-            .transpose()?
-            .unwrap_or(4)
-            .clamp(1, 32);
+        let limit = max_slots()?;
         let slot = loop {
             let mut slot = None;
             for index in 0..limit {
@@ -769,6 +806,7 @@ impl Vm {
                 Ok(info) => {
                     thread::sleep(Duration::from_secs(2));
                     drop(admission);
+                    pending.0.take();
                     return Ok(Self {
                         info,
                         child,
