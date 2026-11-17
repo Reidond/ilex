@@ -314,7 +314,7 @@ immutable ID. The alias retains only an additional local name for the existing
 image; no registry upload or extra image contents are created.
 
 CI runs the tier on the tested candidate, probes the actual runner each
-time, explicitly chooses KVM or TCG, and enforces a 45-minute total deadline.
+time, explicitly chooses KVM or TCG, and enforces a 45-minute guest-tier deadline.
 Failures/timeouts are unqualified and fail the build; an unchanged image's
 unrun tier is labelled **UNQUALIFIED** in the summary. `test=true` forces it.
 The optional dispatch input `security_accelerator=tcg` forces the explicit
@@ -323,6 +323,23 @@ and the default `probe` selects from the actual runner probe. A KVM entry
 failure never silently retries another accelerator within a qualification.
 Serial logs, firmware identity, versions, PCR replay, timing and cleanup
 evidence are retained under `artifacts/security/` (CI: `security-evidence`).
+Startup failure collection authorizes the fixture's runtime path independently
+of a running VM handle. It copies `swtpm.log` and `swtpm-setup.log` before
+cleanup/retry; manufacturing captures both stdout and stderr, and emulator
+errors include their exit status. `swtpm_setup --version` is in the host probe.
+
+On disposable GitHub runners, the security step unloads only Ubuntu's
+`usr.bin.swtpm` AppArmor profile, whose allowed libvirt socket paths omit the
+private ilex runtime. It retains the packaged profile, loaded-profile lists
+before/after and relevant kernel denials. This CI preparation changes no local
+host policy and still requires the manufactured TPM2 state and SHA-256 bank.
+Before guest qualification, `.github/security-startup-self-check.sh` runs the
+real `security --self-check` path with emulator/setup failure injection. The
+emulator case first manufactures real SHA-256 state, then exits before creating
+its socket. Both cases must retain distinctive stdout/stderr in the uploaded
+logs and stay unqualified; a QEMU launch is refused by the fixture. Temporary
+state stays outside the artifact tree and is removed. These startup fixtures
+have a 12-minute total deadline; the alias self-check has five minutes.
 TPM state and credential files are not uploaded or cached. Existing apt/disk
 caches and the GPT automount workaround retain their behavior.
 

@@ -34,6 +34,7 @@ pub fn host_probe() -> HostProbe {
             ("kernel", "uname", "-r"),
             ("qemu", "qemu-system-x86_64", "--version"),
             ("swtpm", "swtpm", "--version"),
+            ("swtpm_setup", "swtpm_setup", "--version"),
         ]
         .into_iter()
         .map(|(name, program, arg)| {
@@ -478,12 +479,22 @@ impl Bundle {
             };
             if !matches!(spec.tpm, TpmLifecycle::Off) {
                 fs::create_dir(root.join("tpm"))?;
+                let setup_log = File::create(runtime.join("swtpm-setup.log"))?;
                 cmd::run(
                     Command::new("swtpm_setup")
                         .args(["--tpm2", "--tpmstate"])
                         .arg(root.join("tpm"))
-                        .args(["--pcr-banks", "sha256", "--createek", "--create-spk"]),
-                )?;
+                        .args(["--pcr-banks", "sha256", "--createek", "--create-spk"])
+                        .stdin(Stdio::null())
+                        .stdout(setup_log.try_clone()?)
+                        .stderr(setup_log),
+                )
+                .with_context(|| {
+                    format!(
+                        "manufacturing TPM; see {}",
+                        runtime.join("swtpm-setup.log").display()
+                    )
+                })?;
             }
             let ilex_tooling_core::BootSource::Disk { path, .. } = &spec.boot else {
                 bail!("security bundle requires disk")
@@ -552,14 +563,22 @@ impl Bundle {
                     .stdin(Stdio::null())
                     .stdout(log.try_clone()?)
                     .stderr(log)
-                    .spawn()?,
+                    .spawn()
+                    .with_context(|| {
+                        format!(
+                            "starting swtpm; see {}",
+                            runtime.join("swtpm.log").display()
+                        )
+                    })?,
             );
             let start = Instant::now();
             while !socket.exists() {
-                ensure!(
-                    bundle.tpm.as_mut().unwrap().try_wait()?.is_none(),
-                    "swtpm exited; see swtpm.log"
-                );
+                if let Some(status) = bundle.tpm.as_mut().unwrap().try_wait()? {
+                    bail!(
+                        "swtpm exited ({status}); see {}",
+                        runtime.join("swtpm.log").display()
+                    );
+                }
                 ensure!(
                     start.elapsed() < Duration::from_secs(10),
                     "swtpm socket deadline exceeded"

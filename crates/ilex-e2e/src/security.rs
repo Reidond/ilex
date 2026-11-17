@@ -60,6 +60,7 @@ fn run() -> Result<()> {
 
 /// Drop always stops our process before removing our disk and identity bundle.
 struct Fixture {
+    workspace: Workspace,
     provider: LinuxProvider,
     vm: LinuxVm,
     spec: VmSpec,
@@ -138,6 +139,7 @@ impl Fixture {
         *format = ilex_devkit::core::DiskFormat::Qcow2;
         let vm = provider.create(spec.clone())?;
         Ok(Self {
+            workspace: ws.clone(),
             provider,
             vm,
             spec,
@@ -150,11 +152,21 @@ impl Fixture {
         self.vm.running_mut()?.wait_ssh(deadline)?;
         Ok(start.elapsed().as_secs_f64())
     }
-    fn logs(&mut self, artifacts: &Path, label: &str) -> Result<()> {
-        let dir = &self.vm.running_mut()?.info.dir;
-        for file in ["serial.log", "qemu.log", "swtpm.log"] {
-            if dir.join(file).exists() {
-                fs::copy(dir.join(file), artifacts.join(format!("{label}-{file}")))?;
+    fn logs(&self, artifacts: &Path, label: &str) -> Result<()> {
+        // Startup can fail before LinuxProvider returns a running handle.
+        // Authorize the known fixture path independently, before cleanup/retry.
+        self.workspace.identity()?.authorize(&self.spec.owner)?;
+        let runtime = self.workspace.ensure_runtime()?;
+        let dir = runtime.join(&self.spec.purpose);
+        if !dir.try_exists()? {
+            return Ok(());
+        }
+        ilex_devkit::provider::require_owned_path(&runtime, &dir)?;
+        for file in ["serial.log", "qemu.log", "swtpm.log", "swtpm-setup.log"] {
+            let source = dir.join(file);
+            if source.try_exists()? {
+                ilex_devkit::provider::require_owned_path(&dir, &source)?;
+                fs::copy(source, artifacts.join(format!("{label}-{file}")))?;
             }
         }
         Ok(())
@@ -214,7 +226,11 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
         let first = match fixture.start(deadline) {
             Ok(seconds) => seconds,
             Err(error) => {
-                let _ = fixture.logs(artifacts, "failed-start");
+                if let Err(log_error) = fixture.logs(artifacts, "failed-start") {
+                    return Err(error.context(format!(
+                        "startup diagnostics collection failed: {log_error:#}"
+                    )));
+                }
                 return Err(error);
             }
         };
