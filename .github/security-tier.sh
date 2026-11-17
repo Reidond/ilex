@@ -56,7 +56,10 @@ kvm|tcg) accel=$requested ;;
 *) echo "invalid security accelerator: $requested" >&2; exit 1 ;;
 esac
 echo "security: explicitly selecting $accel (request=$requested; runner probe retained); no silent QEMU fallback"
-echo "security accelerator: **$accel** (runner probe retained); 4 GiB, 2 vCPUs; boot deadline KVM=420s / TCG=900s; total deadline=45m." >> "$GITHUB_STEP_SUMMARY"
+echo "security accelerator: **$accel** (runner probe retained); 4 GiB, 2 vCPUs; boot deadline KVM=420s / TCG=900s; each fault/qualification run deadline=45m." >> "$GITHUB_STEP_SUMMARY"
+# Real guest boots precede an injected EFI-control startup failure. Run this
+# before normal qualification: the expected failure invalidates its profile.
+ILEX_SECURITY_ACCELERATOR="$accel" bash .github/security-control-startup-self-check.sh
 timeout --signal=TERM --kill-after=20s 45m cargo xtask security --self-check --accelerator "$accel"
 python3 - "$ILEX_ARTIFACTS/security/result.json" <<'PY'
 import json,sys

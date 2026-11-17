@@ -342,8 +342,7 @@ fn qualify(
         fixture.logs(artifacts, "final")?;
         result?;
         fixture.provider.stop(&mut fixture.vm)?; // Keep identity; release its slot.
-        *stage = "unsigned_control";
-        unsigned_control(ws, artifacts, accelerator, deadline)?;
+        unsigned_control(ws, artifacts, accelerator, deadline, stage)?;
         ensure!(
             !qemu::running_vms(ws)
                 .iter()
@@ -514,7 +513,9 @@ fn unsigned_control(
     artifacts: &Path,
     accelerator: Accelerator,
     deadline: Duration,
+    stage: &mut &'static str,
 ) -> Result<()> {
+    *stage = "platform";
     let payload = unsigned_efi();
     ensure!(
         payload[0x98 + 112 + 4 * 8..0x98 + 112 + 5 * 8]
@@ -525,12 +526,15 @@ fn unsigned_control(
     fs::write(artifacts.join("unsigned.efi"), &payload)?;
     let source = artifacts.join("unsigned.img");
     fs::write(&source, fat_disk(&payload))?;
-    let run = |secure| -> Result<serde_json::Value> {
+    let mut run = |secure| -> Result<serde_json::Value> {
         let label = if secure {
             "unsigned-on"
         } else {
             "unsigned-off"
         };
+        // Each control must provision and launch before it can fail as a guest.
+        // In particular, the on control must not inherit the off control's stage.
+        *stage = "platform";
         let mut fixture = Fixture::new(
             ws,
             &source,
@@ -539,10 +543,18 @@ fn unsigned_control(
             secure,
             false,
         )?;
-        fixture.provider.start(&mut fixture.vm)?;
+        if let Err(error) = fixture.provider.start(&mut fixture.vm) {
+            if let Err(log_error) = fixture.logs(artifacts, &format!("{label}-failed-start")) {
+                return Err(error.context(format!(
+                    "unsigned-control startup diagnostics collection failed: {log_error:#}"
+                )));
+            }
+            return Err(error);
+        }
+        *stage = "unsigned_control";
         let vm = fixture.vm.running_mut()?;
         let start = Instant::now();
-        let result = loop {
+        let result = (|| loop {
             let serial = fs::read_to_string(vm.info.dir.join("serial.log")).unwrap_or_default();
             let executed = serial.contains("ILEX-UNSIGNED-EXECUTED");
             if secure {
@@ -568,7 +580,7 @@ fn unsigned_control(
                 ));
             }
             thread::sleep(Duration::from_millis(100));
-        };
+        })();
         fixture.logs(artifacts, label)?;
         result?;
         fs::write(

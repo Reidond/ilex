@@ -60,6 +60,20 @@ record is authoritative. None is an ignored/green security pass. The existing
 CI wrapper fails on missing evidence and uploads the public security directory.
 An unchanged image's unrun tier is explicitly UNQUALIFIED in the CI summary.
 
+Unsigned-control preparation and QEMU startup stay in the platform stage;
+only a successful launch enters the unsigned-control guest stage. Startup
+logs are retained as `unsigned-off-failed-start-qemu.log` or
+`unsigned-on-failed-start-qemu.log` before fixture cleanup. The booted-image
+`.github/security-control-startup-self-check.sh` injects a QEMU exit before
+QMP only for the named EFI control, after real ilex first/warm/cold boots and
+TPM decrypt pass. It requires platform/unqualified reporting, both diagnostic
+streams and a failed shared profile. The optional `on` argument checks the
+second control after the off payload has actually executed; the default is
+`off`. Set `ILEX_IMAGE`, `ILEX_ARTIFACTS` and the selected accelerator/memory
+environment when running it locally. CI runs the default self-check before
+normal qualification so its deliberately failed profile is requalified by
+the final passing tier. Both runs have separate 45-minute limits.
+
 Evidence includes the host ioctl and runtime versions, firmware descriptor and
 CODE/template fingerprints, guest RPM/kernel versions and key-variable hashes,
 booted image/configuration, raw EFI variables, lockdown, TPM/PCR state, binary

@@ -240,6 +240,12 @@ exact-profile record without starting a VM; `--self-check --memory 2G` measures
 that profile. Failures retain an unqualified result with the failing stage,
 distinguishing platform provisioning from guest failure. No installer,
 encryption or TPM-enrollment behavior is added.
+Unsigned EFI controls remain in the platform stage through provisioning and
+QEMU launch and retain startup logs on failure. CI's
+`.github/security-control-startup-self-check.sh` boots real ilex through the
+restart checks, then injects an EFI-control-only QEMU startup failure and
+requires platform/unqualified reporting. Normal qualification runs afterward
+to restore a passing profile; `on` selects the second control for local checks.
 
 `cargo xtask security` reports this Linux host's KVM SMM capability and
 security prerequisites. Its result is explicitly `not_yet_qualified` until
