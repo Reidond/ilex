@@ -1,0 +1,2 @@
+This is the minimal public ilex profile example.
+Adjust users/andriishafar/user.toml and settings.toml before using it as your own.

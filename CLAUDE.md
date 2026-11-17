@@ -614,7 +614,7 @@ Keep Anaconda's distinctly named local wheel administrator for maintenance.
 Create the daily account locally from that account:
 
 ```sh
-sudo ilex-agent home-create alice --disk-size=20 --real-name='Alice'
+sudo ilex-agent home-create andriishafar --disk-size=20 --real-name='Andrii Shafar'
 # Add --admin only when this daily account should have password-authenticated sudo.
 ```
 
@@ -676,7 +676,7 @@ encrypted root, Secure Boot or the future Windows security backend.
 
 ## Public user profiles
 
-`image.toml` selects public profiles with `users = ["reidond"]`. This is a
+`image.toml` selects public profiles with `users = ["andriishafar"]`. This is a
 fourth configuration dimension; every root (including shell-free `base`) and
 its machine layers carry the same catalogue. No publication name, OCI layer
 selection or image label gains a user dimension. Images work without selecting
@@ -690,8 +690,11 @@ can name only `wheel` and `gamemode`; provisioning must explicitly authorize
 administration and check group availability. Applying a profile never changes
 an identity, storage size or groups. Unknown fields, including homed secret,
 privileged, password, recovery, binding/status and signature fields, fail the
-build. The minimal `reidond` example has no email, credentials or administrative
-groups; the owner should adjust its name/settings before use.
+build. The minimal `andriishafar` example uses the owner's requested username
+and display name (Andrii Shafar), with no email, credentials, administrative
+groups or additional personal data. The owner should adjust its settings before
+use. Keep the maintenance administrator distinct (the fixture uses `ilexmaint`);
+homed refuses creation when the requested username already exists in NSS.
 
 Optional `settings.toml` accepts `[gnome]` with `color-scheme` (`default`,
 `prefer-dark`, `prefer-light`), boolean `clock-show-weekday`, and `clock-format`
@@ -715,7 +718,7 @@ enter root content/cache and installer fingerprints.
 
 After `sudo ilex-agent home-create NAME --disk-size=20`, authenticate locally
 as the new daily user and run `ilex-agent profile list`, then
-`ilex-agent profile apply reidond`. A public profile can seed a custom homed
+`ilex-agent profile apply andriishafar`. A public profile can seed a custom homed
 username; its identity suggestions remain metadata for setup. Apply refuses
 root, an inactive/non-LUKS home, or a caller/home UID mismatch. It uses NSS,
 not `$HOME`, and writes with owned no-follow directory descriptors. Nothing
@@ -748,8 +751,10 @@ There are no root-run profile hooks. Installer choice/provisioning UX is PR 22.
 `cargo xtask test ephemeral::user_profiles homed::profiles -- --test-threads 1`
 checks catalogue/schema/path/registry rejection in a booted image and profile
 application through PR 20's real creation/TTY path in an enforcing installed
-guest. The latter uses 2 GiB and no UI automation, tests user-edit/deletion and
-link preservation, future-state/rollback refusal, opt-in app failure, and a
+guest. It creates `andriishafar` from the catalogue metadata alongside the local
+`ilexmaint` administrator, verifies maintenance-name collision refusal and
+maintenance recovery login. The guest uses 2 GiB and no UI automation, and tests
+user-edit/deletion and link preservation, future-state/rollback refusal, opt-in app failure, and a
 successful relogin while the older image's user service declines newer state.
 On a GNOME image it also checks scoped dconf updates, reset preservation,
 dconf directory/leaf links outside the encrypted home, inherited environment
@@ -1503,8 +1508,10 @@ for a handoff.
 the offered defaults without logging the capability URL.
 
 On **Create account**, create a separate **maintenance/recovery administrator**
-and keep its credentials for administration and recovery. This is a traditional
-local account. A separate daily user managed by systemd-homed and created at
+such as `ilexmaint`, and keep its credentials for administration and recovery.
+Reserve `andriishafar` for the owner's daily homed account; never use the selected
+daily username for maintenance. The maintenance user is a traditional local
+account. A separate daily user managed by systemd-homed and created at
 first boot is planned for a later PR; that setup is not delivered here.
 The stock account page is retained without patching the web interface's bundles.
 

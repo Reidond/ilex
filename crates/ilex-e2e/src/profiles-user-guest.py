@@ -29,7 +29,7 @@ spec.loader.exec_module(module)
 
 def fixture(root, code, apps=False):
     module.ROOT = root
-    args = argparse.Namespace(name="reidond", selected=False, shell=None, install_apps=apps)
+    args = argparse.Namespace(name="andriishafar", selected=False, shell=None, install_apps=apps)
     try:
         if apps:
             output = io.StringIO()
@@ -44,6 +44,8 @@ def fixture(root, code, apps=False):
 
 
 assert os.getuid() != 0 and os.environ.get("SYSTEMD_HOME") == "1"
+assert pwd.getpwuid(os.getuid()).pw_name == "andriishafar"
+assert subprocess.check_output(['getent', '-s', 'files', 'passwd', 'ilexmaint'], text=True).startswith('ilexmaint:')
 record = json.loads(subprocess.check_output(['homectl', 'inspect', pwd.getpwuid(os.getuid()).pw_name, '--json=short'], text=True))
 print('homed profile admission:', {key: record.get(key) for key in ('userName', 'uid', 'homeDirectory', 'storage')},
       'states:', [v.get('state') for v in record.get('status', {}).values()],
@@ -66,14 +68,14 @@ if gnome:
     if dconf_dir.exists():
         dconf_dir.rename(saved_dconf)
     dconf_dir.symlink_to(external_path, target_is_directory=True)
-    result = cli("reidond", code=1)
+    result = cli("andriishafar", code=1)
     assert any(c.startswith("settings.gnome") for c in json.loads(result.stdout)["conflicts"])
     assert sentinel_db.read_bytes() == b"outside encrypted home sentinel\n"
     assert sorted(p.name for p in external_path.iterdir()) == ["user"]
     dconf_dir.unlink()
     dconf_dir.mkdir(mode=0o700)
     (dconf_dir / "user").symlink_to(sentinel_db)
-    result = cli("reidond", code=1)
+    result = cli("andriishafar", code=1)
     assert any(c.startswith("settings.gnome") for c in json.loads(result.stdout)["conflicts"])
     assert sentinel_db.read_bytes() == b"outside encrypted home sentinel\n"
     (dconf_dir / "user").unlink()
@@ -84,7 +86,7 @@ if gnome:
     override.parent.mkdir(parents=True)
     override.write_text("[Service]\nExecStart=\nExecStart=/usr/libexec/dconf-service\n")
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    result = cli("reidond", code=1)
+    result = cli("andriishafar", code=1)
     assert any(c.startswith("settings.gnome") for c in json.loads(result.stdout)["conflicts"])
     override.unlink()
     override.parent.rmdir()
@@ -94,20 +96,20 @@ if gnome:
     redirected = dict(os.environ, XDG_CONFIG_HOME=external.name, XDG_DATA_HOME=external.name,
                       XDG_CACHE_HOME=external.name, DCONF_PROFILE=str(sentinel_db),
                       GSETTINGS_BACKEND="keyfile", DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent")
-    cli("reidond", code=1, env=redirected)  # preexisting welcome remains a conflict
+    cli("andriishafar", code=1, env=redirected)  # preexisting welcome remains a conflict
     assert sentinel_db.read_bytes() == b"outside encrypted home sentinel\n"
     assert sorted(p.name for p in external_path.iterdir()) == ["user"]
     print("real homed dconf directory/leaf symlinks and inherited redirects: passed")
-cli("reidond", code=1)
+cli("andriishafar", code=1)
 assert welcome.read_text() == "preexisting user file\n"
 welcome.unlink()
-cli("reidond")
+cli("andriishafar")
 original = welcome.read_bytes()
 if gnome:
     assert subprocess.check_output(['dconf', 'read', '/org/gnome/desktop/interface/clock-show-weekday'], text=True).strip() == 'true'
     subprocess.run(['gsettings', 'reset', 'org.gnome.desktop.interface', 'clock-show-weekday'], check=True)
     assert subprocess.check_output(['dconf', 'read', '/org/gnome/desktop/interface/clock-show-weekday'], text=True).strip() == ''
-    result = cli("reidond", code=1)
+    result = cli("andriishafar", code=1)
     assert "settings.gnome.clock-show-weekday" in json.loads(result.stdout)["conflicts"]
     assert subprocess.check_output(['dconf', 'read', '/org/gnome/desktop/interface/clock-show-weekday'], text=True).strip() == ''
     assert json.loads(state.read_text())["settings"]["clock-show-weekday"] == "true"
@@ -122,7 +124,7 @@ if gnome:
         os.close(verified_home.fd)
     print("user setting reset survives reapply and is reported as a conflict: passed")
     subprocess.run(['gsettings', 'set', 'org.gnome.desktop.interface', 'clock-show-weekday', 'true'], check=True)
-    cli("reidond")
+    cli("andriishafar")
 assert json.loads(state.read_text())["files"][".config/ilex/welcome.txt"] == hashlib.sha256(original).hexdigest()
 welcome.write_text("edited by user\n")
 fixture("/run/ilex-profile-v2", 1)
@@ -142,7 +144,7 @@ assert not added.exists()
 
 # The actual older shipped profile must decline newer mutable home state.
 before = state.read_bytes()
-cli("reidond", code=2)
+cli("andriishafar", code=2)
 assert state.read_bytes() == before
 fixture("/run/ilex-profile-rewritten-v2", 2)
 assert state.read_bytes() == before

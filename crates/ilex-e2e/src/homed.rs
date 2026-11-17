@@ -38,7 +38,7 @@ fn profiles() -> Result<()> {
     config.memory = "2G".into();
     let mut vm = vmtest::boot(&ws, config)?;
     let result = (|| {
-        vm.ssh_ok("test \"$(getenforce)\" = Enforcing; ! ilex-agent profile apply reidond; ilex-agent profile list")?;
+        vm.ssh_ok("test \"$(getenforce)\" = Enforcing; ! ilex-agent profile apply andriishafar; ilex-agent profile list")?;
         vm.ssh_ok(&format!(
             "printf %s {} | base64 -d > /run/ilex-profiles-user.py",
             qemu::base64(include_str!("profiles-user-guest.py").as_bytes())
@@ -53,39 +53,47 @@ for name, text in [('v2', 'profile revision two\n'), ('rewritten-v2', 'rewritten
     root = pathlib.Path('/run/ilex-profile-' + name)
     shutil.copytree(source / 'users', root / 'users')
     shutil.copy(source / 'image.json', root / 'image.json')
-    leaf = root / 'users/reidond/home/.config/ilex/welcome.txt'
+    leaf = root / 'users/andriishafar/home/.config/ilex/welcome.txt'
     leaf.write_text(text)
     added = leaf.with_name('added.txt')
     added.write_text('new public file\n')
-    manifest = root / 'users/reidond/user.json'
+    manifest = root / 'users/andriishafar/user.json'
     data = json.loads(manifest.read_text())
     data['revision'] = 2
     data['settings'] = {'gnome': {'color-scheme': 'default', 'clock-show-weekday': False}}
     data['files'] = {'.config/ilex/' + p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in [leaf, added]}
     data['apps'] = {'flatpaks': [{'id': 'org.example.IlexMissing', 'remote': 'flathub'}]}
     manifest.write_text(json.dumps(data))
-    catalogue = {'schema': 1, 'profiles': [{'id': 'reidond', 'schema': 1, 'revision': 2, 'sha256': hashlib.sha256(manifest.read_bytes()).hexdigest()}]}
+    catalogue = {'schema': 1, 'profiles': [{'id': 'andriishafar', 'schema': 1, 'revision': 2, 'sha256': hashlib.sha256(manifest.read_bytes()).hexdigest()}]}
     (root / 'users.json').write_text(json.dumps(catalogue))
 PY"#)?;
+        let identity: Value =
+            serde_json::from_str(&vm.ssh_ok("cat /usr/share/ilex/users/andriishafar/user.json")?)?;
+        let owner = identity["username"].as_str().context("profile username")?;
+        ensure!(owner == "andriishafar", "unexpected owner profile username");
         let secret = password()?;
+        let maintenance = password()?;
+        guest(&vm, json!({"action":"maintenance", "secrets":[maintenance]}))?;
+        guest(&vm, json!({"action":"collision", "secrets":[secret]}))?;
         guest(
             &vm,
-            json!({"action":"create", "name":"profiletest", "secrets":[secret]}),
+            json!({"action":"create", "name":owner, "secrets":[secret]}),
         )?;
         guest(
             &vm,
-            json!({"action":"profiles", "name":"profiletest", "secrets":[secret]}),
+            json!({"action":"profiles", "name":owner, "secrets":[secret]}),
         )?;
         vm.wait_for(
             "profile user's home is released",
-            "! mountpoint -q /home/profiletest",
+            &format!("! mountpoint -q /home/{owner}"),
             WAIT,
         )?;
         guest(
             &vm,
-            json!({"action":"profile-relogin", "name":"profiletest", "secrets":[secret]}),
+            json!({"action":"profile-relogin", "name":owner, "secrets":[secret]}),
         )?;
-        guest(&vm, json!({"action":"secret-audit", "secrets":[secret]}))?;
+        guest(&vm, json!({"action":"maintenance-recovery", "secrets":[maintenance]}))?;
+        guest(&vm, json!({"action":"secret-audit", "secrets":[secret, maintenance]}))?;
         Ok(())
     })();
     if let Ok(journal) = vm.ssh_ok("journalctl --no-pager -u systemd-homed -u 'user@*' -n 200") {

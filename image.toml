@@ -1,5 +1,5 @@
 # Public profile data shipped in every composition, without a user OCI tag.
-users = ["reidond"]
+users = ["andriishafar"]
 
 # The default composition: what `cargo xtask build`, `test`, `vm` and `disk`
 # use with no flags. It is the base + these shells + machine `generic`.

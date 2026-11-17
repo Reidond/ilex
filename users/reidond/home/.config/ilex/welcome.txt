@@ -1,2 +1,0 @@
-This is the minimal public ilex profile example.
-Adjust users/reidond/user.toml and settings.toml before using it as your own.

@@ -15,6 +15,9 @@ from image_tree import Tree
 catalogue = json.loads(Path("/usr/share/ilex/users.json").read_bytes())
 registry = json.loads(Path("/usr/share/ilex/.generated.json").read_bytes())
 assert catalogue["schema"] == 1
+owner = next(p for p in catalogue["profiles"] if p["id"] == "andriishafar")
+owner_data = json.loads(Path("/usr/share/ilex/users", owner["id"], "user.json").read_bytes())
+assert owner_data["username"] == "andriishafar" and owner_data["display-name"] == "Andrii Shafar"
 for profile in catalogue["profiles"]:
     path = f"users/{profile['id']}/user.json"
     raw = Path("/usr/share/ilex", path).read_bytes()
