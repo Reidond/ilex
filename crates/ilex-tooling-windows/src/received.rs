@@ -37,7 +37,13 @@ pub fn relative(name: &str) -> Result<()> {
                     .all(|b| b.is_ascii_alphanumeric() || b" ._-+".contains(&b)),
             "invalid Windows artifact name: {name:?}"
         );
-        let stem = part.split('.').next().unwrap().to_ascii_lowercase();
+        // Win32 also recognizes device stems with spaces before an extension.
+        let stem = part
+            .split('.')
+            .next()
+            .unwrap()
+            .trim_end_matches(' ')
+            .to_ascii_lowercase();
         ensure!(
             !matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
                 && !(stem.len() == 4

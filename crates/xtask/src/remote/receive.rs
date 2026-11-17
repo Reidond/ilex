@@ -211,6 +211,8 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
         "artifacts/a:ads",
         "artifacts/a\\b",
         "artifacts/CON.txt",
+        "artifacts/CON .txt",
+        "artifacts/com1 .json",
         "artifacts/a.",
         "artifacts//empty",
         "iso/.ilex-owner.json",
