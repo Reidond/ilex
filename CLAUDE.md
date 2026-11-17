@@ -788,7 +788,7 @@ Real-homed interleaving regressions use other processes of the same user to
 save after the file comparison, save again during rollback, reset a setting
 after comparison or during its write, and restart the checked dconf writer.
 Measured 2026-11-17: the shell-free image is 1,977.84 MiB against Fedora
-bootc's 1,917.62 MiB, a 60.22 MiB increase within the unchanged 128 MiB budget.
+bootc's 1,917.62 MiB, a 60.23 MiB increase within the unchanged 128 MiB budget.
 
 ## Build sharing: kache
 
