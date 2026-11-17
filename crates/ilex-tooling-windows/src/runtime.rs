@@ -318,6 +318,12 @@ pub fn update() -> Result<PathBuf> {
     Ok(path)
 }
 fn gpu_smoke(path: &Path) -> Result<()> {
+    let available = available_memory()?;
+    ensure!(
+        available >= 14 * 1024 * 1024 * 1024 + 256 * 1024 * 1024,
+        "GPU fixture needs 256 MiB plus the 14 GiB host reserve; only {:.1} GiB available",
+        available as f64 / 1024.0 / 1024.0 / 1024.0
+    );
     let reservation = TcpListener::bind(("127.0.0.1", 0))?;
     let port = reservation.local_addr()?.port();
     drop(reservation);
@@ -406,30 +412,48 @@ fn gpu_smoke(path: &Path) -> Result<()> {
 struct TcpTransport(BufReader<TcpStream>);
 impl ilex_tooling_qmp::Transport for TcpTransport {
     fn read_message(&mut self, deadline: Instant) -> Result<serde_json::Value> {
-        self.0.get_mut().set_read_timeout(Some(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .max(Duration::from_millis(1)),
-        ))?;
         let mut bytes = Vec::new();
-        self.0
-            .by_ref()
-            .take(ilex_tooling_qmp::MAX_MESSAGE_BYTES + 1)
-            .read_until(b'\n', &mut bytes)?;
-        ensure!(
-            !bytes.is_empty() && bytes.len() as u64 <= ilex_tooling_qmp::MAX_MESSAGE_BYTES,
-            "empty/oversized QMP response"
-        );
+        loop {
+            ensure!(Instant::now() < deadline, "QMP response deadline expired");
+            self.0.get_mut().set_read_timeout(Some(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_millis(1)),
+            ))?;
+            let buffer = self.0.fill_buf()?;
+            ensure!(!buffer.is_empty(), "QMP endpoint closed");
+            let count = buffer
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(buffer.len(), |i| i + 1);
+            ensure!(
+                (bytes.len() + count) as u64 <= ilex_tooling_qmp::MAX_MESSAGE_BYTES,
+                "oversized QMP response"
+            );
+            let complete = buffer[count - 1] == b'\n';
+            bytes.extend_from_slice(&buffer[..count]);
+            self.0.consume(count);
+            if complete {
+                break;
+            }
+        }
         Ok(serde_json::from_slice(&bytes)?)
     }
     fn write_message(&mut self, message: &serde_json::Value, deadline: Instant) -> Result<()> {
-        self.0.get_mut().set_write_timeout(Some(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .max(Duration::from_millis(1)),
-        ))?;
-        serde_json::to_writer(self.0.get_mut(), message)?;
-        self.0.get_mut().write_all(b"\r\n")?;
+        let mut bytes = serde_json::to_vec(message)?;
+        bytes.extend_from_slice(b"\r\n");
+        let mut offset = 0;
+        while offset < bytes.len() {
+            ensure!(Instant::now() < deadline, "QMP write deadline expired");
+            self.0.get_mut().set_write_timeout(Some(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_millis(1)),
+            ))?;
+            let count = self.0.get_mut().write(&bytes[offset..])?;
+            ensure!(count != 0, "QMP endpoint closed during write");
+            offset += count;
+        }
         Ok(())
     }
 }

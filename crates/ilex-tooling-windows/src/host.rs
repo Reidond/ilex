@@ -17,6 +17,18 @@ pub fn root() -> Result<PathBuf> {
             .join("ilex"),
     )
 }
+pub fn available_memory() -> Result<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // All fields are integers; dwLength is required before the OS fills them.
+    let mut memory: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    memory.dwLength = std::mem::size_of_val(&memory) as u32;
+    ensure!(
+        unsafe { GlobalMemoryStatusEx(&mut memory) } != 0,
+        "reading available memory: {}",
+        std::io::Error::last_os_error()
+    );
+    Ok(memory.ullAvailPhys)
+}
 pub fn hash_file(path: &Path) -> Result<String> {
     let mut f = File::open(path)?;
     let mut digest = Sha256::new();

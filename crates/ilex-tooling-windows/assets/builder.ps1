@@ -1,7 +1,8 @@
 param([Parameter(Mandatory=$true)][string]$Request)
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
-$r=Get-Content -LiteralPath $Request -Raw | ConvertFrom-Json
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+$r=Get-Content -LiteralPath $Request -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($r.schema -ne 1) {throw 'Unsupported builder request schema; no mutation performed'}
 $root=[IO.Path]::GetFullPath($r.root)
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -53,13 +54,13 @@ public sealed class IlexSerialCapture : IDisposable {
 }
 '@
 if(Test-Path -LiteralPath $journal) {
-    $j=Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
+    $j=Get-Content -LiteralPath $journal -Raw -Encoding UTF8 | ConvertFrom-Json
     if($j.schema -ne 1 -or $j.owner -ne $owner -or $j.name -ne $name -or $j.root -ne $root) {throw 'Builder journal identity/version mismatch; no mutation performed'}
 }
 if($r.operation -ne 'status' -and (Test-Path -LiteralPath "$journal.partial") -and $j) {
     # A flushed rename candidate can survive a host/process interruption. Recover
     # it only when its UUID/resource and the pre-existing creation intent agree.
-    $candidate=Get-Content -LiteralPath "$journal.partial" -Raw | ConvertFrom-Json
+    $candidate=Get-Content -LiteralPath "$journal.partial" -Raw -Encoding UTF8 | ConvertFrom-Json
     if($candidate.schema -ne 1 -or $candidate.owner -ne $owner -or $candidate.root -ne $root -or $candidate.name -ne $name -or $candidate.run -ne $j.run) {throw 'Interrupted journal candidate identity mismatch'}
     if($candidate.vm_id) {
         Import-Module Hyper-V
@@ -128,10 +129,10 @@ function Addresses($vm) {
     $mac=$nic[0].MacAddress.Replace('-','').Replace(':','').ToUpper()
     $switch=Get-VMSwitch -Name 'Default Switch'
     $hostNic=Get-VMNetworkAdapter -ManagementOS | Where-Object {$_.SwitchId -eq $switch.Id} | Select-Object -First 1
-    $adapter=Get-NetAdapter -IncludeHidden | Where-Object {$_.MacAddress.Replace('-','').Replace(':','') -eq $hostNic.MacAddress} | Select-Object -First 1
+    $adapter=Get-NetAdapter -IncludeHidden | Where-Object {$hostNic -and $_.MacAddress -and $_.MacAddress.Replace('-','').Replace(':','') -eq $hostNic.MacAddress} | Select-Object -First 1
     $candidates=@($nic[0].IPAddresses)
     if($adapter) {
-        $candidates+=@(Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue | Where-Object {$_.LinkLayerAddress.Replace('-','').Replace(':','').ToUpper() -eq $mac -and $_.State -notin @('Unreachable','Incomplete')} | ForEach-Object {$_.IPAddress})
+        $candidates+=@(Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue | Where-Object {$_.LinkLayerAddress -and $_.LinkLayerAddress.Replace('-','').Replace(':','').ToUpper() -eq $mac -and $_.State -notin @('Unreachable','Incomplete')} | ForEach-Object {$_.IPAddress})
     }
     return @($candidates | Where-Object {
         $ip=$null
@@ -141,6 +142,25 @@ function Addresses($vm) {
 function Ssh-Args([string]$address) {
     return @('-F','NUL','-i',(Join-Path $root 'identity'),'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-o','ConnectTimeout=3','-o','ConnectionAttempts=1','-o','StrictHostKeyChecking=yes','-o',"UserKnownHostsFile=$(Join-Path $root 'known_hosts')",'-o','GlobalKnownHostsFile=NUL','-o',"HostKeyAlias=$name",'-o','LogLevel=ERROR',"ilex@$address")
 }
+function Invoke-GuestSsh([string[]]$sshArguments,[string]$op,[int]$timeout) {
+    $psi=New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName=(Get-Command ssh.exe).Source
+    $psi.Arguments=($sshArguments | ForEach-Object {'"'+$_.Replace('"','\"')+'"'}) -join ' '
+    $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
+    $psi.RedirectStandardInput=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
+    $p=New-Object Diagnostics.Process;$p.StartInfo=$psi
+    $null=$p.Start();$out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
+    # The finite guest protocol is UTF-8 with LF framing, including on Windows.
+    $p.StandardInput.NewLine="`n"
+    $p.StandardInput.WriteLine($op)
+    if($op -eq 'update') {
+        $payload=@{schema=1;revision=$r.revision;provision=[IO.File]::ReadAllText((Join-Path $root 'provision.sh'));control=[IO.File]::ReadAllText((Join-Path $root 'builder-control.sh'));smoke=[IO.File]::ReadAllText((Join-Path $root 'smoke.sh'))}
+        $p.StandardInput.WriteLine(($payload | ConvertTo-Json -Depth 4 -Compress))
+    }
+    $p.StandardInput.Close()
+    if(!$p.WaitForExit($timeout*1000)) {$p.Kill();$p.WaitForExit();throw "Guest $op timed out; provisioning logs retained"}
+    return [pscustomobject]@{Code=$p.ExitCode;Out=$out.Result;Err=$err.Result}
+}
 function Guest([string]$op,[int]$timeout=1200) {
     $vm=Owned-VM
     if($vm.State -ne 'Running') {throw "Builder is $($vm.State), not running"}
@@ -149,37 +169,18 @@ function Guest([string]$op,[int]$timeout=1200) {
         foreach($address in (Addresses $vm)) {
             $sshArguments=Ssh-Args $address
             $errFile=Join-Path $root 'ssh-last-error.txt'
-            # Server forced-command consumes one finite operation on stdin.
-            $oldPreference=$ErrorActionPreference
-            $ErrorActionPreference='Continue'
-            $probe='probe' | & ssh.exe @sshArguments 2>$errFile
-            $probeExit=$LASTEXITCODE
-            $ErrorActionPreference=$oldPreference
-            if($probeExit -ne 0) {continue}
-            try {$identity=($probe -join "`n") | ConvertFrom-Json} catch {continue}
+            $reply=Invoke-GuestSsh $sshArguments 'probe' 12
+            [IO.File]::WriteAllText($errFile,$reply.Err)
+            if($reply.Code -ne 0) {continue}
+            try {$identity=$reply.Out | ConvertFrom-Json} catch {continue}
             if($identity.schema -ne 1 -or $identity.owner -ne $owner) {throw 'Pinned SSH endpoint provisioning identity mismatch'}
             if($j.data_uuid -and $identity.data_uuid -ne $j.data_uuid) {throw 'Builder data filesystem identity mismatch'}
             $script:address=$address
             if($op -eq 'probe') {return $identity}
-            # Bound long provisioning/smoke SSH calls with Process.WaitForExit.
-            $psi=New-Object Diagnostics.ProcessStartInfo
-            $psi.FileName=(Get-Command ssh.exe).Source
-            # Windows quoting: only structured argv values, no cmd.exe or shell.
-            $psi.Arguments=($sshArguments | ForEach-Object {'"'+$_.Replace('"','\"')+'"'}) -join ' '
-            $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
-            $psi.RedirectStandardInput=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
-            $p=New-Object Diagnostics.Process;$p.StartInfo=$psi
-            $null=$p.Start();$out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
-            $p.StandardInput.WriteLine($op)
-            if($op -eq 'update') {
-                $payload=@{schema=1;revision=$r.revision;provision=[IO.File]::ReadAllText((Join-Path $root 'provision.sh'));control=[IO.File]::ReadAllText((Join-Path $root 'builder-control.sh'));smoke=[IO.File]::ReadAllText((Join-Path $root 'smoke.sh'))}
-                $p.StandardInput.WriteLine(($payload | ConvertTo-Json -Depth 4 -Compress))
-            }
-            $p.StandardInput.Close()
-            if(!$p.WaitForExit($timeout*1000)) {$p.Kill();$p.WaitForExit();throw "Guest $op timed out; provisioning logs retained"}
-            $stdout=$out.Result;$stderr=$err.Result
+            $reply=Invoke-GuestSsh $sshArguments $op $timeout
+            $stdout=$reply.Out;$stderr=$reply.Err
             [IO.File]::WriteAllText((Join-Path $root "guest-$op.log"),$stdout+"`n"+$stderr)
-            if($p.ExitCode -ne 0) {throw "Guest $op failed ($($p.ExitCode)); $stderr"}
+            if($reply.Code -ne 0) {throw "Guest $op failed ($($reply.Code)); $stderr"}
             if($op -eq 'smoke') {return ($stdout | ConvertFrom-Json)}
             return $stdout
         }
@@ -216,10 +217,11 @@ function Key([string]$file) {
 }
 function Seed {
     $seed=Join-Path $root 'seed';New-Item -ItemType Directory -Path $seed | Out-Null
-    Key (Join-Path $seed 'bootstrap')
-    Key (Join-Path $seed 'host')
+    $keys=Join-Path $root 'seed-keys';New-Item -ItemType Directory -Path $keys | Out-Null
+    Key (Join-Path $keys 'bootstrap')
+    Key (Join-Path $keys 'host')
     Key (Join-Path $root 'identity')
-    $hostPublic=(Get-Content -LiteralPath (Join-Path $seed 'host.pub') -Raw).Trim()
+    $hostPublic=(Get-Content -LiteralPath (Join-Path $keys 'host.pub') -Raw -Encoding UTF8).Trim()
     [IO.File]::WriteAllText((Join-Path $root 'known_hosts'),"$name $hostPublic`n")
     $files=@(
         @{path='/var/lib/ilex-builder/owner';permissions='0600';content=$owner},
@@ -230,14 +232,14 @@ function Seed {
     }
     # Maintenance key is forced to the finite controller; bootstrap key is revoked by provisioning.
     $maintenance=(Get-Content -LiteralPath (Join-Path $root 'identity.pub') -Raw).Trim()
-    $bootstrap=(Get-Content -LiteralPath (Join-Path $seed 'bootstrap.pub') -Raw).Trim()
+    $bootstrap=(Get-Content -LiteralPath (Join-Path $keys 'bootstrap.pub') -Raw -Encoding UTF8).Trim()
     $cloud=@{
         hostname=$name;ssh_pwauth=$false;disable_root=$true
         users=@(
             @{name='ilex-bootstrap';lock_passwd=$true;shell='/bin/bash';ssh_authorized_keys=@($bootstrap)},
             @{name='ilex';lock_passwd=$true;shell='/bin/bash';ssh_authorized_keys=@("restrict,command=`"/usr/local/libexec/ilex-builder-control`" $maintenance")}
         )
-        ssh_keys=@{ed25519_private=[IO.File]::ReadAllText((Join-Path $seed 'host'));ed25519_public=$hostPublic}
+        ssh_keys=@{ed25519_private=[IO.File]::ReadAllText((Join-Path $keys 'host'));ed25519_public=$hostPublic}
         write_files=$files
         runcmd=@(,@('/bin/bash','/var/lib/ilex-builder/provision.sh',$r.revision))
     }
@@ -263,7 +265,7 @@ public class IlexIsoWriter {
 function Cleanup-Seed {
     $vm=Owned-VM
     Get-VMDvdDrive -VM $vm | Where-Object {$_.Path -eq (Join-Path $root 'seed.iso')} | Set-VMDvdDrive -Path $null
-    foreach($p in @('seed','seed.iso')) {Remove-Owned (Join-Path $root $p)}
+    foreach($p in @('seed','seed-keys','seed.iso')) {Remove-Owned (Join-Path $root $p)}
 }
 function Reply {
     $vm=Owned-VM
@@ -333,7 +335,14 @@ try {
         Start-Owned
         Say 'Waiting for pinned SSH/cloud-init provisioning identity'
         $probe=Guest 'probe'
-        if($probe.revision -ne $r.revision) {throw 'Provisioning revision differs; builder update is required'}
+        if($probe.revision -ne $r.revision) {
+            if($j.phase -ne 'provisioning') {throw 'Provisioning revision differs; builder update is required'}
+            Say 'Resuming the unfinished provisioning recipe through the pinned controller'
+            $null=Guest 'update'
+            $probe=Guest 'probe'
+            if($probe.revision -ne $r.revision) {throw 'Resumed provisioning revision mismatch'}
+            $j.revision=$r.revision;Write-Journal
+        }
         if($j.phase -ne 'ready') {$null=Guest 'smoke';Cleanup-Seed;$j.data_uuid=$probe.data_uuid;$j.phase='ready';Write-Journal}
     } elseif($r.operation -eq 'down') {Stop-Owned}
     elseif($r.operation -eq 'cleanup-incomplete') {
@@ -342,7 +351,7 @@ try {
         $vm=Owned-VM
         if($vm) {if($vm.State -ne 'Off'){Stop-VM -VM $vm -TurnOff -Confirm:$false};Remove-VM -VM $vm -Force}
         elseif(Get-VM -Name $name -ErrorAction SilentlyContinue) {throw 'Unjournaled VM exists; UUID authorization unavailable, refusing cleanup'}
-        foreach($p in @('seed','seed.iso','identity','identity.pub','known_hosts','config','os.vhdx','data.vhdx')) {Remove-Owned (Join-Path $root $p)}
+        foreach($p in @('seed','seed-keys','seed.iso','identity','identity.pub','known_hosts','config','os.vhdx','data.vhdx')) {Remove-Owned (Join-Path $root $p)}
         Remove-Item -LiteralPath $journal;$j=$null
     } elseif($r.operation -eq 'accept-update') {
         if(!$j -or !$j.checkpoint_id -or $j.update_phase -notin @('verified','rolled-back')) {throw 'No verified/rolled-back recovery checkpoint to accept'}
@@ -357,7 +366,9 @@ try {
         $processor=Get-VMProcessor -VM $vm
         if($memory.DynamicMemoryEnabled -or $memory.Startup -ne $j.memory_bytes -or !$processor.ExposeVirtualizationExtensions -or $vm.AutomaticCheckpointsEnabled) {throw 'Fixed-memory/nested/checkpoint configuration drift'}
         $probe=Guest 'smoke'
+        if($probe.revision -ne $r.revision) {throw 'Provisioning revision differs; run builder update before self-check'}
         if(!$probe.nested_kvm_boot) {throw 'Nested KVM VM did not boot userspace'}
+        if([long]$probe.guest_memory_bytes -lt ([long]$j.memory_bytes-512MB) -or $probe.guest_cpus -ne $j.cpus) {throw 'Live guest memory/CPU does not match the fixed resource profile'}
         Say "Nested KVM boot passed; UUID=$($vm.Id); revision=$($probe.revision)"
     } elseif($r.operation -in @('update','rollback')) {
         if(!$j -or $j.phase -ne 'ready') {throw 'Update/rollback requires a ready builder'}
@@ -372,7 +383,9 @@ try {
             $snapshot=Get-VMSnapshot -VM (Owned-VM) | Where-Object {$_.Id -eq [guid]$j.checkpoint_id}
             if(!$snapshot){throw 'Exact recovery checkpoint missing'}
             Restore-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
-            Start-Owned;$probe=Guest 'smoke';$j.revision=$probe.revision;$j.update_phase='rolled-back';Write-Journal
+            Start-Owned;$probe=Guest 'smoke'
+            if(!$probe.nested_kvm_boot -or $probe.revision -ne $j.revision) {throw 'Recovery checkpoint provisioning/KVM verification failed'}
+            $j.update_phase='rolled-back';Write-Journal
         } else {
             if($j.update_phase -eq 'updating') {throw 'Interrupted update: run builder rollback before another update'}
             Start-Owned
@@ -384,18 +397,25 @@ try {
             Set-VM -VM $vm -CheckpointType Standard
             $snap=Checkpoint-VM -VM $vm -SnapshotName "ilex-builder-before-$([guid]::NewGuid())" -Passthru
             $j.checkpoint_id=[string]$snap.Id;$j.update_phase='updating';Write-Journal
+            $previousRevision=$j.revision
             try {
                 Start-Owned
                 $null=Guest 'update'
+                $updatedProbe=Guest 'probe'
+                if($updatedProbe.revision -ne $r.revision) {throw 'Updated guest provisioning revision mismatch'}
+                Say "Applied provisioning revision $($updatedProbe.revision)"
                 if($r.options.rollback_probe){throw 'Requested rollback acceptance probe after real package update'}
-                Stop-Owned;Start-Owned;$null=Guest 'smoke'
+                Stop-Owned;Start-Owned;$probe=Guest 'smoke'
+                if(!$probe.nested_kvm_boot -or $probe.revision -ne $r.revision) {throw 'Updated guest reboot/KVM verification failed'}
                 $j.revision=$r.revision;$j.update_phase='verified';Write-Journal
             } catch {
                 $failure=$_
                 $vm=Owned-VM
                 if($vm.State -ne 'Off'){Stop-VM -VM $vm -TurnOff -Confirm:$false}
                 Restore-VMSnapshot -VMSnapshot (Get-VMSnapshot -VM (Owned-VM) | Where-Object {$_.Id -eq [guid]$j.checkpoint_id}) -Confirm:$false
-                Start-Owned;$probe=Guest 'smoke';$j.revision=$probe.revision;$j.update_phase='rolled-back';Write-Journal
+                Start-Owned;$probe=Guest 'smoke'
+                if(!$probe.nested_kvm_boot -or $probe.revision -ne $previousRevision) {throw 'Automatic rollback provisioning/KVM verification failed'}
+                $j.revision=$probe.revision;$j.update_phase='rolled-back';Write-Journal
                 throw "Update failed and exact owned checkpoint was restored and smoke-tested: $failure"
             }
         }

@@ -16,7 +16,7 @@ dnf --setopt=gpgcheck=1 --setopt=max_parallel_downloads=10 install -y \
 image_builder_ready() { python3 - <<'PY'
 import subprocess
 s=subprocess.check_output(['image-builder','version'],text=True)
-v=next(line.split(':',1)[1].strip() for line in s.splitlines() if line.startswith('version:'))
+v=next(line.strip().split(':',1)[1].strip() for line in s.splitlines() if line.strip().startswith('version:'))
 assert int(v.split('.')[0]) >= 89, s
 PY
 }
@@ -24,6 +24,8 @@ if ! image_builder_ready; then
     dnf --setopt=gpgcheck=1 --enablerepo=updates-testing upgrade -y image-builder
 fi
 image_builder_ready
+systemctl daemon-reexec
+systemctl daemon-reload
 if ! mountpoint -q /var/lib/ilex-data; then
     # The owned VM has one 40 GiB OS disk and one dedicated 240 GiB data disk.
     # No wildcard write: select one disk with the recorded serial and expected size.
@@ -79,7 +81,7 @@ import hashlib,json,os,sys,subprocess
 p='/var/lib/ilex-builder/provision.json'
 v={'schema':1,'revision':sys.argv[1],'owner':open('/var/lib/ilex-builder/owner').read().strip(),
    'data_uuid':subprocess.check_output(['findmnt','-n','-o','UUID','/var/lib/ilex-data'],text=True).strip(),
-   'bcvk':subprocess.check_output(['bcvk','--version'],text=True).strip(),
+   'bcvk':subprocess.check_output(['/usr/local/bin/bcvk','--version'],text=True).strip(),
    'package_manifest_sha256':hashlib.sha256(open('/var/lib/ilex-builder/packages.txt','rb').read()).hexdigest(),
    'packages':[line for line in open('/var/lib/ilex-builder/packages.txt').read().splitlines()
                if line.split()[0] in {'podman','qemu-kvm','qemu-system-x86-core','libvirt-daemon-kvm','image-builder','cargo','rust','kernel-core','hyperv-daemons'}]}
