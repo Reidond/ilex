@@ -1,0 +1,17 @@
+[package]
+name = "ilexctl"
+description = "The ilex machine command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["dev"]
+# K2 adds the checkout tooling here; the image always disables this feature.
+dev = []
+
+[dependencies]
+clap.workspace = true
+clap_complete = "4"
+ilex-agent = { path = "../ilex-agent" }

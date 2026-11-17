@@ -87,10 +87,21 @@ export RUSTC_WRAPPER=kache
 if [ -f /kache-host/index.db ]; then
     export KACHE_READONLY_STORE=/kache-host
 fi
-cargo build --release --locked -p ilex-agent -p drupe
+cargo build --release --locked -p ilexctl --no-default-features
+cargo build --release --locked -p drupe
 kache daemon stop || true
 kache stats --last-build --root /src
-install -Dm755 target/release/ilex-agent /out/usr/bin/ilex-agent
+install -Dm755 target/release/ilexctl /out/usr/bin/ilexctl
+for shell in bash zsh fish; do
+    case "$shell" in
+        bash) completion=/usr/share/bash-completion/completions/ilexctl ;;
+        zsh) completion=/usr/share/zsh/site-functions/_ilexctl ;;
+        fish) completion=/usr/share/fish/vendor_completions.d/ilexctl.fish ;;
+    esac
+    mkdir -p "/out$(dirname "$completion")"
+    target/release/ilexctl completion "$shell" > "/out$completion"
+    chmod 0644 "/out$completion"
+done
 install -Dm755 target/release/drupe /out/usr/bin/drupe
 install -Dm755 target/release/drupe-enter /out/usr/libexec/drupe/drupe-enter
 EOF
@@ -131,7 +142,7 @@ RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose
 # stage new images daily (see the drop-ins in rootfs), and offer a restart
 # from every user's session once one is staged.
 # ilex-sigpolicy pins a machine that tracks ghcr.io/reidond/ilex to signed
-# images at boot, however it was installed (ilex-agent enforce-sigpolicy).
+# images at boot, however it was installed (ilexctl system enforce-sigpolicy).
 # chmod: checkouts on Windows filesystems carry no exec bits.
 # drupe (developer tools from signed disk images): /app is where a tool's
 # image appears in the mount namespace of its own processes, an empty

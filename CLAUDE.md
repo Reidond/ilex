@@ -202,6 +202,44 @@ cargo xtask info               # resource identity, selection and available conf
 - Publishing (`xtask publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
 
+## ilexctl
+
+The image ships the machine build of `ilexctl` from `crates/ilexctl`
+(`cargo build --release -p ilexctl --no-default-features`). It composes the
+`ilex-agent` library; there is no `/usr/bin/ilex-agent` or compatibility alias.
+Units keep their names and switch together with the binary on upgrade/rollback.
+Drupe remains its own command, with its service, setuid helper and state unchanged.
+
+| Previous machine command | Machine command |
+| --- | --- |
+| `ilex-agent --self-check` | `ilexctl system --self-check` (also `system check`) |
+| `ilex-agent config [--json]` | `ilexctl system config [--json]` |
+| `ilex-agent enforce-sigpolicy [--dry-run]` | `ilexctl system enforce-sigpolicy [--dry-run]` |
+| `ilex-agent home-create NAME ...` | `ilexctl home create NAME ...` |
+| `ilex-agent home-label UID` (internal) | `ilexctl home label UID` (hidden) |
+| `ilex-agent profile ...` | `ilexctl profile ...` |
+
+Homed creation/labeling stay in Rust. Public profile operations, including
+`prune-backups`, retain the internal Python implementation; clap validates the
+public command tree before dispatch. The updater and notifier retain bootc's
+units and their internal notification script.
+
+Help groups the machine commands under “On an ilex machine”. `--self-check`
+belongs to a group (`system --self-check`, `profile --self-check`), with `check`
+as the equivalent verb. `--json` is per command; `system config --json` emits
+one document with top-level `schema: 1`, preserving `image` and `machine`.
+Exit codes are 0 for success/no-op/dry run, 1 for failed operations/checks,
+and 2 for invalid usage. Errors use stderr. Drupe's exit-code behaviour is unchanged.
+`ilexctl completion bash|zsh|fish|powershell` generates static completions;
+the image installs bash, zsh and fish scripts under their usual `/usr/share`
+completion directories. `ilexctl --version` identifies the machine build.
+
+The default `dev` feature is an empty extension point until K2. Checkout tools
+still run through `cargo xtask` and `ilex-vmctl`; the cargo alias, installed
+launcher and MCP migration arrive with K2. On non-Linux hosts machine commands
+explain that they require an ilex machine; help/completions still work. A dev
+build on an ilex host hands machine commands to `/usr/bin/ilexctl`.
+
 ## Configurations: shells, design systems, machines and users
 
 `image.toml` names the installed shells and design systems and one default of
@@ -218,7 +256,7 @@ fedora-bootc image: growth must be at most **128 MiB** (uncompressed `.Size`).
 The error includes both sizes and removes only the rejected build's tag, so a
 later test cannot reuse it. Packages that exceed the budget belong in a
 shell or machine, or need a justified budget change in a commit. The base adds
-ilex-agent, signature policy, the updater and drupe, plus the latter's
+ilexctl, signature policy, the updater and drupe, plus the latter's
 `systemd-container` runtime dependency. A package-free base boots, but cannot
 install or run drupe tools: `tool::` checks this on both kinds of root.
 The base excludes exactly systemd-container's three QEMU recommendations:
@@ -480,8 +518,8 @@ fingerprint. An agent or `rootfs/` edit reruns no package transaction.
 
 The image records schema 1 JSON in `/usr/share/ilex/image.json` and
 `/usr/share/ilex/machine.json`, and selected design systems' tokens under
-`/usr/share/ilex/design-systems/<name>/tokens.json`. `ilex-agent config` prints
-the selection; `ilex-agent config --json` returns both documents. The agent's
+`/usr/share/ilex/design-systems/<name>/tokens.json`. `ilexctl system config` prints
+the selection; `ilexctl system config --json` returns both documents. The agent's
 self-check validates the configuration, sessions, greeter, target, tokens and
 machine packages, plus the literal non-group entries of `packages.install` and
 `shell-packages.install` recorded in `image.json`. With no shell, the empty
@@ -614,7 +652,7 @@ Keep Anaconda's distinctly named local wheel administrator for maintenance.
 Create the daily account locally from that account:
 
 ```sh
-sudo ilex-agent home-create andriishafar --disk-size=20 --real-name='Andrii Shafar'
+sudo ilexctl home create andriishafar --disk-size=20 --real-name='Andrii Shafar'
 # Add --admin only when this daily account should have password-authenticated sudo.
 ```
 
@@ -680,7 +718,7 @@ encrypted root, Secure Boot or the future Windows security backend.
 fourth configuration dimension; every root (including shell-free `base`) and
 its machine layers carry the same catalogue. No publication name, OCI layer
 selection or image label gains a user dimension. Images work without selecting
-a profile: `home-create` still accepts a custom local username.
+a profile: `ilexctl home create` still accepts a custom local username.
 
 `users/<id>/user.toml` is a template, never an exported homed record. Schema 1
 requires `schema`, positive `revision`, `username` equal to the directory,
@@ -716,9 +754,9 @@ profile input through no-follow directory descriptors and stages canonical
 the existing generated-file installer and `.generated.json`. Profile inputs
 enter root content/cache and installer fingerprints.
 
-After `sudo ilex-agent home-create NAME --disk-size=20`, authenticate locally
-as the new daily user and run `ilex-agent profile list`, then
-`ilex-agent profile apply andriishafar`. A public profile can seed a custom homed
+After `sudo ilexctl home create NAME --disk-size=20`, authenticate locally
+as the new daily user and run `ilexctl profile list`, then
+`ilexctl profile apply andriishafar`. A public profile can seed a custom homed
 username; its identity suggestions remain metadata for setup. Apply refuses
 root, an inactive/non-LUKS home, or a caller/home UID mismatch. It uses NSS,
 not `$HOME`, and writes with owned no-follow directory descriptors. Nothing
@@ -767,10 +805,10 @@ preserved and reported as conflicts (exit 1).
 
 Apply never prunes backups. It prints a one-line notice above 50 MiB; ordinary
 unchanged applies create no new state snapshot or backup directory. Inspect
-sizes and proposed deletions with `ilex-agent profile prune-backups` (dry run).
+sizes and proposed deletions with `ilexctl profile prune-backups` (dry run).
 `--keep 5` retains the five newest backup applies; it still only lists by default.
 After closing editors and reviewing/recovering any changed versions, explicitly
-run `ilex-agent profile prune-backups --keep 5 --execute` to delete older ones.
+run `ilexctl profile prune-backups --keep 5 --execute` to delete older ones.
 `--execute` without `--keep` removes all listed applies. Cleanup requires the
 authenticated homed user, rejects links/unsafe file types, and preserves its own
 previous-state snapshot in a new backup apply in addition to the requested N.
@@ -796,7 +834,7 @@ best-effort, not transactional; do not claim all concurrent settings edits are
 recoverable.
 Invalid/newer state, a newer profile revision, or changed content without a
 revision bump declines updates
-(exit 2). Never lower a revision during rollback. Removed profile files are
+(exit 1). Never lower a revision during rollback. Removed profile files are
 left in place. The per-user `ilex-profile.service` reapplies only an already
 selected profile on login, without app installation; no selection is a no-op.
 There are no root-run profile hooks. Installer choice/provisioning UX is PR 22.
@@ -842,7 +880,7 @@ restored vs compiled.
   `~/.cache/kache`, once it holds an `index.db`) read-only at `/kache-host`,
   and the builder reads it only when present, so a plain `podman build` and CI
   work without it (`--no-host-kache` skips it). After a host `cargo build
-  --release -p ilex-agent` with kache set up (`cargo install kache && kache
+  --release -p ilexctl --no-default-features` with kache set up (`cargo install kache && kache
   init`, once per machine; inside WSL on Windows), the image build restores
   those crates instead of compiling them.
 - To bump kache, change the version in the URL and the sha256 in the
@@ -1733,7 +1771,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   the selected policy. OSTree-remote verification does not apply that ban.
   The image retains a safety net for machines installed otherwise:
   `ilex-sigpolicy.service` (enabled by the preset, `ConditionPathExists=
-  /run/ostree-booted`, ordered before the updater) runs `ilex-agent
+  /run/ostree-booted`, ordered before the updater) runs `ilexctl system
   enforce-sigpolicy` at every boot. When the booted deployment tracks
   `ghcr.io/reidond/ilex` (any tag or digest) over the registry transport with
   no verification, it rewrites the origin with `bootc switch --mutate-in-place
@@ -1742,7 +1780,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   "containerPolicy"`. It does nothing on ephemeral VMs (no deployment), other
   images or transports (test images in containers-storage, other registries,
   `ghcr.io/reidond/ilex-iso`) and machines that already verify, so there is
-  nothing to run by hand; `ilex-agent enforce-sigpolicy --dry-run` shows what
+  nothing to run by hand; `ilexctl system enforce-sigpolicy --dry-run` shows what
   it would do. An OSTree-remote-verified origin is a successful no-op without
   consulting container policy, including in dry-run mode. For container-policy
   origins, and before adding that enforcement, the agent resolves bootc's

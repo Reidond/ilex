@@ -277,6 +277,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a35200383f20018d41c14d1ab19c1727c697f544492143f7d93aa39f0187848"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -679,6 +688,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 name = "ilex-agent"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "serde",
  "serde_json",
 ]
@@ -729,6 +739,15 @@ dependencies = [
  "ilex-devkit",
  "png",
  "serde_json",
+]
+
+[[package]]
+name = "ilexctl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "ilex-agent",
 ]
 
 [[package]]

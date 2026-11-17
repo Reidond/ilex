@@ -12,7 +12,7 @@ Type=oneshot
 RemainAfterExit=yes
 # Idempotent: a no-op unless the booted deployment tracks ghcr.io/reidond/ilex
 # without signature verification (an ISO install, a plain `bootc switch`).
-ExecStart=/usr/bin/ilex-agent enforce-sigpolicy
+ExecStart=/usr/bin/ilexctl system enforce-sigpolicy
 
 [Install]
 WantedBy=multi-user.target

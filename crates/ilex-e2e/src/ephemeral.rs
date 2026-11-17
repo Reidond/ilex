@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::common::{self, Group, ensure, trial};
 
-const AGENT: &str = "/usr/bin/ilex-agent";
+const ILEXCTL: &str = "/usr/bin/ilexctl";
 
 static GROUP: Group<EphemeralVm> = Group::new("ephemeral", boot);
 
@@ -45,6 +45,7 @@ pub fn trials() -> Vec<Trial> {
         trial("ephemeral::agent_self_check", || {
             GROUP.run(agent_self_check)
         }),
+        trial("ephemeral::ilexctl", || GROUP.run(ilexctl)),
         trial("ephemeral::image_under_test", || {
             GROUP.run(image_under_test)
         }),
@@ -56,6 +57,16 @@ pub fn trials() -> Vec<Trial> {
         trial("ephemeral::configuration", || GROUP.run(configuration)),
         trial("ephemeral::user_profiles", || GROUP.run(user_profiles)),
     ]
+}
+
+fn ilexctl(vm: &EphemeralVm) -> Result<()> {
+    let source = ilex_devkit::qemu::base64(include_bytes!("ilexctl-guest.py"));
+    vm.ssh(&format!("printf %s {source} | base64 -d > /run/ilexctl-check.py"))?
+        .ok("installing ilexctl guest checks")?;
+    let out = vm.ssh("python3 -I -S /run/ilexctl-check.py")?
+        .ok("ilexctl machine CLI")?;
+    println!("     {}", out.stdout);
+    Ok(())
 }
 
 fn user_profiles(vm: &EphemeralVm) -> Result<()> {
@@ -127,8 +138,8 @@ fn sshd_active(vm: &EphemeralVm) -> Result<()> {
 /// The binaries we ship check themselves from inside the guest.
 fn agent_self_check(vm: &EphemeralVm) -> Result<()> {
     let out = vm
-        .ssh("ilex-agent --self-check")?
-        .ok("ilex-agent --self-check")?;
+        .ssh("ilexctl system --self-check")?
+        .ok("ilexctl system --self-check")?;
     ensure(out.stdout.contains("self-check: ok"), || {
         format!("unexpected output:\n{}", out.stdout)
     })
@@ -151,9 +162,9 @@ fn image_under_test(vm: &EphemeralVm) -> Result<()> {
         )
     })?;
 
-    let in_image = bcvk::image_file_sha256(vm.image(), AGENT)?;
+    let in_image = bcvk::image_file_sha256(vm.image(), ILEXCTL)?;
     let in_guest = vm
-        .ssh(&format!("sha256sum {AGENT}"))?
+        .ssh(&format!("sha256sum {ILEXCTL}"))?
         .ok("sha256sum in the guest")?;
     let in_guest = in_guest
         .out()
@@ -163,7 +174,7 @@ fn image_under_test(vm: &EphemeralVm) -> Result<()> {
         .to_string();
     ensure(in_guest == in_image, || {
         format!(
-            "{AGENT} is {in_guest} in the guest but {in_image} in {}",
+            "{ILEXCTL} is {in_guest} in the guest but {in_image} in {}",
             vm.image()
         )
     })
@@ -243,8 +254,8 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
     }
     let selection = common::selection()?;
     let out = vm
-        .ssh("ilex-agent config --json")?
-        .ok("ilex-agent config --json")?;
+        .ssh("ilexctl system config --json")?
+        .ok("ilexctl system config --json")?;
     let guest: Value = serde_json::from_str(&out.stdout)?;
     let image = &guest["image"];
     let names = |key: &str| -> Result<Vec<String>> {
@@ -619,15 +630,15 @@ fn same_image(a: &str, b: &str) -> bool {
 }
 
 /// Signature enforcement does nothing here: an ephemeral VM has no booted
-/// deployment, so `ilex-agent enforce-sigpolicy` (which `ilex-sigpolicy.service`
+/// deployment, so `ilexctl system enforce-sigpolicy` (which `ilex-sigpolicy.service`
 /// runs at every boot of an installed machine) must neither fail nor try to
 /// switch anything. The unit itself must not be in the failed state, which
 /// `no_failed_units` already requires; the real switch is tested on an
 /// installed system, in `upgrade::sigpolicy_enforced`.
 fn sigpolicy_noop(vm: &EphemeralVm) -> Result<()> {
     let out = vm
-        .ssh("ilex-agent enforce-sigpolicy")?
-        .ok("ilex-agent enforce-sigpolicy")?;
+        .ssh("ilexctl system enforce-sigpolicy")?
+        .ok("ilexctl system enforce-sigpolicy")?;
     ensure(out.stdout.contains("nothing to do"), || {
         format!("expected a no-op, got:\n{}{}", out.stdout, out.stderr)
     })?;

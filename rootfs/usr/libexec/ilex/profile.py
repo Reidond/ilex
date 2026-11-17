@@ -293,7 +293,7 @@ def save_state(home, new, old_raw):
 
 def backup_notice(size):
     if size > BACKUP_NOTICE_BYTES:
-        print(f"ilex profile: backups use {size / (1024 * 1024):.1f} MiB; review with ilex-agent profile prune-backups (dry run)", file=sys.stderr)
+        print(f"ilex profile: backups use {size / (1024 * 1024):.1f} MiB; review with ilexctl profile prune-backups (dry run)", file=sys.stderr)
 
 
 def prune_backups(args):
@@ -727,5 +727,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
-        print(f"ilex profile: {error}", file=sys.stderr)
+        print(f"ilexctl: error: profile: {error}", file=sys.stderr)
         sys.exit(2)

@@ -5,7 +5,7 @@ After=dbus.socket
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/ilex-agent profile apply --selected
+ExecStart=/usr/bin/ilexctl profile apply --selected
 
 [Install]
 WantedBy=default.target

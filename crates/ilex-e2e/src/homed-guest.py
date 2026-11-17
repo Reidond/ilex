@@ -104,7 +104,7 @@ def terminal(argv, dialogue, timeout=180, allow_failure=False, optional=False, c
 
 
 def create(name, password, admin=False):
-    argv = ["/usr/bin/ilex-agent", "home-create", name, "--disk-size=2", "--real-name=Ilex Homed Test"]
+    argv = ["/usr/bin/ilexctl", "home", "create", name, "--disk-size=2", "--real-name=Ilex Homed Test"]
     if admin:
         argv.append("--admin")
     terminal(argv, [(r"password[^\r\n]*:", password), (r"(?:password|again)[^\r\n]*:", password)])
@@ -298,7 +298,7 @@ def main():
             except OSError as error:
                 assert error.errno == errno.ENOSPC
         try:
-            refused = sp.run(["ilex-agent", "home-create", "homedfull", "--disk-size=2"], stdin=sp.DEVNULL, capture_output=True)
+            refused = sp.run(["ilexctl", "home", "create", "homedfull", "--disk-size=2"], stdin=sp.DEVNULL, capture_output=True)
             assert refused.returncode != 0
             assert b"system reserve" in refused.stderr
             assert sp.run(["getent", "passwd", "homedfull"], capture_output=True).returncode != 0

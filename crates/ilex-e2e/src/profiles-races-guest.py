@@ -174,7 +174,7 @@ with open(sys.argv[1], 'r+b') as stream:
         assert result == 1 and any(recoveries[-1] in c for c in report["conflicts"]), report
         # Keep the next iteration independent. Explicit user-run cleanup is the
         # only production operation allowed to remove these retained versions.
-        cleanup = subprocess.run(["/usr/bin/ilex-agent", "profile", "prune-backups", "--execute"],
+        cleanup = subprocess.run(["/usr/bin/ilexctl", "profile", "prune-backups", "--execute"],
                                  capture_output=True, text=True)
         assert cleanup.returncode == 0, (cleanup.stdout, cleanup.stderr)
     print("real btrfs homed outstanding-fd saves survive in backups; end/next apply report paths: passed")
@@ -208,7 +208,7 @@ with open(sys.argv[1], 'r+b') as stream:
     assert (home / large).stat().st_size == 51 * 1024 * 1024
 
     def cleanup(*args, code=0):
-        result = subprocess.run(["/usr/bin/ilex-agent", "profile", "prune-backups", *args],
+        result = subprocess.run(["/usr/bin/ilexctl", "profile", "prune-backups", *args],
                                 capture_output=True, text=True)
         assert result.returncode == code, (result.stdout, result.stderr)
         return json.loads(result.stdout) if code == 0 else None
@@ -229,8 +229,8 @@ with open(sys.argv[1], 'r+b') as stream:
     backup_root.rename(saved_root)
     backup_root.symlink_to(outside, target_is_directory=True)
     try:
-        cleanup(code=2)
-        cleanup("--execute", code=2)
+        cleanup(code=1)
+        cleanup("--execute", code=1)
         assert sentinel.read_text() == "outside sentinel\n"
     finally:
         backup_root.unlink()
@@ -259,7 +259,7 @@ with open(sys.argv[1], 'r+b') as stream:
         protected.chmod(0o500)
         try:
             # The reviewer's exact EACCES case must leave survivors indexed.
-            cleanup("--execute", code=2)
+            cleanup("--execute", code=1)
             assert all(path in json.loads(state_path.read_bytes())["backups"] for path in before)
         finally:
             protected.chmod(0o700)
@@ -305,7 +305,7 @@ with open(sys.argv[1], 'r+b') as stream:
         orphan = (home / survivors[0]).parent / "orphan-recovered.txt"
         orphan.symlink_to(sentinel)
         try:
-            cleanup("--execute", code=2)
+            cleanup("--execute", code=1)
             assert sentinel.read_text() == "outside sentinel\n"
         finally:
             orphan.unlink()

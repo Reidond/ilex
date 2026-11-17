@@ -11,33 +11,30 @@ use serde_json::Value;
 /// user@ starts only after pam_systemd_home has acquired the home. Initialize
 /// its filesystem labels here, before the user manager or login shell can
 /// create files. Classic accounts do not depend on homed for recovery.
-pub fn label(args: Vec<String>) -> ExitCode {
-    match label_inner(args) {
+pub fn label(uid: u32) -> ExitCode {
+    match label_inner(uid) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("ilex-agent: home-label: {error}");
+            eprintln!("ilexctl: error: home label: {error}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn label_inner(args: Vec<String>) -> Result<(), String> {
-    if args.len() != 1 || !args[0].bytes().all(|b| b.is_ascii_digit()) {
-        return Err("expected one numeric user@ UID".into());
-    }
-    let uid: u32 = args[0].parse().map_err(|_| "invalid UID")?;
+fn label_inner(uid: u32) -> Result<(), String> {
+    let uid_arg = uid.to_string();
     if uid < 1000 {
         return Ok(());
     }
     let local = Command::new("/usr/bin/getent")
-        .args(["-s", "files", "passwd", &args[0]])
+        .args(["-s", "files", "passwd", &uid_arg])
         .output()
         .map_err(|e| e.to_string())?;
     if local.status.success() {
         return Ok(());
     }
     let entry = Command::new("/usr/bin/getent")
-        .args(["passwd", &args[0]])
+        .args(["passwd", &uid_arg])
         .output()
         .map_err(|e| e.to_string())?;
     if !entry.status.success() {
@@ -115,53 +112,24 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-pub fn create(args: Vec<String>) -> ExitCode {
+pub fn create(args: CreateArgs) -> ExitCode {
     match create_inner(args) {
-        Ok(code) => ExitCode::from(code),
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
         Err(error) => {
-            eprintln!("ilex-agent: home-create: {error}");
-            ExitCode::from(2)
+            eprintln!("ilexctl: error: home create: {error}");
+            ExitCode::FAILURE
         }
     }
 }
 
-fn create_inner(args: Vec<String>) -> Result<u8, String> {
-    const USAGE: &str = "home-create NAME --disk-size=GiB [--admin] [--real-name=NAME]\n\
-        GiB is an integer of at least 2 (for example --disk-size=20).\n\
-        Run locally with sudo; homectl prompts twice for the new home password.\n\
-        Keep the separately named local maintenance administrator.";
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("{USAGE}");
-        return Ok(0);
-    }
-    let name = args.first().ok_or(USAGE)?;
-    if !valid_name(name) {
-        return Err("NAME must be a lowercase Unix username (at most 31 bytes)".into());
-    }
-    let (mut size, mut real_name, mut admin) = (None, None, false);
-    for arg in &args[1..] {
-        if let Some(value) = arg.strip_prefix("--disk-size=") {
-            let gib: u64 = value.parse().map_err(|_| USAGE)?;
-            if size.is_some() || !(2..=1_048_576).contains(&gib) {
-                return Err("specify one disk size between 2 and 1048576 GiB".into());
-            }
-            size = Some(gib);
-        } else if let Some(value) = arg.strip_prefix("--real-name=") {
-            if real_name.is_some()
-                || value.is_empty()
-                || value.len() > 256
-                || value.chars().any(char::is_control)
-            {
-                return Err("specify one nonempty display name without control characters".into());
-            }
-            real_name = Some(value);
-        } else if arg == "--admin" && !admin {
-            admin = true;
-        } else {
-            return Err(USAGE.into());
-        }
-    }
-    let size = size.ok_or(USAGE)?;
+fn create_inner(args: CreateArgs) -> Result<u8, String> {
+    let CreateArgs {
+        name,
+        disk_size: size,
+        real_name,
+        admin,
+    } = args;
     // Admission check, not a quota/reservation: keep at least 2 GiB on the
     // backing filesystem after the requested allocation. Homed still handles
     // races/ENOSPC atomically; administrators must budget simultaneous homes.
@@ -183,7 +151,7 @@ fn create_inner(args: Vec<String>) -> Result<u8, String> {
     let mut command = Command::new("/usr/bin/homectl");
     command.args([
         "create",
-        name,
+        &name,
         "--storage=luks",
         "--fs-type=btrfs",
         "--auto-resize-mode=off",
@@ -219,4 +187,37 @@ fn create_inner(args: Vec<String>) -> Result<u8, String> {
         .code()
         .and_then(|c| u8::try_from(c).ok())
         .unwrap_or(1))
+}
+
+/// No password, record import, alternate home path or arbitrary homectl flags.
+#[derive(clap::Args)]
+pub struct CreateArgs {
+    /// Lowercase Unix username, distinct from the maintenance administrator
+    #[arg(value_parser = parse_name)]
+    name: String,
+    /// Home capacity in GiB, with a further 2 GiB system reserve
+    #[arg(long, value_name = "GiB", value_parser = clap::value_parser!(u64).range(2..=1_048_576))]
+    disk_size: u64,
+    /// Allow password-authenticated sudo for this daily account
+    #[arg(long)]
+    admin: bool,
+    /// Display name (homectl prompts locally for the password)
+    #[arg(long, value_name = "NAME", value_parser = parse_real_name)]
+    real_name: Option<String>,
+}
+
+fn parse_name(value: &str) -> Result<String, String> {
+    if valid_name(value) {
+        Ok(value.into())
+    } else {
+        Err("NAME must be a lowercase Unix username (at most 31 bytes)".into())
+    }
+}
+
+fn parse_real_name(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        Err("specify a nonempty display name without control characters (at most 256 bytes)".into())
+    } else {
+        Ok(value.into())
+    }
 }

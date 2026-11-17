@@ -1,8 +1,8 @@
-//! `ilex-agent`: the on-machine ilex binary shipped in the image.
+//! Machine operations for `ilexctl`, with no standalone agent binary.
 //!
 //! There are no unit tests in this repo: anything worth testing has to be
 //! observable from inside a booted VM, so the e2e tests call
-//! `ilex-agent --self-check` over SSH and read its exit code and output.
+//! `ilexctl system --self-check` over SSH and read its exit code and output.
 
 use std::fs;
 use std::path::Path;
@@ -12,53 +12,8 @@ mod config;
 mod homed;
 mod sigpolicy;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-fn main() -> ExitCode {
-    let arg = std::env::args().nth(1);
-    match arg.as_deref() {
-        Some("--version" | "-V") => {
-            println!("ilex-agent {VERSION}");
-            ExitCode::SUCCESS
-        }
-        Some("--self-check") => self_check(),
-        Some("home-create") => homed::create(std::env::args().skip(2).collect()),
-        Some("profile") => profile(std::env::args().skip(2)),
-        // Internal user@ dependency; labels a new homed filesystem before
-        // the first user process starts. Not an account-provisioning front end.
-        Some("home-label") => homed::label(std::env::args().skip(2).collect()),
-        Some("config") => match std::env::args().nth(2).as_deref() {
-            None => config::run(false),
-            Some("--json") => config::run(true),
-            Some(other) => {
-                eprintln!("ilex-agent: config: unknown argument `{other}`");
-                ExitCode::from(2)
-            }
-        },
-        Some("enforce-sigpolicy") => match std::env::args().nth(2).as_deref() {
-            None => sigpolicy::run(false),
-            Some("--dry-run") => sigpolicy::run(true),
-            Some(other) => {
-                eprintln!("ilex-agent: enforce-sigpolicy: unknown argument `{other}`");
-                ExitCode::from(2)
-            }
-        },
-        None | Some("--help" | "-h") => {
-            println!(
-                "ilex-agent {VERSION}\n\n\
-                 Usage: ilex-agent [--self-check | --version | config [--json] | enforce-sigpolicy [--dry-run]]\n\
-                 \x20      ilex-agent home-create NAME --disk-size=GiB [--admin] [--real-name=NAME]\n\
-                 \x20      ilex-agent profile list | apply [ID | --selected] [--shell gnome] [--install-apps]\n\
-                 \x20      ilex-agent profile prune-backups [--keep N] [--execute]"
-            );
-            ExitCode::SUCCESS
-        }
-        Some(other) => {
-            eprintln!("ilex-agent: unknown argument `{other}` (try --help)");
-            ExitCode::from(2)
-        }
-    }
-}
+mod cli;
+pub use cli::{HomeArgs, ProfileArgs, SystemArgs, home, profile, system};
 
 type Check = (&'static str, fn() -> Result<(), String>);
 
@@ -75,7 +30,7 @@ const CHECKS: &[Check] = &[
     }),
     ("image configuration readable", config::check_image),
     ("public user catalogue", || {
-        if profile(["check".to_string()].into_iter()) == ExitCode::SUCCESS {
+        if run_profile(["check"]) == ExitCode::SUCCESS {
             Ok(())
         } else {
             Err("profile catalogue validation failed".into())
@@ -101,6 +56,8 @@ const CHECKS: &[Check] = &[
     ("sigpolicy unit enabled", || {
         exists("/etc/systemd/system/multi-user.target.wants/ilex-sigpolicy.service")
     }),
+    ("ilexctl is not setuid", check_ilexctl),
+    ("ilexctl completions present", check_completions),
     ("drupe helper is setuid root", check_drupe_helper),
     ("drupe mount point /app present", || exists("/app")),
     ("drupe unit enabled", || {
@@ -108,15 +65,16 @@ const CHECKS: &[Check] = &[
     }),
 ];
 
-fn profile(args: impl Iterator<Item = String>) -> ExitCode {
+fn run_profile(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> ExitCode {
     match std::process::Command::new("/usr/bin/python3")
         .args(["-I", "-S", "/usr/libexec/ilex/profile.py"])
         .args(args)
         .status()
     {
-        Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
         Err(error) => {
-            eprintln!("ilex-agent: profile: {error}");
+            eprintln!("ilexctl: error: profile: {error}");
             ExitCode::FAILURE
         }
     }
@@ -134,10 +92,10 @@ fn self_check() -> ExitCode {
         }
     }
     if failed == 0 {
-        println!("ilex-agent self-check: ok");
+        println!("ilexctl system self-check: ok");
         ExitCode::SUCCESS
     } else {
-        println!("ilex-agent self-check: {failed} failed");
+        println!("ilexctl system self-check: {failed} failed");
         ExitCode::FAILURE
     }
 }
@@ -179,6 +137,39 @@ fn check_drupe_helper() -> Result<(), String> {
         }
     }
     let _ = meta;
+    Ok(())
+}
+
+fn check_ilexctl() -> Result<(), String> {
+    const BINARY: &str = "/usr/bin/ilexctl";
+    let meta = fs::metadata(BINARY).map_err(|e| format!("{BINARY}: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !meta.is_file() || meta.uid() != 0 || meta.mode() & 0o6000 != 0 {
+            return Err(format!(
+                "{BINARY} must be a regular root-owned binary without setuid/setgid"
+            ));
+        }
+    }
+    let _ = meta;
+    if Path::new("/usr/bin/ilex-agent").exists() {
+        return Err("obsolete /usr/bin/ilex-agent is still installed".into());
+    }
+    Ok(())
+}
+
+fn check_completions() -> Result<(), String> {
+    for path in [
+        "/usr/share/bash-completion/completions/ilexctl",
+        "/usr/share/zsh/site-functions/_ilexctl",
+        "/usr/share/fish/vendor_completions.d/ilexctl.fish",
+    ] {
+        let data = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        if !data.contains("ilexctl") {
+            return Err(format!("{path}: empty or invalid completion"));
+        }
+    }
     Ok(())
 }
 

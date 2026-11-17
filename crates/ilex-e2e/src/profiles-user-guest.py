@@ -18,7 +18,7 @@ welcome = home / ".config/ilex/welcome.txt"
 
 
 def cli(*args, code=0, env=None):
-    result = subprocess.run(["/usr/bin/ilex-agent", "profile", "apply", *args], capture_output=True, text=True, env=env)
+    result = subprocess.run(["/usr/bin/ilexctl", "profile", "apply", *args], capture_output=True, text=True, env=env)
     assert result.returncode == code, (args, result.returncode, result.stdout, result.stderr)
     return result
 
@@ -145,7 +145,7 @@ assert not added.exists()
 
 # The actual older shipped profile must decline newer mutable home state.
 before = state.read_bytes()
-cli("andriishafar", code=2)
+cli("andriishafar", code=1)
 assert state.read_bytes() == before
 fixture("/run/ilex-profile-rewritten-v2", 2)
 assert state.read_bytes() == before

@@ -7,7 +7,7 @@
 //! plain `bootc switch`, tracks ghcr *unverified*: kickstart's `bootc`
 //! command has no way to pass `--enforce-container-sigpolicy`.
 //!
-//! `ilex-agent enforce-sigpolicy`, run at every boot by `ilex-sigpolicy.service`,
+//! `ilexctl system enforce-sigpolicy`, run at every boot by `ilex-sigpolicy.service`,
 //! rewrites the origin in place (`bootc switch --mutate-in-place`: no
 //! download, no new deployment, no reboot; /sysroot is remounted writable in a
 //! private mount namespace for the call) when, and only when, the booted
@@ -155,12 +155,12 @@ fn is_ilex_repository(image: &str) -> bool {
     }
 }
 
-/// `ilex-agent enforce-sigpolicy [--dry-run]`.
+/// `ilexctl system enforce-sigpolicy [--dry-run]`.
 pub fn run(dry_run: bool) -> ExitCode {
     match enforce(dry_run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
-            eprintln!("ilex-agent: enforce-sigpolicy: {why}");
+            eprintln!("ilexctl: error: system enforce-sigpolicy: {why}");
             ExitCode::FAILURE
         }
     }

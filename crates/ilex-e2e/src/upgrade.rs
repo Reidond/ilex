@@ -227,10 +227,16 @@ fn upgrade_and_rollback() -> Result<()> {
     })?;
     check_v2(&vm, &token)?;
     check_boot_mount(&vm, "v2")?;
+    // Machine commands are only invoked after booting the candidate. No v1
+    // step depends on whether that published image uses ilex-agent or ilexctl.
+    vm.ssh("ilexctl --version && ilexctl system --self-check && test ! -e /usr/bin/ilex-agent")?
+        .ok("v2 machine CLI")?;
+    check_no_failed_units(&vm)?;
 
     // --- signature enforcement, on v2 -----------------------------------
     check_sigpolicy(&vm, &installed)?;
     check_boot_mount(&vm, "v2 after policy reboot")?;
+    check_no_failed_units(&vm)?;
 
     // --- rollback ---------------------------------------------------------
     step("bootc rollback");
@@ -245,6 +251,7 @@ fn upgrade_and_rollback() -> Result<()> {
     if !legacy_v1 {
         check_boot_mount(&vm, "v1 after rollback")?;
     }
+    check_no_failed_units(&vm)?;
     ensure(!path_exists(&vm, MARKER_USR)?, || {
         format!("{MARKER_USR} still exists after rollback")
     })?;
@@ -256,6 +263,14 @@ fn upgrade_and_rollback() -> Result<()> {
     })?;
     step("upgrade and rollback verified");
     Ok(())
+}
+
+fn check_no_failed_units(vm: &LibvirtVm) -> Result<()> {
+    vm.ssh_timeout("systemctl is-system-running --wait", Duration::from_secs(300))?
+        .ok("system running after reboot")?;
+    let failed = vm.ssh("systemctl --failed --no-legend --no-pager --plain")?
+        .ok("checking failed units after reboot")?;
+    ensure(failed.out().is_empty(), || format!("failed units:\n{}", failed.out()))
 }
 
 /// Inspect the immutable /usr of the actual booted v1, rather than infer
@@ -615,7 +630,7 @@ refuse() {
     for mode in apply dry-run; do
         flag=
         if [ "$mode" = dry-run ]; then flag=--dry-run; fi
-        if output=$("$@" ilex-agent enforce-sigpolicy $flag 2>&1); then
+        if output=$("$@" ilexctl system enforce-sigpolicy $flag 2>&1); then
             echo "unsafe policy unexpectedly accepted ($mode): $output"
             exit 1
         fi
@@ -624,7 +639,7 @@ refuse() {
     done
 }
 allow() {
-    output=$("$@" ilex-agent enforce-sigpolicy --dry-run)
+    output=$("$@" ilexctl system enforce-sigpolicy --dry-run)
     printf '%s\n' "$output" | grep -Fq 'would enforce signatures'
 }
 refuse "$user_policy" env -u CONTAINERS_POLICY_JSON -u XDG_CONFIG_HOME HOME=/root
@@ -638,7 +653,7 @@ cp "$fixture/unsafe.json" "$fixture/xdg/containers/policy.json"
 refuse "$fixture/xdg/containers/policy.json" env -u CONTAINERS_POLICY_JSON HOME=/root XDG_CONFIG_HOME="$fixture/xdg"
 rm "$fixture/xdg/containers/policy.json"
 allow env -u CONTAINERS_POLICY_JSON HOME=/root XDG_CONFIG_HOME="$fixture/xdg"
-if output=$(env HOME=/root CONTAINERS_POLICY_JSON="$fixture/missing.json" ilex-agent enforce-sigpolicy --dry-run 2>&1); then
+if output=$(env HOME=/root CONTAINERS_POLICY_JSON="$fixture/missing.json" ilexctl system enforce-sigpolicy --dry-run 2>&1); then
     echo 'missing explicit policy unexpectedly fell through'
     exit 1
 fi

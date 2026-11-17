@@ -7,6 +7,6 @@ StopWhenUnneeded=yes
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/ilex-agent home-label %i
+ExecStart=/usr/bin/ilexctl home label %i
 StateDirectory=ilex/homed-labels
 StateDirectoryMode=0700

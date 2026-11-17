@@ -69,13 +69,13 @@ fn fixture() -> Result<()> {
         || "fixture kargs differ".into(),
     )?;
     let config = vm
-        .ssh("ilex-agent config --json")?
+        .ssh("ilexctl system config --json")?
         .ok("fixture configuration")?;
     let config: serde_json::Value = serde_json::from_str(&config.stdout)?;
     ensure(config["machine"]["name"] == "fixture", || {
         "machine must be fixture".into()
     })?;
-    vm.ssh("ilex-agent --self-check")?
+    vm.ssh("ilexctl system --self-check")?
         .ok("fixture self-check")?;
     let inherited = vm
         .ssh("cat /usr/share/ilex-config-parent/entry")?

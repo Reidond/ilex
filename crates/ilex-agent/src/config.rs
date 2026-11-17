@@ -84,7 +84,7 @@ pub fn run(json_output: bool) -> ExitCode {
     match print(json_output) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("ilex-agent: config: {error}");
+            eprintln!("ilexctl: error: system config: {error}");
             ExitCode::FAILURE
         }
     }
@@ -94,7 +94,7 @@ fn print(json_output: bool) -> Result<()> {
     let image = image()?;
     let machine = machine()?;
     if json_output {
-        println!("{}", json!({"image": image, "machine": machine}));
+        println!("{}", json!({"schema": 1, "image": image, "machine": machine}));
     } else {
         println!(
             "machine:         {} ({})",
