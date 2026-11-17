@@ -21,6 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod probes;
+
 pub fn trials() -> Vec<Trial> {
     vec![common::trial("security::firmware", run)]
 }
@@ -32,24 +34,44 @@ fn run() -> Result<()> {
         artifacts.join("result.json"),
         b"{\"qualification\":\"unqualified\",\"reason\":\"run has not completed\"}\n",
     )?;
-    fs::write(
-        artifacts.join("host.json"),
-        serde_json::to_vec_pretty(&security::host_probe())?,
-    )?;
     let start = Instant::now();
-    let image = common::image()?;
-    fs::write(
-        artifacts.join("image.json"),
-        cmd::output(Command::new("podman").args([
+    let mut stage = "image";
+    let result = (|| {
+        fs::write(
+            artifacts.join("host.json"),
+            serde_json::to_vec_pretty(&security::host_probe())?,
+        )?;
+        let image = common::image()?;
+        let inspected = cmd::output(Command::new("podman").args([
             "image",
             "inspect",
             "--format",
             "{{json .}}",
             &image,
-        ]))?,
-    )?;
-    let result = qualify(&ws, &artifacts);
-    let report = serde_json::json!({"qualification": if result.is_ok() { "passed" } else { "unqualified" }, "elapsed_seconds": start.elapsed().as_secs_f64(), "error": result.as_ref().err().map(|e| format!("{e:#}"))});
+        ]))?;
+        fs::write(artifacts.join("image.json"), &inspected)?;
+        let inspected: serde_json::Value = serde_json::from_str(&inspected)?;
+        // A cloud-image firmware pass cannot qualify the candidate ilex image.
+        let selection = common::selection()?;
+        let digest = inspected["Digest"].as_str().unwrap_or_default();
+        ensure!(
+            digest.starts_with("sha256:") && digest.len() == 71,
+            "image has no immutable manifest digest"
+        );
+        qualify(&ws, &artifacts, digest, &selection, &mut stage)
+    })();
+    // Diagnostic labels describe this tier's failure stage, not a second
+    // capability/qualification model. T6's typed record remains authoritative.
+    let disposition = if result.is_ok() {
+        "qualified"
+    } else {
+        match stage {
+            "platform" => "platform_unsupported_or_unqualified",
+            "guest_boot" | "guest_assertions" | "unsigned_control" => "guest_failed",
+            _ => "unqualified",
+        }
+    };
+    let report = serde_json::json!({"qualification": if result.is_ok() { "passed" } else { "unqualified" }, "disposition": disposition, "stage": stage, "elapsed_seconds": start.elapsed().as_secs_f64(), "error": result.as_ref().err().map(|e| format!("{e:#}"))});
     fs::write(
         artifacts.join("result.json"),
         serde_json::to_vec_pretty(&report)?,
@@ -186,7 +208,13 @@ impl Drop for Fixture {
     }
 }
 
-fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
+fn qualify(
+    ws: &Workspace,
+    artifacts: &Path,
+    digest: &str,
+    selection: &ilex_devkit::config::Selection,
+    stage: &mut &'static str,
+) -> Result<()> {
     let accelerator = match std::env::var("ILEX_SECURITY_ACCELERATOR").as_deref() {
         Ok("tcg") => Accelerator::Tcg,
         Ok("kvm") | Err(_) => Accelerator::Native,
@@ -199,16 +227,23 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
     } else {
         420
     });
+    *stage = "disk_delivery";
     // 4 GiB / 2 vCPUs by default; diagnostic sizes must be explicit.
     let disk = {
         let _install_slot = ilex_devkit::slots::acquire(&ws.vm_name("security-install"))?;
         vmtest::disk(ws)?
     };
+    *stage = "platform";
     let mut fixture = Fixture::new(ws, &disk, "security-firmware", accelerator, true, true)?;
     let mut qualification = ilex_devkit::qualification::Run::begin(ws, &fixture.spec, artifacts)?;
     let mut result = (|| -> Result<()> {
         let caps = fixture.provider.probe(&fixture.spec)?;
+        fs::write(
+            artifacts.join("provisioning.json"),
+            serde_json::to_vec_pretty(&caps)?,
+        )?;
         caps.require_provisioning(Capability::FirmwareEnforcement)?;
+        caps.require_provisioning(Capability::PersistentTpm)?;
         ensure!(
             caps.require(Capability::FirmwareEnforcement).is_err(),
             "fixture launch promoted unqualified capabilities"
@@ -223,6 +258,7 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
             "security: {accelerator:?}, {} bytes, 2 vCPUs; each boot deadline {deadline:?}",
             fixture.spec.resources.memory_bytes
         );
+        *stage = "guest_boot";
         let first = match fixture.start(deadline) {
             Ok(seconds) => seconds,
             Err(error) => {
@@ -235,10 +271,19 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
             }
         };
         let result = (|| -> Result<()> {
-            measurements(fixture.vm.running_mut()?, artifacts, "first")?;
+            *stage = "guest_assertions";
+            measurements(
+                fixture.vm.running_mut()?,
+                artifacts,
+                "first",
+                digest,
+                selection,
+            )?;
+            let control = ilex_vmctl::Vmctl::from_info(fixture.vm.running_mut()?.info.clone());
+            probes::amdgpu(&control, artifacts)?;
             let vm = fixture.vm.running_mut()?;
             let versions = vm
-            .ssh_ok("rpm -q shim-x64 grub2-efi-x64 systemd; uname -r; bootctl status --no-pager; sha256sum /sys/firmware/efi/efivars/PK-* /sys/firmware/efi/efivars/KEK-* /sys/firmware/efi/efivars/db-* /sys/firmware/efi/efivars/dbx-*")?;
+            .ssh_ok("set -eu; rpm -q bootc shim-x64 grub2-efi-x64 systemd kernel-core; uname -r; bootctl status --no-pager; sha256sum /sys/firmware/efi/efivars/PK-* /sys/firmware/efi/efivars/KEK-* /sys/firmware/efi/efivars/db-* /sys/firmware/efi/efivars/dbx-*")?;
             fs::write(artifacts.join("guest.txt"), versions)?;
             // Encrypt a deliberately public test value to this TPM's primary seed
             // and PCR7 policy. Successful decrypt after cold restart proves TPM
@@ -249,7 +294,13 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
             let start = Instant::now();
             vm.reboot(deadline)?;
             let warm = start.elapsed().as_secs_f64();
-            measurements(fixture.vm.running_mut()?, artifacts, "warm")?;
+            measurements(
+                fixture.vm.running_mut()?,
+                artifacts,
+                "warm",
+                digest,
+                selection,
+            )?;
             decrypt(fixture.vm.running_mut()?)?;
             fixture.logs(artifacts, "warm")?;
             // Graceful poweroff, then start a NEW QEMU and swtpm using the bundle.
@@ -265,7 +316,13 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
             }
             fixture.provider.stop(&mut fixture.vm)?;
             let cold = fixture.start(deadline)?;
-            measurements(fixture.vm.running_mut()?, artifacts, "cold")?;
+            measurements(
+                fixture.vm.running_mut()?,
+                artifacts,
+                "cold",
+                digest,
+                selection,
+            )?;
             decrypt(fixture.vm.running_mut()?)?;
             let bundle = security::bundle_path(ws, &fixture.spec)?;
             fs::copy(bundle.join("bundle.json"), artifacts.join("bundle.json"))?;
@@ -280,6 +337,7 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
         fixture.logs(artifacts, "final")?;
         result?;
         fixture.provider.stop(&mut fixture.vm)?; // Keep identity; release its slot.
+        *stage = "unsigned_control";
         unsigned_control(ws, artifacts, accelerator, deadline)?;
         ensure!(
             !qemu::running_vms(ws)
@@ -291,6 +349,7 @@ fn qualify(ws: &Workspace, artifacts: &Path) -> Result<()> {
     })();
     qualification.finish(&result)?;
     if result.is_ok() {
+        *stage = "capability_contract";
         result = qualification_contract(&mut fixture, artifacts);
         if result.is_err() {
             qualification.finish(&result)?;
@@ -434,29 +493,15 @@ fn decrypt(vm: &qemu::Vm) -> Result<()> {
     )?;
     Ok(())
 }
-fn measurements(vm: &qemu::Vm, artifacts: &Path, label: &str) -> Result<()> {
-    vm.ssh_ok("set -eu; test \"$(od -An -j4 -N1 -tu1 /sys/firmware/efi/efivars/SecureBoot-*)\" -eq 1; test \"$(od -An -j4 -N1 -tu1 /sys/firmware/efi/efivars/SetupMode-*)\" -eq 0; test \"$(cat /sys/class/tpm/tpm0/tpm_version_major)\" = 2; test -c /dev/tpmrm0")?;
-    let pcr = vm
-        .ssh_ok("cat /sys/class/tpm/tpm0/pcr-sha256/7")?
-        .to_ascii_lowercase();
-    let out = vm.ssh("cat /sys/kernel/security/tpm0/binary_bios_measurements")?;
-    ensure!(out.status.success(), "cannot capture guest TPM event log");
-    fs::write(artifacts.join(format!("{label}-eventlog.bin")), &out.stdout)?;
-    let replay = security::replay_pcr7(&out.stdout)?;
-    ensure!(
-        pcr == replay.sha256,
-        "PCR7 {pcr} differs from replay {}",
-        replay.sha256
-    );
-    fs::write(
-        artifacts.join(format!("{label}-pcr7.json")),
-        serde_json::to_vec_pretty(&replay)?,
-    )?;
-    println!(
-        "security {label}: SB=1 SetupMode=0 TPM2 PCR7={pcr}; {} replayed events",
-        replay.events
-    );
-    Ok(())
+fn measurements(
+    vm: &qemu::Vm,
+    artifacts: &Path,
+    label: &str,
+    digest: &str,
+    selection: &ilex_devkit::config::Selection,
+) -> Result<()> {
+    let control = ilex_vmctl::Vmctl::from_info(vm.info.clone());
+    probes::guest(&control, artifacts, label, digest, selection)
 }
 
 fn unsigned_control(

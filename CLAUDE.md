@@ -227,6 +227,20 @@ cargo xtask info               # resource identity, selection and available conf
 
 ## Linux security qualification
 
+PR 17's consumer checks and backend requirements are documented in
+[`docs/security-probes.md`](docs/security-probes.md). Guest probes also require
+kernel lockdown, the selected manifest digest and all five ilex composition
+labels after each boot. The common image's signed in-tree amdgpu module must
+load under lockdown with no unsigned-module taint (including RX 9070 XT PCI
+alias coverage); this does not qualify physical GPU rendering. These checks
+use the existing `VmControl` interface and T6 qualification records. Native
+Windows security remains unavailable pending tooling T5's Hyper-V provider.
+`cargo xtask security --require-qualified --memory 2G` asserts an existing
+exact-profile record without starting a VM; `--self-check --memory 2G` measures
+that profile. Failures retain an unqualified result with the failing stage,
+distinguishing platform provisioning from guest failure. No installer,
+encryption or TPM-enrollment behavior is added.
+
 `cargo xtask security` reports this Linux host's KVM SMM capability and
 security prerequisites. Its result is explicitly `not_yet_qualified` until
 the booted-guest tier passes. `cargo xtask security --self-check` runs
