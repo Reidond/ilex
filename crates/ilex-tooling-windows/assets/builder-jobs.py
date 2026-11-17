@@ -539,7 +539,9 @@ def execute(owner, job):
                 'ILEX_ARTIFACTS': str(state / 'artifacts'),
                 'ILEX_VM_LOG_DIR': str(console_logs),
                 'ILEX_JOB_RESOURCE_DIR': str(path / 'resources'),
-                'CARGO_TARGET_DIR': str(BASE / 'cargo/targets' / owner / ('x86_64-linux-' + hashlib.sha256(checked(['rustc', '-vV'])).hexdigest()[:16])),
+                # Cargo freshness uses mtimes and shared binary paths. Returning
+                # to an older immutable tree must not execute a newer worker.
+                'CARGO_TARGET_DIR': str(BASE / 'cargo/targets' / owner / ('x86_64-linux-' + hashlib.sha256(checked(['rustc', '-vV'])).hexdigest()[:16]) / root.name),
                 'CARGO_BUILD_JOBS': str(min(4, os.cpu_count())), 'ILEX_VM_SLOTS': '1',
             }
             for name, chunks in spec.get('inputs', {}).items():
