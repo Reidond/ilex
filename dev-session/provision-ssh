@@ -10,7 +10,13 @@ source = Path('/sys/firmware/qemu_fw_cfg/by_name/opt/ilex/ssh-host-key/raw')
 if not source.exists():
     subprocess.run(['/usr/sbin/modprobe', 'qemu_fw_cfg'], check=True)
 os.makedirs('/run/ilex-dev', mode=0o700, exist_ok=True)
-subprocess.run(['/usr/bin/chcon', '-t', 'sshd_var_run_t', '/run/ilex-dev'], check=True)
+def label(path, kind):
+    # bcvk's ephemeral installation root has no active SELinux mount/labels.
+    # Installed native boots keep their normal enforcing policy and receive a
+    # full context, which also works for a newly created, unlabeled tmpfs file.
+    if Path('/sys/fs/selinux/enforce').exists():
+        subprocess.run(['/usr/bin/chcon', f'system_u:object_r:{kind}:s0', str(path)], check=True)
+label('/run/ilex-dev', 'sshd_var_run_t')
 target = Path('/run/ilex-dev/ssh_host_ed25519_key')
 if source.exists():
     key = source.read_bytes()
@@ -22,4 +28,4 @@ if source.exists():
 elif not target.exists():
     subprocess.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(target)], check=True)
 # This is a disposable guest's /run, never the host or production image.
-subprocess.run(['/usr/bin/chcon', '-t', 'sshd_key_t', '/run/ilex-dev/ssh_host_ed25519_key'], check=True)
+label(target, 'sshd_key_t')
