@@ -118,7 +118,8 @@ try {
     $cleanupCrash=Replace-Once $salted $remove ($remove+';[Environment]::Exit(86)')
     Expected (Invoke-Helper $cleanupCrash 'cleanup-incomplete' $fixture @{}) 86
     $deletingBytes=[IO.File]::ReadAllText($journal);$deleting=$deletingBytes|ConvertFrom-Json
-    Check ($deleting.phase -eq 'deleting' -and $deleting.vm_id -eq [string]$fixtureId -and !(Get-VM -Id $fixtureId -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $fixture 'seed-keys\bootstrap')) -and (Test-Path -LiteralPath (Join-Path $fixture 'disks\os.vhdx'))) 'Cleanup interruption missed the unregistered-VM/pending-files boundary'
+    $inventory=@(Get-VM -ErrorAction Stop)
+    Check ($deleting.phase -eq 'deleting' -and $deleting.vm_id -eq [string]$fixtureId -and !@($inventory | Where-Object {$_.Id -eq $fixtureId}).Count -and (Test-Path -LiteralPath (Join-Path $fixture 'seed-keys\bootstrap')) -and (Test-Path -LiteralPath (Join-Path $fixture 'disks\os.vhdx'))) 'Cleanup interruption missed the unregistered-VM/pending-files boundary'
     [Console]::Error.WriteLine('builder recovery self-check: allocated candidate with empty Notes recovered; wrong run and ordinary ready empty Notes rejected')
     $deleting.cleanup_paths[0]=Join-Path $root 'identity'
     [IO.File]::WriteAllText($journal,($deleting|ConvertTo-Json -Depth 15))

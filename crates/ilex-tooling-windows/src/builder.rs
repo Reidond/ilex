@@ -23,6 +23,7 @@ pub enum Operation {
     Update,
     SelfCheck,
     RecoverySelfCheck,
+    MaintenanceSelfCheck,
     CleanupIncomplete,
     Rollback,
     AcceptUpdate,
@@ -87,6 +88,9 @@ pub fn verify_fedora_metadata() -> Result<()> {
 pub fn run(operation: Operation, options: Options) -> Result<Value> {
     ilex_tooling_core::check_version(1)?;
     verify_fedora_metadata()?;
+    if matches!(operation, Operation::MaintenanceSelfCheck) {
+        return maintenance_self_check(options);
+    }
     let base = root()?.join("builder");
     // Status never creates state, downloads, starts a VM, or repairs a journal.
     if matches!(operation, Operation::Status) && !base.exists() {
@@ -176,5 +180,72 @@ pub fn run(operation: Operation, options: Options) -> Result<Value> {
             .as_u64()
             .context("missing builder reply schema")? as u32,
     )?;
+    Ok(value)
+}
+
+// This diagnostic has its own installation and helper files. It must not hold
+// the shared builder lock, resize it, or replace files another checkout uses.
+fn maintenance_self_check(options: Options) -> Result<Value> {
+    let parent = root()?.join("builder-checks");
+    secure_dir(&root()?)?;
+    secure_dir(&parent)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let work = parent.join(format!(
+        "maintenance-{}-{nonce}.partial",
+        std::process::id()
+    ));
+    secure_dir(&work)?;
+    let fixture_guard = lock(&work.join("host.lock"))?;
+    let qemu = runtime::fetch()?;
+    let cached = root()?.join("builder/Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2");
+    let image = if cached.exists() {
+        verify(&cached, IMAGE_SHA)?;
+        cached
+    } else {
+        let image = work.join("Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2");
+        download(IMAGE_URL, &image, IMAGE_SHA, 606732288)?;
+        image
+    };
+    let helper = work.join("builder.ps1");
+    fs::write(&helper, include_str!("../assets/builder.ps1"))?;
+    for (name, content) in [
+        ("provision.sh", include_str!("../assets/provision.sh")),
+        (
+            "builder-control.sh",
+            include_str!("../assets/builder-control.sh"),
+        ),
+        ("smoke.sh", include_str!("../assets/smoke.sh")),
+    ] {
+        fs::write(work.join(name), content)?;
+    }
+    let script = work.join("check.ps1");
+    let request = work.join("request.json");
+    fs::write(
+        &script,
+        include_str!("../assets/builder-maintenance-check.ps1"),
+    )?;
+    fs::write(
+        &request,
+        serde_json::to_vec(&json!({
+            "schema":1,"work":work,"helper":helper,"runtime":qemu,
+            "image":image,"revision":revision(),"options":options
+        }))?,
+    )?;
+    let output = output_owned(&mut powershell(&script, &request), Stdio::inherit())?;
+    ensure!(
+        output.status.success(),
+        "maintenance check failed; diagnostic/recovery state retained at {}",
+        work.display()
+    );
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        value["fixture_removed"] == true,
+        "maintenance fixture cleanup is unconfirmed"
+    );
+    drop(fixture_guard);
+    // Same bounded, no-reparse-point removal used for private runtime fixtures.
+    runtime::remove_owned_tree(&work, &parent)?;
     Ok(value)
 }

@@ -80,13 +80,33 @@ function Assert-JournalIdentity($record) {
     } elseif($record.resource -or $record.phase -notin @('preparing','deleting')) {throw 'Journal phase requires an exact VM UUID'}
     if($record.phase -eq 'deleting') {Assert-CleanupManifest $record}
 }
+function VM-Inventory {
+    # A missing UUID is established only by a successful complete query. Never
+    # turn provider/access errors into an empty inventory, even nonterminating ones.
+    $lookupErrors=@()
+    $inventory=@(Get-VM -ErrorAction Stop -ErrorVariable lookupErrors)
+    if(!$? -or $lookupErrors.Count) {throw 'Hyper-V inventory lookup failed; absence is unconfirmed'}
+    foreach($entry in $inventory) {if(!$entry.Id -or !$entry.Name){throw 'Malformed Hyper-V inventory; absence is unconfirmed'}}
+    return $inventory
+}
+function Name-Conflict {
+    return @(VM-Inventory | Where-Object {$_.Name -eq $name}).Count -gt 0
+}
+function Assert-VMAbsent($record) {
+    $inventory=@(VM-Inventory)
+    if($record.vm_id -and @($inventory | Where-Object {$_.Id -eq [guid]$record.vm_id}).Count) {throw 'Owned VM is still registered; no files were deleted'}
+    if(@($inventory | Where-Object {$_.Name -eq $name}).Count) {throw 'Builder name was reused by a different UUID; refusing cleanup of replacement resources'}
+}
 function Resolve-OwnedVM($record,[bool]$allowDeleted=$false) {
     Assert-JournalIdentity $record
     if(!$record.vm_id) {return $null}
-    $vm=Get-VM -Id ([guid]$record.vm_id) -ErrorAction SilentlyContinue
+    $inventory=@(VM-Inventory)
+    $vmMatches=@($inventory | Where-Object {$_.Id -eq [guid]$record.vm_id})
+    if($vmMatches.Count -gt 1) {throw 'Ambiguous exact UUID in Hyper-V inventory'}
+    $vm=$vmMatches | Select-Object -First 1
     if(!$vm) {
         if($allowDeleted -and $record.phase -eq 'deleting') {
-            if(Get-VM -Name $name -ErrorAction SilentlyContinue) {throw 'Builder name was reused by a different UUID; refusing cleanup of replacement resources'}
+            if(@($inventory | Where-Object {$_.Name -eq $name}).Count) {throw 'Builder name was reused by a different UUID; refusing cleanup of replacement resources'}
             return $null
         }
         throw "Owned VM UUID $($record.vm_id) is missing; refusing name-based adoption"
@@ -303,6 +323,69 @@ function Assert-Resources($vm) {
     if($memory.DynamicMemoryEnabled -or $memory.Startup -ne $j.memory_bytes -or $processor.Count -ne $j.cpus -or !$processor.ExposeVirtualizationExtensions) {throw "Actual VM resources differ from journal (possibly interrupted resize); no VM was started. While off, repair explicitly with builder up --memory-gib $([long]$j.memory_bytes/1GB) --cpus $($j.cpus)."}
     return [long]$memory.Startup
 }
+function Recovery-Snapshot {
+    $lookupErrors=@()
+    $snapshots=@(Get-VMSnapshot -VM (Owned-VM) -ErrorAction Stop -ErrorVariable lookupErrors)
+    if(!$? -or $lookupErrors.Count) {throw 'Hyper-V checkpoint lookup failed; absence is unconfirmed'}
+    if($j.checkpoint_id) {$found=@($snapshots | Where-Object {$_.Id -eq [guid]$j.checkpoint_id})}
+    elseif($j.checkpoint_name) {$found=@($snapshots | Where-Object {$_.Name -eq $j.checkpoint_name})}
+    else {throw 'No owned recovery checkpoint or creation intent'}
+    if($found.Count -gt 1) {throw 'Ambiguous owned checkpoint creation intent'}
+    if($found.Count -eq 1) {
+        if($j.checkpoint_name -and $found[0].Name -ne $j.checkpoint_name) {throw 'Recovery checkpoint name/UUID mismatch'}
+        return $found[0]
+    }
+    return $null
+}
+function Clear-Recovery {
+    foreach($field in @('checkpoint_id','checkpoint_name','checkpoint_revision','update_phase')) {$j | Add-Member -NotePropertyName $field -NotePropertyValue $null -Force}
+    Write-Journal
+}
+function Finish-Rollback {
+    $recoveryRevision=$j.checkpoint_revision
+    if(!$recoveryRevision) {$recoveryRevision=$j.revision}
+    Start-Owned
+    $script:probe=Guest 'smoke'
+    if(!$probe.nested_kvm_boot -or $probe.revision -ne $recoveryRevision) {throw 'Recovery checkpoint provisioning/KVM verification failed'}
+    $j.revision=$probe.revision;$j.update_phase='rolled-back';Write-Journal
+}
+function Recover-Update {
+    if($j.update_phase -eq 'accepting') {throw 'Checkpoint acceptance was interrupted; resume builder accept-update'}
+    if($j.update_phase -eq 'restored') {
+        # Do not restore again: an explicit repair may have reconciled a legacy
+        # checkpoint's mismatched resources while this phase was pending.
+        Finish-Rollback
+        return
+    }
+    $snapshot=Recovery-Snapshot
+    if(!$snapshot) {
+        if($j.update_phase -ne 'checkpointing') {throw 'Exact recovery checkpoint missing; refusing recovery'}
+        $vm=Owned-VM
+        if($vm.State -ne 'Off' -or [int]$vm.PrimaryOperationalStatus -ne 2 -or $vm.SecondaryOperationalStatus) {throw 'Checkpoint operation is still pending; retry builder rollback'}
+        # Re-query after the idle observation: creation may have completed
+        # between the first snapshot query and the VM status query.
+        $snapshot=Recovery-Snapshot
+        if(!$snapshot) {
+            # No guest update was sent; abandon only the unfulfilled intent.
+            Clear-Recovery
+            return
+        }
+    }
+    if(!$j.checkpoint_revision) {
+        if($j.update_phase -eq 'verified') {throw 'Recovery checkpoint revision missing; refusing an unverifiable rollback'}
+        $j | Add-Member -NotePropertyName checkpoint_revision -NotePropertyValue $j.revision -Force
+    }
+    $vm=Owned-VM
+    if($j.update_phase -in @('checkpointing','updating','restoring')) {
+        if($vm.State -ne 'Off') {Stop-VM -VM $vm -TurnOff -Confirm:$false}
+    } else {Stop-Owned}
+    $j.checkpoint_id=[string]$snapshot.Id;$j.update_phase='restoring';Write-Journal
+    Restore-VMSnapshot -VMSnapshot $snapshot -Confirm:$false -ErrorAction Stop
+    $j.update_phase='restored';Write-Journal
+    # Keep this durable phase if admission/probing fails. Rollback can retry it,
+    # and explicit up options can repair the journal profile without re-restoring.
+    Finish-Rollback
+}
 function Key([string]$file) {
     Native (Get-Command ssh-keygen.exe).Source @('-q','-t','ed25519','-N','""','-f',$file)
 }
@@ -376,9 +459,9 @@ try {
     Read-Journal
     if($r.operation -eq 'status') {Reply;exit 0}
     if($r.operation -eq 'up') {
-        if($j -and $j.update_phase -eq 'updating') {throw 'Interrupted update requires builder rollback before up'}
+        if($j -and $j.update_phase -in @('checkpointing','updating','restoring','accepting')) {throw 'Interrupted maintenance requires builder rollback (or accept-update for accepting) before up'}
         if(!$j) {
-            if(Get-VM -Name $name -ErrorAction SilentlyContinue) {throw 'Builder name already exists without an ownership journal; refusing adoption'}
+            if(Name-Conflict) {throw 'Builder name already exists without an ownership journal; refusing adoption'}
             $memory=16GB;if($r.options.memory_gib){$memory=[long]$r.options.memory_gib*1GB}
             $cpus=8;if($r.options.cpus){$cpus=[int]$r.options.cpus}
             if($memory -lt 4GB -or $memory -gt 32GB -or $cpus -lt 2 -or $cpus -gt [Environment]::ProcessorCount) {throw 'Builder resources require 4..32 GiB fixed memory and 2..host CPU count'}
@@ -422,7 +505,8 @@ try {
             $actualMemory=Get-VMMemory -VM (Owned-VM)
             $actualProcessor=Get-VMProcessor -VM (Owned-VM)
             if($requestedMemory -ne $j.memory_bytes -or $requestedCpus -ne $j.cpus -or $actualMemory.Startup -ne $requestedMemory -or $actualMemory.DynamicMemoryEnabled -or $actualProcessor.Count -ne $requestedCpus -or !$actualProcessor.ExposeVirtualizationExtensions) {
-                if((Owned-VM).State -ne 'Off' -or $j.checkpoint_id) {throw 'Resource changes require builder down and no retained recovery checkpoint'}
+                $restoredRepair=$j.update_phase -eq 'restored' -and $requestedMemory -eq $j.memory_bytes -and $requestedCpus -eq $j.cpus
+                if((Owned-VM).State -ne 'Off' -or ($j.checkpoint_id -and !$restoredRepair)) {throw 'Resource changes require builder down and no retained checkpoint, except original-profile repair after restoration'}
                 if($requestedMemory -lt 4GB -or $requestedMemory -gt 32GB -or $requestedCpus -lt 2 -or $requestedCpus -gt [Environment]::ProcessorCount) {throw 'Invalid builder resources'}
                 # Changing an off VM's configuration allocates no RAM. Actual
                 # resources are reconciled and admitted by Start-Owned below.
@@ -431,6 +515,7 @@ try {
                 $j.memory_bytes=$requestedMemory;$j.cpus=$requestedCpus;Write-Journal
             }
         }
+        if($j.update_phase -eq 'restored') {Finish-Rollback;Reply;exit 0}
         if($j.phase -eq 'provisioning') {$serialCapture=New-Object IlexSerialCapture($name,(Join-Path $root 'serial.log'))}
         Start-Owned
         Say 'Waiting for pinned SSH/cloud-init provisioning identity'
@@ -450,7 +535,7 @@ try {
         if($j.phase -eq 'ready') {throw 'Ready builder is persistent infrastructure; cleanup-incomplete cannot destroy it'}
         $vm=Owned-VM
         if($j.phase -ne 'deleting') {
-            if(!$vm -and (Get-VM -Name $name -ErrorAction SilentlyContinue)) {throw 'Unjournaled VM exists; UUID authorization unavailable, refusing cleanup'}
+            if(!$vm -and (Name-Conflict)) {throw 'Unjournaled VM exists; UUID authorization unavailable, refusing cleanup'}
             $j | Add-Member -NotePropertyName cleanup_from_phase -NotePropertyValue $j.phase -Force
             $j | Add-Member -NotePropertyName cleanup_paths -NotePropertyValue @(Cleanup-Paths) -Force
             Assert-CleanupManifest $j
@@ -458,16 +543,18 @@ try {
         }
         Assert-CleanupManifest $j
         if($vm) {if($vm.State -ne 'Off'){Stop-VM -VM $vm -TurnOff -Confirm:$false};Remove-VM -VM $vm -Force}
-        elseif(Get-VM -Name $name -ErrorAction SilentlyContinue) {throw 'Unjournaled VM exists; UUID authorization unavailable, refusing cleanup'}
+        Assert-VMAbsent $j
         foreach($path in $j.cleanup_paths) {Remove-Owned $path}
         Remove-Item -LiteralPath $journal;$j=$null
     } elseif($r.operation -eq 'accept-update') {
-        if(!$j -or !$j.checkpoint_id -or $j.update_phase -notin @('verified','rolled-back')) {throw 'No verified/rolled-back recovery checkpoint to accept'}
-        $snapshot=Get-VMSnapshot -VM (Owned-VM) | Where-Object {$_.Id -eq [guid]$j.checkpoint_id}
-        if(!$snapshot) {throw 'Exact owned checkpoint missing'}
-        Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
-        $j | Add-Member -NotePropertyName checkpoint_revision -NotePropertyValue $null -Force
-        $j.checkpoint_id=$null;$j.update_phase=$null;Write-Journal
+        if(!$j -or !$j.checkpoint_id -or $j.update_phase -notin @('verified','rolled-back','accepting')) {throw 'No verified/rolled-back recovery checkpoint to accept'}
+        $snapshot=Recovery-Snapshot
+        # Explicit acceptance may finish an older interrupted removal too.
+        # Recovery-Snapshot must positively confirm absence; errors never clear it.
+        $j.update_phase='accepting';Write-Journal
+        if($snapshot) {Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false -ErrorAction Stop}
+        if(Recovery-Snapshot) {throw 'Checkpoint removal is still pending; retry accept-update'}
+        Clear-Recovery
     } elseif($r.operation -eq 'self-check') {
         $vm=Owned-VM
         if(!$vm -or $vm.State -ne 'Running') {throw 'Run builder up before the active self-check'}
@@ -481,40 +568,28 @@ try {
     } elseif($r.operation -in @('update','rollback')) {
         if(!$j -or $j.phase -ne 'ready') {throw 'Update/rollback requires a ready builder'}
         if($r.operation -eq 'rollback') {
-            if(!$j.checkpoint_id){throw 'No owned recovery checkpoint'}
-            $recoveryRevision=$j.checkpoint_revision
-            if(!$recoveryRevision) {
-                if($j.update_phase -eq 'verified') {throw 'Recovery checkpoint revision missing; refusing an unverifiable rollback'}
-                $recoveryRevision=$j.revision
-            }
-            if($j.update_phase -eq 'updating') {
-                # Explicit rollback is recovery of this exact interrupted maintenance
-                # transaction; its checkpoint was taken while all jobs were quiescent.
-                $vm=Owned-VM
-                if($vm.State -ne 'Off'){Stop-VM -VM $vm -TurnOff -Confirm:$false}
-            } else {Stop-Owned}
-            $snapshot=Get-VMSnapshot -VM (Owned-VM) | Where-Object {$_.Id -eq [guid]$j.checkpoint_id}
-            if(!$snapshot){throw 'Exact recovery checkpoint missing'}
-            Restore-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
-            Start-Owned;$probe=Guest 'smoke'
-            if(!$probe.nested_kvm_boot -or $probe.revision -ne $recoveryRevision) {throw 'Recovery checkpoint provisioning/KVM verification failed'}
-            $j.revision=$probe.revision
-            $j.update_phase='rolled-back';Write-Journal
+            if(!$j.checkpoint_id -and !$j.checkpoint_name){throw 'No owned recovery checkpoint or creation intent'}
+            Recover-Update
         } else {
-            if($j.update_phase -eq 'updating') {throw 'Interrupted update: run builder rollback before another update'}
-            if($j.checkpoint_id) {throw 'Recovery checkpoint retained; accept it with builder accept-update before updating again'}
+            if($j.update_phase -in @('checkpointing','updating','restoring','restored','accepting')) {throw 'Interrupted maintenance: run builder rollback (or accept-update for accepting) before another update'}
+            if($j.checkpoint_id -or $j.checkpoint_name) {throw 'Recovery checkpoint retained; accept it with builder accept-update before updating again'}
             $vm=Owned-VM
+            # Reject interrupted resize before shutdown, journal mutation or any
+            # recovery checkpoint. Ordinary explicit off-state repair stays usable.
+            $admittedMemory=Assert-Resources $vm
             if($vm.State -eq 'Running'){Wait-Idle;Stop-Owned}
             elseif($vm.State -ne 'Off'){throw "Unsupported builder state for update: $($vm.State)"}
             Ensure-DiskStorage
-            Preflight ([long]$j.memory_bytes)
+            Preflight $admittedMemory
             $vm=Owned-VM
+            $null=Assert-Resources $vm
             Set-VM -VM $vm -CheckpointType Standard
-            $snap=Checkpoint-VM -VM $vm -SnapshotName "ilex-builder-before-$([guid]::NewGuid())" -Passthru
+            $j | Add-Member -NotePropertyName checkpoint_name -NotePropertyValue "ilex-builder-before-$([guid]::NewGuid())" -Force
             $j | Add-Member -NotePropertyName checkpoint_revision -NotePropertyValue $j.revision -Force
-            $j.checkpoint_id=[string]$snap.Id;$j.update_phase='updating';Write-Journal
-            $previousRevision=$j.revision
+            $j.update_phase='checkpointing';Write-Journal
             try {
+                $snap=Checkpoint-VM -VM $vm -SnapshotName $j.checkpoint_name -Passthru -ErrorAction Stop
+                $j.checkpoint_id=[string]$snap.Id;$j.update_phase='updating';Write-Journal
                 Start-Owned
                 $null=Guest 'update'
                 $updatedProbe=Guest 'probe'
@@ -526,13 +601,8 @@ try {
                 $j.revision=$r.revision;$j.update_phase='verified';Write-Journal
             } catch {
                 $failure=$_
-                $vm=Owned-VM
-                if($vm.State -ne 'Off'){Stop-VM -VM $vm -TurnOff -Confirm:$false}
-                Restore-VMSnapshot -VMSnapshot (Get-VMSnapshot -VM (Owned-VM) | Where-Object {$_.Id -eq [guid]$j.checkpoint_id}) -Confirm:$false
-                Start-Owned;$probe=Guest 'smoke'
-                if(!$probe.nested_kvm_boot -or $probe.revision -ne $previousRevision) {throw 'Automatic rollback provisioning/KVM verification failed'}
-                $j.revision=$probe.revision;$j.update_phase='rolled-back';Write-Journal
-                throw "Update failed and exact owned checkpoint was restored and smoke-tested: $failure"
+                try {Recover-Update} catch {throw "Update failed: $failure; recovery remains $($j.update_phase). Resume builder rollback (explicit original-profile up options can repair restored resources): $_"}
+                throw "Update failed and owned recovery completed ($($j.update_phase)): $failure"
             }
         }
     } else {throw "Unsupported builder operation $($r.operation)"}

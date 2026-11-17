@@ -271,7 +271,7 @@ fn extract_tar(reader: impl Read, destination: &Path, package: &str) -> Result<(
     }
     Ok(())
 }
-fn remove_owned_tree(path: &Path, base: &Path) -> Result<()> {
+pub(crate) fn remove_owned_tree(path: &Path, base: &Path) -> Result<()> {
     ensure!(
         path.parent() == Some(base) && path.extension().is_some_and(|x| x == "partial"),
         "unsafe runtime cleanup target"

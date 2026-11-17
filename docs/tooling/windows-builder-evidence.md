@@ -303,3 +303,69 @@ on the published v1 before candidate update, with active `/boot` autofs. This
 does not qualify the newer review-fix head. The newer phase0/T1 fix is now
 included through the rebase. The final PR records the latest shared CI queue
 check and whether a fresh branch run was dispatched.
+
+## Re-review 5941791417 — maintenance and lookup failures
+
+The two additional P2s were tested with the new isolated command:
+
+```powershell
+cargo xtask builder maintenance-self-check --wait-for-memory-seconds 10800
+cargo clippy -p xtask --locked -- -D warnings
+```
+
+This diagnostic has private helper/request/recipe files and its own installation
+lock. It neither takes the real builder's lock nor overwrites that installation's
+scripts. The shared UUID `b521170d-a2e0-4791-8b3e-71819084203d` was observed off at
+**16 GiB/eight CPUs**, with a matching journal, at the start and finish. Its
+configuration, checkpoints, disks and keys were not modified by these checks;
+T3 can continue using that shared installation.
+
+The private Gen2 fixture remained **off** throughout. It uses explicit host-only
+readiness/acceptance preconditions and a start witness; **no guest update or
+guest smoke is claimed by this diagnostic**. Existing real guest evidence above
+is separate. The complete final result is
+`C:/Users/reido/Documents/ilex-tooling-t2-2026-11-17-rereview/maintenance-self-check-final.json`.
+
+- Actual 16 GiB versus journal 4 GiB was injected immediately after
+  `Set-VMMemory`. `update` rejected drift before checkpoint creation or recovery
+  phase mutation. Zero checkpoints and an unchanged journal/file inventory were
+  required; ordinary explicit original-profile repair remained available.
+- A second drift was injected immediately after the real capacity wait.
+  Revalidation rejected it before creating a checkpoint or intent. The unchanged
+  14 GiB reserve and one overall wait budget were enforced; the fixture's 4 GiB
+  admission gate was not reduced.
+- Abrupt exits after checkpoint-intent publication, checkpoint API return,
+  updating-journal publication, restoring-journal publication, restore API return,
+  and checkpoint acceptance before/after removal all recovered. The exact
+  reserved name lets rollback find a checkpoint whose UUID was not yet committed;
+  an unfulfilled intent can be abandoned only after successful lookup/idle checks.
+- A real legacy bad checkpoint captured 16 GiB while the journal retained 4 GiB.
+  Rollback left durable `restored` on resource rejection. Explicit original-profile
+  `up` options repaired it with the checkpoint retained, and retry did not restore
+  the bad settings again. Interrupted older acceptance with an already absent
+  snapshot also completed after positive lookup.
+- Cleanup was interrupted after the `deleting` journal, before unregistering.
+  Both a terminating access error and a nonterminating provider error were injected
+  at the inventory query. The VM remained registered and **every tracked file,
+  directory and journal remained unchanged**. The same two faults were injected
+  after a real unregister interruption, with the same preservation result. Only
+  an unmodified successful inventory allowed final file/journal cleanup. Inventory
+  comparison covers all paths/sizes and hashes the journal, seed and key files;
+  Hyper-V-managed files are not opened for hashing while locked by VMMS.
+
+Final fixture UUID **`57874542-1373-448d-b7cd-7d65da577038`** was removed; the final
+helper SHA256 was
+`2df4e3dc563dedf833cc2a385e779ed8d3831e2d489ca70661eb59ee80a7ed35`.
+Its result flags all recovery and preservation gates true, with
+`host_only=true` and `guest_update_sent=false`. The earlier complete fixture
+`be334739-210d-4177-b52a-271bff442d2a` is also absent. Successful checks removed
+their private installation directories.
+
+The initial observation attempt tried to hash a VMMS-locked configuration file
+and failed. Its `finally` cleanup removed UUID
+`31770c62-d612-437e-80e3-48628ffc3667`, disks, seed, identities and journal; these
+absences were verified with a successful inventory. Automatic approval review
+rejected a later recursive deletion of its diagnostic-only directory with
+“blocked by policy”, so helper scripts/requests remain privately at
+`%LOCALAPPDATA%/ilex/builder-checks/maintenance-34136-1794932166491462100.partial/`.
+No VM, disk, seed or key remains there. No unit tests were added or run.

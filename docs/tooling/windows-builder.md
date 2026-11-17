@@ -14,6 +14,7 @@ cargo xtask builder up
 cargo xtask builder status --json
 cargo xtask builder self-check
 cargo xtask builder recovery-self-check --wait-for-memory-seconds 10800
+cargo xtask builder maintenance-self-check --wait-for-memory-seconds 10800
 cargo xtask builder down
 cargo xtask builder update
 ```
@@ -165,7 +166,11 @@ the tool cannot safely authorize name-only deletion.
 Before unregistering an incomplete VM, cleanup durably records `deleting`, its
 origin phase and a validated fixed path manifest. Retry can finish those paths
 after the UUID is absent; a different VM reusing the name blocks cleanup and is
-never adopted or removed. A flushed `allocated` candidate with empty VM Notes
+never adopted or removed. Absence requires a successful complete Hyper-V
+inventory query, including a fresh check after unregistering and before file
+deletion. Provider/access errors, including nonterminating errors, abort cleanup
+without treating an empty result as absence. Checkpoint lookups also fail closed.
+A flushed `allocated` candidate with empty VM Notes
 can recover only when the full prior creation intent, UUID/resource, generation,
 configuration and disk paths agree. Ordinary ready records still require Notes.
 If cloud-init completed but the host was interrupted before marking readiness,
@@ -173,16 +178,36 @@ If cloud-init completed but the host was interrupted before marking readiness,
 unfinished provisioning recipe with an older revision can resume through the
 pinned finite controller; a ready builder requires explicit `update` instead.
 
-Updates stop the idle builder, create an explicit powered-off Standard checkpoint
+Updates validate actual resources before shutdown or maintenance state changes,
+and revalidate after the capacity wait. Resource drift leaves ordinary off-state
+repair available and creates no checkpoint. Updates stop the idle builder,
+create an explicit powered-off Standard checkpoint
 covering VM/OS/data/vTPM, start, update, reboot and run the nested smoke. On failure,
 restore that exact checkpoint and verify boot again. `builder update
 --rollback-probe` deliberately fails after a real package update to exercise this
-path. Interrupted updates retain `updating` and require explicit `builder rollback`.
+path. A durable unique checkpoint-name intent precedes checkpoint creation;
+rollback can recover its exact snapshot if creation finished before its UUID
+was committed. An idle VM and successful absence queries allow abandoning an
+intent whose creation never completed.
 The checkpoint's provisioning revision is recorded separately from the active
 revision, so explicit rollback after a successful update verifies the old recipe.
 The recovery checkpoint remains until `builder accept-update` explicitly removes
 it. No data disk is attached to a second writable VM, and no prune is performed.
 `rollback` also accepts `--wait-for-memory-seconds` for recovery on a busy host.
+
+| Maintenance phase | Supported recovery |
+| --- | --- |
+| `checkpointing` | `rollback` resolves the exact reserved snapshot or clears an unfulfilled intent after successful lookup and idle checks. |
+| `updating` | `rollback` stops the owned maintenance VM and restores its checkpoint. |
+| `restoring` | `rollback` safely repeats the restore after an interruption. |
+| `restored` | `rollback` or `up` resumes admission/smoke without another restore; explicit original memory/CPU options can repair drift while off, including a legacy bad checkpoint. |
+| `verified`, `rolled-back` | `accept-update` removes the recovery point; ordinary rollback remains available. |
+| `accepting` | `accept-update` resumes removal or clears the record after positively confirming that the checkpoint is already gone. |
+
+Restoration is recorded before admission, so a failed start/probe keeps a
+resumable `restored` phase. Resource repair there permits only the recorded
+original profile. T3 must reject new job registration under the shared host lock
+while `checkpointing`, `updating`, `restoring`, `restored` or `accepting` is active.
 
 Bootstrap/update logs and the last SSH diagnostic are retained in the builder
 state directory. `builder status --json` exposes provisioning/update phase,
@@ -197,6 +222,17 @@ including wrong-run, ready-Notes, path and replacement-UUID rejection. Instrumen
 copies add only identity salting, abrupt exits and a start witness; the recovery
 logic is the embedded production helper. All fixture UUIDs/paths are recorded,
 and successful checks remove them. No existing builder disk or key is replaced.
+
+`builder maintenance-self-check` uses a separate private installation and off
+Gen2 VM; it does not resize, stop, checkpoint or rewrite the shared builder's
+files, so other checkouts can keep using it. Real checkpoint/restore/removal
+operations exercise maintenance interruption boundaries, including legacy drift
+repair. Host-only readiness/acceptance preconditions are set explicitly in this
+fixture; no guest update or guest smoke is claimed. A start witness keeps it off.
+Terminating and nonterminating lookup failures are injected before and after
+unregistering, and file/journal inventories must remain unchanged. The single
+capacity-wait budget is bounded by `--wait-for-memory-seconds`; final cleanup
+uses the unmodified lookup and owned-resource logic.
 
 `runtime activation-self-check` uses fresh private process-local state and copies
 the checksum-verified compressed cache. It forces a real SDL initialization

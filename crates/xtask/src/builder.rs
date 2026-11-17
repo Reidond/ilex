@@ -39,6 +39,11 @@ enum Operation {
         #[arg(long, default_value_t = 10800)]
         wait_for_memory_seconds: u32,
     },
+    /// Exercise maintenance/checkpoint and failed-lookup recovery in an isolated off VM
+    MaintenanceSelfCheck {
+        #[arg(long, default_value_t = 10800)]
+        wait_for_memory_seconds: u32,
+    },
     /// Remove only journal-owned resources from an incomplete bootstrap
     CleanupIncomplete,
     /// Restore and smoke-test the exact retained recovery checkpoint
@@ -81,6 +86,12 @@ pub fn run(args: Args) -> Result<()> {
             } => {
                 options.wait_for_memory_seconds = wait_for_memory_seconds;
                 Op::RecoverySelfCheck
+            }
+            Operation::MaintenanceSelfCheck {
+                wait_for_memory_seconds,
+            } => {
+                options.wait_for_memory_seconds = wait_for_memory_seconds;
+                Op::MaintenanceSelfCheck
             }
             Operation::CleanupIncomplete => Op::CleanupIncomplete,
             Operation::Rollback {
