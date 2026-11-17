@@ -132,11 +132,3 @@ pub(super) fn key_command(command: &mut Command, key: &OwnedFd) {
         });
     }
 }
-
-pub fn duplicate(fd: i32) -> Result<OwnedFd> {
-    ensure!(fd >= 3, "credential descriptors must be >= 3");
-    // SAFETY: fcntl validates fd and creates an independent owned descriptor.
-    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-    ensure!(copy >= 0, "invalid credential descriptor");
-    Ok(unsafe { OwnedFd::from_raw_fd(copy) })
-}

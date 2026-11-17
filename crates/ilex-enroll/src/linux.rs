@@ -8,9 +8,9 @@ use std::{
 use zeroize::Zeroize;
 
 mod secret;
-pub use secret::{Secret, duplicate, harden, secret_fd};
+pub use secret::{Secret, harden, secret_fd};
 mod probe;
-pub use probe::{Probe, probe, tool_versions};
+pub use probe::{Probe, probe, tool_manifest, tool_versions};
 mod enroll;
 pub use enroll::{Device, Enrollment, recovery, status, tpm, validate_token};
 mod layout;

@@ -189,7 +189,8 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify /usr/lib/dracut/modules.d/91ilex-
 
 # Generic unlock support must travel with every deployment, including updates.
 # This runs before overlay replay and never sees a machine TPM or credential.
-RUN mkdir -p "$(realpath /root)" && \
+RUN ilex-enroll tool-manifest > /usr/lib/ilex/security/tools.json && \
+    mkdir -p "$(realpath /root)" && \
     kernel=$(kernel-install list --json=short | python3 -c 'import json,sys; print(next(k["version"] for k in json.load(sys.stdin) if k["has_kernel"]))') && \
     DRACUT_NO_XATTR=1 dracut --force --zstd --reproducible --no-hostonly \
         "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}" && \

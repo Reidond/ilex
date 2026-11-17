@@ -33,6 +33,8 @@ fn run() -> anyhow::Result<()> {
             #[arg(long)]
             json: bool,
         },
+        #[command(hide = true)]
+        ToolManifest,
         Status {
             #[arg(long)]
             device: PathBuf,
@@ -92,6 +94,7 @@ fn run() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("a subcommand is required"))?
     {
         Cmd::Probe { .. } => serde_json::to_value(probe())?,
+        Cmd::ToolManifest => tool_manifest()?,
         Cmd::Status { device, .. } => status(&Device::open(&device)?)?,
         Cmd::Recovery {
             device,
@@ -102,22 +105,23 @@ fn run() -> anyhow::Result<()> {
                 unlock_fd != key_out_fd,
                 "input/output descriptors must differ"
             );
-            serde_json::to_value(recovery(
-                &Device::open(&device)?,
-                duplicate(unlock_fd)?,
-                duplicate(key_out_fd)?,
-            )?)?
+            let unlock = inherited(unlock_fd)?;
+            let output = inherited(key_out_fd)?;
+            serde_json::to_value(recovery(&Device::open(&device)?, unlock, output)?)?
         }
         Cmd::Tpm {
             device,
             unlock_fd,
             target_root,
             ..
-        } => serde_json::to_value(tpm(
-            &Device::open(&device)?,
-            duplicate(unlock_fd)?,
-            &tool_versions(&target_root)?,
-        )?)?,
+        } => {
+            let unlock = inherited(unlock_fd)?;
+            serde_json::to_value(tpm(
+                &Device::open(&device)?,
+                unlock,
+                &tool_versions(&target_root)?,
+            )?)?
+        }
         Cmd::Layout { root } => serde_json::to_value(discover(&root)?)?,
         Cmd::Complete {
             root,
@@ -132,4 +136,19 @@ fn run() -> anyhow::Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn inherited(fd: i32) -> anyhow::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    anyhow::ensure!(fd >= 3, "credential descriptors must be >= 3");
+    // SAFETY: this CLI owns the explicitly supplied descriptor. Mark the
+    // original close-on-exec before any probe/status subprocess can inherit it.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    anyhow::ensure!(flags >= 0, "invalid credential descriptor");
+    anyhow::ensure!(
+        unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == 0,
+        "cannot protect credential descriptor"
+    );
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }

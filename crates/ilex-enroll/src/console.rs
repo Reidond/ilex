@@ -167,7 +167,7 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
         );
     }
     let capability = probe();
-    let target_tools = tool_versions(root)?;
+    let target_tools = tool_versions(root).unwrap_or_default();
     let unlock_stack: Value = fs::read(root.join("usr/lib/ilex/security/unlock.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -200,7 +200,7 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
     console.clear()?;
     console.say("Recovery key saved and privately verified.\r\n\r\n")?;
     console.say(if state["state"] == "pending" {
-        "TPM enrolled to PCR 7 (SHA-256). First boot will verify unlock.\r\n"
+        "TPM enrolled to PCR 7 (SHA-256). Unlock verification is pending.\r\n"
     } else {
         "TPM enrollment unavailable. This disk uses its passphrase.\r\n"
     })?;
@@ -290,6 +290,45 @@ pub fn self_check() -> Result<()> {
     let image = dir.join("luks.img");
     File::create(&image)?.set_len(64 << 20)?;
     let result = (|| {
+        // Exercise the ISO's RPM-less lookup against actual booted-image
+        // binaries, and reject a changed executable rather than trusting JSON.
+        let metadata = fs::read("/usr/lib/ilex/security/tools.json")?;
+        let manifest: Value = serde_json::from_slice(&metadata)?;
+        let tools_root = dir.join("tools-root");
+        for path in manifest["sha256"]
+            .as_object()
+            .context("missing tool hashes")?
+            .keys()
+        {
+            let relative = Path::new(path);
+            ensure!(
+                relative.is_relative()
+                    && !relative
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_))),
+                "invalid tool path"
+            );
+            let target = tools_root.join(relative);
+            fs::create_dir_all(target.parent().unwrap())?;
+            fs::copy(Path::new("/").join(relative), target)?;
+        }
+        fs::create_dir_all(tools_root.join("usr/lib/ilex/security"))?;
+        fs::write(
+            tools_root.join("usr/lib/ilex/security/tools.json"),
+            metadata,
+        )?;
+        ensure!(
+            tool_versions(&tools_root)? == tool_versions(Path::new("/"))?,
+            "RPM-less tool versions differ"
+        );
+        fs::write(tools_root.join("usr/bin/ilex-enroll"), b"changed tool")?;
+        ensure!(
+            tool_versions(&tools_root).is_err(),
+            "changed tool was accepted"
+        );
+        println!(
+            "ilex-enroll self-check: RPM-less version metadata and changed-tool rejection passed"
+        );
         let output = Command::new("losetup")
             .args(["--find", "--show"])
             .arg(&image)

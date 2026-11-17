@@ -36,6 +36,12 @@ matching event-log replay, the qualified systemd 262 format, matching live/targe
 RPM versions and the target unlock-stack marker. The initial allowlist is
 systemd/systemd-udev `262.1-1.fc45.x86_64` and cryptsetup/cryptsetup-libs
 `2.8.8-1.fc45.x86_64`; another pair stays passphrase-only until qualified.
+Both builds record package versions and SHA-256 hashes of the helper, enrollment
+and unlock executables, TPM token plugin, cryptsetup library and TSS ESAPI.
+Runtime verifies these files against `/usr/lib/ilex/security/tools.json` before
+using its version metadata. This works on the exact ISO, where image-builder
+removes the RPM database. A target without metadata uses its RPM database;
+missing or inconsistent metadata declines automatic enrollment.
 Enrollment uses explicit
 `--tpm2-pcrs=7:sha256 --tpm2-with-pin=no` and disables public-key, signature
 and pcrlock discovery. Header validation rejects additional PCRs, another bank,

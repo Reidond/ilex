@@ -2060,8 +2060,9 @@ The installer reserves `/etc/ilex/setup.json` on the target, schema 1, with
 the selected composition/image, null profile ID/schema, requested TPM mode
 `unspecified`, actual capability `unknown` and status `not-configured`.
 The catalogue reserves empty `profiles` and `security-capabilities` objects.
-These are nonsecret contracts only: no TPM probing/enrollment, encrypted home
-setup or profile provisioning is delivered here. See `installer/setup/README.md`
+The final encrypted-install completion updates TPM capability/status and adds
+private local recovery acknowledgement and PCR-7 enrollment. Encrypted home
+setup and profile provisioning remain later work. See `installer/setup/README.md`
 for extension rules; future helpers below `installer/` enter the fingerprint.
 
 The fingerprint covers all of `installer/` (including the reserved setup helper

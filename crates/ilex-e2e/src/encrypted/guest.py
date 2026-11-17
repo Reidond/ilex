@@ -186,7 +186,7 @@ def finish():
     for name, command in [
         ('probe.json', ['ilex-enroll', 'probe', '--json']),
         ('layout.json', ['ilex-enroll', 'layout', '--root', str(root)]),
-        ('versions.txt', ['rpm', '-q', 'systemd', 'systemd-udev', 'cryptsetup', 'anaconda-core', 'shim-x64', 'grub2-efi-x64']),
+        ('versions.txt', ['cat', '/usr/lib/ilex/security/tools.json']),
     ]:
         output = subprocess.run(command, capture_output=True, check=True)
         (PUBLIC / name).write_bytes(output.stdout)

@@ -133,7 +133,9 @@ EOT
 # Kickstart defaults: install the newest ilex image and keep tracking ghcr.
 # Anaconda still asks for the disk, the user and everything else.
 COPY --from=installer-config / /
-RUN mkdir -p /usr/lib/systemd/system/anaconda.target.wants && \
+RUN mkdir -p /usr/lib/ilex/security && \
+    ilex-enroll tool-manifest > /usr/lib/ilex/security/tools.json && \
+    mkdir -p /usr/lib/systemd/system/anaconda.target.wants && \
     ln -s /dev/null /etc/systemd/system/anaconda-shell@tty6.service && \
     ln -s /dev/null /etc/systemd/system/getty@tty6.service && \
     ln -s ../ilex-installer-chooser.service \

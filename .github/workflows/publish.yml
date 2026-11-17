@@ -108,7 +108,7 @@ jobs:
     # syntax the dev box accepts.
     if: ${{ !inputs.v1_disk }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.encrypted_install && 360 || 120 }}
     outputs:
       changed: ${{ steps.roots.outputs.changed }}
       installer_changed: ${{ steps.changed.outputs.changed || 'false' }}
