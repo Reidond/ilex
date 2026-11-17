@@ -325,7 +325,7 @@ keep moving, and its visible composition must stay the one its person chose.
 
 A shell is `shells/<name>/shell.toml`: its name and description, packages,
 Wayland session file (without `.desktop`), compositor command, optional greeter
-unit and theme targets. The default shell owns the greeter; GNOME uses GDM.
+unit. The default shell owns the greeter; GNOME uses GDM.
 To add a shell, create its directory and manifest, optionally add a `rootfs/`
 overlay, then name it in `image.toml`. Overlays are add-only: they follow the
 packages and common `rootfs/` in shell list order, and may share real directories
@@ -351,8 +351,8 @@ The final stage copies each overlay to temporary staging by content and runs
 staging without launching another command. Final-stage copies use ordinary
 `COPY`, since `COPY --link` replaces ancestor directory metadata. A build guard
 requires `/tmp` and `/var/tmp` to remain `1777 root:root` in the image itself
-(a VM's `tmp.mount` hides the underlying `/tmp`). Generated
-JSON and tokens have separate staging and use directory descriptors with
+(a VM's `tmp.mount` hides the underlying `/tmp`). Generated files
+have separate staging and use directory descriptors with
 `O_NOFOLLOW`, including at the leaf. `/usr/share/ilex/.generated.json` records
 generated file hashes: a later layer may replace only an unchanged, registered
 generated file, and registry keys use the same strict path normalization. Base
@@ -1391,8 +1391,9 @@ installer staging or the start of upgrade. Each published root records
 image digests. `changed --root <tag> --inputs-only` compares that key against
 the root's own immutable snapshot before building. Missing keys force a build.
 After a miss the existing v3 RPM/content fingerprint still decides publication;
-a forced test never republishes unchanged content. Shell packages/manifests,
-overlays and design tokens affect only roots selecting them. Base packages,
+a forced test never republishes unchanged content. Shell packages, manifests
+and overlays affect only roots selecting them. Unshipped `design/` material
+affects neither root inputs nor content fingerprints. Base packages,
 `rootfs`, shipped crate trees and common build helpers affect both roots. A
 base-only input change cannot leave the desktop unchanged when that input is
 shared; independent RPM/content outcomes and snapshots can still let either
