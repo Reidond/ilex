@@ -83,5 +83,6 @@ ratio or successful tier run is claimed here.
 At 16:15 UTC `publish.yml` run `44118969608` on
 `phase0/17-security-probes` was in progress. No competing branch workflow was
 dispatched at that point. It later completed, leaving the queue clear. The
-existing workflow stages candidate images in ghcr even for branch dispatches;
-no run was dispatched under this task's no-new-registry-push constraint.
+existing workflow stages candidate images in ghcr even for branch dispatches.
+The owner subsequently clarified that exactly one normal branch CI staging run
+is authorized; the no-push rule applies to local/dev/builder execution.

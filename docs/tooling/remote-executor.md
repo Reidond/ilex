@@ -101,7 +101,9 @@ The host installation lock fences registration against T2 maintenance. Queued
 and running `ilex-job-<UUID>.service` units and a shared guest lifecycle lock make
 the builder nonidle. Each checkout has an exclusive job lease. A guest scheduler
 reserves memory-weighted slots and CPU across checkout jobs, retaining leases
-while their exact systemd units are active and reconciling stale unit leases.
+while their exact systemd units are active. Stale leases require reconciliation
+of recorded container/domain IDs before release; provider lookup errors fail
+closed rather than proving absence.
 `ILEX_VM_SLOTS` can further reduce the cap. Existing nested VM slots are capped
 at one within a job. The builder's fixed memory is charged once on Windows;
 nested memory comes out of that allocation, not a second physical allocation.

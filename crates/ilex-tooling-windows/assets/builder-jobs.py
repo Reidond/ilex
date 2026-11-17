@@ -366,6 +366,13 @@ def capacity(spec):
                 record = read_json(lease)
                 if running(service(lease.parent.name)):
                     active.append(record)
+                else:
+                    # A dead launcher is not proof that libvirt/conmon stopped.
+                    # Reconcile its exact recorded IDs before releasing memory.
+                    previous = read_json(lease.parent / 'request.json')
+                    assert previous['job'] == lease.parent.name and previous['snapshot']['identity']['owner'] == lease.parent.parent.name
+                    cleanup_resources(lease.parent, previous)
+                    lease.unlink(missing_ok=True)
             if len(active) < cap and sum(x['bytes'] for x in active) + weight <= total - 2 * 1024**3 and sum(x['cpus'] for x in active) + min(4, os.cpu_count()) <= os.cpu_count():
                 atomic(job_path(spec['snapshot']['identity']['owner'], spec['job']) / 'lease.json',
                        encode({'bytes': weight, 'cpus': min(4, os.cpu_count()), 'unit': service(spec['job'])}))
@@ -420,27 +427,27 @@ def cleanup_resources(path, spec):
         identity, name = resource['id'], resource['name']
         if resource['provider'] == 'podman':
             assert re.fullmatch('[0-9a-f]{64}', identity)
-            result = subprocess.run(['podman', 'container', 'inspect', identity], env=ENV, capture_output=True)
-            if result.returncode:
+            inventory = checked(['podman', 'ps', '--all', '--no-trunc', '--format', '{{.ID}}']).decode().splitlines()
+            if identity not in inventory:
                 continue
-            container = json.loads(result.stdout)[0]
+            container = json.loads(checked(['podman', 'container', 'inspect', identity]))[0]
             assert container['Id'] == identity and container['Name'].lstrip('/') == name, 'container allocation changed'
             checked(['podman', 'rm', '--force', '--time', '5', identity])
         elif resource['provider'] == 'libvirt':
             ident(identity)
-            result = subprocess.run(['virsh', 'domname', identity], env=ENV, capture_output=True, text=True)
-            if result.returncode:
+            inventory = checked(['virsh', 'list', '--all', '--uuid']).decode().split()
+            if identity not in inventory:
                 continue
-            assert result.stdout.strip() == name, 'domain allocation changed'
+            assert checked(['virsh', 'domname', identity]).decode().strip() == name, 'domain allocation changed'
             subprocess.run(['virsh', 'destroy', identity], env=ENV, capture_output=True)
             assert checked(['virsh', 'domuuid', name]).decode().strip() == identity, 'domain UUID changed'
             checked(['bcvk', 'libvirt', 'rm', '--force', name])
         elif resource['provider'] == 'image_alias':
             assert re.fullmatch('localhost/ilex-job:[0-9a-f]{64}', identity), 'invalid temporary image allocation'
-            result = subprocess.run(['podman', 'image', 'inspect', identity], env=ENV, capture_output=True)
-            if result.returncode:
+            inventory = checked(['podman', 'images', '--all', '--format', '{{.Repository}}:{{.Tag}}']).decode().splitlines()
+            if identity not in inventory:
                 continue
-            image = json.loads(result.stdout)[0]
+            image = json.loads(checked(['podman', 'image', 'inspect', identity]))[0]
             assert image['Labels']['ilex.checkout-owner'] == spec['snapshot']['identity']['owner'], 'temporary image owner changed'
             checked(['podman', 'untag', identity, identity])
         else:
@@ -448,10 +455,10 @@ def cleanup_resources(path, spec):
     for cid in sorted((path / 'resources').glob('*.cid')):
         identity = cid.read_text().strip()
         assert re.fullmatch('[0-9a-f]{64}', identity), 'invalid Podman-created CID'
-        result = subprocess.run(['podman', 'container', 'inspect', identity], env=ENV, capture_output=True)
-        if result.returncode:
+        inventory = checked(['podman', 'ps', '--all', '--no-trunc', '--format', '{{.ID}}']).decode().splitlines()
+        if identity not in inventory:
             continue
-        container = json.loads(result.stdout)[0]
+        container = json.loads(checked(['podman', 'container', 'inspect', identity]))[0]
         labels = container['Config']['Labels']
         assert container['Id'] == identity and labels['ilex.remote-job'] == spec['job'] and labels['ilex.checkout-owner'] == spec['snapshot']['identity']['owner'], 'foreign job container'
         checked(['podman', 'rm', '--force', '--time', '5', identity])
@@ -595,9 +602,16 @@ def request(frame, payload):
             if not result and not running(service(frame['job'])):
                 # A power loss/cgroup kill remains observable and still exposes logs.
                 state = owner_dir(spec['snapshot']) / 'state' / spec['snapshot']['identity']['slug']
+                cleanup_error = None
+                try:
+                    cleanup_resources(path, spec)
+                    (path / 'lease.json').unlink(missing_ok=True)
+                except Exception as error:
+                    cleanup_error = str(error)
                 result = {'schema': 1, 'job': frame['job'], 'owner': frame['owner'],
                           'source_digest': spec['snapshot']['source']['digest'], 'exit_code': 130,
-                          'artifacts': artifact_inventory(path, state), 'interrupted': True}
+                          'artifacts': artifact_inventory(path, state), 'interrupted': True,
+                          'resource_cleanup_error': cleanup_error}
                 atomic(path / 'result.json', encode(result))
             sizes = {n: (path / (n + '.log')).stat().st_size if (path / (n + '.log')).exists() else 0 for n in ('stdout', 'stderr')}
             return {'state': read_json(path / 'state.json'), 'result': result, 'logs': sizes}, b''
