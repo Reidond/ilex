@@ -453,7 +453,9 @@ done
 restorecon -RF /etc/ssh/ilex-homed-e2e
 printf '\nMatch User ilexmaint,homedtest\n    AuthorizedKeysFile /etc/ssh/ilex-homed-e2e/%%u\n' >> /etc/ssh/sshd_config
 sshd -t
-sshd -T -C user=homedtest,host=localhost,addr=127.0.0.1 | grep -Fx 'authorizedkeysfile /etc/ssh/ilex-homed-e2e/%u'
+for user in ilexmaint homedtest; do
+    sshd -T -C user=$user,host=localhost,addr=127.0.0.1 | grep -iFx 'authorizedkeysfile /etc/ssh/ilex-homed-e2e/%u'
+done
 systemctl reload sshd
 "#, common::quote(key.trim())))?;
         let cursor = vm.ssh_ok("journalctl -n 1 -o json --no-pager | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"__CURSOR\"])'")?;
