@@ -2,8 +2,8 @@ name = "gnome"
 description = "GNOME on Wayland, signed in through GDM"
 
 [packages]
-# Public profile settings use a confined writer and private session bus.
-install = ["@gnome-desktop", "gdm", "bubblewrap", "dbus-daemon"]
+# Public profile settings confine the session's dconf writer.
+install = ["@gnome-desktop", "gdm", "bubblewrap"]
 
 [session]
 # The session file in /usr/share/wayland-sessions, without .desktop.

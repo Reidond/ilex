@@ -722,10 +722,11 @@ not `$HOME`, and writes with owned no-follow directory descriptors. Nothing
 imports or rewrites `.identity`, `.identity-blob`, keyrings or credentials.
 External settings/app writers run in bubblewrap with a read-only host, masked
 homes and runtime, a clean environment, and only no-follow-opened home
-subdirectories bound writable. GNOME uses its own dconf profile and private
-session bus (`dbus-daemon`); the existing session's redirected writer is never
-used. Symlinked dconf directories/databases are conflicts. Running desktop
-components may need a new session to observe these settings changes.
+subdirectories bound writable. A systemd user drop-in confines the session's
+actual dconf writer for homed accounts, retaining its bus, cache and desktop
+notifications. Local maintenance accounts retain Fedora's writer. Profile
+clients use a canonical dconf/session environment and refuse activation
+overrides. Symlinked dconf directories/databases are conflicts.
 
 `~/.local/state/ilex/profile.json` stores schema, profile revision/digest and
 managed file/setting hashes or values. Missing files are seeded atomically;

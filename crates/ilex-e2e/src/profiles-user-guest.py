@@ -126,6 +126,7 @@ assert welcome.read_text() == "profile revision two\n"
 if gnome:
     assert subprocess.check_output(['dconf', 'read', '/org/gnome/desktop/interface/clock-show-weekday'], text=True).strip() == 'false'
     subprocess.run(['gsettings', 'set', 'org.gnome.desktop.interface', 'color-scheme', 'prefer-dark'], check=True)
+    assert subprocess.check_output(['dconf', 'read', '/org/gnome/desktop/interface/clock-show-weekday'], text=True).strip() == 'false'
 added.unlink()
 fixture("/run/ilex-profile-v2", 1)
 assert not added.exists()

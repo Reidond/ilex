@@ -20,13 +20,6 @@ import uuid
 ROOT = "/usr/share/ilex"
 STATE = ".local/state/ilex/profile.json"
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-SETTINGS_WORKER = """import json, runpy, sys
-module = runpy.run_path('/usr/libexec/ilex/profile.py', run_name='ilex_settings_worker')
-request = json.loads(sys.stdin.read(1048577))
-conflicts = []
-managed = module['settings_worker'](request['data'], request['previous'], conflicts)
-print(json.dumps({'managed': managed, 'conflicts': conflicts}))
-"""
 
 
 def digest(data):
@@ -123,12 +116,12 @@ def run(*args, **options):
     return result.stdout.strip()
 
 
-def confined(home, directories, command, payload=None, network=False):
+def confined(home, directories, command, network=False, runtime=None, replace=False):
     """External writers see only pinned home subdirectories as writable.
 
     A path check alone cannot constrain the session's existing dconf service.
-    Mask homes/runtime, clear inherited XDG/dconf/D-Bus redirects and use a
-    private bus. Even a concurrent symlink swap cannot write outside the
+    Mask homes/runtime and clear inherited XDG/dconf/D-Bus redirects.
+    Even a concurrent symlink swap cannot write outside the
     explicitly bound directory in the authenticated home; the rest is RO.
     """
     with ExitStack() as opened:
@@ -137,7 +130,8 @@ def confined(home, directories, command, payload=None, network=False):
             arguments.append("--share-net")
         arguments += ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
                       "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/var/home",
-                      "--dir", home.path, "--dir", f"/run/user/{home.owner}", "--clearenv"]
+                      "--perms", "0700", "--dir", home.path,
+                      "--perms", "0700", "--dir", f"/run/user/{home.owner}", "--clearenv"]
         for key, value in {"PATH": "/usr/bin:/usr/sbin", "HOME": home.path,
                            "XDG_CONFIG_HOME": home.path + "/.config",
                            "XDG_DATA_HOME": home.path + "/.local/share",
@@ -147,13 +141,46 @@ def confined(home, directories, command, payload=None, network=False):
                            "DCONF_PROFILE": "/usr/libexec/ilex/dconf-profile"}.items():
             arguments += ["--setenv", key, value]
         descriptors = []
+        if network:
+            resolver = opened.enter_context(open("/etc/resolv.conf", "rb"))
+            descriptors.append(resolver.fileno())
+            arguments += ["--ro-bind-fd", str(resolver.fileno()), "/etc/resolv.conf"]
+        if runtime is not None:
+            descriptors.append(runtime.fd)
+            arguments += ["--bind-fd", str(runtime.fd), runtime.path,
+                          "--setenv", "DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime.path}/bus"]
         for directory in directories:
             fd, _ = opened.enter_context(home.parent(directory + "/.anchor", create=True))
             descriptors.append(fd)
             arguments += ["--dir", home.path + "/" + directory,
                           "--bind-fd", str(fd), home.path + "/" + directory]
         arguments += ["--chdir", home.path, "--", *command]
-        return run(*arguments, pass_fds=descriptors, input=payload)
+        if replace:
+            for fd in descriptors:
+                os.set_inheritable(fd, True)
+            os.execv(arguments[0], arguments)
+        return run(*arguments, pass_fds=descriptors)
+
+
+def dconf_service():
+    """The actual session writer, confined for homed users, with normal IPC."""
+    account = pwd.getpwuid(os.getuid())
+    if account.pw_uid == 0:
+        raise ValueError("dconf profile writer must run as its home user")
+    # Local maintenance accounts retain Fedora's writer. They cannot apply a
+    # public profile. Never fall back after a homed authentication/path error.
+    for line in read_image("/etc/passwd").decode().splitlines():
+        fields = line.split(":")
+        if len(fields) == 7 and fields[0] == account.pw_name and fields[2] == str(account.pw_uid):
+            os.execv("/usr/libexec/dconf-service", ["/usr/libexec/dconf-service"])
+    home = active_home()
+    runtime = Home(f"/run/user/{home.owner}", home.owner)
+    try:
+        home.read(".config/dconf/user")
+        confined(home, [".config/dconf"], ["/usr/libexec/dconf-service"], runtime=runtime, replace=True)
+    finally:
+        os.close(runtime.fd)
+        os.close(home.fd)
 
 
 def read_image(path):
@@ -229,7 +256,7 @@ def active_home():
     return Home(path, uid)
 
 
-def settings_worker(data, previous, conflicts):
+def settings_worker(data, previous, conflicts, environment):
     managed = dict(previous)
     for key, value in data.get("gnome", {}).items():
         if key not in {"color-scheme", "clock-show-weekday", "clock-format"}:
@@ -237,14 +264,14 @@ def settings_worker(data, previous, conflicts):
         variant = ("true" if value else "false") if type(value) is bool else f"'{value}'"
         path = f"/org/gnome/desktop/interface/{key}"
         try:
-            current = run("/usr/bin/dconf", "read", path)
+            current = run("/usr/bin/dconf", "read", path, env=environment)
             if (key in previous and current != previous[key]) or (key not in previous and current):
                 conflicts.append(f"settings.gnome.{key}")
                 continue
             if key in previous and variant == previous[key]:
                 continue
-            run("/usr/bin/gsettings", "set", "org.gnome.desktop.interface", key, variant)
-            managed[key] = run("/usr/bin/dconf", "read", path)
+            run("/usr/bin/gsettings", "set", "org.gnome.desktop.interface", key, variant, env=environment)
+            managed[key] = run("/usr/bin/dconf", "read", path, env=environment)
         except (ValueError, OSError, subprocess.TimeoutExpired):
             conflicts.append(f"settings.gnome.{key} (unavailable; retry after login)")
     return managed
@@ -254,15 +281,22 @@ def settings(home, data, previous, shell, conflicts):
     if shell != "gnome" or not data.get("gnome"):
         return dict(previous)
     try:
-        # Reject redirected databases before launching any writer. The
-        # namespace also closes the check/use race and contains service writes.
+        # Canonical client context; the shipped dconf.service confines the
+        # single session writer itself, including the check/use race.
         home.read(".config/dconf/user")
-        result = json.loads(confined(home, [".config/dconf"], [
-            "/usr/bin/dbus-run-session", "--", "/usr/bin/python3", "-I", "-S",
-            "-c", SETTINGS_WORKER,
-        ], json.dumps({"data": data, "previous": previous})))
-        conflicts.extend(result["conflicts"])
-        return result["managed"]
+        environment = {"HOME": home.path, "XDG_CONFIG_HOME": home.path + "/.config",
+                       "XDG_RUNTIME_DIR": f"/run/user/{home.owner}", "GSETTINGS_BACKEND": "dconf",
+                       "DCONF_PROFILE": "/usr/libexec/ilex/dconf-profile",
+                       "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{home.owner}/bus"}
+        # Refuse a user override that removes the confined activation path.
+        def unit_value(property_name):
+            return run("/usr/bin/systemctl", "--user", "show", "dconf.service", "--value",
+                       "--property=" + property_name, env=environment)
+        if (unit_value("FragmentPath") != "/usr/lib/systemd/user/dconf.service"
+            or unit_value("DropInPaths") != "/usr/lib/systemd/user/dconf.service.d/50-ilex-home.conf"
+            or not unit_value("ExecStart").startswith("{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S /usr/libexec/ilex/dconf-service.py ; ")):
+            raise ValueError("dconf writer activation is overridden")
+        return settings_worker(data, previous, conflicts, environment)
     except (ValueError, OSError, subprocess.TimeoutExpired):
         conflicts.append("settings.gnome (unsafe storage or unavailable writer; retry after login)")
         return dict(previous)
