@@ -292,8 +292,10 @@ def settings(home, data, previous, shell, conflicts):
         def unit_value(property_name):
             return run("/usr/bin/systemctl", "--user", "show", "dconf.service", "--value",
                        "--property=" + property_name, env=environment)
+        dropins = unit_value("DropInPaths").split()
         if (unit_value("FragmentPath") != "/usr/lib/systemd/user/dconf.service"
-            or unit_value("DropInPaths") != "/usr/lib/systemd/user/dconf.service.d/50-ilex-home.conf"
+            or "/usr/lib/systemd/user/dconf.service.d/50-ilex-home.conf" not in dropins
+            or any(not path.startswith("/usr/lib/systemd/user/") for path in dropins)
             or not unit_value("ExecStart").startswith("{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S /usr/libexec/ilex/dconf-service.py ; ")):
             raise ValueError("dconf writer activation is overridden")
         return settings_worker(data, previous, conflicts, environment)
