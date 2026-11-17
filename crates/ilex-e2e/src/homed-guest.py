@@ -135,13 +135,17 @@ def login_argv(name):
             "--noreset", "--noclear", "--noissue", "-", "dumb"]
 
 
-def sizes(name):
+def sizes(name, flush=True):
     home = "/home/" + name
-    run("sync", "-f", home)
+    if flush:
+        run("sync", "-f", home)
     source = run("findmnt", "-nro", "SOURCE", "--target", home).split("[")[0]
     assert source.startswith("/dev/mapper/"), source
     assert run("findmnt", "-nro", "FSTYPE", "--target", home) == "btrfs"
-    fs = int(re.search(r"total_bytes\s+(\d+)", run("btrfs", "inspect-internal", "dump-super", source)).group(1))
+    if flush:
+        fs = int(re.search(r"total_bytes\s+(\d+)", run("btrfs", "inspect-internal", "dump-super", source)).group(1))
+    else:
+        fs = int(re.search(r"Device size:\s+(\d+)", run("btrfs", "filesystem", "usage", "-b", home)).group(1))
     mapper = int(run("blockdev", "--getsize64", source))
     backing = os.stat("/var/home/" + name + ".home").st_size
     assert 0 < fs <= mapper < backing, (fs, mapper, backing)
@@ -257,6 +261,16 @@ def main():
         terminal(["homectl", "resize", name, "2G"], [(r"password[^\r\n]*:", secrets[0])], optional=True)
         assert sizes(name) == measured[2], ("size not restored", sizes(name), measured)
         return {"sizes_fs_mapper_backing": measured, "sha256": digest, "undersize_sizes": minimum, "undersize_data_preserved": True}
+    if action == "resize-to":
+        assert request["size"] in ("2G", "3G")
+        terminal(["homectl", "resize", name, request["size"]], [(r"password[^\r\n]*:", secrets[0])], optional=True)
+        return {"sizes": sizes(name), "sha256": checksum(name)}
+    if action == "crash-start":
+        import ilex_homed_crash
+        return ilex_homed_crash.start(name, secrets[0], request["direction"], terminal, sizes)
+    if action == "crash-wait":
+        import ilex_homed_crash
+        return ilex_homed_crash.wait()
     if action == "multi-home":
         create("homedother", secrets[0])
         activate("homedother", secrets[0])

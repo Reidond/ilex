@@ -583,8 +583,11 @@ Fedora policy 45.24 denies `passwd_t` D-Bus messages to homed, including
 `chpasswd`'s PAM query. The image installs `ilex-homed.cil` before overlays:
 bidirectional `dbus send_msg` between `passwd_t` and `systemd_homed_t`,
 matching Fedora's `systemd_homed_dbus_chat` interface, plus `filesystem getattr`
-from `systemd_homework_t` to `pidfs_t` for the fsck spawn path. D-Bus/polkit/homed still
-authorize each request; SELinux remains enforcing. Reassess this small module
+from `systemd_homework_t` to `pidfs_t` for the fsck spawn path. Interrupted
+resize recovery also needs `dir setattr` from `systemd_homework_t` to
+`systemd_homed_cache_t` to restore the staging directory's attributes on
+activation. D-Bus/polkit/homed still authorize each request; SELinux remains
+enforcing. Reassess this small module
 when Fedora ships the corresponding caller integration.
 
 New homed filesystems also need their initial SELinux labels before user
@@ -645,11 +648,29 @@ when a daily home cannot be unlocked. Profiles and firstboot UI are later work.
 backend, never the SELinux-disabled ephemeral guest. `homed::lifecycle`
 checks enforcing SELinux, authselect/NSS, inactive discovery in AccountsService
 and GDM, password login/logout, TTY, password change, sudo, maintenance recovery
-and SSH denial. `homed::allocation` uses disposable outer btrfs storage to
+and SSH denial. The inactive SSH check supplies a valid key outside the
+encrypted home, verifies rejection by `DenyGroups` without home activation,
+and verifies the maintenance administrator can still SSH in.
+`homed::allocation` uses disposable outer btrfs storage to
 check online 2 → 3 → 2 GiB resizing, filesystem/mapper/backing sizes, checksums,
 two active homes and ENOSPC/recovery without filling the system filesystem.
-Both audit authentication/home AVCs and retain nonsecret evidence under
-`<state dir>/artifacts/homed/`. This tier qualifies homed integration, not
+`homed::crash_grow` and `homed::crash_shrink` each use a fresh disposable
+installed-disk overlay with 2 GiB RAM and two CPUs. A guest ptrace probe stops
+the actual homework worker at the btrfs resize ioctl: entry after lower-layer
+growth, or successful exit before lower-layer shrink. QMP resets the same VM
+without guest shutdown or sync. Each trial verifies a new boot, maintenance
+login, password unlock, pre-existing data checksums, actual allocation,
+supported resize recovery and deactivate/reactivate. Interrupted growth can
+leave a safe smaller filesystem inside the larger allocation; requesting the
+same size can be a no-op. The trial normalizes through the smaller size with
+`homectl resize` before retrying growth, never by truncating the backing file.
+
+All four trials audit authentication/home AVCs and retain nonsecret evidence
+under `<state dir>/artifacts/homed/`. Crash trials separately annotate the
+exact worker/tracer PID pair's proc-directory search denial from systemd's
+optional proot detection, which the probe itself triggers. The raw audit is
+retained; other home/authentication denials still fail the trial. No tracer
+access is granted in policy. This tier qualifies homed integration, not
 encrypted root, Secure Boot or the future Windows security backend.
 
 ## Build sharing: kache

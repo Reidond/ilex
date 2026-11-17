@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use ilex_devkit::qemu::{self, Vm, VmConfig};
+use ilex_vmctl::qmp::Qmp;
 use ilex_vmctl::{Vmctl, WaitCond};
 use libtest_mimic::Trial;
 use serde_json::{Value, json};
@@ -17,11 +18,14 @@ use crate::{common, disk::vmtest};
 const USER: &str = "homedtest";
 const WAIT: Duration = Duration::from_secs(240);
 const GUEST_DRIVER: &str = include_str!("homed-guest.py");
+const CRASH_DRIVER: &str = include_str!("homed-crash.py");
 
 pub fn trials() -> Vec<Trial> {
     vec![
         common::trial("homed::lifecycle", lifecycle),
         common::trial("homed::allocation", allocation),
+        common::trial("homed::crash_grow", || resize_crash("grow")),
+        common::trial("homed::crash_shrink", || resize_crash("shrink")),
     ]
 }
 
@@ -41,10 +45,15 @@ fn password() -> Result<String> {
 fn guest(vm: &Vm, request: Value) -> Result<Value> {
     // /run is cleared by the lifecycle's reboots. Reinstall this nonsecret
     // driver on each call; credentials still travel only through stdin.
-    vm.ssh_ok(&format!(
-        "umask 077; printf %s {} | base64 -d > /run/ilex-homed-e2e.py",
-        qemu::base64(GUEST_DRIVER.as_bytes())
-    ))?;
+    for (path, driver) in [
+        ("/run/ilex-homed-e2e.py", GUEST_DRIVER),
+        ("/run/ilex_homed_crash.py", CRASH_DRIVER),
+    ] {
+        vm.ssh_ok(&format!(
+            "umask 077; printf %s {} | base64 -d > {path}",
+            qemu::base64(driver.as_bytes())
+        ))?;
+    }
     let mut child = Command::new("ssh")
         .args([
             "-o",
@@ -133,13 +142,52 @@ fn inactive(vm: &mut Vm, name: &str) -> Result<()> {
 }
 
 fn audit(vm: &Vm, artifacts: &Path) -> Result<()> {
+    audit_with_probe(vm, artifacts, None)
+}
+
+fn audit_with_probe(vm: &Vm, artifacts: &Path, probe: Option<(u64, u64)>) -> Result<()> {
     // Audit records are not necessarily in journald when auditd is present.
     let records = vm.ssh_ok("journalctl --no-pager -g 'avc:.*denied' 2>/dev/null; test ! -f /var/log/audit/audit.log || grep -E 'type=(AVC|USER_AVC).*denied' /var/log/audit/audit.log; true")?;
     qemu::write_artifact(artifacts, "avc.txt", &records)?;
+    // v262 detect_container() probes /proc/TracerPid/comm to detect proot.
+    // That optional probe cannot search the fixture tracer's unconfined proc
+    // directory. Annotate only this exact worker/tracer pair; retain every
+    // record and do not grant a runtime permission for the test harness.
+    // https://github.com/systemd/systemd/blob/v262/src/basic/virt.c
+    let tracer_probe = |line: &str| {
+        probe.is_some_and(|(tracer, worker)| {
+            line.contains(&format!("pid={worker} "))
+                && line.contains(&format!("name=\"{tracer}\" "))
+                && line.contains("dev=\"proc\"")
+                && line.contains("scontext=system_u:system_r:systemd_homework_t:")
+                && line.contains(":unconfined_r:unconfined_t:")
+                && line.contains("tclass=dir")
+                && line.contains("{ search }")
+        })
+    };
+    if let Some((tracer, worker)) = probe {
+        let annotated: Vec<_> = records.lines().filter(|line| tracer_probe(line)).collect();
+        qemu::write_artifact(
+            artifacts,
+            "tracer-probe-avc.json",
+            &serde_json::to_string_pretty(&json!({
+                "tracer_pid":tracer, "worker_pid":worker,
+                "cause":"v262 detect_container optional proot probe while ptraced",
+                "records":annotated,
+            }))?,
+        )?;
+        println!(
+            "     annotated {} optional tracer-probe AVC(s); full audit retained",
+            annotated.len()
+        );
+    }
     // Keep unrelated desktop denials visible, fail on any home/auth boundary.
     let relevant: Vec<_> = records
         .lines()
         .filter(|l| {
+            if tracer_probe(l) {
+                return false;
+            }
             [
                 "homed",
                 "homework",
@@ -250,6 +298,7 @@ fn lifecycle() -> Result<()> {
         // deactivation: PAM/logind must release the last reference itself.
         vm.ssh_ok("uid=$(id -u homedtest); runuser -u homedtest -- env XDG_RUNTIME_DIR=/run/user/$uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus gnome-session-quit --logout --no-prompt")?;
         inactive(&mut vm, USER)?;
+        ssh_inactive(&mut vm, &artifacts)?;
         guest(
             &vm,
             json!({"action":"maintenance-recovery", "secrets":[admin]}),
@@ -339,8 +388,13 @@ done
 "#,
         common::quote(key.trim())
     ))?;
+    ssh_attempts(vm)
+}
+
+fn ssh_attempts(vm: &Vm) -> Result<()> {
     for (user, allowed) in [("ilexmaint", true), (USER, false)] {
         let output = Command::new("ssh")
+            .env("LC_ALL", "C")
             .args([
                 "-o",
                 "StrictHostKeyChecking=no",
@@ -367,8 +421,68 @@ done
             "SSH boundary for {user}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        if allowed {
+            ensure!(
+                String::from_utf8_lossy(&output.stdout).trim() == user,
+                "SSH returned the wrong identity"
+            );
+        } else {
+            ensure!(
+                String::from_utf8_lossy(&output.stderr).contains("Permission denied"),
+                "SSH failed before authentication: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
     Ok(())
+}
+
+fn ssh_inactive(vm: &mut Vm, artifacts: &Path) -> Result<()> {
+    inactive(vm, USER)?;
+    let key = std::fs::read_to_string(vm.info.ssh_key.with_extension("pub"))?;
+    vm.ssh_ok("umask 077; cp /etc/ssh/sshd_config /run/ilex-e2e-sshd_config")?;
+    let result = (|| {
+        // A valid, world-readable public key outside either home. Match is
+        // appended after all global configuration; root's SSH is unchanged.
+        vm.ssh_ok(&format!(r#"set -eu
+install -d -m 755 /etc/ssh/ilex-homed-e2e
+for user in ilexmaint homedtest; do
+    printf '%s\n' {} > /etc/ssh/ilex-homed-e2e/$user
+    chmod 644 /etc/ssh/ilex-homed-e2e/$user
+done
+restorecon -RF /etc/ssh/ilex-homed-e2e
+printf '\nMatch User ilexmaint,homedtest\n    AuthorizedKeysFile /etc/ssh/ilex-homed-e2e/%%u\n' >> /etc/ssh/sshd_config
+sshd -t
+sshd -T -C user=homedtest,host=localhost,addr=127.0.0.1 | grep -Fx 'authorizedkeysfile /etc/ssh/ilex-homed-e2e/%u'
+systemctl reload sshd
+"#, common::quote(key.trim())))?;
+        let cursor = vm.ssh_ok("journalctl -n 1 -o json --no-pager | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"__CURSOR\"])'")?;
+        ssh_attempts(vm)?;
+        inactive(vm, USER)?;
+        let logs = vm.ssh_ok(&format!(
+            "journalctl --no-pager -o cat -u sshd -u systemd-homed --after-cursor={}",
+            common::quote(&cursor)
+        ))?;
+        qemu::write_artifact(artifacts, "ssh-inactive.txt", &logs)?;
+        ensure!(
+            logs.lines()
+                .any(|l| l.contains(USER) && l.contains("DenyGroups")),
+            "locked-home SSH was not refused by DenyGroups: {logs}"
+        );
+        ensure!(
+            !logs
+                .lines()
+                .any(|l| l.contains(USER) && l.contains("inactive → activating")),
+            "SSH attempted to activate the locked home: {logs}"
+        );
+        println!(
+            "     locked-home SSH: external valid key refused by DenyGroups; maintenance accepted; home stayed inactive"
+        );
+        Ok(())
+    })();
+    let cleanup = vm.ssh_ok("set -eu; cat /run/ilex-e2e-sshd_config > /etc/ssh/sshd_config; sshd -t; systemctl reload sshd; rm /run/ilex-e2e-sshd_config").map(|_| ());
+    cleanup.context("restoring normal sshd configuration after the locked-home check")?;
+    result
 }
 
 fn allocation() -> Result<()> {
@@ -418,5 +532,231 @@ fn allocation() -> Result<()> {
         evidence(&vm, &artifacts)
     })();
     let avc = audit(&vm, &artifacts);
+    finish(result, avc)
+}
+
+fn dimensions(value: &Value) -> Result<[u64; 3]> {
+    let read = |i| {
+        value["sizes"][i]
+            .as_u64()
+            .context("missing filesystem/mapper/backing size")
+    };
+    Ok([read(0)?, read(1)?, read(2)?])
+}
+
+fn resize_crash(direction: &str) -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, &format!("homed/crash-{direction}"))?;
+    for name in ["failure.txt", "normalized.json", "tracer-probe-avc.json"] {
+        match std::fs::remove_file(artifacts.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context("clearing previous crash-trial evidence"),
+        }
+    }
+    let disk = vmtest::disk(&ws)?;
+    let mut config = VmConfig::new(format!("homed-crash-{direction}"), disk);
+    config.memory = "2G".into();
+    config.vcpus = 2;
+    let mut vm = vmtest::boot(&ws, config)?;
+    let (secret, admin) = (password()?, password()?);
+    let mut maintenance_created = false;
+    let mut trace_probe = None;
+    let result = (|| {
+        // Only this disposable overlay: keep the reset boot headless too.
+        vm.ssh_ok("systemctl set-default multi-user.target; systemctl stop gdm")?;
+        prepare(&vm)?;
+        guest(&vm, json!({"action":"maintenance", "secrets":[admin]}))?;
+        maintenance_created = true;
+        guest(
+            &vm,
+            json!({"action":"create", "admin":true, "secrets":[secret]}),
+        )?;
+        let original = guest(&vm, json!({"action":"activate", "secrets":[secret]}))?;
+        vm.ssh_ok("homectl deactivate homedtest")?;
+        inactive(&mut vm, USER)?;
+        guest(&vm, json!({"action":"tty", "secrets":[secret]}))?;
+        inactive(&mut vm, USER)?;
+        let mut before = guest(&vm, json!({"action":"activate", "secrets":[secret]}))?;
+        if direction == "shrink" {
+            before = guest(
+                &vm,
+                json!({"action":"resize-to", "size":"3G", "secrets":[secret]}),
+            )?;
+        }
+        ensure!(
+            before["sha256"] == original["sha256"],
+            "fixture checksum changed before interruption"
+        );
+        let before_sizes = dimensions(&before)?;
+        let boot_id = vm.ssh_ok("sync && cat /proc/sys/kernel/random/boot_id")?;
+        qemu::write_artifact(
+            &artifacts,
+            "before.json",
+            &serde_json::to_string_pretty(&before)?,
+        )?;
+        let tracer = guest(
+            &vm,
+            json!({"action":"crash-start", "direction":direction, "secrets":[secret]}),
+        )?;
+        let gate = guest(&vm, json!({"action":"crash-wait"}))?;
+        trace_probe = Some((
+            tracer["tracer_pid"]
+                .as_u64()
+                .context("missing tracer PID")?,
+            gate["worker_pid"].as_u64().context("missing worker PID")?,
+        ));
+        qemu::write_artifact(
+            &artifacts,
+            "gate.json",
+            &serde_json::to_string_pretty(&gate)?,
+        )?;
+        let gated = dimensions(&gate)?;
+        ensure!(
+            gate["worker_state"]
+                .as_str()
+                .is_some_and(|s| s.contains("tracing stop")),
+            "resize worker was not stopped"
+        );
+        ensure!(
+            gate["resize_client_completed"] == false,
+            "resize completed before the crash"
+        );
+        if direction == "grow" {
+            ensure!(
+                gated[0] == before_sizes[0]
+                    && gated[1] > before_sizes[1]
+                    && gated[2] > before_sizes[2],
+                "growth gate was not between lower-layer growth and filesystem growth: {before_sizes:?} -> {gated:?}"
+            );
+        } else {
+            ensure!(
+                gated[0] < before_sizes[0]
+                    && gated[1] == before_sizes[1]
+                    && gated[2] == before_sizes[2],
+                "shrink gate was not between filesystem shrink and lower-layer shrink: {before_sizes:?} -> {gated:?}"
+            );
+        }
+        // A hardware reset, without guest shutdown, sync or a new overlay.
+        let mut qmp = Qmp::connect(&vm.info.qmp_sock)?;
+        qmp.execute("stop", json!({}))?;
+        ensure!(
+            qmp.execute("query-status", json!({}))?["running"] == false,
+            "QEMU did not pause"
+        );
+        qmp.execute("system_reset", json!({}))?;
+        qmp.execute("cont", json!({}))?;
+        drop(qmp);
+        vm.wait_for(
+            "new boot after interrupted homed resize",
+            &format!(
+                "test \"$(cat /proc/sys/kernel/random/boot_id)\" != {}",
+                common::quote(&boot_id)
+            ),
+            vmtest::BOOT_TIMEOUT,
+        )?;
+        let after_boot = vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?;
+        qemu::write_artifact(
+            &artifacts,
+            "reset.json",
+            &serde_json::to_string_pretty(
+                &json!({"method":"QMP stop/system_reset/cont", "before_boot_id":boot_id, "after_boot_id":after_boot}),
+            )?,
+        )?;
+        prepare(&vm)?;
+        guest(
+            &vm,
+            json!({"action":"maintenance-recovery", "secrets":[admin]}),
+        )?;
+        let reopened = guest(&vm, json!({"action":"activate", "secrets":[secret]}))?;
+        qemu::write_artifact(
+            &artifacts,
+            "reopened.json",
+            &serde_json::to_string_pretty(&reopened)?,
+        )?;
+        ensure!(
+            reopened["sha256"] == original["sha256"],
+            "interrupted {direction} changed pre-existing home data"
+        );
+        let target = if direction == "grow" { "3G" } else { "2G" };
+        let target_bytes = if direction == "grow" { 3u64 } else { 2u64 } * 1024 * 1024 * 1024;
+        let reopened_sizes = dimensions(&reopened)?;
+        ensure!(
+            (before_sizes[2].min(target_bytes)..=before_sizes[2].max(target_bytes))
+                .contains(&reopened_sizes[2]),
+            "recovered allocation outside the old/requested bounds"
+        );
+        // A same-backing-size request can be a no-op after interrupted growth,
+        // leaving a safe smaller filesystem. Normalize through the smaller
+        // supported size first, then retry the requested growth; never truncate
+        // the backing file or resize dm-crypt/partitions by hand.
+        if direction == "grow" && reopened_sizes[0] < reopened_sizes[1] {
+            let normalized = guest(
+                &vm,
+                json!({"action":"resize-to", "size":"2G", "secrets":[secret]}),
+            )?;
+            ensure!(
+                normalized["sha256"] == original["sha256"],
+                "normalizing partial growth changed data"
+            );
+            qemu::write_artifact(
+                &artifacts,
+                "normalized.json",
+                &serde_json::to_string_pretty(&normalized)?,
+            )?;
+        }
+        let retried = guest(
+            &vm,
+            json!({"action":"resize-to", "size":target, "secrets":[secret]}),
+        )?;
+        qemu::write_artifact(
+            &artifacts,
+            "retried.json",
+            &serde_json::to_string_pretty(&retried)?,
+        )?;
+        let final_sizes = dimensions(&retried)?;
+        ensure!(
+            retried["sha256"] == original["sha256"]
+                && final_sizes[0] == final_sizes[1]
+                && final_sizes[2] == target_bytes,
+            "resize retry did not restore consistent allocation/data"
+        );
+        vm.ssh_ok("homectl deactivate homedtest")?;
+        inactive(&mut vm, USER)?;
+        let relogged = guest(&vm, json!({"action":"activate", "secrets":[secret]}))?;
+        ensure!(
+            relogged == retried,
+            "repaired allocation/data did not survive deactivate/reactivate"
+        );
+        vm.ssh_ok("homectl deactivate homedtest")?;
+        inactive(&mut vm, USER)?;
+        guest(
+            &vm,
+            json!({"action":"maintenance-recovery", "secrets":[admin]}),
+        )?;
+        guest(
+            &vm,
+            json!({"action":"secret-audit", "secrets":[secret,admin]}),
+        )?;
+        evidence(&vm, &artifacts)
+    })();
+    if result.is_err() {
+        let _ = evidence(&vm, &artifacts);
+        let maintenance = if maintenance_created {
+            guest(
+                &vm,
+                json!({"action":"maintenance-recovery", "secrets":[admin]}),
+            )
+            .map(|_| ())
+        } else {
+            Ok(())
+        };
+        let _ = qemu::write_artifact(
+            &artifacts,
+            "failure.txt",
+            &format!("{result:?}\nmaintenance recovery: {maintenance:?}"),
+        );
+    }
+    let avc = audit_with_probe(&vm, &artifacts, trace_probe);
     finish(result, avc)
 }

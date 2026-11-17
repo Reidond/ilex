@@ -9,3 +9,6 @@
 ; The manager already has Fedora's fs_getattr_pidfs permission; the worker
 ; needs the same metadata-only access. No pidfd/process access is granted.
 (allow systemd_homework_t pidfs_t (filesystem (getattr)))
+; An interrupted resize can leave a staging directory with the homed cache
+; type. The next activation restores its mode/ownership before mounting it.
+(allow systemd_homework_t systemd_homed_cache_t (dir (setattr)))
