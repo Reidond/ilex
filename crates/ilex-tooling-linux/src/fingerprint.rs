@@ -80,6 +80,20 @@ pub fn hash_users(ws: &Workspace, hash: &mut Sha256) -> Result<()> {
 }
 
 pub fn hash_inputs(ws: &Workspace, hash: &mut Sha256, inputs: Vec<String>) -> Result<()> {
+    if let Some(context) = crate::source::remote_context(&ws.root)? {
+        crate::source::verify_materialized(&ws.root, &context.source)?;
+        // Cover selected working bytes, modes, links and deletions, rather than HEAD-only trees.
+        for entry in &context.source.entries {
+            if inputs
+                .iter()
+                .any(|p| entry.path == *p || entry.path.starts_with(&format!("{p}/")))
+            {
+                hash.update(serde_json::to_vec(entry)?);
+                hash.update(b"\n");
+            }
+        }
+        return Ok(());
+    }
     for path in inputs {
         let tree = git::tree_hash(&ws.root, &path).with_context(|| format!("hashing {path}"))?;
         eprintln!("  {path}: {tree}");

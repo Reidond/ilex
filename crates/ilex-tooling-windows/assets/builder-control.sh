@@ -5,10 +5,11 @@ if [ "$(id -u)" != 0 ]; then exec sudo /usr/local/libexec/ilex-builder-control; 
 # sudo deliberately preserves this one bounded operation value via an argument-free
 # stdin frame, not arbitrary environment or host shell strings.
 IFS= read -r op
-case "$op" in probe|idle|smoke|update) ;; *) echo 'unsupported builder operation' >&2; exit 64;; esac
+case "$op" in probe|idle|smoke|update|job) ;; *) echo 'unsupported builder operation' >&2; exit 64;; esac
+if [ "$op" = job ]; then exec /usr/bin/python3 -I -S /usr/local/libexec/ilex-builder-jobs; fi
 if [ "$op" = probe ]; then cat /var/lib/ilex-builder/provision.json; exit 0; fi
 exec 8>/run/lock/ilex-builder-jobs.lock
-if ! flock -n 8 || systemctl list-units 'ilex-job-*.service' --state=running --no-legend | grep -q .; then
+if ! flock -n 8 || systemctl list-units 'ilex-job-*.service' --state=active,activating,deactivating --no-legend | grep -q .; then
     if [ "$op" = idle ]; then printf '{"schema":1,"idle":false}\n'; exit 0; fi
     echo 'builder has active jobs' >&2; exit 75
 fi

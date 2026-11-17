@@ -22,7 +22,7 @@ use ilex_devkit::{Workspace, bcvk, cmd};
 
 use crate::build;
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Args {
     #[command(flatten)]
     pub selection: crate::select::Args,
@@ -85,7 +85,11 @@ fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
 fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
     let requested = std::env::var("ILEX_IMAGE").ok().filter(|s| !s.is_empty());
     let resolved = args.selection.resolve(ws, requested.as_deref(), None)?;
-    let machine_layer = args.selection.requested_machine()?.as_deref().is_some_and(|m| m != "generic");
+    let machine_layer = args
+        .selection
+        .requested_machine()?
+        .as_deref()
+        .is_some_and(|m| m != "generic");
     let image = resolved.image.clone();
     let mut rebuild = args.build;
     if !rebuild {
@@ -117,8 +121,16 @@ fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
             ws,
             &build::Args {
                 selection: args.selection.clone(),
-                tag: if machine_layer { None } else { requested.clone() },
-                on: if machine_layer { requested.clone() } else { None },
+                tag: if machine_layer {
+                    None
+                } else {
+                    requested.clone()
+                },
+                on: if machine_layer {
+                    requested.clone()
+                } else {
+                    None
+                },
                 no_pull: args.no_pull,
                 ..build::Args::default()
             },

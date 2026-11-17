@@ -8,7 +8,7 @@
 use anyhow::Result;
 use ilex_devkit::{Workspace, tool};
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Args {
     /// Name of the tool (and of its image)
     pub name: String,

@@ -44,6 +44,9 @@ pub fn is_dirty(root: &Path) -> Result<bool> {
 
 /// `<sha>` or `<sha>-dirty`, for `org.opencontainers.image.revision`.
 pub fn revision(root: &Path) -> Result<String> {
+    if let Some(context) = crate::source::remote_context(root)? {
+        return Ok(context.identity.source_revision);
+    }
     let sha = head_sha(root)?;
     Ok(if is_dirty(root)? {
         format!("{sha}-dirty")

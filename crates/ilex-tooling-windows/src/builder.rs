@@ -53,12 +53,17 @@ pub fn revision() -> String {
     hash(
         format!(
             "{}\n{}\n{}",
-            include_str!("../assets/provision.sh"),
+            provision(),
             include_str!("../assets/builder-control.sh"),
             include_str!("../assets/smoke.sh")
         )
         .as_bytes(),
     )
+}
+fn provision() -> String {
+    include_str!("../assets/provision.sh").replace("# @ILEX_JOB_RUNNER@", &format!(
+        "cat > /usr/local/libexec/ilex-builder-jobs <<'ILEX_JOB_RUNNER_EOF'\n{}\nILEX_JOB_RUNNER_EOF\nchmod 0755 /usr/local/libexec/ilex-builder-jobs",
+        include_str!("../assets/builder-jobs.py")))
 }
 pub fn verify_fedora_metadata() -> Result<()> {
     let keys = SignedPublicKey::from_bytes_many(
@@ -139,10 +144,7 @@ pub fn run(operation: Operation, options: Options) -> Result<Value> {
     let helper = base.join("builder.ps1");
     // Fixed reviewed scripts, with parameter data in a versioned request file.
     fs::write(&helper, include_str!("../assets/builder.ps1"))?;
-    fs::write(
-        base.join("provision.sh"),
-        include_str!("../assets/provision.sh"),
-    )?;
+    fs::write(base.join("provision.sh"), provision())?;
     fs::write(
         base.join("builder-control.sh"),
         include_str!("../assets/builder-control.sh"),

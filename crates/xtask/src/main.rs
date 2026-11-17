@@ -14,13 +14,15 @@ mod builder;
 mod changed;
 mod disk;
 mod doctor;
-mod info;
 mod identity;
+mod info;
 mod iso;
 mod prepare_publish;
 mod publish;
 mod rechunk;
 mod registry;
+mod remote;
+mod remote_worker;
 mod runtime;
 mod select;
 mod security;
@@ -41,6 +43,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Resume, cancel or qualify this checkout's remote builder jobs
+    Remote(remote::Args),
+    #[command(hide = true)]
+    RemoteWorker(remote_worker::Args),
     /// Provision and maintain the native Windows Hyper-V Fedora builder
     Builder(builder::Args),
     /// Fetch or inspect the pinned per-user portable Windows QEMU runtime
@@ -87,15 +93,23 @@ fn main() -> ExitCode {
 }
 
 fn run(cmd: Cmd) -> Result<()> {
-    if let Cmd::Identity(args) = &cmd { return identity::run(args); }
+    if let Cmd::Identity(args) = &cmd {
+        return identity::run(args);
+    }
     // Infrastructure commands work outside a checkout and never discover WSL.
     let cmd = match cmd {
+        Cmd::RemoteWorker(args) => return remote_worker::run(args),
         Cmd::Builder(args) => return builder::run(args),
         Cmd::Runtime(args) => return runtime::run(args),
         other => other,
     };
     let ws = Workspace::discover()?;
+    let Some(cmd) = remote::route(&ws, cmd)? else {
+        return Ok(());
+    };
     match cmd {
+        Cmd::Remote(args) => remote::run(&ws, args),
+        Cmd::RemoteWorker(_) => unreachable!("handled before workspace discovery"),
         Cmd::Build(args) => build::run(&ws, args),
         Cmd::Rechunk(args) => rechunk::run(&ws, args),
         // The VM stack lives in WSL2; --gui's window is ilex-viewer.exe.
@@ -104,9 +118,13 @@ fn run(cmd: Cmd) -> Result<()> {
             // handing over to WSL. GUI prediction inspects Linux image labels.
             let resolved = args.resolve(&ws)?;
             match ilex_devkit::host_backend() {
-                ilex_devkit::HostBackend::WslCompatibility => wsl::forward(&ws.root, args.gui && !args.print_image),
+                ilex_devkit::HostBackend::WslCompatibility => {
+                    wsl::forward(&ws.root, args.gui && !args.print_image)
+                }
                 ilex_devkit::HostBackend::Linux => vm::run(&ws, args, resolved),
-                ilex_devkit::HostBackend::Unsupported => anyhow::bail!("no VM backend implemented for this host"),
+                ilex_devkit::HostBackend::Unsupported => {
+                    anyhow::bail!("no VM backend implemented for this host")
+                }
             }
         }
         Cmd::Disk(args) => disk::run(&ws, args),

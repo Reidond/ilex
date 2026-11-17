@@ -5,13 +5,17 @@ pub mod config;
 pub mod identity;
 pub mod installer;
 pub mod request;
+pub mod snapshot;
 pub mod state;
+pub mod transfer;
 pub mod vm;
 
 pub use capability::*;
 pub use identity::*;
 pub use request::*;
+pub use snapshot::*;
 pub use state::*;
+pub use transfer::*;
 pub use vm::*;
 
 use anyhow::{Result, bail};

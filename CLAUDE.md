@@ -1153,19 +1153,24 @@ Firmware enforcement, persistent TPM and suspend remain explicitly unavailable
 or unqualified for ordinary Linux defaults; no security capability is silently
 weakened. WSL removal and native Windows providers belong to later tooling PRs.
 
-## Windows: run everything in WSL2
+## Windows: builder commands and WSL compatibility
 
-The T2 infrastructure commands are native Windows exceptions: run `cargo xtask
+The infrastructure commands run natively: run `cargo xtask
 runtime fetch|status|update|self-check` and `cargo xtask builder
 up|status|down|update|self-check` in PowerShell. The persistent per-user Gen2
 builder, pinned acquisition, SSH identity, owned cleanup and update recovery are
 documented in [Windows builder tooling](docs/tooling/windows-builder.md).
-Build/test routing below remains unchanged until the remote-executor layer
-lands. Never remove a ready shared builder as ordinary checkout cleanup.
+T3 also routes native Windows `build`, `test`, `disk`, `iso`, `tool` and `rechunk`
+to that builder automatically. See [remote execution](docs/tooling/remote-executor.md)
+for source snapshots, ownership, logs/artifact delivery, cancellation and resume.
+Use `cargo xtask remote snapshot` to inspect source without starting it, and
+`remote self-check` for a real nested KVM boot through the job path. Native
+security tiers require T5. Never remove a ready shared builder as ordinary
+checkout cleanup.
 
-podman, bcvk and QEMU are Linux-only. On Windows the stack lives in the
+The existing interactive `vm` compatibility path still uses the
 `FedoraLinux-45` WSL2 distro (nested virtualization gives it `/dev/kvm`).
-Run xtask there, from the checkout's directory (WSL translates the cwd):
+The previous direct WSL commands remain available (WSL translates the cwd):
 
 ```sh
 wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'

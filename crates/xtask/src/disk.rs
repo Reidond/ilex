@@ -13,7 +13,17 @@ use ilex_devkit::qemu::{self, DiskFormat, DiskSpec};
 use crate::build;
 mod check;
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    clap::ValueEnum,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum Format {
     #[default]
     Qcow2,
@@ -32,7 +42,7 @@ impl From<Format> for DiskFormat {
 /// The virtual disk size when `--size` isn't given.
 const DEFAULT_SIZE: &str = "30G";
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Args {
     /// Inject alias inspection/store failures in disposable CLI fixtures (Linux)
     #[arg(long)]

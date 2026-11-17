@@ -127,13 +127,27 @@ pub fn podman_rm(name: &str) {
     if !name.starts_with(&ws.vm_prefix()) || ws.ensure_runtime().is_err() {
         return;
     }
-    let Some(owner) = cmd::probe(Command::new("podman").args(["container", "inspect", "--format", "{{index .Config.Labels \"ilex.checkout-owner\"}}", name])) else {
+    let Some(owner) = cmd::probe(Command::new("podman").args([
+        "container",
+        "inspect",
+        "--format",
+        "{{index .Config.Labels \"ilex.checkout-owner\"}}",
+        name,
+    ])) else {
         return;
     };
     if !ws.identity().is_ok_and(|id| id.owner == owner) {
         return;
     }
-    if let Some(id) = cmd::probe(Command::new("podman").args(["container", "inspect", "--format", "{{.Id}}", name])) { remove_container(&id); }
+    if let Some(id) = cmd::probe(Command::new("podman").args([
+        "container",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        name,
+    ])) {
+        remove_container(&id);
+    }
 }
 
 fn remove_container(id: &str) {
@@ -294,6 +308,12 @@ impl EphemeralVm {
             vm.container.is_some(),
             "bcvk did not create an identifiable container"
         );
+        crate::ownership::record_remote_resource(
+            &ws,
+            "podman",
+            vm.container.as_deref().unwrap(),
+            name,
+        )?;
 
         vm.wait_ssh(opts.boot_timeout)?;
         Ok(vm)
@@ -464,6 +484,12 @@ impl LibvirtVm {
             vm.uuid.is_some(),
             "bcvk did not create an identifiable domain"
         );
+        crate::ownership::record_remote_resource(
+            &ws,
+            "libvirt",
+            vm.uuid.as_deref().unwrap(),
+            name,
+        )?;
 
         if let Err(err) = vm.wait_ssh(opts.boot_timeout) {
             // The domain is removed on drop: keep what its consoles said.

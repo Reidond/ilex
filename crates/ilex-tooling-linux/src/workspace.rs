@@ -58,6 +58,13 @@ impl Workspace {
                 .strip_prefix(r"\\?\")
                 .unwrap_or(&root.to_string_lossy()),
         );
+        if let Ok(Some(context)) = crate::source::remote_context(&root) {
+            return Self {
+                root,
+                slug: context.identity.slug,
+                worktree: Some("remote-snapshot".into()),
+            };
+        }
         let worktree = worktree_name(&root).or_else(|| {
             // Unknown gitfiles and missing metadata must never acquire main's
             // namespace. Only a real main checkout has a .git directory.
@@ -84,6 +91,13 @@ impl Workspace {
     /// Native identity survives Windows-to-WSL handoff. The Linux executor
     /// never derives a second owner from the translated mount path.
     pub fn identity(&self) -> Result<CheckoutIdentity> {
+        if let Some(context) = crate::source::remote_context(&self.root)? {
+            anyhow::ensure!(
+                self.slug == context.identity.slug,
+                "remote namespace mismatch"
+            );
+            return Ok(context.identity);
+        }
         let mut identity = allocation(&self.root, worktree_name(&self.root).as_deref())?;
         anyhow::ensure!(
             self.slug == identity.slug,
@@ -318,6 +332,10 @@ pub fn vm_runtime_root() -> PathBuf {
 fn state_root() -> PathBuf {
     if let Some(dir) = env::var_os("ILEX_STATE_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(dir).join("ilex").join("checkouts");
     }
     if let Some(dir) = env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir).join("ilex");

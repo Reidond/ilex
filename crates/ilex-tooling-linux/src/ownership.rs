@@ -463,6 +463,30 @@ pub fn vm_lease(ws: &Workspace, name: &str) -> Result<File> {
     Ok(file)
 }
 
+/// An exact created ID is the cancellation authority, never a VM name prefix.
+/// Local Linux launchers keep their existing lifetime guards unchanged.
+pub fn record_remote_resource(ws: &Workspace, provider: &str, id: &str, name: &str) -> Result<()> {
+    let Some(directory) = std::env::var_os("ILEX_JOB_RESOURCE_DIR") else {
+        return Ok(());
+    };
+    let context = crate::source::remote_context(&ws.root)?
+        .context("remote resource has no source context")?;
+    let directory = std::path::PathBuf::from(directory);
+    let key = digest(format!("{provider}:{id}").as_bytes());
+    fs::create_dir_all(&directory)?;
+    let path = directory.join(format!("{}.json", &key[7..]));
+    let temporary = path.with_extension("partial");
+    fs::write(
+        &temporary,
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "owner": context.identity.owner, "provider": provider,
+            "id": id, "name": name, "source_digest": context.source.digest,
+        }))?,
+    )?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
 pub fn validate_build_args(args: &[String]) -> Result<()> {
     for arg in args {
         ensure!(

@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use crate::build::{BASE_IMAGE, image_exists};
 use crate::registry::FINGERPRINT_LABEL;
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Args {
     /// Image to rechunk: tag (e.g. `candidate`) or full reference (defaults to
     /// this checkout's image). Replaced in place unless `--output` is given.

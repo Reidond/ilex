@@ -27,7 +27,8 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 "source": source, "image": ws.image_ref(), "runtime_dir": ws.runtime_dir(),
                 "state_dir": ws.state_dir(), "backend": format!("{:?}", ilex_devkit::host_backend()),
                 "host_arch": ilex_devkit::core::Architecture::host()?,
-                "capabilities": ilex_devkit::provider::capabilities("none", (1280, 800))
+                "capabilities": ilex_devkit::provider::capabilities("none", (1280, 800)),
+                "build_executor": executor_info(ws)?
             }))?
         );
         return Ok(());
@@ -80,6 +81,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             println!("vm prefix:   {}", ws.vm_prefix());
             println!("runtime dir: {}", ws.runtime_dir().display());
             println!("state dir:   {}", ws.state_dir().display());
+            println!("executor:    {}", executor_info(ws)?);
             println!("vm slots:    {}", slots::max_slots());
             let selection = resolved.selection.context(
                 "reading image.toml for info; run `cargo xtask build` for manifest diagnostics",
@@ -139,6 +141,39 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+fn executor_info(ws: &Workspace) -> Result<serde_json::Value> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = ilex_tooling_windows::builder::run(
+            ilex_tooling_windows::builder::Operation::Status,
+            Default::default(),
+        )?;
+        let owner = ws.identity()?.owner;
+        let last = ws.state_dir().join("remote/last-job");
+        let result = std::fs::read_to_string(last)
+            .ok()
+            .and_then(|id| {
+                std::fs::read(
+                    ws.state_dir()
+                        .join("remote/jobs")
+                        .join(id)
+                        .join("result.json"),
+                )
+                .ok()
+            })
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        Ok(
+            serde_json::json!({"kind":"hyperv-builder","vm_id":status["vm_id"],"state":status["state"],
+            "checkout_root":format!("/var/lib/ilex-data/checkouts/{owner}"),"last_result":result}),
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = ws;
+        Ok(serde_json::json!({"kind":"local-linux"}))
     }
 }
 

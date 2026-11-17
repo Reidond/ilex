@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use ilex_devkit::{Workspace, cmd, config::Selection, workspace::check_tag_length};
 
-#[derive(clap::Args, Clone, Debug, Default)]
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[group(id = "selection")]
 pub struct Args {
     /// Shell to install (repeatable; first is default). `none` is headless.

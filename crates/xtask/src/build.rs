@@ -12,7 +12,7 @@
 use anyhow::{Context, Result, bail};
 use ilex_devkit::{Workspace, cmd};
 
-#[derive(clap::Args, Debug, Default)]
+#[derive(clap::Args, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Args {
     #[command(flatten)]
     pub selection: crate::select::Args,

@@ -20,6 +20,10 @@ fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 pub fn manifest(ws: &Workspace) -> Result<SourceManifest> {
+    if let Some(context) = remote_context(&ws.root)? {
+        verify_materialized(&ws.root, &context.source)?;
+        return Ok(context.source);
+    }
     let first = inventory(ws)?;
     let second = inventory(ws)?;
     ensure!(
@@ -29,6 +33,94 @@ pub fn manifest(ws: &Workspace) -> Result<SourceManifest> {
         "source bytes changed during inventory; retry the command"
     );
     Ok(second)
+}
+
+pub fn remote_context(root: &Path) -> Result<Option<ilex_tooling_core::SnapshotContext>> {
+    let Some(path) = std::env::var_os("ILEX_REMOTE_CONTEXT") else {
+        return Ok(None);
+    };
+    let context: ilex_tooling_core::SnapshotContext = serde_json::from_slice(&fs::read(path)?)?;
+    context.validate()?;
+    if fs::canonicalize(root)? != fs::canonicalize(&context.root)? {
+        return Ok(None);
+    }
+    Ok(Some(context))
+}
+
+pub fn verify_materialized(root: &Path, source: &SourceManifest) -> Result<()> {
+    source.validate()?;
+    let others = git_bytes(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for path in others.split(|b| *b == 0).filter(|b| !b.is_empty()) {
+        let name = std::str::from_utf8(path)?;
+        ensure!(
+            source.entries.iter().any(|e| e.path == name),
+            "new source input appeared after staging: {name}"
+        );
+    }
+    for entry in &source.entries {
+        let path = root.join(&entry.path);
+        // A symlink parent is never a directory into which source can be written.
+        for parent in path
+            .parent()
+            .unwrap()
+            .ancestors()
+            .take_while(|p| *p != root)
+        {
+            if let Ok(meta) = fs::symlink_metadata(parent) {
+                ensure!(
+                    !meta.is_symlink(),
+                    "symlink parent in source: {}",
+                    entry.path
+                );
+            }
+        }
+        let bytes = match &entry.kind {
+            SourceEntryKind::Deleted => {
+                ensure!(
+                    !path.try_exists()? && fs::symlink_metadata(&path).is_err(),
+                    "deleted source reappeared: {}",
+                    entry.path
+                );
+                continue;
+            }
+            SourceEntryKind::Symlink { target } => {
+                ensure!(
+                    fs::symlink_metadata(&path)?.is_symlink()
+                        && fs::read_link(&path)? == Path::new(target),
+                    "source link changed: {}",
+                    entry.path
+                );
+                target.as_bytes().to_vec()
+            }
+            SourceEntryKind::File { executable } => {
+                let meta = fs::symlink_metadata(&path)?;
+                ensure!(
+                    meta.is_file() && !meta.is_symlink(),
+                    "source type changed: {}",
+                    entry.path
+                );
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    ensure!(
+                        (meta.permissions().mode() & 0o111 != 0) == *executable,
+                        "source mode changed: {}",
+                        entry.path
+                    );
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = executable;
+                fs::read(&path)?
+            }
+        };
+        ensure!(
+            bytes.len() as u64 == entry.bytes
+                && entry.sha256.as_deref() == Some(digest(&bytes).as_str()),
+            "source bytes changed: {}",
+            entry.path
+        );
+    }
+    Ok(())
 }
 
 fn inventory(ws: &Workspace) -> Result<SourceManifest> {
@@ -88,6 +180,12 @@ fn inventory(ws: &Workspace) -> Result<SourceManifest> {
         .filter(|b| !b.is_empty())
         .map(|b| std::str::from_utf8(b).map(str::to_owned))
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    // Staged deletions disappear from the index. Keep their HEAD names so both
+    // staged and unstaged deletions are explicit in the transport manifest.
+    let head_files = git_bytes(&ws.root, &["ls-tree", "-r", "--name-only", "-z", "HEAD"])?;
+    for path in head_files.split(|b| *b == 0).filter(|b| !b.is_empty()) {
+        paths.push(std::str::from_utf8(path)?.to_owned());
+    }
     paths.sort();
     paths.dedup();
     let canonical_root = fs::canonicalize(&ws.root)?;
@@ -102,19 +200,37 @@ fn inventory(ws: &Workspace) -> Result<SourceManifest> {
         if path.components().take(1).any(|c| {
             matches!(
                 c.as_os_str().to_str(),
-                Some(".git" | "target" | ".ilex-state")
+                Some(".git" | "target" | ".ilex-state" | ".claude" | ".t3")
             )
         }) {
             continue;
         }
         ensure!(
             !path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s == ".env" || s.ends_with(".key")),
+                .components()
+                .any(|p| p.as_os_str().to_str().is_some_and(|s| matches!(
+                    s,
+                    ".env" | ".ssh" | ".gnupg" | "ilex-secrets" | "credentials"
+                ) || s.starts_with(".env.")
+                    || [".key", ".pem", ".p12", ".pfx"]
+                        .iter()
+                        .any(|e| s.ends_with(e)))),
             "private-named source input {relative}; remove it before building; it cannot be silently omitted from provenance"
         );
         let absolute = ws.root.join(path);
+        for ancestor in absolute
+            .parent()
+            .unwrap()
+            .ancestors()
+            .take_while(|p| *p != ws.root)
+        {
+            if let Ok(meta) = fs::symlink_metadata(ancestor) {
+                ensure!(
+                    !is_reparse(&meta) && !meta.is_symlink(),
+                    "source has symlink/reparse parent: {relative}"
+                );
+            }
+        }
         let parent = absolute.parent().context("source file has no parent")?;
         let parent = parent
             .ancestors()
@@ -139,16 +255,33 @@ fn inventory(ws: &Workspace) -> Result<SourceManifest> {
             }
             Err(err) => return Err(err.into()),
         };
+        ensure!(
+            !is_reparse(&meta) || meta.is_symlink(),
+            "unsupported source reparse point: {relative}"
+        );
         let (kind, bytes) = if meta.is_symlink() || mode == Some("120000") {
             let target = if meta.is_symlink() {
                 fs::read_link(&absolute)?.to_string_lossy().into_owned()
             } else {
                 fs::read_to_string(&absolute)?
             };
+            let mut depth = relative.split('/').count() - 1;
+            ensure!(
+                !target.contains(['\\', ':']) && !target.starts_with('/'),
+                "source symlink escapes checkout: {relative}"
+            );
+            for part in target.split('/') {
+                if part == ".." {
+                    ensure!(depth > 0, "source symlink escapes checkout: {relative}");
+                    depth -= 1;
+                } else if !part.is_empty() && part != "." {
+                    depth += 1;
+                }
+            }
             let resolved = absolute.parent().unwrap().join(&target);
             ensure!(
                 !Path::new(&target).is_absolute()
-                    && fs::canonicalize(&resolved)?.starts_with(&canonical_root),
+                    && fs::canonicalize(&resolved).with_context(|| format!("resolving source symlink {relative}; its target must exist inside the checkout"))?.starts_with(&canonical_root),
                 "source symlink escapes checkout: {relative}"
             );
             (
@@ -161,7 +294,7 @@ fn inventory(ws: &Workspace) -> Result<SourceManifest> {
             ensure!(meta.is_file(), "unsupported source entry {relative}");
             (
                 SourceEntryKind::File {
-                    executable: mode == Some("100755"),
+                    executable: executable(&meta, mode),
                 },
                 fs::read(&absolute)?,
             )
@@ -190,4 +323,33 @@ fn inventory(ws: &Workspace) -> Result<SourceManifest> {
         digest,
         entries,
     })
+}
+
+fn is_reparse(meta: &fs::Metadata) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
+fn executable(meta: &fs::Metadata, mode: Option<&str>) -> bool {
+    if let Some(mode) = mode {
+        return mode == "100755";
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = meta;
+        false
+    }
 }

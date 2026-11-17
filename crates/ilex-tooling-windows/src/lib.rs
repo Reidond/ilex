@@ -5,6 +5,8 @@ pub mod builder;
 mod host;
 #[cfg(target_os = "windows")]
 pub mod runtime;
+#[cfg(target_os = "windows")]
+pub mod transport;
 
 #[cfg(not(target_os = "windows"))]
 pub fn unsupported() -> anyhow::Result<()> {

@@ -47,7 +47,7 @@ const FINGERPRINT_LINE: &str = "installer-fingerprint: ";
 /// the same day).
 const RELEASE_TAG_PREFIX: &str = "installer-";
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Args {
     /// Directory the ISO is written to (default: `<state dir>/iso`)
     #[arg(long)]
@@ -437,18 +437,26 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
         let bin = ws.ensure_state()?.join("image-builder-bin");
         fs::create_dir_all(&bin)?;
         let wrapper = bin.join("osbuild");
-        fs::copy(ws.root.join("installer/image-builder/osbuild-cache"), &wrapper)?;
+        fs::copy(
+            ws.root.join("installer/image-builder/osbuild-cache"),
+            &wrapper,
+        )?;
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
         }
         let mut paths = vec![bin];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
         return cmd::run(
             Command::new("image-builder")
                 .env("PATH", std::env::join_paths(paths)?)
-                .args(build_args(&out_dir.to_string_lossy(), &cache.join("store").to_string_lossy())),
+                .args(build_args(
+                    &out_dir.to_string_lossy(),
+                    &cache.join("store").to_string_lossy(),
+                )),
         );
     }
     eprintln!(

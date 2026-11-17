@@ -72,6 +72,7 @@ tar -xzf /var/lib/ilex-builder/bcvk.tar.gz -C /var/lib/ilex-builder bcvk-x86_64-
 install -m 0755 /var/lib/ilex-builder/bcvk-x86_64-unknown-linux-gnu /usr/local/bin/bcvk
 install -m 0755 /var/lib/ilex-builder/builder-control.sh /usr/local/libexec/ilex-builder-control
 install -m 0755 /var/lib/ilex-builder/smoke.sh /usr/local/libexec/ilex-builder-smoke
+# @ILEX_JOB_RUNNER@
 printf 'ilex ALL=(root) NOPASSWD: /usr/local/libexec/ilex-builder-control\n' >/etc/sudoers.d/ilex-builder
 chmod 0440 /etc/sudoers.d/ilex-builder
 visudo -cf /etc/sudoers.d/ilex-builder
