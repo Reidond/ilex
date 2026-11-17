@@ -73,7 +73,16 @@ pub fn probe() -> Probe {
         return result;
     }
     result.reason = "tool-mismatch";
-    if result.tools.len() != 4 || !result.tools["systemd"].starts_with("262.") {
+    if result.tools.len() != 4
+        || result.tools.iter().any(|(name, version)| {
+            version
+                != match name.as_str() {
+                    "systemd" | "systemd-udev" => "262.1-1.fc45.x86_64",
+                    "cryptsetup" | "cryptsetup-libs" => "2.8.8-1.fc45.x86_64",
+                    _ => "unqualified",
+                }
+        })
+    {
         return result;
     }
     result.verdict = "eligible";

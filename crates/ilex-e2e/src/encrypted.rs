@@ -241,7 +241,7 @@ fn install(fixture: &mut Fixture, artifacts: &Path, deadline: Duration) -> Resul
                 // Guest waits for this explicit nonsecret acknowledgement.
                 // No timeout or failure screenshot may capture the visible key.
                 ctl.save_screenshot(&artifacts.join(file))?;
-                ctl.key("f12")?;
+                ctl.key("shift")?;
                 screenshots[index] = true;
             }
         }
@@ -409,6 +409,7 @@ fn assertions(
     ensure!(
         evidence["schema"] == 1
             && evidence["uuid"] == layout["uuid"]
+            && evidence["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim()
             && evidence["method"] == "tpm2",
         "first boot lacks direct TPM unlock evidence"
     );
@@ -441,8 +442,17 @@ fn assertions(
         state["state"] == "pending" && state["recovery"]["acknowledged"] == true,
         "enrollment was not acknowledged and pending verification"
     );
+    ensure!(
+        evidence["token"]
+            .as_str()
+            .and_then(|id| id.parse::<u64>().ok())
+            == state["tpm"]["token"].as_u64()
+            && evidence["slot"] == state["tpm"]["slot"],
+        "unlock evidence differs from the enrolled token/slot"
+    );
     vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; grep -qw 'rd.luks.options=tpm2-device=auto' /proc/cmdline; ! grep -q headless /etc/crypttab; test \"$(systemctl is-system-running --wait)\" = running; test -z \"$(systemctl --failed --no-legend --plain)\"; ilex-enroll --self-check")?;
-    let topology = vm.ssh_ok("lsblk --json --output NAME,TYPE,FSTYPE,UUID,MOUNTPOINTS; cat /etc/crypttab; cat /proc/cmdline; cat /proc/swaps; findmnt /sysroot /var /boot /boot/efi")?;
+    vm.ssh_ok(&format!("grep 'UUID={uuid}' /etc/crypttab | grep -q tpm2-device=auto; ! grep -q headless /proc/cmdline"))?;
+    let topology = vm.ssh_ok("set -eu; lsblk --json --output NAME,TYPE,FSTYPE,UUID,MOUNTPOINTS; cat /etc/crypttab; cat /proc/cmdline; cat /proc/swaps; for path in /sysroot /var /boot /boot/efi; do findmnt --target \"$path\"; done")?;
     fs::write(artifacts.join("storage.txt"), topology)?;
     Ok(())
 }

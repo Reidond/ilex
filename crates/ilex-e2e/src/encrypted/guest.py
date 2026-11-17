@@ -77,7 +77,7 @@ def screen():
         return b''
 
 
-def wait_for(text, deadline=1800):
+def wait_for(text, deadline=300):
     start = time.monotonic()
     while text not in screen():
         if time.monotonic() - start > deadline:
@@ -135,7 +135,7 @@ def drive():
                 data = os.read(fd, 24 * 64)
                 for at in range(0, len(data), 24):
                     _, _, kind, code, value = struct.unpack('llHHi', data[at:at + 24])
-                    if kind == 1 and code == 88 and value == 1:  # F12, no secret
+                    if kind == 1 and code == 42 and value == 0:  # Shift release: no terminal characters
                         with open('/dev/tty6', 'rb', buffering=0) as tty:
                             termios.tcflush(tty, termios.TCIFLUSH)
                         return

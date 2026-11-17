@@ -33,7 +33,10 @@ The later `ilexctl` rename is outside this change.
 
 Eligibility requires SecureBoot=1, SetupMode=0, TPM2, a nonzero SHA-256 PCR 7
 matching event-log replay, the qualified systemd 262 format, matching live/target
-RPM versions and the target unlock-stack marker. Enrollment uses explicit
+RPM versions and the target unlock-stack marker. The initial allowlist is
+systemd/systemd-udev `262.1-1.fc45.x86_64` and cryptsetup/cryptsetup-libs
+`2.8.8-1.fc45.x86_64`; another pair stays passphrase-only until qualified.
+Enrollment uses explicit
 `--tpm2-pcrs=7:sha256 --tpm2-with-pin=no` and disables public-key, signature
 and pcrlock discovery. Header validation rejects additional PCRs, another bank,
 a PIN, signed policies and pcrlock. No `--wipe-slot=all` or production

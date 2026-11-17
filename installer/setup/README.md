@@ -9,11 +9,15 @@ the generated kickstart's `%post`. `schema: 1` identifies this contract.
   map every composition to one signed tag without changing `composition`.
 - `profile`: `id` and profile `schema`, both null until profile support exists.
 - `security.capabilities`: an empty map, reserved for observed capabilities.
-- `security.tpm`: requested mode `unspecified`, actual capability `unknown`,
-  status `not-configured`. These are unmeasured/unconfigured states.
+- `security.tpm`: unencrypted installs retain requested mode `unspecified`,
+  capability `unknown` and status `not-configured`. Encrypted completion writes
+  requested mode `auto`, observed capability/reason, and `enrolled-unverified`
+  or `passphrase-only`. Enrollment stays pending until PR19 verifies a boot.
 
-This record performs no security setup, capability probing, TPM enrollment,
-encryption or user provisioning. No service consumes it yet. Future readers
+The local encrypted-install completion helper updates this record without
+changing its composition, image or profile. Enrollment details live in the
+encrypted target's `/var/lib/ilex/security/enrollment.json`; see
+`docs/installer-enrollment.md`. This record performs no user provisioning. Readers
 must decline unsupported schema versions, tolerate additive fields and inspect
 actual system state before reporting success. Never put passwords, recovery
 material, tokens or private keys in this record or the installer catalogue.

@@ -109,6 +109,7 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
     console.say("ilex encrypted installation — local completion\r\n\r\nThe administrator account is for maintenance and recovery.\r\nThe disk passphrase remains a recovery option.\r\n\r\n")?;
     let passphrase = console.read("Re-enter the disk passphrase (input is hidden): ")?;
     device.authenticate(passphrase.fd()?)?;
+    configure_crypttab(root, &layout.uuid)?;
     let current = status(&device)?;
     let recovery_exists = current["tokens"]
         .as_array()
@@ -206,6 +207,74 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
     console.say("Installation completion is ready. Press Enter to return to Anaconda.\r\n")?;
     drop(console.read("")?);
     Ok(())
+}
+
+fn configure_crypttab(root: &Path, uuid: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("etc/crypttab");
+    let metadata = fs::symlink_metadata(&path)?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "crypttab must be a regular file"
+    );
+    let original = fs::read_to_string(&path)?;
+    let source = format!("UUID={uuid}");
+    let mut updated = String::new();
+    let mut changed = false;
+    for line in original.lines() {
+        let mut fields: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+        if fields.get(1) == Some(&source) && !line.trim_start().starts_with('#') {
+            let mut options: Vec<&str> = fields
+                .get(3)
+                .map_or("", String::as_str)
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .collect();
+            ensure!(
+                options
+                    .iter()
+                    .all(|o| !o.starts_with("tpm2-device=") || *o == "tpm2-device=auto"),
+                "conflicting root TPM device option"
+            );
+            if !options.contains(&"tpm2-device=auto") {
+                options.push("tpm2-device=auto");
+                let options = options.join(",");
+                if fields.len() == 3 {
+                    fields.push(options);
+                } else {
+                    fields[3] = options;
+                }
+                updated.push_str(&fields.join("\t"));
+                changed = true;
+            } else {
+                updated.push_str(line);
+            }
+        } else {
+            updated.push_str(line);
+        }
+        updated.push('\n');
+    }
+    if !changed {
+        return Ok(());
+    }
+    let temporary = root.join(format!("etc/.crypttab-ilex-{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(metadata.permissions().mode() & 0o777)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)?;
+    let result = (|| {
+        file.write_all(updated.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)?;
+        File::open(root.join("etc"))?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 pub fn self_check() -> Result<()> {
