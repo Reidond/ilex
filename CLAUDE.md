@@ -753,7 +753,7 @@ dconf directory/leaf links outside the encrypted home, inherited environment
 redirects and user-setting conflicts. The compiler regression rejects sparse
 512 MiB templates and all three manifests under a 128 MiB address-space limit.
 Measured 2026-11-17: the shell-free image is 1,977.83 MiB against Fedora
-bootc's 1,917.62 MiB, a 60.21 MiB increase within the unchanged 128 MiB budget.
+bootc's 1,917.62 MiB, a 60.22 MiB increase within the unchanged 128 MiB budget.
 
 ## Build sharing: kache
 
