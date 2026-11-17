@@ -737,8 +737,8 @@ guest. The latter uses 2 GiB and no UI automation, tests user-edit/deletion and
 link preservation, future-state/rollback refusal, opt-in app failure, and a
 successful relogin while the older image's user service declines newer state.
 On a GNOME image it also checks scoped dconf updates and user-setting conflicts.
-Measured 2026-11-16: the shell-free image is 1,977.82 MiB against Fedora
-bootc's 1,917.61 MiB, a 60.21 MiB increase within the unchanged 128 MiB budget.
+Measured 2026-11-17: the shell-free image is 1,977.83 MiB against Fedora
+bootc's 1,917.62 MiB, a 60.21 MiB increase within the unchanged 128 MiB budget.
 
 ## Build sharing: kache
 
