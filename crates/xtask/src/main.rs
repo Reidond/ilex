@@ -87,7 +87,9 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("xtask: error: {err:#}");
-            err.downcast_ref::<remote::Failure>().map(|failure| ExitCode::from(failure.code)).unwrap_or(ExitCode::FAILURE)
+            err.downcast_ref::<remote::Failure>()
+                .map(|failure| ExitCode::from(failure.code))
+                .unwrap_or(ExitCode::FAILURE)
         }
     }
 }

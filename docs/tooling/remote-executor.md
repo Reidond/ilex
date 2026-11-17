@@ -104,6 +104,13 @@ reserves memory-weighted slots and CPU across checkout jobs, retaining leases
 while their exact systemd units are active. Stale leases require reconciliation
 of recorded container/domain IDs before release; provider lookup errors fail
 closed rather than proving absence.
+Cleanup errors retain their resource lease after the service exits. Maintenance
+reports `unreconciled_resources` rather than stopping the builder; a later
+status/resume or admission retries exact-resource reconciliation. The original
+failed result remains historical evidence. A prelaunch nonce in bcvk libvirt
+metadata fences partial launches before their UUID can be recorded. Domain XML,
+which contains a development SSH key, is parsed inside the builder and never
+written to job logs.
 `ILEX_VM_SLOTS` can further reduce the cap. Existing nested VM slots are capped
 at one within a job. The builder's fixed memory is charged once on Windows;
 nested memory comes out of that allocation, not a second physical allocation.
@@ -125,7 +132,9 @@ failure rather than a passing job.
 The builder keeps rootful Podman/libvirt storage on its T2 data disk. Container
 builds retain the shared `ilex-kache` mount and optional read-only host-store
 import, where the host is now the builder. Linux Cargo targets are separated by
-checkout owner, architecture and rustc toolchain identity. Windows target trees
+checkout owner, architecture, rustc toolchain and immutable snapshot identity.
+Cargo's mtime freshness cannot safely share executable paths when returning to
+an older snapshot; each snapshot reuses only its own outputs. Windows target trees
 are never imported. No store pruning or wholesale WSL migration occurs.
 
 Jobs freeze returned state outputs with XFS reflinks (a sparse copy fallback)
@@ -136,6 +145,9 @@ and returned even after command failure. Development private keys stay inside
 the builder. Disk outputs are format/size checked with qemu-img and have no
 backing file; existing QEMU/bcvk fixtures keep their SSH credential recipe.
 Persistent development-disk enrollment and native providers are later layers.
+Libvirt consoles use job-specific directories under its labelled log tree,
+outside private source/credential trees, and are copied into returned artifact
+state after resource cleanup.
 
 Windows state defaults to `%LOCALAPPDATA%/ilex/checkouts/<owner-qualified slug>`.
 The state receipt also fences `main`. It contains:
@@ -150,9 +162,13 @@ The state receipt also fences `main`. It contains:
 
 Downloads are verified into `.partial` files before rename; a matching local
 hash avoids another transfer. Space checks retain 30 GiB on each output volume.
+Explicit disk/archive files and ISO directories require T1 ownership receipts;
+file destinations also take their allocation lock. Foreign claims and reparse
+paths fail before submission. Resume revalidates these claims before delivering
+outputs, including when a local destination was changed after submission.
 `info` reports the original owner, builder UUID/state/root, image reference and
 last result without starting the builder. `transfer.json` records source/upload
 bytes and staging time; results record operation time and actual tool versions.
 
 See [remote-executor-evidence.md](remote-executor-evidence.md) for measured
-validation and outstanding merge gates. No unit-test suite is added.
+validation, exact hashes and measurement limits. No unit-test suite is added.
