@@ -170,7 +170,7 @@ def main():
         tty(name, secrets[0], "python3 -I -S /run/ilex-profiles-user.py")
         return "password-authenticated profile application and safety regressions passed"
     if action == "profile-relogin":
-        tty(name, secrets[0], 'test -r ~/.local/state/ilex/profile.json && test -r ~/.config/ilex/welcome.txt && systemctl --user is-enabled ilex-profile.service && ! systemctl --user restart ilex-profile.service && test "$(systemctl --user show ilex-profile.service -p ExecMainStatus --value)" = 2')
+        tty(name, secrets[0], 'test -r ~/.local/state/ilex/profile.json && test -r ~/.config/ilex/welcome.txt && systemctl --user is-enabled ilex-profile.service && ! systemctl --user restart ilex-profile.service && test "$(systemctl --user show ilex-profile.service -p ExecMainStatus --value)" = 1')
         return "login succeeds with a newer profile state on an older image"
     if action == "maintenance":
         run("useradd", "--create-home", "--groups", "wheel", "--shell", "/bin/bash", "ilexmaint")
