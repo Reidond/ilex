@@ -67,7 +67,11 @@ vm_stack() (
     sudo mkdir -p "$debs/partial"
     echo "apt-debs: $(find "$debs" -maxdepth 1 -name '*.deb' | wc -l) packages from the cache"
     sudo apt-get update
-    sudo apt-get install -y "${apt[@]}" qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo
+    # The ISO tier runs on the Ubuntu host too: xorriso reads its GRUB menu,
+    # e2fsprogs creates OEMDRV, openssh-client supplies SSH/keygen, and ovmf
+    # supplies UEFI firmware. Do not rely on the runner's preinstalled tools.
+    sudo apt-get install -y "${apt[@]}" qemu-system-x86 qemu-utils virtiofsd libvirt-daemon-system passt skopeo \
+        xorriso e2fsprogs openssh-client ovmf
     uname -a
     qemu-system-x86_64 --version
     virsh --version

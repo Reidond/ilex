@@ -59,6 +59,13 @@ fn main() {
             })
             .count()
     };
+    if !args.list
+        && will_run("iso::") > 0
+        && let Err(error) = iso::preflight()
+    {
+        eprintln!("{error:#}");
+        std::process::exit(1);
+    }
     ephemeral::expect(will_run("ephemeral::"));
     // `tool::installed_system` boots a disk of its own, not the tier's VM.
     tool::expect(will_run("tool::") - will_run("tool::installed_system"));

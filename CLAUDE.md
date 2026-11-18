@@ -1648,9 +1648,13 @@ checked again before release; disappearance after a successful installation
 is an error rather than a deferral.
 
 The job prepares KVM/QEMU/libvirt with `vm-prep.sh`, restores its apt package
-cache, checks disk space and the ISO checksum, then runs
+cache (v2 also includes `xorriso`, `e2fsprogs`, `openssh-client` and `ovmf`),
+checks disk space and the ISO checksum, then runs
 `ILEX_ISO=<downloaded artifact> cargo xtask test iso::` with the verified tag and
-`ILEX_ISO_DIGEST`. No ilex container is built by that invocation. The tier boots
+`ILEX_ISO_DIGEST`. No ilex container is built by that invocation. Before any
+selected ISO trial runs, the harness checks all host commands (`xorriso`,
+`qemu-system-x86_64`, `qemu-img`, `mkfs.ext4`, `skopeo`, `ssh`, `ssh-keygen`)
+and reports missing prerequisites with package hints. The tier boots
 Anaconda, installs onto a sparse blank 40 GiB disk, boots it, and asserts the
 booted and tracked `generic.gnome` registry reference, the exact verified
 digest, system `running`, no failed units and GDM up. It requires KVM and 6 GiB

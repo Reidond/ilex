@@ -85,7 +85,8 @@ env:
   # Ubuntu's packages for the VM stack in the Actions cache (vm-prep.sh): the
   # newest entry with this prefix is restored; a job that downloaded packages
   # it lacked saves the set under this prefix and a hash of their names.
-  APT_DEBS: apt-debs-${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}-
+  # v2 includes the ISO tier's host tools (not just the bcvk VM stack).
+  APT_DEBS: apt-debs-${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}-v2-
 
 jobs:
   build:

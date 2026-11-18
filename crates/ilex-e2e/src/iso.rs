@@ -73,6 +73,26 @@ echo ILEX-INSTALL-DONE > /dev/ttyS0
 %end
 "#;
 
+/// Check the whole tier before any trial starts a VM or resolves a registry tag.
+pub fn preflight() -> Result<()> {
+    for tool in [
+        "xorriso",
+        "qemu-system-x86_64",
+        "qemu-img",
+        "mkfs.ext4",
+        "skopeo",
+        "ssh",
+        "ssh-keygen",
+    ] {
+        cmd::require(tool).context(
+            "iso:: host prerequisites: install xorriso, QEMU (including qemu-img), \
+             e2fsprogs, skopeo and the OpenSSH client (Ubuntu: openssh-client); \
+             UEFI firmware is also required (Ubuntu: ovmf)",
+        )?;
+    }
+    Ok(())
+}
+
 pub fn trials() -> Vec<Trial> {
     let mut trials = Vec::new();
     for (name, machine, board_only, kernel) in [
