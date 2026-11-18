@@ -34,7 +34,7 @@ def privacy_module():
 
 def scan_roots():
     roots = ['/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/root',
-             '/run/anaconda', '/run/ilex-enroll', '/var/lib/systemd/coredump',
+             '/run/anaconda', '/run/ilex', '/run/ilex-enroll', '/var/lib/systemd/coredump',
              '/var/spool/abrt', str(PUBLIC)]
     for target in ['/mnt/sysroot', '/mnt/sysimage']:
         roots.extend(target + suffix for suffix in

@@ -341,7 +341,7 @@ fn artifact_privacy(roots: &[&Path], credentials: &Value) -> Result<Value> {
 
 fn guest_privacy(vm: &qemu::Vm, artifacts: &Path, label: &str, credentials: &Value) -> Result<()> {
     let script = format!(
-        "__name__ = 'ilex_private_matcher'\n{PRIVACY}\nprint(json.dumps(scan(['/etc', '/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/var/lib/ilex', '/var/roothome', '/root', '/var/lib/systemd/coredump', '/var/spool/abrt', '/run/anaconda', '/run/ilex-enroll'], json.loads({:?}), journal=True)))",
+        "__name__ = 'ilex_private_matcher'\n{PRIVACY}\nprint(json.dumps(scan(['/etc', '/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/var/lib/ilex', '/var/roothome', '/root', '/var/lib/systemd/coredump', '/var/spool/abrt', '/run/anaconda', '/run/ilex', '/run/ilex-enroll'], json.loads({:?}), journal=True)))",
         credentials.to_string()
     );
     let command = format!("python3 -I -S -c '{}'", script.replace('\'', "'\\''"));
