@@ -127,7 +127,7 @@ def prepare():
     unit.write_text('[Unit]\nDefaultDependencies=no\n'
                     'After=anaconda.service anaconda-direct.service\n'
                     'Before=umount.target poweroff.target\n'
-                    '[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -I -S '
+                    '[Service]\nType=oneshot\nTimeoutStartSec=1800\nExecStart=/usr/bin/python3 -I -S '
                     + str(SEED / 'guest.py') + ' finalise\n')
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     subprocess.run(['systemctl', 'add-wants', 'poweroff.target', unit.name], check=True)

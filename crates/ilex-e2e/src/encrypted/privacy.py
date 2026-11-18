@@ -46,8 +46,10 @@ def scan(roots, fingerprints, journal=False):
               'read_errors': 0, 'journal_scanned': False, 'secret_found': False,
               'credentials_checked': len(fingerprints)}
     seen = set()
+    def unreadable(_error):
+        result['read_errors'] += 1
     for root in roots:
-        for directory, _, files in os.walk(root, followlinks=False):
+        for directory, _, files in os.walk(root, followlinks=False, onerror=unreadable):
             for name in files:
                 path = pathlib.Path(directory) / name
                 try:

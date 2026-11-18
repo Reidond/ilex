@@ -81,12 +81,29 @@ fallback prompts; a successful path without direct method evidence records
 PR 19 owns later verification and fallback repair. No boot service in PR 18
 automatically reseals or generates recovery material.
 
-The base growth gate is 192 MiB (previously 160 MiB). After rebasing onto
+The base growth gate increases **128 → 192 MiB** against this stack's base:
+64 MiB more allowance (50%). The 160 MiB gate was an intermediate PR 18 change.
+After rebasing onto
 main's homed/ilexctl base, the bare image measured 2090.87 MiB versus Fedora's
 1917.62 MiB, growth 173.26 MiB. The earlier pre-rebase image grew 151.84 MiB.
-The rebuilt generic initramfs contributes an approximately 111 MiB layer over
-the inherited Fedora archive. Security and homed support belong in the bare
-base. The measured combined footprint requires the bounded increase; the
+The measured growth exceeds the original 128 MiB allowance by 45.26 MiB.
+Layer accounting for this checkout's bare build is approximately:
+
+| Layer group | MiB |
+| --- | ---: |
+| Rebuilt generic dracut crypt/TPM initramfs and tool manifest | 110.92 |
+| Complete base package transaction, including existing main support | 37.52 |
+| Configuration, including SELinux/homed | 20.69 |
+| Copied helpers, generated files and build plans | 4.14 |
+| Total growth over Fedora bootc | 173.26 |
+
+The replacement initramfs includes cryptsetup fallback, the TPM token plugin,
+tpm2-tss/libcrypto, TPM drivers and ilex-enroll, over the inherited Fedora
+archive. This is layer accounting, not a claim of 173 MiB of new RPMs. The
+explicit security requests are cryptsetup, tpm2-tss, systemd-udev, dracut and
+kbd; some were already present, including systemd-udev through homed.
+Security and homed support belong in the bare base. The combined footprint
+requires the bounded increase; the
 192 MiB limit stays enforced, and the ISO keeps its separate 2 GiB limit.
 
 ## Qualification
@@ -126,7 +143,13 @@ claims in-place conversion of an unencrypted filesystem.
 The fixture requires direct TPM evidence on the first installed boot, no
 password input, matching/replayed ISO and installed PCR 7, encrypted mount
 topology, crypttab/kargs, SELinux enforcing, no failed units, a cold restart
-and a separate no-TPM passphrase fallback. That guest also retries local
+and disposable first-boot PCR-mismatch and actual recovery-key unlocks. The
+first-boot negative has Secure Boot disabled and a different present TPM; it
+records/replays changed PCR 7 and retains fallback slots. A further negative
+changes only the stopped positive fixture's SecureBootEnable variable while
+keeping its original TPM and LUKS header. Both require a prompt, passphrase
+boot, unknown unlock method and no automatic reseal. A separate no-TPM
+passphrase fallback also retries local
 completion, records passphrase-only mode and proves that recovery acknowledgement
 and all slots/tokens are retained. `ilex-enroll --self-check` in the
 booted guest creates one disposable loopback LUKS2 volume and exercises real
@@ -135,9 +158,20 @@ rejection. There are no unit tests.
 
 The guest's private virtual keyboard drives the normal local completion UI.
 It waits at two key-free screens for an explicit screenshot acknowledgement;
-the recovery key is never photographed or returned to the host. Both test
-secret values are scanned against installer/target logs, journal and public
-evidence without printing matches. Only public metadata, event logs, serial
+the recovery key is never photographed. The guest encrypts its test-only copy
+to an ephemeral RSA-OAEP key whose private half stays in the host's private
+fixture. Decryption feeds locked, dump-disabled memory; keyboard input with
+that exact saved key must unlock the installed initramfs on a different TPM.
+No plaintext recovery file is exported. Fingerprints of these high-entropy
+random fixture credentials let guest, host and CI scan both credentials
+without printing matches. Matching paths, lines and exception text are
+suppressed. Scans cover live/target kickstart locations, logs, state and
+journal exports; a poweroff unit repeats the live scan after Anaconda
+finalisation, and installed/cold/negative guests scan the final target files.
+Recursive scans cover the staged and copied export sets and all CI artifact
+tiers after all trials, including gzip/xz/bzip2/ZIP contents. Image files are
+excluded with header checks and the screenshot handshake; no OCR is claimed.
+Only public metadata, event logs, serial
 diagnostics and key-free screenshots enter `artifacts/encrypted-install/`.
 Evidence is staged privately until the installer privacy gate and recursive
 artifact scan both pass. A failed run publishes its unqualified result and,
@@ -148,9 +182,25 @@ Disks, firmware/TPM state, private answers and signing keys are removed.
 The install deadline defaults to three hours for explicit TCG and can be set
 with positive `ILEX_ENCRYPTED_INSTALL_TIMEOUT` seconds. Missing qualification,
 missing evidence, failure and timeout remain **unqualified**, with a failed
-stage. The CI `encrypted_install=true` input selects the 6 GiB firmware profile
-and requires both exact encrypted storage gates. Public evidence for automatic
+stage. The interrupted trial kills the shipped completion while its first
+recovery key is visible, before acknowledgement/TPM enrollment. It boots with
+the passphrase and the unacknowledged recovery key, checks the incomplete
+state and intact slots, verifies an ordinary retry refuses implicit reissue,
+then performs authenticated explicit reissue and boots with the new key. No
+test helper replaces the enrollment executable or the ISO.
+
+The CI `encrypted_install=true` input forces build, rechunk, staging, VM setup
+and exact 6 GiB firmware qualification even with `test=false` and unchanged
+inputs. Missing backend/firmware/TPM evidence fails the job under T6's contract;
+the cache-only `v1_disk=true` combination fails explicitly. It requires both
+exact encrypted storage gates plus the interrupted trial. Public evidence for automatic
 storage and existing free space is retained separately; the gate is opt-in
-while being qualified.
+while being qualified. A hosted qualifying run should select branch
+`phase0/18-luks-enroll`, `encrypted_install=true`, `security_accelerator=kvm`,
+`v1_disk=false`, `test=true`, `iso=false`. The encrypted gate builds its own
+exact ISO; `iso=true` additionally runs the independent publication ISO path.
+The hosted runner's earlier 4 GiB KVM result does not qualify 6 GiB: this run
+must measure the 6 GiB/two-vCPU contract before the encrypted tests. A KVM SMM
+failure remains unqualified; explicit TCG is a separately measured alternative.
 Physical fTPM, firmware changes and actual kernel-upgrade/rollback behavior
 remain later qualification, never inferred from this fixture.
