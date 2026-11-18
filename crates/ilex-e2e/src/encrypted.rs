@@ -1365,8 +1365,9 @@ fn interrupted_repair(
     ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
     ctl.key("ret")?;
     vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Press Enter when it is saved offline.\" /dev/vcs8; do sleep 1; done'")?;
-    // Capture character cells into locked host memory only; never an artifact
-    // or screenshot. Matched bytes and subprocess output are never formatted.
+    // Capture cells privately, move the key into locked host memory and erase
+    // the transient buffers. Neither cells nor the key become an artifact or
+    // screenshot; matched bytes/subprocess output are never formatted.
     let mut cells = vm.ssh("cat /dev/vcs8")?;
     ensure!(cells.status.success(), "private local recovery read failed");
     let key = cells
@@ -1523,8 +1524,10 @@ fn same_tpm_mismatch(
         "cat /run/ilex/root-unlock.json",
     )?;
     ensure!(
-        unlock["method"] == "unknown",
-        "policy rejection was incorrectly called TPM unlock"
+        unlock["method"] == "unknown"
+            && unlock["uuid"] == tokens["uuid"]
+            && unlock["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim(),
+        "policy rejection lacks matching root fallback evidence"
     );
     let uuid = tokens["uuid"].as_str().context("root UUID missing")?;
     let after = guest_json(
