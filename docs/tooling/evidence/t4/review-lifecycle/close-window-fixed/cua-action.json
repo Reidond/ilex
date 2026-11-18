@@ -1,0 +1,39 @@
+{
+  "structuredContent": {
+    "code": "tool_invocation_failed",
+    "executed": 1,
+    "failed_step": 0,
+    "observation": {
+      "message": "No window with window_id 104206152 exists. Call `list_windows({\"pid\": 37328})` for candidates.",
+      "ok": false,
+      "tool": "get_window_state"
+    },
+    "ok": false,
+    "steps": [
+      {
+        "index": 0,
+        "message": "foreground_unavailable: exact target HWND 0x6360f48 or a verified same-process post-action window was not foreground after the click (actual foreground HWND 0x307d6)",
+        "ok": false,
+        "phase": "action",
+        "target": {
+          "window": {
+            "app": null,
+            "pid": 37328,
+            "title": null,
+            "window_id": 104206152
+          }
+        },
+        "tool": "click"
+      }
+    ],
+    "total": 1
+  },
+  "content": [
+    {
+      "type": "text",
+      "text": "run_steps: step 1 of 1 failed; 0 step(s) ran before it, 0 not run\n1. click ERROR (action): foreground_unavailable: exact target HWND 0x6360f48 or a verified same-process post-action window was not foreground after the click (actual foreground HWND 0x307d6)\nobservation: get_window_state ERROR: No window with window_id 104206152 exists. Call `list_windows({\"pid\": 37328})` for candidates."
+    }
+  ],
+  "isError": true,
+  "image_blocks_omitted": true
+}

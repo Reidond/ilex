@@ -1,0 +1,11 @@
+{
+  "utc": "2026-11-18T11:29:39.5673356Z",
+  "owned_native_qemu": [],
+  "owned_launchers": [],
+  "builder_state": "Off",
+  "builder_memory_gib": 16,
+  "builder_dynamic_memory": false,
+  "desktop_memory_gib": 8,
+  "reserve_gib": 14,
+  "head": "65dc7cfc921cce9301a2d377a897a34b50cd0701"
+}

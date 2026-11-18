@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "test-driver-notes",
+  "accepted_minimized_probe": "minimized-direct-result.json",
+  "accepted_probe_source": "../verify-minimized-capture.py",
+  "accepted_probe_method": "Real SendInput; IsIconic sampled immediately before and after the native vmctl command; exit 1, no PNG, explicit no-fresh-frame error.",
+  "unqualified_cua_trial": "The earlier minimized.png/frame.json are excluded from minimized-window evidence. Cua reported a minimized window, but no immediate IsIconic sample bracketed that command. That command produced a WGC image, and the following bring_to_front reported restored=false. The atomic probe above removes this timing ambiguity.",
+  "restore": "restored-direct.frame.json records capture after the accepted minimized probe. restored-motion.png/frame.json show a new Qt workload after restore.",
+  "recording": "recording/audit.json validates thirteen distinct RGB frames with strictly advancing WGC ticks. GIF sampling is separate from application frame rate."
+}

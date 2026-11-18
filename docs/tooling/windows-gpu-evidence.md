@@ -24,9 +24,14 @@ from runtime metadata and omit credential paths.
 | Development helper isolation | [Ordinary image filesystem audit](evidence/t4/production-helper-audit.json), [private composition audit](evidence/t4/development-helper-audit.json). |
 | Review P1: ACLs, reconnects and low-integrity denial | [Pinned QEMU endpoints and raw DACL SDDL](evidence/t4/review-transport-acl/transport-ready.json), [real lowered-token connection results](evidence/t4/review-transport-acl/low-integrity.json). Both clients receive Windows error 10013; normal clients reconnect before and after. |
 | Review P1: long artifact-state paths, concurrent clients and listener audit | [Long-path context](evidence/t4/review-transport-known-folder/context.json), [lowered-token checks](evidence/t4/review-transport-known-folder/low-integrity.json), [held input connection](evidence/t4/review-dual-qmp/result.json), [simultaneous native vmctl check](evidence/t4/review-dual-qmp/vmctl-self-check.json), [actual VM TCP listeners](evidence/t4/review-dual-qmp/listeners.json). Only pinned SSH listens on TCP. [Isolated runtime activation](evidence/t4/review-runtime-activation-final.stdout.log) also passes with private QMP. |
-| Review P2: delayed GNOME login | [Full timestamped retry trace](evidence/t4/review-late-login/timeline.jsonl), [result](evidence/t4/review-late-login/result.json), [Cua window geometry](evidence/t4/review-late-login/cua-window-after-resize.json). GDM stayed stopped beyond 25 seconds after resize; session 1 → 50 recovered 1596×953 without another host resize. |
+| Review P2: delayed GNOME login on the final observer | [Timestamped retries and physical client sizes](evidence/t4/review-late-login-final/timeline.jsonl), [result](evidence/t4/review-late-login-final/result.json), [Cua resize](evidence/t4/review-late-login-final/cua-resize.json), [native crop metadata](evidence/t4/review-late-login-final/after-login.frame.json). GDM stayed stopped for another 25 seconds after resize; session 1 → 40 recovered 1696×1003 without another host resize. The [earlier run](evidence/t4/review-late-login/result.json) also passed. |
+| Review P2: compositor switch and repeated session change | [GNOME → Hyprland result](evidence/t4/review-session-hyprland-fixed/result.json), [full trace](evidence/t4/review-session-hyprland-fixed/timeline.jsonl), [Hyprland re-login result](evidence/t4/review-session-relogin-fixed/result.json), [full trace](evidence/t4/review-session-relogin-fixed/timeline.jsonl). Sessions 1 → 256 → 269 preserved the 1596×953 physical client. The forced 1280×800 bootstrap mode triggered recovery counters 0 → 1 → 2, with no second host resize. |
 | Review P3: real PrintWindow motion and frozen-frame refusal | [Raw commands, timing, frame proofs and PNG hashes](evidence/t4/review-capture/result.json), [positive content-change sidecar](evidence/t4/review-capture/moving-printwindow.frame.json), [unchanged-frame negative](evidence/t4/review-capture/paused-printwindow-1.stderr.log). Changing GTK pixels passed; both paused-guest attempts failed with no output PNG. Presentation ticks are null for PrintWindow. |
-| Review teardown probes | [Real caption close](evidence/t4/review-lifecycle/close-window/result.json), [Cua close action](evidence/t4/review-lifecycle/close-window/cua-action.json), [SendInput Ctrl-C](evidence/t4/review-lifecycle/ctrl-c-before-resize-recovery/result.json), [Cua Ctrl-C action](evidence/t4/review-lifecycle/ctrl-c-before-resize-recovery/cua-action.json). Both processes exited, keys/sockets were removed and stale attachment failed. The later console-isolation refinement and forced-exit/restart gate still need their final rerun. |
+| Review Qt renderer, sustained motion, Unicode and re-login | [OpenGL 4.3 virgl renderer](evidence/t4/review-qt-fixed/qt-renderer-and-motion.txt), [90.232-second frame statistics](evidence/t4/review-qt-fixed/qt-motion.json), [Unicode checks](evidence/t4/review-qt-fixed/qt-clipboard.json), [65-second counters](evidence/t4/review-qt-fixed/qt-clipboard-idle.json), [new GDM invocation](evidence/t4/review-qt-relogin-fixed/relogin.json), [post-login Unicode](evidence/t4/review-qt-relogin-fixed/qt-clipboard.json), [post-login counters](evidence/t4/review-qt-relogin-fixed/qt-clipboard-idle.json), [post-login frame statistics](evidence/t4/review-qt-relogin-fixed/qt-motion.json). |
+| Review native resize, minimized refusal, restore and recording | [1596×953 crop](evidence/t4/review-qt-fixed/before-resize.frame.json), [1496×903 crop](evidence/t4/review-qt-fixed/after-resize.frame.json), [guest acknowledgement](evidence/t4/review-qt-fixed/resize-status.json), [atomic minimized result](evidence/t4/review-qt-relogin-fixed/minimized-direct-result.json), [explicit no-fresh-frame error](evidence/t4/review-qt-relogin-fixed/minimized-direct.stderr.log), [real SendInput probe source](evidence/t4/verify-minimized-capture.py), [restored crop](evidence/t4/review-qt-relogin-fixed/restored-motion.frame.json), [13-frame recording audit](evidence/t4/review-qt-relogin-fixed/recording/audit.json), [capture metadata](evidence/t4/review-qt-relogin-fixed/recording/recording.json), [driver context](evidence/t4/review-qt-relogin-fixed/capture-context.json). |
+| Review normal teardown on the final runtime | [SendInput Ctrl-C](evidence/t4/review-lifecycle/ctrl-c-fixed/result.json), [Cua action](evidence/t4/review-lifecycle/ctrl-c-fixed/cua-action.json), [console/launcher relationship](evidence/t4/review-lifecycle/ctrl-c-fixed/console-processes.json), [ephemeral caption close](evidence/t4/review-lifecycle/close-window-fixed/result.json), [final GNOME caption close](evidence/t4/review-lifecycle/close-after-final-login/result.json), [Cua close action](evidence/t4/review-lifecycle/close-after-final-login/cua-action.json). Both processes exit 0, private keys/sockets disappear and stale attachment fails. Ctrl-C requests poweroff and completes teardown in 3.417 seconds without forced kill. |
+| Review forced launcher exit and restart | [Forced-exit process results](evidence/t4/review-lifecycle/forced-exit/result.json), [restart/reclamation and new pinned SSH](evidence/t4/review-lifecycle/restart-after-force/result.json), [fresh launch](evidence/t4/review-lifecycle/restart-after-force/launch.json). The owned job stops QEMU after launcher exit 37. The next launch removes the old keys, sockets and ephemeral disk/firmware, rotates both public keys and reuses the slot. |
+| Final cleanup and unchanged resource policy | [Final owned-process audit and builder configuration](evidence/t4/review-final-cleanup.json), [capacity observations](evidence/t4/capacity.jsonl), [admission timeout cleanup](evidence/t4/review-admission-timeout-35072/result.json), [owned Windows process audit](evidence/t4/review-owned-qemu-audit.json), [owned WSL resource audit](evidence/t4/review-owned-wsl-audit.json). Builder 16 GiB, desktop 8 GiB and reserve 14 GiB remain unchanged. |
 | Rebased compiler checks | [Exact source and exit codes](evidence/t4/review-clippy-results.json), [Windows clippy](evidence/t4/review-windows-clippy.stderr.log), [Linux clippy](evidence/t4/review-linux-clippy.stderr.log). xtask, vmctl and the e2e binary pass with warnings denied. No unit tests run. |
 
 The original desktop observations below predate the base-stack rewrite and
@@ -34,9 +39,29 @@ identify their frozen installed disk/source explicitly. Post-review transport
 results use the rebased Windows implementation. The first compositor-switch
 [negative trace](evidence/t4/review-session-hyprland/timeline.jsonl) exposed SDL
 adopting the guest's smaller bootstrap mode as the host target. The corrected
-build preserves the acknowledged target while EDID is unchanged. Its cold-boot
-session regression and final console-isolation/forced-exit probes remain
-queued for host capacity and are not claimed complete here.
+build preserves the acknowledged target while EDID is unchanged. The final
+delayed-login, compositor-switch, repeated-session and lifecycle probes above
+all passed after capacity became available. These native regressions use the
+same explicitly identified builder-delivered installed base, with writable
+overlays. Later commits change the e2e fixtures and evidence; the Windows/Linux
+compiler logs identify the unchanged Rust implementation source.
+
+The post-review Qt run recorded 6,750 frames in 90.232 seconds (about 74.8/s),
+with mean interval 13.350 ms, median 13 ms, p95 15 ms and p99 16 ms. Re-login
+recorded 6,750 frames in 90.186 seconds. The native GIF contains thirteen
+distinct client images with strictly advancing WGC ticks; its sampling rate
+is separate from application frame rate. New attached evidence:
+[before resize](https://github.com/user-attachments/assets/ead845c2-ff1d-44e0-9114-40baddbc8ff5),
+[after resize](https://github.com/user-attachments/assets/d6440a55-97ad-4995-b6ff-488c2c788307),
+[restored motion](https://github.com/user-attachments/assets/4e6471fb-2e2a-4b32-87ea-adff8209ae46),
+[native recording](https://github.com/user-attachments/assets/741313f4-0ee5-440a-ba4d-fe9d97641e75),
+[GNOME after delayed login](https://github.com/user-attachments/assets/4823337d-340f-4e80-9803-b38e625ccfbc).
+
+Cua's caption-close receipt reports a post-action foreground/window lookup
+error because the target HWND has closed. The separate process observer
+records both exit codes and cleanup. The accepted minimized-window probe
+brackets capture with native `IsIconic` checks; the earlier Cua trial without
+those checks is explicitly excluded in its driver context.
 
 These are real VM observations from 17–18 November 2026, separate from the
 feasibility spike. The host runs Windows 11 Pro build 26300 with a Radeon

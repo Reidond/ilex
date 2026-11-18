@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "C:\Users\reido\Documents\ilex-t4-spike-2026-11-16\venv\Lib\site-packages\paramiko\channel.py", line 697, in recv
+    out = self.in_buffer.read(nbytes, self.timeout)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\reido\Documents\ilex-t4-spike-2026-11-16\venv\Lib\site-packages\paramiko\buffered_pipe.py", line 154, in read
+    raise PipeTimeout()
+paramiko.buffered_pipe.PipeTimeout
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\reido\Documents\ilex-t4-2026-11-17-t3-1c5289be\guest-command.py", line 15, in <module>
+    sys.stdout.buffer.write(o.read());sys.stderr.buffer.write(e.read())
+                            ^^^^^^^^
+  File "C:\Users\reido\Documents\ilex-t4-spike-2026-11-16\venv\Lib\site-packages\paramiko\file.py", line 184, in read
+    new_data = self._read(self._DEFAULT_BUFSIZE)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\reido\Documents\ilex-t4-spike-2026-11-16\venv\Lib\site-packages\paramiko\channel.py", line 1359, in _read
+    return self.channel.recv(size)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\reido\Documents\ilex-t4-spike-2026-11-16\venv\Lib\site-packages\paramiko\channel.py", line 699, in recv
+    raise socket.timeout()
+TimeoutError

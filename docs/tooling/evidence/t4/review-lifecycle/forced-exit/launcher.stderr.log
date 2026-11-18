@@ -1,0 +1,10 @@
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+ilex: native WHPX VM ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-reviewcrash; Right-Ctrl+G releases SDL grab
+ssh -p 54679 -i "C:\Users\reido\AppData\Local\Temp\ilex-vm\t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef\reviewcrash\53896-1794999895877405100\id_ed25519" -o StrictHostKeyChecking=yes -o UserKnownHostsFile="C:\Users\reido\AppData\Local\Temp\ilex-vm\t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef\reviewcrash\53896-1794999895877405100\known_hosts" -o HostKeyAlias=ilex-dev-53896-1794999895877405100 root@127.0.0.1

@@ -1,0 +1,3 @@
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+ilex-vmctl: error: windows-qemu-whpx: required capability Screenshot is Unavailable("minimized: no fresh QEMU client frame")

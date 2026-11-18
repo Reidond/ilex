@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "run": "53192-1794995437219390700",
+  "started_utc": "2026-11-18T10:59:07.407886+00:00",
+  "method": "real SendInput mouse down/up at Cua-grounded minimize caption",
+  "screen_point": [
+    1413,
+    121
+  ],
+  "is_iconic_before_capture": true,
+  "finished_utc": "2026-11-18T10:59:07.807992+00:00",
+  "capture_exit": 1,
+  "is_iconic_after_capture": true,
+  "png_created": false
+}

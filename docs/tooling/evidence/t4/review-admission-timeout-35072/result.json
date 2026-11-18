@@ -1,0 +1,11 @@
+{
+  "utc": "2026-11-18T09:50:05.6122220Z",
+  "run": "35072-1794984580765297700",
+  "launcherExit": 1,
+  "guestStarted": false,
+  "runCredentialFilesRemaining": [],
+  "desktopGiB": 8,
+  "reserveGiB": 14,
+  "builderGiB": 16,
+  "normalAdmissionTimeout": true
+}

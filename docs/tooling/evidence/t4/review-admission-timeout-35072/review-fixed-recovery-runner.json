@@ -1,0 +1,7 @@
+{
+  "started_utc": "2026-11-18T08:27:40.440587+00:00",
+  "launcher_pid": 35072,
+  "passed": false,
+  "error": "Queued launcher exited before the guest became ready",
+  "finished_utc": "2026-11-18T09:49:44.943596+00:00"
+}

@@ -1,0 +1,8 @@
+{
+  "time": "2026-11-18T10:19:25.9630329+02:00",
+  "hostTotalGiB": 63.92,
+  "hostFreeGiB": 11.46,
+  "nativeThresholdGiB": 22,
+  "builderThresholdGiB": 30,
+  "reserveGiB": 14
+}

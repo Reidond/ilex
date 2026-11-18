@@ -1,0 +1,58 @@
+{
+  "structuredContent": {
+    "executed": 1,
+    "failed_step": null,
+    "observation": {
+      "ok": true,
+      "state": {
+        "app_name": "powershell.exe",
+        "capture_id": "capture_f2e8b6f3f1514360a60f3e028089d6cf_0000000000000019",
+        "invalidated_snapshot_ids": [
+          "s0000001a"
+        ],
+        "pid": 3536,
+        "screenshot_height": 765,
+        "screenshot_mime_type": "image/png",
+        "screenshot_width": 1348,
+        "window_bounds": {
+          "height": 767,
+          "width": 1350,
+          "x": 47,
+          "y": 38
+        },
+        "window_id": 451480176,
+        "window_title": "ilex T4 owned Ctrl-C acceptance console (fixed resize)"
+      },
+      "tool": "get_window_state"
+    },
+    "ok": true,
+    "steps": [
+      {
+        "index": 0,
+        "message": "✅ Pressed ctrl+c on pid 3536 via SendInput (Win32 target).",
+        "ok": true,
+        "target": {
+          "window": {
+            "app": null,
+            "pid": 3536,
+            "title": null,
+            "window_id": 451480176
+          }
+        },
+        "tool": "hotkey"
+      }
+    ],
+    "total": 1
+  },
+  "content": [
+    {
+      "type": "text",
+      "text": "run_steps: 1/1 steps ok\n1. hotkey ok: ✅ Pressed ctrl+c on pid 3536 via SendInput (Win32 target).\nobservation: get_window_state ok (below)"
+    },
+    {
+      "type": "text",
+      "text": "Invalidated snapshots s0000001a: their element_tokens are stale."
+    }
+  ],
+  "image_blocks_omitted": true
+}

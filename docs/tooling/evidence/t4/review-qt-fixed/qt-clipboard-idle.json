@@ -1,0 +1,20 @@
+{
+  "before": {
+    "activations": 3,
+    "active": true,
+    "deactivations": 2,
+    "guest_updates": 1,
+    "host_updates": 4,
+    "schema": 1,
+    "suppressed": 0
+  },
+  "after": {
+    "activations": 3,
+    "active": true,
+    "deactivations": 2,
+    "guest_updates": 1,
+    "host_updates": 4,
+    "schema": 1,
+    "suppressed": 0
+  }
+}

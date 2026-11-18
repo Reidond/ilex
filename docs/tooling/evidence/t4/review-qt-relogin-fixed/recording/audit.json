@@ -1,0 +1,429 @@
+{
+  "utc": "2026-11-18T11:14:05.788621+00:00",
+  "sampled_frames": 13,
+  "distinct_rgb_frames": 13,
+  "client_size": [
+    1496,
+    903
+  ],
+  "all_wgc_ticks_advance": true,
+  "gif_sha256": "df04961a14f6414af6e3606ed61100058c29bddc6a3c5277a3fc7fe5d35386a8",
+  "frames": [
+    {
+      "file": "frame-0000.png",
+      "png_sha256": "2f898902d4a5d328967a78a1b2cbef22c54ea92ecbfc43406dae0c5dfe4fc628",
+      "rgb_sha256": "de062323cb1292383b800888f6ed6c4419afea6d363576bb8cafb5575eb23927",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999228751,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787258746140
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787258746140,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0001.png",
+      "png_sha256": "fb5ab8c3ad60ebd093c26e768e7e93127e90d80539ff0b3df2fe04a0e8557e4a",
+      "rgb_sha256": "ea7b73f4d604daede04e753360f51935a47137e6681bf954fa818b2abff89931",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999229570,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787266937043
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787266937043,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0002.png",
+      "png_sha256": "ee235fa37c0a6ee1ba73bf6ccf1d03c5b680b144f9cf26ba2bcebb493a17af19",
+      "rgb_sha256": "b67b652d058b4401b94275b6c0800114d9649c3bd1596dd829931f6cfdfd52f4",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999230345,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787274690262
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787274690262,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0003.png",
+      "png_sha256": "23491ed84fc075c3dd26deb5d0eeb1653ac9c0fc4a1e40c4cd2d40172350089b",
+      "rgb_sha256": "1e11aa75a85d1fe7a01050c4d549c929e1f96ca5edae408a7d83e9722d12d052",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999231120,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787282442511
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787282442511,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0004.png",
+      "png_sha256": "6c31250231e5987996abf14ae79ac188ec9c37d4bc618426e961170176e16bc8",
+      "rgb_sha256": "6c0104df2633ac50651e51cc7f468a6081745f072bd81ce8b0f590695c453491",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999231889,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787290134879
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787290134879,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0005.png",
+      "png_sha256": "b952fc65e56727ad61c6d718fe0806ebea386b18697f0d127b794e32cb9c65be",
+      "rgb_sha256": "e6b8b086b236113be4e34c294f699fa9e44930176aa17bfde0a20388c012e9a8",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999232683,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787298076052
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787298076052,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0006.png",
+      "png_sha256": "fa1eb90781a2597bff65b74bbdd3ed14222ab6c2c8377b1d8b08d4325647c95d",
+      "rgb_sha256": "bc7f1e619a88d05bfd0ef8669958ed61985013875e3f7999a24a2c0fdb36b94c",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999233472,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787305954577
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787305954577,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0007.png",
+      "png_sha256": "f3d2dd5e5c28042c05fcc76635916553e6598a3b6e4c2dcfe2f4092b27ed6f2f",
+      "rgb_sha256": "e76e501f259d45f12ff175b0abb3894f9978b32ad551728afe09cea06424fc88",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999234247,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787313707605
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787313707605,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0008.png",
+      "png_sha256": "85cd025668fad853cd3ff848a44aa57fe9daddfb5b1fe03312c85e079722517e",
+      "rgb_sha256": "eb4a1920da6c632e16fd2566166e5ce23de47553c800c74343ed249dbba18369",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999235016,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787321398867
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787321398867,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0009.png",
+      "png_sha256": "054e56b9991840a0b3e6d057ec505fa8e70ab6f8b746f105de2891a74c9025a6",
+      "rgb_sha256": "43331c9bc4e4e70bad4c9a6813b79fa40e940e7d0c0df040e391a14f00da617b",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999235791,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787329152358
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787329152358,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0010.png",
+      "png_sha256": "d87e5467127ca3823498e6796fc556900c53c082de6c3c2781d56c742ec0bc48",
+      "rgb_sha256": "60e5a4b8d0de88c7c4ede9c411741944021178f2fd090a0adb28ba5e62d1b4e9",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999236579,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787337030166
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787337030166,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0011.png",
+      "png_sha256": "d92f6b5631f64bf8883ffa95515e322380693237ca22fbf37ca758c561df145b",
+      "rgb_sha256": "7e750574dde53248f3ff1868f41dbb5d5b1e0ea5573b87f8a8d930018b5c669c",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999237342,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787344659221
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787344659221,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    },
+    {
+      "file": "frame-0012.png",
+      "png_sha256": "066fc467cd6be7a25414be8da54739e1f8712da498cdf4c46e340cf43648c648",
+      "rgb_sha256": "89ea70c50649e67ce061de0ba9fe208c7cc4e3a30c1b3f48f0810445beed7c9c",
+      "size": [
+        1496,
+        903
+      ],
+      "frame": {
+        "captured_unix_ms": 1794999238111,
+        "client_size": [
+          1496,
+          903
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 787352350092
+        },
+        "generation": 24,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 787352350092,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "38264:134394718287575198",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "53192-1794995437219390700",
+          "schema": 1
+        }
+      }
+    }
+  ]
+}

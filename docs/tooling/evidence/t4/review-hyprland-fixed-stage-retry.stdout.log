@@ -1,0 +1,437 @@
+An overlayfs is already mounted on /usr
+Updating and loading repositories:
+ Copr repo for Hyprland owned by lionhe 100% |   1.5 KiB/s |   1.5 KiB |  00m01s
+Repositories loaded.
+Package                           Arch   Version             Repository                                              Size
+Installing:
+ glx-utils                        x86_64 0:9.0.0-12.fc45     fedora                                             418.1 KiB
+ hyprland                         x86_64 0:0.57.2-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland  67.6 MiB
+ qt6-qtdeclarative-devel          x86_64 0:6.11.2-3.fc45     updates                                             25.7 MiB
+ qt6-qtwayland                    x86_64 0:6.11.2-1.fc45     fedora                                               3.3 MiB
+ wl-clipboard                     x86_64 0:2.3.0-2.fc45      fedora                                             148.8 KiB
+Installing dependencies:
+ aquamarine                       x86_64 0:0.16.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland   1.4 MiB
+ binutils                         x86_64 0:2.47-1.fc45       fedora                                              28.4 MiB
+ cmake                            x86_64 0:4.3.0-7.fc45      updates                                             40.4 MiB
+ cmake-data                       noarch 0:4.3.0-7.fc45      updates                                              9.4 MiB
+ cmake-filesystem                 x86_64 0:4.3.0-7.fc45      updates                                              0.0   B
+ double-conversion                x86_64 0:3.4.0-4.fc45      fedora                                             101.8 KiB
+ gcc                              x86_64 0:16.2.1-3.fc45     updates                                            121.8 MiB
+ gcc-c++                          x86_64 0:16.2.1-3.fc45     updates                                             46.8 MiB
+ glibc-devel                      x86_64 0:2.44-2.fc45       updates                                              2.3 MiB
+ grim                             x86_64 0:1.5.0-4.fc45      fedora                                              49.4 KiB
+ hyprcursor                       x86_64 0:0.1.14-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 764.4 KiB
+ hyprgraphics                     x86_64 0:0.6.0-1.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland 244.8 KiB
+ hyprlang                         x86_64 0:0.6.8-4.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland 288.8 KiB
+ hyprtoolkit                      x86_64 0:0.6.0-2.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland   1.7 MiB
+ hyprutils                        x86_64 0:0.14.3-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 496.8 KiB
+ hyprwire                         x86_64 0:0.3.1-3.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland 346.4 KiB
+ ibus-panel                       x86_64 0:1.5.35-2.fc45     updates                                            318.2 KiB
+ iniparser                        x86_64 0:4.2.6-5.fc45      fedora                                              37.5 KiB
+ jsoncpp                          x86_64 0:1.9.6-3.fc44      fedora                                             285.6 KiB
+ kernel-headers                   x86_64 0:7.3.3-300.fc45    updates                                              7.1 MiB
+ kitty-kitten                     x86_64 0:0.50.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland  30.3 MiB
+ kitty-shell-integration          noarch 0:0.50.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 126.6 KiB
+ kitty-terminfo                   noarch 0:0.50.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland  38.0 KiB
+ libX11-devel                     x86_64 0:1.8.13-3.fc45     fedora                                               1.0 MiB
+ libXau-devel                     x86_64 0:1.0.12-5.fc45     fedora                                               7.3 KiB
+ libb2                            x86_64 0:0.98.1-16.fc45    fedora                                              41.9 KiB
+ libdbusmenu                      x86_64 0:16.04.0-32.fc45   fedora                                             540.1 KiB
+ libdbusmenu-gtk3                 x86_64 0:16.04.0-32.fc45   fedora                                              88.3 KiB
+ libfbclient2                     x86_64 0:5.0.4.1812-2.fc45 fedora                                               3.3 MiB
+ libffi-devel                     x86_64 0:3.5.2-3.fc45      fedora                                              33.9 KiB
+ libglvnd-core-devel              x86_64 1:1.7.0-10.fc45     fedora                                              40.3 KiB
+ libglvnd-devel                   x86_64 1:1.7.0-10.fc45     fedora                                               2.1 MiB
+ libpq                            x86_64 0:18.4-4.fc45       fedora                                               1.1 MiB
+ libseat                          x86_64 0:0.9.3-2.fc45      fedora                                              51.5 KiB
+ libstdc++-devel                  x86_64 0:16.2.1-3.fc45     updates                                             41.3 MiB
+ libtommath                       x86_64 0:1.3.1~rc1-8.fc45  fedora                                             130.3 KiB
+ libxcb-devel                     x86_64 0:1.17.0-8.fc45     fedora                                               2.6 MiB
+ libxcrypt-devel                  x86_64 0:4.5.2-4.fc45      fedora                                              31.0 KiB
+ libxkbcommon-devel               x86_64 0:1.13.1-4.fc45     fedora                                             393.4 KiB
+ libxkbcommon-x11                 x86_64 0:1.13.1-4.fc45     fedora                                              39.5 KiB
+ libxml2-devel                    x86_64 0:2.15.4-1.fc45     fedora                                               6.7 MiB
+ make                             x86_64 1:4.4.1-13.fc45     fedora                                               1.8 MiB
+ mariadb-connector-c              x86_64 0:3.4.9-3.fc45      fedora                                             505.5 KiB
+ mariadb-connector-c-config       noarch 0:3.4.9-3.fc45      fedora                                              26.4 KiB
+ miniz                            x86_64 0:3.1.2-2.fc45      fedora                                             129.1 KiB
+ muParser                         x86_64 0:2.3.5-6.fc45      fedora                                             563.4 KiB
+ odbcinst-generate                noarch 0:2.3.14-36.fc45    fedora                                              22.5 KiB
+ pcre2-utf16                      x86_64 0:10.49-1.fc45      updates                                            659.2 KiB
+ playerctl-libs                   x86_64 0:2.4.1-13.fc45     fedora                                             109.2 KiB
+ python3-pyxdg                    noarch 0:0.28-4.fc45       fedora                                             471.7 KiB
+ qt6-filesystem                   x86_64 0:6.11.2-1.fc45     fedora                                               0.0   B
+ qt6-qtbase                       x86_64 0:6.11.2-3.fc45     fedora                                              13.9 MiB
+ qt6-qtbase-common                noarch 0:6.11.2-3.fc45     fedora                                              76.0   B
+ qt6-qtbase-devel                 x86_64 0:6.11.2-3.fc45     fedora                                              22.9 MiB
+ qt6-qtbase-gui                   x86_64 0:6.11.2-3.fc45     fedora                                              27.4 MiB
+ qt6-qtbase-ibase                 x86_64 0:6.11.2-3.fc45     fedora                                             158.6 KiB
+ qt6-qtbase-mysql                 x86_64 0:6.11.2-3.fc45     fedora                                             118.4 KiB
+ qt6-qtbase-odbc                  x86_64 0:6.11.2-3.fc45     fedora                                             154.0 KiB
+ qt6-qtbase-postgresql            x86_64 0:6.11.2-3.fc45     fedora                                             138.2 KiB
+ qt6-qtdeclarative                x86_64 0:6.11.2-3.fc45     updates                                             59.3 MiB
+ qt6-qtsvg                        x86_64 0:6.11.2-1.fc45     fedora                                             947.8 KiB
+ qt6-rpm-macros                   noarch 0:6.11.2-1.fc45     fedora                                               3.0 KiB
+ re2                              x86_64 2:20251105-19.fc45  fedora                                             607.2 KiB
+ rhash                            x86_64 0:1.4.5-5.fc45      fedora                                             354.8 KiB
+ tomlplusplus                     x86_64 0:3.4.0-8.fc45      fedora                                             262.1 KiB
+ tslib                            x86_64 0:1.24-3.fc45       fedora                                             406.8 KiB
+ unixODBC                         x86_64 0:2.3.14-36.fc45    fedora                                               1.0 MiB
+ uwsm                             noarch 0:0.27.1-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 573.3 KiB
+ vim-filesystem                   noarch 2:9.2.1302-2.fc45   updates                                             40.0   B
+ vulkan-headers                   noarch 0:1.4.350.0-4.fc45  fedora                                              38.8 MiB
+ vulkan-loader-devel              x86_64 0:1.4.350.0-2.fc45  fedora                                               8.0 KiB
+ wayland-devel                    x86_64 0:1.26.0-3.fc45     fedora                                             724.6 KiB
+ xcb-util-cursor                  x86_64 0:0.1.6-3.fc45      fedora                                              27.1 KiB
+ xcb-util-errors                  x86_64 0:1.0.1-8.fc45      fedora                                              40.3 KiB
+ xcb-util-image                   x86_64 0:0.4.1-10.fc45     fedora                                              26.0 KiB
+ xcb-util-keysyms                 x86_64 0:0.4.1-10.fc45     fedora                                              16.5 KiB
+ xcb-util-renderutil              x86_64 0:0.3.10-10.fc45    fedora                                              24.2 KiB
+ xcb-util-wm                      x86_64 0:0.4.2-10.fc45     fedora                                              77.0 KiB
+ xorg-x11-proto-devel             noarch 0:2025.1-3.fc45     fedora                                               1.8 MiB
+ xxhash-libs                      x86_64 0:0.8.4-2.fc45      updates                                             94.0 KiB
+ xz-devel                         x86_64 1:5.8.3-2.fc45      fedora                                             258.8 KiB
+ zlib-ng-compat-devel             x86_64 0:2.3.3-6.fc45      fedora                                             107.0 KiB
+Installing weak dependencies:
+ brightnessctl                    x86_64 0:0.5.1-17.fc45     fedora                                              29.0 KiB
+ gstreamer1-plugins-good-qt6      x86_64 0:1.28.9-1.fc45     updates                                            236.2 KiB
+ hyprland-uwsm                    x86_64 0:0.57.2-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 202.0   B
+ hyprpicker                       x86_64 0:0.4.8-1.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland 266.3 KiB
+ kitty                            x86_64 0:0.50.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland  19.1 MiB
+ playerctl                        x86_64 0:2.4.1-13.fc45     fedora                                              97.9 KiB
+ qt6-qttranslations               noarch 0:6.11.2-1.fc45     fedora                                              15.5 MiB
+ qt6-qtwayland-adwaita-decoration x86_64 0:6.11.2-1.fc45     fedora                                             131.7 KiB
+ ripgrep                          x86_64 0:15.2.0-1.fc45     fedora                                               4.6 MiB
+ shader-slang                     x86_64 0:2026.21-1.fc45    copr:copr.fedorainfracloud.org:lionheartp:Hyprland  63.5 MiB
+ wofi                             x86_64 0:1.5.3-3.fc45      fedora                                             164.1 KiB
+ xdg-desktop-portal-hyprland      x86_64 1:1.5.0-1.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland   1.2 MiB
+ xdriinfo                         x86_64 0:1.0.8-1.fc45      fedora                                              31.1 KiB
+
+Transaction Summary:
+ Installing:       100 packages
+
+Total size of inbound packages is 226 MiB. Need to download 0 B.
+After this operation, 728 MiB extra will be used (install 728 MiB, remove 0 B).
+[  1/100] wl-clipboard-0:2.3.0-2.fc45.x 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[  2/100] hyprland-0:0.57.2-1.fc45.x86_ 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[  3/100] muParser-0:2.3.5-6.fc45.x86_6 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[  4/100] re2-2:20251105-19.fc45.x86_64 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[  5/100] tomlplusplus-0:3.4.0-8.fc45.x 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[  6/100] xcb-util-errors-0:1.0.1-8.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[  7/100] xcb-util-wm-0:0.4.2-10.fc45.x 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[  8/100] aquamarine-0:0.16.0-1.fc45.x8 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[  9/100] hyprgraphics-0:0.6.0-1.fc45.x 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 10/100] hyprwire-0:0.3.1-3.fc45.x86_6 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 11/100] libseat-0:0.9.3-2.fc45.x86_64 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 12/100] qt6-qtdeclarative-devel-0:6.1 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 13/100] qt6-qtbase-0:6.11.2-3.fc45.x8 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 14/100] qt6-qtbase-devel-0:6.11.2-3.f 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 15/100] qt6-qtbase-gui-0:6.11.2-3.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 16/100] double-conversion-0:3.4.0-4.f 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 17/100] libb2-0:0.98.1-16.fc45.x86_64 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 18/100] qt6-filesystem-0:6.11.2-1.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 19/100] qt6-qtbase-common-0:6.11.2-3. 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 20/100] qt6-qtbase-ibase-0:6.11.2-3.f 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 21/100] qt6-qtbase-mysql-0:6.11.2-3.f 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 22/100] qt6-qtbase-odbc-0:6.11.2-3.fc 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 23/100] qt6-qtbase-postgresql-0:6.11. 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 24/100] qt6-rpm-macros-0:6.11.2-1.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 25/100] libxkbcommon-x11-0:1.13.1-4.f 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 26/100] tslib-0:1.24-3.fc45.x86_64    100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 27/100] xcb-util-cursor-0:0.1.6-3.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 28/100] xcb-util-image-0:0.4.1-10.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 29/100] xcb-util-keysyms-0:0.4.1-10.f 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 30/100] xcb-util-renderutil-0:0.3.10- 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 31/100] libfbclient2-0:5.0.4.1812-2.f 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 32/100] mariadb-connector-c-0:3.4.9-3 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 33/100] unixODBC-0:2.3.14-36.fc45.x86 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 34/100] libpq-0:18.4-4.fc45.x86_64    100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 35/100] libtommath-0:1.3.1~rc1-8.fc45 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 36/100] mariadb-connector-c-config-0: 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 37/100] odbcinst-generate-0:2.3.14-36 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 38/100] qt6-qtwayland-0:6.11.2-1.fc45 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 39/100] glx-utils-0:9.0.0-12.fc45.x86 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 40/100] hyprutils-0:0.14.3-1.fc45.x86 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 41/100] hyprlang-0:0.6.8-4.fc45.x86_6 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 42/100] hyprcursor-0:0.1.14-1.fc45.x8 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 43/100] cmake-filesystem-0:4.3.0-7.fc 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 44/100] qt6-qtdeclarative-0:6.11.2-3. 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 45/100] qt6-qtsvg-0:6.11.2-1.fc45.x86 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 46/100] cmake-0:4.3.0-7.fc45.x86_64   100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 47/100] jsoncpp-0:1.9.6-3.fc44.x86_64 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 48/100] make-1:4.4.1-13.fc45.x86_64   100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 49/100] rhash-0:1.4.5-5.fc45.x86_64   100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 50/100] gcc-c++-0:16.2.1-3.fc45.x86_6 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 51/100] libglvnd-devel-1:1.7.0-10.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 52/100] libX11-devel-0:1.8.13-3.fc45. 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 53/100] libglvnd-core-devel-1:1.7.0-1 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 54/100] xorg-x11-proto-devel-0:2025.1 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 55/100] libxkbcommon-devel-0:1.13.1-4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 56/100] pcre2-utf16-0:10.49-1.fc45.x8 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 57/100] vulkan-loader-devel-0:1.4.350 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 58/100] vulkan-headers-0:1.4.350.0-4. 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 59/100] wayland-devel-0:1.26.0-3.fc45 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 60/100] libxcb-devel-0:1.17.0-8.fc45. 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 61/100] gcc-0:16.2.1-3.fc45.x86_64    100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 62/100] libstdc++-devel-0:16.2.1-3.fc 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 63/100] binutils-0:2.47-1.fc45.x86_64 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 64/100] glibc-devel-0:2.44-2.fc45.x86 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 65/100] libxcrypt-devel-0:4.5.2-4.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 66/100] cmake-data-0:4.3.0-7.fc45.noa 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 67/100] libffi-devel-0:3.5.2-3.fc45.x 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 68/100] libXau-devel-0:1.0.12-5.fc45. 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 69/100] kernel-headers-0:7.3.3-300.fc 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 70/100] vim-filesystem-2:9.2.1302-2.f 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 71/100] libxml2-devel-0:2.15.4-1.fc45 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 72/100] xz-devel-1:5.8.3-2.fc45.x86_6 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 73/100] zlib-ng-compat-devel-0:2.3.3- 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 74/100] ibus-panel-0:1.5.35-2.fc45.x8 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 75/100] libdbusmenu-0:16.04.0-32.fc45 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 76/100] libdbusmenu-gtk3-0:16.04.0-32 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 77/100] xdg-desktop-portal-hyprland-1 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 78/100] grim-0:1.5.0-4.fc45.x86_64    100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 79/100] hyprtoolkit-0:0.6.0-2.fc45.x8 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 80/100] iniparser-0:4.2.6-5.fc45.x86_ 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 81/100] qt6-qtwayland-adwaita-decorat 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 82/100] gstreamer1-plugins-good-qt6-0 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 83/100] kitty-0:0.50.0-1.fc45.x86_64  100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 84/100] kitty-kitten-0:0.50.0-1.fc45. 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 85/100] kitty-shell-integration-0:0.5 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 86/100] kitty-terminfo-0:0.50.0-1.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 87/100] wofi-0:1.5.3-3.fc45.x86_64    100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 88/100] brightnessctl-0:0.5.1-17.fc45 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 89/100] playerctl-0:2.4.1-13.fc45.x86 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 90/100] playerctl-libs-0:2.4.1-13.fc4 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 91/100] hyprland-uwsm-0:0.57.2-1.fc45 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 92/100] qt6-qttranslations-0:6.11.2-1 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 93/100] xdriinfo-0:1.0.8-1.fc45.x86_6 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 94/100] xxhash-libs-0:0.8.4-2.fc45.x8 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 95/100] uwsm-0:0.27.1-1.fc45.noarch   100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 96/100] python3-pyxdg-0:0.28-4.fc45.n 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 97/100] hyprpicker-0:0.4.8-1.fc45.x86 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 98/100] shader-slang-0:2026.21-1.fc45 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[ 99/100] miniz-0:3.1.2-2.fc45.x86_64   100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+[100/100] ripgrep-0:15.2.0-1.fc45.x86_6 100% |   0.0   B/s |   0.0   B |  00m00s
+>>> Already downloaded
+--------------------------------------------------------------------------------
+[100/100] Total                         100% |   0.0   B/s |   0.0   B |  00m00s
+Running transaction
+[101/101] https://download.copr.fedorai 100% |  14.0 KiB/s |   1.0 KiB |  00m00s
+--------------------------------------------------------------------------------
+[101/101] Total                         100% |   0.0   B/s |   0.0   B |  00m00s
+Importing OpenPGP key 0x2C4B2995:
+ UserID     : "lionheartp_Hyprland (None) <lionheartp#Hyprland@copr.fedorahosted.org>"
+ Fingerprint: 97E23476C89635135407C7D5E9BA41342C4B2995
+ From       : https://download.copr.fedorainfracloud.org/results/lionheartp/Hyprland/pubkey.gpg
+The key was successfully imported.
+[  1/102] Verify package files          100% | 134.0   B/s | 100.0   B |  00m01s
+[  2/102] Prepare transaction           100% | 265.0   B/s | 100.0   B |  00m00s
+[  3/102] Installing cmake-filesystem-0 100% | 390.3 KiB/s |   9.4 KiB |  00m00s
+[  4/102] Installing hyprutils-0:0.14.3 100% |  32.4 MiB/s | 498.2 KiB |  00m00s
+[  5/102] Installing hyprlang-0:0.6.8-4 100% |  23.6 MiB/s | 290.1 KiB |  00m00s
+[  6/102] Installing hyprgraphics-0:0.6 100% |  20.0 MiB/s | 246.2 KiB |  00m00s
+[  7/102] Installing libdbusmenu-0:16.0 100% |  53.0 MiB/s | 542.2 KiB |  00m00s
+[  8/102] Installing pcre2-utf16-0:10.4 100% |  49.6 MiB/s | 660.0 KiB |  00m00s
+[  9/102] Installing xorg-x11-proto-dev 100% |  16.9 MiB/s |   1.8 MiB |  00m00s
+[ 10/102] Installing make-1:4.4.1-13.fc 100% |  26.1 MiB/s |   1.8 MiB |  00m00s
+[ 11/102] Installing xcb-util-renderuti 100% |   3.6 MiB/s |  25.7 KiB |  00m00s
+[ 12/102] Installing xcb-util-image-0:0 100% |   3.8 MiB/s |  27.5 KiB |  00m00s
+[ 13/102] Installing libxkbcommon-x11-0 100% |   5.6 MiB/s |  40.3 KiB |  00m00s
+[ 14/102] Installing xcb-util-wm-0:0.4. 100% |   9.6 MiB/s |  79.0 KiB |  00m00s
+[ 15/102] Installing tomlplusplus-0:3.4 100% |  28.6 MiB/s | 263.5 KiB |  00m00s
+[ 16/102] Installing hyprcursor-0:0.1.1 100% |  20.8 MiB/s | 766.2 KiB |  00m00s
+[ 17/102] Installing xcb-util-cursor-0: 100% |   2.8 MiB/s |  28.5 KiB |  00m00s
+[ 18/102] Installing libXau-devel-0:1.0 100% | 701.6 KiB/s |   9.1 KiB |  00m00s
+[ 19/102] Installing libxcb-devel-0:1.1 100% |   6.5 MiB/s |   3.0 MiB |  00m00s
+[ 20/102] Installing libX11-devel-0:1.8 100% |   7.3 MiB/s |   1.1 MiB |  00m00s
+[ 21/102] Installing libdbusmenu-gtk3-0 100% |  14.5 MiB/s |  89.3 KiB |  00m00s
+[ 22/102] Installing hyprwire-0:0.3.1-3 100% |  37.7 MiB/s | 347.8 KiB |  00m00s
+[ 23/102] Installing vulkan-headers-0:1 100% | 126.5 MiB/s |  38.8 MiB |  00m00s
+[ 24/102] Installing vulkan-loader-deve 100% |   1.3 MiB/s |   9.1 KiB |  00m00s
+[ 25/102] Installing zlib-ng-compat-dev 100% |  10.6 MiB/s | 108.6 KiB |  00m00s
+[ 26/102] Installing playerctl-0:2.4.1- 100% |   1.5 MiB/s | 100.5 KiB |  00m00s
+[ 27/102] Installing playerctl-libs-0:2 100% |   1.2 MiB/s | 110.7 KiB |  00m00s
+[ 28/102] Installing miniz-0:3.1.2-2.fc 100% |  14.2 MiB/s | 130.6 KiB |  00m00s
+[ 29/102] Installing python3-pyxdg-0:0. 100% |  21.4 MiB/s | 481.4 KiB |  00m00s
+[ 30/102] Installing uwsm-0:0.27.1-1.fc 100% |   6.9 MiB/s | 584.5 KiB |  00m00s
+[ 31/102] Installing xxhash-libs-0:0.8. 100% |   9.3 MiB/s |  95.4 KiB |  00m00s
+[ 32/102] Installing kitty-terminfo-0:0 100% |   6.3 MiB/s |  38.5 KiB |  00m00s
+[ 33/102] Installing kitty-shell-integr 100% |   9.1 MiB/s | 130.7 KiB |  00m00s
+[ 34/102] Installing kitty-kitten-0:0.5 100% | 115.3 MiB/s |  30.3 MiB |  00m00s
+[ 35/102] Installing iniparser-0:4.2.6- 100% |   3.2 MiB/s |  39.5 KiB |  00m00s
+[ 36/102] Installing grim-0:1.5.0-4.fc4 100% |   1.8 MiB/s |  51.0 KiB |  00m00s
+[ 37/102] Installing xz-devel-1:5.8.3-2 100% |  17.1 MiB/s | 262.6 KiB |  00m00s
+[ 38/102] Installing libxml2-devel-0:2. 100% |  32.6 MiB/s |   6.7 MiB |  00m00s
+[ 39/102] Installing libxkbcommon-devel 100% |  42.9 MiB/s | 395.1 KiB |  00m00s
+[ 40/102] Installing vim-filesystem-2:9 100% | 372.6 KiB/s |   4.8 KiB |  00m00s
+[ 41/102] Installing kernel-headers-0:7 100% |  20.3 MiB/s |   7.2 MiB |  00m00s
+[ 42/102] Installing glibc-devel-0:2.44 100% |  13.8 MiB/s |   2.4 MiB |  00m00s
+[ 43/102] Installing libxcrypt-devel-0: 100% |   4.1 MiB/s |  33.3 KiB |  00m00s
+[ 44/102] Installing libffi-devel-0:3.5 100% |   5.8 MiB/s |  35.6 KiB |  00m00s
+[ 45/102] Installing wayland-devel-0:1. 100% |  18.8 MiB/s | 733.3 KiB |  00m00s
+[ 46/102] Installing binutils-0:2.47-1. 100% |  87.4 MiB/s |  28.4 MiB |  00m00s
+[ 47/102] Installing gcc-0:16.2.1-3.fc4 100% | 114.7 MiB/s | 121.8 MiB |  00m01s
+[ 48/102] Installing libstdc++-devel-0: 100% |  72.3 MiB/s |  41.5 MiB |  00m01s
+[ 49/102] Installing gcc-c++-0:16.2.1-3 100% |  95.5 MiB/s |  46.8 MiB |  00m00s
+[ 50/102] Installing libglvnd-core-deve 100% |   6.7 MiB/s |  41.1 KiB |  00m00s
+[ 51/102] Installing libglvnd-devel-1:1 100% |  88.4 MiB/s |   2.1 MiB |  00m00s
+[ 52/102] Installing rhash-0:1.4.5-5.fc 100% |  11.7 MiB/s | 360.1 KiB |  00m00s
+[ 53/102] Installing jsoncpp-0:1.9.6-3. 100% |  17.5 MiB/s | 287.1 KiB |  00m00s
+[ 54/102] Installing cmake-data-0:4.3.0 100% |  11.2 MiB/s |  10.1 MiB |  00m01s
+[ 55/102] Installing cmake-0:4.3.0-7.fc 100% | 111.6 MiB/s |  40.4 MiB |  00m00s
+[ 56/102] Installing qt6-rpm-macros-0:6 100% | 163.3 KiB/s |   4.1 KiB |  00m00s
+[ 57/102] Installing glx-utils-0:9.0.0- 100% |  16.4 MiB/s | 419.2 KiB |  00m00s
+[ 58/102] Installing odbcinst-generate- 100% | 464.4 KiB/s |  23.7 KiB |  00m00s
+[ 59/102] Installing unixODBC-0:2.3.14- 100% |  15.2 MiB/s |   1.0 MiB |  00m00s
+[ 60/102] Installing mariadb-connector- 100% |   3.3 MiB/s |  27.2 KiB |  00m00s
+[ 61/102] Installing mariadb-connector- 100% |  26.3 MiB/s | 511.0 KiB |  00m00s
+[ 62/102] Installing libtommath-0:1.3.1 100% |  18.3 MiB/s | 131.4 KiB |  00m00s
+[ 63/102] Installing libfbclient2-0:5.0 100% | 109.3 MiB/s |   3.3 MiB |  00m00s
+[ 64/102] Installing libpq-0:18.4-4.fc4 100% |  17.0 MiB/s |   1.1 MiB |  00m00s
+[ 65/102] Installing xcb-util-keysyms-0 100% |   1.4 MiB/s |  17.7 KiB |  00m00s
+[ 66/102] Installing tslib-0:1.24-3.fc4 100% |   8.3 MiB/s | 423.3 KiB |  00m00s
+[ 67/102] Installing qt6-filesystem-0:6 100% | 387.6 KiB/s |   3.5 KiB |  00m00s
+[ 68/102] Installing libb2-0:0.98.1-16. 100% |   5.3 MiB/s |  43.0 KiB |  00m00s
+[ 69/102] Installing double-conversion- 100% |  10.1 MiB/s | 103.6 KiB |  00m00s
+[ 70/102] Installing qt6-qtbase-0:6.11. 100% |  64.9 MiB/s |  14.0 MiB |  00m00s
+[ 71/102] Installing qt6-qtbase-common- 100% |  68.8 KiB/s | 352.0   B |  00m00s
+[ 72/102] Installing qt6-qtbase-gui-0:6 100% |  74.4 MiB/s |  27.4 MiB |  00m00s
+[ 73/102] Installing qt6-qtsvg-0:6.11.2 100% |  38.7 MiB/s | 950.9 KiB |  00m00s
+[ 74/102] Installing qt6-qtdeclarative- 100% |  70.4 MiB/s |  59.7 MiB |  00m01s
+[ 75/102] Installing qt6-qtwayland-0:6. 100% |  62.2 MiB/s |   3.4 MiB |  00m00s
+[ 76/102] Installing qt6-qtbase-ibase-0 100% |  15.7 MiB/s | 160.4 KiB |  00m00s
+[ 77/102] Installing qt6-qtbase-mysql-0 100% |  16.8 MiB/s | 120.2 KiB |  00m00s
+[ 78/102] Installing qt6-qtbase-odbc-0: 100% |  12.7 MiB/s | 155.9 KiB |  00m00s
+[ 79/102] Installing qt6-qtbase-postgre 100% |   8.0 MiB/s | 140.1 KiB |  00m00s
+[ 80/102] Installing qt6-qtbase-devel-0 100% |  26.1 MiB/s |  23.4 MiB |  00m01s
+[ 81/102] Installing libseat-0:0.9.3-2. 100% |   5.7 MiB/s |  52.7 KiB |  00m00s
+[ 82/102] Installing aquamarine-0:0.16. 100% |  69.7 MiB/s |   1.4 MiB |  00m00s
+[ 83/102] Installing hyprtoolkit-0:0.6. 100% |  66.1 MiB/s |   1.7 MiB |  00m00s
+[ 84/102] Installing xcb-util-errors-0: 100% |   5.1 MiB/s |  41.5 KiB |  00m00s
+[ 85/102] Installing re2-2:20251105-19. 100% |   3.4 MiB/s | 608.6 KiB |  00m00s
+[ 86/102] Installing muParser-0:2.3.5-6 100% |  26.3 MiB/s | 564.9 KiB |  00m00s
+[ 87/102] Installing hyprland-0:0.57.2- 100% | 109.6 MiB/s |  67.6 MiB |  00m01s
+[ 88/102] Installing xdg-desktop-portal 100% |  13.2 MiB/s |   1.2 MiB |  00m00s
+[ 89/102] Installing qt6-qtdeclarative- 100% |  26.7 MiB/s |  26.4 MiB |  00m01s
+[ 90/102] Installing qt6-qtwayland-adwa 100% |  11.9 MiB/s | 133.7 KiB |  00m00s
+[ 91/102] Installing gstreamer1-plugins 100% |  21.0 MiB/s | 236.9 KiB |  00m00s
+[ 92/102] Installing kitty-0:0.50.0-1.f 100% |  40.3 MiB/s |  19.3 MiB |  00m00s
+[ 93/102] Installing hyprland-uwsm-0:0. 100% |  80.1 KiB/s | 492.0   B |  00m00s
+[ 94/102] Installing shader-slang-0:202 100% | 129.4 MiB/s |  63.5 MiB |  00m00s
+[ 95/102] Installing ibus-panel-0:1.5.3 100% |  31.2 MiB/s | 319.1 KiB |  00m00s
+[ 96/102] Installing hyprpicker-0:0.4.8 100% |   8.7 MiB/s | 267.7 KiB |  00m00s
+[ 97/102] Installing ripgrep-0:15.2.0-1 100% |  69.2 MiB/s |   4.6 MiB |  00m00s
+[ 98/102] Installing xdriinfo-0:1.0.8-1 100% |   1.2 MiB/s |  32.8 KiB |  00m00s
+[ 99/102] Installing qt6-qttranslations 100% |  63.3 MiB/s |  15.5 MiB |  00m00s
+[100/102] Installing brightnessctl-0:0. 100% |   1.0 MiB/s |  30.4 KiB |  00m00s
+[101/102] Installing wofi-0:1.5.3-3.fc4 100% |   5.2 MiB/s | 165.9 KiB |  00m00s
+[102/102] Installing wl-clipboard-0:2.3 100% |  54.1 KiB/s | 151.8 KiB |  00m03s
+Complete!
+()
+()
+()
+hyprland-0.57.2-1.fc45.x86_64
+qt6-qtbase-6.11.2-3.fc45.x86_64
+qt6-qtdeclarative-6.11.2-3.fc45.x86_64
+qt6-qtwayland-6.11.2-1.fc45.x86_64
+wl-clipboard-2.3.0-2.fc45.x86_64
+Session staged; restart GDM through the session regression fixture

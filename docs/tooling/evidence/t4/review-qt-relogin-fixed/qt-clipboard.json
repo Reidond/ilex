@@ -1,0 +1,5 @@
+{
+  "qt_guest_to_host": true,
+  "qt_host_to_guest": true,
+  "route": "SendInput physical Ctrl+A/C, Tab, Ctrl+V into Qt Quick TextInputs"
+}

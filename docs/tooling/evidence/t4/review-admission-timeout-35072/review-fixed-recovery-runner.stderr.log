@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "C:\Users\reido\Documents\ilex-t4-2026-11-17-t3-1c5289be\run-fixed-recovery.py", line 63, in <module>
+    assert k.WaitForSingleObject(launcher, 0) == 258, 'Queued launcher exited before the guest became ready'
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Queued launcher exited before the guest became ready

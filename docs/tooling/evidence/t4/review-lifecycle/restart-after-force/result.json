@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "utc": "2026-11-18T11:08:32.779599+00:00",
+  "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+  "purpose": "reviewcrash",
+  "old_run": "53896-1794999895877405100",
+  "new_run": "49096-1795000064965037600",
+  "old_keys_sockets_ephemeral_disk_and_vars_removed": true,
+  "new_keys_sockets_ephemeral_disk_and_vars_present": true,
+  "new_public_key_sha256": {
+    "id_ed25519.pub": "4304f66c7b92eab80a41946cc67330133bcc5a6f607e781edc86fabff20f7c59",
+    "host_ed25519.pub": "db90a3bb273d30f7f1bd3cca4ec1497c6f6b5133a5a8dadbf5063a8709e5c6dc"
+  },
+  "both_public_keys_rotated": true,
+  "new_pinned_ssh_connected": true,
+  "new_guest_boot_id": "a486f11c-da7c-4f9c-8143-794255a1ec57",
+  "slot_reused_by_same_purpose": true
+}

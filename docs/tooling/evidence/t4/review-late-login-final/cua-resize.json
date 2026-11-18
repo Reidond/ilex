@@ -1,0 +1,22 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Set and verified the requested window frame."
+    }
+  ],
+  "structuredContent": {
+    "delivery": {
+      "mode": "not_applicable"
+    },
+    "effect": "confirmed",
+    "evidence": [
+      {
+        "detail": "DWM visible-frame bounds matched the requested frame",
+        "kind": "value_readback"
+      }
+    ],
+    "route": "system_api",
+    "summary": "Set and verified the requested window frame."
+  }
+}

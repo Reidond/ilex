@@ -1,0 +1,16 @@
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+ilex: native WHPX VM ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-research; Right-Ctrl+G releases SDL grab
+ssh -p 56051 -i "C:\Users\reido\AppData\Local\Temp\ilex-vm\t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef\research\40988-1795000684423612700\id_ed25519" -o StrictHostKeyChecking=yes -o UserKnownHostsFile="C:\Users\reido\AppData\Local\Temp\ilex-vm\t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef\research\40988-1795000684423612700\known_hosts" -o HostKeyAlias=ilex-dev-40988-1795000684423612700 root@127.0.0.1
+ilex: dev clipboard active in an unlocked guest session
+ilex: dev clipboard suspended (no unlocked guest session)
+ilex: dev clipboard suspended (no unlocked guest session)
+ilex: dev clipboard suspended (no unlocked guest session)
+ilex: dev clipboard active in an unlocked guest session
+ilex: dev clipboard channel disconnected; retrying while VM is active

@@ -1,0 +1,16 @@
+[
+  {
+    "ProcessId": 3536,
+    "ParentProcessId": 55368,
+    "ExecutablePath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "CommandLine": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -File C:\\Users\\reido\\Documents\\ilex-t4-2026-11-17-t3-1c5289be\\review-research-console-fixed.ps1",
+    "CreationDate": "2026-11-18T11:50:17.743044+02:00"
+  },
+  {
+    "ProcessId": 53192,
+    "ParentProcessId": 3536,
+    "ExecutablePath": "C:\\Users\\reido\\Documents\\ilex-t4-2026-11-17-t3-1c5289be\\review-fixed-bin\\xtask.exe",
+    "CommandLine": "\"C:\\Users\\reido\\Documents\\ilex-t4-2026-11-17-t3-1c5289be\\review-fixed-bin\\xtask.exe\" vm --gui --persist --purpose research",
+    "CreationDate": "2026-11-18T11:50:18.08208+02:00"
+  }
+]
