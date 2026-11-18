@@ -242,6 +242,9 @@ impl VmInfo {
             vm_id: Some(format!("{}:{}", self.pid, self.process_start)),
             phase: BootPhase::Unknown,
             features,
+            provisioning: BTreeMap::new(),
+            qualification: None,
+            runtime: Default::default(),
             screenshot_source: Some(
                 if self.hwnd != 0 {
                     "windows-graphics-capture-client"
@@ -308,6 +311,9 @@ pub fn idle_capabilities() -> VmCapabilities {
         vm_id: None,
         phase: BootPhase::Unknown,
         features,
+        provisioning: BTreeMap::new(),
+        qualification: None,
+        runtime: Default::default(),
         screenshot_source: None,
         screenshot_dimensions: None,
         text_layout: Some(
@@ -323,6 +329,7 @@ pub struct Config {
     pub purpose: String,
     pub gui: bool,
     pub gl: bool,
+    pub apps: bool,
     pub memory_bytes: u64,
     pub vcpus: u32,
     pub persist: bool,
@@ -459,14 +466,7 @@ impl Drop for PendingRun {
 }
 impl Vm {
     pub fn boot(config: Config) -> Result<Self> {
-        ensure!(
-            !config.purpose.is_empty()
-                && config
-                    .purpose
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
-            "invalid VM purpose"
-        );
+        ilex_tooling_core::validate_vm_purpose(&config.purpose)?;
         ensure!(
             Architecture::host()? == Architecture::X86_64,
             "WHPX requires x86_64"
@@ -795,6 +795,13 @@ impl Vm {
                 .stdin(Stdio::null())
                 .stdout(File::create(dir.join("qemu-stdout.log"))?)
                 .stderr(File::create(dir.join("qemu-stderr.log"))?);
+            if !config.apps {
+                command.arg("-smbios").arg(format!(
+                    "type=11,value=io.systemd.credential.binary:systemd.unit-dropin.ilex-apps.timer={}",
+                    base64::engine::general_purpose::STANDARD
+                        .encode(b"[Unit]\nConditionPathExists=/run/ilex-harness-enable-apps\n")
+                ));
+            }
             drop(ports); // QEMU has no socket-activation API; retry bind races.
             let (job, mut child) = host::spawn_owned(&mut command)?;
             let startup = (|| -> Result<VmInfo> {

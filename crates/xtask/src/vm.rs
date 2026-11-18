@@ -89,7 +89,14 @@ pub struct Args {
 
 impl Args {
     pub fn resolve(&self, ws: &Workspace) -> Result<crate::select::Resolved> {
+        if let Some(purpose) = &self.purpose {
+            ilex_devkit::core::validate_vm_purpose(purpose)?;
+        }
         self.selection.resolve(ws, self.image.as_deref(), None)
+    }
+
+    pub fn apps_enabled(&self) -> bool {
+        self.apps || (self.gui && !self.no_apps)
     }
 }
 
@@ -153,13 +160,6 @@ fn run_ephemeral(ws: &Workspace, args: Args, image: String) -> Result<()> {
     }
     cmd::require("bcvk")?;
     let purpose = args.purpose.as_deref().unwrap_or("vm");
-    anyhow::ensure!(
-        !purpose.is_empty()
-            && purpose
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
-        "invalid VM purpose"
-    );
     let name = ws.vm_name(purpose);
     ws.ensure_state()?;
     ws.verify_implicit_image(&image)?;
@@ -204,7 +204,7 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
         .unwrap_or(if args.gui { "gui" } else { "vm" });
     let mut config = VmConfig::graphical(purpose, disk);
     config.snapshot = !args.persist;
-    config.apps = args.apps || (args.gui && !args.no_apps);
+    config.apps = args.apps_enabled();
     config.vcpus = args.vcpus.unwrap_or(if args.gui { gui_vcpus() } else { 4 });
     if let Some(memory) = &args.memory {
         config.memory = memory.clone();

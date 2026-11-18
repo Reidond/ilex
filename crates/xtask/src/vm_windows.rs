@@ -37,6 +37,7 @@ pub fn run(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resol
             .unwrap_or_else(|| if args.gui { "gui" } else { "vm" }.into()),
         gui: args.gui,
         gl: args.gui && !args.no_gl,
+        apps: args.apps_enabled(),
         memory_bytes: ilex_devkit::provider::memory_bytes(args.memory.as_deref().unwrap_or("8G"))?,
         vcpus: args.vcpus.unwrap_or(4),
         persist: args.persist,

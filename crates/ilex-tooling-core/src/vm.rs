@@ -140,20 +140,22 @@ pub struct VmSpec {
     pub require: Vec<Capability>,
 }
 
+pub fn validate_vm_purpose(purpose: &str) -> Result<()> {
+    ensure!(
+        !purpose.is_empty()
+            && purpose.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        "invalid VM purpose (expected ASCII letters, digits or dashes)"
+    );
+    Ok(())
+}
+
 impl VmSpec {
     pub fn validate(&self, identity: &CheckoutIdentity, caps: &VmCapabilities) -> Result<()> {
         check_version(self.schema)?;
         check_version(caps.schema)?;
         identity.authorize(&self.owner)?;
         ensure!(!self.run.is_empty(), "VM run identity is empty");
-        ensure!(
-            !self.purpose.is_empty()
-                && self
-                    .purpose
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
-            "invalid VM purpose (expected ASCII letters, digits or dashes)"
-        );
+        validate_vm_purpose(&self.purpose)?;
         ensure!(
             self.resources.memory_bytes > 0 && self.resources.vcpus > 0,
             "VM resources must be nonzero"
