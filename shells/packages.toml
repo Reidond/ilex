@@ -3,7 +3,7 @@
 # A shell's own packages are in shells/<name>/shell.toml.
 
 [apps]
-install = ["firefox", "flatpak"]
+install = ["firefox"]
 
 [updates]
 # notify-send for the update-ready notification.
@@ -11,3 +11,8 @@ install = ["libnotify"]
 # bootc owns OS updates. Without these, a software centre tries to manage the
 # OS itself and asks for a password to "check available updates" at login.
 exclude = ["PackageKit", "PackageKit-command-not-found", "gnome-software-rpm-ostree"]
+
+[flatpak]
+# The headless base keeps only required Flatpak dependencies. Desktop shells
+# also need its recommended certificate helper and portal service.
+install = ["p11-kit-server", "xdg-desktop-portal"]

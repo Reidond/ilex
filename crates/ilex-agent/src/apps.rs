@@ -56,6 +56,7 @@ struct State {
     fingerprint: String,
     last_update: u64,
     initial_install_complete: bool,
+    update_in_progress: bool,
     free_bytes: u64,
     apps: Vec<App>,
     updates: Vec<Value>,
@@ -297,7 +298,7 @@ fn sync(update: bool, dry_run: bool) -> Result<u8> {
     );
     if dry_run {
         println!(
-            "plan: check flathub URL/enabled state; hide system catalogue; reserve 8 GiB initially, 2 GiB later; probe remote; preinstall{}",
+            "plan: check flathub URL/enabled state; hide system catalogue; reserve 8 GiB minus downloaded content (at least 2 GiB); no space gate for removals; probe remote; preinstall{}",
             if update {
                 "; daily update (20h minimum)"
             } else {
@@ -390,15 +391,43 @@ fn sync(update: bool, dry_run: bool) -> Result<u8> {
         .trim()
         .parse::<u64>()
         .map_err(|e| e.to_string())?;
-    let reserve = if state.initial_install_complete { 2 } else { 8 } * 1024_u64.pow(3);
-    if state.free_bytes < reserve {
+    let missing = state.apps.iter().any(|a| a.status == "missing");
+    // OSTree retains deployed and partially downloaded objects after an
+    // interruption. Credit their allocated space against the initial budget,
+    // while always retaining 2 GiB for subsequent work. Removal-only runs
+    // must be allowed to reclaim space even below that margin.
+    let margin = 2 * 1024_u64.pow(3);
+    let reserve = if missing && !state.initial_install_complete {
+        let usage = Command::new("du")
+            .args(["-s", "-B1", "/var/lib/flatpak"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !usage.status.success() {
+            return Err(String::from_utf8_lossy(&usage.stderr).into());
+        }
+        let downloaded = String::from_utf8_lossy(&usage.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .parse::<u64>()
+            .map_err(|e| e.to_string())?;
+        (8 * 1024_u64.pow(3)).saturating_sub(downloaded).max(margin)
+    } else {
+        margin
+    };
+    // Even a timer invocation whose daily update is due must first be able
+    // to remove a departed shell's apps on a nearly full disk. With no
+    // missing refs, preinstall cannot schedule a new app download.
+    if !missing {
+        ok(&["preinstall", "-y", "--noninteractive"])?;
+    }
+    if (missing || due) && state.free_bytes < reserve {
         return defer(
             &mut state,
             "space",
             format!("need {reserve} free bytes; retry later"),
         );
     }
-    let missing = state.apps.iter().any(|a| a.status == "missing");
     if missing || due {
         let probe = Command::new("curl")
             .args([
@@ -481,13 +510,15 @@ fn sync(update: bool, dry_run: bool) -> Result<u8> {
             return defer(&mut state, "retry", String::from_utf8_lossy(&result.stderr).trim());
         }
     }
-    let result = flatpak(&["preinstall", "-y", "--noninteractive"])?;
-    if !result.status.success() {
-        return defer(
-            &mut state,
-            "retry",
-            String::from_utf8_lossy(&result.stderr).trim(),
-        );
+    if missing {
+        let result = flatpak(&["preinstall", "-y", "--noninteractive"])?;
+        if !result.status.success() {
+            return defer(
+                &mut state,
+                "retry",
+                String::from_utf8_lossy(&result.stderr).trim(),
+            );
+        }
     }
     state.apps = classify(&refs)?;
     if state
@@ -508,15 +539,29 @@ fn sync(update: bool, dry_run: bool) -> Result<u8> {
         }
     }
     if due {
+        if !state.update_in_progress {
+            state.updates.clear();
+            state.update_in_progress = true;
+            save(&state)?;
+        }
         let before = installed()?;
         let result = flatpak(&["update", "-y", "--noninteractive"])?;
         // Record applied refs even when a later operation in the transaction
         // failed. Include runtimes, which ilex updates as well as applications.
         let after = installed()?;
-        state.updates = after.iter().filter_map(|(reference, (origin, commit))| {
+        for change in after.iter().filter_map(|(reference, (origin, commit))| {
             let old = before.get(reference)?;
             (old.1 != *commit).then(|| json!({"kind":"flatpak", "ref":reference, "origin":origin, "from":old.1, "to":commit, "applied_at":now}))
-        }).collect();
+        }) {
+            if let Some(previous) = state.updates.iter_mut().find(|u| u["ref"] == change["ref"]) {
+                // Preserve the start of the transaction if a ref changes more
+                // than once while retrying, and report its latest result.
+                previous["to"] = change["to"].clone();
+                previous["applied_at"] = change["applied_at"].clone();
+            } else {
+                state.updates.push(change);
+            }
+        }
         if !result.status.success() {
             return defer(
                 &mut state,
@@ -525,6 +570,7 @@ fn sync(update: bool, dry_run: bool) -> Result<u8> {
             );
         }
         state.last_update = now;
+        state.update_in_progress = false;
     }
     state.result = if unavailable { "degraded" } else { "complete" }.into();
     state.detail = if unavailable {
@@ -624,8 +670,8 @@ pub fn check() -> Result<()> {
         ));
     }
     let enabled = Path::new("/etc/systemd/system/timers.target.wants/ilex-apps.timer").exists();
-    if enabled == image["shells"].as_array().unwrap().is_empty() {
-        return Err("apps timer differs from shell selection".into());
+    if !enabled {
+        return Err("apps timer must also reconcile shell-free transitions".into());
     }
     if previous()?.result == "degraded" {
         return Err("unavailable apps; run ilexctl apps status".into());

@@ -119,7 +119,7 @@ FROM quay.io/fedora/fedora-bootc:45
 COPY --from=compose /out/build/base/ /tmp/ilex-build/
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     --mount=type=tmpfs,target=/run \
-    bash /tmp/ilex-build/install-packages.sh ilex-var.conf
+    bash /tmp/ilex-build/install-packages.sh ilex-var.conf --setopt=install_weak_deps=0
 
 # Shells share one transaction and its excludes, in a separate image layer.
 # With no shell this payload is empty: no dnf and no tmpfiles file.
@@ -157,6 +157,8 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify && \
     systemctl set-default "$(python3 -I -S -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
     systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service systemd-homed.service && \
     systemctl --global enable ilex-profile.service && \
+    systemctl enable ilex-apps.timer && \
+    systemctl preset flatpak-add-fedora-repos.service && \
     authselect enable-feature with-systemd-homed && \
     mv /var/lib/authselect/checksum /usr/share/authselect/checksum && \
     authselect check && \
@@ -170,8 +172,6 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify && \
     rm -rf /tmp/ilex-accountsservice && \
     if [ "$(systemctl get-default)" = graphical.target ]; then \
         systemctl --global enable ilex-update-notify.path ilex-update-notify.service ilex-apps-notify.path ilex-apps-notify.service && \
-        systemctl enable ilex-apps.timer && \
-        systemctl preset flatpak-add-fedora-repos.service && \
         glib-compile-schemas /usr/share/glib-2.0/schemas && \
         mkdir -p /usr/share/flatpak/preinstall.d && \
         for list in /usr/share/ilex/apps/*.preinstall; do \

@@ -12,7 +12,7 @@ layer on that root. Rust tooling, e2e-only tests on QEMU via bcvk.
 
 ```sh
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
-cargo xtask build --shell none # small base → localhost/ilex:<tag>.s-none (128 MiB growth budget)
+cargo xtask build --shell none # small base → localhost/ilex:<tag>.s-none (256 MiB growth budget)
 cargo xtask build --machine vm # build the base, then localhost/ilex:<tag>.m-vm
 cargo xtask build --machine vm --on <image> # only a machine layer on an existing image
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
@@ -406,14 +406,22 @@ build on an ilex host hands machine commands to `/usr/bin/ilexctl`.
 `image.toml` names the installed shells and one default when the list is
 non-empty. `packages.toml` is the base's package list,
 installed first in every root image; `systemd-container` supplies the
-`systemd-dissect` command Drupe needs even without a shell. `shells/packages.toml`
-contains Firefox, Flatpak, libnotify and the PackageKit excludes, installed only
+`systemd-dissect` command Drupe needs even without a shell. Flatpak also stays
+in the base so switching away from a shell can remove its old preinstalled
+apps from persistent `/var`. The base transaction omits weak dependencies;
+Flatpak's recommended desktop portal belongs to a shell. `shells/packages.toml`
+contains Firefox, libnotify and the PackageKit excludes, installed only
 with a shell. These and all selected shells' packages share a second transaction
 and image layer, with their combined excludes. A shell's excludes cannot prevent
 installation of a base package. The machine remains the last, squashed layer.
 
 `cargo xtask build` checks every root built without shells against the local
-fedora-bootc image: growth must be at most **128 MiB** (uncompressed `.Size`).
+fedora-bootc image: growth must be at most **256 MiB** (uncompressed `.Size`).
+The former 128 MiB budget cannot accommodate Fedora's required Flatpak
+libraries and regenerated SELinux policy. Retaining its headless client and
+timer guarantees cleanup after a shell-free switch; no app payload is added.
+Measured 2026-11-18: the cleanup-capable base is 2,213,021,459 bytes against
+Fedora bootc's 2,010,765,876 bytes, a 192.89 MiB increase within that budget.
 The error includes both sizes and removes only the rejected build's tag, so a
 later test cannot reuse it. Packages that exceed the budget belong in a
 shell or machine, or need a justified budget change in a commit. The base adds
@@ -669,7 +677,8 @@ the OS, bootc, install config, signature policy and drupe checks still run.
 alongside labels and overlays, and requires design-system metadata, labels and
 the `/usr/share/ilex/design-systems` directory to be absent from every image.
 A shell-free generic base must have
-no sessions, display manager, Firefox or Flatpak; a machine may add those packages.
+no sessions, display manager or Firefox; a machine may add those packages.
+Flatpak and the root apps timer remain available for transition cleanup.
 Every shell-free image must omit globally enabled notifier
 units. Images with a shell must enable both notifier units and have none of the
 literal packages excluded by `shells/packages.toml` installed, even through the
@@ -788,7 +797,8 @@ comparison to the enumerated human-user table. A separate build stage uses
 the SHA-256-pinned Fedora SRPM and replaces only `/usr/libexec/accounts-daemon`
 when that exact RPM is installed; its client library/data remain packaged.
 Another RPM version fails the build for review/removal of this backport.
-The shell-free image installs no AccountsService daemon or package.
+Flatpak's malcontent dependency also brings AccountsService to shell-free
+images; the same package-pinned daemon patch applies there.
 
 Keep Anaconda's distinctly named local wheel administrator for maintenance.
 Create the daily account locally from that account:
@@ -869,11 +879,14 @@ shell preinstalls on switch while retaining home data. Unused runtimes stay
 under Flatpak's normal lifecycle; ilex never runs `uninstall --unused` as root.
 The root `ilex-apps.timer` starts independently of boot targets, then daily.
 Incomplete work exits 75 and retries with backoff; offline installs never hold
-up GDM. Initial installation needs 8 GiB free, later work 2 GiB. Unchanged
+up GDM. Initial installation reserves 8 GiB minus allocated system Flatpak
+content (including interrupted downloads), with a 2 GiB minimum; later work
+reserves 2 GiB. Removal-only reconciliation bypasses the space gate. Unchanged
 complete lists avoid network; `--update` reaches Flathub at most every 20 hours.
 `apps status --json` reports wanted/installed/declined/unavailable apps, origin,
 last result and free space. `updates list [--json]` includes staged OS and the
-last system Flatpak update transaction, including runtime refs. Session path
+last system Flatpak update transaction, including runtime refs and changes
+accumulated across retries of a partial transaction. Session path
 units announce installation, completion and applied Flatpak updates.
 
 The committed Flathub trust file bootstraps the system remote without network.
@@ -1069,7 +1082,7 @@ They inject mid-prune and state-write failures, reproduce EACCES on an owned
 0500 backup directory, and verify survivor indexing, retry, orphan discovery and
 cleanup with missing files/directories or no profile state.
 Measured 2026-11-17: the shell-free image is 1,977.85 MiB against Fedora
-bootc's 1,917.62 MiB, a 60.24 MiB increase within the unchanged 128 MiB budget.
+bootc's 1,917.62 MiB, a 60.24 MiB increase within the then-current 128 MiB budget.
 
 ## Build sharing: kache
 
@@ -2248,7 +2261,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 
 ## Conventions
 
-- `packages.toml` belongs to the base and stays within its 128 MiB growth
+- `packages.toml` belongs to the base and stays within its 256 MiB growth
   budget; desktop-wide dependencies belong in `shells/packages.toml`. Both
   transactions precede ilex files, configuration and overlays.
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one

@@ -382,7 +382,7 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
                 "test -z \"$(find /usr/share/wayland-sessions /usr/share/xsessions -mindepth 1 -maxdepth 1 2>/dev/null)\" && \
                  test ! -e /etc/systemd/system/display-manager.service && \
                  test ! -L /etc/systemd/system/display-manager.service && \
-                 test ! -e /usr/bin/firefox && test ! -e /usr/bin/flatpak"
+                 test ! -e /usr/bin/firefox && test -x /usr/bin/flatpak"
             )?.ok("bare base has no desktop package files")?;
             println!("     bare base: sessions, display manager and desktop apps absent");
         }

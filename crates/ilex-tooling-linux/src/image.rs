@@ -6,7 +6,10 @@ use std::{path::PathBuf, process::Command};
 const KACHE_HOST_MOUNT: &str = "/kache-host";
 pub const BASE_IMAGE: &str = "quay.io/fedora/fedora-bootc:45";
 pub const BUILDER_IMAGE: &str = "quay.io/fedora/fedora:45";
-const BASE_BUDGET: u64 = 128 * 1024 * 1024;
+// Keep headless Flatpak for preinstall cleanup after a shell-free switch.
+// Required libraries and regenerated SELinux policy exceed 128 MiB;
+// recommendations stay in shells and app payloads remain in /var.
+const BASE_BUDGET: u64 = 256 * 1024 * 1024;
 pub fn build(
     ws: &Workspace,
     request: &BuildRequest,
@@ -119,7 +122,7 @@ pub fn build(
             bail!(
                 "base size budget exceeded: {image} is {size} bytes ({:.2} MiB), \
                  fedora-bootc is {base_size} bytes ({:.2} MiB); \
-                 growth {:.2} MiB exceeds the 128 MiB budget. \
+                 growth {:.2} MiB exceeds the 256 MiB budget. \
                  Move packages to a shell or machine, or justify a budget change in a commit",
                 size as f64 / 1048576.0,
                 base_size as f64 / 1048576.0,
@@ -127,7 +130,7 @@ pub fn build(
             );
         }
         eprintln!(
-            "base size: {:.2} MiB, fedora-bootc {:.2} MiB, growth {:.2} MiB (budget 128 MiB)",
+            "base size: {:.2} MiB, fedora-bootc {:.2} MiB, growth {:.2} MiB (budget 256 MiB)",
             size as f64 / 1048576.0,
             base_size as f64 / 1048576.0,
             growth as f64 / 1048576.0
