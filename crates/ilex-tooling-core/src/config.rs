@@ -139,12 +139,14 @@ pub fn manifest(path: &Path) -> Result<toml::Table> {
         .with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Registry directories only; stray files (including .gitkeep) are ignored.
+/// Registry directories only; shells also require a shell.toml manifest.
 pub fn available(root: &Path, directory: &str) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(root.join(directory))? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
+        if entry.file_type()?.is_dir()
+            && (directory != "shells" || entry.path().join("shell.toml").is_file())
+        {
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
     }

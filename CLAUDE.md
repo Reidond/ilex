@@ -552,12 +552,13 @@ generic so a future design is a token change inside the shell. Compositions
 do not choose or install a design system, and shells declare no theme targets.
 GNOME continues to draw itself with Adwaita.
 
-`design/ilex/` holds source material for that shell, not an installed component
+`shells/ilex/design/` holds source material for that shell, not an installed component
 or an image/installer input. It includes the owner's complete Claude export
 titled "ilex": Breeze frames, Adwaita interiors and holly green, with light and
 dark tokens. Change values in that artifact and replace `tokens.json` with the
 whole export; never edit it by hand. `.gitattributes` disables text conversion
-for `design/*/tokens.json`, preserving its exact bytes and original line endings.
+for `shells/ilex/design/tokens.json`, preserving its exact bytes and original line endings.
+Without `shell.toml`, `shells/ilex/` is not selectable and is excluded from the build context.
 
 Machines live in `machines/<name>/machine.toml`; `generic` is the base image
 with no packages or overlay. Add a machine by creating one
@@ -662,7 +663,7 @@ The fingerprint covers the selected manifests, overlays and build scripts;
 old images without configuration labels must be rebuilt.
 Fingerprint v3 includes `shells/packages.toml` only with a shell, and excludes
 `image.toml`: the three selection labels already cover its resolved selection.
-An edit to an unselected shell or to `design/` does not change the base's
+An edit to an unselected shell or to `shells/ilex/design/` does not change the base's
 fingerprint. An agent or `rootfs/` edit reruns no package transaction.
 
 The image records schema 1 JSON in `/usr/share/ilex/image.json` and
@@ -1932,7 +1933,7 @@ image digests. `changed --root <tag> --inputs-only` compares that key against
 the root's own immutable snapshot before building. Missing keys force a build.
 After a miss the existing v3 RPM/content fingerprint still decides publication;
 a forced test never republishes unchanged content. Shell packages, manifests
-and overlays affect only roots selecting them. Unshipped `design/` material
+and overlays affect only roots selecting them. Unshipped `shells/ilex/design/` material
 affects neither root inputs nor content fingerprints. Base packages,
 `rootfs`, shipped crate trees and common build helpers affect both roots. A
 base-only input change cannot leave the desktop unchanged when that input is

@@ -1,7 +1,7 @@
 # Text defaults to LF, even under core.autocrlf=true on Windows.
 * text=auto eol=lf
 # Token exports keep their exact bytes, including original line endings.
-design/*/tokens.json -text
+shells/ilex/design/tokens.json -text
 *.png binary
 *.qcow2 binary
 *.gpg binary

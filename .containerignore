@@ -5,4 +5,4 @@ target/
 .git
 .claude/
 # Unshipped source material for the future ilex shell.
-design/
+shells/ilex/
