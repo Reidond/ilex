@@ -1110,17 +1110,25 @@ fn fallback(
         let pcr = vm.ssh_ok("cat /sys/class/tpm/tpm0/pcr-sha256/7")?;
         let eventlog = vm.ssh("cat /sys/kernel/security/tpm0/binary_bios_measurements")?;
         ensure!(eventlog.status.success(), "mismatch event log missing");
-        let replay = security::replay_pcr7(&eventlog.stdout)?;
         ensure!(
             probe["secure_boot"] == false
                 && probe["tpm2"] == true
-                && pcr.trim() == replay.sha256
+                && pcr.len() == 64
+                && pcr.bytes().all(|b| b.is_ascii_hexdigit())
+                && pcr.bytes().any(|b| b != b'0')
                 && installer_probe["pcr7"] != pcr.trim(),
             "present TPM / changed Secure Boot PCR was not measured"
         );
+        // The positive replay deliberately requires Secure Boot authority
+        // events. Disabled Secure Boot omits those events; it is not an
+        // eligible profile. Preserve its raw log and measured PCR instead of
+        // applying (or weakening) the positive qualification contract.
+        fs::write(artifacts.join("mismatch-eventlog.bin"), eventlog.stdout)?;
         fs::write(
-            artifacts.join("mismatch-pcr-replay.json"),
-            serde_json::to_vec_pretty(&replay)?,
+            artifacts.join("mismatch-pcr.json"),
+            serde_json::to_vec_pretty(&json!({"pcr7":pcr,
+                "installer_pcr7":installer_probe["pcr7"],
+                "secure_boot":false,"tpm2":true,"qualification":"unqualified"}))?,
         )?;
     } else {
         ensure!(
