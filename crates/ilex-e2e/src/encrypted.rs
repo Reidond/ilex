@@ -883,7 +883,21 @@ fn fallback(
     )?;
     let mut spec = template.clone();
     spec.run.push_str(&format!("-{mode}"));
-    spec.purpose = format!("{}-{mode}", template.purpose);
+    // Runtime paths include the owner-qualified checkout slug. Keep QMP and
+    // swtpm Unix sockets within sockaddr_un even for the interrupted case.
+    let family = match template.purpose.as_str() {
+        "encrypted-space" => "s",
+        "encrypted-interrupted" => "i",
+        _ => "a",
+    };
+    let suffix = match mode {
+        "pcr-mismatch" => "pcr",
+        "recovery" => "recovery",
+        "reissued-recovery" => "reissue",
+        "no-tpm" => "no-tpm",
+        _ => bail!("unknown fallback case"),
+    };
+    spec.purpose = format!("enroll-{family}-{suffix}");
     spec.iso = None;
     spec.additional_disks.clear();
     spec.secure_boot = if mode == "pcr-mismatch" {
