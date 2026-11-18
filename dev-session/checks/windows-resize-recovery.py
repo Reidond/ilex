@@ -67,6 +67,10 @@ try:
         while time.monotonic() < until:
             sample()
             time.sleep(1)
+        unavailable = [row['resize'] for row in rows if not row['resize'].get('acknowledged')]
+        assert len(unavailable) >= 3
+        assert unavailable[-1]['observed_unix_ms'] - unavailable[0]['observed_unix_ms'] > 12000
+        assert unavailable[-1]['attempt'] > unavailable[0]['attempt']
         command('systemctl start gdm')
     else:
         assert baseline['acknowledged'], 'Need a previously acknowledged display'

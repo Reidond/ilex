@@ -56,6 +56,7 @@ try:
     if fallback.returncode == 0:
         frame = proof['frame']
         assert frame['source'] == 'printwindow-content-change'
+        assert frame['source_ticks'] is None
         assert frame['freshness']['kind'] == 'content-change'
         assert frame['freshness']['baseline_sha256'] != frame['freshness']['frame_sha256']
     else:
