@@ -943,8 +943,8 @@ profile migration (no deployed machine used one when this was introduced).
 Measured 2026-11-18 against the same Fedora bootc digest
 `81ada60d0dfec088b591672bce2945d6d7ac8e32e7f263eba188bdfa809fbc04`:
 the main baseline image is 5,009,428,787 bytes and the GNOME Flatpak stack image
-is 4,133,857,054 bytes (`podman image inspect .Size`, uncompressed), a reduction
-of 875,571,733 bytes (835.01 MiB). Flatpak payloads/runtimes live separately
+is 4,126,631,728 bytes (`podman image inspect .Size`, uncompressed), a reduction
+of 882,797,059 bytes (841.90 MiB). Flatpak payloads/runtimes live separately
 in `/var/lib/flatpak`; this is an OS image measurement, not total installed disk
 usage. The planning run estimated about 5.5 GB for those payloads.
 
