@@ -24,7 +24,8 @@ parser.add_argument('--artifacts', required=True, type=Path)
 parser.add_argument('--vmctl', required=True, type=Path)
 parser.add_argument('--motion-seconds', type=float, default=65)
 parser.add_argument('--limits', action='store_true', help='Also exercise real clipboard UTF-8 byte limits')
-parser.add_argument('operation', choices=['provision', 'clipboard', 'relogin', 'lock', 'qt-clipboard', 'input', 'focus', 'hold-shift', 'release-shift', 'facts'])
+parser.add_argument('--previous', type=Path, help='Earlier ssh-identity.json from the same persistent overlay')
+parser.add_argument('operation', choices=['provision', 'clipboard', 'relogin', 'lock', 'qt-clipboard', 'input', 'focus', 'hold-shift', 'release-shift', 'facts', 'ssh-identity'])
 args = parser.parse_args()
 info = json.loads(args.info.read_text())
 args.artifacts.mkdir(parents=True, exist_ok=True)
@@ -118,6 +119,38 @@ elif args.operation == 'facts':
     data = ssh("uname -r; rpm -q gnome-shell mutter mesa-dri-drivers; bootc status --json; journalctl -b --no-pager -g 'GBM renderer|virtio_gpu' | tail -30")
     (args.artifacts / 'guest-facts.txt').write_bytes(data)
     print(data.decode())
+elif args.operation == 'ssh-identity':
+    import hashlib
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    public = ssh('cat /run/ilex-dev/authorized_keys/root').split()[:2]
+    assert public == Path(info['ssh_key']).with_suffix('.pub').read_bytes().split()[:2]
+    (args.artifacts / 'ssh-provisioning.txt').write_bytes(ssh('getenforce; ls -ldZ /run/ilex-dev/authorized_keys /run/ilex-dev/authorized_keys/root'))
+    random_public = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    wrong = paramiko.Ed25519Key(data=b'\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20' + random_public)
+    negative = paramiko.SSHClient()
+    negative.get_host_keys().add(f"[127.0.0.1]:{info['ssh_port']}", 'ssh-ed25519', wrong)
+    negative.set_missing_host_key_policy(paramiko.RejectPolicy())
+    rejected = False
+    try:
+        negative.connect('127.0.0.1', port=info['ssh_port'], username='root', key_filename=info['ssh_key'],
+                         look_for_keys=False, allow_agent=False, timeout=5)
+    except paramiko.BadHostKeyException:
+        rejected = True
+    finally:
+        negative.close()
+    assert rejected
+    result = {'run': info['run'], 'disk': Path(info['disk']).name, 'correct_pin_accepted': True,
+              'wrong_pin_rejected': True, 'firmware_access_key_matches': True,
+              'host_pin_sha256': hashlib.sha256(client.get_transport().get_remote_server_key().asbytes()).hexdigest(),
+              'access_key_sha256': hashlib.sha256(public[1]).hexdigest()}
+    if args.previous:
+        previous = json.loads(args.previous.read_text())
+        assert previous['disk'] == result['disk'] and previous['run'] != result['run']
+        assert all(previous[k] != result[k] for k in ['host_pin_sha256', 'access_key_sha256'])
+        result['persistent_overlay_new_keys_passed'] = True
+    (args.artifacts / 'ssh-identity.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+    print(json.dumps(result))
 elif args.operation in ['hold-shift', 'release-shift']:
     key(0xa0, args.operation == 'release-shift')
     print(args.operation)
@@ -369,6 +402,10 @@ elif args.operation in ['clipboard', 'relogin', 'lock']:
         print(json.dumps(result))
         assert all(result.values())
         if args.limits:
+            ascii_maximum = 'a' * (256 * 1024)
+            clipboard.write(ascii_maximum)
+            time.sleep(2)
+            ascii_maximum_passed = read_text() == ascii_maximum
             maximum = '🙂' * (256 * 1024 // 4)
             oversize = maximum + '🙂'
             clipboard.write(maximum)
@@ -388,7 +425,7 @@ elif args.operation in ['clipboard', 'relogin', 'lock']:
             until = time.monotonic() + 5
             while time.monotonic() < until and clipboard.read() != other:
                 time.sleep(.1)
-            limits = {'maximum_utf8_bytes': len(maximum.encode()), 'maximum_host_to_guest': maximum_passed,
+            limits = {'maximum_utf8_bytes': len(maximum.encode()), 'maximum_ascii_host_to_guest': ascii_maximum_passed, 'maximum_host_to_guest': maximum_passed,
                       'oversize_host_to_guest_refused': host_oversize_refused, 'oversize_guest_to_host_refused': guest_oversize_refused,
                       'normal_transfer_recovers': clipboard.read() == other}
             (args.artifacts / 'byte-limits.json').write_text(json.dumps(limits, indent=2))

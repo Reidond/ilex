@@ -69,7 +69,7 @@ fn state(ws: &Workspace) -> Result<PathBuf> {
     Ok(root)
 }
 
-fn delivered_disk(ws: &Workspace, directory: &Path) -> Result<PathBuf> {
+fn delivered_disk(ws: &Workspace, directory: &Path, request: &Job) -> Result<PathBuf> {
     use ilex_tooling_windows::received::Directory;
     let control = Directory::open(directory)?;
     let collection: Value = control_json(&control, "collection.json")?;
@@ -78,6 +78,8 @@ fn delivered_disk(ws: &Workspace, directory: &Path) -> Result<PathBuf> {
     ensure!(
         collection["schema"] == 1
             && collection["owner"] == identity.owner
+            && collection["job"] == request.job
+            && collection["source_digest"] == request.snapshot.source.digest
             && collection["exit_code"] == 0,
         "invalid disk collection identity"
     );
@@ -341,6 +343,21 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
             let job: Job = control_json(&control, "request.json")?;
             ensure!(job.job == id, "local job identity mismatch");
             ws.identity()?.authorize(&job.snapshot.identity.owner)?;
+            if matches!(&job.command, Command::Disk(a) if a.development) {
+                match control.read("collection.json") {
+                    Ok(receipt) => {
+                        drop(receipt);
+                        let disk = delivered_disk(ws, &dir, &job)?;
+                        println!("{}", disk.display());
+                        return Ok(());
+                    }
+                    Err(error)
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {}
+                    Err(error) => return Err(error),
+                }
+            }
             let destinations: Value = control_json(&control, "destinations.json")?;
             let _outputs = claim_outputs(
                 ws,
@@ -584,6 +601,9 @@ fn wait(
     receipt.file.write_all(&serde_json::to_vec(&json!({"schema":1,"job":job.job,"owner":owner,"source_digest":job.snapshot.source.digest,"exit_code":code,"received":attempt.path}))?)?;
     receipt.file.sync_all()?;
     received::rename(&receipt, "collection.json")?;
+    // A bound create handle denies sharing until dropped, including reopening
+    // the just-published receipt during native disk promotion below.
+    drop(receipt);
     if code != 0 {
         let code = if code < 0 { 128 - code } else { code };
         return Err(super::Failure {
@@ -597,7 +617,7 @@ fn wait(
         .into());
     }
     if matches!(&job.command, Command::Disk(a) if a.development) {
-        let disk = delivered_disk(ws, dir)?;
+        let disk = delivered_disk(ws, dir, job)?;
         println!("{}", disk.display());
         return Ok(Some(disk));
     }
