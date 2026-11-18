@@ -16,7 +16,7 @@ finish() {
     return "$result"
 }
 trap finish EXIT
-[[ -n "${ILEX_IMAGE:-}" && -f "${ILEX_ISO:-}" ]] || { echo '::error::encrypted qualification requires a staged candidate and exact ISO'; exit 1; }
+[[ -n "${ILEX_IMAGE:-}" && -f "${ILEX_ISO:-}" ]] || { echo '::error::encrypted qualification requires a local candidate and exact ISO'; exit 1; }
 command -v openssl >/dev/null
 export ILEX_SECURITY_ACCELERATOR
 ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")

@@ -15,8 +15,11 @@ The kernel mount ID of an opened directory selects its visible mount, so
 Anaconda's stacked bind mounts cannot select a hidden mount or make an
 otherwise valid encrypted layout ambiguous.
 
-The final `%post --nochroot` starts local completion on reserved **tty8**,
-then returns to Anaconda's GUI on VT6. The helper rejects a graphics-mode VT.
+After Anaconda writes the target configuration, the Flatpak preload runs in
+private mount and PID namespaces. Its runtime binds and descendant processes
+are gone when the final `%post --nochroot` starts local completion on reserved
+**tty8**. Enrollment uses Anaconda's own view of the unlocked target and its
+devices, then returns to the GUI on VT6. The helper rejects a graphics-mode VT.
 This uses the plan's explicit no-echo re-entry alternative: there is no
 Anaconda D-Bus password broker. Re-enter the disk passphrase, save the new
 recovery key offline, then privately enter that key to confirm it. Only this
@@ -199,9 +202,12 @@ state and intact slots, verifies an ordinary retry refuses implicit reissue,
 then performs authenticated explicit reissue and boots with the new key. No
 test helper replaces the enrollment executable or the ISO.
 
-The CI `encrypted_install=true` input forces build, rechunk, staging, VM setup
-and exact 6 GiB firmware qualification even with `test=false` and unchanged
-inputs. Missing backend/firmware/TPM evidence fails the job under T6's contract;
+The CI `encrypted_install=true` input forces build, rechunk, VM setup and exact
+6 GiB firmware qualification even with `test=false` and unchanged inputs. The
+build runner supplies the local rechunked image to the ephemeral and security
+tiers. The encrypted installer fixture serves that image from its disposable
+registry. This mode skips GHCR staging, upgrade and other root builds. Missing
+backend/firmware/TPM evidence fails the job under T6's contract;
 the cache-only `v1_disk=true` combination fails explicitly. It requires both
 exact encrypted storage gates plus the interrupted trial. Public evidence for automatic
 storage and existing free space is retained separately; the gate is opt-in

@@ -71,7 +71,7 @@ on:
         options: [probe, kvm, tcg]
         default: probe
       encrypted_install:
-        description: Qualify exact 6 GiB firmware, both encrypted storage modes, interruption, recovery boot and privacy (forces prerequisites)
+        description: Qualify exact 6 GiB firmware, encrypted storage, interruption, recovery boot and privacy on the build runner
         type: boolean
         default: false
 
@@ -225,22 +225,26 @@ jobs:
           FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
 
       - name: Wait for :generic.gnome
-        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install
+        if: ${{ !inputs.encrypted_install && (steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps) }}
         timeout-minutes: 15
         run: .github/vm-prep.sh wait "root-pull.$INSTALLER_TAG"
 
       # The upgrade job waits for this step (by name) and pulls the digest.
       # Unsigned, never :generic.gnome: a branch run stages too, so its upgrade tier
-      # can run, but only main publishes.
+      # can run, but only main publishes. Encrypted qualification uses the same
+      # local image ID and supplies the installer through its own loopback registry.
       - name: Stage the candidate
         id: stage
         if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install
         run: |
           image_id=$(podman image inspect --format '{{.Id}}' localhost/ilex:rechunked)
           image_id="sha256:${image_id#sha256:}"
-          cargo xtask publish "$image_id" --stage --as "$INSTALLER_TAG"
+          if [[ "$ENCRYPTED_INSTALL" != true ]]; then
+            cargo xtask publish "$image_id" --stage --as "$INSTALLER_TAG"
+          fi
           echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
         env:
+          ENCRYPTED_INSTALL: ${{ inputs.encrypted_install }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for the VM stack
@@ -339,6 +343,7 @@ jobs:
       # build/rechunk/boot. A job output is committed only after all tests pass.
       - name: Build and test the other roots
         id: roots
+        if: ${{ !inputs.encrypted_install }}
         env:
           INSTALLER_SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
           INSTALLER_CHANGED: ${{ steps.changed.outputs.changed || 'false' }}
@@ -355,7 +360,7 @@ jobs:
   # Actions cache. Without one (say, a run that starts before the v1-disk run
   # of the last publish is done) it installs v1 itself, from its first minute.
   upgrade:
-    if: ${{ !inputs.v1_disk }}
+    if: ${{ !inputs.v1_disk && !inputs.encrypted_install }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     outputs:
@@ -807,7 +812,7 @@ jobs:
   # no ilex image, so it needn't wait for the publish, and `installer/` can
   # change alone. Reads the latest installer release.
   installer-due:
-    if: ${{ !inputs.v1_disk }}
+    if: ${{ !inputs.v1_disk && (!inputs.encrypted_install || inputs.iso) }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 15
     outputs:
