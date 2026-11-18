@@ -757,6 +757,19 @@ fn failure_code(error: &anyhow::Error) -> Value {
         (b"qemu exited", "guest-exited"),
         (b"QMP command", "qmp-deadline"),
         (b"QMP response ID", "qmp-response-id"),
+        (b"installed system health", "installed-system-health"),
+        (b"installed enrollment self-check", "enrollment-self-check"),
+        (b"PCR7 lacks meaningful", "positive-authority-log"),
+        (
+            b"present TPM / changed Secure Boot PCR",
+            "mismatch-measurement",
+        ),
+        (
+            b"fallback boot changed slots/tokens",
+            "fallback-metadata-changed",
+        ),
+        (b"post-finalisation private scan", "target-privacy-scan"),
+        (b"credential found or unreadable", "artifact-privacy-scan"),
     ];
     let codes: Vec<&str> = patterns
         .iter()
@@ -1618,7 +1631,23 @@ fn assertions(
             && evidence["slot"] == state["tpm"]["slot"],
         "unlock evidence differs from the enrolled token/slot"
     );
-    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; grep -qw 'rd.luks.options=tpm2-device=auto' /proc/cmdline; ! grep -q headless /etc/crypttab; test \"$(systemctl is-system-running --wait)\" = running; test -z \"$(systemctl --failed --no-legend --plain)\"; ilex-enroll --self-check")?;
+    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; grep -qw 'rd.luks.options=tpm2-device=auto' /proc/cmdline; ! grep -q headless /etc/crypttab")?;
+    // Preserve structured health before asserting it; a partial diagnostic
+    // can identify a failed unit without exposing raw command error chains.
+    let failed = guest_json(
+        vm,
+        artifacts,
+        "failed-units.json",
+        "systemctl list-units --all --state=failed --output=json --no-pager",
+    )?;
+    ensure!(
+        failed.as_array().is_some_and(Vec::is_empty),
+        "installed system health: failed units"
+    );
+    vm.ssh_ok("test \"$(systemctl is-system-running --wait)\" = running")
+        .context("installed system health")?;
+    vm.ssh_ok("ilex-enroll --self-check")
+        .context("installed enrollment self-check")?;
     if expected["preserve_data"] == true {
         preserved_data(vm, artifacts)?;
     }
