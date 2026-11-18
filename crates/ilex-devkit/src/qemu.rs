@@ -326,6 +326,9 @@ pub struct VmConfig {
     /// Attach a second UART, saved as `serial-secondary.log`, for observing
     /// faults in the primary diagnostic sink independently.
     pub secondary_serial: bool,
+    /// Use an xHCI USB keyboard for firmware input. Some OVMF builds lose
+    /// navigation/modifier keys from virtio-keyboard before the OS boots.
+    pub usb_keyboard: bool,
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
@@ -354,6 +357,7 @@ impl VmConfig {
             x_display: None,
             cdrom: None,
             secondary_serial: false,
+            usb_keyboard: false,
             extra_disks: Vec::new(),
             smbios: Vec::new(),
             efi_vars: None,
@@ -464,7 +468,13 @@ impl Vm {
         qemu
             .arg("-device")
             .arg(format!("{vga},xres={},yres={}", config.width, config.height))
-            .args(["-device", "virtio-tablet-pci", "-device", "virtio-keyboard-pci"])
+            .args(["-device", "virtio-tablet-pci"]);
+        if config.usb_keyboard {
+            qemu.args(["-device", "qemu-xhci", "-device", "usb-kbd"]);
+        } else {
+            qemu.args(["-device", "virtio-keyboard-pci"]);
+        }
+        qemu
             .args(["-object", "rng-random,id=rng0,filename=/dev/urandom"])
             .args(["-device", "virtio-rng-pci,rng=rng0"])
             .arg("-netdev")

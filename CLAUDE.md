@@ -151,7 +151,13 @@ cargo xtask info               # resource identity, selection and available conf
   edits GRUB with real key input on the untouched ISO and asserts the chooser
   was skipped; the OEMDRV `install` trial also asserts that it was skipped.
   GRUB needs 100 ms key holds; vmctl's fast desktop typing drops characters
-  there. The chooser HTTP probes are enabled only by the harness's public
+  there. The harness waits for its menu countdown, stops it before reading
+  the ISO with xorriso, then waits for the editor's final command to be drawn
+  before sending cursor movement and text. The earlier menu instructions
+  appear while GRUB is still drawing and cannot establish input readiness.
+  That trial uses a USB keyboard: Ubuntu's OVMF drops navigation/modifier
+  input from `virtio-keyboard` in GRUB even though Linux accepts it normally.
+  The chooser HTTP probes are enabled only by the harness's public
   `ilex.chooser.self-check=1` systemd credential (SMBIOS), then the person-facing
   form is still submitted with real key events.
   Lifecycle trials close Firefox with Ctrl+Shift+W and Enter at its quit

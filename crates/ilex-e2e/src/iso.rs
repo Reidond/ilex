@@ -212,6 +212,7 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     let mut config = VmConfig::new(format!("iso-{name}"), &disk);
     config.memory = INSTALLER_MEMORY.into();
     config.vcpus = 4;
+    config.usb_keyboard = kernel;
     config.cdrom = Some(iso.clone());
     config.smbios = smbios(&table, machine, board_only)?;
     let serial_fault = name.strip_prefix("chooser_serial_");
@@ -245,8 +246,22 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
         "serial.log"
     });
     if kernel {
-        wait_serial(&mut vm, &serial, "Press enter to boot")?;
-        kernel_argument(&iso, &work, &table.default, &ctl, &artifacts)?;
+        // The instructions print before GRUB finishes drawing the menu. Its
+        // countdown is the point at which it starts accepting edit keys.
+        wait_serial(
+            &mut vm,
+            &serial,
+            "The highlighted entry will be executed automatically",
+        )?;
+        kernel_argument(
+            &iso,
+            &work,
+            &table.default,
+            &ctl,
+            &artifacts,
+            &mut vm,
+            &serial,
+        )?;
     } else {
         let wanted = format!("ILEX-CHOOSER default={detected} offered=");
         wait_serial(&mut vm, &serial, &wanted)?;
@@ -437,8 +452,13 @@ fn kernel_argument(
     tag: &str,
     ctl: &Vmctl,
     artifacts: &Path,
+    vm: &mut Vm,
+    serial: &Path,
 ) -> Result<()> {
     installer::validate_tag(tag)?;
+    // The caller waited for the menu countdown. Stop it before reading the
+    // ISO, so even slow storage cannot let the default entry boot mid-edit.
+    grub_key(ctl, "up")?;
     let grub = work.join("grub.cfg");
     cmd::run(
         Command::new("xorriso")
@@ -451,17 +471,23 @@ fn kernel_argument(
     let entry = original
         .lines()
         .skip_while(|l| !l.trim_start().starts_with("menuentry "))
-        .skip(1);
-    let line = entry
+        .skip(1)
         .take_while(|l| l.trim() != "}")
+        .collect::<Vec<_>>();
+    let line = entry
+        .iter()
         .position(|l| {
             l.trim_start().starts_with("linux ") || l.trim_start().starts_with("linuxefi ")
         })
         .context("no linux line in ISO's first GRUB entry")?;
-    // The caller waited for GRUB's serial menu prompt, within its ten-second
-    // countdown. All editing is through the virtual keyboard.
-    grub_key(ctl, "up")?; // Stop the menu countdown.
+    let last_line = entry
+        .iter()
+        .rfind(|l| !l.trim().is_empty())
+        .context("empty GRUB entry")?;
     grub_key(ctl, "e")?;
+    // Firmware can spend seconds drawing the editor. Keys sent before its
+    // final command is visible are lost, including the cursor movement.
+    wait_serial(vm, serial, last_line.trim())?;
     grub_key(ctl, "ctrl+home")?;
     // GRUB inserts setparams and a blank line before the entry's commands.
     for _ in 0..line + 2 {
