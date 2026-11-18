@@ -1,5 +1,6 @@
 #!/usr/bin/python3 -I
 import os
+import base64
 import subprocess
 from pathlib import Path
 
@@ -29,3 +30,28 @@ elif not target.exists():
     subprocess.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(target)], check=True)
 # This is a disposable guest's /run, never the host or production image.
 label(target, 'sshd_key_t')
+
+# systemd-tmpfiles SSH credential setup preserves an existing authorized_keys in
+# a persistent home. Native launches need their new access key on every boot,
+# independently of that first-boot file. The key is public and arrives through
+# the same owned firmware channel as the pinned host identity.
+access = Path('/sys/firmware/qemu_fw_cfg/by_name/opt/ilex/ssh-authorized-key/raw')
+if source.exists():
+    if not access.exists():
+        raise SystemExit('native development access credential missing')
+    public = access.read_bytes()
+    if not 1 <= len(public) <= 4096:
+        raise SystemExit('invalid development access credential')
+    fields = public.split()
+    if len(fields) < 2 or fields[0] != b'ssh-ed25519':
+        raise SystemExit('invalid development access credential')
+    decoded = base64.b64decode(fields[1], validate=True)
+    if len(decoded) != 51 or decoded[:19] != b'\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20':
+        raise SystemExit('invalid development access credential')
+    directory = Path('/run/ilex-dev/authorized_keys')
+    directory.mkdir(mode=0o700, exist_ok=True)
+    label(directory, 'sshd_var_run_t')
+    fd = os.open(directory / 'root', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(b'ssh-ed25519 ' + fields[1] + b'\n')
+    label(directory / 'root', 'ssh_home_t')

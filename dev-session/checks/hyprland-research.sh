@@ -14,9 +14,17 @@ curl --fail --location --silent --show-error \
     --output /etc/yum.repos.d/ilex-t4-hyprland.repo
 dnf -y install hyprland qt6-qtdeclarative-devel qt6-qtwayland wl-clipboard glx-utils
 install -d -o ilexdev -g ilexdev /var/home/ilexdev/.config/hypr
+install -d -o ilexdev -g ilexdev /var/home/ilexdev/.local/bin
+cat >/var/home/ilexdev/.local/bin/ilex-t4-super-e <<'EOF'
+#!/bin/sh
+printf '1\n' >> "$XDG_RUNTIME_DIR/ilex-t4-super-e"
+EOF
+chmod 0755 /var/home/ilexdev/.local/bin/ilex-t4-super-e
+chown ilexdev:ilexdev /var/home/ilexdev/.local/bin/ilex-t4-super-e
 cat >/var/home/ilexdev/.config/hypr/hyprland.conf <<'EOF'
 monitor = , preferred, auto, 1
 exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP
+bind = SUPER, E, exec, /var/home/ilexdev/.local/bin/ilex-t4-super-e
 input {
     kb_layout = us
 }

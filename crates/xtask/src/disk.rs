@@ -167,7 +167,7 @@ pub fn write_metadata(ws: &Workspace, a: &Args, disk: &std::path::Path) -> Resul
     firmware: core::Firmware::Uefi,
     // The base remains unenrolled. The existing QEMU fixture injects
     // its public key through systemd credentials at each test boot.
-    provisioning_hash: if a.development { core::digest(b"ilex-dev-session-v1;fwcfg-host-key") } else { core::digest(b"unenrolled-base;qemu-systemd-ssh-credentials-v1") },
+    provisioning_hash: if a.development { core::digest(b"ilex-dev-session-v2;fwcfg-host-key;fwcfg-access-key") } else { core::digest(b"unenrolled-base;qemu-systemd-ssh-credentials-v1") },
     location: core::ArtifactLocation { executor_id: executor, path: disk.to_path_buf(), sha256: checksum },
 };
     std::fs::write(

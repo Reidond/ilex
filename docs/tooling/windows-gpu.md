@@ -88,9 +88,14 @@ disposable guest's `/run/ilex-dev-session`, records its source hash and starts
 it automatically. The guest host key stays in its separate root-only directory.
 
 Each launch generates an SSH access key and a guest host key in a directory
-with current-user/SYSTEM ACLs. The guest receives its host identity through
-the owned QEMU firmware channel, and its public access credential through
-systemd's SMBIOS credential mechanism. SSH requires that exact host key;
+with current-user/SYSTEM ACLs. The guest receives its host identity and public
+access credential through the owned QEMU firmware channel. Its volatile
+authorized-key file is refreshed on every native boot, including persistent
+overlays. The SMBIOS credential remains available to the earlier installation
+path. Systemd's normal credential setup preserves existing authorized keys,
+so it cannot refresh a persistent guest's launch key by itself (see
+[systemd credentials](https://www.freedesktop.org/software/systemd/man/latest/systemd.system-credentials.html)).
+SSH requires that exact host key;
 neither first-contact acceptance nor disabled host verification is used.
 Run-specific host identity is independent of the persistent disk's identity.
 The earlier `bcvk to-disk` installer boot has no native firmware identity and

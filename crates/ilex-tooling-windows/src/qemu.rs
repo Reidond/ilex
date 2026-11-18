@@ -393,8 +393,8 @@ fn cache_disk(
     );
     ensure!(
         artifact.provisioning_hash
-            == ilex_tooling_core::digest(b"ilex-dev-session-v1;fwcfg-host-key"),
-        "ILEX_DISK needs disk --development provisioning"
+            == ilex_tooling_core::digest(b"ilex-dev-session-v2;fwcfg-host-key;fwcfg-access-key"),
+        "ILEX_DISK needs current disk --development provisioning"
     );
     let directory = state.join("disks");
     host::secure_dir(&directory)?;
@@ -501,7 +501,9 @@ impl Vm {
         );
         ensure!(
             metadata.provisioning_hash
-                == ilex_tooling_core::digest(b"ilex-dev-session-v1;fwcfg-host-key"),
+                == ilex_tooling_core::digest(
+                    b"ilex-dev-session-v2;fwcfg-host-key;fwcfg-access-key"
+                ),
             "disk needs the private development composition; use disk --development"
         );
         ensure!(
@@ -661,6 +663,12 @@ impl Vm {
             let mut command = runtime::command(&runtime, "qemu-system-x86_64.exe");
             command
                 .env("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2")
+                // SDL's absolute-mouse notifier can run on a vCPU thread.
+                // Its automatic grab updates the caption synchronously on
+                // Windows, deadlocking against the UI thread's QEMU lock if
+                // the pointer is already over a newly focused window. Show
+                // without activation; the user's first click selects/grabs it.
+                .env("SDL_WINDOW_ACTIVATE_WHEN_SHOWN", "0")
                 .args([
                     "-name",
                     &name,
@@ -730,6 +738,11 @@ impl Vm {
                 .arg(format!(
                     "name=opt/ilex/ssh-host-key,file={}",
                     qemu_path(&host_key)?
+                ))
+                .arg("-fw_cfg")
+                .arg(format!(
+                    "name=opt/ilex/ssh-authorized-key,file={}",
+                    qemu_path(&key.with_extension("pub"))?
                 ))
                 .arg("-smbios")
                 .arg(format!(

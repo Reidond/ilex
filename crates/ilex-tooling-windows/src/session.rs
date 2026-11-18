@@ -159,12 +159,23 @@ pub fn display_info(info: &VmInfo, target: Option<(u32, u32)>) -> Result<Value> 
             .map(|_| bytes);
         let _ = sender.send(result);
     });
+    let deadline = Instant::now() + Duration::from_secs(5);
     let result = (|| -> Result<Value> {
         let bytes = receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .context("guest mode acknowledgement deadline expired")??;
         ensure!(bytes.len() <= 65536, "display probe output limit");
-        ensure!(child.wait()?.success(), "guest mode unavailable");
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "display probe exit deadline expired"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        ensure!(status.success(), "guest mode unavailable");
         Ok(serde_json::from_slice(&bytes)?)
     })();
     let _ = child.kill();
@@ -370,8 +381,9 @@ pub fn write_clipboard(text: &str, owner: Option<HWND>) -> Result<u32> {
             }
             std::ptr::copy_nonoverlapping(data.as_ptr(), pointer as *mut u16, data.len());
             let _ = GlobalUnlock(memory);
-            EmptyClipboard()?;
-            if let Err(error) = SetClipboardData(13, Some(HANDLE(memory.0))) {
+            if let Err(error) =
+                EmptyClipboard().and_then(|()| SetClipboardData(13, Some(HANDLE(memory.0))))
+            {
                 let _ = windows::Win32::Foundation::GlobalFree(Some(memory));
                 return Err(error.into());
             }

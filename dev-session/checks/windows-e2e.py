@@ -23,6 +23,7 @@ parser.add_argument('--info', required=True, type=Path)
 parser.add_argument('--artifacts', required=True, type=Path)
 parser.add_argument('--vmctl', required=True, type=Path)
 parser.add_argument('--motion-seconds', type=float, default=65)
+parser.add_argument('--limits', action='store_true', help='Also exercise real clipboard UTF-8 byte limits')
 parser.add_argument('operation', choices=['provision', 'clipboard', 'relogin', 'lock', 'qt-clipboard', 'input', 'focus', 'hold-shift', 'release-shift', 'facts'])
 args = parser.parse_args()
 info = json.loads(args.info.read_text())
@@ -122,6 +123,11 @@ elif args.operation in ['hold-shift', 'release-shift']:
     print(args.operation)
 elif args.operation == 'input':
     validate_window(foreground=True)
+    hyprland = json.loads(ctl('display'))['backend'] == 'hyprland'
+    if hyprland:
+        uid = int(ssh('id -u ilexdev').decode().strip())
+        marker = f'/run/user/{uid}/ilex-t4-super-e'
+        ssh(f'rm -f {marker}')
     source = client.exec_command('python3 -u /var/tmp/ilex-t4-evdev.py 14')[1]
     assert json.loads(source.readline())['ready']
     if 'exit grab' not in caption():
@@ -149,7 +155,12 @@ elif args.operation == 'input':
             elif event['value'] == 0:
                 held.discard(item)
     assert not held, ('guest keys left held after escape', sorted(held))
-    (args.artifacts / 'host-input.json').write_text(json.dumps({'route': 'SendInput physical set-1 scan codes with extended flags', 'chords': titles, 'right_ctrl_g_escape': True, 'no_held_test_keys': True}, indent=2))
+    result = {'route': 'SendInput physical set-1 scan codes with extended flags', 'chords': titles, 'right_ctrl_g_escape': True, 'no_held_test_keys': True}
+    if hyprland:
+        dispatched = int(ssh(f'wc -l < {marker}').decode().strip())
+        assert dispatched == 3, ('Hyprland Super+E action count', dispatched)
+        result['hyprland_super_e_actions'] = dispatched
+    (args.artifacts / 'host-input.json').write_text(json.dumps(result, indent=2))
     print('SDL real-input matrix passed')
 elif args.operation == 'focus':
     validate_window(foreground=True)
@@ -357,6 +368,31 @@ elif args.operation in ['clipboard', 'relogin', 'lock']:
         (args.artifacts / 'clipboard.json').write_text(json.dumps(result, indent=2))
         print(json.dumps(result))
         assert all(result.values())
+        if args.limits:
+            maximum = '🙂' * (256 * 1024 // 4)
+            oversize = maximum + '🙂'
+            clipboard.write(maximum)
+            time.sleep(2)
+            maximum_passed = read_text() == maximum
+            clipboard.write(oversize)
+            time.sleep(2)
+            host_oversize_refused = read_text() == maximum
+            baseline = 'ilex T4 bounded clipboard recovery ✓'
+            clipboard.write(baseline)
+            time.sleep(2)
+            assert read_text() == baseline
+            send({'op': 'set', 'text': oversize})
+            time.sleep(2)
+            guest_oversize_refused = clipboard.read() == baseline
+            send({'op': 'set', 'text': other})
+            until = time.monotonic() + 5
+            while time.monotonic() < until and clipboard.read() != other:
+                time.sleep(.1)
+            limits = {'maximum_utf8_bytes': len(maximum.encode()), 'maximum_host_to_guest': maximum_passed,
+                      'oversize_host_to_guest_refused': host_oversize_refused, 'oversize_guest_to_host_refused': guest_oversize_refused,
+                      'normal_transfer_recovers': clipboard.read() == other}
+            (args.artifacts / 'byte-limits.json').write_text(json.dumps(limits, indent=2))
+            assert all(limits.values()), limits
         # Keep the renderer alive for a sustained sample. Cua can resize and
         # native vmctl can capture while this independent workload is running.
         time.sleep(2)
