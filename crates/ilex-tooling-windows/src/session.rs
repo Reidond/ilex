@@ -87,27 +87,58 @@ impl ResizeSession {
         let stopped = stop.clone();
         let worker = thread::spawn(move || {
             let mut previous = None;
-            let mut acknowledged = false;
             let mut changed = Instant::now();
+            let mut next_probe = Instant::now();
+            let mut attempts = 0u64;
+            let mut session = Value::Null;
+            let mut output = Value::Null;
+            let mut session_changes = 0u64;
+            let mut output_changes = 0u64;
             while !stopped.load(Ordering::Relaxed) && info.is_running() {
                 if let Ok(geometry) = crate::capture::geometry(&info) {
                     let _ = crate::capture::record_geometry(&info, geometry);
                     let size = (geometry.width, geometry.height);
                     if previous != Some(size) {
                         previous = Some(size);
-                        acknowledged = false;
                         changed = Instant::now();
+                        next_probe = changed + Duration::from_millis(300);
                     }
-                    if !acknowledged
-                        && changed.elapsed() > Duration::from_millis(300)
-                        && changed.elapsed() < Duration::from_secs(12)
-                        && let Ok(value) = display_info(&info, Some(size))
+                    if changed.elapsed() > Duration::from_millis(300)
+                        && Instant::now() >= next_probe
                     {
-                        acknowledged = value["acknowledged"] == true;
+                        attempts = attempts.saturating_add(1);
+                        // Every attempt has its own five-second deadline. Keep
+                        // probing after success too: logind/compositor/output
+                        // changes do not necessarily resize the host window.
+                        let mut value = display_info(&info, Some(size)).unwrap_or_else(|_| json!({"schema":1,"acknowledged":false,"state":"guest-display-unavailable","target":[size.0,size.1]}));
+                        if value["session"] != session {
+                            session_changes = session_changes.saturating_add(1);
+                            session = value["session"].clone();
+                        }
+                        let observed_output = json!({"backend":value["backend"],"edid":value["edid"],"monitors":value["monitors"],"display_instance":value["display_instance"]});
+                        if observed_output != output {
+                            output_changes = output_changes.saturating_add(1);
+                            output = observed_output;
+                        }
+                        if crate::capture::geometry(&info).ok() != Some(geometry) {
+                            value["acknowledged"] = json!(false);
+                            value["state"] = json!("host-resized-during-probe");
+                        }
+                        value["run"] = json!(info.run);
+                        value["attempt"] = json!(attempts);
+                        value["session_changes"] = json!(session_changes);
+                        value["output_changes"] = json!(output_changes);
+                        value["observed_unix_ms"] = json!(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                        );
                         let _ = host::atomic(
                             &info.dir.join("resize-status.json"),
                             &serde_json::to_vec(&value).unwrap_or_default(),
                         );
+                        next_probe = Instant::now() + Duration::from_secs(2);
                     }
                 }
                 for _ in 0..5 {

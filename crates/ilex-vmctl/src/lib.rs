@@ -115,6 +115,8 @@ struct FrameMapping {
     #[cfg(target_os = "windows")]
     source_ticks: Option<i64>,
     #[cfg(target_os = "windows")]
+    freshness: Option<Value>,
+    #[cfg(target_os = "windows")]
     screenshot_source: Option<String>,
 }
 
@@ -236,13 +238,19 @@ impl Vmctl {
                 .mapping
                 .lock()
                 .map_err(|_| anyhow::anyhow!("frame mapping poisoned"))?;
-            anyhow::ensure!(
-                mapping
-                    .source_ticks
-                    .is_none_or(|ticks| captured.source_ticks > ticks),
-                "capture did not produce a new compositor frame"
-            );
-            mapping.source_ticks = Some(captured.source_ticks);
+            if let Some(presented) = captured.source_ticks {
+                anyhow::ensure!(
+                    mapping.source_ticks.is_none_or(|ticks| presented > ticks),
+                    "capture did not produce a new compositor frame"
+                );
+            } else {
+                anyhow::ensure!(
+                    captured.freshness["kind"] == "content-change",
+                    "no qualified frame freshness"
+                );
+            }
+            mapping.source_ticks = captured.source_ticks;
+            mapping.freshness = Some(captured.freshness);
             mapping.screenshot_source = Some(captured.source.into());
             mapping.generation = captured.generation;
             mapping.captured_unix_ms = Some(captured.timestamp_ms);
@@ -334,7 +342,7 @@ impl Vmctl {
             std::fs::write(
                 path.with_extension("frame.json"),
                 serde_json::to_vec_pretty(
-                    &json!({"schema":1,"vm":self.handle(),"captured_unix_ms":mapping.captured_unix_ms,"source_ticks":mapping.source_ticks,"generation":mapping.generation,"client_size":mapping.size,"source":source}),
+                    &json!({"schema":1,"vm":self.handle(),"captured_unix_ms":mapping.captured_unix_ms,"source_ticks":mapping.source_ticks,"freshness":mapping.freshness,"generation":mapping.generation,"client_size":mapping.size,"source":source}),
                 )?,
             )?;
         }

@@ -133,7 +133,8 @@ pub struct Capture {
     pub height: u32,
     pub rgb: Vec<u8>,
     pub timestamp_ms: u64,
-    pub source_ticks: i64,
+    pub source_ticks: Option<i64>,
+    pub freshness: serde_json::Value,
     pub source: &'static str,
     pub generation: u64,
 }
@@ -330,7 +331,8 @@ fn wgc(info: &VmInfo, before: Geometry, started: i64) -> Result<Capture> {
                         height: before.height,
                         rgb,
                         timestamp_ms: unix_ms()?.saturating_sub(age),
-                        source_ticks: ticks,
+                        source_ticks: Some(ticks),
+                        freshness: serde_json::json!({"kind":"wgc-presentation","presentation_ticks":ticks}),
                         source: "wgc",
                         generation: record_geometry(info, before)?,
                     });
@@ -355,8 +357,9 @@ fn unix_ms() -> Result<u64> {
 
 /// PrintWindow is synchronous and can hang inside a driver. Run it on a bounded
 /// worker with at most one in flight per process. It validates the exact
-/// non-minimized client, deadline, dimensions and nonblack GL pixels; its
-/// source is labelled separately from WGC's compositor timestamp.
+/// non-minimized client, deadline and dimensions. Nonblack pixels alone are
+/// unqualified: two acquisitions must show a content change within this call.
+/// Observation time is never represented as a compositor presentation tick.
 fn print_window(info: &VmInfo, before: Geometry) -> Result<Capture> {
     static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     ensure!(
@@ -366,14 +369,38 @@ fn print_window(info: &VmInfo, before: Geometry) -> Result<Capture> {
     let info = info.clone();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     thread::spawn(move || {
-        let _ = sender.send(print_window_inner(&info, before));
+        let result = (|| -> Result<Capture> {
+            let deadline = Instant::now() + Duration::from_millis(1800);
+            let baseline = print_window_inner(&info, before, deadline)?;
+            let baseline_hash = crate::host::hash(&baseline);
+            let baseline_observed = unix_ms()?;
+            while Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(80));
+                let rgb = print_window_inner(&info, before, deadline)?;
+                if rgb != baseline {
+                    let observed = unix_ms()?;
+                    return Ok(Capture {
+                        width: before.width,
+                        height: before.height,
+                        source_ticks: None,
+                        freshness: serde_json::json!({"kind":"content-change","baseline_sha256":baseline_hash,"frame_sha256":crate::host::hash(&rgb),"baseline_observed_unix_ms":baseline_observed,"change_observed_unix_ms":observed}),
+                        rgb,
+                        timestamp_ms: observed,
+                        source: "printwindow-content-change",
+                        generation: record_geometry(&info, before)?,
+                    });
+                }
+            }
+            bail!("PrintWindow pixels stayed unchanged; no fresh frame")
+        })();
+        let _ = sender.send(result);
         IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
     });
     receiver
         .recv_timeout(Duration::from_secs(2))
         .context("PrintWindow deadline expired; no fresh frame")?
 }
-fn print_window_inner(info: &VmInfo, before: Geometry) -> Result<Capture> {
+fn print_window_inner(info: &VmInfo, before: Geometry, deadline: Instant) -> Result<Vec<u8>> {
     use windows::Win32::{
         Graphics::Gdi::*,
         Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow},
@@ -413,11 +440,10 @@ fn print_window_inner(info: &VmInfo, before: Geometry) -> Result<Capture> {
         let mut bits = std::ptr::null_mut();
         let bitmap = CreateDIBSection(Some(dc), &bitmap_info, DIB_RGB_COLORS, &mut bits, None, 0)?;
         let old = SelectObject(memory, bitmap.into());
-        let started = Instant::now();
         let success = PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(3)).as_bool();
-        let result = (|| -> Result<Capture> {
+        let result = (|| -> Result<Vec<u8>> {
             ensure!(
-                success && started.elapsed() < Duration::from_secs(2) && geometry(info)? == before,
+                success && Instant::now() < deadline && geometry(info)? == before,
                 "PrintWindow failed/minimized/resized; no fresh frame"
             );
             let pixels = std::slice::from_raw_parts(
@@ -430,22 +456,14 @@ fn print_window_inner(info: &VmInfo, before: Geometry) -> Result<Capture> {
                     .0
                     .iter()
                     .any(|p| p[..3].iter().any(|&c| c != 0)),
-                "PrintWindow returned black/unqualified GL pixels"
+                "PrintWindow returned black/unqualified GL pixels; no fresh frame"
             );
-            Ok(Capture {
-                width: before.width,
-                height: before.height,
-                rgb: pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .flat_map(|p| [p[2], p[1], p[0]])
-                    .collect(),
-                timestamp_ms: unix_ms()?,
-                source_ticks: qpc_ticks()?,
-                source: "printwindow-qualified",
-                generation: record_geometry(info, before)?,
-            })
+            Ok(pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [p[2], p[1], p[0]])
+                .collect())
         })();
         SelectObject(memory, old);
         let _ = DeleteObject(bitmap.into());

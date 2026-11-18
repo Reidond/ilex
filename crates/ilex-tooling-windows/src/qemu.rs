@@ -1,5 +1,9 @@
 //! Native nonsecure WHPX development VM. No Linux/WSL execution or viewer.
-use crate::{host, qmp::Qmp, runtime, transport};
+use crate::{
+    host,
+    qmp::{self, Qmp},
+    runtime, transport,
+};
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use ilex_tooling_core::{
@@ -440,6 +444,7 @@ pub struct Vm {
     _job: host::ProcessJob,
     _lease: File,
     _slot: File,
+    _qmp: qmp::Endpoints,
     persistent: bool,
 }
 // Before Vm owns the launch, cancellation/failed admission/failed QEMU startup
@@ -653,12 +658,13 @@ impl Vm {
             thread::sleep(Duration::from_secs(10));
         };
         for attempt in 0..5 {
-            let ports: Vec<_> = (0..3)
+            let ports: Vec<_> = (0..1)
                 .map(|_| TcpListener::bind(("127.0.0.1", 0)))
                 .collect::<std::io::Result<_>>()?;
             let ssh_port = ports[0].local_addr()?.port();
-            let control = format!("127.0.0.1:{}", ports[1].local_addr()?.port());
-            let input = format!("127.0.0.1:{}", ports[2].local_addr()?.port());
+            let endpoints = qmp::Endpoints::new(&config.identity.owner, &run, attempt)?;
+            let control = endpoints.control.clone();
+            let input = endpoints.input.clone();
             let name = format!("ilex-{}-{}", config.identity.slug, config.purpose);
             let mut command = runtime::command(&runtime, "qemu-system-x86_64.exe");
             command
@@ -732,9 +738,9 @@ impl Vm {
                 ])
                 .args([
                     "-qmp",
-                    &format!("tcp:{control},server=on,wait=off"),
+                    &format!("{control},server=on,wait=off"),
                     "-qmp",
-                    &format!("tcp:{input},server=on,wait=off"),
+                    &format!("{input},server=on,wait=off"),
                     "-monitor",
                     "none",
                 ])
@@ -819,6 +825,12 @@ impl Vm {
                     thread::sleep(Duration::from_millis(100));
                 }
                 host::atomic(&dir.join("vm.json"), &serde_json::to_vec_pretty(&info)?)?;
+                host::atomic(
+                    &dir.join("qmp-security.json"),
+                    &serde_json::to_vec_pretty(
+                        &json!({"schema":1,"run":run,"control":qmp::security(&info.qmp_endpoint)?,"input":qmp::security(&info.input_endpoint)?}),
+                    )?,
+                )?;
                 Ok(info)
             })();
             match startup {
@@ -832,6 +844,7 @@ impl Vm {
                         _job: job,
                         _lease: lease,
                         _slot: slot,
+                        _qmp: endpoints,
                         persistent: config.persist,
                     });
                 }

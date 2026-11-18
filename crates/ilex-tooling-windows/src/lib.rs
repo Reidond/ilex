@@ -6,6 +6,8 @@ pub mod capture;
 #[cfg(target_os = "windows")]
 mod host;
 #[cfg(target_os = "windows")]
+mod private_qmp;
+#[cfg(target_os = "windows")]
 pub mod qemu;
 #[cfg(target_os = "windows")]
 pub mod qmp;

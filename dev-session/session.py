@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import uuid
+import hashlib
 from pathlib import Path
 from gi.repository import Gio, GLib
 
@@ -136,6 +137,7 @@ def display_info(target=None):
             if seat and props.get('Active') and props.get('Type') == 'wayland':
                 return subprocess.run(['runuser', '-u', user, '--', 'env',
                     f'XDG_RUNTIME_DIR=/run/user/{uid}', f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus',
+                    'ILEX_DEV_DISPLAY_SESSION=' + json.dumps({'id': sid, 'uid': uid, 'leader': props.get('Leader'), 'started_monotonic': props.get('TimestampMonotonic')}),
                     HELPER] + (['--display-info'] if target is None else ['--resize', str(target[0]), str(target[1])]), check=True).returncode
         raise ValueError('no active display session')
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -148,7 +150,8 @@ def display_info(target=None):
             preferred = [mode for mode in modes if mode[-1].get('is-preferred')]
             monitors.append({'name': identity[0], 'current': [list(m[1:3]) for m in current],
                              'preferred': [list(m[1:3]) for m in preferred]})
-        reply = {'schema': 1, 'backend': 'mutter', 'monitors': monitors}
+        owner = dbus(bus, 'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'GetNameOwner', GLib.Variant('(s)', ('org.gnome.Mutter.DisplayConfig',))).unpack()[0]
+        reply = {'schema': 1, 'backend': 'mutter', 'monitors': monitors, 'display_instance': owner}
     except GLib.Error:
         environment = hypr_environment()
         result = subprocess.run(['hyprctl', '-j', 'monitors'], env=environment, capture_output=True, timeout=2, check=True)
@@ -172,8 +175,18 @@ def display_info(target=None):
                 if applied.returncode != 0 or applied.stdout.strip() != b'ok':
                     subprocess.run(['hyprctl', 'keyword', 'monitor', f"{monitor['name']},{mode.removesuffix('Hz')},auto,1"], env=environment, capture_output=True, check=True, timeout=2)
                 monitors = json.loads(subprocess.run(['hyprctl', '-j', 'monitors'], env=environment, capture_output=True, check=True, timeout=2).stdout)
-        reply = {'schema': 1, 'backend': 'hyprland', 'monitors':
+        reply = {'schema': 1, 'backend': 'hyprland', 'display_instance': environment['HYPRLAND_INSTANCE_SIGNATURE'], 'monitors':
             [{'name': m['name'], 'current': [[m['width'], m['height']]], 'available': m['availableModes']} for m in monitors]}
+    reply['session'] = json.loads(os.environ.get('ILEX_DEV_DISPLAY_SESSION', 'null'))
+    reply['edid'] = []
+    for connector in Path('/sys/class/drm').glob('card*-*'):
+        try:
+            with (connector / 'edid').open('rb') as stream:
+                content = stream.read(32768)
+            if content:
+                reply['edid'].append({'connector': connector.name, 'sha256': hashlib.sha256(content).hexdigest()})
+        except OSError:
+            pass
     if target is not None:
         reply['target'] = list(target)
         reply['acknowledged'] = any(list(target) in m['current'] for m in reply['monitors'])
