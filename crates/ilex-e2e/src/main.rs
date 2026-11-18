@@ -11,6 +11,7 @@ use std::panic::{self, AssertUnwindSafe};
 use libtest_mimic::{Arguments, Trial};
 
 mod common;
+mod apps;
 // Fixtures preserve Unix modes and symlinks; these tiers run in WSL on Windows.
 #[cfg(target_os = "linux")]
 mod config;
@@ -32,6 +33,12 @@ fn main() {
     trials.extend(disk::trials());
     trials.extend(upgrade::trials());
     trials.extend(graphical::trials());
+    if filters.iter().any(|f| f.contains("apps::")) {
+        trials.extend(apps::trials());
+    }
+    if filters.iter().any(|f| f.contains("graphical::apps")) {
+        trials.push(graphical::apps_trial());
+    }
     trials.extend(tool::trials());
     // Installed, enforcing SELinux homes are an explicit, slow qualification.
     if filters.iter().any(|f| f.contains("homed")) {
@@ -74,12 +81,14 @@ fn main() {
         std::process::exit(1);
     }
     ephemeral::expect(will_run("ephemeral::"));
+    apps::expect(will_run("apps::"));
     // `tool::installed_system` boots a disk of its own, not the tier's VM.
     tool::expect(will_run("tool::") - will_run("tool::installed_system"));
 
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| libtest_mimic::run(&args, trials)));
     // Safety net: nothing may outlive the run.
     ephemeral::shutdown();
+    apps::shutdown();
     tool::shutdown();
     match outcome {
         Ok(conclusion) => conclusion.exit(),

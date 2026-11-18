@@ -907,8 +907,10 @@ skips disabled and no-enumerate remotes; its
 still considers them. GNOME Software 51.1's
 [`setup_thread_cb` and `ensure_scope`](https://github.com/GNOME/gnome-software/blob/51.1/plugins/flatpak/gs-plugin-flatpak.c)
 use the unacquirable `appstream-update` permission to disable system refresh
-and default new bundles to user scope. No system AppStream catalogue is
-downloaded by this stack, avoiding Software's no-enumerate/main-ref edge case.
+and default new bundles to user scope. Sync removes any older system Flathub
+AppStream cache before marking the remote changed, including on its fast path.
+No system catalogue is downloaded by ilex; this avoids Software's
+no-enumerate/main-ref edge case while preserving user catalogues and app data.
 No-enumerate also excludes the remote from runtime dependency search.
 Before preinstall (and daily app runtime transitions), sync reads the signed
 app metadata and explicitly installs missing runtime refs from Flathub with
@@ -927,6 +929,25 @@ the apps timer, keeping downloads out of ordinary tests. Upgrade masks both
 apps units before the first timer deadline. `xtask vm --disk --apps` enables
 downloads; `vm --gui` enables them by default (`--no-apps` opts out).
 Ephemeral assertions parse the lists and trust file without Flathub traffic.
+
+`cargo xtask test apps::` opts into an enforcing installed disk and real
+Flathub downloads: offline timer/backoff with the internet NIC down and a
+restricted SSH management NIC, real installation, list additions/removals,
+manual declines, unavailable IDs, retained app data, reboot fast path, real
+updates after rolling an app back, polkit denial and a real per-user install.
+`graphical::apps` is registered only when explicitly named. It logs into GNOME
+with a homed wheel account, checks MIME handlers, launches Text Editor, Papers
+and Firefox, persists a real Flatpak setting in the encrypted home, verifies
+Clocks/Weather's D-Bus integration into the shell-owned settings, and asks
+GNOME Software's public search provider to require user-only Flathub results,
+then its Install action to install the discovered Chess result. The opt-in
+fixture downloads a legacy system catalogue first to qualify its removal.
+Screenshots and SSH evidence go to the `graphical-apps` artifact directory.
+Flatpaks without dconf access use their own keyfile under `~/.var/app`; that
+is normal and the test records the actual backend. GNOME's host writer stays
+confined for the shell-owned Clocks/Weather integration settings.
+`publish.yml` runs only metadata checks by default; `apps=true` additionally
+qualifies `apps::install` and reports whether it ran in the run summary.
 
 The apps stack must merge together in one main push: the GNOME RPM removal
 alone would publish an image without a browser. The ilex shell itself is out

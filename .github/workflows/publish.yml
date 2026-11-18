@@ -57,6 +57,10 @@ on:
         description: Run the e2e tests even if the image is unchanged (to check CI changes from a branch; only main publishes)
         type: boolean
         default: false
+      apps:
+        description: Run the opt-in installed-system Flatpak qualification (downloads from Flathub)
+        type: boolean
+        default: false
       v1_disk:
         description: Only install the published installer composition to a disk for the upgrade tier's cache (the publish job starts this after each publish)
         type: boolean
@@ -119,6 +123,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check configured Flathub apps (metadata only)
+        run: cargo xtask apps --check
+
       - name: Registry names and installer composition
         id: composition
         env:
@@ -180,14 +187,14 @@ jobs:
         run: nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
 
       - name: Build the candidate image
-        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps
         run: cargo xtask build --tag candidate --no-pull
 
       # Fingerprints the image as built (the rechunk keeps it): when it is the
       # published one, everything below is skipped.
       - name: Compare with the published image
         id: changed
-        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps
         run: |
           reference="$IMAGE_REPO:$INSTALLER_TAG"
           if [ "$SNAPSHOT" != - ]; then reference="$IMAGE_REPO@$SNAPSHOT"; fi
@@ -203,13 +210,13 @@ jobs:
       # reboot. See CLAUDE.md.) A forced test run (`test`) of an unchanged
       # image is rechunked too, for the same reason.
       - name: Rechunk (reproducible layers)
-        if: steps.changed.outputs.changed == 'true' || inputs.test
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
         run: cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT"
         env:
           FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
 
       - name: Wait for :generic.gnome
-        if: steps.changed.outputs.changed == 'true' || inputs.test
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
         timeout-minutes: 15
         run: .github/vm-prep.sh wait "root-pull.$INSTALLER_TAG"
 
@@ -218,7 +225,7 @@ jobs:
       # can run, but only main publishes.
       - name: Stage the candidate
         id: stage
-        if: steps.changed.outputs.changed == 'true' || inputs.test
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
         run: |
           image_id=$(podman image inspect --format '{{.Id}}' localhost/ilex:rechunked)
           image_id="sha256:${image_id#sha256:}"
@@ -229,7 +236,7 @@ jobs:
 
       - name: Wait for the VM stack
         id: stack
-        if: steps.changed.outputs.changed == 'true' || inputs.test
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
         timeout-minutes: 15
         run: |
           .github/vm-prep.sh wait vm-stack
@@ -245,7 +252,7 @@ jobs:
           key: ${{ steps.stack.outputs.debs }}
 
       - name: e2e tests (ephemeral)
-        if: steps.changed.outputs.changed == 'true' || inputs.test
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
         env:
           # Always the rechunked image: the one staged above.
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
@@ -273,6 +280,21 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: e2e apps installation (opt-in)
+        id: apps
+        if: inputs.apps
+        timeout-minutes: 60
+        env:
+          ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
+        run: sg libvirt -c 'cargo xtask test apps::install -- --test-threads 1'
+
+      - name: Apps qualification summary
+        if: always()
+        env:
+          APPS_RESULT: ${{ steps.apps.outcome || 'skipped' }}
+        run: |
+          echo "Installed-system Flatpak qualification (apps input): $APPS_RESULT" >> "$GITHUB_STEP_SUMMARY"
+
       # Keep the installer staging step early: upgrade starts while other roots
       # build/rechunk/boot. A job output is committed only after all tests pass.
       - name: Build and test the other roots
@@ -283,7 +305,7 @@ jobs:
           INSTALLER_DIGEST: ${{ steps.stage.outputs.digest }}
           INSTALLER_FINGERPRINT: ${{ steps.stage.outputs.fingerprint }}
           INSTALLER_IMAGE_ID: ${{ steps.stage.outputs.image_id }}
-          FORCE_TEST: ${{ inputs.test == true }}
+          FORCE_TEST: ${{ inputs.test == true || inputs.apps == true }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/build-roots.sh
 
@@ -595,7 +617,7 @@ jobs:
           ROOTS: ${{ needs.build.outputs.roots }}
           PUBLISHED_INSTALLER_ROOTS: ${{ needs.publish.outputs.roots || '[]' }}
           PUBLISHED_OTHER_ROOTS: ${{ needs.publish-other-roots.outputs.roots || '[]' }}
-          FORCE_TEST: ${{ inputs.test == true }}
+          FORCE_TEST: ${{ inputs.test == true || inputs.apps == true }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
@@ -619,7 +641,7 @@ jobs:
         id: tested
         if: steps.plan.outputs.build == 'true'
         env:
-          FORCE_TEST: ${{ inputs.test == true }}
+          FORCE_TEST: ${{ inputs.test == true || inputs.apps == true }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/test-machines.sh
 

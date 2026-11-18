@@ -119,7 +119,7 @@ fn password() -> Result<String> {
 
 /// Unlike Vm::ssh_ok, neither the command nor its errors can contain the
 /// credential: JSON travels only through an anonymous stdin pipe to Python.
-fn guest(vm: &Vm, request: Value) -> Result<Value> {
+pub(crate) fn guest(vm: &Vm, request: Value) -> Result<Value> {
     // /run is cleared by the lifecycle's reboots. Reinstall this nonsecret
     // driver on each call; credentials still travel only through stdin.
     for (path, driver) in [

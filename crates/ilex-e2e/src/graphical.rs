@@ -42,10 +42,14 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(300);
 const FRAMEBUFFER: (u32, u32) = (3840, 2160);
 
 pub fn trials() -> Vec<Trial> {
-    vec![Trial::test("graphical::login", || run().map_err(|e| Failed::from(format!("{e:#}"))))]
+    vec![Trial::test("graphical::login", || run(false).map_err(|e| Failed::from(format!("{e:#}"))))]
 }
 
-fn run() -> Result<()> {
+pub fn apps_trial() -> Trial {
+    Trial::test("graphical::apps", || run(true).map_err(|e| Failed::from(format!("{e:#}"))))
+}
+
+fn run(apps: bool) -> Result<()> {
     let selection = common::selection()?;
     if selection.default_shell.as_deref() != Some("gnome") {
         bail!(
@@ -54,15 +58,17 @@ fn run() -> Result<()> {
         );
     }
     let ws = common::workspace()?;
-    let artifacts = qemu::artifact_dir(&ws, "graphical")?;
+    let artifacts = qemu::artifact_dir(&ws, if apps { "graphical-apps" } else { "graphical" })?;
     clear_artifacts(&artifacts);
 
     // 1. Boot the installed disk.
     let disk = vmtest::disk(&ws)?;
-    let mut vm = vmtest::boot(&ws, VmConfig::graphical("graphical", disk))?;
+    let mut config = VmConfig::graphical(if apps { "graphical-apps" } else { "graphical" }, disk);
+    config.apps = apps;
+    let mut vm = vmtest::boot(&ws, config)?;
     let ctl = Vmctl::from_info(vm.info.clone());
 
-    let result = session(&mut vm, &ctl, &artifacts);
+    let result = session(&mut vm, &ctl, &artifacts, apps);
     if result.is_err() {
         // Evidence for whoever reads the failure.
         let _ = ctl.save_screenshot(&artifacts.join("failure.png"));
@@ -78,7 +84,7 @@ fn run() -> Result<()> {
     result
 }
 
-fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
+fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, apps: bool) -> Result<()> {
     // 2. GDM is up and has drawn something. On a fresh install that is GNOME
     // Initial Setup, run by GDM because there is no user yet.
     wait_gdm(vm)?;
@@ -89,7 +95,13 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     // 3. A test user, created over SSH for this boot only; reboot so GDM
     // starts with a user and shows the real login screen.
     let password = test_password();
-    create_user(vm, &password)?;
+    if apps {
+        crate::homed::guest(vm, serde_json::json!({"action":"create", "name":USER, "admin":true, "secrets":[password]}))?;
+        crate::homed::guest(vm, serde_json::json!({"action":"activate", "name":USER, "secrets":[password]}))?;
+        vm.ssh_ok(&format!("install -d -o {USER} -g {USER} -m700 /home/{USER}/.config; echo yes > /home/{USER}/.config/gnome-initial-setup-done; chown {USER}:{USER} /home/{USER}/.config/gnome-initial-setup-done; restorecon -R /home/{USER}; homectl deactivate {USER}"))?;
+    } else {
+        create_user(vm, &password)?;
+    }
     println!("ok   created test user {USER}");
     vm.reboot(vmtest::BOOT_TIMEOUT).context("rebooting with the test user in place")?;
     wait_gdm(vm)?;
@@ -130,7 +142,7 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     report.check("no system units failed", no_failed_system_units(vm));
     report.finish()?;
 
-    scaling(vm, ctl, artifacts, &password)
+    if apps { app_checks(vm, ctl, artifacts) } else { scaling(vm, ctl, artifacts, &password) }
 }
 
 /// Display scaling is GNOME's own, so this tests that the image keeps it.
@@ -331,6 +343,57 @@ fn as_user(vm: &Vm, cmd: &str) -> Result<String> {
         "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/{uid} \
          DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus {cmd}"
     ))
+}
+
+fn app_checks(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
+    // A real first install can exceed the desktop's idle timeout. Keep this
+    // disposable session awake so screenshots show the launched applications.
+    as_user(vm, "gsettings set org.gnome.desktop.session idle-delay 0")?;
+    crate::apps::install(vm)?;
+    vm.ssh_ok(&format!(r#"set -eu
+python3 - <<'PY'
+from pathlib import Path
+p=Path('/home/{USER}/ilex-apps.pdf')
+objects=[b'1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n',b'2 0 obj<</Type /Pages /Kids [3 0 R] /Count 1>>endobj\n',b'3 0 obj<</Type /Page /Parent 2 0 R /MediaBox [0 0 300 200]>>endobj\n']
+data=b'%PDF-1.4\n';offsets=[0]
+for obj in objects: offsets.append(len(data));data+=obj
+xref=len(data);data+=b'xref\n0 4\n0000000000 65535 f \n'
+for offset in offsets[1:]:data+=f'{{offset:010}} 00000 n \n'.encode()
+data+=f'trailer<</Size 4 /Root 1 0 R>>\nstartxref\n{{xref}}\n%%EOF\n'.encode();p.write_bytes(data)
+PY
+chown {USER}:{USER} /home/{USER}/ilex-apps.pdf
+restorecon /home/{USER}/ilex-apps.pdf
+test "$(getenforce)" = Enforcing
+pid=$(pgrep -u {USER} -x gnome-shell)
+for action in $(pkaction | grep '^org.freedesktop.Flatpak.'); do
+    if pkcheck --action-id "$action" --process "$pid"; then exit 1; else test $? -eq 1 || exit 1; fi
+done
+"#))?;
+    let script = qemu::base64(include_bytes!("apps-graphical-guest.sh"));
+    vm.ssh_ok(&format!("printf %s {script} | base64 -d > /run/ilex-apps-graphical.sh"))?;
+    // Use the authenticated session's environment (not root's SSH environment):
+    // XDG_DATA_DIRS includes Flatpak exports and Wayland lives on this bus.
+    // Keep app/helper descendants off the SSH pipes, then collect the unit's
+    // journal: a retained pipe in a sandbox helper can otherwise hide a failure.
+    let evidence = as_user(vm, r#"bash -c 'systemd-run --user --wait --collect --property=RuntimeMaxSec=15min --unit=ilex-apps-check bash -x /run/ilex-apps-graphical.sh; result=$?; journalctl --user -u ilex-apps-check.service --no-pager -o cat; exit "$result"'"#)?;
+    qemu::write_artifact(artifacts, "apps.txt", &evidence)?;
+    let settings = as_user(vm, "sh -c 'systemctl --user show dconf.service -p ExecStart -p DropInPaths; gsettings get org.gnome.shell.world-clocks locations; gsettings get org.gnome.shell.weather locations'")?;
+    if !settings.contains("/usr/libexec/ilex/dconf-service.py") || !settings.contains("50-ilex-home.conf") {
+        bail!("homed session's dconf writer is not confined: {settings}");
+    }
+    qemu::write_artifact(artifacts, "homed-dconf.txt", &settings)?;
+    if settings.matches("UKBB").count() != 2 {
+        bail!("Clocks/Weather integration settings did not persist: {settings}");
+    }
+    let software = vm.ssh_ok("journalctl -b _COMM=gnome-software --no-pager -o cat -n 3000")?;
+    qemu::write_artifact(artifacts, "gnome-software.txt", &software)?;
+    ctl.key("Escape")?;
+    settle(ctl)?;
+    shot(ctl, artifacts, "07-flatpak-apps")?;
+    ctl.key("super+v")?;
+    std::thread::sleep(Duration::from_secs(3));
+    shot(ctl, artifacts, "08-date-menu")?;
+    Ok(())
 }
 
 /// A user session exists and its shell is running.

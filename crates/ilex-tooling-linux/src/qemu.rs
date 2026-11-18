@@ -399,6 +399,8 @@ pub struct VmConfig {
     pub snapshot: bool,
     /// Enable Flathub downloads; harnesses opt in explicitly.
     pub apps: bool,
+    /// Keep SSH on a restricted management NIC while testing an offline link.
+    pub isolated_ssh: bool,
     pub memory: String,
     pub vcpus: u32,
     /// virtio-vga preferred mode, read by the guest from EDID.
@@ -442,6 +444,7 @@ impl VmConfig {
             disk: disk.into(),
             snapshot: true,
             apps: false,
+            isolated_ssh: false,
             memory: "4G".into(),
             vcpus: 2,
             width: 1280,
@@ -686,8 +689,8 @@ impl Vm {
             .args(["-object", "rng-random,id=rng0,filename=/dev/urandom"])
             .args(["-device", "virtio-rng-pci,rng=rng0"])
             .arg("-netdev")
-            .arg(format!("user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22"))
-            .args(["-device", "virtio-net-pci,netdev=net0"])
+            .arg(if config.isolated_ssh { "user,id=net0".to_string() } else { format!("user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22") })
+            .args(["-device", "virtio-net-pci,netdev=net0,id=internet"])
             .arg("-smbios")
             .arg(format!(
                 "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root={}",
@@ -700,6 +703,10 @@ impl Vm {
         if config.secondary_serial {
             qemu.arg("-serial")
                 .arg(format!("file:{}", dir.join("serial-secondary.log").display()));
+        }
+        if config.isolated_ssh {
+            qemu.arg("-netdev").arg(format!("user,id=management,restrict=on,net=10.0.3.0/24,hostfwd=tcp:127.0.0.1:{ssh_port}-:22"))
+                .args(["-device", "virtio-net-pci,netdev=management,id=management"]);
         }
         for structure in &config.smbios {
             qemu.args(["-smbios", structure]);
