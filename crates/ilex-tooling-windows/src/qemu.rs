@@ -716,7 +716,13 @@ impl Vm {
                 ))
                 .args([
                     "-device",
-                    "virtio-tablet-pci",
+                    // USB HID keeps its absolute handler active across guest
+                    // driver shutdown. Virtio tablet deactivation invokes
+                    // SDL's caption update on a vCPU thread and can deadlock
+                    // Windows while grabbed (QEMU 11.1.3).
+                    "qemu-xhci,id=ilex-usb",
+                    "-device",
+                    "usb-tablet,bus=ilex-usb.0",
                     "-device",
                     "virtio-keyboard-pci",
                     "-device",

@@ -18,12 +18,14 @@ ilex-vmctl mcp
 
 `vm --gui` asks the T3 builder for an installed development qcow2, verifies
 the delivered disk manifest and SHA256, and runs the pinned T2 QEMU locally.
-No registry or WSL execution is needed for this path. `vm --disk` also uses
+Image builds run on the builder; QEMU and vmctl run directly on Windows. `vm --disk` also uses
 native WHPX, with a software headless display. The Linux GTK/KVM path and the
 explicit WSL viewer/ephemeral path remain available until T7.
 
 The native profile uses q35, `-cpu max`, four vCPUs, 8 GiB fixed guest RAM,
-nonsecure EDK2 and virtio disk/network/input. Graphics are exactly
+nonsecure EDK2, virtio disk/network/keyboard and a USB absolute tablet. The
+tablet keeps QEMU's absolute pointer handler active across guest shutdown,
+avoiding a grabbed SDL window-title deadlock in the pinned runtime. Graphics are exactly
 `-accel whpx,kernel-irqchip=off -device virtio-vga-gl -display
 sdl,gl=on,grab-mod=rctrl`. The child's private environment sets
 `SDL_WINDOWS_DPI_AWARENESS=permonitorv2` and
@@ -70,7 +72,10 @@ The qualified SDL runtime needs no custom keyboard hook.
 SDL advertises physical client dimensions through virtio EDID. The session
 observer debounces resize, checks the actual compositor mode over pinned SSH,
 and records `resize-status.json`. GNOME follows its preferred mode. The
-Hyprland adapter selects an advertised mode through `hyprctl` when needed;
+Hyprland adapter selects an advertised mode through `hyprctl` when needed.
+If its mode list is stale, the adapter can use the exact preferred timing
+from the matching DRM connector's checked EDID; it does not synthesize modes.
+Current Hyprland uses Lua runtime commands, with the older keyword fallback;
 it never writes monitor configuration. An unsupported mode stays unacknowledged.
 `ilex-vmctl display` reports the actual guest mode independently of screenshot
 size. Screenshot/input coordinates on Windows are cropped **client pixels**;

@@ -25,7 +25,7 @@ parser.add_argument('--vmctl', required=True, type=Path)
 parser.add_argument('--motion-seconds', type=float, default=65)
 parser.add_argument('--limits', action='store_true', help='Also exercise real clipboard UTF-8 byte limits')
 parser.add_argument('--previous', type=Path, help='Earlier ssh-identity.json from the same persistent overlay')
-parser.add_argument('operation', choices=['provision', 'clipboard', 'relogin', 'lock', 'qt-clipboard', 'input', 'focus', 'hold-shift', 'release-shift', 'facts', 'ssh-identity'])
+parser.add_argument('operation', choices=['provision', 'clipboard', 'relogin', 'lock', 'qt-clipboard', 'qt-relogin', 'input', 'focus', 'hold-shift', 'release-shift', 'facts', 'ssh-identity', 'shutdown-grabbed'])
 args = parser.parse_args()
 info = json.loads(args.info.read_text())
 args.artifacts.mkdir(parents=True, exist_ok=True)
@@ -109,6 +109,27 @@ def ctl(*command):
     return subprocess.check_output([str(args.vmctl), '--vm', info['purpose'], *command], cwd=Path(__file__).resolve().parents[2])
 
 
+def check_relogin():
+    status_path = args.info.with_name('session-status.json')
+    before = json.loads(status_path.read_text())
+    assert before['active']
+    gdm_before = ssh('systemctl show gdm.service --property=InvocationID --value').decode().strip()
+    ssh('systemctl restart gdm')
+    until = time.monotonic() + 90
+    inactive = False
+    while time.monotonic() < until:
+        current = json.loads(status_path.read_text())
+        inactive |= not current['active'] or current.get('deactivations', 0) > before.get('deactivations', 0)
+        if inactive and current['active'] and current.get('activations', 0) > before.get('activations', 0):
+            break
+        time.sleep(.2)
+    else:
+        raise AssertionError('clipboard did not automatically reconnect after guest login')
+    gdm_after = ssh('systemctl show gdm.service --property=InvocationID --value').decode().strip()
+    assert gdm_before and gdm_before != gdm_after
+    (args.artifacts / 'relogin.json').write_text(json.dumps({'inactive_observed': inactive, 'reactivated': True, 'gdm_before': gdm_before, 'gdm_after': gdm_after}, indent=2))
+
+
 if args.operation == 'provision':
     with client.open_sftp() as sftp:
         for name in ['gtk-motion.py', 'evdev.py', 'qt-motion.qml']:
@@ -154,6 +175,32 @@ elif args.operation == 'ssh-identity':
 elif args.operation in ['hold-shift', 'release-shift']:
     key(0xa0, args.operation == 'release-shift')
     print(args.operation)
+elif args.operation == 'shutdown-grabbed':
+    validate_window(foreground=True)
+    if 'exit grab' not in caption():
+        chord(0xa3, 0x47)
+    assert 'exit grab' in caption(), 'Shutdown regression requires an actual SDL grab'
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = [W.DWORD, W.BOOL, W.DWORD]
+    kernel.OpenProcess.restype = W.HANDLE
+    kernel.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
+    kernel.CloseHandle.argtypes = [W.HANDLE]
+    process = kernel.OpenProcess(0x100000, False, info['pid'])
+    assert process
+    try:
+        started = time.monotonic()
+        ssh('systemctl poweroff')
+        until = started + 30
+        while time.monotonic() < until and kernel.WaitForSingleObject(process, 100) == 258:
+            pass
+        exited = kernel.WaitForSingleObject(process, 0) == 0
+        result = {'grabbed_before_shutdown': True, 'qemu_process_exited': exited,
+                  'elapsed_seconds': time.monotonic() - started}
+        (args.artifacts / 'shutdown-grabbed.json').write_text(json.dumps(result, indent=2))
+        assert exited, 'QEMU did not exit within 30 s after grabbed guest shutdown'
+        print(json.dumps(result))
+    finally:
+        kernel.CloseHandle(process)
 elif args.operation == 'input':
     validate_window(foreground=True)
     hyprland = json.loads(ctl('display'))['backend'] == 'hyprland'
@@ -229,16 +276,18 @@ elif args.operation == 'focus':
     (args.artifacts / 'focus-events.json').write_text(json.dumps(events, indent=2))
     assert all(result.values()), result
     print('SDL focus-loss release passed')
-elif args.operation == 'qt-clipboard':
+elif args.operation in ['qt-clipboard', 'qt-relogin']:
     # Real Qt Quick TextInputs consume/offer the Wayland selection. Paste is
     # masked; the child emits booleans and frame statistics, never pasted text.
     import importlib.util
     spec = importlib.util.spec_from_file_location('clipboard', Path(__file__).with_name('win-clipboard.py'))
     clipboard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(clipboard)
+    if args.operation == 'qt-relogin':
+        check_relogin()
     assert json.loads(ctl('display'))['backend'] == 'hyprland'
     uid = int(ssh('id -u ilexdev').decode().strip())
-    launch = f'runuser -u ilexdev -- env XDG_RUNTIME_DIR=/run/user/{uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus systemd-run --user --quiet --pipe --wait --collect --service-type=exec --property=RuntimeMaxSec=120 env QT_QPA_PLATFORM=wayland QSG_RHI_BACKEND=opengl QSG_INFO=1 QT_LOGGING_RULES=qt.rhi.general=true qml-qt6 /var/tmp/ilex-t4-qt-motion.qml'
+    launch = f'runuser -u ilexdev -- env XDG_RUNTIME_DIR=/run/user/{uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus systemd-run --user --quiet --pipe --wait --collect --service-type=exec --property=RuntimeMaxSec=120 env QT_QPA_PLATFORM=wayland QSG_RHI_BACKEND=opengl QSG_INFO=1 QT_FORCE_STDERR_LOGGING=1 QT_LOGGING_TO_CONSOLE=1 QT_LOGGING_TO_JOURNAL=0 QT_LOGGING_RULES=qt.rhi.general=true qml-qt6 /var/tmp/ilex-t4-qt-motion.qml'
     previous = clipboard.read()
     stream, output, error = client.exec_command(launch)
     stream.close()
@@ -258,7 +307,8 @@ elif args.operation == 'qt-clipboard':
     try:
         until = time.monotonic() + 20
         while time.monotonic() < until:
-            if messages.get(timeout=20).get('qt_ready'):
+            value = messages.get(timeout=20)
+            if value.get('qt_ready') and value.get('qt_active'):
                 break
         else:
             raise AssertionError('Qt window did not become active')
@@ -343,23 +393,7 @@ elif args.operation in ['clipboard', 'relogin', 'lock']:
         assert status()['active'] and status()['activations'] > before['activations']
         (args.artifacts / 'lock.json').write_text(json.dumps({'inactive_while_locked': True, 'no_transfers_while_locked': True, 'automatically_reactivated': True}, indent=2))
     if args.operation == 'relogin':
-        before = status()
-        assert before['active']
-        gdm_before = ssh('systemctl show gdm.service --property=InvocationID --value').decode().strip()
-        ssh('systemctl restart gdm')
-        until = time.monotonic() + 90
-        inactive = False
-        while time.monotonic() < until:
-            current = status()
-            inactive |= not current['active'] or current.get('deactivations', 0) > before.get('deactivations', 0)
-            if inactive and current['active'] and current.get('activations', 0) > before.get('activations', 0):
-                break
-            time.sleep(.2)
-        else:
-            raise AssertionError('clipboard did not automatically reconnect after guest login')
-        gdm_after = ssh('systemctl show gdm.service --property=InvocationID --value').decode().strip()
-        assert gdm_before and gdm_before != gdm_after
-        (args.artifacts / 'relogin.json').write_text(json.dumps({'inactive_observed': inactive, 'reactivated': True, 'gdm_before': gdm_before, 'gdm_after': gdm_after}, indent=2))
+        check_relogin()
     uid = int(ssh('id -u ilexdev').decode().strip())
     launch = f'runuser -u ilexdev -- env XDG_RUNTIME_DIR=/run/user/{uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus systemd-run --user --quiet --pipe --wait --collect --service-type=exec --property=RuntimeMaxSec=180 python3 -u /var/tmp/ilex-t4-gtk-motion.py'
     stdin, stdout, stderr = client.exec_command(launch)

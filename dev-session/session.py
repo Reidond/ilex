@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from gi.repository import Gio, GLib
 
 MAX_TEXT = 256 * 1024
@@ -89,6 +90,40 @@ def active_session():
     return None
 
 
+def drm_preferred_modeline(name, target):
+    # Aquamarine can retain its original mode list after virtio EDID changes.
+    # Use only the kernel-advertised preferred timing for this exact connector
+    # and target, never a synthesized arbitrary mode or persistent config edit.
+    for connector in Path('/sys/class/drm').glob('card*-*'):
+        if connector.name.split('-', 1)[-1] != name:
+            continue
+        try:
+            with (connector / 'modes').open() as stream:
+                modes = stream.read(4096).splitlines()
+            with (connector / 'edid').open('rb') as stream:
+                edid = stream.read(128)
+        except OSError:
+            continue
+        if (f'{target[0]}x{target[1]}' not in modes or len(edid) != 128 or
+                edid[:8] != b'\x00\xff\xff\xff\xff\xff\xff\x00' or sum(edid) % 256):
+            continue
+        d = edid[54:72]
+        width, height = d[2] | ((d[4] & 0xf0) << 4), d[5] | ((d[7] & 0xf0) << 4)
+        hblank, vblank = d[3] | ((d[4] & 15) << 8), d[6] | ((d[7] & 15) << 8)
+        hoff, hsync = d[8] | ((d[11] & 0xc0) << 2), d[9] | ((d[11] & 0x30) << 4)
+        voff, vsync = (d[10] >> 4) | ((d[11] & 12) << 2), (d[10] & 15) | ((d[11] & 3) << 4)
+        clock = d[0] | (d[1] << 8)
+        if ((width, height) != target or not clock or d[17] & 0x80 or
+                d[17] & 0x18 != 0x18 or not (0 < hoff < hoff + hsync <= hblank) or
+                not (0 < voff < voff + vsync <= vblank)):
+            continue
+        return (f'modeline {clock / 100:.2f} {width} {width + hoff} '
+                f'{width + hoff + hsync} {width + hblank} {height} {height + voff} '
+                f'{height + voff + vsync} {height + vblank} '
+                f'{"+" if d[17] & 2 else "-"}hsync {"+" if d[17] & 4 else "-"}vsync')
+    return None
+
+
 def display_info(target=None):
     # Read-only mode inspection is also useful at GDM; clipboard admission
     # remains restricted to unlocked user sessions above.
@@ -122,8 +157,20 @@ def display_info(target=None):
             monitor = monitors[0]
             prefix = f'{target[0]}x{target[1]}@'
             mode = next((m for m in monitor['availableModes'] if m.startswith(prefix)), None)
+            if mode is None:
+                mode = drm_preferred_modeline(monitor['name'], target)
             if mode and (monitor['width'], monitor['height']) != target:
-                subprocess.run(['hyprctl', 'keyword', 'monitor', f"{monitor['name']},{mode.removesuffix('Hz')},auto,1"], env=environment, capture_output=True, check=True, timeout=2)
+                # Hyprland 0.55+ uses Lua, including runtime monitor changes.
+                # Decimal byte escapes are valid Lua strings even for unusual
+                # connector names, without allowing them to become Lua code.
+                def lua_string(text):
+                    return '"' + ''.join(f'\\{byte:03d}' for byte in text.encode('utf-8')) + '"'
+                statement = ('hl.monitor({output=' + lua_string(monitor['name']) +
+                    ',mode=' + lua_string(mode.removesuffix('Hz')) + ',position="auto",scale=1})')
+                applied = subprocess.run(['hyprctl', 'eval', statement], env=environment,
+                    capture_output=True, timeout=2)
+                if applied.returncode != 0 or applied.stdout.strip() != b'ok':
+                    subprocess.run(['hyprctl', 'keyword', 'monitor', f"{monitor['name']},{mode.removesuffix('Hz')},auto,1"], env=environment, capture_output=True, check=True, timeout=2)
                 monitors = json.loads(subprocess.run(['hyprctl', '-j', 'monitors'], env=environment, capture_output=True, check=True, timeout=2).stdout)
         reply = {'schema': 1, 'backend': 'hyprland', 'monitors':
             [{'name': m['name'], 'current': [[m['width'], m['height']]], 'available': m['availableModes']} for m in monitors]}

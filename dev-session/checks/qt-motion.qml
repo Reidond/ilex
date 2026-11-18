@@ -9,8 +9,9 @@ Window {
     property double previous: 0
     property var intervals: []
     property int frames: 0
-    onActiveChanged: if (active) console.log(JSON.stringify({qt_ready: true}))
+    onActiveChanged: if (active) console.warn(JSON.stringify({qt_ready: true, qt_active: true}))
     onFrameSwapped: {
+        if (frames === 0) console.warn(JSON.stringify({qt_ready: true, qt_active: active}))
         const now = Date.now()
         if (previous && now - started > 2000) intervals.push(now - previous)
         previous = now
@@ -44,14 +45,14 @@ Window {
         // acceptance screenshot. Only the boolean assertion goes to the log.
         echoMode: TextInput.Password
         KeyNavigation.tab: source
-        onTextChanged: console.log(JSON.stringify({qt_host_to_guest: text === "ilex T4 Qt host → guest Україна 日本語 🙂 ✓"}))
+        onTextChanged: console.warn(JSON.stringify({qt_host_to_guest: text === "ilex T4 Qt host → guest Україна 日本語 🙂 ✓"}))
     }
     Timer {
         interval: 90000; running: true
         onTriggered: {
             intervals.sort((a,b) => a-b)
             const sum = intervals.reduce((a,b) => a+b, 0)
-            console.log(JSON.stringify({frames: frames, duration_ms: Date.now()-started, samples: intervals.length, mean_ms: sum/intervals.length, median_ms: intervals[Math.floor(intervals.length*.5)], p95_ms: intervals[Math.floor(intervals.length*.95)], p99_ms: intervals[Math.floor(intervals.length*.99)]}))
+            console.warn(JSON.stringify({frames: frames, duration_ms: Date.now()-started, samples: intervals.length, mean_ms: sum/intervals.length, median_ms: intervals[Math.floor(intervals.length*.5)], p95_ms: intervals[Math.floor(intervals.length*.95)], p99_ms: intervals[Math.floor(intervals.length*.99)]}))
             Qt.quit()
         }
     }

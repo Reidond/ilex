@@ -50,24 +50,91 @@ The job exited zero. Its verified 6,073,090,048-byte installed qcow2 has SHA256
 The receipt identifies this checkout, job and source, and promotion keeps the
 installed base immutable. No `ILEX_DISK` override was used for this command.
 
-Native boot and repeat-launch credential acceptance are still pending host
-capacity. The old per-launch root credential bug is fixed by refreshing the
-volatile firmware access-key file on every native boot. The checks require
-the same persistent overlay to accept different launch keys and host pins;
-a deliberately wrong pin must still be rejected.
+The default command booted that disk into GNOME and exited zero after guest
+poweroff. It waited with the configured RAM/reserve intact, then started after
+the supported idle-checked builder shutdown released its 16 GiB. A second
+native cold boot used the same persistent overlay and firmware store. Both
+boots reached GNOME with SDL's non-activating startup hint.
+
+Both boots accepted their correct pins and rejected deliberately wrong pins.
+The second run had different host-pin and access-key hashes and authenticated
+successfully against the same persistent disk. The volatile authorized-key
+file matched the firmware public credential, remained root-only (directory
+0700, file 0600), and had the expected SELinux labels under enforcing mode.
+
+The builder-delivered disk repeated the real host keyboard matrix and
+bidirectional Unicode checks. Exactly 262,144 UTF-8 bytes of ASCII and emoji
+transferred; payloads one emoji over the limit were refused in both directions,
+and ordinary transfers recovered. Motion delivered 5,977 callbacks in 80.08 s,
+with steady samples around 75/s. Host/guest counters stayed unchanged over
+65 s. The second boot also passed automatic clipboard reactivation after a
+new GDM invocation, multilingual transfer, and another 65 s no-loop interval.
+
+Native vmctl self-check and the actual stdio MCP test passed on this disk.
+Cua resized 1280×800 to 1596×953; Mutter mode matched, old screenshot
+coordinates were rejected and a fresh screenshot restored input mapping.
+A separate native recording sampled 12 fresh frames, with 11 distinct pixel
+images; freshness comes from advancing WGC timestamps rather than pixel changes.
 
 ## Hyprland / Qt
 
-Still pending. The disposable research overlay uses
-`dev-session/checks/hyprland-research.sh`; it does not add Hyprland to ilex or
-published images. Its dependency resolution was exercised separately against
-the Fedora 45 repositories, but that is not desktop acceptance.
+The separate disposable Fedora 45 overlay used
+`dev-session/checks/hyprland-research.sh`: Hyprland 0.57.2-1.fc45,
+Qt base/declarative 6.11.2-3.fc45, Qt Wayland 6.11.2-1.fc45 and
+wl-clipboard 2.3.0-2.fc45. This uses the guest's transient `bootc usr-overlay`;
+it adds neither Hyprland nor development helpers to published images.
+The fixture selects the Wayland session through AccountsService and uses
+Hyprland's current Lua configuration.
+
+| Check | Observation |
+| --- | --- |
+| Qt renderer | Native Wayland Qt Quick, OpenGL RHI; `virgl (AMD Radeon RX 9070 XT)`, OpenGL 4.3 Mesa 26.2.6. |
+| Sustained motion | 6,750 frames / 90.315 s; interval mean 13.368 ms, median 13 ms, p95 15 ms, p99 16 ms. After re-login: 6,751 / 90.624 s, mean 13.335 ms, same median/p95/p99. Approximately 75 application frames/s. |
+| Resize | Actual monitor and client 1596×953 → 1496×903, automatically acknowledged. Aquamarine's old mode list required the kernel's freshly advertised preferred EDID timing. The helper validates that exact connector, dimensions, checksum and progressive timing, then applies it through runtime Lua without writing configuration. |
+| Keyboard | Real SendInput matrix passes, including three observed Super+E compositor actions and Right-Ctrl+G escape; all tested guest keys released. Focus-loss probe observes guest Shift-up while host Shift is still held. |
+| Qt clipboard | Physical Ctrl+A/C and Tab/Ctrl+V into Qt Quick TextInputs transfer multilingual Unicode in both directions. The receiver is masked. Counters stay unchanged for 65 s. A real GDM restart changes invocation, automatically reconnects the adapter, and repeats the Qt clipboard/no-loop checks. |
+| Capture | Real MCP resize/stale-coordinate check passes. Fully occluded 1496×903 WGC frames have advancing timestamps and changing Qt pixels. Independently verified minimized HWND yields an explicit no-fresh-frame error and no PNG. Restore yields a fresh crop. |
+
+## Shutdown regression and final pointer profile
+
+A grabbed guest shutdown exposed a pinned QEMU SDL title-update deadlock.
+The final profile uses `qemu-xhci` with `usb-tablet`, retaining the virtio
+keyboard. Unlike virtio-input's activation changes, USB HID keeps its absolute
+handler active across driver shutdown; see the pinned QEMU
+[virtio input](https://github.com/qemu/qemu/blob/v11.1.3/hw/input/virtio-input-hid.c)
+and [HID implementation](https://github.com/qemu/qemu/blob/v11.1.3/hw/input/hid.c).
+No binary patch, injected shim or system setting change is involved.
+
+The revised profile cold-booted the same persistent GNOME overlay with new
+SSH credentials. It repeated clipboard byte limits, the 65 s no-loop check,
+real keyboard matrix and MCP resize/capture checks. GTK delivered 5,957
+callbacks / 80.106 s, with steady five-second samples 73.4–75.2/s.
+`shutdown-grabbed` then kept SDL grabbed, requested guest poweroff over pinned
+SSH, and observed the actual QEMU process exit naturally in 3.406 s.
+The revised Hyprland profile then cold-booted the separate persistent research
+disk and recreated its transient package layer with the checked-in fixture.
+Native preparation deployed the exact checked-in adapter (SHA256
+`44e0496bcf0a114a2bb5448b298453b9171c03f4ca0864a494b84c457a8bdc1b`),
+with no manual helper refresh. Qt repeated Unicode transfer, a 65 s no-loop
+interval, and automatic 1280×800 → 1596×953 resize with fresh native PNGs/GIF.
+It delivered 6,750 frames / 90.273 s; mean interval 13.346 ms, median 13 ms,
+p95/p99 16 ms. The keyboard matrix repeated all three Super+E actions.
+Grabbed shutdown exited the actual QEMU process naturally in 3.469 s.
+
+An independent human-input QMP connection stayed open while native vmctl
+completed its real self-check through the control endpoint, including two
+fresh WGC captures; the human connection remained usable afterward.
+Both desktop guests and their launchers exited. Their writable disks stay in
+this checkout's state for review; run credentials are removed. The shared
+builder's configuration remains 16 GiB/eight vCPUs and its supported shutdown
+retains its identity and disks. No other checkout/VM cleanup or prune is used.
 
 ## Reproduction
 
 Use `windows-e2e.py --info <owned vm.json> --artifacts <dir> --vmctl <native exe>`
 with `provision`, `ssh-identity`, `clipboard --limits`, `relogin`, `lock`,
-`input`, `focus`, or `qt-clipboard`. Cua selects the exact owned HWND before
+`input`, `focus`, `qt-clipboard`, `qt-relogin`, or `shutdown-grabbed`.
+Cua selects the exact owned HWND before
 input and performs window geometry/focus/minimize actions. Acceptance keyboard
 events use real host SendInput rather than posted window messages.
 `windows-mcp.py --resize` exercises the real stdio MCP server, rejects old

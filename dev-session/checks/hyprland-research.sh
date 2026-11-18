@@ -21,19 +21,18 @@ printf '1\n' >> "$XDG_RUNTIME_DIR/ilex-t4-super-e"
 EOF
 chmod 0755 /var/home/ilexdev/.local/bin/ilex-t4-super-e
 chown ilexdev:ilexdev /var/home/ilexdev/.local/bin/ilex-t4-super-e
-cat >/var/home/ilexdev/.config/hypr/hyprland.conf <<'EOF'
-monitor = , preferred, auto, 1
-exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP
-bind = SUPER, E, exec, /var/home/ilexdev/.local/bin/ilex-t4-super-e
-input {
-    kb_layout = us
-}
-misc {
-    disable_hyprland_logo = true
-    disable_splash_rendering = true
-}
+cat >/var/home/ilexdev/.config/hypr/hyprland.lua <<'EOF'
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
+hl.config({
+    input = { kb_layout = "us" },
+    misc = { disable_hyprland_logo = true, disable_splash_rendering = true },
+})
+hl.bind("SUPER + E", hl.dsp.exec_cmd("/var/home/ilexdev/.local/bin/ilex-t4-super-e"))
+hl.on("hyprland.start", function()
+    hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP")
+end)
 EOF
-chown ilexdev:ilexdev /var/home/ilexdev/.config/hypr/hyprland.conf
+chown ilexdev:ilexdev /var/home/ilexdev/.config/hypr/hyprland.lua
 cat >/usr/share/wayland-sessions/ilex-t4-hyprland.desktop <<'EOF'
 [Desktop Entry]
 Name=ilex T4 Hyprland research
@@ -42,8 +41,13 @@ Exec=env XDG_CURRENT_DESKTOP=Hyprland Hyprland
 Type=Application
 DesktopNames=Hyprland
 EOF
-install -d /var/lib/AccountsService/users
-printf '[User]\nSession=ilex-t4-hyprland\nXSession=ilex-t4-hyprland\nSystemAccount=false\n' >/var/lib/AccountsService/users/ilexdev
+account_path="/org/freedesktop/Accounts/User$(id -u ilexdev)"
+gdbus call --system --dest org.freedesktop.Accounts --object-path "$account_path" \
+    --method org.freedesktop.Accounts.User.SetSessionType wayland
+for method in SetSession SetXSession; do
+    gdbus call --system --dest org.freedesktop.Accounts --object-path "$account_path" \
+        --method "org.freedesktop.Accounts.User.$method" ilex-t4-hyprland
+done
 printf '[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin=ilexdev\nDefaultSession=ilex-t4-hyprland.desktop\n' >/etc/gdm/custom.conf
 rpm -q hyprland qt6-qtbase qt6-qtdeclarative qt6-qtwayland wl-clipboard
 systemctl restart gdm

@@ -347,9 +347,12 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
                 match control.read("collection.json") {
                     Ok(receipt) => {
                         drop(receipt);
-                        let disk = delivered_disk(ws, &dir, &job)?;
-                        println!("{}", disk.display());
-                        return Ok(());
+                        let collection: Value = control_json(&control, "collection.json")?;
+                        if collection["exit_code"] == 0 {
+                            let disk = delivered_disk(ws, &dir, &job)?;
+                            println!("{}", disk.display());
+                            return Ok(());
+                        }
                     }
                     Err(error)
                         if error
