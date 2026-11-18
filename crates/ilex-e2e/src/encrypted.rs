@@ -500,7 +500,8 @@ fn no_tpm(
     );
     vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; ilex-enroll layout --root /; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
     fixture.logs(artifacts, "no-tpm")?;
-    poweroff(&mut fixture)
+    poweroff(&mut fixture)?;
+    fixture.provider.destroy_owned(&mut fixture.vm)
 }
 
 fn assertions(
@@ -768,6 +769,11 @@ fn run() -> Result<()> {
         }
         let iso_hash = cmd::output(Command::new("sha256sum").arg(&iso))?;
         fs::write(artifacts.join("iso-sha256.txt"), iso_hash)?;
+        stage = "cleanup";
+        // Drop remains the failure-path backstop. On success, propagating
+        // destruction errors prevents a retained private TPM bundle going green.
+        fixture.provider.destroy_owned(&mut fixture.vm)?;
+        stage = "complete";
         Ok(())
     })();
     if result.is_ok() {
