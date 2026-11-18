@@ -103,16 +103,28 @@ fn checkpoint() -> Result<()> {
             && original_manifest["disk"].as_str() == work.join("root.qcow2").to_str(),
         "checkpoint bundle identity differs"
     );
+    let purpose = original_manifest["purpose"]
+        .as_str()
+        .context("checkpoint purpose missing")?;
+    ensure!(
+        matches!(
+            purpose,
+            "encrypted-install" | "encrypted-space" | "encrypted-interrupted"
+        ),
+        "unsupported checkpoint purpose"
+    );
+    let interrupted = purpose == "encrypted-interrupted";
     fs::create_dir(&work)?;
     fs::set_permissions(&work, fs::Permissions::from_mode(0o700))?;
     let mut bundle_created = false;
     let mut restored = false;
     let mut cleanup_spec = None;
     let mut core_proven = false;
+    let mut interruption_proven = false;
     let mut stage = "restore";
     let mut credentials = Value::Null;
     let artifacts = work.join("evidence");
-    let published = qemu::artifact_dir(&ws, "enrollment-checkpoint")?;
+    let published = qemu::artifact_dir(&ws, &format!("enrollment-checkpoint-{purpose}"))?;
     clear_evidence(&published)?;
     let mut result = (|| -> Result<()> {
         restore_files(&source.join("work"), &work)?;
@@ -123,8 +135,8 @@ fn checkpoint() -> Result<()> {
         restored = true;
         let expected: Value = serde_json::from_slice(&fs::read(artifacts.join("candidate.json"))?)?;
         ensure!(
-            expected["interrupt_completion"] != true,
-            "this diagnostic requires completed TPM enrollment"
+            expected["interrupt_completion"] == interrupted,
+            "checkpoint interruption mode differs"
         );
         let seed = work.join("oemdrv.img");
         let passphrase = Secret::read(File::open(work.join("seed/passphrase"))?.into())?;
@@ -179,41 +191,43 @@ fn checkpoint() -> Result<()> {
         )?;
         let vm = provider.create(spec.clone())?;
         let mut fixture = Fixture { provider, vm, spec };
-        stage = "first_installed_boot";
-        fixture.disk_boot()?;
-        let booted = assertions(&mut fixture, &artifacts, &expected, &installer_probe);
-        fixture.logs(&artifacts, "checkpoint-installed")?;
-        booted?;
-        core_proven = true;
-        guest_privacy(
-            fixture.vm.running_mut()?,
-            &artifacts,
-            "checkpoint-after-finalisation",
-            &credentials,
-        )?;
-        stage = "cold_restart";
-        poweroff(&mut fixture, &artifacts, "checkpoint-installed")?;
-        fixture.disk_boot()?;
-        let cold = artifacts.join("cold");
-        fs::create_dir_all(&cold)?;
-        assertions(&mut fixture, &cold, &expected, &installer_probe)?;
-        guest_privacy(
-            fixture.vm.running_mut()?,
-            &cold,
-            "checkpoint-cold",
-            &credentials,
-        )?;
-        poweroff(&mut fixture, &artifacts, "checkpoint-cold")?;
-        stage = "same_tpm_policy_mismatch";
-        same_tpm_mismatch(
-            &ws,
-            &mut fixture,
-            &artifacts,
-            &passphrase,
-            &credentials,
-            &installer_probe,
-            &tokens,
-        )?;
+        if !interrupted {
+            stage = "first_installed_boot";
+            fixture.disk_boot()?;
+            let booted = assertions(&mut fixture, &artifacts, &expected, &installer_probe);
+            fixture.logs(&artifacts, "checkpoint-installed")?;
+            booted?;
+            core_proven = true;
+            guest_privacy(
+                fixture.vm.running_mut()?,
+                &artifacts,
+                "checkpoint-after-finalisation",
+                &credentials,
+            )?;
+            stage = "cold_restart";
+            poweroff(&mut fixture, &artifacts, "checkpoint-installed")?;
+            fixture.disk_boot()?;
+            let cold = artifacts.join("cold");
+            fs::create_dir_all(&cold)?;
+            assertions(&mut fixture, &cold, &expected, &installer_probe)?;
+            guest_privacy(
+                fixture.vm.running_mut()?,
+                &cold,
+                "checkpoint-cold",
+                &credentials,
+            )?;
+            poweroff(&mut fixture, &artifacts, "checkpoint-cold")?;
+            stage = "same_tpm_policy_mismatch";
+            same_tpm_mismatch(
+                &ws,
+                &mut fixture,
+                &artifacts,
+                &passphrase,
+                &credentials,
+                &installer_probe,
+                &tokens,
+            )?;
+        }
         // The frozen original disk has never had an installed boot. It is
         // backing-only for these separate first-boot mismatch/recovery guests.
         let frozen = source.join("work/root.qcow2");
@@ -245,20 +259,47 @@ fn checkpoint() -> Result<()> {
             &expected,
             "recovery",
         )?;
-        stage = "no_tpm_fallback";
-        fallback(
-            &ws,
-            &disk,
-            &fixture.spec,
-            &work,
-            &artifacts,
-            &passphrase,
-            &credentials,
-            &installer_probe,
-            &tokens,
-            &expected,
-            "no-tpm",
-        )?;
+        if interrupted {
+            stage = "interrupted_completion_repair";
+            let (reissued, repaired_tokens) = interrupted_repair(
+                &mut fixture,
+                &artifacts,
+                &passphrase,
+                &mut credentials,
+                &tokens,
+                &expected,
+            )?;
+            stage = "reissued_recovery_key_boot";
+            fallback(
+                &ws,
+                &disk,
+                &fixture.spec,
+                &work,
+                &artifacts,
+                &reissued,
+                &credentials,
+                &installer_probe,
+                &repaired_tokens,
+                &expected,
+                "reissued-recovery",
+            )?;
+            interruption_proven = true;
+        } else {
+            stage = "no_tpm_fallback";
+            fallback(
+                &ws,
+                &disk,
+                &fixture.spec,
+                &work,
+                &artifacts,
+                &passphrase,
+                &credentials,
+                &installer_probe,
+                &tokens,
+                &expected,
+                "no-tpm",
+            )?;
+        }
         fixture.provider.destroy_owned(&mut fixture.vm)?;
         stage = "post_install_gates_complete";
         Ok(())
@@ -306,7 +347,7 @@ fn checkpoint() -> Result<()> {
         published.join("result.json"),
         serde_json::to_vec_pretty(&json!({
         "qualification":"unqualified", "scope":"owned completed-installer checkpoint; this diagnosis cannot qualify the original live finalisation privacy gate",
-            "core_boot_proof":if core_proven {"passed"} else {"unproven"}, "post_install_gates":if result.is_ok() {"passed"} else {"unqualified"},
+            "core_boot_proof":if core_proven {"passed"} else if interrupted {"not-applicable-interrupted"} else {"unproven"}, "interruption_boot_proof":if interruption_proven {"passed"} else {"unproven"}, "post_install_gates":if result.is_ok() {"passed"} else {"unqualified"},
             "stage":stage, "source_run":run, "source_harness":receipt["source_head"], "restored_original_tpm_and_vars":restored,
             "error":result.as_ref().err().map(|_|"private diagnostic details suppressed")
         }))?,
@@ -1115,6 +1156,7 @@ fn interrupted_repair(
         before == *original_tokens,
         "interrupted boot left half-enrolled slots or tokens"
     );
+    vm.ssh_ok("python3 -I -S -c 'import pathlib; assert sorted(p.name for p in pathlib.Path(\"/var/lib/ilex/security\").iterdir()) == [\"enrollment.json\"]'")?;
     guest_privacy(vm, artifacts, "interrupted-after-finalisation", credentials)?;
     // Ordinary retry must refuse the unacknowledged slot, preserve it and
     // request explicit authenticated reissue; it must never show it again.

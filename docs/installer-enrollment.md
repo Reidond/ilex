@@ -212,6 +212,8 @@ repeating the import. `ILEX_ENROLLMENT_CHECKPOINT=<owned-state-checkpoint>` with
 TPM and firmware bundle only after the original controller has exited. It
 requires the exact qualified 6 GiB/two-vCPU backend, authenticates the private
 credential fingerprints, then runs first/cold boot and fallback gates. It
+can also exercise passphrase/recovery boot and explicit reissue from an
+interrupted completion checkpoint, reported separately from TPM boot proof. It
 refuses foreign state and existing fixture paths. The result and exit status
 always remain **unqualified** for the complete installer; any direct core boot
 proof is reported separately. This opt-in diagnostic is outside CI's
