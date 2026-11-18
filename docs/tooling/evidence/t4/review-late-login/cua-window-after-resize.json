@@ -1,0 +1,37 @@
+{
+  "utc": "2026-11-18 06:16:56 UTC",
+  "observation": {
+    "_legacy_windows": [
+      {
+        "height": 1000,
+        "is_on_screen": true,
+        "minimized": false,
+        "pid": 35964,
+        "title": "QEMU (ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-gui-0)",
+        "width": 1600,
+        "window_id": 554503130,
+        "x": 100,
+        "y": 100
+      }
+    ],
+    "current_space_id": null,
+    "windows": [
+      {
+        "app_name": "qemu-system-x86_64.exe",
+        "bounds": {
+          "height": 1000,
+          "width": 1600,
+          "x": 100,
+          "y": 100
+        },
+        "is_on_screen": true,
+        "layer": 0,
+        "minimized": false,
+        "pid": 35964,
+        "title": "QEMU (ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-gui-0)",
+        "window_id": 554503130,
+        "z_index": 0
+      }
+    ]
+  }
+}

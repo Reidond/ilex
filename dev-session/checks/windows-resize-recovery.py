@@ -15,6 +15,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--info', type=Path, required=True)
 p.add_argument('--out', type=Path, required=True)
 p.add_argument('--backend', choices=['mutter', 'hyprland'], required=True)
+p.add_argument('--expect-guest-mode-recovery', action='store_true')
 p.add_argument('stage', choices=['delayed-login', 'session-change'])
 a = p.parse_args()
 i = json.loads(a.info.read_text())
@@ -82,6 +83,7 @@ try:
         value = sample()
         if (value.get('acknowledged') and value.get('backend') == a.backend
                 and value.get('session') != baseline.get('session')
+                and (a.stage != 'session-change' or value.get('target') == baseline.get('target'))
                 and value.get('attempt', 0) > baseline.get('attempt', 0)):
             recovered = value
             break
@@ -94,6 +96,8 @@ try:
         assert value['acknowledged'] and value['target'] == recovered['target']
     if a.stage == 'session-change':
         assert recovered['target'] == baseline['target'], 'Host window changed during session regression'
+    if a.expect_guest_mode_recovery:
+        assert recovered['guest_mode_recoveries'] > baseline.get('guest_mode_recoveries', 0)
     result = {'schema': 1, 'stage': a.stage, 'run': i['run'], 'utc': utc(),
               'gdm_started_utc': restarted, 'baseline': baseline, 'recovered': recovered,
               'no_second_host_resize': True, 'continued_acknowledgements': True}

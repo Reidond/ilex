@@ -1,0 +1,14 @@
+{
+  "utc": "2026-11-18T06:19:54.3371449Z",
+  "run": "2832-1794978584466538000",
+  "pid": 35964,
+  "listeners": [
+    {
+      "LocalAddress": "127.0.0.1",
+      "LocalPort": 50672
+    }
+  ],
+  "only_pinned_ssh_tcp": true,
+  "human": "unix:C:/Users/reido/AppData/Local/ilex/qmp/10c11ce913a4f12717d3c67def62071e/input.sock",
+  "control": "unix:C:/Users/reido/AppData/Local/ilex/qmp/10c11ce913a4f12717d3c67def62071e/control.sock"
+}

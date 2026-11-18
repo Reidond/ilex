@@ -32,6 +32,7 @@ k.GetProcessTimes.argtypes = [W.HANDLE, C.POINTER(W.FILETIME), C.POINTER(W.FILET
 k.QueryFullProcessImageNameW.argtypes = [W.HANDLE, W.DWORD, W.LPWSTR, C.POINTER(W.DWORD)]
 k.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
 k.TerminateProcess.argtypes = [W.HANDLE, W.UINT]
+k.GetExitCodeProcess.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
 
 
 def identity(handle):
@@ -75,12 +76,22 @@ try:
                    'sockets_remaining': [p.name for p in sockets if p.exists()],
                    'ephemeral_disk_remaining': (run_dir / 'overlay.qcow2').exists(),
                    'ephemeral_vars_remaining': (run_dir / 'overlay.vars.fd').exists()})
+    for name, handle in [('launcher', launcher), ('qemu', qemu)]:
+        code = W.DWORD()
+        assert k.GetExitCodeProcess(handle, C.byref(code))
+        result[name + '_exit_code'] = code.value
+    teardown = a.info.parent / 'teardown-status.json'
+    if teardown.exists():
+        value = json.loads(teardown.read_text())
+        if value.get('run') == i['run']:
+            result['launcher_teardown'] = value
     stale = subprocess.run([str(a.vmctl), '--vm', i['purpose'], 'self-check'], capture_output=True, timeout=10)
     result['stale_attach_exit'] = stale.returncode
     result['stale_attach_error'] = stale.stderr.decode(errors='replace')
     assert stale.returncode != 0, 'vmctl accepted a dead VM'
     (a.out / 'result.json').write_text(json.dumps(result, indent=2))
     if a.mode != 'forced-exit':
+        assert result['launcher_exit_code'] == 0 and result['qemu_exit_code'] == 0
         assert not result['keys_remaining'] and not result['sockets_remaining']
         assert not result['ephemeral_disk_remaining'] and not result['ephemeral_vars_remaining']
     print(json.dumps(result))

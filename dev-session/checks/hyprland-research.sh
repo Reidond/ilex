@@ -3,6 +3,16 @@
 # ilexdev test user. Never a production image recipe or host/distro installer.
 set -euo pipefail
 test "${1:-}" = --disposable-research-vm
+shift
+stage_only=false
+small_bootstrap=false
+for option in "$@"; do
+    case "$option" in
+        --stage-only) stage_only=true ;;
+        --small-bootstrap-mode) small_bootstrap=true ;;
+        *) printf 'Unknown research option: %s\n' "$option" >&2; exit 2 ;;
+    esac
+done
 test "$(id -u)" = 0
 test "$(rpm -E %fedora)" = 45
 test -f /sys/firmware/qemu_fw_cfg/by_name/opt/ilex/ssh-host-key/raw
@@ -33,6 +43,9 @@ hl.on("hyprland.start", function()
 end)
 EOF
 chown ilexdev:ilexdev /var/home/ilexdev/.config/hypr/hyprland.lua
+if "$small_bootstrap"; then
+    sed -i 's/mode = "preferred"/mode = "1280x800@74.99"/' /var/home/ilexdev/.config/hypr/hyprland.lua
+fi
 cat >/usr/share/wayland-sessions/ilex-t4-hyprland.desktop <<'EOF'
 [Desktop Entry]
 Name=ilex T4 Hyprland research
@@ -50,4 +63,8 @@ for method in SetSession SetXSession; do
 done
 printf '[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin=ilexdev\nDefaultSession=ilex-t4-hyprland.desktop\n' >/etc/gdm/custom.conf
 rpm -q hyprland qt6-qtbase qt6-qtdeclarative qt6-qtwayland wl-clipboard
-systemctl restart gdm
+if "$stage_only"; then
+    printf 'Session staged; restart GDM through the session regression fixture\n'
+else
+    systemctl restart gdm
+fi

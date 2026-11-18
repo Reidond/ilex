@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "results": [
+    {
+      "role": "control",
+      "utc": "2026-11-18T06:13:36Z",
+      "acl": {
+        "ace_count": 2,
+        "acl_verified": true,
+        "allowed_sids": [
+          "S-1-5-18",
+          "S-1-5-21-2519408406-910423453-1880906839-1001"
+        ],
+        "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+        "dacl_sddl": "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+        "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/364b63759ce752483fd49c846836ec18/control.sock",
+        "transport": "windows-af-unix"
+      },
+      "normal_before": true,
+      "low_integrity_sid": "S-1-16-4096",
+      "parent_token_id": "bc9f007300000000",
+      "child_token_id": "e8e6007300000000",
+      "verified_child_integrity_rid": 4096,
+      "low_client_exit": 1,
+      "low_client_error": "Error: connecting private QMP socket: 10013\n",
+      "normal_after": true
+    },
+    {
+      "role": "input",
+      "utc": "2026-11-18T06:13:36Z",
+      "acl": {
+        "ace_count": 2,
+        "acl_verified": true,
+        "allowed_sids": [
+          "S-1-5-18",
+          "S-1-5-21-2519408406-910423453-1880906839-1001"
+        ],
+        "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+        "dacl_sddl": "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+        "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/364b63759ce752483fd49c846836ec18/input.sock",
+        "transport": "windows-af-unix"
+      },
+      "normal_before": true,
+      "low_integrity_sid": "S-1-16-4096",
+      "parent_token_id": "bc9f007300000000",
+      "child_token_id": "9b4b017300000000",
+      "verified_child_integrity_rid": 4096,
+      "low_client_exit": 1,
+      "low_client_error": "Error: connecting private QMP socket: 10013\n",
+      "normal_after": true
+    }
+  ]
+}

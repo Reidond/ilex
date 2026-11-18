@@ -63,6 +63,9 @@ impl Transport for Socket {
 pub struct Qmp(Client<Socket>, Option<std::fs::File>);
 impl Qmp {
     pub fn connect(endpoint: &str) -> Result<Self> {
+        Self::connect_with_timeout(endpoint, Duration::from_secs(5))
+    }
+    pub(crate) fn connect_with_timeout(endpoint: &str, timeout: Duration) -> Result<Self> {
         let (writer, access) = crate::private_qmp::connect(endpoint)?;
         let reader = BufReader::new(writer.try_clone()?);
         Ok(Self(
@@ -72,7 +75,7 @@ impl Qmp {
                     writer,
                     _access: access,
                 },
-                Duration::from_secs(5),
+                timeout,
             )?,
             None,
         ))
@@ -120,7 +123,7 @@ pub struct Endpoints {
 }
 impl Endpoints {
     pub fn clean_stale(owner: &str, run: &str) -> Result<()> {
-        let root = crate::host::root()?.join("qmp");
+        let root = crate::private_qmp::root()?;
         for attempt in 0..5 {
             let path =
                 root.join(&crate::host::hash(format!("{owner}:{run}:{attempt}").as_bytes())[..32]);
@@ -143,7 +146,7 @@ impl Endpoints {
         Ok(())
     }
     pub fn new(owner: &str, run: &str, attempt: usize) -> Result<Self> {
-        let root = crate::host::root()?.join("qmp");
+        let root = crate::private_qmp::root()?;
         crate::host::secure_dir(&root)?;
         let path =
             root.join(&crate::host::hash(format!("{owner}:{run}:{attempt}").as_bytes())[..32]);

@@ -39,6 +39,10 @@ The base disk remains immutable. Each launch gets a writable qcow2 overlay
 and its own UEFI variable store; `--persist` retains that pair for subsequent
 launches of the same installed base. Closing SDL exits QEMU. Ctrl-C stops only
 this launch, requesting guest poweroff before an owned-process deadline.
+QEMU runs without the launcher's console so a physical console Ctrl-C reaches
+the launcher instead of terminating QEMU before that request. Normal teardown
+records poweroff acknowledgement, deadline fallback and exit code in
+`teardown-status.json`.
 The Windows Job Object also contains the launch's helper processes. Logs and
 metadata remain in the checkout's runtime directory; ordinary overlays and
 run-specific access keys are removed after normal teardown. Forced launcher
@@ -74,11 +78,17 @@ The qualified SDL runtime needs no custom keyboard hook.
 
 SDL advertises physical client dimensions through virtio EDID. The session
 observer debounces resize, checks the actual compositor mode over pinned SSH,
-and records `resize-status.json`. Each probe has a five-second deadline;
+and records `resize-status.json`. Each SSH transaction has a five-second deadline;
 probing continues every two seconds after success or failure, including long
 periods at GDM. Session identity, compositor instance, connector EDID hashes
 and outputs are observed again, so login, re-login and compositor changes
-recover without another host resize. GNOME follows its preferred mode. The
+recover without another host resize. SDL also
+[resizes its window when a guest surface changes](https://github.com/qemu/qemu/blob/v11.1.3/ui/sdl2.c#L144),
+including a compositor's bootstrap mode. The observer retains the last
+acknowledged host target when the guest-driven window change leaves EDID
+unchanged, allows two seconds for a human resize's EDID update, then restores
+that target through a second bounded transaction. Recovery counters and the
+last corrected dimensions remain in the status file. GNOME follows its preferred mode. The
 Hyprland adapter selects an advertised mode through `hyprctl` when needed.
 If its mode list is stale, the adapter can use the exact preferred timing
 from the matching DRM connector's checked EDID; it does not synthesize modes.
@@ -154,6 +164,10 @@ The zero-guest `qmp-self-check` e2e example and `windows-qmp-security.py`
 exercise reconnects and real connections from independently lowered child
 tokens; low-integrity clients must be refused by the OS. No accounts or host
 security settings are changed by that probe.
+The firmware-only runtime activation probe uses this transport too. Its
+unchanged 256 MiB profile preallocates RAM while holding the shared host
+admission lock. Socket names use Windows' OS-known per-user Local AppData
+directory, so long isolated artifact-state paths cannot exceed `sockaddr_un`.
 
 Virgl screenshots use Windows Graphics Capture `CreateForWindow` for that
 owned HWND, cropped with physical DWM/client geometry. Every acquisition
@@ -186,6 +200,11 @@ those are application callback intervals, not input-to-photon measurements.
 coordinates are rejected, and recovers by acquiring a new screenshot.
 `windows-resize-recovery.py` keeps GDM stopped beyond the former retry window,
 then verifies delayed login and session changes at unchanged host dimensions.
+For the compositor regression, stage the disposable research guest with
+`hyprland-research.sh --disposable-research-vm --stage-only --small-bootstrap-mode`
+while GNOME is acknowledged at a larger window size. Run the session fixture
+with `--backend hyprland --expect-guest-mode-recovery session-change`, then
+repeat it for re-login without touching the host window.
 
 T4 merge acceptance requires the actual ilex GNOME image and the separate
 Fedora Hyprland/Qt research workload, renderer evidence, sustained motion and

@@ -1,0 +1,22 @@
+{
+  "utc": "2026-11-18 06:42:31 UTC",
+  "result": {
+    "executed": 1,
+    "failed_step": null,
+    "observation": {
+      "message": "Nothing to return: both include_accessibility_tree:false and include_screenshot:false. Set at least one to true, or pass screenshot_out_file to force a capture.",
+      "ok": false,
+      "tool": "get_window_state"
+    },
+    "ok": true,
+    "steps": [
+      {
+        "index": 0,
+        "message": "✅ Pressed ctrl+c on pid 10444 via SendInput (Win32 target).",
+        "ok": true,
+        "tool": "hotkey"
+      }
+    ],
+    "total": 1
+  }
+}

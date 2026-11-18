@@ -26,6 +26,19 @@ pub struct Access {
     pub report: Value,
 }
 
+pub(crate) fn root() -> Result<std::path::PathBuf> {
+    // Artifact isolation may override LOCALAPPDATA with a deep fixture path.
+    // Socket names must fit sockaddr_un: anchor their ephemeral namespace in
+    // the OS-known current user's directory, independent of that override.
+    use windows::Win32::{System::Com::CoTaskMemFree, UI::Shell::*};
+    unsafe {
+        let folder = SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None)?;
+        let result = folder.to_string();
+        CoTaskMemFree(Some(folder.0.cast()));
+        Ok(std::path::PathBuf::from(result?).join("ilex/qmp"))
+    }
+}
+
 unsafe fn sid_string(sid: PSID) -> Result<String> {
     unsafe {
         let mut text = std::ptr::null_mut();
@@ -82,7 +95,7 @@ pub fn verify(endpoint: &str) -> Result<Access> {
     let path = Path::new(name);
     let parent = path.parent().context("QMP socket parent missing")?;
     let directory = crate::received::Directory::open(parent)?;
-    let root = std::fs::canonicalize(crate::host::root()?.join("qmp"))?;
+    let root = std::fs::canonicalize(root()?)?;
     ensure!(
         std::fs::canonicalize(parent)?.parent() == Some(root.as_path())
             && matches!(

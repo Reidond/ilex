@@ -1,0 +1,119 @@
+Development mode enabled.  A writable overlayfs is now mounted on /usr.
+All changes there will be discarded on reboot.
+Package                           Arch   Version             Repository                                              Size
+Installing:
+ glx-utils                        x86_64 0:9.0.0-12.fc45     fedora                                             418.1 KiB
+ hyprland                         x86_64 0:0.57.2-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland  67.6 MiB
+ qt6-qtdeclarative-devel          x86_64 0:6.11.2-3.fc45     updates                                             25.7 MiB
+ qt6-qtwayland                    x86_64 0:6.11.2-1.fc45     fedora                                               3.3 MiB
+ wl-clipboard                     x86_64 0:2.3.0-2.fc45      fedora                                             148.8 KiB
+Installing dependencies:
+ aquamarine                       x86_64 0:0.16.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland   1.4 MiB
+ binutils                         x86_64 0:2.47-1.fc45       fedora                                              28.4 MiB
+ cmake                            x86_64 0:4.3.0-7.fc45      updates                                             40.4 MiB
+ cmake-data                       noarch 0:4.3.0-7.fc45      updates                                              9.4 MiB
+ cmake-filesystem                 x86_64 0:4.3.0-7.fc45      updates                                              0.0   B
+ double-conversion                x86_64 0:3.4.0-4.fc45      fedora                                             101.8 KiB
+ gcc                              x86_64 0:16.2.1-3.fc45     updates                                            121.8 MiB
+ gcc-c++                          x86_64 0:16.2.1-3.fc45     updates                                             46.8 MiB
+ glibc-devel                      x86_64 0:2.44-2.fc45       updates                                              2.3 MiB
+ grim                             x86_64 0:1.5.0-4.fc45      fedora                                              49.4 KiB
+ hyprcursor                       x86_64 0:0.1.14-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 764.4 KiB
+ hyprgraphics                     x86_64 0:0.6.0-1.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland 244.8 KiB
+ hyprlang                         x86_64 0:0.6.8-4.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland 288.8 KiB
+ hyprtoolkit                      x86_64 0:0.6.0-2.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland   1.7 MiB
+ hyprutils                        x86_64 0:0.14.3-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 496.8 KiB
+ hyprwire                         x86_64 0:0.3.1-3.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland 346.4 KiB
+ ibus-panel                       x86_64 0:1.5.35-2.fc45     updates                                            318.2 KiB
+ iniparser                        x86_64 0:4.2.6-5.fc45      fedora                                              37.5 KiB
+ jsoncpp                          x86_64 0:1.9.6-3.fc44      fedora                                             285.6 KiB
+ kernel-headers                   x86_64 0:7.3.3-300.fc45    updates                                              7.1 MiB
+ kitty-kitten                     x86_64 0:0.50.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland  30.3 MiB
+ kitty-shell-integration          noarch 0:0.50.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 126.6 KiB
+ kitty-terminfo                   noarch 0:0.50.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland  38.0 KiB
+ libX11-devel                     x86_64 0:1.8.13-3.fc45     fedora                                               1.0 MiB
+ libXau-devel                     x86_64 0:1.0.12-5.fc45     fedora                                               7.3 KiB
+ libb2                            x86_64 0:0.98.1-16.fc45    fedora                                              41.9 KiB
+ libdbusmenu                      x86_64 0:16.04.0-32.fc45   fedora                                             540.1 KiB
+ libdbusmenu-gtk3                 x86_64 0:16.04.0-32.fc45   fedora                                              88.3 KiB
+ libfbclient2                     x86_64 0:5.0.4.1812-2.fc45 fedora                                               3.3 MiB
+ libffi-devel                     x86_64 0:3.5.2-3.fc45      fedora                                              33.9 KiB
+ libglvnd-core-devel              x86_64 1:1.7.0-10.fc45     fedora                                              40.3 KiB
+ libglvnd-devel                   x86_64 1:1.7.0-10.fc45     fedora                                               2.1 MiB
+ libpq                            x86_64 0:18.4-4.fc45       fedora                                               1.1 MiB
+ libseat                          x86_64 0:0.9.3-2.fc45      fedora                                              51.5 KiB
+ libstdc++-devel                  x86_64 0:16.2.1-3.fc45     updates                                             41.3 MiB
+ libtommath                       x86_64 0:1.3.1~rc1-8.fc45  fedora                                             130.3 KiB
+ libxcb-devel                     x86_64 0:1.17.0-8.fc45     fedora                                               2.6 MiB
+ libxcrypt-devel                  x86_64 0:4.5.2-4.fc45      fedora                                              31.0 KiB
+ libxkbcommon-devel               x86_64 0:1.13.1-4.fc45     fedora                                             393.4 KiB
+ libxkbcommon-x11                 x86_64 0:1.13.1-4.fc45     fedora                                              39.5 KiB
+ libxml2-devel                    x86_64 0:2.15.4-1.fc45     fedora                                               6.7 MiB
+ make                             x86_64 1:4.4.1-13.fc45     fedora                                               1.8 MiB
+ mariadb-connector-c              x86_64 0:3.4.9-3.fc45      fedora                                             505.5 KiB
+ mariadb-connector-c-config       noarch 0:3.4.9-3.fc45      fedora                                              26.4 KiB
+ miniz                            x86_64 0:3.1.2-2.fc45      fedora                                             129.1 KiB
+ muParser                         x86_64 0:2.3.5-6.fc45      fedora                                             563.4 KiB
+ odbcinst-generate                noarch 0:2.3.14-36.fc45    fedora                                              22.5 KiB
+ pcre2-utf16                      x86_64 0:10.49-1.fc45      updates                                            659.2 KiB
+ playerctl-libs                   x86_64 0:2.4.1-13.fc45     fedora                                             109.2 KiB
+ python3-pyxdg                    noarch 0:0.28-4.fc45       fedora                                             471.7 KiB
+ qt6-filesystem                   x86_64 0:6.11.2-1.fc45     fedora                                               0.0   B
+ qt6-qtbase                       x86_64 0:6.11.2-3.fc45     fedora                                              13.9 MiB
+ qt6-qtbase-common                noarch 0:6.11.2-3.fc45     fedora                                              76.0   B
+ qt6-qtbase-devel                 x86_64 0:6.11.2-3.fc45     fedora                                              22.9 MiB
+ qt6-qtbase-gui                   x86_64 0:6.11.2-3.fc45     fedora                                              27.4 MiB
+ qt6-qtbase-ibase                 x86_64 0:6.11.2-3.fc45     fedora                                             158.6 KiB
+ qt6-qtbase-mysql                 x86_64 0:6.11.2-3.fc45     fedora                                             118.4 KiB
+ qt6-qtbase-odbc                  x86_64 0:6.11.2-3.fc45     fedora                                             154.0 KiB
+ qt6-qtbase-postgresql            x86_64 0:6.11.2-3.fc45     fedora                                             138.2 KiB
+ qt6-qtdeclarative                x86_64 0:6.11.2-3.fc45     updates                                             59.3 MiB
+ qt6-qtsvg                        x86_64 0:6.11.2-1.fc45     fedora                                             947.8 KiB
+ qt6-rpm-macros                   noarch 0:6.11.2-1.fc45     fedora                                               3.0 KiB
+ re2                              x86_64 2:20251105-19.fc45  fedora                                             607.2 KiB
+ rhash                            x86_64 0:1.4.5-5.fc45      fedora                                             354.8 KiB
+ tomlplusplus                     x86_64 0:3.4.0-8.fc45      fedora                                             262.1 KiB
+ tslib                            x86_64 0:1.24-3.fc45       fedora                                             406.8 KiB
+ unixODBC                         x86_64 0:2.3.14-36.fc45    fedora                                               1.0 MiB
+ uwsm                             noarch 0:0.27.1-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 573.3 KiB
+ vim-filesystem                   noarch 2:9.2.1302-2.fc45   updates                                             40.0   B
+ vulkan-headers                   noarch 0:1.4.350.0-4.fc45  fedora                                              38.8 MiB
+ vulkan-loader-devel              x86_64 0:1.4.350.0-2.fc45  fedora                                               8.0 KiB
+ wayland-devel                    x86_64 0:1.26.0-3.fc45     fedora                                             724.6 KiB
+ xcb-util-cursor                  x86_64 0:0.1.6-3.fc45      fedora                                              27.1 KiB
+ xcb-util-errors                  x86_64 0:1.0.1-8.fc45      fedora                                              40.3 KiB
+ xcb-util-image                   x86_64 0:0.4.1-10.fc45     fedora                                              26.0 KiB
+ xcb-util-keysyms                 x86_64 0:0.4.1-10.fc45     fedora                                              16.5 KiB
+ xcb-util-renderutil              x86_64 0:0.3.10-10.fc45    fedora                                              24.2 KiB
+ xcb-util-wm                      x86_64 0:0.4.2-10.fc45     fedora                                              77.0 KiB
+ xorg-x11-proto-devel             noarch 0:2025.1-3.fc45     fedora                                               1.8 MiB
+ xxhash-libs                      x86_64 0:0.8.4-2.fc45      updates                                             94.0 KiB
+ xz-devel                         x86_64 1:5.8.3-2.fc45      fedora                                             258.8 KiB
+ zlib-ng-compat-devel             x86_64 0:2.3.3-6.fc45      fedora                                             107.0 KiB
+Installing weak dependencies:
+ brightnessctl                    x86_64 0:0.5.1-17.fc45     fedora                                              29.0 KiB
+ gstreamer1-plugins-good-qt6      x86_64 0:1.28.9-1.fc45     updates                                            236.2 KiB
+ hyprland-uwsm                    x86_64 0:0.57.2-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland 202.0   B
+ hyprpicker                       x86_64 0:0.4.8-1.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland 266.3 KiB
+ kitty                            x86_64 0:0.50.0-1.fc45     copr:copr.fedorainfracloud.org:lionheartp:Hyprland  19.1 MiB
+ playerctl                        x86_64 0:2.4.1-13.fc45     fedora                                              97.9 KiB
+ qt6-qttranslations               noarch 0:6.11.2-1.fc45     fedora                                              15.5 MiB
+ qt6-qtwayland-adwaita-decoration x86_64 0:6.11.2-1.fc45     fedora                                             131.7 KiB
+ ripgrep                          x86_64 0:15.2.0-1.fc45     fedora                                               4.6 MiB
+ shader-slang                     x86_64 0:2026.21-1.fc45    copr:copr.fedorainfracloud.org:lionheartp:Hyprland  63.5 MiB
+ wofi                             x86_64 0:1.5.3-3.fc45      fedora                                             164.1 KiB
+ xdg-desktop-portal-hyprland      x86_64 1:1.5.0-1.fc45      copr:copr.fedorainfracloud.org:lionheartp:Hyprland   1.2 MiB
+ xdriinfo                         x86_64 0:1.0.8-1.fc45      fedora                                              31.1 KiB
+
+Transaction Summary:
+ Installing:       100 packages
+
+()
+()
+()
+hyprland-0.57.2-1.fc45.x86_64
+qt6-qtbase-6.11.2-3.fc45.x86_64
+qt6-qtdeclarative-6.11.2-3.fc45.x86_64
+qt6-qtwayland-6.11.2-1.fc45.x86_64
+wl-clipboard-2.3.0-2.fc45.x86_64
+Session staged; the resize regression will restart GDM

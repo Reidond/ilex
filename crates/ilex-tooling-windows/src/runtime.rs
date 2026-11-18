@@ -4,8 +4,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -79,8 +78,13 @@ pub fn status() -> Result<Status> {
     })
 }
 pub fn command(path: &Path, exe: &str) -> Command {
+    use std::os::windows::process::CommandExt;
     let bin = path.join("ucrt64/bin");
     let mut c = Command::new(bin.join(exe));
+    // The launcher owns Ctrl-C. QEMU must not inherit the caller's console
+    // and terminate before the launcher can request bounded guest poweroff.
+    // This does not hide SDL's separately created GUI window.
+    c.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     // Limit DLL lookup to this runtime and Windows, independently of MSYS2/global PATH.
     let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     c.env(
@@ -361,19 +365,43 @@ pub fn activation_self_check(xtask: &Path) -> Result<serde_json::Value> {
     Ok(value)
 }
 fn gpu_smoke(path: &Path) -> Result<()> {
+    // Isolated runtime state still shares real host RAM with desktop/builder
+    // launches. Serialize admission in the OS-known per-user namespace.
+    let admission_dir = crate::private_qmp::root()?
+        .parent()
+        .context("private host state parent missing")?
+        .join("admission");
+    secure_dir(&admission_dir)?;
+    let admission_deadline = Instant::now() + Duration::from_secs(30);
+    let _admission = loop {
+        if let Some(guard) = try_lock(&admission_dir.join("host.lock"))? {
+            break guard;
+        }
+        ensure!(
+            Instant::now() < admission_deadline,
+            "runtime GPU fixture host admission is busy"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     let available = available_memory()?;
     ensure!(
         available >= 14 * 1024 * 1024 * 1024 + 256 * 1024 * 1024,
         "GPU fixture needs 256 MiB plus the 14 GiB host reserve; only {:.1} GiB available",
         available as f64 / 1024.0 / 1024.0 / 1024.0
     );
-    let reservation = TcpListener::bind(("127.0.0.1", 0))?;
-    let port = reservation.local_addr()?.port();
-    drop(reservation);
-    let endpoint = format!("tcp:127.0.0.1:{port},server=on,wait=off");
-    let fixture_name = format!("ilex-runtime-smoke-{}-{port}", std::process::id());
+    let run = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let endpoints = crate::qmp::Endpoints::new("runtime-gpu-smoke", &run, 0)?;
+    let endpoint = format!("{},server=on,wait=off", endpoints.control);
+    let fixture_name = format!("ilex-runtime-smoke-{run}");
     let (_job, mut child) = spawn_owned(
         command(path, "qemu-system-x86_64.exe")
+            .env("SDL_WINDOW_ACTIVATE_WHEN_SHOWN", "0")
             .args([
                 "-name",
                 &fixture_name,
@@ -383,6 +411,7 @@ fn gpu_smoke(path: &Path) -> Result<()> {
                 "q35",
                 "-cpu",
                 "max",
+                "-mem-prealloc",
                 "-m",
                 "256",
                 "-smp",
@@ -405,27 +434,23 @@ fn gpu_smoke(path: &Path) -> Result<()> {
     )?;
     let result = (|| -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(20);
-        let stream = loop {
-            if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) {
-                break stream;
+        let mut client = loop {
+            // Keep the cold SDL/GL handshake allowance from T2, now using the
+            // same ACL-verified, bounded transport as native desktop control.
+            match crate::qmp::Qmp::connect_with_timeout(&endpoints.control, Duration::from_secs(30))
+            {
+                Ok(client) => break client,
+                Err(error) if Instant::now() >= deadline => {
+                    return Err(error).context("GPU fixture private QMP startup timed out");
+                }
+                Err(_) => {}
             }
             ensure!(
                 child.try_wait()?.is_none(),
                 "WHPX/SDL/GL firmware fixture exited before QMP"
             );
-            ensure!(
-                Instant::now() < deadline,
-                "GPU fixture QMP startup timed out (loopback port {port})"
-            );
             std::thread::sleep(Duration::from_millis(100));
         };
-        let mut client = ilex_tooling_qmp::Client::connect(
-            TcpTransport(BufReader::new(stream)),
-            // Allow cold SDL/GL initialization to reach QEMU's main loop on a
-            // busy host, while keeping every I/O operation bounded.
-            Duration::from_secs(30),
-        )
-        .context("GPU fixture QMP handshake")?;
         let identity = client
             .execute("query-name", serde_json::json!({}))
             .context("GPU fixture QMP identity")?;
@@ -456,54 +481,6 @@ fn gpu_smoke(path: &Path) -> Result<()> {
         let _ = child.wait();
     }
     result
-}
-struct TcpTransport(BufReader<TcpStream>);
-impl ilex_tooling_qmp::Transport for TcpTransport {
-    fn read_message(&mut self, deadline: Instant) -> Result<serde_json::Value> {
-        let mut bytes = Vec::new();
-        loop {
-            ensure!(Instant::now() < deadline, "QMP response deadline expired");
-            self.0.get_mut().set_read_timeout(Some(
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .max(Duration::from_millis(1)),
-            ))?;
-            let buffer = self.0.fill_buf()?;
-            ensure!(!buffer.is_empty(), "QMP endpoint closed");
-            let count = buffer
-                .iter()
-                .position(|b| *b == b'\n')
-                .map_or(buffer.len(), |i| i + 1);
-            ensure!(
-                (bytes.len() + count) as u64 <= ilex_tooling_qmp::MAX_MESSAGE_BYTES,
-                "oversized QMP response"
-            );
-            let complete = buffer[count - 1] == b'\n';
-            bytes.extend_from_slice(&buffer[..count]);
-            self.0.consume(count);
-            if complete {
-                break;
-            }
-        }
-        Ok(serde_json::from_slice(&bytes)?)
-    }
-    fn write_message(&mut self, message: &serde_json::Value, deadline: Instant) -> Result<()> {
-        let mut bytes = serde_json::to_vec(message)?;
-        bytes.extend_from_slice(b"\r\n");
-        let mut offset = 0;
-        while offset < bytes.len() {
-            ensure!(Instant::now() < deadline, "QMP write deadline expired");
-            self.0.get_mut().set_write_timeout(Some(
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .max(Duration::from_millis(1)),
-            ))?;
-            let count = self.0.get_mut().write(&bytes[offset..])?;
-            ensure!(count != 0, "QMP endpoint closed during write");
-            offset += count;
-        }
-        Ok(())
-    }
 }
 pub fn self_check() -> Result<()> {
     let path = fetch()?;

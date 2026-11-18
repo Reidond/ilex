@@ -94,6 +94,11 @@ impl ResizeSession {
             let mut output = Value::Null;
             let mut session_changes = 0u64;
             let mut output_changes = 0u64;
+            let mut confirmed_size = None;
+            let mut confirmed_edid = Value::Null;
+            let mut guest_resize: Option<((u32, u32), Instant)> = None;
+            let mut guest_mode_recoveries = 0u64;
+            let mut last_guest_mode_recovery = Value::Null;
             while !stopped.load(Ordering::Relaxed) && info.is_running() {
                 if let Ok(geometry) = crate::capture::geometry(&info) {
                     let _ = crate::capture::record_geometry(&info, geometry);
@@ -107,10 +112,49 @@ impl ResizeSession {
                         && Instant::now() >= next_probe
                     {
                         attempts = attempts.saturating_add(1);
-                        // Every attempt has its own five-second deadline. Keep
+                        // Every SSH transaction has a five-second deadline;
+                        // guest-driven resize recovery uses a second bounded
+                        // transaction. Keep
                         // probing after success too: logind/compositor/output
                         // changes do not necessarily resize the host window.
                         let mut value = display_info(&info, Some(size)).unwrap_or_else(|_| json!({"schema":1,"acknowledged":false,"state":"guest-display-unavailable","target":[size.0,size.1]}));
+                        let mut target = size;
+                        // SDL_SetWindowSize follows a new guest surface, but
+                        // does not advertise a new EDID as a human resize does.
+                        // Do not let a compositor's bootstrap mode replace the
+                        // last acknowledged host target. Allow EDID two seconds
+                        // to settle before deciding that this was guest-driven.
+                        if value["acknowledged"] == true
+                            && confirmed_size.is_some_and(|wanted| wanted != size)
+                            && value["edid"] == confirmed_edid
+                            && confirmed_edid.as_array().is_some_and(|v| !v.is_empty())
+                        {
+                            let since = match guest_resize {
+                                Some((candidate, since)) if candidate == size => since,
+                                _ => {
+                                    let now = Instant::now();
+                                    guest_resize = Some((size, now));
+                                    now
+                                }
+                            };
+                            let wanted = confirmed_size.expect("checked above");
+                            if since.elapsed() >= Duration::from_secs(2) {
+                                target = wanted;
+                                value = display_info(&info, Some(wanted)).unwrap_or_else(|_| json!({"schema":1,"acknowledged":false,"state":"guest-display-unavailable","target":[wanted.0,wanted.1]}));
+                                value["recovery"] =
+                                    json!("preserved-host-target-after-guest-mode-change");
+                                if value["acknowledged"] == true {
+                                    guest_mode_recoveries = guest_mode_recoveries.saturating_add(1);
+                                    last_guest_mode_recovery = json!({"attempt":attempts,"from_client_size":[size.0,size.1],"target":[wanted.0,wanted.1],"edid":confirmed_edid});
+                                }
+                            } else {
+                                value["acknowledged"] = json!(false);
+                                value["state"] = json!("waiting-for-edid-settlement");
+                            }
+                            value["preserved_target"] = json!([wanted.0, wanted.1]);
+                        } else {
+                            guest_resize = None;
+                        }
                         if value["session"] != session {
                             session_changes = session_changes.saturating_add(1);
                             session = value["session"].clone();
@@ -120,14 +164,23 @@ impl ResizeSession {
                             output_changes = output_changes.saturating_add(1);
                             output = observed_output;
                         }
-                        if crate::capture::geometry(&info).ok() != Some(geometry) {
+                        if !crate::capture::geometry(&info)
+                            .is_ok_and(|g| (g.width, g.height) == target)
+                        {
                             value["acknowledged"] = json!(false);
                             value["state"] = json!("host-resized-during-probe");
+                        }
+                        if value["acknowledged"] == true {
+                            confirmed_size = Some(target);
+                            confirmed_edid = value["edid"].clone();
+                            guest_resize = None;
                         }
                         value["run"] = json!(info.run);
                         value["attempt"] = json!(attempts);
                         value["session_changes"] = json!(session_changes);
                         value["output_changes"] = json!(output_changes);
+                        value["guest_mode_recoveries"] = json!(guest_mode_recoveries);
+                        value["last_guest_mode_recovery"] = last_guest_mode_recovery.clone();
                         value["observed_unix_ms"] = json!(
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)

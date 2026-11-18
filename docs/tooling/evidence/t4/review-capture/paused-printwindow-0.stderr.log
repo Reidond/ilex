@@ -1,0 +1,3 @@
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+ilex-vmctl: error: PrintWindow failed/minimized/resized; no fresh frame

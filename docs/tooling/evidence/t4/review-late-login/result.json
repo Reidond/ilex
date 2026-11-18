@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "stage": "delayed-login",
+  "run": "2832-1794978584466538000",
+  "utc": "2026-11-18T06:16:45.300114+00:00",
+  "gdm_started_utc": "2026-11-18T06:16:33.286392+00:00",
+  "baseline": {
+    "acknowledged": true,
+    "attempt": 24,
+    "backend": "mutter",
+    "display_instance": ":1.9",
+    "edid": [
+      {
+        "connector": "card1-Virtual-1",
+        "sha256": "e2020bcce3f0c2edfbd7be364150dd7d45e737f75df86433308bcba84f9079c1"
+      }
+    ],
+    "monitors": [
+      {
+        "current": [
+          [
+            1280,
+            800
+          ]
+        ],
+        "name": "Virtual-1",
+        "preferred": [
+          [
+            1280,
+            800
+          ]
+        ]
+      }
+    ],
+    "observed_unix_ms": 1794982548818,
+    "output_changes": 2,
+    "run": "2832-1794978584466538000",
+    "schema": 1,
+    "session": {
+      "id": "1",
+      "leader": 1031,
+      "started_monotonic": 11251980,
+      "uid": 1000
+    },
+    "session_changes": 1,
+    "target": [
+      1280,
+      800
+    ]
+  },
+  "recovered": {
+    "acknowledged": true,
+    "attempt": 44,
+    "backend": "mutter",
+    "display_instance": ":1.9",
+    "edid": [
+      {
+        "connector": "card1-Virtual-1",
+        "sha256": "1f870a421b1b0152217d15ae6618a4f848959a31956d015e086c54c096c0de2b"
+      }
+    ],
+    "monitors": [
+      {
+        "current": [
+          [
+            1596,
+            953
+          ]
+        ],
+        "name": "Virtual-1",
+        "preferred": [
+          [
+            1596,
+            953
+          ]
+        ]
+      }
+    ],
+    "observed_unix_ms": 1794982599492,
+    "output_changes": 4,
+    "run": "2832-1794978584466538000",
+    "schema": 1,
+    "session": {
+      "id": "50",
+      "leader": 2949,
+      "started_monotonic": 127697440,
+      "uid": 1000
+    },
+    "session_changes": 3,
+    "target": [
+      1596,
+      953
+    ]
+  },
+  "no_second_host_resize": true,
+  "continued_acknowledgements": true
+}

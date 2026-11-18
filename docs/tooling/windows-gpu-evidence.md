@@ -23,12 +23,19 @@ from runtime metadata and omit credential paths.
 | Grabbed shutdown and fixed resource policy | [GNOME shutdown timing](evidence/t4/usb-gnome/shutdown-grabbed.json), [Hyprland shutdown timing](evidence/t4/usb-hyprland-qt/shutdown-grabbed.json), [timestamped host capacity/configuration observations](evidence/t4/capacity.jsonl). |
 | Development helper isolation | [Ordinary image filesystem audit](evidence/t4/production-helper-audit.json), [private composition audit](evidence/t4/development-helper-audit.json). |
 | Review P1: ACLs, reconnects and low-integrity denial | [Pinned QEMU endpoints and raw DACL SDDL](evidence/t4/review-transport-acl/transport-ready.json), [real lowered-token connection results](evidence/t4/review-transport-acl/low-integrity.json). Both clients receive Windows error 10013; normal clients reconnect before and after. |
+| Review P1: long artifact-state paths, concurrent clients and listener audit | [Long-path context](evidence/t4/review-transport-known-folder/context.json), [lowered-token checks](evidence/t4/review-transport-known-folder/low-integrity.json), [held input connection](evidence/t4/review-dual-qmp/result.json), [simultaneous native vmctl check](evidence/t4/review-dual-qmp/vmctl-self-check.json), [actual VM TCP listeners](evidence/t4/review-dual-qmp/listeners.json). Only pinned SSH listens on TCP. [Isolated runtime activation](evidence/t4/review-runtime-activation-final.stdout.log) also passes with private QMP. |
+| Review P2: delayed GNOME login | [Full timestamped retry trace](evidence/t4/review-late-login/timeline.jsonl), [result](evidence/t4/review-late-login/result.json), [Cua window geometry](evidence/t4/review-late-login/cua-window-after-resize.json). GDM stayed stopped beyond 25 seconds after resize; session 1 → 50 recovered 1596×953 without another host resize. |
+| Review P3: real PrintWindow motion and frozen-frame refusal | [Raw commands, timing, frame proofs and PNG hashes](evidence/t4/review-capture/result.json), [positive content-change sidecar](evidence/t4/review-capture/moving-printwindow.frame.json), [unchanged-frame negative](evidence/t4/review-capture/paused-printwindow-1.stderr.log). Changing GTK pixels passed; both paused-guest attempts failed with no output PNG. Presentation ticks are null for PrintWindow. |
+| Review teardown probes | [Real caption close](evidence/t4/review-lifecycle/close-window/result.json), [Cua close action](evidence/t4/review-lifecycle/close-window/cua-action.json), [SendInput Ctrl-C](evidence/t4/review-lifecycle/ctrl-c-before-resize-recovery/result.json), [Cua Ctrl-C action](evidence/t4/review-lifecycle/ctrl-c-before-resize-recovery/cua-action.json). Both processes exited, keys/sockets were removed and stale attachment failed. The later console-isolation refinement and forced-exit/restart gate still need their final rerun. |
 
 The original desktop observations below predate the base-stack rewrite and
 identify their frozen installed disk/source explicitly. Post-review transport
-results use the rebased Windows implementation. The delayed-login,
-compositor-switch, PrintWindow frozen-guest and launcher-teardown regression
-results are still awaiting host capacity and are not claimed complete here.
+results use the rebased Windows implementation. The first compositor-switch
+[negative trace](evidence/t4/review-session-hyprland/timeline.jsonl) exposed SDL
+adopting the guest's smaller bootstrap mode as the host target. The corrected
+build preserves the acknowledged target while EDID is unchanged. Its cold-boot
+session regression and final console-isolation/forced-exit probes remain
+queued for host capacity and are not claimed complete here.
 
 These are real VM observations from 17–18 November 2026, separate from the
 feasibility spike. The host runs Windows 11 Pro build 26300 with a Radeon

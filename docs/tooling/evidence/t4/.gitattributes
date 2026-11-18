@@ -1,2 +1,2 @@
 # Preserve captured bytes so manifest SHA256 values match raw Git downloads.
-* -text
+* -text -whitespace

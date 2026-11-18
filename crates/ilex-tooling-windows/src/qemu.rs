@@ -928,15 +928,21 @@ impl Vm {
 }
 impl Drop for Vm {
     fn drop(&mut self) {
+        let started = Instant::now();
+        let mut powerdown_requested = false;
+        let mut forced_kill = false;
         if self.child.try_wait().ok().flatten().is_none() {
             if let Ok(mut qmp) = Qmp::connect(&self.info.qmp_endpoint) {
-                let _ = qmp.execute("system_powerdown", json!({}));
+                powerdown_requested = qmp.execute("system_powerdown", json!({})).is_ok();
             }
             let until = Instant::now() + Duration::from_secs(15);
             while Instant::now() < until && self.child.try_wait().ok().flatten().is_none() {
                 thread::sleep(Duration::from_millis(100));
             }
-            let _ = self.child.kill();
+            if self.child.try_wait().ok().flatten().is_none() {
+                forced_kill = true;
+                let _ = self.child.kill();
+            }
             let _ = self.child.wait();
         }
         // Keep metadata and logs. Remove only exact run-owned ephemeral files;
@@ -955,6 +961,11 @@ impl Drop for Vm {
                 let _ = fs::remove_file(directory.join(name));
             }
         }
+        let status = self.child.try_wait().ok().flatten();
+        let _ = host::atomic(
+            &self.info.dir.join("teardown-status.json"),
+            &serde_json::to_vec(&json!({"schema":1,"run":self.info.run,"powerdown_requested":powerdown_requested,"forced_kill":forced_kill,"qemu_exited":status.is_some(),"exit_code":status.and_then(|s| s.code()),"drop_elapsed_ms":started.elapsed().as_millis(),"observed_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()})).unwrap_or_default(),
+        );
     }
 }
 fn qemu_path(path: &Path) -> Result<String> {

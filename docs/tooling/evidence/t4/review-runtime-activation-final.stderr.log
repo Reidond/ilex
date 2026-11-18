@@ -1,0 +1,2 @@
+runtime activation self-check: fresh acquisition followed by real SDL failure left active/previous absent
+runtime activation self-check: successful WHPX/SDL/GL firmware smoke then activated the first pointer

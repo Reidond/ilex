@@ -1,0 +1,60 @@
+[
+  {
+    "renderer": "virgl (AMD Radeon RX 9070 XT)",
+    "version": "OpenGL ES 3.2 Mesa 26.2.6",
+    "display_type": "GdkWaylandDisplay"
+  },
+  {
+    "frames": 337,
+    "elapsed_seconds": 5.013156692999985,
+    "callbacks_per_second_last5": 67.4
+  },
+  {
+    "set": true
+  },
+  {
+    "frames": 712,
+    "elapsed_seconds": 10.022390919999992,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 1087,
+    "elapsed_seconds": 15.025404544999986,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 1104,
+    "elapsed_seconds": 20.641383440999988,
+    "callbacks_per_second_last5": 0.2
+  },
+  {
+    "frames": 1455,
+    "elapsed_seconds": 25.652278596000002,
+    "callbacks_per_second_last5": 70.2
+  },
+  {
+    "frames": 1830,
+    "elapsed_seconds": 30.653858696000015,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 2206,
+    "elapsed_seconds": 35.66646353399997,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 2581,
+    "elapsed_seconds": 40.66780203199997,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 2955,
+    "elapsed_seconds": 45.66834221399998,
+    "callbacks_per_second_last5": 74.8
+  },
+  {
+    "frames": 3331,
+    "elapsed_seconds": 50.682095245,
+    "callbacks_per_second_last5": 75.0
+  }
+]

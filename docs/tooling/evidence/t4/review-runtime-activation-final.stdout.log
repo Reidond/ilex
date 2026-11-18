@@ -1,0 +1,10 @@
+{
+  "failed_first_update_left_active_absent": true,
+  "failed_first_update_left_previous_absent": true,
+  "failure": "real SDL initialization with unavailable video driver",
+  "fixture_removed": true,
+  "normal_pointer_unchanged": true,
+  "schema": 1,
+  "successful_gpu_smoke_activated": true,
+  "verified_acquisition_retained": true
+}

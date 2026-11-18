@@ -1,0 +1,23 @@
+{
+  "captured_unix_ms": 1794982723248,
+  "client_size": [
+    1596,
+    953
+  ],
+  "freshness": {
+    "kind": "wgc-presentation",
+    "presentation_ticks": 622206622118
+  },
+  "generation": 11,
+  "schema": 1,
+  "source": "wgc",
+  "source_ticks": 622206622118,
+  "vm": {
+    "guest_arch": "x86_64",
+    "opaque_id": "35964:134394560560383972",
+    "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+    "provider": "windows-qemu-whpx",
+    "run": "2832-1794978584466538000",
+    "schema": 1
+  }
+}

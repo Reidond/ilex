@@ -1,0 +1,222 @@
+Updating and loading repositories:
+ Copr repo for Hyprland owned by lionhe 100% |   1.6 KiB/s |   1.5 KiB |  00m01s
+Repositories loaded.
+Total size of inbound packages is 226 MiB. Need to download 226 MiB.
+After this operation, 728 MiB extra will be used (install 728 MiB, remove 0 B).
+[  1/100] hyprland-0:0.57.2-1.fc45.x86_ 100% |   5.0 MiB/s |  50.4 MiB |  00m10s
+[  2/100] wl-clipboard-0:2.3.0-2.fc45.x 100% | 361.6 KiB/s |  56.8 KiB |  00m00s
+>>> Curl error (28): Timeout was reached for https://fedora.ip-connect.vn.ua/linux/releases/45/Everything/x86_64/os/Packages/w/wl-clipboard-2.3.0-2.fc45.x86_64.rpm [Connection timed out after 30001 milliseconds] - https://fedora.ip-connect.vn.ua/linux/releases/45/Everything/x86_64/os/Packages/w/wl-clipboard-2.3.0-2.fc45.x86_64.rpm
+[  3/100] muParser-0:2.3.5-6.fc45.x86_6 100% | 794.5 KiB/s | 181.1 KiB |  00m00s
+>>> Curl error (28): Timeout was reached for https://fedora.ip-connect.vn.ua/linux/releases/45/Everything/x86_64/os/Packages/m/muParser-2.3.5-6.fc45.x86_64.rpm [Connection timed out after 30000 milliseconds] - https://fedora.ip-connect.vn.ua/linux/releases/45/Everything/x86_64/os/Packages/m/muParser-2.3.5-6.fc45.x86_64.rpm
+[  4/100] tomlplusplus-0:3.4.0-8.fc45.x 100% |   1.2 MiB/s | 106.3 KiB |  00m00s
+[  5/100] xcb-util-errors-0:1.0.1-8.fc4 100% | 305.7 KiB/s |  19.6 KiB |  00m00s
+[  6/100] xcb-util-wm-0:0.4.2-10.fc45.x 100% | 387.8 KiB/s |  30.6 KiB |  00m00s
+[  7/100] hyprgraphics-0:0.6.0-1.fc45.x 100% | 109.1 KiB/s | 106.5 KiB |  00m01s
+[  8/100] aquamarine-0:0.16.0-1.fc45.x8 100% | 358.3 KiB/s | 473.7 KiB |  00m01s
+[  9/100] re2-2:20251105-19.fc45.x86_64 100% |   1.0 MiB/s | 250.0 KiB |  00m00s
+>>> Curl error (35): SSL connect error for https://fedora.ip-connect.vn.ua/linux/releases/45/Everything/x86_64/os/Packages/r/re2-20251105-19.fc45.x86_64.rpm [Recv failure: Connection reset by peer] - https://fedora.ip-connect.vn.ua/linux/releases/45/Everything/x86_64/os/Packages/r/re2-20251105-19.fc45.x86_64.rpm
+[ 10/100] libseat-0:0.9.3-2.fc45.x86_64 100% | 227.6 KiB/s |  31.0 KiB |  00m00s
+[ 11/100] hyprwire-0:0.3.1-3.fc45.x86_6 100% | 298.7 KiB/s | 146.4 KiB |  00m00s
+[ 12/100] qt6-qtbase-0:6.11.2-3.fc45.x8 100% |   7.6 MiB/s |   4.4 MiB |  00m01s
+[ 13/100] qt6-qtbase-devel-0:6.11.2-3.f 100% |   4.4 MiB/s |   4.3 MiB |  00m01s
+[ 14/100] qt6-qtbase-gui-0:6.11.2-3.fc4 100% |   6.6 MiB/s |   8.7 MiB |  00m01s
+[ 15/100] double-conversion-0:3.4.0-4.f 100% |  60.7 KiB/s |  54.6 KiB |  00m01s
+[ 16/100] qt6-qtdeclarative-devel-0:6.1 100% |   2.2 MiB/s |   4.8 MiB |  00m02s
+[ 17/100] qt6-filesystem-0:6.11.2-1.fc4 100% |  31.2 KiB/s |  10.5 KiB |  00m00s
+[ 18/100] qt6-qtbase-ibase-0:6.11.2-3.f 100% | 354.4 KiB/s |  70.9 KiB |  00m00s
+[ 19/100] qt6-qtbase-common-0:6.11.2-3. 100% |  29.8 KiB/s |  11.3 KiB |  00m00s
+[ 20/100] qt6-qtbase-mysql-0:6.11.2-3.f 100% | 378.1 KiB/s |  54.4 KiB |  00m00s
+[ 21/100] libb2-0:0.98.1-16.fc45.x86_64 100% |  31.2 KiB/s |  26.0 KiB |  00m01s
+[ 22/100] qt6-qtbase-odbc-0:6.11.2-3.fc 100% | 308.9 KiB/s |  68.0 KiB |  00m00s
+[ 23/100] qt6-qtbase-postgresql-0:6.11. 100% | 138.8 KiB/s |  61.3 KiB |  00m00s
+[ 24/100] libxkbcommon-x11-0:1.13.1-4.f 100% |  39.5 KiB/s |  22.8 KiB |  00m01s
+[ 25/100] qt6-rpm-macros-0:6.11.2-1.fc4 100% |  10.0 KiB/s |  11.8 KiB |  00m01s
+[ 26/100] tslib-0:1.24-3.fc45.x86_64    100% | 129.2 KiB/s | 158.3 KiB |  00m01s
+[ 27/100] xcb-util-cursor-0:0.1.6-3.fc4 100% |  21.5 KiB/s |  18.9 KiB |  00m01s
+[ 28/100] xcb-util-image-0:0.4.1-10.fc4 100% |  53.5 KiB/s |  18.8 KiB |  00m00s
+[ 29/100] xcb-util-keysyms-0:0.4.1-10.f 100% |  47.9 KiB/s |  14.1 KiB |  00m00s
+[ 30/100] xcb-util-renderutil-0:0.3.10- 100% |  59.6 KiB/s |  17.4 KiB |  00m00s
+[ 31/100] libfbclient2-0:5.0.4.1812-2.f 100% |   1.1 MiB/s |   1.2 MiB |  00m01s
+[ 32/100] unixODBC-0:2.3.14-36.fc45.x86 100% | 506.3 KiB/s | 420.7 KiB |  00m01s
+[ 33/100] mariadb-connector-c-0:3.4.9-3 100% | 245.4 KiB/s | 210.8 KiB |  00m01s
+[ 34/100] libtommath-0:1.3.1~rc1-8.fc45 100% |   1.1 MiB/s |  64.3 KiB |  00m00s
+[ 35/100] mariadb-connector-c-config-0: 100% | 252.6 KiB/s |  21.7 KiB |  00m00s
+[ 36/100] qt6-qtwayland-0:6.11.2-1.fc45 100% |   1.0 MiB/s | 802.2 KiB |  00m01s
+[ 37/100] odbcinst-generate-0:2.3.14-36 100% |  25.8 KiB/s |  22.0 KiB |  00m01s
+[ 38/100] libpq-0:18.4-4.fc45.x86_64    100% | 287.9 KiB/s | 292.8 KiB |  00m01s
+[ 39/100] glx-utils-0:9.0.0-12.fc45.x86 100% | 956.9 KiB/s |  69.9 KiB |  00m00s
+[ 40/100] hyprlang-0:0.6.8-4.fc45.x86_6 100% | 142.6 KiB/s | 124.2 KiB |  00m01s
+[ 41/100] cmake-filesystem-0:4.3.0-7.fc 100% | 323.1 KiB/s |  14.9 KiB |  00m00s
+[ 42/100] hyprutils-0:0.14.3-1.fc45.x86 100% | 180.1 KiB/s | 210.4 KiB |  00m01s
+[ 43/100] qt6-qtsvg-0:6.11.2-1.fc45.x86 100% |   2.0 MiB/s | 319.3 KiB |  00m00s
+[ 44/100] hyprcursor-0:0.1.14-1.fc45.x8 100% | 187.3 KiB/s | 244.8 KiB |  00m01s
+[ 45/100] jsoncpp-0:1.9.6-3.fc44.x86_64 100% | 526.4 KiB/s | 110.0 KiB |  00m00s
+[ 46/100] make-1:4.4.1-13.fc45.x86_64   100% |   3.0 MiB/s | 588.3 KiB |  00m00s
+[ 47/100] rhash-0:1.4.5-5.fc45.x86_64   100% |   1.8 MiB/s | 201.7 KiB |  00m00s
+[ 48/100] qt6-qtdeclarative-0:6.11.2-3. 100% |   5.3 MiB/s |  14.8 MiB |  00m03s
+[ 49/100] libglvnd-devel-1:1.7.0-10.fc4 100% | 786.3 KiB/s | 162.0 KiB |  00m00s
+[ 50/100] libX11-devel-0:1.8.13-3.fc45. 100% |   3.9 MiB/s |   1.1 MiB |  00m00s
+[ 51/100] libglvnd-core-devel-1:1.7.0-1 100% |  51.4 KiB/s |  17.1 KiB |  00m00s
+[ 52/100] xorg-x11-proto-devel-0:2025.1 100% |   2.0 MiB/s | 302.2 KiB |  00m00s
+[ 53/100] libxkbcommon-devel-0:1.13.1-4 100% | 305.9 KiB/s |  74.3 KiB |  00m00s
+[ 54/100] pcre2-utf16-0:10.49-1.fc45.x8 100% | 817.7 KiB/s | 257.6 KiB |  00m00s
+[ 55/100] vulkan-loader-devel-0:1.4.350 100% |  73.1 KiB/s |  12.4 KiB |  00m00s
+[ 56/100] cmake-0:4.3.0-7.fc45.x86_64   100% |   3.1 MiB/s |  14.4 MiB |  00m05s
+[ 57/100] gcc-c++-0:16.2.1-3.fc45.x86_6 100% |   3.9 MiB/s |  17.3 MiB |  00m04s
+[ 58/100] wayland-devel-0:1.26.0-3.fc45 100% | 341.7 KiB/s | 161.3 KiB |  00m00s
+[ 59/100] libxcb-devel-0:1.17.0-8.fc45. 100% |   5.1 MiB/s |   1.5 MiB |  00m00s
+[ 60/100] vulkan-headers-0:1.4.350.0-4. 100% |   1.2 MiB/s |   1.7 MiB |  00m01s
+[ 61/100] libstdc++-devel-0:16.2.1-3.fc 100% |   4.3 MiB/s |   6.0 MiB |  00m01s
+[ 62/100] glibc-devel-0:2.44-2.fc45.x86 100% |   3.5 MiB/s | 658.8 KiB |  00m00s
+[ 63/100] libxcrypt-devel-0:4.5.2-4.fc4 100% |  41.9 KiB/s |  30.4 KiB |  00m01s
+[ 64/100] binutils-0:2.47-1.fc45.x86_64 100% |   2.5 MiB/s |   6.2 MiB |  00m03s
+[ 65/100] cmake-data-0:4.3.0-7.fc45.noa 100% |   3.4 MiB/s |   2.7 MiB |  00m01s
+[ 66/100] libXau-devel-0:1.0.12-5.fc45. 100% |  24.5 KiB/s |  13.9 KiB |  00m01s
+[ 67/100] libffi-devel-0:3.5.2-3.fc45.x 100% |  30.3 KiB/s |  29.5 KiB |  00m01s
+[ 68/100] vim-filesystem-2:9.2.1302-2.f 100% | 195.6 KiB/s |  15.6 KiB |  00m00s
+[ 69/100] libxml2-devel-0:2.15.4-1.fc45 100% |   1.6 MiB/s | 536.4 KiB |  00m00s
+[ 70/100] kernel-headers-0:7.3.3-300.fc 100% |   3.7 MiB/s |   1.8 MiB |  00m00s
+[ 71/100] xz-devel-1:5.8.3-2.fc45.x86_6 100% | 368.9 KiB/s |  66.4 KiB |  00m00s
+[ 72/100] ibus-panel-0:1.5.35-2.fc45.x8 100% |   2.3 MiB/s | 132.7 KiB |  00m00s
+[ 73/100] zlib-ng-compat-devel-0:2.3.3- 100% | 158.9 KiB/s |  37.8 KiB |  00m00s
+[ 74/100] libdbusmenu-0:16.04.0-32.fc45 100% | 179.5 KiB/s | 133.0 KiB |  00m01s
+[ 75/100] libdbusmenu-gtk3-0:16.04.0-32 100% |  39.6 KiB/s |  38.1 KiB |  00m01s
+[ 76/100] grim-0:1.5.0-4.fc45.x86_64    100% | 313.2 KiB/s |  28.8 KiB |  00m00s
+[ 77/100] gcc-0:16.2.1-3.fc45.x86_64    100% |   7.2 MiB/s |  43.2 MiB |  00m06s
+[ 78/100] iniparser-0:4.2.6-5.fc45.x86_ 100% |  42.0 KiB/s |  25.8 KiB |  00m01s
+[ 79/100] xdg-desktop-portal-hyprland-1 100% | 314.2 KiB/s | 448.1 KiB |  00m01s
+[ 80/100] gstreamer1-plugins-good-qt6-0 100% |   1.8 MiB/s |  93.6 KiB |  00m00s
+[ 81/100] qt6-qtwayland-adwaita-decorat 100% | 431.8 KiB/s |  59.2 KiB |  00m00s
+[ 82/100] hyprtoolkit-0:0.6.0-2.fc45.x8 100% | 408.7 KiB/s | 544.0 KiB |  00m01s
+[ 83/100] kitty-shell-integration-0:0.5 100% | 107.0 KiB/s |  44.2 KiB |  00m00s
+[ 84/100] kitty-0:0.50.0-1.fc45.x86_64  100% |   5.3 MiB/s |   5.6 MiB |  00m01s
+[ 85/100] kitty-terminfo-0:0.50.0-1.fc4 100% |  44.4 KiB/s |  20.3 KiB |  00m00s
+[ 86/100] brightnessctl-0:0.5.1-17.fc45 100% |  81.5 KiB/s |  21.5 KiB |  00m00s
+[ 87/100] wofi-0:1.5.3-3.fc45.x86_64    100% |  94.0 KiB/s |  82.7 KiB |  00m01s
+[ 88/100] playerctl-0:2.4.1-13.fc45.x86 100% |  68.2 KiB/s |  44.3 KiB |  00m01s
+[ 89/100] playerctl-libs-0:2.4.1-13.fc4 100% | 810.0 KiB/s |  46.2 KiB |  00m00s
+[ 90/100] hyprland-uwsm-0:0.57.2-1.fc45 100% |  20.2 KiB/s |   7.0 KiB |  00m00s
+[ 91/100] qt6-qttranslations-0:6.11.2-1 100% |   4.6 MiB/s |   2.1 MiB |  00m00s
+[ 92/100] xdriinfo-0:1.0.8-1.fc45.x86_6 100% | 184.6 KiB/s |  21.8 KiB |  00m00s
+[ 93/100] xxhash-libs-0:0.8.4-2.fc45.x8 100% | 825.2 KiB/s |  41.3 KiB |  00m00s
+[ 94/100] uwsm-0:0.27.1-1.fc45.noarch   100% | 498.8 KiB/s | 176.1 KiB |  00m00s
+[ 95/100] hyprpicker-0:0.4.8-1.fc45.x86 100% | 280.6 KiB/s | 113.6 KiB |  00m00s
+[ 96/100] python3-pyxdg-0:0.28-4.fc45.n 100% |  83.3 KiB/s | 133.5 KiB |  00m02s
+[ 97/100] miniz-0:3.1.2-2.fc45.x86_64   100% | 631.9 KiB/s |  67.6 KiB |  00m00s
+[ 98/100] ripgrep-0:15.2.0-1.fc45.x86_6 100% |   3.3 MiB/s |   1.5 MiB |  00m00s
+[ 99/100] shader-slang-0:2026.21-1.fc45 100% |   6.3 MiB/s |  13.8 MiB |  00m02s
+[100/100] kitty-kitten-0:0.50.0-1.fc45. 100% |   1.2 MiB/s |   8.6 MiB |  00m07s
+--------------------------------------------------------------------------------
+[100/100] Total                         100% |   3.7 MiB/s | 226.2 MiB |  01m01s
+Running transaction
+[101/101] https://download.copr.fedorai 100% |  49.7 KiB/s |   1.0 KiB |  00m00s
+--------------------------------------------------------------------------------
+[101/101] Total                         100% |   3.7 MiB/s | 226.2 MiB |  01m01s
+Importing OpenPGP key 0x2C4B2995:
+ UserID     : "lionheartp_Hyprland (None) <lionheartp#Hyprland@copr.fedorahosted.org>"
+ Fingerprint: 97E23476C89635135407C7D5E9BA41342C4B2995
+ From       : https://download.copr.fedorainfracloud.org/results/lionheartp/Hyprland/pubkey.gpg
+The key was successfully imported.
+[  1/102] Verify package files          100% | 142.0   B/s | 100.0   B |  00m01s
+[  2/102] Prepare transaction           100% | 273.0   B/s | 100.0   B |  00m00s
+[  3/102] Installing cmake-filesystem-0 100% | 520.4 KiB/s |   9.4 KiB |  00m00s
+[  4/102] Installing hyprutils-0:0.14.3 100% |  48.6 MiB/s | 498.2 KiB |  00m00s
+[  5/102] Installing hyprlang-0:0.6.8-4 100% |  31.5 MiB/s | 290.1 KiB |  00m00s
+[  6/102] Installing hyprgraphics-0:0.6 100% |  20.0 MiB/s | 246.2 KiB |  00m00s
+[  7/102] Installing libdbusmenu-0:16.0 100% |  44.1 MiB/s | 542.2 KiB |  00m00s
+[  8/102] Installing pcre2-utf16-0:10.4 100% |  49.6 MiB/s | 660.0 KiB |  00m00s
+[  9/102] Installing xorg-x11-proto-dev 100% |  16.2 MiB/s |   1.8 MiB |  00m00s
+[ 10/102] Installing make-1:4.4.1-13.fc 100% |  25.1 MiB/s |   1.8 MiB |  00m00s
+[ 11/102] Installing xcb-util-renderuti 100% |   3.6 MiB/s |  25.7 KiB |  00m00s
+[ 12/102] Installing xcb-util-image-0:0 100% |   3.8 MiB/s |  27.5 KiB |  00m00s
+[ 13/102] Installing libxkbcommon-x11-0 100% |   6.6 MiB/s |  40.3 KiB |  00m00s
+[ 14/102] Installing xcb-util-wm-0:0.4. 100% |   9.6 MiB/s |  79.0 KiB |  00m00s
+[ 15/102] Installing tomlplusplus-0:3.4 100% |  28.6 MiB/s | 263.5 KiB |  00m00s
+[ 16/102] Installing hyprcursor-0:0.1.1 100% |  23.4 MiB/s | 766.2 KiB |  00m00s
+[ 17/102] Installing xcb-util-cursor-0: 100% |   3.1 MiB/s |  28.5 KiB |  00m00s
+[ 18/102] Installing libXau-devel-0:1.0 100% | 829.2 KiB/s |   9.1 KiB |  00m00s
+[ 19/102] Installing libxcb-devel-0:1.1 100% |   7.3 MiB/s |   3.0 MiB |  00m00s
+[ 20/102] Installing libX11-devel-0:1.8 100% |   5.8 MiB/s |   1.1 MiB |  00m00s
+[ 21/102] Installing libdbusmenu-gtk3-0 100% |   8.7 MiB/s |  89.3 KiB |  00m00s
+[ 22/102] Installing hyprwire-0:0.3.1-3 100% |  22.6 MiB/s | 347.8 KiB |  00m00s
+[ 23/102] Installing vulkan-headers-0:1 100% |  98.8 MiB/s |  38.8 MiB |  00m00s
+[ 24/102] Installing vulkan-loader-deve 100% | 534.5 KiB/s |   9.1 KiB |  00m00s
+[ 25/102] Installing zlib-ng-compat-dev 100% |  10.6 MiB/s | 108.6 KiB |  00m00s
+[ 26/102] Installing playerctl-0:2.4.1- 100% |   2.9 MiB/s | 100.5 KiB |  00m00s
+[ 27/102] Installing playerctl-libs-0:2 100% |  10.8 MiB/s | 110.7 KiB |  00m00s
+[ 28/102] Installing miniz-0:3.1.2-2.fc 100% |  11.6 MiB/s | 130.6 KiB |  00m00s
+[ 29/102] Installing python3-pyxdg-0:0. 100% |  18.8 MiB/s | 481.4 KiB |  00m00s
+[ 30/102] Installing uwsm-0:0.27.1-1.fc 100% |   5.8 MiB/s | 584.5 KiB |  00m00s
+[ 31/102] Installing xxhash-libs-0:0.8. 100% |  10.3 MiB/s |  95.4 KiB |  00m00s
+[ 32/102] Installing kitty-terminfo-0:0 100% |   4.7 MiB/s |  38.5 KiB |  00m00s
+[ 33/102] Installing kitty-shell-integr 100% |  12.8 MiB/s | 130.7 KiB |  00m00s
+[ 34/102] Installing kitty-kitten-0:0.5 100% | 123.8 MiB/s |  30.3 MiB |  00m00s
+[ 35/102] Installing iniparser-0:4.2.6- 100% |   4.8 MiB/s |  39.5 KiB |  00m00s
+[ 36/102] Installing grim-0:1.5.0-4.fc4 100% |   2.0 MiB/s |  51.0 KiB |  00m00s
+[ 37/102] Installing xz-devel-1:5.8.3-2 100% |  19.7 MiB/s | 262.6 KiB |  00m00s
+[ 38/102] Installing libxml2-devel-0:2. 100% |  34.8 MiB/s |   6.7 MiB |  00m00s
+[ 39/102] Installing libxkbcommon-devel 100% |  48.2 MiB/s | 395.1 KiB |  00m00s
+[ 40/102] Installing vim-filesystem-2:9 100% | 440.3 KiB/s |   4.8 KiB |  00m00s
+[ 41/102] Installing kernel-headers-0:7 100% |  20.3 MiB/s |   7.2 MiB |  00m00s
+[ 42/102] Installing glibc-devel-0:2.44 100% |  15.3 MiB/s |   2.4 MiB |  00m00s
+[ 43/102] Installing libxcrypt-devel-0: 100% |   3.6 MiB/s |  33.3 KiB |  00m00s
+[ 44/102] Installing libffi-devel-0:3.5 100% |   4.3 MiB/s |  35.6 KiB |  00m00s
+[ 45/102] Installing wayland-devel-0:1. 100% |  13.5 MiB/s | 733.3 KiB |  00m00s
+[ 46/102] Installing binutils-0:2.47-1. 100% |  80.0 MiB/s |  28.4 MiB |  00m00s
+[ 47/102] Installing gcc-0:16.2.1-3.fc4 100% | 111.9 MiB/s | 121.8 MiB |  00m01s
+[ 48/102] Installing libstdc++-devel-0: 100% |  68.5 MiB/s |  41.5 MiB |  00m01s
+[ 49/102] Installing gcc-c++-0:16.2.1-3 100% | 122.6 MiB/s |  46.8 MiB |  00m00s
+[ 50/102] Installing libglvnd-core-deve 100% |   6.7 MiB/s |  41.1 KiB |  00m00s
+[ 51/102] Installing libglvnd-devel-1:1 100% |  81.6 MiB/s |   2.1 MiB |  00m00s
+[ 52/102] Installing rhash-0:1.4.5-5.fc 100% |  10.7 MiB/s | 360.1 KiB |  00m00s
+[ 53/102] Installing jsoncpp-0:1.9.6-3. 100% |  14.8 MiB/s | 287.1 KiB |  00m00s
+[ 54/102] Installing cmake-data-0:4.3.0 100% |   9.1 MiB/s |  10.1 MiB |  00m01s
+[ 55/102] Installing cmake-0:4.3.0-7.fc 100% |  96.4 MiB/s |  40.4 MiB |  00m00s
+[ 56/102] Installing qt6-rpm-macros-0:6 100% | 120.1 KiB/s |   4.1 KiB |  00m00s
+[ 57/102] Installing glx-utils-0:9.0.0- 100% |  14.1 MiB/s | 419.2 KiB |  00m00s
+[ 58/102] Installing odbcinst-generate- 100% | 401.4 KiB/s |  23.7 KiB |  00m00s
+[ 59/102] Installing unixODBC-0:2.3.14- 100% |   8.7 MiB/s |   1.0 MiB |  00m00s
+[ 60/102] Installing mariadb-connector- 100% |   1.2 MiB/s |  27.2 KiB |  00m00s
+[ 61/102] Installing mariadb-connector- 100% |  23.8 MiB/s | 511.0 KiB |  00m00s
+[ 62/102] Installing libtommath-0:1.3.1 100% |  18.3 MiB/s | 131.4 KiB |  00m00s
+[ 63/102] Installing libfbclient2-0:5.0 100% | 102.5 MiB/s |   3.3 MiB |  00m00s
+[ 64/102] Installing libpq-0:18.4-4.fc4 100% |  51.7 MiB/s |   1.1 MiB |  00m00s
+[ 65/102] Installing xcb-util-keysyms-0 100% |   2.9 MiB/s |  17.7 KiB |  00m00s
+[ 66/102] Installing tslib-0:1.24-3.fc4 100% |   7.3 MiB/s | 423.3 KiB |  00m00s
+[ 67/102] Installing qt6-filesystem-0:6 100% | 348.8 KiB/s |   3.5 KiB |  00m00s
+[ 68/102] Installing libb2-0:0.98.1-16. 100% |   3.5 MiB/s |  43.0 KiB |  00m00s
+[ 69/102] Installing double-conversion- 100% |   6.3 MiB/s | 103.6 KiB |  00m00s
+[ 70/102] Installing qt6-qtbase-0:6.11. 100% |  61.5 MiB/s |  14.0 MiB |  00m00s
+[ 71/102] Installing qt6-qtbase-common- 100% |  57.3 KiB/s | 352.0   B |  00m00s
+[ 72/102] Installing qt6-qtbase-gui-0:6 100% |  86.9 MiB/s |  27.4 MiB |  00m00s
+[ 73/102] Installing qt6-qtsvg-0:6.11.2 100% |  38.7 MiB/s | 950.9 KiB |  00m00s
+[ 74/102] Installing qt6-qtdeclarative- 100% |  67.5 MiB/s |  59.7 MiB |  00m01s
+[ 75/102] Installing qt6-qtwayland-0:6. 100% |  59.9 MiB/s |   3.4 MiB |  00m00s
+[ 76/102] Installing qt6-qtbase-ibase-0 100% |  17.4 MiB/s | 160.4 KiB |  00m00s
+[ 77/102] Installing qt6-qtbase-mysql-0 100% |  14.7 MiB/s | 120.2 KiB |  00m00s
+[ 78/102] Installing qt6-qtbase-odbc-0: 100% |  15.2 MiB/s | 155.9 KiB |  00m00s
+[ 79/102] Installing qt6-qtbase-postgre 100% |   9.1 MiB/s | 140.1 KiB |  00m00s
+[ 80/102] Installing qt6-qtbase-devel-0 100% |  23.2 MiB/s |  23.4 MiB |  00m01s
+[ 81/102] Installing libseat-0:0.9.3-2. 100% |   5.7 MiB/s |  52.7 KiB |  00m00s
+[ 82/102] Installing aquamarine-0:0.16. 100% |  60.6 MiB/s |   1.4 MiB |  00m00s
+[ 83/102] Installing hyprtoolkit-0:0.6. 100% |  68.8 MiB/s |   1.7 MiB |  00m00s
+[ 84/102] Installing xcb-util-errors-0: 100% |   5.1 MiB/s |  41.5 KiB |  00m00s
+[ 85/102] Installing re2-2:20251105-19. 100% |   4.4 MiB/s | 608.6 KiB |  00m00s
+[ 86/102] Installing muParser-0:2.3.5-6 100% |  29.0 MiB/s | 564.9 KiB |  00m00s
+[ 87/102] Installing hyprland-0:0.57.2- 100% | 129.0 MiB/s |  67.6 MiB |  00m01s
+[ 88/102] Installing xdg-desktop-portal 100% |  17.2 MiB/s |   1.2 MiB |  00m00s
+[ 89/102] Installing qt6-qtdeclarative- 100% |  26.4 MiB/s |  26.4 MiB |  00m01s
+[ 90/102] Installing qt6-qtwayland-adwa 100% |  11.9 MiB/s | 133.7 KiB |  00m00s
+[ 91/102] Installing gstreamer1-plugins 100% |  19.3 MiB/s | 236.9 KiB |  00m00s
+[ 92/102] Installing kitty-0:0.50.0-1.f 100% |  38.8 MiB/s |  19.3 MiB |  00m00s
+[ 93/102] Installing hyprland-uwsm-0:0. 100% |  80.1 KiB/s | 492.0   B |  00m00s
+[ 94/102] Installing shader-slang-0:202 100% | 125.8 MiB/s |  63.5 MiB |  00m01s
+[ 95/102] Installing ibus-panel-0:1.5.3 100% |  31.2 MiB/s | 319.1 KiB |  00m00s
+[ 96/102] Installing hyprpicker-0:0.4.8 100% |   9.7 MiB/s | 267.7 KiB |  00m00s
+[ 97/102] Installing ripgrep-0:15.2.0-1 100% |  70.3 MiB/s |   4.6 MiB |  00m00s
+[ 98/102] Installing xdriinfo-0:1.0.8-1 100% |   1.2 MiB/s |  32.8 KiB |  00m00s
+[ 99/102] Installing qt6-qttranslations 100% |  60.3 MiB/s |  15.5 MiB |  00m00s
+[100/102] Installing brightnessctl-0:0. 100% |   1.3 MiB/s |  30.4 KiB |  00m00s
+[101/102] Installing wofi-0:1.5.3-3.fc4 100% |   5.8 MiB/s | 165.9 KiB |  00m00s
+[102/102] Installing wl-clipboard-0:2.3 100% |  45.3 KiB/s | 151.8 KiB |  00m03s
+Complete!

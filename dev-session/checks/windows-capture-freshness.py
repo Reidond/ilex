@@ -5,6 +5,7 @@ finally block resumes it even on failure. No posted host window messages.
 """
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -46,6 +47,7 @@ def screenshot(name, backend):
     row['output_exists'] = path.exists()
     if result.returncode == 0:
         row['frame'] = json.loads(path.with_suffix('.frame.json').read_text())
+        row['png_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result, row
 
 

@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "run": "2832-1794978584466538000",
+  "results": [
+    {
+      "utc": "2026-11-18T06:18:43.477101+00:00",
+      "name": "moving-wgc",
+      "exit": 0,
+      "seconds": 0.7809999999954016,
+      "stderr": "$ git rev-parse HEAD\n$ git status --porcelain --untracked-files=normal\n",
+      "output_exists": true,
+      "frame": {
+        "captured_unix_ms": 1794982723248,
+        "client_size": [
+          1596,
+          953
+        ],
+        "freshness": {
+          "kind": "wgc-presentation",
+          "presentation_ticks": 622206622118
+        },
+        "generation": 11,
+        "schema": 1,
+        "source": "wgc",
+        "source_ticks": 622206622118,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "35964:134394560560383972",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "2832-1794978584466538000",
+          "schema": 1
+        }
+      },
+      "png_sha256": "84d417f7f8fefa5d1e28765064ecee9bfd5af24e121e02ebf7bb0296b5eb11a9"
+    },
+    {
+      "utc": "2026-11-18T06:18:44.277761+00:00",
+      "name": "moving-printwindow",
+      "exit": 0,
+      "seconds": 0.8120000000053551,
+      "stderr": "$ git rev-parse HEAD\n$ git status --porcelain --untracked-files=normal\n",
+      "output_exists": true,
+      "frame": {
+        "captured_unix_ms": 1794982724180,
+        "client_size": [
+          1596,
+          953
+        ],
+        "freshness": {
+          "baseline_observed_unix_ms": 1794982723959,
+          "baseline_sha256": "5c1ed54d02b50a73909abd748d4f2316f2d6001630013c52036d8cc655f86b58",
+          "change_observed_unix_ms": 1794982724180,
+          "frame_sha256": "b307dcf59225f9f1a46b9db40548f7f5d9fc154f4ad1a7cffb0f613ca3b7776f",
+          "kind": "content-change"
+        },
+        "generation": 11,
+        "schema": 1,
+        "source": "printwindow-content-change",
+        "source_ticks": null,
+        "vm": {
+          "guest_arch": "x86_64",
+          "opaque_id": "35964:134394560560383972",
+          "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+          "provider": "windows-qemu-whpx",
+          "run": "2832-1794978584466538000",
+          "schema": 1
+        }
+      },
+      "png_sha256": "ca6b5c204e6d53166ef2cd04b3190c4256ae99a6c065ecc1d6380f5f0f37e9d8"
+    },
+    {
+      "utc": "2026-11-18T06:18:44.318174+00:00",
+      "name": "guest-stop",
+      "exit": 0,
+      "seconds": 0.0319999999992433,
+      "stderr": ""
+    },
+    {
+      "utc": "2026-11-18T06:18:47.509524+00:00",
+      "name": "paused-printwindow-0",
+      "exit": 1,
+      "seconds": 2.186999999998079,
+      "stderr": "$ git rev-parse HEAD\n$ git status --porcelain --untracked-files=normal\nilex-vmctl: error: PrintWindow failed/minimized/resized; no fresh frame\n",
+      "output_exists": false
+    },
+    {
+      "utc": "2026-11-18T06:18:49.645866+00:00",
+      "name": "paused-printwindow-1",
+      "exit": 1,
+      "seconds": 2.1410000000032596,
+      "stderr": "$ git rev-parse HEAD\n$ git status --porcelain --untracked-files=normal\nilex-vmctl: error: PrintWindow pixels stayed unchanged; no fresh frame\n",
+      "output_exists": false
+    },
+    {
+      "utc": "2026-11-18T06:18:49.701725+00:00",
+      "name": "guest-resume",
+      "exit": 0,
+      "seconds": 0.06199999999807915,
+      "stderr": ""
+    }
+  ]
+}
