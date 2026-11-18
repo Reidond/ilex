@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "exported_utc": "2026-11-18T06:57:51.685112+00:00",
+  "exported_utc": "2026-11-18T07:09:34.645321+00:00",
   "timestamp_note": "file_written_utc is the original artifact file timestamp; capture sidecars carry presentation/UTC acquisition metadata. Raw contents are copied byte for byte.",
   "files": [
     {
@@ -107,9 +107,9 @@
     },
     {
       "path": "capacity.jsonl",
-      "bytes": 34265,
-      "sha256": "ee5fa3a8db48d43c4b990d9a8dd086387d27ba63733b1843c6637227241010ba",
-      "file_written_utc": "2026-11-18T06:57:05.829389+00:00"
+      "bytes": 35333,
+      "sha256": "62f698d41d172d75eafd5f1054eb2586bb54cfdf377a9b9ae141afb86641d56d",
+      "file_written_utc": "2026-11-18T07:09:15.534979+00:00"
     },
     {
       "path": "default-builder-delivery.json",
@@ -142,6 +142,12 @@
       "file_written_utc": "2026-11-18T00:52:52.039928+00:00"
     },
     {
+      "path": "gnome-pass/gnome-motion.json",
+      "bytes": 1778,
+      "sha256": "00ed50da9c1dda8f30eebb23a2409fefc30d9da8289ec7579ffa5e9cf1fc4114",
+      "file_written_utc": "2026-11-18T00:42:45.260007+00:00"
+    },
+    {
       "path": "hyprland-focus/focus-events.json",
       "bytes": 842,
       "sha256": "ff20aa859c0de25adec3a2734b5a4577a4d7e2f61f72378250a5f4792985bb13",
@@ -158,6 +164,12 @@
       "bytes": 199,
       "sha256": "2b60d848e75c376ccc2b6308bd06326d5eeb50f4a99b39aca3c53baeb02f8624",
       "file_written_utc": "2026-11-18T03:35:44.005447+00:00"
+    },
+    {
+      "path": "hyprland-qt3/qt-motion.json",
+      "bytes": 179,
+      "sha256": "6f29431cbb87fb2f3880f6e1980679f3455e72e6c36e011fd4e0dcb1e9c925e5",
+      "file_written_utc": "2026-11-18T03:29:05.941610+00:00"
     },
     {
       "path": "hyprland-relogin/capture-checks.json",
@@ -316,6 +328,12 @@
       "file_written_utc": "2026-11-18T06:18:49.702734+00:00"
     },
     {
+      "path": "review-clippy-results.json",
+      "bytes": 299,
+      "sha256": "91bec344fa6dad9ab97c668e48b475a5389e86ebcee1647afb16018fdf0aa742",
+      "file_written_utc": "2026-11-18T07:08:06.612124+00:00"
+    },
+    {
       "path": "review-dual-qmp/listeners.json",
       "bytes": 442,
       "sha256": "8da8ffebf353161239acd8b2cabacb18b6e66ab9268629d5bfdaf0ec656a04d0",
@@ -434,6 +452,18 @@
       "bytes": 1268,
       "sha256": "12b6bf2f54fe8f4541faf2027402866a62b9c7d3d83dfb1c63a64709426f643d",
       "file_written_utc": "2026-11-18T06:42:32.332277+00:00"
+    },
+    {
+      "path": "review-linux-clippy.stderr.log",
+      "bytes": 73,
+      "sha256": "6a5f487a075f2ee07bf741331c205b559f2f43dc5c66eeb53f3d6eb6a80ebfe1",
+      "file_written_utc": "2026-11-18T07:08:06.508163+00:00"
+    },
+    {
+      "path": "review-linux-clippy.stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T07:08:04.515666+00:00"
     },
     {
       "path": "review-runtime-activation-final.stderr.log",
@@ -560,6 +590,18 @@
       "bytes": 1044,
       "sha256": "890c7190a874a330a5b44f410e6b729039b23d5a84752bc07cee901a4320f801",
       "file_written_utc": "2026-11-18T06:13:35.718653+00:00"
+    },
+    {
+      "path": "review-windows-clippy.stderr.log",
+      "bytes": 73,
+      "sha256": "3022fc4cea736d2546f115a670c2652db979dc4dcc55bb4f718199dc2dde5515",
+      "file_written_utc": "2026-11-18T07:08:04.506565+00:00"
+    },
+    {
+      "path": "review-windows-clippy.stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T07:08:03.021926+00:00"
     },
     {
       "path": "usb-gnome-input/guest-input.json",

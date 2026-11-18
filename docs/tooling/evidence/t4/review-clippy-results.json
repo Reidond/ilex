@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "utc": "2026-11-18T07:08:06.5099386Z",
+  "source_revision": "059a82e419861a28ed6c2479d4f294cbcb9d4ab4",
+  "packages": [
+    "xtask",
+    "ilex-vmctl",
+    "ilex-e2e"
+  ],
+  "warnings_denied": true,
+  "windows_exit": 0,
+  "linux_exit": 0,
+  "unit_tests_run": false
+}

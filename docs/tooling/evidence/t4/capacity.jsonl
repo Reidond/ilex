@@ -174,3 +174,9 @@
 {"time":"2026-11-18T08:53:02.4033567+02:00","freeGiB":11.92,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
 {"time":"2026-11-18T08:55:03.9410197+02:00","freeGiB":11.76,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
 {"time":"2026-11-18T08:57:05.5612480+02:00","freeGiB":11.72,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
+{"time":"2026-11-18T08:59:07.2658415+02:00","freeGiB":11.75,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
+{"time":"2026-11-18T09:01:08.8519826+02:00","freeGiB":12.52,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
+{"time":"2026-11-18T09:03:10.3664351+02:00","freeGiB":11.79,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
+{"time":"2026-11-18T09:05:11.8673121+02:00","freeGiB":11.52,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
+{"time":"2026-11-18T09:07:13.5401088+02:00","freeGiB":11.82,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
+{"time":"2026-11-18T09:09:15.1528635+02:00","freeGiB":11.73,"builderState":"Off","builderStartupGiB":16,"builderDynamic":false,"reserveGiB":14,"nativeDesktopGiB":8,"native":[]}
