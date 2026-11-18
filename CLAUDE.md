@@ -559,6 +559,8 @@ dark tokens. Change values in that artifact and replace `tokens.json` with the
 whole export; never edit it by hand. `.gitattributes` disables text conversion
 for `shells/ilex/design/tokens.json`, preserving its exact bytes and original line endings.
 Without `shell.toml`, `shells/ilex/` is not selectable and is excluded from the build context.
+Shell discovery skips a manifestless directory only when its sole entry is a
+real `design/` subdirectory. Any other directory without `shell.toml` is an error.
 
 Machines live in `machines/<name>/machine.toml`; `generic` is the base image
 with no packages or overlay. Add a machine by creating one
