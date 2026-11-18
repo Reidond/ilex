@@ -39,6 +39,7 @@ const DISK_SIZE: &str = "40G";
 /// is installed; its absence means the installer gave up.
 const INSTALL_DONE: &str = "ILEX-INSTALL-DONE";
 /// Fixed artifact names: guest serial records may not choose arbitrary paths.
+/// The first three logs are required over serial before first boot.
 const INSTALLER_LOGS: &[(&str, &str)] = &[
     ("ilex-apps.log", "/var/log/anaconda/ilex-apps.log"),
     ("program.log", "/var/log/anaconda/program.log"),
@@ -56,6 +57,11 @@ const INSTALLER_LOGS: &[(&str, &str)] = &[
         "installer-mounts-after.txt",
         "/var/lib/ilex/apps/installer-mounts-after",
     ),
+    (
+        "installer-cleanup-result.txt",
+        "/var/lib/ilex/apps/installer-cleanup-result",
+    ),
+    ("installer-pidns.txt", "/var/lib/ilex/apps/installer-pidns"),
 ];
 
 /// Test-only answers, delivered on a disk labelled `OEMDRV` (Anaconda reads
@@ -95,23 +101,27 @@ import json
 from pathlib import Path
 # Capture before assertions/poweroff, even if the installed system cannot boot.
 for name, path in [
-    ('ilex-apps.log', 'var/log/anaconda/ilex-apps.log'),
-    ('program.log', 'var/log/anaconda/program.log'),
-    ('anaconda.log', 'var/log/anaconda/anaconda.log'),
-    ('installer-apps-state.json', 'var/lib/ilex/apps/state.json'),
-    ('installer-apps-result.txt', 'var/lib/ilex/apps/installer-result'),
-    ('installer-mounts-before.txt', 'var/lib/ilex/apps/installer-mounts-before'),
-    ('installer-mounts-after.txt', 'var/lib/ilex/apps/installer-mounts-after'),
+    ('ilex-apps.log', '/mnt/sysroot/var/log/anaconda/ilex-apps.log'),
+    ('program.log', '/tmp/program.log'),
+    ('anaconda.log', '/tmp/anaconda.log'),
+    ('installer-apps-state.json', '/mnt/sysroot/var/lib/ilex/apps/state.json'),
+    ('installer-apps-result.txt', '/mnt/sysroot/var/lib/ilex/apps/installer-result'),
+    ('installer-mounts-before.txt', '/mnt/sysroot/var/lib/ilex/apps/installer-mounts-before'),
+    ('installer-mounts-after.txt', '/mnt/sysroot/var/lib/ilex/apps/installer-mounts-after'),
+    ('installer-cleanup-result.txt', '/mnt/sysroot/var/lib/ilex/apps/installer-cleanup-result'),
+    ('installer-pidns.txt', '/mnt/sysroot/var/lib/ilex/apps/installer-pidns'),
 ]:
     try:
-        text = (Path('/mnt/sysroot') / path).read_text(errors='replace')
+        text = Path(path).read_text(errors='replace')
         print('ILEX-INSTALLER-LOG ' + json.dumps({'name': name, 'text': text}), flush=True)
     except OSError as error:
         print(f'ILEX-INSTALLER-LOG-ERROR {name}: {error}', flush=True)
 state = Path('/mnt/sysroot/var/lib/ilex/apps')
-before = (state / 'installer-mounts-before').read_text()
-after = (state / 'installer-mounts-after').read_text()
+before = json.loads((state / 'installer-mounts-before').read_text())
+after = json.loads((state / 'installer-mounts-after').read_text())
+assert before['schema'] == after['schema'] == 1
 assert before == after, f'preload changed runtime mounts: before={before!r}, after={after!r}'
+assert (state / 'installer-cleanup-result').read_text().strip() == '0'
 print('ILEX-PRELOAD-MOUNTS-CLEAN')
 PY
 echo ILEX-INSTALL-DONE > /dev/ttyS0
@@ -793,7 +803,7 @@ fn unattended_install(
             started.elapsed()
         );
         let console = fs::read_to_string(&serial).unwrap_or_default();
-        let preload_log = save_installer_serial(artifacts, &console)?;
+        let serial_logs = save_installer_serial(artifacts, &console)?;
         // Diagnostic JSON can quote kickstart text, including these markers.
         // Only actual control lines may establish installation completion.
         let mut control = console
@@ -825,8 +835,8 @@ fn unattended_install(
                 "the installer powered off without finishing the install (no {INSTALL_DONE} on the serial console; see 06-installing.png)"
             );
         }
-        if !preload_log {
-            bail!("installer did not mirror its preload log to serial");
+        if !serial_logs {
+            bail!("installer did not mirror preload and both live Anaconda logs to serial");
         }
         if !control
             .clone()
@@ -1002,7 +1012,7 @@ PY"#)?;
 /// them, but cannot be the only source when installation or first boot fails.
 fn save_installer_serial(artifacts: &Path, console: &str) -> Result<bool> {
     qemu::write_artifact(artifacts, "installer-serial.txt", console)?;
-    let mut preload_log = false;
+    let mut received = [false; 3];
     for record in console.lines().filter_map(|line| {
         serde_json::from_str::<serde_json::Value>(line.strip_prefix("ILEX-INSTALLER-LOG ")?)
             .ok()
@@ -1011,15 +1021,25 @@ fn save_installer_serial(artifacts: &Path, console: &str) -> Result<bool> {
             && INSTALLER_LOGS.iter().any(|(allowed, _)| *allowed == name)
         {
             qemu::write_artifact(artifacts, name, text)?;
-            preload_log |= name == "ilex-apps.log";
+            if let Some(index) = INSTALLER_LOGS[..3]
+                .iter()
+                .position(|(required, _)| *required == name)
+            {
+                received[index] = true;
+            }
         }
     }
-    Ok(preload_log)
+    Ok(received.into_iter().all(|present| present))
 }
 
 fn installer_logs(vm: &Vm, artifacts: &Path) -> Result<()> {
     let mut failures = Vec::new();
     for &(name, path) in INSTALLER_LOGS {
+        // Keep the live installer copies captured before Anaconda's final
+        // copy-to-target step; an older target copy must not replace them.
+        if matches!(name, "program.log" | "anaconda.log") && artifacts.join(name).is_file() {
+            continue;
+        }
         match vm.ssh_ok(&format!("cat {path}")) {
             Ok(log) => qemu::write_artifact(artifacts, name, &log)?,
             Err(error) => {

@@ -40,24 +40,70 @@ sed -i -E '\|^[^#[:space:]]+[[:space:]]+/[[:space:]]|d' /etc/fstab
 # Failure is non-fatal: retain the diagnostic and let ilex-apps.timer retry.
 %post --nochroot --log=/mnt/sysroot/var/log/anaconda/ilex-apps.log
 runtime_mounts() {
-    for path in dev proc sys run; do
-        findmnt --kernel --mountpoint "/mnt/sysroot/$path" \
-            --noheadings --raw --output ID,TARGET,SOURCE,FSTYPE || :
-    done
+    python3 -I -S - <<'PY'
+import hashlib,json,os,pathlib,re
+root=os.path.realpath('/mnt/sysroot')
+wanted={root+'/'+name for name in ('dev','proc','sys','run')}
+lines=pathlib.Path('/proc/self/mountinfo').read_text().splitlines()
+if not lines:raise ValueError('empty mount table')
+mounts=[]
+for line in lines:
+    left,separator,right=line.partition(' - ')
+    fields,filesystem=left.split(),right.split()
+    if not separator or len(fields)<6 or len(filesystem)<3:raise ValueError('invalid mountinfo row')
+    int(fields[0]);int(fields[1])
+    point=re.sub(r'\\([0-7]{3})',lambda match:chr(int(match[1],8)),fields[4])
+    if point in wanted:mounts.append([*fields,*filesystem])
+try:status=hashlib.sha256(pathlib.Path('/run/ilex/apps/status').read_bytes()).hexdigest()
+except FileNotFoundError:status=None
+print(json.dumps({'schema':1,'mounts':mounts,'installer_status':status},sort_keys=True))
+PY
 }
 mkdir -p /mnt/sysroot/var/lib/ilex/apps
 runtime_mounts > /mnt/sysroot/var/lib/ilex/apps/installer-mounts-before
+before=$?
+result=1
+rm -f /mnt/sysroot/var/lib/ilex/apps/installer-pidns
 if [ -x /mnt/sysroot/usr/bin/ilexctl ] && [ -x /mnt/sysroot/usr/bin/flatpak ]; then
-    timeout 1800 unshare --mount --propagation private \
-        /usr/libexec/ilex-installer/preload-apps /mnt/sysroot
-    result=$?
-    printf '%s\n' "$result" > /mnt/sysroot/var/lib/ilex/apps/installer-result
-    if [ "$result" -ne 0 ]; then
-        echo "System apps are incomplete; ilex-apps.timer will retry after boot (exit $result)."
+    if [ "$before" -eq 0 ]; then
+        # Killing the PID namespace's init also kills detached descendants.
+        timeout --kill-after=15s 1800 unshare --mount --pid --fork \
+            --kill-child=KILL --propagation private \
+            /usr/libexec/ilex-installer/preload-apps /mnt/sysroot
+        result=$?
     fi
 else
     echo "This payload has no system apps helper; no Flatpaks to preload."
 fi
 runtime_mounts > /mnt/sysroot/var/lib/ilex/apps/installer-mounts-after
+python3 -I -S - <<'PY'
+import json,os,pathlib,time
+state=pathlib.Path('/mnt/sysroot/var/lib/ilex/apps')
+before=json.loads((state/'installer-mounts-before').read_text())
+after=json.loads((state/'installer-mounts-after').read_text())
+assert before['schema']==after['schema']==1,'invalid mount snapshot schema'
+assert before==after,'preload changed caller mounts or live installer status'
+namespace=(state/'installer-pidns').read_text().strip()
+assert namespace.startswith('pid:[') and namespace.endswith(']'),namespace
+deadline=time.monotonic()+5
+while True:
+    remaining=[]
+    for process in pathlib.Path('/proc').iterdir():
+        if not process.name.isdecimal():continue
+        try:
+            if os.readlink(process/'ns/pid')==namespace:remaining.append(process.name)
+        except (FileNotFoundError,ProcessLookupError):pass
+    if not remaining:break
+    if time.monotonic()>=deadline:raise RuntimeError(f'preload processes survived: {remaining}')
+    time.sleep(0.05)
+print('Preload namespace empty; caller mounts and live installer status unchanged.')
+PY
+cleanup=$?
+printf '%s\n' "$cleanup" > /mnt/sysroot/var/lib/ilex/apps/installer-cleanup-result
+if [ "$cleanup" -ne 0 ] && [ "$result" -eq 0 ]; then result=1; fi
+printf '%s\n' "$result" > /mnt/sysroot/var/lib/ilex/apps/installer-result
+if [ "$result" -ne 0 ]; then
+    echo "System apps are incomplete; ilex-apps.timer will retry after boot (exit $result)."
+fi
 exit 0
 %end
