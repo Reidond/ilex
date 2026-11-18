@@ -888,6 +888,18 @@ fn interrupted_repair(
     ctl.type_text(std::str::from_utf8(recovery.bytes())?)?;
     ctl.key("ret")?;
     vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
+    let mut cleared = vm.ssh("cat /dev/vcs8")?;
+    let key_visible = cleared
+        .stdout
+        .windows(recovery.bytes().len())
+        .any(|w| w == recovery.bytes());
+    let readable = cleared.status.success();
+    cleared.stdout.fill(0);
+    cleared.stderr.fill(0);
+    ensure!(
+        readable && !key_visible,
+        "reissued recovery screen was not cleared; screenshot suppressed"
+    );
     ctl.save_screenshot(&artifacts.join("interrupted-reissue-confirmed.png"))?;
     ctl.key("ret")?;
     vm.ssh_ok("timeout 120 sh -c 'until test \"$(systemctl show -p SubState --value ilex-interrupted-reissue)\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value ilex-interrupted-reissue)\" = success; systemctl stop ilex-interrupted-reissue")?;
