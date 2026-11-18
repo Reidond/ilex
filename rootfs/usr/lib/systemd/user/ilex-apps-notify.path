@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch system app installation and updates
+
+[Path]
+PathChanged=/run/ilex/apps/status
+
+[Install]
+WantedBy=default.target

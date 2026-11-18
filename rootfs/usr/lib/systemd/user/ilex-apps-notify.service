@@ -1,0 +1,12 @@
+[Unit]
+Description=Report system app installation and updates
+ConditionPathExists=/run/ilex/apps/status
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ilexctl apps notify
+
+[Install]
+WantedBy=graphical-session.target

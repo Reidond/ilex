@@ -169,7 +169,14 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify && \
     fi && \
     rm -rf /tmp/ilex-accountsservice && \
     if [ "$(systemctl get-default)" = graphical.target ]; then \
-        systemctl --global enable ilex-update-notify.path ilex-update-notify.service; \
+        systemctl --global enable ilex-update-notify.path ilex-update-notify.service ilex-apps-notify.path ilex-apps-notify.service && \
+        systemctl enable ilex-apps.timer && \
+        systemctl preset flatpak-add-fedora-repos.service && \
+        glib-compile-schemas /usr/share/glib-2.0/schemas && \
+        mkdir -p /usr/share/flatpak/preinstall.d && \
+        for list in /usr/share/ilex/apps/*.preinstall; do \
+            [ ! -f "$list" ] || cp "$list" "/usr/share/flatpak/preinstall.d/50-ilex-$(basename "$list")"; \
+        done; \
     fi && \
     for directory in /tmp /var/tmp; do \
         actual="$(stat -c '%a %u:%g' "$directory")"; \

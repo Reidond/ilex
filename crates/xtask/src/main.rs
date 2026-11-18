@@ -11,6 +11,7 @@ use ilex_devkit::Workspace;
 
 mod build;
 mod builder;
+mod apps;
 mod changed;
 mod disk;
 mod doctor;
@@ -51,6 +52,8 @@ enum Cmd {
     Builder(builder::Args),
     /// Fetch or inspect the pinned per-user portable Windows QEMU runtime
     Runtime(runtime::Args),
+    /// Check configured Flatpaks against Flathub without downloading apps
+    Apps(apps::Args),
     /// podman build, tagged with this checkout's slug, labels included
     Build(build::Args),
     /// Split the image into reproducible chunks and add the `ilex.fingerprint` label
@@ -112,6 +115,7 @@ fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Remote(args) => remote::run(&ws, args),
         Cmd::RemoteWorker(_) => unreachable!("handled before workspace discovery"),
+        Cmd::Apps(args) => apps::run(&ws, args),
         Cmd::Build(args) => build::run(&ws, args),
         Cmd::Rechunk(args) => rechunk::run(&ws, args),
         // The VM stack lives in WSL2; --gui's window is ilex-viewer.exe.

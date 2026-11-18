@@ -64,6 +64,12 @@ pub struct Args {
     /// With --gui: no virgl, the guest renders on its CPUs (default: virgl when the host has a GPU)
     #[arg(long)]
     pub no_gl: bool,
+    /// Enable the apps timer in a headless disk VM (Flathub downloads)
+    #[arg(long, conflicts_with = "no_apps")]
+    pub apps: bool,
+    /// Disable the apps timer in a GUI VM
+    #[arg(long)]
+    pub no_apps: bool,
     /// With --disk/--gui: write changes to the disk instead of a throwaway overlay
     #[arg(long)]
     pub persist: bool,
@@ -184,6 +190,7 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
     let purpose = if args.gui { "gui" } else { "vm" };
     let mut config = VmConfig::graphical(purpose, disk);
     config.snapshot = !args.persist;
+    config.apps = args.apps || (args.gui && !args.no_apps);
     config.vcpus = args.vcpus.unwrap_or(if args.gui { gui_vcpus() } else { 4 });
     if let Some(memory) = &args.memory {
         config.memory = memory.clone();

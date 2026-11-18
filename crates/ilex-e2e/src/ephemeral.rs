@@ -55,6 +55,7 @@ pub fn trials() -> Vec<Trial> {
         }),
         trial("ephemeral::sigpolicy_noop", || GROUP.run(sigpolicy_noop)),
         trial("ephemeral::configuration", || GROUP.run(configuration)),
+        trial("ephemeral::apps_plan", || GROUP.run(apps_plan)),
         trial("ephemeral::user_profiles", || GROUP.run(user_profiles)),
     ]
 }
@@ -68,6 +69,27 @@ fn ilexctl(vm: &EphemeralVm) -> Result<()> {
     println!("     {}", out.stdout);
     Ok(())
 }
+
+fn apps_plan(vm: &EphemeralVm) -> Result<()> {
+    let out = vm.ssh("ilexctl apps sync --dry-run")?.ok("apps dry run")?;
+    ensure(
+        out.stdout.contains("wanted:") && out.stdout.contains("not an installed system"),
+        || out.stdout.clone(),
+    )?;
+    let out = vm
+        .ssh("ilexctl apps status --json")?
+        .ok("apps JSON status")?;
+    let state: Value = serde_json::from_str(&out.stdout)?;
+    ensure(state["schema"] == 1 && state["apps"].is_array(), || {
+        "invalid apps status".into()
+    })?;
+    vm.ssh("test ! -e /var/lib/ilex/apps/state.json")?
+        .ok("dry run must not write apps state")?;
+    let source = ilex_devkit::qemu::base64(include_bytes!("apps-config-guest.py"));
+    vm.ssh(&format!("printf %s {source} | base64 -d > /run/apps-config-check.py && python3 -I -S /run/apps-config-check.py"))?.ok("app manifests, trust and units")?;
+    Ok(())
+}
+
 
 fn user_profiles(vm: &EphemeralVm) -> Result<()> {
     use ilex_devkit::qemu::base64;
@@ -397,6 +419,14 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
             })?;
         }
         check_packages(vm, &manifest)?;
+        if let Some(excludes) = manifest.get("packages").and_then(|a| a.get("exclude")).and_then(|a| a.as_array()) {
+            for package in excludes {
+                let name = package.as_str().context("exclude must be a string")?;
+                if !name.contains(['*', '?', '[', ']']) {
+                    vm.ssh(&format!("rpm -q -- {}; test $? -eq 1", common::quote(name)))?.ok("excluded shell RPM absent")?;
+                }
+            }
+        }
         let overlay = common::workspace()?
             .root
             .join("shells")
@@ -537,6 +567,19 @@ fn check_overlay_absent(
 }
 
 fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {
+    if let Some(packages) = manifest
+        .get("apps")
+        .and_then(|a| a.get("rpm"))
+        .and_then(|a| a.as_array())
+    {
+        for package in packages {
+            let name = package.as_str().context("app RPM must be a string")?;
+            if !name.starts_with('@') {
+                vm.ssh(&format!("rpm -q -- {}", common::quote(name)))?
+                    .ok("app RPM installed")?;
+            }
+        }
+    }
     if let Some(packages) = manifest
         .get("packages")
         .and_then(|p| p.get("install"))

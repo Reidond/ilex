@@ -136,6 +136,8 @@ fn upgrade_and_rollback() -> Result<()> {
     let opts = LibvirtOpts::default();
     let vm = LibvirtVm::boot(&name, &installed, &opts)?;
     step(&format!("{name} is up (VM slot {})", vm.slot_index()));
+    vm.ssh("systemctl mask --now ilex-apps.timer ilex-apps.service")?
+        .ok("mask apps before its first timer fires, also across upgrade/rollback")?;
     boot_diagnostics(&vm, "v1 before boot protection check", false);
     let v1 = status(&vm)?;
     ensure(v1.staged.is_none(), || {

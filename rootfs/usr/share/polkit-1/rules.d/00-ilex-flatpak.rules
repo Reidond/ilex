@@ -1,0 +1,9 @@
+// Flatpak's system helper only serves root. This precedes Fedora's wheel
+// passwordless rule. User installations never go through this helper.
+// Includes appstream-update: GNOME Software treats an unacquirable denial
+// as a read-only system installation and chooses user scope for new bundles.
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.Flatpak.") === 0 && subject.user !== "root") {
+        return polkit.Result.NO;
+    }
+});

@@ -397,6 +397,8 @@ pub struct VmConfig {
     pub disk: PathBuf,
     /// Boot from a throwaway overlay of `disk` (default) or write to it.
     pub snapshot: bool,
+    /// Enable Flathub downloads; harnesses opt in explicitly.
+    pub apps: bool,
     pub memory: String,
     pub vcpus: u32,
     /// virtio-vga preferred mode, read by the guest from EDID.
@@ -439,6 +441,7 @@ impl VmConfig {
             purpose: purpose.into(),
             disk: disk.into(),
             snapshot: true,
+            apps: false,
             memory: "4G".into(),
             vcpus: 2,
             width: 1280,
@@ -700,6 +703,12 @@ impl Vm {
         }
         for structure in &config.smbios {
             qemu.args(["-smbios", structure]);
+        }
+        if !config.apps {
+            qemu.arg("-smbios").arg(format!(
+                "type=11,value=io.systemd.credential.binary:systemd.unit-dropin.ilex-apps.timer={}",
+                base64(b"[Unit]\nConditionPathExists=/run/ilex-harness-enable-apps\n")
+            ));
         }
         // QEMU refuses a VNC server next to a GL display ("Display vnc is
         // incompatible with the GL context").

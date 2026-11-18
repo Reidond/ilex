@@ -1,8 +1,10 @@
 #!/bin/sh
 # Offer a restart once bootc has staged an update. "Restart now" reboots;
 # dismissing leaves the update for the next restart.
+details=$(/usr/bin/ilexctl updates list)
 action=$(notify-send --app-name=ilex --icon=software-update-available \
   --action=restart="Restart now" --wait \
-  "Update ready" "A new ilex image is downloaded and applies on the next restart.")
+  "Update ready" "A new ilex image applies on the next restart.
+$details")
 [ "$action" = restart ] && systemctl reboot
 exit 0

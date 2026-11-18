@@ -1,0 +1,11 @@
+[Unit]
+Description=Install and update ilex system apps
+
+[Timer]
+OnBootSec=2min
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

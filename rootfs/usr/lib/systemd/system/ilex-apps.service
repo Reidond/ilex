@@ -1,0 +1,15 @@
+[Unit]
+Description=Reconcile and update ilex system Flatpaks
+ConditionPathExists=/run/ostree-booted
+ConditionPathExists=/usr/bin/flatpak
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ilexctl apps sync --update
+StateDirectory=ilex/apps
+Restart=on-failure
+RestartSec=2min
+RestartSteps=6
+RestartMaxDelaySec=1h
+Nice=10
+IOSchedulingClass=idle

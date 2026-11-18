@@ -854,6 +854,71 @@ retained; other home/authentication denials still fail the trial. No tracer
 access is granted in policy. This tier qualifies homed integration, not
 encrypted root, Secure Boot or the future Windows security backend.
 
+## Apps
+
+Shell manifests may declare `[apps] flatpak = ["org.example.App"]` and
+`rpm = ["host-integration-package"]`. IDs are unique application IDs; Flathub
+and branch `stable` are fixed. App RPMs join the shell transaction. The composer
+generates lists under `/usr/share/ilex/apps`, copied before overlays into
+`/usr/share/flatpak/preinstall.d/50-ilex-*.preinstall`. No app payload ships in
+the OS image. `/etc/flatpak/preinstall.d` can override groups (`Install=false`).
+
+`ilexctl apps sync [--update] [--dry-run]` wraps upstream `flatpak preinstall`.
+Flatpak preserves administrator removals and manual installs, and removes old
+shell preinstalls on switch while retaining home data. Unused runtimes stay
+under Flatpak's normal lifecycle; ilex never runs `uninstall --unused` as root.
+The root `ilex-apps.timer` starts independently of boot targets, then daily.
+Incomplete work exits 75 and retries with backoff; offline installs never hold
+up GDM. Initial installation needs 8 GiB free, later work 2 GiB. Unchanged
+complete lists avoid network; `--update` reaches Flathub at most every 20 hours.
+`apps status --json` reports wanted/installed/declined/unavailable apps, origin,
+last result and free space. `updates list [--json]` includes staged OS and the
+last system Flatpak update transaction, including runtime refs. Session path
+units announce installation, completion and applied Flatpak updates.
+
+The committed Flathub trust file bootstraps the system remote without network.
+Fedora's remote-add unit is disabled. The sync marks Flathub `--no-enumerate`;
+it also disables a `fedora` remote retained in `/var` by an older deployment.
+`00-ilex-flatpak.rules` denies every system-helper action for non-root,
+including wheel. Users install into their own Flatpak installation. In GNOME
+Software an unacquirable `appstream-update` denial disables system metadata
+refresh and selects user scope for bundles; the system apps remain visible as
+installed. The bundle default is user scope too. Only root manages system apps;
+to decline a preinstall use a root uninstall or an `/etc` list override.
+Removing/disabling Flathub or changing its URL is respected, not repaired.
+
+Verified source for the shipped versions: Flatpak 1.18.4's
+[`update_appstream`](https://github.com/flatpak/flatpak/blob/1.18.4/app/flatpak-builtins-utils.c)
+skips disabled and no-enumerate remotes; its
+[`add_sync_preinstalled`](https://github.com/flatpak/flatpak/blob/1.18.4/common/flatpak-transaction.c)
+still considers them. GNOME Software 51.1's
+[`setup_thread_cb` and `ensure_scope`](https://github.com/GNOME/gnome-software/blob/51.1/plugins/flatpak/gs-plugin-flatpak.c)
+use the unacquirable `appstream-update` permission to disable system refresh
+and default new bundles to user scope. No system AppStream catalogue is
+downloaded by this stack, avoiding Software's no-enumerate/main-ref edge case.
+No-enumerate also excludes the remote from runtime dependency search.
+Before preinstall (and daily app runtime transitions), sync reads the signed
+app metadata and explicitly installs missing runtime refs from Flathub with
+`--no-auto-pin`. Related extensions remain Flatpak's responsibility. This
+keeps the remote hidden throughout and does not permanently pin old runtimes.
+
+`cargo xtask apps --check` checks configured IDs against Flathub's API without
+installing apps, warns about EOL, trust-file changes and imminent key expiry,
+and explicitly reports unreachable checks as unverified. GPG inspection uses
+a temporary home inside the checkout, never the host root's GPG state.
+The checked-in key expires 2027-06-14; review refreshed upstream trust data
+before that date. Do not assume remote metadata refresh alone renews the key.
+
+Disk VMs default to a systemd SMBIOS credential adding an unmet condition to
+the apps timer, keeping downloads out of ordinary tests. Upgrade masks both
+apps units before the first timer deadline. `xtask vm --disk --apps` enables
+downloads; `vm --gui` enables them by default (`--no-apps` opts out).
+Ephemeral assertions parse the lists and trust file without Flathub traffic.
+
+The apps stack must merge together in one main push: the GNOME RPM removal
+alone would publish an image without a browser. The ilex shell itself is out
+of scope; its future KDE application list belongs to that shell's project.
+
 ## Public user profiles
 
 `image.toml` selects public profiles with `users = ["andriishafar"]`. This is a

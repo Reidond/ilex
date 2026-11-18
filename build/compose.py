@@ -107,11 +107,12 @@ def default(path, key, value, choices):
 
 
 def shell(path, is_default):
-    data = table(path, "", load(path), {"name", "description", "packages", "session", "greeter"})
+    data = table(path, "", load(path), {"name", "description", "packages", "apps", "session", "greeter"})
     identity(path, data)
     if data["name"] == "none":
         fail(path, "name", "must not be 'none' (reserved for shell selection)")
     packages(path, "packages", data.setdefault("packages", {}))
+    apps(path, data)
     session = table(path, "session", data.get("session"), {"desktop", "compositor"})
     for key in ("desktop", "compositor"):
         value = string(path, f"session.{key}", session.get(key))
@@ -125,6 +126,25 @@ def shell(path, is_default):
         if not re.fullmatch(r"[A-Za-z0-9_@.-]+\.service", unit):
             fail(path, "greeter.unit", "must name a systemd service")
     return data
+
+
+def apps(path, data):
+    value = table(path, "apps", data.setdefault("apps", {}), {"flatpak", "rpm"})
+    ids = strings(path, "apps.flatpak", value.setdefault("flatpak", []))
+    for app_id in ids:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*){2,}", app_id):
+            fail(path, "apps.flatpak", "must contain Flatpak application IDs")
+    if len(ids) != len(set(ids)):
+        fail(path, "apps.flatpak", "must not contain duplicates")
+    packages(path, "apps.rpm", {"install": value.setdefault("rpm", [])})
+    return value
+
+
+def preinstall(generated, kind, value, ids):
+    if ids:
+        text = f"# Generated from {kind}/{value}. Do not edit.\n"
+        text += "".join(f"[Flatpak Preinstall {app_id}]\nBranch=stable\n\n" for app_id in ids)
+        generated.write(f"usr/share/ilex/apps/{kind}-{value}.preinstall", text.encode())
 
 
 def machine_matches(path, data):
@@ -378,6 +398,7 @@ def image(args):
         manifest = shell(ctx / "shells" / selected_name / "shell.toml", selected_name == shell_default)
         manifests.append(manifest)
         shell_sets.append(manifest["packages"])
+        shell_sets.append({"install": manifest["apps"]["rpm"]})
     machine = generic(ctx / "machines/generic/machine.toml")
 
     # Stage each overlay separately. The final-stage installer can see package
@@ -395,6 +416,8 @@ def image(args):
             overlays.append({"name": label, "directory": directory})
     with Tree(out / "install/generated", "generated files", create=True) as generated:
         user_profiles(ctx, selected(path, "users", data.get("users", [])), generated)
+        for manifest in manifests:
+            preinstall(generated, "shell", manifest["name"], manifest["apps"]["flatpak"])
         generated.write("usr/share/ilex/image.json", json_bytes({
             "schema": 1, "shells": manifests, "default-shell": shell_default,
             "packages": base_packages, "shell-packages": shell_packages,

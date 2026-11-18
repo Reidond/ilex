@@ -8,7 +8,9 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
+mod apps;
 mod config;
+pub use apps::{AppsArgs, UpdatesArgs, run as apps, updates};
 mod homed;
 mod sigpolicy;
 
@@ -29,6 +31,7 @@ const CHECKS: &[Check] = &[
         exists("/usr/lib/bootc/kargs.d/10-ilex.toml")
     }),
     ("image configuration readable", config::check_image),
+    ("system app manifests and timer", apps::check),
     ("public user catalogue", || {
         if run_profile(["check"]) == ExitCode::SUCCESS {
             Ok(())
