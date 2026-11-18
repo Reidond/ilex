@@ -81,13 +81,13 @@ fallback prompts; a successful path without direct method evidence records
 PR 19 owns later verification and fallback repair. No boot service in PR 18
 automatically reseals or generates recovery material.
 
-The base growth gate is 160 MiB (previously 128 MiB). Against Fedora base
-`81ada60d…`, the first build measured 2069.31 MiB versus 1917.62 MiB, growth
-151.69 MiB: the rebuilt generic initramfs contributes a new approximately
-111 MiB layer over the inherited Fedora archive. The required crypto RPMs
-were already installed. Security support belongs in the bare base; it cannot
-move to a desktop overlay. The 160 MiB limit stays enforced, and the ISO
-keeps its separate 2 GiB limit.
+The base growth gate is 192 MiB (previously 160 MiB). After rebasing onto
+main's homed/ilexctl base, the bare image measured 2090.87 MiB versus Fedora's
+1917.62 MiB, growth 173.26 MiB. The earlier pre-rebase image grew 151.84 MiB.
+The rebuilt generic initramfs contributes an approximately 111 MiB layer over
+the inherited Fedora archive. Security and homed support belong in the bare
+base. The measured combined footprint requires the bounded increase; the
+192 MiB limit stays enforced, and the ISO keeps its separate 2 GiB limit.
 
 ## Qualification
 
