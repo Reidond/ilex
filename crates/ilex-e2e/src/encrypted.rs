@@ -9,6 +9,7 @@ use ilex_devkit::{
     qemu::{self, VmConfig},
     security,
 };
+use ilex_enroll::Secret;
 use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
 use serde::{Deserialize, Serialize};
@@ -25,11 +26,13 @@ use std::{
 };
 
 const GUEST: &str = include_str!("encrypted/guest.py");
+const PRIVACY: &str = include_str!("encrypted/privacy.py");
 
 pub fn trials() -> Vec<Trial> {
     vec![
-        common::trial("security::encrypted_install", || run(false)),
-        common::trial("security::encrypted_existing_space", || run(true)),
+        common::trial("security::encrypted_install", || run(false, false)),
+        common::trial("security::encrypted_existing_space", || run(true, false)),
+        common::trial("security::encrypted_interrupted", || run(false, true)),
     ]
 }
 
@@ -157,7 +160,7 @@ impl Drop for Fixture {
     }
 }
 
-fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Vec<u8>)> {
+fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Secret)> {
     let dir = work.join("seed");
     fs::create_dir(&dir)?;
     let mut passphrase = vec![0u8; 48];
@@ -168,6 +171,36 @@ fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Vec<u8>)> {
     fs::write(dir.join("passphrase"), &passphrase)?;
     fs::write(dir.join("config.json"), serde_json::to_vec(config)?)?;
     fs::write(dir.join("guest.py"), GUEST)?;
+    fs::write(dir.join("privacy.py"), PRIVACY)?;
+    // Test-only transport: no recovery plaintext is written to host media.
+    let private_key = work.join("recovery.pem");
+    ensure!(
+        Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out"
+            ])
+            .arg(&private_key)
+            .output()?
+            .status
+            .success(),
+        "private fixture key generation failed"
+    );
+    ensure!(
+        Command::new("openssl")
+            .args(["pkey", "-in"])
+            .arg(&private_key)
+            .args(["-pubout", "-out"])
+            .arg(dir.join("recovery.pub"))
+            .output()?
+            .status
+            .success(),
+        "fixture public key generation failed"
+    );
     fs::copy(work.join("cosign.pub"), dir.join("test.pub"))?;
     // Start the private console driver before the shipped completion %post.
     // The source override changes only the test registry and keeps target and
@@ -215,7 +248,120 @@ python3 -I -S /run/ilex-encrypted-test/seed/guest.py finish
             .arg(&dir)
             .arg(&seed),
     )?;
-    Ok((seed, passphrase))
+    let secret = Secret::read(ilex_enroll::secret_fd(&passphrase)?)?;
+    passphrase.fill(0);
+    Ok((seed, secret))
+}
+
+fn recovery_secret(seed: &Path, work: &Path) -> Result<Secret> {
+    let output = Command::new("debugfs")
+        .args(["-R", "cat /recovery.oaep"])
+        .arg(seed)
+        .output()?;
+    ensure!(
+        output.status.success() && output.stdout.len() == 256,
+        "private recovery envelope missing"
+    );
+    let envelope = work.join("recovery.oaep");
+    fs::write(&envelope, output.stdout)?;
+    let mut child = Command::new("openssl")
+        .args(["pkeyutl", "-decrypt", "-inkey"])
+        .arg(work.join("recovery.pem"))
+        .args(["-in"])
+        .arg(envelope)
+        .args([
+            "-pkeyopt",
+            "rsa_padding_mode:oaep",
+            "-pkeyopt",
+            "rsa_oaep_md:sha256",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let secret = Secret::read(
+        child
+            .stdout
+            .take()
+            .context("private recovery pipe missing")?
+            .into(),
+    )?;
+    ensure!(
+        child.wait()?.success() && secret.bytes().len() == 71,
+        "private recovery decryption failed"
+    );
+    ensure!(
+        secret
+            .bytes()
+            .iter()
+            .enumerate()
+            .all(|(i, b)| if i % 9 == 8 {
+                *b == b'-'
+            } else {
+                b"cbdefghijklnrtuv".contains(b)
+            }),
+        "invalid recovery credential; details suppressed"
+    );
+    Ok(secret)
+}
+
+fn fingerprints(secrets: &[&Secret]) -> Value {
+    json!(
+        secrets
+            .iter()
+            .map(|s| json!({"length":s.bytes().len(), "sha256":security::hash(s.bytes())}))
+            .collect::<Vec<_>>()
+    )
+}
+
+fn private_scan(script: &str) -> Result<Value> {
+    let script = format!("__name__ = 'ilex_private_matcher'\n{script}");
+    let output = Command::new("python3")
+        .args(["-I", "-S", "-c", &script])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "private artifact scan failed; diagnostics suppressed"
+    );
+    let result: Value =
+        serde_json::from_slice(&output.stdout).context("invalid private scan result")?;
+    ensure!(
+        result["secret_found"] == false && result["read_errors"] == 0,
+        "credential found or unreadable evidence; details suppressed"
+    );
+    Ok(result)
+}
+
+fn artifact_privacy(roots: &[&Path], credentials: &Value) -> Result<Value> {
+    private_scan(&format!(
+        "{PRIVACY}\nprint(json.dumps(scan(json.loads({:?}), json.loads({:?}))))",
+        serde_json::to_string(roots)?,
+        credentials.to_string()
+    ))
+}
+
+fn guest_privacy(vm: &qemu::Vm, artifacts: &Path, label: &str, credentials: &Value) -> Result<()> {
+    let script = format!(
+        "__name__ = 'ilex_private_matcher'\n{PRIVACY}\nprint(json.dumps(scan(['/etc', '/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/var/lib/ilex', '/var/roothome', '/root'], json.loads({:?}), journal=True)))",
+        credentials.to_string()
+    );
+    let command = format!("python3 -I -S -c '{}'", script.replace('\'', "'\\''"));
+    let output = vm.ssh(&command)?;
+    ensure!(
+        output.status.success(),
+        "post-finalisation private scan failed; diagnostics suppressed"
+    );
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        result["secret_found"] == false
+            && result["read_errors"] == 0
+            && result["journal_scanned"] == true,
+        "post-finalisation privacy failed; details suppressed"
+    );
+    fs::write(
+        artifacts.join(format!("{label}-privacy.json")),
+        serde_json::to_vec_pretty(&result)?,
+    )?;
+    Ok(())
 }
 
 fn extract(seed: &Path, artifacts: &Path, file: &str) -> Result<Vec<u8>> {
@@ -318,7 +464,12 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install(fixture: &mut Fixture, artifacts: &Path, deadline: Duration) -> Result<()> {
+fn install(
+    fixture: &mut Fixture,
+    artifacts: &Path,
+    deadline: Duration,
+    interrupted: bool,
+) -> Result<()> {
     fixture.provider.start(&mut fixture.vm)?;
     let vm = fixture.vm.running_mut()?;
     let ctl = Vmctl::from_info(vm.info.clone());
@@ -352,7 +503,7 @@ fn install(fixture: &mut Fixture, artifacts: &Path, deadline: Duration) -> Resul
             ensure!(
                 status.success()
                     && serial.contains("ILEX-ENCRYPTED-DONE")
-                    && screenshots == [true, true],
+                    && screenshots == [true, !interrupted],
                 "encrypted ISO installation did not finish"
             );
             break;
@@ -387,15 +538,20 @@ fn poweroff(fixture: &mut Fixture) -> Result<()> {
     fixture.provider.stop(&mut fixture.vm)
 }
 
-fn no_tpm(
+#[allow(clippy::too_many_arguments)] // One explicit disposable negative boot profile.
+fn fallback(
     ws: &Workspace,
     source: &Path,
     template: &VmSpec,
     work: &Path,
     artifacts: &Path,
-    passphrase: &[u8],
+    credential: &Secret,
+    credentials: &Value,
+    installer_probe: &Value,
+    original_tokens: &Value,
+    mode: &str,
 ) -> Result<()> {
-    let disk = work.join("no-tpm.qcow2");
+    let disk = work.join(format!("{mode}.qcow2"));
     cmd::run(
         Command::new("qemu-img")
             .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b"])
@@ -403,14 +559,22 @@ fn no_tpm(
             .arg(&disk),
     )?;
     let mut spec = template.clone();
-    spec.run.push_str("-no-tpm");
-    spec.purpose = if template.purpose == "encrypted-space" {
-        "space-no-tpm"
+    spec.run.push_str(&format!("-{mode}"));
+    spec.purpose = format!("{}-{mode}", template.purpose);
+    spec.iso = None;
+    spec.additional_disks.clear();
+    spec.secure_boot = if mode == "pcr-mismatch" {
+        Requirement::Off
     } else {
-        "encrypted-no-tpm"
-    }
-    .into();
-    spec.tpm = TpmLifecycle::Off;
+        Requirement::Required
+    };
+    spec.tpm = if mode == "no-tpm" {
+        TpmLifecycle::Off
+    } else {
+        TpmLifecycle::Persistent {
+            bundle_id: spec.run.clone(),
+        }
+    };
     // This negative has a separate identity. It measures fallback behavior and
     // cannot mint a passing T6 firmware/TPM qualification for a different profile.
     spec.security_launch = ilex_devkit::core::SecurityLaunch::QualificationFixture;
@@ -441,27 +605,47 @@ fn no_tpm(
         thread::sleep(Duration::from_secs(2));
     }
     let ctl = Vmctl::from_info(vm.info.clone());
-    ctl.save_screenshot(&artifacts.join("no-tpm-passphrase-prompt.png"))?;
-    ctl.type_text(std::str::from_utf8(passphrase)?)?;
+    ctl.save_screenshot(&artifacts.join(format!("{mode}-passphrase-prompt.png")))?;
+    ctl.type_text(std::str::from_utf8(credential.bytes())?)?;
     ctl.key("ret")?;
     vm.wait_ssh(Duration::from_secs(900))?;
     let probe = guest_json(
         vm,
         artifacts,
-        "no-tpm-probe.json",
+        &format!("{mode}-probe.json"),
         "ilex-enroll probe --json",
     )?;
-    ensure!(
-        probe["secure_boot"] == true
-            && probe["setup_mode"] == false
-            && probe["tpm2"] == false
-            && probe["reason"] == "no-tpm",
-        "no-TPM mode was not preserved"
-    );
+    if mode == "no-tpm" {
+        ensure!(
+            probe["secure_boot"] == true && probe["tpm2"] == false && probe["reason"] == "no-tpm",
+            "no-TPM mode was not preserved"
+        );
+    } else if mode == "pcr-mismatch" {
+        let pcr = vm.ssh_ok("cat /sys/class/tpm/tpm0/pcr-sha256/7")?;
+        let eventlog = vm.ssh("cat /sys/kernel/security/tpm0/binary_bios_measurements")?;
+        ensure!(eventlog.status.success(), "mismatch event log missing");
+        let replay = security::replay_pcr7(&eventlog.stdout)?;
+        ensure!(
+            probe["secure_boot"] == false
+                && probe["tpm2"] == true
+                && pcr.trim() == replay.sha256
+                && installer_probe["pcr7"] != pcr.trim(),
+            "present TPM / changed Secure Boot PCR was not measured"
+        );
+        fs::write(
+            artifacts.join("mismatch-pcr-replay.json"),
+            serde_json::to_vec_pretty(&replay)?,
+        )?;
+    } else {
+        ensure!(
+            probe["secure_boot"] == true && probe["tpm2"] == true,
+            "recovery boot must retain Secure Boot and a present, different TPM"
+        );
+    }
     let evidence = guest_json(
         vm,
         artifacts,
-        "no-tpm-unlock.json",
+        &format!("{mode}-unlock.json"),
         "cat /run/ilex/root-unlock.json",
     )?;
     ensure!(
@@ -474,11 +658,11 @@ fn no_tpm(
     let before = guest_json(
         vm,
         artifacts,
-        "no-tpm-enrollment-before.json",
+        &format!("{mode}-enrollment-before.json"),
         "cat /var/lib/ilex/security/enrollment.json",
     )?;
     ensure!(
-        before["recovery"]["acknowledged"] == true,
+        mode != "no-tpm" || before["recovery"]["acknowledged"] == true,
         "recovery acknowledgement missing"
     );
     let uuid = before["uuid"]
@@ -489,46 +673,313 @@ fn no_tpm(
         "invalid no-TPM root UUID"
     );
     let token_command = format!("ilex-enroll status --json --device /dev/disk/by-uuid/{uuid}");
-    let tokens_before = guest_json(vm, artifacts, "no-tpm-tokens-before.json", &token_command)?;
-    vm.ssh_ok("chvt 8; systemd-run --quiet --remain-after-exit --unit=ilex-enroll-no-tpm-completion /usr/bin/ilex-enroll complete --root / --tty /dev/tty8")?;
-    vm.ssh_ok("timeout 60 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
-    ctl.type_text(std::str::from_utf8(passphrase)?)?;
-    ctl.key("ret")?;
-    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
-    ctl.save_screenshot(&artifacts.join("no-tpm-passphrase-only.png"))?;
-    ctl.key("ret")?;
-    vm.ssh_ok("set -eu; timeout 30 sh -c 'until test \"$(systemctl show -p SubState --value ilex-enroll-no-tpm-completion)\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value ilex-enroll-no-tpm-completion)\" = success; systemctl stop ilex-enroll-no-tpm-completion")?;
-    let after = guest_json(
+    let tokens_before = guest_json(
         vm,
         artifacts,
-        "no-tpm-enrollment.json",
-        "cat /var/lib/ilex/security/enrollment.json",
-    )?;
-    let setup = guest_json(
-        vm,
-        artifacts,
-        "no-tpm-setup.json",
-        "cat /etc/ilex/setup.json",
+        &format!("{mode}-tokens-before.json"),
+        &token_command,
     )?;
     ensure!(
-        after["state"] == "unavailable"
-            && after["reason"] == "no-tpm"
-            && after["recovery"] == before["recovery"]
-            && setup["security"]["tpm"]["status"] == "passphrase-only",
-        "no-TPM completion did not preserve passphrase-only mode"
+        tokens_before == *original_tokens,
+        "fallback boot changed slots/tokens or resealed automatically"
     );
-    let tokens_after = guest_json(vm, artifacts, "no-tpm-tokens.json", &token_command)?;
-    ensure!(
-        tokens_after == tokens_before,
-        "no-TPM completion changed LUKS slots/tokens"
-    );
+    if mode == "no-tpm" {
+        vm.ssh_ok("chvt 8; systemd-run --quiet --remain-after-exit --unit=ilex-enroll-no-tpm-completion /usr/bin/ilex-enroll complete --root / --tty /dev/tty8")?;
+        vm.ssh_ok("timeout 60 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
+        ctl.type_text(std::str::from_utf8(credential.bytes())?)?;
+        ctl.key("ret")?;
+        vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
+        ctl.save_screenshot(&artifacts.join(format!("{mode}-passphrase-only.png")))?;
+        ctl.key("ret")?;
+        vm.ssh_ok("set -eu; timeout 30 sh -c 'until test \"$(systemctl show -p SubState --value ilex-enroll-no-tpm-completion)\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value ilex-enroll-no-tpm-completion)\" = success; systemctl stop ilex-enroll-no-tpm-completion")?;
+        let after = guest_json(
+            vm,
+            artifacts,
+            &format!("{mode}-enrollment.json"),
+            "cat /var/lib/ilex/security/enrollment.json",
+        )?;
+        let setup = guest_json(
+            vm,
+            artifacts,
+            &format!("{mode}-setup.json"),
+            "cat /etc/ilex/setup.json",
+        )?;
+        ensure!(
+            after["state"] == "unavailable"
+                && after["reason"] == "no-tpm"
+                && after["recovery"] == before["recovery"]
+                && setup["security"]["tpm"]["status"] == "passphrase-only",
+            "no-TPM completion did not preserve passphrase-only mode"
+        );
+        let tokens_after = guest_json(
+            vm,
+            artifacts,
+            &format!("{mode}-tokens.json"),
+            &token_command,
+        )?;
+        ensure!(
+            tokens_after == tokens_before,
+            "no-TPM completion changed LUKS slots/tokens"
+        );
+    }
     vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; ilex-enroll layout --root /; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
     if template.purpose == "encrypted-space" {
         preserved_data(vm, artifacts)?;
     }
-    fixture.logs(artifacts, "no-tpm")?;
+    guest_privacy(vm, artifacts, mode, credentials)?;
+    fixture.logs(artifacts, mode)?;
     poweroff(&mut fixture)?;
     fixture.provider.destroy_owned(&mut fixture.vm)
+}
+
+fn interrupted_repair(
+    fixture: &mut Fixture,
+    artifacts: &Path,
+    passphrase: &Secret,
+    credentials: &mut Value,
+    original_tokens: &Value,
+) -> Result<(Secret, Value)> {
+    fixture.disk_boot()?;
+    let vm = fixture.vm.running_mut()?;
+    let ctl = Vmctl::from_info(vm.info.clone());
+    let start = Instant::now();
+    loop {
+        let serial = fs::read_to_string(vm.info.dir.join("serial.log"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if serial.contains("please enter")
+            && (serial.contains("passphrase") || serial.contains("password"))
+        {
+            break;
+        }
+        ensure!(
+            vm.exited()?.is_none() && start.elapsed() < Duration::from_secs(1800),
+            "interrupted install did not retain fallback prompt"
+        );
+        thread::sleep(Duration::from_secs(2));
+    }
+    ctl.save_screenshot(&artifacts.join("interrupted-first-boot-prompt.png"))?;
+    ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
+    ctl.key("ret")?;
+    vm.wait_ssh(Duration::from_secs(1800))?;
+    let state = guest_json(
+        vm,
+        artifacts,
+        "interrupted-first-boot-state.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    ensure!(
+        state["state"] == "recovery-incomplete"
+            && state["recovery"]["acknowledged"] == false
+            && state["tpm"].is_null(),
+        "interrupted install claimed completed recovery/TPM enrollment"
+    );
+    let unlock = guest_json(
+        vm,
+        artifacts,
+        "interrupted-first-boot-unlock.json",
+        "cat /run/ilex/root-unlock.json",
+    )?;
+    ensure!(
+        unlock["method"] == "unknown",
+        "interrupted boot falsely claimed TPM unlock"
+    );
+    let uuid = state["uuid"].as_str().context("interrupted UUID missing")?;
+    ensure!(uuid.len() == 36 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
+    let token_command = format!("ilex-enroll status --json --device /dev/disk/by-uuid/{uuid}");
+    let before = guest_json(
+        vm,
+        artifacts,
+        "interrupted-first-boot-tokens.json",
+        &token_command,
+    )?;
+    ensure!(
+        before == *original_tokens,
+        "interrupted boot left half-enrolled slots or tokens"
+    );
+    guest_privacy(vm, artifacts, "interrupted-after-finalisation", credentials)?;
+    // Ordinary retry must refuse the unacknowledged slot, preserve it and
+    // request explicit authenticated reissue; it must never show it again.
+    vm.ssh_ok("chvt 8; systemd-run --quiet --unit=ilex-interrupted-retry /usr/bin/ilex-enroll complete --root / --tty /dev/tty8")?;
+    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
+    ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
+    ctl.key("ret")?;
+    vm.ssh_ok("timeout 180 sh -c 'until test \"$(systemctl show -p Result --value ilex-interrupted-retry)\" = exit-code; do sleep 1; done'; systemctl reset-failed ilex-interrupted-retry")?;
+    let unchanged = guest_json(
+        vm,
+        artifacts,
+        "interrupted-retry-tokens.json",
+        &token_command,
+    )?;
+    ensure!(unchanged == before, "ordinary retry changed fallback slots");
+    vm.ssh_ok("systemd-run --quiet --remain-after-exit --unit=ilex-interrupted-reissue /usr/bin/ilex-enroll complete --root / --tty /dev/tty8 --reissue-recovery")?;
+    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
+    ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
+    ctl.key("ret")?;
+    vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Press Enter when it is saved offline.\" /dev/vcs8; do sleep 1; done'")?;
+    // Capture character cells into locked host memory only; never an artifact
+    // or screenshot. Matched bytes and subprocess output are never formatted.
+    let mut cells = vm.ssh("cat /dev/vcs8")?;
+    ensure!(cells.status.success(), "private local recovery read failed");
+    let key = cells
+        .stdout
+        .windows(71)
+        .find(|w| {
+            w.iter().enumerate().all(|(i, b)| {
+                if i % 9 == 8 {
+                    *b == b'-'
+                } else {
+                    b"cbdefghijklnrtuv".contains(b)
+                }
+            })
+        })
+        .context("reissued recovery key not shown locally")?;
+    let recovery = Secret::read(ilex_enroll::secret_fd(key)?)?;
+    cells.stdout.fill(0);
+    cells.stderr.fill(0);
+    credentials
+        .as_array_mut()
+        .context("missing credentials")?
+        .push(json!({"length":71,"sha256":security::hash(recovery.bytes())}));
+    fs::write(
+        artifacts.join("installer-credentials.json"),
+        serde_json::to_vec_pretty(credentials)?,
+    )?;
+    ctl.key("ret")?;
+    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Enter the saved recovery key to confirm\" /dev/vcs8; do sleep 1; done'")?;
+    ctl.type_text(std::str::from_utf8(recovery.bytes())?)?;
+    ctl.key("ret")?;
+    vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
+    ctl.save_screenshot(&artifacts.join("interrupted-reissue-confirmed.png"))?;
+    ctl.key("ret")?;
+    vm.ssh_ok("timeout 120 sh -c 'until test \"$(systemctl show -p SubState --value ilex-interrupted-reissue)\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value ilex-interrupted-reissue)\" = success; systemctl stop ilex-interrupted-reissue")?;
+    let after = guest_json(
+        vm,
+        artifacts,
+        "interrupted-reissue-tokens.json",
+        &token_command,
+    )?;
+    for slot in before["slots"]
+        .as_array()
+        .context("missing original slots")?
+    {
+        ensure!(
+            after["slots"]
+                .as_array()
+                .context("missing repaired slots")?
+                .contains(slot),
+            "reissue removed an original fallback slot"
+        );
+    }
+    for token in before["tokens"]
+        .as_array()
+        .context("missing original tokens")?
+    {
+        ensure!(
+            after["tokens"]
+                .as_array()
+                .context("missing repaired tokens")?
+                .contains(token),
+            "reissue replaced an original recovery token"
+        );
+    }
+    let repaired = guest_json(
+        vm,
+        artifacts,
+        "interrupted-repaired-state.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    ensure!(
+        repaired["recovery"]["acknowledged"] == true
+            && repaired["recovery"]["slot"] != state["recovery"]["slot"],
+        "explicit reissue did not preserve the original recovery story"
+    );
+    guest_privacy(vm, artifacts, "interrupted-repaired", credentials)?;
+    fixture.logs(artifacts, "interrupted-repaired")?;
+    poweroff(fixture)?;
+    Ok((recovery, after))
+}
+
+fn same_tpm_mismatch(
+    ws: &Workspace,
+    fixture: &mut Fixture,
+    artifacts: &Path,
+    passphrase: &Secret,
+    credentials: &Value,
+    installer_probe: &Value,
+    tokens: &Value,
+) -> Result<()> {
+    let mut negative = fixture.spec.clone();
+    negative.security_launch = ilex_devkit::core::SecurityLaunch::QualificationFixture;
+    let vars = security::bundle_path(ws, &negative)?.join("VARS.fd");
+    let original_vars = fs::read(&vars)?;
+    security::disable_fixture_secure_boot(ws, &negative)?;
+    fixture.disk_boot()?;
+    let vm = fixture.vm.running_mut()?;
+    let ctl = Vmctl::from_info(vm.info.clone());
+    let start = Instant::now();
+    loop {
+        let serial = fs::read_to_string(vm.info.dir.join("serial.log"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if serial.contains("please enter")
+            && (serial.contains("passphrase") || serial.contains("password"))
+        {
+            break;
+        }
+        ensure!(
+            vm.exited()?.is_none() && start.elapsed() < Duration::from_secs(1800),
+            "same-TPM PCR mismatch did not retain a prompt"
+        );
+        thread::sleep(Duration::from_secs(2));
+    }
+    ctl.save_screenshot(&artifacts.join("same-tpm-pcr-mismatch-prompt.png"))?;
+    ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
+    ctl.key("ret")?;
+    vm.wait_ssh(Duration::from_secs(1800))?;
+    let probe = guest_json(
+        vm,
+        artifacts,
+        "same-tpm-mismatch-probe.json",
+        "ilex-enroll probe --json",
+    )?;
+    let pcr = vm.ssh_ok("cat /sys/class/tpm/tpm0/pcr-sha256/7")?;
+    ensure!(
+        probe["secure_boot"] == false
+            && probe["tpm2"] == true
+            && pcr.len() == 64
+            && installer_probe["pcr7"] != pcr.trim(),
+        "same-TPM Secure Boot/PCR policy was not changed"
+    );
+    fs::write(artifacts.join("same-tpm-mismatch-pcr.txt"), pcr)?;
+    let unlock = guest_json(
+        vm,
+        artifacts,
+        "same-tpm-mismatch-unlock.json",
+        "cat /run/ilex/root-unlock.json",
+    )?;
+    ensure!(
+        unlock["method"] == "unknown",
+        "policy rejection was incorrectly called TPM unlock"
+    );
+    let uuid = tokens["uuid"].as_str().context("root UUID missing")?;
+    let after = guest_json(
+        vm,
+        artifacts,
+        "same-tpm-mismatch-tokens.json",
+        &format!("ilex-enroll status --json --device /dev/disk/by-uuid/{uuid}"),
+    )?;
+    ensure!(
+        after == *tokens,
+        "policy mismatch automatically resealed or changed fallback slots"
+    );
+    guest_privacy(vm, artifacts, "same-tpm-mismatch", credentials)?;
+    fixture.logs(artifacts, "same-tpm-mismatch")?;
+    poweroff(fixture)?;
+    // Restore only this stopped disposable firmware store; its TPM, LUKS
+    // header and every enrolled slot remain intact throughout the negative.
+    fs::write(vars, original_vars)?;
+    Ok(())
 }
 
 fn assertions(
@@ -673,9 +1124,12 @@ test "$(cat /run/ilex-preserved-check/sentinel)" = ilex-public-sentinel-v1
     Ok(())
 }
 
-fn run(preserve_data: bool) -> Result<()> {
+fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
+    ilex_enroll::harden()?;
     let ws = common::workspace()?;
-    let tier = if preserve_data {
+    let tier = if interrupted {
+        "encrypted-interrupted"
+    } else if preserve_data {
         "encrypted-existing-space"
     } else {
         "encrypted-install"
@@ -700,6 +1154,7 @@ fn run(preserve_data: bool) -> Result<()> {
     fs::create_dir(&artifacts)?;
     let start = Instant::now();
     let mut stage = "platform";
+    let mut credentials = Value::Null;
     let mut result = (|| {
         let iso = PathBuf::from(std::env::var_os("ILEX_ISO").context("ILEX_ISO required")?);
         ensure!(iso.is_file(), "exact installer ISO missing");
@@ -744,6 +1199,7 @@ fn run(preserve_data: bool) -> Result<()> {
         let image = common::image()?;
         let (_registry, mut expected) = registry(&ws, &image, &work)?;
         expected["preserve_data"] = json!(preserve_data);
+        expected["interrupt_completion"] = json!(interrupted);
         fs::write(
             artifacts.join("candidate.json"),
             serde_json::to_vec_pretty(&expected)?,
@@ -763,7 +1219,7 @@ fn run(preserve_data: bool) -> Result<()> {
                 .unwrap_or_else(|_| "10800".into())
                 .parse()?,
         );
-        let installed = install(&mut fixture, &artifacts, deadline);
+        let installed = install(&mut fixture, &artifacts, deadline, interrupted);
         fixture.logs(&artifacts, "installer")?;
         if installed.is_err() {
             fixture.provider.stop(&mut fixture.vm)?;
@@ -773,6 +1229,14 @@ fn run(preserve_data: bool) -> Result<()> {
         }
         installed?;
         fixture.provider.stop(&mut fixture.vm)?;
+        let recovery = recovery_secret(&seed_path, &work)?;
+        credentials = fingerprints(&[&passphrase, &recovery]);
+        let recorded: Value =
+            serde_json::from_slice(&extract(&seed_path, &artifacts, "credentials.json")?)?;
+        ensure!(
+            recorded == credentials,
+            "private credential fingerprints differ"
+        );
         let installer_probe: Value =
             serde_json::from_slice(&extract(&seed_path, &artifacts, "probe.json")?)?;
         ensure!(
@@ -794,39 +1258,121 @@ fn run(preserve_data: bool) -> Result<()> {
             "setup.json",
             "versions.txt",
             "leak-scan.json",
+            "finaliser-leak-scan.json",
+            "tokens.json",
         ] {
             extract(&seed_path, &artifacts, file)?;
         }
         let scan: Value =
             serde_json::from_slice(&fs::read(artifacts.join("installer-leak-scan.json"))?)?;
-        ensure!(
-            scan["secret_found"] == false && scan["journal_scanned"] == true,
-            "private guest secret scan failed"
-        );
-        stage = "first_installed_boot";
-        fixture.disk_boot()?;
-        let booted = assertions(&mut fixture, &artifacts, &expected, &installer_probe);
-        fixture.logs(&artifacts, "installed")?;
-        booted?;
-        stage = "cold_restart";
-        poweroff(&mut fixture)?;
-        fixture.disk_boot()?;
-        let cold = artifacts.join("cold");
-        fs::create_dir_all(&cold)?;
-        assertions(&mut fixture, &cold, &expected, &installer_probe)?;
-        fixture.logs(&artifacts, "cold")?;
-        poweroff(&mut fixture)?;
-        stage = "no_tpm_fallback";
-        no_tpm(&ws, &disk, &fixture.spec, &work, &artifacts, &passphrase)?;
-        // Artifacts cannot contain the test passphrase. Never print a matching
-        // path/line or the bytes, including on a failed assertion.
-        for path in evidence_files(&artifacts)? {
+        for scan in [
+            scan,
+            serde_json::from_slice(&fs::read(
+                artifacts.join("installer-finaliser-leak-scan.json"),
+            )?)?,
+        ] {
             ensure!(
-                !fs::read(path)?
-                    .windows(passphrase.len())
-                    .any(|w| w == passphrase),
-                "secret found in artifacts; details suppressed"
+                scan["secret_found"] == false
+                    && scan["journal_scanned"] == true
+                    && scan["read_errors"] == 0
+                    && scan["credentials_checked"] == 2,
+                "private guest secret scan failed"
             );
+        }
+        let original_tokens: Value =
+            serde_json::from_slice(&fs::read(artifacts.join("installer-tokens.json"))?)?;
+        stage = "pcr_mismatch_first_boot";
+        fallback(
+            &ws,
+            &disk,
+            &fixture.spec,
+            &work,
+            &artifacts,
+            &passphrase,
+            &credentials,
+            &installer_probe,
+            &original_tokens,
+            "pcr-mismatch",
+        )?;
+        stage = "recovery_key_boot";
+        fallback(
+            &ws,
+            &disk,
+            &fixture.spec,
+            &work,
+            &artifacts,
+            &recovery,
+            &credentials,
+            &installer_probe,
+            &original_tokens,
+            "recovery",
+        )?;
+        if interrupted {
+            stage = "interrupted_completion_repair";
+            let (reissued, repaired_tokens) = interrupted_repair(
+                &mut fixture,
+                &artifacts,
+                &passphrase,
+                &mut credentials,
+                &original_tokens,
+            )?;
+            stage = "reissued_recovery_key_boot";
+            fallback(
+                &ws,
+                &disk,
+                &fixture.spec,
+                &work,
+                &artifacts,
+                &reissued,
+                &credentials,
+                &installer_probe,
+                &repaired_tokens,
+                "reissued-recovery",
+            )?;
+        } else {
+            stage = "first_installed_boot";
+            fixture.disk_boot()?;
+            let booted = assertions(&mut fixture, &artifacts, &expected, &installer_probe);
+            fixture.logs(&artifacts, "installed")?;
+            booted?;
+            guest_privacy(
+                fixture.vm.running_mut()?,
+                &artifacts,
+                "installed-after-finalisation",
+                &credentials,
+            )?;
+            stage = "cold_restart";
+            poweroff(&mut fixture)?;
+            fixture.disk_boot()?;
+            let cold = artifacts.join("cold");
+            fs::create_dir_all(&cold)?;
+            assertions(&mut fixture, &cold, &expected, &installer_probe)?;
+            guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
+            fixture.logs(&artifacts, "cold")?;
+            poweroff(&mut fixture)?;
+            stage = "same_tpm_policy_mismatch";
+            same_tpm_mismatch(
+                &ws,
+                &mut fixture,
+                &artifacts,
+                &passphrase,
+                &credentials,
+                &installer_probe,
+                &original_tokens,
+            )?;
+            stage = "no_tpm_fallback";
+            fallback(
+                &ws,
+                &disk,
+                &fixture.spec,
+                &work,
+                &artifacts,
+                &passphrase,
+                &credentials,
+                &installer_probe,
+                &original_tokens,
+                "no-tpm",
+            )?;
         }
         let iso_hash = cmd::output(Command::new("sha256sum").arg(&iso))?;
         fs::write(artifacts.join("iso-sha256.txt"), iso_hash)?;
@@ -834,6 +1380,11 @@ fn run(preserve_data: bool) -> Result<()> {
         // Drop remains the failure-path backstop. On success, propagating
         // destruction errors prevents a retained private TPM bundle going green.
         fixture.provider.destroy_owned(&mut fixture.vm)?;
+        let scan = artifact_privacy(&[&artifacts], &credentials)?;
+        fs::write(
+            artifacts.join("final-artifact-privacy.json"),
+            serde_json::to_vec_pretty(&scan)?,
+        )?;
         stage = "complete";
         Ok(())
     })();
@@ -844,6 +1395,12 @@ fn run(preserve_data: bool) -> Result<()> {
                 fs::create_dir_all(target.parent().context("evidence has no parent")?)?;
                 fs::copy(path, target)?;
             }
+            // Scan the actual copied/exported set too, including other CI
+            // artifact tiers. The workflow repeats this gate after all cases.
+            let root = std::env::var_os("ILEX_ARTIFACTS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| published.clone());
+            artifact_privacy(&[&root], &credentials)?;
             Ok(())
         })();
         if let Err(error) = export {
@@ -861,8 +1418,10 @@ fn run(preserve_data: bool) -> Result<()> {
     fs::write(
         published.join("result.json"),
         serde_json::to_vec_pretty(
-            &json!({"qualification": if result.is_ok() {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|e|format!("{e:#}")), "storage":if preserve_data {"existing-free-space"} else {"automatic-empty-disk"}, "scope":"exact ISO, signed local candidate, first installed boot; physical hardware remains unqualified"}),
+            &json!({"qualification": if result.is_ok() {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|_|"private failure details suppressed"), "storage":if preserve_data {"existing-free-space"} else if interrupted {"interrupted-completion"} else {"automatic-empty-disk"}, "scope":"exact ISO, signed local candidate, installed boot; physical hardware remains unqualified"}),
         )?,
     )?;
-    result
+    result.map_err(|_| {
+        anyhow::anyhow!("encrypted qualification failed at {stage}; private diagnostics suppressed")
+    })
 }

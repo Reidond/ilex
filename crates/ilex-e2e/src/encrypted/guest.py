@@ -12,6 +12,7 @@ import pathlib
 import re
 import resource
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -22,6 +23,22 @@ PRIVATE = pathlib.Path('/run/ilex-encrypted-test')
 SEED = PRIVATE / 'seed'
 PUBLIC = SEED / 'public'
 DRIVE_STEP = 'not-started'
+
+
+def privacy_module():
+    # -I -S deliberately excludes provisioning media from Python's search path.
+    scope = {'__name__': 'ilex_private_matcher'}
+    exec((SEED / 'privacy.py').read_text(), scope)
+    return scope
+
+
+def scan_roots():
+    roots = ['/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/root', str(PUBLIC)]
+    for target in ['/mnt/sysroot', '/mnt/sysimage']:
+        roots.extend(target + suffix for suffix in
+                     ['/etc', '/var/log', '/var/tmp', '/var/roothome',
+                      '/var/lib/anaconda', '/var/lib/ilex'])
+    return roots
 
 ERRORS = {
     'var-unencrypted': b'/var does not share encrypted root',
@@ -104,6 +121,16 @@ def prepare():
                         b'--luks-version=luks2 --passphrase=' + passphrase + b'\n')
     storage.chmod(0o600)
     PUBLIC.mkdir(mode=0o700)
+    # Anaconda calls poweroff only after its finalisation. This test-only unit
+    # scans that final live/target log and kickstart set before unmounting it.
+    unit = pathlib.Path('/run/systemd/system/ilex-private-final-scan.service')
+    unit.write_text('[Unit]\nDefaultDependencies=no\n'
+                    'After=anaconda.service anaconda-direct.service\n'
+                    'Before=umount.target poweroff.target\n'
+                    '[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -I -S '
+                    + str(SEED / 'guest.py') + ' finalise\n')
+    subprocess.run(['systemctl', 'daemon-reload'], check=True)
+    subprocess.run(['systemctl', 'add-wants', 'poweroff.target', unit.name], check=True)
     marker('PREPARED')
 
 
@@ -114,7 +141,7 @@ def screen():
         return b''
 
 
-def wait_for(text, deadline=300):
+def wait_for(text, deadline=1800):
     start = time.monotonic()
     while text not in screen():
         if time.monotonic() - start > deadline:
@@ -178,26 +205,17 @@ def failure_snapshot(error):
     os.sync()
 
 
-def scan(secrets):
-    roots = ['/tmp', '/var/log', '/root', '/mnt/sysroot/var/log',
-             '/mnt/sysroot/var/roothome', str(PUBLIC)]
-    count = 0
-    leaked = False
-    for root in roots:
-        for directory, _, files in os.walk(root, followlinks=False):
-            for name in files:
-                path = pathlib.Path(directory) / name
-                if path.is_symlink() or not path.is_file():
-                    continue
-                try:
-                    data = path.read_bytes()
-                except OSError:
-                    continue
-                count += 1
-                leaked |= any(value and value in data for value in secrets)
-    journal = subprocess.run(['journalctl', '--no-pager', '-o', 'cat'], capture_output=True, check=True).stdout
-    leaked |= any(value and value in journal for value in secrets)
-    return {'schema': 1, 'files_scanned': count, 'journal_scanned': True, 'secret_found': leaked}
+def scan():
+    fingerprints = json.loads((PUBLIC / 'credentials.json').read_text())
+    return privacy_module()['scan'](scan_roots(), fingerprints, journal=True)
+
+
+def finalise():
+    result = scan()
+    result['phase'] = 'anaconda-poweroff-after-finalisation'
+    (PUBLIC / 'finaliser-leak-scan.json').write_text(json.dumps(result))
+    os.sync()
+    assert not result['secret_found'] and not result['read_errors'], 'private final scan failed'
 
 
 def drive():
@@ -262,6 +280,62 @@ def drive():
         match = re.search(rb'[cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}', screen())
         assert match is not None, 'recovery key was not shown locally'
         recovery = match.group(0)
+        # Only an OAEP envelope leaves this guest. Its throwaway private key
+        # stays in the host's 0700 fixture; decrypted bytes go to locked memory.
+        envelope = subprocess.run(
+            ['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(SEED / 'recovery.pub'),
+             '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
+            input=recovery, capture_output=True, check=True).stdout
+        (SEED / 'recovery.oaep').write_bytes(envelope)
+        matcher = privacy_module()
+        # Both matchers must catch overlapping candidates across a read boundary
+        # inside this VM. The intentional private probe is never a log/export.
+        check_dir = PRIVATE / 'matcher-self-check'
+        check_dir.mkdir()
+        check = check_dir / 'not-an-image.png'
+        try:
+            for value in [passphrase, recovery]:
+                check.write_bytes(b'X' * (1024 * 1024 - 3) + value)
+                report = matcher['scan']([check_dir], [matcher['fingerprint'](value)])
+                assert report['secret_found'], 'private matcher self-check failed'
+                check.unlink()
+                assert not matcher['scan']([check_dir], [matcher['fingerprint'](value)])['secret_found']
+        finally:
+            check.unlink(missing_ok=True)
+            check_dir.rmdir()
+        (PUBLIC / 'credentials.json').write_text(json.dumps(
+            [matcher['fingerprint'](value) for value in [passphrase, recovery]]))
+        config = json.loads((SEED / 'config.json').read_text())
+        if config.get('interrupt_completion', False):
+            # Kill the shipped completion after its recovery slot/state commit,
+            # before acknowledgement or TPM enrollment. No fake helper or ISO.
+            found = []
+            for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):
+                try:
+                    args = path.read_bytes().split(b'\0')
+                except OSError:
+                    continue
+                if (path.parent.name != str(os.getpid()) and args and
+                        args[0].endswith(b'/ilex-enroll') and b'complete' in args):
+                    found.append(int(path.parent.name))
+            assert len(found) == 1, 'ambiguous completion process'
+            os.kill(found[0], signal.SIGKILL)
+            time.sleep(2)
+            root = pathlib.Path('/mnt/sysroot')
+            state = json.loads((root / 'var/lib/ilex/security/enrollment.json').read_text())
+            assert state['state'] == 'recovery-incomplete'
+            assert state['recovery']['acknowledged'] is False and state['tpm'] is None
+            output = subprocess.run(['ilex-enroll', 'status', '--json', '--device',
+                                     '/dev/disk/by-uuid/' + state['uuid']],
+                                    capture_output=True, check=True)
+            tokens = json.loads(output.stdout)
+            assert len(tokens['slots']) == 2 and len(tokens['tokens']) == 1
+            assert tokens['tokens'][0]['type'] == 'systemd-recovery'
+            (PUBLIC / 'interrupted-tokens.json').write_text(json.dumps(tokens))
+            (PRIVATE / 'driver-done').touch()
+            finish()
+            subprocess.run(['systemctl', 'poweroff'], check=True)
+            return
         DRIVE_STEP = 'acknowledge-recovery'
         type_private(b'')
         wait_for(b'Enter the saved recovery key to confirm')
@@ -272,13 +346,7 @@ def drive():
         DRIVE_STEP = 'capture-confirmation'
         safe_capture('RECOVERY-SAFE-SCREEN')
         type_private(b'')
-        DRIVE_STEP = 'wait-final-scan'
-        while not (PRIVATE / 'final-scan').exists():
-            time.sleep(0.2)
-        result = scan([passphrase, recovery])
-        (PUBLIC / 'leak-scan.json').write_text(json.dumps(result))
-        assert not result['secret_found'], 'secret found; matching bytes and lines suppressed'
-        (PRIVATE / 'scanned').touch()
+        (PRIVATE / 'driver-done').touch()
     finally:
         fcntl.ioctl(keyboard, 0x5502)
         os.close(keyboard)
@@ -299,11 +367,17 @@ def finish():
     (PUBLIC / 'eventlog.bin').write_bytes(pathlib.Path('/sys/kernel/security/tpm0/binary_bios_measurements').read_bytes())
     (PUBLIC / 'enrollment.json').write_bytes((root / 'var/lib/ilex/security/enrollment.json').read_bytes())
     (PUBLIC / 'setup.json').write_bytes((root / 'etc/ilex/setup.json').read_bytes())
-    (PRIVATE / 'final-scan').touch()
+    state = json.loads((PUBLIC / 'enrollment.json').read_text())
+    tokens = subprocess.run(['ilex-enroll', 'status', '--json', '--device',
+                             '/dev/disk/by-uuid/' + state['uuid']], capture_output=True, check=True)
+    (PUBLIC / 'tokens.json').write_bytes(tokens.stdout)
     start = time.monotonic()
-    while not (PRIVATE / 'scanned').exists():
+    while not (PRIVATE / 'driver-done').exists():
         assert time.monotonic() - start < 120, 'private leak scan failed or timed out'
         time.sleep(0.2)
+    result = scan()
+    (PUBLIC / 'leak-scan.json').write_text(json.dumps(result))
+    assert not result['secret_found'] and not result['read_errors'], 'private scan failed; details suppressed'
     os.sync()
     marker('DONE')
 
@@ -311,7 +385,7 @@ def finish():
 if __name__ == '__main__':
     harden()
     try:
-        {'prepare': prepare, 'drive': drive, 'finish': finish}[sys.argv[1]]()
+        {'prepare': prepare, 'drive': drive, 'finish': finish, 'finalise': finalise}[sys.argv[1]]()
     except Exception as error:
         # Do not include exception repr: an input or tool failure may contain a
         # credential. Public artifacts expose only the failed phase.

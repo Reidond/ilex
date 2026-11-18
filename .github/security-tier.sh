@@ -61,7 +61,7 @@ echo "security accelerator: **$accel** (runner probe retained); ${ILEX_SECURITY_
 # Real guest boots precede an injected EFI-control startup failure. Run this
 # before normal qualification: the expected failure invalidates its profile.
 ILEX_SECURITY_ACCELERATOR="$accel" bash .github/security-control-startup-self-check.sh
-timeout --signal=TERM --kill-after=20s 45m cargo xtask security --self-check --accelerator "$accel"
+timeout --signal=TERM --kill-after=20s 45m cargo xtask security --self-check --accelerator "$accel" --memory "${ILEX_SECURITY_MEMORY:-4G}"
 python3 - "$ILEX_ARTIFACTS/security/result.json" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))['qualification'] == 'passed', 'missing guest qualification'

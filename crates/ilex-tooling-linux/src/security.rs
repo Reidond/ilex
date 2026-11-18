@@ -396,6 +396,31 @@ fn disable_secure_boot(path: &Path) -> Result<usize> {
     fs::write(path, bytes)?;
     Ok(data_offset)
 }
+
+/// Deliberate policy-mismatch negative on a stopped, owned disposable bundle.
+/// This does not manufacture a TPM, change the manifest or confer qualification.
+pub fn disable_fixture_secure_boot(ws: &Workspace, spec: &VmSpec) -> Result<()> {
+    ensure!(
+        spec.security_launch == ilex_tooling_core::SecurityLaunch::QualificationFixture
+            && spec.secure_boot == Requirement::Required
+            && matches!(spec.tpm, TpmLifecycle::Persistent { .. }),
+        "explicit persistent-TPM negative fixture required"
+    );
+    let root = bundle_path(ws, spec)?;
+    let lock = OpenOptions::new()
+        .write(true)
+        .open(root.join("bundle.lock"))?;
+    lock.try_lock()
+        .context("fixture must be stopped before changing firmware policy")?;
+    let manifest: Manifest = serde_json::from_slice(&fs::read(root.join("bundle.json"))?)?;
+    manifest.authorize(ws, spec)?;
+    ensure!(
+        root.join("tpm/tpm2-00.permall").is_file(),
+        "persistent fixture TPM missing"
+    );
+    disable_secure_boot(&root.join("VARS.fd"))?;
+    Ok(())
+}
 impl Manifest {
     fn authorize(&self, ws: &Workspace, spec: &VmSpec) -> Result<()> {
         ilex_tooling_core::check_version(self.schema)?;

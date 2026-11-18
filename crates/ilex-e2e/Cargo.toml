@@ -23,6 +23,9 @@ serde_json.workspace = true
 toml = "1"
 ilex-vmctl = { path = "../ilex-vmctl" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ilex-enroll = { path = "../ilex-enroll" }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 ilex-tooling-windows.workspace = true
 crc32fast = "1"

@@ -938,6 +938,7 @@ dependencies = [
  "anyhow",
  "crc32fast",
  "ilex-devkit",
+ "ilex-enroll",
  "ilex-tooling-windows",
  "ilex-vmctl",
  "libtest-mimic",
