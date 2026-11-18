@@ -354,7 +354,7 @@ fn checkpoint() -> Result<()> {
         "qualification":"unqualified", "scope":"owned completed-installer checkpoint; this diagnosis cannot qualify the original live finalisation privacy gate",
             "core_boot_proof":if core_proven {"passed"} else if interrupted {"not-applicable-interrupted"} else {"unproven"}, "interruption_boot_proof":if interruption_proven {"passed"} else {"unproven"}, "post_install_gates":if result.is_ok() {"passed"} else {"unqualified"},
             "stage":stage, "source_run":run, "source_harness":receipt["source_head"], "restored_original_tpm_and_vars":restored,
-            "error":result.as_ref().err().map(|_|"private diagnostic details suppressed")
+            "diagnostic":result.as_ref().err().map(failure_code), "error":result.as_ref().err().map(|_|"private diagnostic details suppressed")
         }))?,
     )?;
     bail!(
@@ -732,6 +732,46 @@ fn fingerprints(secrets: &[&Secret]) -> Value {
             .map(|s| json!({"length":s.bytes().len(), "sha256":security::hash(s.bytes())}))
             .collect::<Vec<_>>()
     )
+}
+
+fn failure_code(error: &anyhow::Error) -> Value {
+    // Error chains can contain guest output. Export only fixed classifications
+    // and an OS errno; never the original text, matching path or line.
+    let mut detail = format!("{error:#}").into_bytes();
+    let patterns: &[(&[u8], &str)] = &[
+        (b"QMP chardev-change failed", "console-backend-change"),
+        (b"QMP query-chardev failed", "console-inventory"),
+        (
+            b"expected the fixture's file-backed serial0",
+            "console-backend-type",
+        ),
+        (
+            b"private console endpoint already exists",
+            "console-endpoint-exists",
+        ),
+        (
+            b"did not request fallback authentication",
+            "fallback-prompt",
+        ),
+        (b"did not accept SSH", "ssh-deadline"),
+        (b"qemu exited", "guest-exited"),
+        (b"QMP command", "qmp-deadline"),
+        (b"QMP response ID", "qmp-response-id"),
+    ];
+    let codes: Vec<&str> = patterns
+        .iter()
+        .filter_map(|(pattern, code)| {
+            detail
+                .windows(pattern.len())
+                .any(|w| w == *pattern)
+                .then_some(*code)
+        })
+        .collect();
+    detail.fill(0);
+    let errno = error
+        .chain()
+        .find_map(|e| e.downcast_ref::<std::io::Error>()?.raw_os_error());
+    json!({"codes":codes, "errno":errno})
 }
 
 fn private_scan(script: &str) -> Result<Value> {
