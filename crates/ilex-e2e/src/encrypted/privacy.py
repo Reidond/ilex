@@ -49,6 +49,15 @@ def scan(roots, fingerprints, journal=False):
     def unreadable(_error):
         result['read_errors'] += 1
     for root in roots:
+        # Several target locations are optional (e.g. /var/lib/anaconda on
+        # bootc). An existing directory that cannot be walked still fails.
+        try:
+            pathlib.Path(root).stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            result['read_errors'] += 1
+            continue
         for directory, _, files in os.walk(root, followlinks=False, onerror=unreadable):
             for name in files:
                 path = pathlib.Path(directory) / name
