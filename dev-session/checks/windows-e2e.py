@@ -23,7 +23,7 @@ parser.add_argument('--info', required=True, type=Path)
 parser.add_argument('--artifacts', required=True, type=Path)
 parser.add_argument('--vmctl', required=True, type=Path)
 parser.add_argument('--motion-seconds', type=float, default=65)
-parser.add_argument('operation', choices=['provision', 'clipboard', 'relogin', 'input', 'hold-shift', 'release-shift', 'facts'])
+parser.add_argument('operation', choices=['provision', 'clipboard', 'relogin', 'lock', 'qt-clipboard', 'input', 'focus', 'hold-shift', 'release-shift', 'facts'])
 args = parser.parse_args()
 info = json.loads(args.info.read_text())
 args.artifacts.mkdir(parents=True, exist_ok=True)
@@ -140,9 +140,128 @@ elif args.operation == 'input':
     for code in [125, 18, 56, 15, 29, 1]:
         assert any(e.get('code') == code and e.get('value') == 1 for e in events), ('missing down', code)
         assert any(e.get('code') == code and e.get('value') == 0 for e in events), ('missing up', code)
-    (args.artifacts / 'host-input.json').write_text(json.dumps({'route': 'SendInput physical set-1 scan codes with extended flags', 'chords': titles, 'right_ctrl_g_escape': True}, indent=2))
+    held = set()
+    for event in events:
+        if event.get('code') in [125, 18, 56, 15, 29, 1, 97, 34]:
+            item = (event['device'], event['code'])
+            if event['value'] == 1:
+                held.add(item)
+            elif event['value'] == 0:
+                held.discard(item)
+    assert not held, ('guest keys left held after escape', sorted(held))
+    (args.artifacts / 'host-input.json').write_text(json.dumps({'route': 'SendInput physical set-1 scan codes with extended flags', 'chords': titles, 'right_ctrl_g_escape': True, 'no_held_test_keys': True}, indent=2))
     print('SDL real-input matrix passed')
-elif args.operation in ['clipboard', 'relogin']:
+elif args.operation == 'focus':
+    validate_window(foreground=True)
+    source = client.exec_command('python3 -u /var/tmp/ilex-t4-evdev.py 14')[1]
+    assert json.loads(source.readline())['ready']
+    events = []
+    def event_reader():
+        for line in source:
+            events.append({'observed': time.monotonic(), **json.loads(line)})
+    threading.Thread(target=event_reader, daemon=True).start()
+    if 'exit grab' not in caption():
+        chord(0xa3, 0x47)
+    assert 'exit grab' in caption()
+    key(0xa0)
+    try:
+        until = time.monotonic() + 2
+        while time.monotonic() < until and not any(e['code'] == 42 and e['value'] == 1 for e in events):
+            time.sleep(.05)
+        assert any(e['code'] == 42 and e['value'] == 1 for e in events)
+        (args.artifacts / 'focus-ready.json').write_text(json.dumps({'shift_down_in_guest': True}))
+        until = time.monotonic() + 10
+        while time.monotonic() < until:
+            if user32.GetForegroundWindow() != info['hwnd'] and any(e['code'] == 42 and e['value'] == 0 for e in events):
+                break
+            time.sleep(.05)
+        released = any(e['code'] == 42 and e['value'] == 0 for e in events)
+        host_still_held = bool(user32.GetAsyncKeyState(0xa0) & 0x8000)
+        result = {'guest_release_before_host_release': released, 'host_shift_still_held': host_still_held, 'focus_left_qemu': user32.GetForegroundWindow() != info['hwnd']}
+    finally:
+        key(0xa0, up=True)
+    result['host_shift_released'] = not bool(user32.GetAsyncKeyState(0xa0) & 0x8000)
+    (args.artifacts / 'focus-loss.json').write_text(json.dumps(result, indent=2))
+    (args.artifacts / 'focus-events.json').write_text(json.dumps(events, indent=2))
+    assert all(result.values()), result
+    print('SDL focus-loss release passed')
+elif args.operation == 'qt-clipboard':
+    # Real Qt Quick TextInputs consume/offer the Wayland selection. Paste is
+    # masked; the child emits booleans and frame statistics, never pasted text.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('clipboard', Path(__file__).with_name('win-clipboard.py'))
+    clipboard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(clipboard)
+    assert json.loads(ctl('display'))['backend'] == 'hyprland'
+    uid = int(ssh('id -u ilexdev').decode().strip())
+    launch = f'runuser -u ilexdev -- env XDG_RUNTIME_DIR=/run/user/{uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus systemd-run --user --quiet --pipe --wait --collect --service-type=exec --property=RuntimeMaxSec=120 env QT_QPA_PLATFORM=wayland QSG_RHI_BACKEND=opengl QSG_INFO=1 QT_LOGGING_RULES=qt.rhi.general=true qml-qt6 /var/tmp/ilex-t4-qt-motion.qml'
+    previous = clipboard.read()
+    stream, output, error = client.exec_command(launch)
+    stream.close()
+    messages = queue.Queue()
+    diagnostics = []
+    def qt_reader():
+        for line in error:
+            diagnostics.append(line.rstrip())
+            at = line.find('{')
+            if at >= 0:
+                try:
+                    messages.put(json.loads(line[at:]))
+                except json.JSONDecodeError:
+                    pass
+    threading.Thread(target=qt_reader, daemon=True).start()
+    status_path = args.info.with_name('session-status.json')
+    try:
+        until = time.monotonic() + 20
+        while time.monotonic() < until:
+            if messages.get(timeout=20).get('qt_ready'):
+                break
+        else:
+            raise AssertionError('Qt window did not become active')
+        validate_window(foreground=True)
+        chord(0x11, 0x41)
+        chord(0x11, 0x43)
+        until = time.monotonic() + 5
+        guest_text = 'ilex T4 Qt guest → host Привіт 世界 🚀 ✓'
+        while time.monotonic() < until and clipboard.read() != guest_text:
+            time.sleep(.1)
+        reverse = clipboard.read() == guest_text
+        clipboard.write('ilex T4 Qt host → guest Україна 日本語 🙂 ✓')
+        time.sleep(2)
+        chord(0x09)
+        chord(0x11, 0x56)
+        until = time.monotonic() + 5
+        forward = False
+        while time.monotonic() < until:
+            value = messages.get(timeout=5)
+            if value.get('qt_host_to_guest'):
+                forward = True
+                break
+        result = {'qt_guest_to_host': reverse, 'qt_host_to_guest': forward, 'route': 'SendInput physical Ctrl+A/C, Tab, Ctrl+V into Qt Quick TextInputs'}
+        (args.artifacts / 'qt-clipboard.json').write_text(json.dumps(result, indent=2))
+        print(json.dumps(result))
+        assert reverse and forward
+        time.sleep(2)
+        idle_start = json.loads(status_path.read_text())
+        time.sleep(min(args.motion_seconds, 65))
+        idle_end = json.loads(status_path.read_text())
+        assert all(idle_start[k] == idle_end[k] for k in ['host_updates', 'guest_updates']), 'Qt clipboard feedback loop'
+        (args.artifacts / 'qt-clipboard-idle.json').write_text(json.dumps({'before': idle_start, 'after': idle_end}, indent=2))
+        assert output.channel.recv_exit_status() == 0
+        (args.artifacts / 'qt-renderer-and-motion.txt').write_text('\n'.join(diagnostics))
+        assert any('virgl' in line.lower() for line in diagnostics)
+        metrics = []
+        while not messages.empty():
+            value = messages.get_nowait()
+            if 'samples' in value:
+                metrics.append(value)
+        assert metrics and metrics[-1]['samples'] > 0
+        (args.artifacts / 'qt-motion.json').write_text(json.dumps(metrics, indent=2))
+    finally:
+        (args.artifacts / 'qt-renderer-and-motion.txt').write_text('\n'.join(diagnostics))
+        if previous is not None:
+            clipboard.write(previous)
+elif args.operation in ['clipboard', 'relogin', 'lock']:
     # Independent Wayland client. Transport log contains only renderer/fps and
     # boolean assertions; clipboard payloads and previous host text stay in RAM.
     import importlib.util
@@ -154,9 +273,35 @@ elif args.operation in ['clipboard', 'relogin']:
     status_path = args.info.with_name('session-status.json')
     def status():
         return json.loads(status_path.read_text())
+    if args.operation == 'lock':
+        before = status()
+        assert before['active']
+        sessions = [line.split() for line in ssh('loginctl list-sessions --no-legend').decode().splitlines()]
+        session = [row[0] for row in sessions if len(row) > 3 and row[2:4] == ['ilexdev', 'seat0']]
+        assert len(session) == 1 and session[0].isalnum()
+        try:
+            ssh('loginctl lock-session ' + session[0])
+            until = time.monotonic() + 15
+            while time.monotonic() < until and status()['active']:
+                time.sleep(.1)
+            assert not status()['active']
+            locked = status()
+            clipboard.write('ilex T4 locked-session privacy probe Україна 日本語 🙂')
+            time.sleep(3)
+            after = status()
+            assert not after['active']
+            assert all(locked[k] == after[k] for k in ['host_updates', 'guest_updates'])
+        finally:
+            ssh('loginctl unlock-session ' + session[0])
+        until = time.monotonic() + 20
+        while time.monotonic() < until and not status()['active']:
+            time.sleep(.1)
+        assert status()['active'] and status()['activations'] > before['activations']
+        (args.artifacts / 'lock.json').write_text(json.dumps({'inactive_while_locked': True, 'no_transfers_while_locked': True, 'automatically_reactivated': True}, indent=2))
     if args.operation == 'relogin':
         before = status()
         assert before['active']
+        gdm_before = ssh('systemctl show gdm.service --property=InvocationID --value').decode().strip()
         ssh('systemctl restart gdm')
         until = time.monotonic() + 90
         inactive = False
@@ -168,9 +313,11 @@ elif args.operation in ['clipboard', 'relogin']:
             time.sleep(.2)
         else:
             raise AssertionError('clipboard did not automatically reconnect after guest login')
-        (args.artifacts / 'relogin.json').write_text(json.dumps({'inactive_observed': inactive, 'reactivated': True}, indent=2))
+        gdm_after = ssh('systemctl show gdm.service --property=InvocationID --value').decode().strip()
+        assert gdm_before and gdm_before != gdm_after
+        (args.artifacts / 'relogin.json').write_text(json.dumps({'inactive_observed': inactive, 'reactivated': True, 'gdm_before': gdm_before, 'gdm_after': gdm_after}, indent=2))
     uid = int(ssh('id -u ilexdev').decode().strip())
-    launch = f'runuser -u ilexdev -- env XDG_RUNTIME_DIR=/run/user/{uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus systemd-run --user --quiet --pipe --wait --collect --service-type=exec python3 -u /var/tmp/ilex-t4-gtk-motion.py'
+    launch = f'runuser -u ilexdev -- env XDG_RUNTIME_DIR=/run/user/{uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus systemd-run --user --quiet --pipe --wait --collect --service-type=exec --property=RuntimeMaxSec=180 python3 -u /var/tmp/ilex-t4-gtk-motion.py'
     stdin, stdout, stderr = client.exec_command(launch)
     messages = queue.Queue()
     render = []

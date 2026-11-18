@@ -39,12 +39,23 @@ impl Transport for Socket {
         }
     }
     fn write_message(&mut self, value: &Value, deadline: Instant) -> Result<()> {
-        self.writer.set_write_timeout(Some(
-            deadline
-                .checked_duration_since(Instant::now())
-                .context("QMP deadline expired")?,
-        ))?;
-        writeln!(self.writer, "{value}")?;
+        let mut message = serde_json::to_vec(value)?;
+        message.push(b'\n');
+        ensure!(
+            message.len() as u64 <= MAX_MESSAGE_BYTES,
+            "QMP message exceeds limit"
+        );
+        let mut remaining = message.as_slice();
+        while !remaining.is_empty() {
+            self.writer.set_write_timeout(Some(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .context("QMP deadline expired")?,
+            ))?;
+            let sent = self.writer.write(remaining)?;
+            ensure!(sent != 0, "QMP connection closed during write");
+            remaining = &remaining[sent..];
+        }
         Ok(self.writer.flush()?)
     }
 }

@@ -257,6 +257,7 @@ def session():
     guest_sequence = 0
     transferring = False
     selection_epoch = 0
+    selection_mime = None
     incoming = queue.Queue(8)
     outgoing = queue.Queue(8)
     enabled = True
@@ -332,12 +333,12 @@ def session():
 
     def read_selection():
         nonlocal transferring
-        if transferring or not allowed():
+        if transferring or selection_mime is None or not allowed():
             return
         transferring = True
         epoch = selection_epoch
         try:
-            fd = fdcall('SelectionRead', GLib.Variant('(s)', ('text/plain;charset=utf-8',)))
+            fd = fdcall('SelectionRead', GLib.Variant('(s)', (selection_mime,)))
         except GLib.Error:
             transferring = False
             return
@@ -352,17 +353,29 @@ def session():
             transferring = False
             if data is not None and epoch == selection_epoch:
                 send_text(data)
+            elif epoch != selection_epoch and selection_mime is not None:
+                # A new offer arrived while the previous FD was in flight.
+                # Discard the old bytes, then consume the latest owner.
+                read_selection()
             return False
         threading.Thread(target=worker, daemon=True).start()
 
     def on_signal(conn, sender, obj, iface, name, args):
-        nonlocal selection_epoch
+        nonlocal selection_epoch, selection_mime
         if name == 'Closed':
             loop.quit()
         elif name == 'SelectionOwnerChanged':
             selection_epoch += 1
             options = args.unpack()[0]
-            if not options.get('session-is-owner') and any(t in options.get('mime-types', []) for t in ['text/plain;charset=utf-8', 'text/plain']):
+            types = options.get('mime-types', ())
+            # Mutter 51 encodes this option as a (as) variant, which PyGObject
+            # unpacks to a one-tuple containing the MIME list.
+            if isinstance(types, tuple) and len(types) == 1 and isinstance(types[0], (list, tuple)):
+                types = types[0]
+            selection_mime = next((t for t in ['text/plain;charset=utf-8', 'text/plain'] if isinstance(types, (list, tuple)) and t in types), None)
+            if options.get('session-is-owner'):
+                selection_mime = None
+            if selection_mime is not None:
                 read_selection()
         elif name == 'SelectionTransfer':
             mime, serial = args.unpack()
