@@ -1,0 +1,16 @@
+{
+  "occluded_timestamps_advance": true,
+  "occluded_pixels_change": true,
+  "source": "wgc",
+  "client_size": [
+    1496,
+    903
+  ],
+  "minimized_output_absent": true,
+  "minimized_reason": true,
+  "restore_timestamp_advances": true,
+  "restore_size": [
+    1496,
+    903
+  ]
+}

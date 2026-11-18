@@ -1,0 +1,28 @@
+{
+  "route": "SendInput physical set-1 scan codes with extended flags",
+  "chords": [
+    {
+      "chord": "super",
+      "caption": "QEMU (ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-research-0) - Press Right-Ctrl-G to exit grab",
+      "foreground_qemu": true
+    },
+    {
+      "chord": "super-e",
+      "caption": "QEMU (ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-research-0) - Press Right-Ctrl-G to exit grab",
+      "foreground_qemu": true
+    },
+    {
+      "chord": "alt-tab",
+      "caption": "QEMU (ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-research-0) - Press Right-Ctrl-G to exit grab",
+      "foreground_qemu": true
+    },
+    {
+      "chord": "ctrl-esc",
+      "caption": "QEMU (ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-research-0) - Press Right-Ctrl-G to exit grab",
+      "foreground_qemu": true
+    }
+  ],
+  "right_ctrl_g_escape": true,
+  "no_held_test_keys": true,
+  "hyprland_super_e_actions": 3
+}

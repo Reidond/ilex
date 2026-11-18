@@ -1,0 +1,13 @@
+{
+  "builder_root": "/var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/snapshots/b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41-885f2eafa1a128db9dad7f72daa89335ef4464e3",
+  "builder_seconds": 38.4470587,
+  "chunks": 210,
+  "schema": 1,
+  "snapshot": "sha256:b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41",
+  "snapshot_seconds": 3.9896288,
+  "source_bytes": 1729756,
+  "stage_seconds": 44.2469694,
+  "started_unix_ms": 1794970415139,
+  "upload_seconds": 1.8051895,
+  "uploaded_bytes": 624810
+}

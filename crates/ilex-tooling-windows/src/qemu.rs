@@ -490,6 +490,37 @@ impl Vm {
                 old.owner == config.identity.owner && !old.is_running(),
                 "foreign or live VM metadata; stop its owning launcher first"
             );
+            ensure!(
+                !old.run.is_empty() && old.run.bytes().all(|b| b.is_ascii_digit() || b == b'-'),
+                "invalid stale VM run identity"
+            );
+            let old_run = dir.join(&old.run);
+            ensure!(
+                old.ssh_key == old_run.join("id_ed25519"),
+                "stale key path escaped its run"
+            );
+            if old_run.exists() {
+                let _directory = crate::received::Directory::open(&old_run)?;
+                for name in [
+                    "id_ed25519",
+                    "id_ed25519.pub",
+                    "host_ed25519",
+                    "host_ed25519.pub",
+                ] {
+                    let path = old_run.join(name);
+                    if path.exists() {
+                        fs::remove_file(path)?;
+                    }
+                }
+                if old.disk == old_run.join("overlay.qcow2") {
+                    for path in [&old.disk, &old.disk.with_extension("vars.fd")] {
+                        if path.exists() {
+                            fs::remove_file(path)?;
+                        }
+                    }
+                }
+            }
+            qmp::Endpoints::clean_stale(&old.owner, &old.run)?;
         }
         let runtime = runtime::fetch()?;
         let disk = std::path::absolute(&config.disk)?;

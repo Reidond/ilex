@@ -178,6 +178,8 @@ pub fn connect(endpoint: &str) -> Result<(TcpStream, Access)> {
             "creating private QMP socket: {}",
             WSAGetLastError()
         );
+        // TcpStream provides Winsock read/write/deadline ownership for this
+        // AF_UNIX handle. The socket never uses the TCP/IP address family.
         let stream = TcpStream::from_raw_socket(raw as _);
         stream.set_nonblocking(true)?;
         let mut address: SOCKADDR_UN = std::mem::zeroed();

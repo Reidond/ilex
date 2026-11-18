@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "results": [
+    {
+      "role": "control",
+      "utc": "2026-11-18T05:21:06Z",
+      "acl": {
+        "acl_verified": true,
+        "allowed_sids": [
+          "S-1-5-18",
+          "S-1-5-21-2519408406-910423453-1880906839-1001"
+        ],
+        "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+        "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/705f25b3821751da56a0f4e62fe1122f/control.sock",
+        "transport": "windows-af-unix"
+      },
+      "normal_before": true,
+      "low_integrity_sid": "S-1-16-4096",
+      "parent_token_id": "f935226f00000000",
+      "child_token_id": "626a226f00000000",
+      "verified_child_integrity_rid": 4096,
+      "low_client_exit": 1,
+      "low_client_error": "Error: connecting private QMP socket: 10013\n",
+      "normal_after": true
+    },
+    {
+      "role": "input",
+      "utc": "2026-11-18T05:21:06Z",
+      "acl": {
+        "acl_verified": true,
+        "allowed_sids": [
+          "S-1-5-18",
+          "S-1-5-21-2519408406-910423453-1880906839-1001"
+        ],
+        "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+        "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/705f25b3821751da56a0f4e62fe1122f/input.sock",
+        "transport": "windows-af-unix"
+      },
+      "normal_before": true,
+      "low_integrity_sid": "S-1-16-4096",
+      "parent_token_id": "f935226f00000000",
+      "child_token_id": "e97f226f00000000",
+      "verified_child_integrity_rid": 4096,
+      "low_client_exit": 1,
+      "low_client_error": "Error: connecting private QMP socket: 10013\n",
+      "normal_after": true
+    }
+  ]
+}

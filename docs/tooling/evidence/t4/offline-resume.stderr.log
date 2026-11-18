@@ -1,0 +1,6 @@
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal

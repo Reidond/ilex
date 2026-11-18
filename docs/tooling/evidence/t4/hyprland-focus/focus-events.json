@@ -1,0 +1,44 @@
+[
+  {
+    "observed": 52202.968,
+    "time": 1794972705.543153,
+    "device": "/dev/input/event4",
+    "code": 42,
+    "value": 1
+  },
+  {
+    "observed": 52203.218,
+    "time": 1794972705.799284,
+    "device": "/dev/input/event4",
+    "code": 42,
+    "value": 2
+  },
+  {
+    "observed": 52203.25,
+    "time": 1794972705.833284,
+    "device": "/dev/input/event4",
+    "code": 42,
+    "value": 2
+  },
+  {
+    "observed": 52203.296,
+    "time": 1794972705.867093,
+    "device": "/dev/input/event4",
+    "code": 42,
+    "value": 2
+  },
+  {
+    "observed": 52203.328,
+    "time": 1794972705.901638,
+    "device": "/dev/input/event4",
+    "code": 42,
+    "value": 2
+  },
+  {
+    "observed": 52203.343,
+    "time": 1794972705.922927,
+    "device": "/dev/input/event4",
+    "code": 42,
+    "value": 0
+  }
+]

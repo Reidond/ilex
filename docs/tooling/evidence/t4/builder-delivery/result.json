@@ -1,0 +1,59 @@
+{
+  "artifacts": [
+    {
+      "bytes": 39139,
+      "path": "job/context.json",
+      "sha256": "sha256:7bd64de8b53987a301a7e9bfcd9666d105b22e694cbaba5421364cdbb3266ac5"
+    },
+    {
+      "bytes": 62625,
+      "path": "job/request.json",
+      "sha256": "sha256:bd54ced32c90515b3d148d423fbaf8e123373e0573b5b0d0c1f1f340fb8b5861"
+    },
+    {
+      "bytes": 34,
+      "path": "job/state.json",
+      "sha256": "sha256:1756452a8c1bbbace908ea9c20146f348ea5d54ab82c6672e8533b6d0718ae60"
+    },
+    {
+      "bytes": 5437,
+      "path": "job/stderr.log",
+      "sha256": "sha256:5a9f44ec527c642824e349ab8353e9d52fd2ea54834431074a694748a58dda31"
+    },
+    {
+      "bytes": 515,
+      "path": "job/stdout.log",
+      "sha256": "sha256:13c83a162c1d108432e7aa339e86309f946aadc0e21c3d2c1c0941aa83fb0bb9"
+    },
+    {
+      "bytes": 6073090048,
+      "path": "disks/localhost_ilex_wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc-a35ccae3ebf87c6a.qcow2",
+      "sha256": "sha256:dfe2e5ed22b21d36320c6140687478eab046d6c7ff70d05f9563b1669799c2a6"
+    },
+    {
+      "bytes": 1295,
+      "path": "disks/localhost_ilex_wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc-a35ccae3ebf87c6a.qcow2.disk.json",
+      "sha256": "sha256:c45d66deab788ca5b395d29955ed0eb7c386ec0763f3f1250f993cf058392ee4"
+    }
+  ],
+  "compile_seconds": 42.711345521000005,
+  "data_free_after": 199601324032,
+  "data_free_before": 200256458752,
+  "elapsed_seconds": 53.347747851,
+  "executor_id": "hyperv-builder:3c09e083-3b2b-4ab0-bf23-e96b1dc57322",
+  "exit_code": 0,
+  "job": "7e28a556-cbe5-4efb-be20-e2457f0bcbe3",
+  "operation_seconds": 5.354404672000001,
+  "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+  "resource_cleanup_error": null,
+  "resource_lease_retained": false,
+  "schema": 1,
+  "source_digest": "sha256:b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41",
+  "versions": {
+    "bcvk": "bcvk 0.22.0",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27) (Fedora 1.99.1-2.fc45)",
+    "podman": "podman version 6.1.3",
+    "qemu-system-x86_64": "QEMU emulator version 11.1.3 (qemu-11.1.3-1.fc45)",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Fedora 1.99.1-2.fc45)"
+  }
+}

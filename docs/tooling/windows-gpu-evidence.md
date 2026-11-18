@@ -1,5 +1,35 @@
 # T4 native Windows acceptance
 
+Raw artifacts are checked in under [`evidence/t4`](evidence/t4). The
+[`manifest`](evidence/t4/manifest.json) records SHA256, byte count and original
+file-write UTC for every copied artifact. Capture sidecars contain acquisition
+UTC, presentation ticks, run identity and physical client size. Application
+frame-rate logs retain their elapsed-time samples. These are the original
+probe outputs; the small `identity.json` files select public identity fields
+from runtime metadata and omit credential paths.
+
+| Acceptance claim | Raw evidence |
+| --- | --- |
+| Builder delivery, installed disk identity and successful job | [Receiver receipt](evidence/t4/builder-delivery/collection.json), [worker result](evidence/t4/builder-delivery/result.json), [disk manifest](evidence/t4/builder-delivery/disk.windows.json), [worker stdout](evidence/t4/builder-delivery/job/stdout.log), [worker stderr](evidence/t4/builder-delivery/job/stderr.log), [offline resume](evidence/t4/offline-resume.stdout.log). The default delivery reused the disk installed by the earlier builder job. |
+| Actual GNOME renderer and final-profile sustained frame rate | [Guest facts](evidence/t4/builder-cold1/guest-facts.txt), [GTK renderer and five-second frame samples](evidence/t4/usb-gnome-pass/gnome-motion.json), [owned run identity](evidence/t4/usb-gnome/identity.json). |
+| GNOME real host input and focus release | [SendInput driver result](evidence/t4/usb-gnome-input/host-input.json), [raw guest evdev events](evidence/t4/usb-gnome-input/guest-input.json), [focus assertions](evidence/t4/gnome-input/focus-loss.json), [focus evdev trace](evidence/t4/gnome-input/focus-events.json). |
+| GNOME Unicode, byte limits, no loops and re-login/lock | [Unicode checks](evidence/t4/usb-gnome-pass/clipboard.json), [byte-boundary results](evidence/t4/usb-gnome-pass/byte-limits.json), [65-second counter observations](evidence/t4/usb-gnome-pass/clipboard-idle-counters.json), [re-login](evidence/t4/builder-relogin/relogin.json), [post-login Unicode](evidence/t4/builder-relogin/clipboard.json), [post-login counters](evidence/t4/builder-relogin/clipboard-idle-counters.json), [lock](evidence/t4/gnome-lock/lock.json). Payloads are not recorded. |
+| Hyprland/Qt renderer, motion and resize | [Qt renderer/runtime output](evidence/t4/usb-hyprland-qt/qt-renderer-and-motion.txt), [raw frame interval statistics](evidence/t4/usb-hyprland-qt/qt-motion.json), [guest output after resize](evidence/t4/usb-hyprland-qt/display-after-resize.json), [before crop metadata](evidence/t4/usb-hyprland-qt/before-resize.frame.json), [after crop metadata](evidence/t4/usb-hyprland-qt/after-resize.frame.json), [sampled recording audit](evidence/t4/usb-hyprland-qt/recording/audit.json). |
+| Hyprland host input, compositor actions and focus release | [Host driver](evidence/t4/usb-hyprland-input/host-input.json), [guest evdev](evidence/t4/usb-hyprland-input/guest-input.json), [focus result](evidence/t4/hyprland-focus/focus-loss.json), [focus evdev](evidence/t4/hyprland-focus/focus-events.json). |
+| Qt Unicode and re-login without loops | [Qt checks](evidence/t4/usb-hyprland-qt/qt-clipboard.json), [65-second counters](evidence/t4/usb-hyprland-qt/qt-clipboard-idle.json), [re-login](evidence/t4/hyprland-relogin/relogin.json), [post-login checks](evidence/t4/hyprland-relogin/qt-clipboard.json), [post-login counters](evidence/t4/hyprland-relogin/qt-clipboard-idle.json). |
+| WGC occlusion, minimize and restore | [Occluded frame A](evidence/t4/hyprland-relogin/occluded-a.frame.json), [frame B](evidence/t4/hyprland-relogin/occluded-b.frame.json), [observations](evidence/t4/hyprland-relogin/capture-checks.json), [verified-minimize error](evidence/t4/hyprland-minimized-verified.stderr.log), [restored crop](evidence/t4/hyprland-relogin/restored-verified.frame.json). The earlier `minimized.png` was an unsuccessful setup attempt and is excluded. |
+| Native vmctl and MCP mapping recovery | [Real native self-check](evidence/t4/builder-cold1/vmctl-self-check.json), [stdio MCP resize check](evidence/t4/usb-gnome-mcp/mcp-check.json). |
+| Repeated boot credentials, pin rejection and enforcing labels | [First boot](evidence/t4/builder-cold1/ssh-identity.json), [second boot](evidence/t4/builder-cold2/ssh-identity.json), [final GNOME boot](evidence/t4/usb-gnome/ssh-identity.json), [guest provisioning/labels](evidence/t4/usb-gnome/ssh-provisioning.txt). |
+| Grabbed shutdown and fixed resource policy | [GNOME shutdown timing](evidence/t4/usb-gnome/shutdown-grabbed.json), [Hyprland shutdown timing](evidence/t4/usb-hyprland-qt/shutdown-grabbed.json), [timestamped host capacity/configuration observations](evidence/t4/capacity.jsonl). |
+| Development helper isolation | [Ordinary image filesystem audit](evidence/t4/production-helper-audit.json), [private composition audit](evidence/t4/development-helper-audit.json). |
+| Review P1: ACLs, reconnects and low-integrity denial | [Pinned QEMU endpoints and verified ACLs](evidence/t4/review-transport-final/transport-ready.json), [real lowered-token connection results](evidence/t4/review-transport-final/low-integrity.json). Both clients receive Windows error 10013; normal clients reconnect before and after. |
+
+The original desktop observations below predate the base-stack rewrite and
+identify their frozen installed disk/source explicitly. Post-review transport
+results use the rebased Windows implementation. The delayed-login,
+compositor-switch, PrintWindow frozen-guest and launcher-teardown regression
+results are still awaiting host capacity and are not claimed complete here.
+
 These are real VM observations from 17–18 November 2026, separate from the
 feasibility spike. The host runs Windows 11 Pro build 26300 with a Radeon
 RX 9070 XT and 150% display scaling. Desktop VMs use 8 GiB and four vCPUs;

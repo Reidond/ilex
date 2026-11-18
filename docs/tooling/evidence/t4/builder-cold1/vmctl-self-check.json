@@ -1,0 +1,85 @@
+{
+  "capabilities": {
+    "features": {
+      "clipboard": {
+        "reason": "no active unlocked development session",
+        "status": "unavailable"
+      },
+      "destroy": {
+        "status": "available"
+      },
+      "firmware_enforcement": {
+        "reason": "WHPX development profile is nonsecure; Gen2 security is a separate provider",
+        "status": "unavailable"
+      },
+      "gpu_rendering": {
+        "status": "available"
+      },
+      "persistent_tpm": {
+        "reason": "WHPX development profile is nonsecure; Gen2 security is a separate provider",
+        "status": "unavailable"
+      },
+      "preboot_keyboard": {
+        "status": "available"
+      },
+      "preboot_pointer": {
+        "reason": "use firmware keyboard navigation",
+        "status": "not_yet_qualified"
+      },
+      "screenshot": {
+        "status": "available"
+      },
+      "serial": {
+        "status": "available"
+      },
+      "session_keyboard": {
+        "status": "available"
+      },
+      "session_pointer": {
+        "status": "available"
+      },
+      "start": {
+        "status": "available"
+      },
+      "stop": {
+        "status": "available"
+      },
+      "suspend": {
+        "reason": "WHPX development profile is nonsecure; Gen2 security is a separate provider",
+        "status": "unavailable"
+      }
+    },
+    "phase": "unknown",
+    "provider": "windows-qemu-whpx",
+    "schema": 1,
+    "screenshot_dimensions": [
+      1280,
+      800
+    ],
+    "screenshot_source": "wgc",
+    "text_layout": "US physical keyboard; ASCII text only (Unicode via dev clipboard)",
+    "vm_id": "41868:134394444158367222"
+  },
+  "coordinate_space": "client_pixels",
+  "first_timestamp_ms": 1794970913712,
+  "fresh": true,
+  "generation": 1,
+  "qmp": {
+    "running": true,
+    "status": "running"
+  },
+  "schema": 1,
+  "second_timestamp_ms": 1794970914055,
+  "size": [
+    1280,
+    800
+  ],
+  "vm": {
+    "guest_arch": "x86_64",
+    "opaque_id": "41868:134394444158367222",
+    "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+    "provider": "windows-qemu-whpx",
+    "run": "9196-1794970575272679300",
+    "schema": 1
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "architecture": "x86_64",
+  "format": "qcow2",
+  "virtual_bytes": 32212254720,
+  "allocated_bytes": 6073090048,
+  "sector_bytes": 512,
+  "image": {
+    "executor_id": "linux-local:sha256:b9c22bd867d10addb3014eb9f11d08b6138d96217b4de62f4e9860c0cc039ee1",
+    "local_reference": "localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc",
+    "immutable_id": "d3530f6ae044cb231b0f705864d9703649c9c5f4cb0331531995557a44911988",
+    "registry_digest": "sha256:47ba0b4fd31b507ffc83b2a10596b50c1516fc83705569f4acf88fcc66c5d06e",
+    "architecture": "x86_64"
+  },
+  "install_recipe_hash": "sha256:2ed0fca1e411734dbcd1a9f801d9da82fa09d67484c31c146088659b3fc6d094",
+  "firmware": "uefi",
+  "provisioning_hash": "sha256:deef8641a3da83f287f4dade68543144083348ca4932457218c558a73338d148",
+  "location": {
+    "executor_id": "windows-owner:64addbb8-4a8c-8d86-b005-4b17d6877a97",
+    "path": "C:\\Users\\reido\\AppData\\Local\\ilex\\checkouts\\t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef\\remote\\received\\7e28a556-cbe5-4efb-be20-e2457f0bcbe3\\5e6132ae-32df-430f-9502-3acf39c2785f\\disks/localhost_ilex_wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc-a35ccae3ebf87c6a.qcow2",
+    "sha256": "sha256:dfe2e5ed22b21d36320c6140687478eab046d6c7ff70d05f9563b1669799c2a6"
+  }
+}

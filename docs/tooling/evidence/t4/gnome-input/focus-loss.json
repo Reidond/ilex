@@ -1,0 +1,6 @@
+{
+  "guest_release_before_host_release": true,
+  "host_shift_still_held": true,
+  "focus_left_qemu": true,
+  "host_shift_released": true
+}

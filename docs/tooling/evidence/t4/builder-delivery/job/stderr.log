@@ -1,0 +1,70 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling serde_core v1.0.229
+   Compiling unicode-ident v1.0.27
+   Compiling version_check v0.9.5
+   Compiling quote v1.0.47
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling syn v3.0.9
+   Compiling zmij v1.0.23
+   Compiling anyhow v1.0.104
+   Compiling serde_json v1.0.154
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling rustix v1.1.6
+   Compiling winnow v1.0.5
+   Compiling serde v1.0.229
+   Compiling toml_parser v1.1.5+spec-1.1.0
+   Compiling digest v0.10.7
+   Compiling serde_spanned v1.1.3
+   Compiling toml_datetime v1.1.3+spec-1.1.0
+   Compiling toml_writer v1.2.0+spec-1.1.0
+   Compiling cpufeatures v0.2.17
+   Compiling cfg-if v1.0.5
+   Compiling libc v0.2.191
+   Compiling bitflags v2.13.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling sha2 v0.10.9
+   Compiling toml v1.2.1+spec-1.1.0
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling ilex-tooling-qmp v0.1.0 (/var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/snapshots/b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41-885f2eafa1a128db9dad7f72daa89335ef4464e3/crates/ilex-tooling-qmp)
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling gethostname v1.1.0
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling x11rb-protocol v0.13.2
+   Compiling anstyle v1.0.14
+   Compiling anstream v1.0.0
+   Compiling memmap2 v0.9.12
+   Compiling heck v0.5.0
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.1
+   Compiling clap_builder v4.6.7
+   Compiling x11rb v0.13.2
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.7
+   Compiling ilex-tooling-core v0.1.0 (/var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/snapshots/b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41-885f2eafa1a128db9dad7f72daa89335ef4464e3/crates/ilex-tooling-core)
+   Compiling clap v4.6.7
+   Compiling ilex-tooling-linux v0.1.0 (/var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/snapshots/b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41-885f2eafa1a128db9dad7f72daa89335ef4464e3/crates/ilex-tooling-linux)
+   Compiling ilex-tooling-windows v0.1.0 (/var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/snapshots/b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41-885f2eafa1a128db9dad7f72daa89335ef4464e3/crates/ilex-tooling-windows)
+   Compiling ilex-devkit v0.1.0 (/var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/snapshots/b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41-885f2eafa1a128db9dad7f72daa89335ef4464e3/crates/ilex-devkit)
+   Compiling xtask v0.1.0 (/var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/snapshots/b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41-885f2eafa1a128db9dad7f72daa89335ef4464e3/crates/xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 42.66s
+$ podman image inspect --format '{{json .Config.Labels}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef
+$ podman image inspect --format '{{json .Config.Labels}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef
+$ podman image inspect --format '{{json .Config.Labels}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef
+$ podman image inspect --format '{{.Id}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef
+$ podman info --format '{{.Store.GraphRoot}}'
+$ podman image inspect --format '{{json .Config.Labels}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc
+$ podman image inspect --format '{{json .Config.Labels}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc
+$ podman image inspect --format '{{json .Config.Labels}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc
+$ bcvk to-disk --format qcow2 --console --log-dir journal,console=/run/ilex-builder/ilex-vm/t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef/disk-install-3874 --disk-size 30G localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc /var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/state/t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef/disks/localhost_ilex_wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc-a35ccae3ebf87c6a.qcow2
+disk for localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc: /var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/state/t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef/disks/localhost_ilex_wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc-a35ccae3ebf87c6a.qcow2
+$ qemu-img info --output=json /var/lib/ilex-data/checkouts/64addbb8-4a8c-8d86-b005-4b17d6877a97/state/t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef/disks/localhost_ilex_wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc-a35ccae3ebf87c6a.qcow2
+$ podman info --format '{{.Store.GraphRoot}}'
+$ podman --version
+$ podman image inspect --format '{{.Id}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc
+$ podman image inspect --format '{{.Digest}}' localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc

@@ -1,0 +1,8 @@
+{
+  "maximum_utf8_bytes": 262144,
+  "maximum_ascii_host_to_guest": true,
+  "maximum_host_to_guest": true,
+  "oversize_host_to_guest_refused": true,
+  "oversize_guest_to_host_refused": true,
+  "normal_transfer_recovers": true
+}

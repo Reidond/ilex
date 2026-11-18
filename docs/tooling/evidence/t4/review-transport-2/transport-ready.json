@@ -1,0 +1,26 @@
+{
+  "control": {
+    "acl_verified": true,
+    "allowed_sids": [
+      "S-1-5-18",
+      "S-1-5-21-2519408406-910423453-1880906839-1001"
+    ],
+    "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+    "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/011f0ec8e432c1104dc3c2471efee532/control.sock",
+    "transport": "windows-af-unix"
+  },
+  "input": {
+    "acl_verified": true,
+    "allowed_sids": [
+      "S-1-5-18",
+      "S-1-5-21-2519408406-910423453-1880906839-1001"
+    ],
+    "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+    "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/011f0ec8e432c1104dc3c2471efee532/input.sock",
+    "transport": "windows-af-unix"
+  },
+  "pid": 12956,
+  "reconnect_passed": true,
+  "run": "32100-1794978004672323700",
+  "schema": 1
+}

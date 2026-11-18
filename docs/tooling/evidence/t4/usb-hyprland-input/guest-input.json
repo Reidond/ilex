@@ -1,0 +1,272 @@
+[
+  {
+    "time": 1794973877.819808,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 1
+  },
+  {
+    "time": 1794973877.92075,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 0
+  },
+  {
+    "time": 1794973878.023503,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 1
+  },
+  {
+    "time": 1794973878.125341,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 0
+  },
+  {
+    "time": 1794973878.22667,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 1
+  },
+  {
+    "time": 1794973878.329094,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 0
+  },
+  {
+    "time": 1794973878.429309,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 1
+  },
+  {
+    "time": 1794973878.563814,
+    "device": "/dev/input/event4",
+    "code": 18,
+    "value": 1
+  },
+  {
+    "time": 1794973878.633755,
+    "device": "/dev/input/event4",
+    "code": 18,
+    "value": 0
+  },
+  {
+    "time": 1794973878.706332,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 0
+  },
+  {
+    "time": 1794973878.807819,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 1
+  },
+  {
+    "time": 1794973878.939005,
+    "device": "/dev/input/event4",
+    "code": 18,
+    "value": 1
+  },
+  {
+    "time": 1794973879.002877,
+    "device": "/dev/input/event4",
+    "code": 18,
+    "value": 0
+  },
+  {
+    "time": 1794973879.074538,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 0
+  },
+  {
+    "time": 1794973879.17752,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 1
+  },
+  {
+    "time": 1794973879.310583,
+    "device": "/dev/input/event4",
+    "code": 18,
+    "value": 1
+  },
+  {
+    "time": 1794973879.374239,
+    "device": "/dev/input/event4",
+    "code": 18,
+    "value": 0
+  },
+  {
+    "time": 1794973879.449917,
+    "device": "/dev/input/event4",
+    "code": 125,
+    "value": 0
+  },
+  {
+    "time": 1794973879.55227,
+    "device": "/dev/input/event4",
+    "code": 56,
+    "value": 1
+  },
+  {
+    "time": 1794973879.65206,
+    "device": "/dev/input/event4",
+    "code": 15,
+    "value": 1
+  },
+  {
+    "time": 1794973879.752263,
+    "device": "/dev/input/event4",
+    "code": 15,
+    "value": 0
+  },
+  {
+    "time": 1794973879.856001,
+    "device": "/dev/input/event4",
+    "code": 56,
+    "value": 0
+  },
+  {
+    "time": 1794973879.958704,
+    "device": "/dev/input/event4",
+    "code": 56,
+    "value": 1
+  },
+  {
+    "time": 1794973880.061969,
+    "device": "/dev/input/event4",
+    "code": 15,
+    "value": 1
+  },
+  {
+    "time": 1794973880.165178,
+    "device": "/dev/input/event4",
+    "code": 15,
+    "value": 0
+  },
+  {
+    "time": 1794973880.269448,
+    "device": "/dev/input/event4",
+    "code": 56,
+    "value": 0
+  },
+  {
+    "time": 1794973880.372034,
+    "device": "/dev/input/event4",
+    "code": 56,
+    "value": 1
+  },
+  {
+    "time": 1794973880.474381,
+    "device": "/dev/input/event4",
+    "code": 15,
+    "value": 1
+  },
+  {
+    "time": 1794973880.577665,
+    "device": "/dev/input/event4",
+    "code": 15,
+    "value": 0
+  },
+  {
+    "time": 1794973880.679432,
+    "device": "/dev/input/event4",
+    "code": 56,
+    "value": 0
+  },
+  {
+    "time": 1794973880.780318,
+    "device": "/dev/input/event4",
+    "code": 29,
+    "value": 1
+  },
+  {
+    "time": 1794973880.882714,
+    "device": "/dev/input/event4",
+    "code": 1,
+    "value": 1
+  },
+  {
+    "time": 1794973880.985621,
+    "device": "/dev/input/event4",
+    "code": 1,
+    "value": 0
+  },
+  {
+    "time": 1794973881.088509,
+    "device": "/dev/input/event4",
+    "code": 29,
+    "value": 0
+  },
+  {
+    "time": 1794973881.191311,
+    "device": "/dev/input/event4",
+    "code": 29,
+    "value": 1
+  },
+  {
+    "time": 1794973881.293559,
+    "device": "/dev/input/event4",
+    "code": 1,
+    "value": 1
+  },
+  {
+    "time": 1794973881.399542,
+    "device": "/dev/input/event4",
+    "code": 1,
+    "value": 0
+  },
+  {
+    "time": 1794973881.500965,
+    "device": "/dev/input/event4",
+    "code": 29,
+    "value": 0
+  },
+  {
+    "time": 1794973881.601419,
+    "device": "/dev/input/event4",
+    "code": 29,
+    "value": 1
+  },
+  {
+    "time": 1794973881.703303,
+    "device": "/dev/input/event4",
+    "code": 1,
+    "value": 1
+  },
+  {
+    "time": 1794973881.805673,
+    "device": "/dev/input/event4",
+    "code": 1,
+    "value": 0
+  },
+  {
+    "time": 1794973881.910572,
+    "device": "/dev/input/event4",
+    "code": 29,
+    "value": 0
+  },
+  {
+    "time": 1794973882.014257,
+    "device": "/dev/input/event4",
+    "code": 97,
+    "value": 1
+  },
+  {
+    "time": 1794973882.269169,
+    "device": "/dev/input/event4",
+    "code": 97,
+    "value": 2
+  },
+  {
+    "time": 1794973882.30166,
+    "device": "/dev/input/event4",
+    "code": 97,
+    "value": 0
+  }
+]

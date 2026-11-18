@@ -1,0 +1,10 @@
+{
+  "run": "43704-1794971190950395500",
+  "disk": "gui-63fa03f78e655595.qcow2",
+  "correct_pin_accepted": true,
+  "wrong_pin_rejected": true,
+  "firmware_access_key_matches": true,
+  "host_pin_sha256": "3ceca55e93af3bc042528eb9f652a80c5b6b456ee1b050ffcc2edcb014a32899",
+  "access_key_sha256": "f6b60f26a613fa4b7d245a20eb21e4d08c9f576ec8b146ad9124c74f4008ec8e",
+  "persistent_overlay_new_keys_passed": true
+}

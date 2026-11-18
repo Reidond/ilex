@@ -119,6 +119,29 @@ pub struct Endpoints {
     path: std::path::PathBuf,
 }
 impl Endpoints {
+    pub fn clean_stale(owner: &str, run: &str) -> Result<()> {
+        let root = crate::host::root()?.join("qmp");
+        for attempt in 0..5 {
+            let path =
+                root.join(&crate::host::hash(format!("{owner}:{run}:{attempt}").as_bytes())[..32]);
+            if !path.exists() {
+                continue;
+            }
+            let _directory = crate::received::Directory::open(&path)?;
+            for name in ["control.sock", "input.sock"] {
+                let socket = path.join(name);
+                if socket.exists() {
+                    let endpoint = format!("unix:{}", socket.to_string_lossy().replace('\\', "/"));
+                    // Verify type and ACL before removing only this dead run's socket.
+                    drop(crate::private_qmp::verify(&endpoint)?);
+                    std::fs::remove_file(socket)?;
+                }
+            }
+            drop(_directory);
+            std::fs::remove_dir(path)?;
+        }
+        Ok(())
+    }
     pub fn new(owner: &str, run: &str, attempt: usize) -> Result<Self> {
         let root = crate::host::root()?.join("qmp");
         crate::host::secure_dir(&root)?;

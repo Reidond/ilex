@@ -1,0 +1,415 @@
+{
+  "schema": 1,
+  "exported_utc": "2026-11-18T05:23:23.400162+00:00",
+  "timestamp_note": "file_written_utc is the original artifact file timestamp; capture sidecars carry presentation/UTC acquisition metadata. Raw contents are copied byte for byte.",
+  "files": [
+    {
+      "path": "builder-cold1/guest-facts.txt",
+      "bytes": 1589,
+      "sha256": "b124b6167c7458761e95cd31286200ea003c5cdb0f35e45101a76707d3b2d2a0",
+      "file_written_utc": "2026-11-18T03:05:03.309205+00:00"
+    },
+    {
+      "path": "builder-cold1/ssh-identity.json",
+      "bytes": 368,
+      "sha256": "0b7cc992be85919629ecf9b03a36bf55b412abe382cad70c152977afed435c35",
+      "file_written_utc": "2026-11-18T03:01:36.494223+00:00"
+    },
+    {
+      "path": "builder-cold1/ssh-provisioning.txt",
+      "bytes": 227,
+      "sha256": "a0e91ce706bcc1464a5a9033b8154ac2c7093aad43b3b9c0151c885364c4dbfa",
+      "file_written_utc": "2026-11-18T03:01:36.473129+00:00"
+    },
+    {
+      "path": "builder-cold1/vmctl-self-check.json",
+      "bytes": 2140,
+      "sha256": "c26218a88ca37e8c402a8fa004b772c184d1c18ca24285e29c4bcf79388294dd",
+      "file_written_utc": "2026-11-18T03:01:54.179903+00:00"
+    },
+    {
+      "path": "builder-cold2/ssh-identity.json",
+      "bytes": 416,
+      "sha256": "b3f2116ea00d965ceceab578f1668b31ab38a9e165356ee2e074427212647a31",
+      "file_written_utc": "2026-11-18T03:07:06.628511+00:00"
+    },
+    {
+      "path": "builder-cold2/ssh-provisioning.txt",
+      "bytes": 227,
+      "sha256": "be1e581dfebdc514433e71a47555ce1300536919cf990558526206323b34bfa0",
+      "file_written_utc": "2026-11-18T03:07:06.597579+00:00"
+    },
+    {
+      "path": "builder-delivery/collection.json",
+      "bytes": 415,
+      "sha256": "f66981b9e2f6a6d9d3cea0064ec23e2037e9c8d00e4cbf4191e23ac5cbf2ecaa",
+      "file_written_utc": "2026-11-18T02:55:53.095206+00:00"
+    },
+    {
+      "path": "builder-delivery/delivered.json",
+      "bytes": 2069,
+      "sha256": "4fa7e9b694c1ca60eb0156e487975f4a7b3360b5aa294d85f1c623fc72d2561a",
+      "file_written_utc": "2026-11-18T02:55:49.365849+00:00"
+    },
+    {
+      "path": "builder-delivery/disk.windows.json",
+      "bytes": 1336,
+      "sha256": "729edfd01a41cfe83a2af4365aa5df4d177eea07466487aa9adccd2bda1ae25b",
+      "file_written_utc": "2026-11-18T02:55:53.082694+00:00"
+    },
+    {
+      "path": "builder-delivery/job/stderr.log",
+      "bytes": 5437,
+      "sha256": "5a9f44ec527c642824e349ab8353e9d52fd2ea54834431074a694748a58dda31",
+      "file_written_utc": "2026-11-18T02:54:30.026573+00:00"
+    },
+    {
+      "path": "builder-delivery/job/stdout.log",
+      "bytes": 515,
+      "sha256": "13c83a162c1d108432e7aa339e86309f946aadc0e21c3d2c1c0941aa83fb0bb9",
+      "file_written_utc": "2026-11-18T02:54:30.315640+00:00"
+    },
+    {
+      "path": "builder-delivery/result.json",
+      "bytes": 2210,
+      "sha256": "80d4f3a23febaaf251b34e151f7adff4ca22638145f996dc223f7d7379cd1bd0",
+      "file_written_utc": "2026-11-18T02:54:28.841633+00:00"
+    },
+    {
+      "path": "builder-delivery/transfer.json",
+      "bytes": 545,
+      "sha256": "7b3fbeda4d5c33555b2ba9769e2364c59fe5cb340d6e3355baf3da31df5e9753",
+      "file_written_utc": "2026-11-18T02:53:35.139754+00:00"
+    },
+    {
+      "path": "builder-relogin/clipboard-idle-counters.json",
+      "bytes": 358,
+      "sha256": "559b55248926b01ddf8fef91e9eca775e657e7fa2603b2aff0de4cf5df34df94",
+      "file_written_utc": "2026-11-18T03:08:41.413826+00:00"
+    },
+    {
+      "path": "builder-relogin/clipboard.json",
+      "bytes": 94,
+      "sha256": "ca916e472cade044ad2426b9030a0b03732a9efe4112bc34711d8d67eb16ef31",
+      "file_written_utc": "2026-11-18T03:07:34.409230+00:00"
+    },
+    {
+      "path": "builder-relogin/gnome-motion.json",
+      "bytes": 1776,
+      "sha256": "d3ad9a9838ff1ad72ff3f7598d40d9795247fbb523721c743dd23cf1fb3ba569",
+      "file_written_utc": "2026-11-18T03:08:41.414835+00:00"
+    },
+    {
+      "path": "builder-relogin/relogin.json",
+      "bytes": 162,
+      "sha256": "988b74452076b77aca2bc5e47b3aa994a1b12f48f8deb22c57e0824229de50b6",
+      "file_written_utc": "2026-11-18T03:07:28.877692+00:00"
+    },
+    {
+      "path": "capacity.jsonl",
+      "bytes": 25265,
+      "sha256": "2ca9eda35f5434c7f8ba8699bafb85530896cd497be0febdc6e1f0c70a0c39bf",
+      "file_written_utc": "2026-11-18T05:21:54.458519+00:00"
+    },
+    {
+      "path": "default-builder-delivery.json",
+      "bytes": 2197,
+      "sha256": "0082820c9285dc9e2f1ca0ea931c8109b7fb90eb9e4109d74f5d893a9cd4e3f2",
+      "file_written_utc": "2026-11-18T02:57:26.209218+00:00"
+    },
+    {
+      "path": "development-helper-audit.json",
+      "bytes": 196,
+      "sha256": "0ad1f216a33a551a26084980994b8262fff43db3880294d9f59f2cf19d59fc48",
+      "file_written_utc": "2026-11-17T23:49:30.169516+00:00"
+    },
+    {
+      "path": "gnome-input/focus-events.json",
+      "bytes": 37728,
+      "sha256": "9c856d8e21c0926c79e7b571533c2dba3f50b48c007fbe2c839f1e7b4b699eb1",
+      "file_written_utc": "2026-11-18T00:51:45.708177+00:00"
+    },
+    {
+      "path": "gnome-input/focus-loss.json",
+      "bytes": 143,
+      "sha256": "e5a1e3aa93a4157919c4b7e7923eff70d7079bd71c0ec70e2b5a2a326ba0e116",
+      "file_written_utc": "2026-11-18T00:51:45.706173+00:00"
+    },
+    {
+      "path": "gnome-lock/lock.json",
+      "bytes": 113,
+      "sha256": "7e73c6a537b9b978e57e4591dd1007aac0dd510769cdd1f08dade4f81cd60497",
+      "file_written_utc": "2026-11-18T00:52:52.039928+00:00"
+    },
+    {
+      "path": "hyprland-focus/focus-events.json",
+      "bytes": 842,
+      "sha256": "ff20aa859c0de25adec3a2734b5a4577a4d7e2f61f72378250a5f4792985bb13",
+      "file_written_utc": "2026-11-18T03:31:45.924508+00:00"
+    },
+    {
+      "path": "hyprland-focus/focus-loss.json",
+      "bytes": 143,
+      "sha256": "e5a1e3aa93a4157919c4b7e7923eff70d7079bd71c0ec70e2b5a2a326ba0e116",
+      "file_written_utc": "2026-11-18T03:31:45.923499+00:00"
+    },
+    {
+      "path": "hyprland-minimized-verified.stderr.log",
+      "bytes": 199,
+      "sha256": "2b60d848e75c376ccc2b6308bd06326d5eeb50f4a99b39aca3c53baeb02f8624",
+      "file_written_utc": "2026-11-18T03:35:44.005447+00:00"
+    },
+    {
+      "path": "hyprland-relogin/capture-checks.json",
+      "bytes": 295,
+      "sha256": "259382a6bf1ce9dc66f3e62b9a1e76fd9831a7782eb8d2f2be90a2c8317d92bf",
+      "file_written_utc": "2026-11-18T03:36:14.655462+00:00"
+    },
+    {
+      "path": "hyprland-relogin/occluded-a.frame.json",
+      "bytes": 400,
+      "sha256": "d76db1153c49595489c000338568802755daa8746134d807af6b64b5b741b681",
+      "file_written_utc": "2026-11-18T03:33:30.427839+00:00"
+    },
+    {
+      "path": "hyprland-relogin/occluded-b.frame.json",
+      "bytes": 400,
+      "sha256": "75095f835792cd5828529eaf47caec5df77fe4201854d9dff428160d06de2f56",
+      "file_written_utc": "2026-11-18T03:33:32.037485+00:00"
+    },
+    {
+      "path": "hyprland-relogin/qt-clipboard-idle.json",
+      "bytes": 358,
+      "sha256": "7d705ca9a9b2451344482c193d8bfa65c7e93bc4c7eddc7dedc6e5ca12b047da",
+      "file_written_utc": "2026-11-18T03:33:31.279193+00:00"
+    },
+    {
+      "path": "hyprland-relogin/qt-clipboard.json",
+      "bytes": 142,
+      "sha256": "73f951ff5ada91ba7b7f9b041a8ab9d65b08c34260db384c6aefaf747a20e5a3",
+      "file_written_utc": "2026-11-18T03:32:24.275169+00:00"
+    },
+    {
+      "path": "hyprland-relogin/qt-motion.json",
+      "bytes": 179,
+      "sha256": "236390ab8a2b28c7be349bedfdd9c92ef05227e184a3a702e126e33af2370621",
+      "file_written_utc": "2026-11-18T03:33:51.374567+00:00"
+    },
+    {
+      "path": "hyprland-relogin/relogin.json",
+      "bytes": 162,
+      "sha256": "b781aea21af444dd23418ea1257ac593379a124a032de6579eaf0675e933c94f",
+      "file_written_utc": "2026-11-18T03:32:19.443600+00:00"
+    },
+    {
+      "path": "hyprland-relogin/restored-verified.frame.json",
+      "bytes": 400,
+      "sha256": "c72a15da06b882992101f955565ad54eca88fd5e1fab2e1c768a6c82371ecaf9",
+      "file_written_utc": "2026-11-18T03:35:48.908709+00:00"
+    },
+    {
+      "path": "offline-resume.stderr.log",
+      "bytes": 219,
+      "sha256": "1901a65ca057c49d4b9fd92ff4a5114696db7a450d83ef89a75862228cb8b834",
+      "file_written_utc": "2026-11-18T03:54:51.109062+00:00"
+    },
+    {
+      "path": "offline-resume.stdout.log",
+      "bytes": 170,
+      "sha256": "fcd2ad3e81d7347a8c274cb99ffda05c165beef786e6e9c76dbaba54eb09dfeb",
+      "file_written_utc": "2026-11-18T03:54:51.066026+00:00"
+    },
+    {
+      "path": "production-helper-audit.json",
+      "bytes": 200,
+      "sha256": "993f3c3190eb3b87af097b14f02603520b58da8805badeb1dc430f7fcdedbe31",
+      "file_written_utc": "2026-11-17T23:49:29.682022+00:00"
+    },
+    {
+      "path": "review-transport-2/low-integrity.json",
+      "bytes": 1598,
+      "sha256": "dad2eb407678953b8da36f3dd7201e6194e12b2e6d9b2cac472a7a1c5767a241",
+      "file_written_utc": "2026-11-18T05:00:15.503362+00:00"
+    },
+    {
+      "path": "review-transport-2/qemu-stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T05:00:05.448860+00:00"
+    },
+    {
+      "path": "review-transport-2/transport-ready.json",
+      "bytes": 813,
+      "sha256": "af9e1b1b549fc2f52a82af1b33df090b8a1108ba946dc6cffd815a0aa5914ab2",
+      "file_written_utc": "2026-11-18T05:00:05.628195+00:00"
+    },
+    {
+      "path": "review-transport-final/low-integrity.json",
+      "bytes": 1688,
+      "sha256": "b3aa8c9abe74219730e29b50c8d3c253e5e51d4b9c5141b94ab60d32aea13003",
+      "file_written_utc": "2026-11-18T05:21:06.498184+00:00"
+    },
+    {
+      "path": "review-transport-final/qemu-stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T05:20:50.814226+00:00"
+    },
+    {
+      "path": "review-transport-final/qemu-stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T05:20:50.814226+00:00"
+    },
+    {
+      "path": "review-transport-final/transport-ready.json",
+      "bytes": 813,
+      "sha256": "e9259424493030978e1cc60fae5468d9e15754485ca450af173f7fb6523057a2",
+      "file_written_utc": "2026-11-18T05:20:51.005848+00:00"
+    },
+    {
+      "path": "usb-gnome-input/guest-input.json",
+      "bytes": 5042,
+      "sha256": "854dde9f475992c20aa5438a83f32c13f1b9e878f26c529bf0040b0daec8e89f",
+      "file_written_utc": "2026-11-18T03:44:38.178921+00:00"
+    },
+    {
+      "path": "usb-gnome-input/host-input.json",
+      "bytes": 935,
+      "sha256": "e9b7f604563f427c8b7649454d8ea0b51e655399a35eae5e9656ff60d7ae3a08",
+      "file_written_utc": "2026-11-18T03:44:38.178921+00:00"
+    },
+    {
+      "path": "usb-gnome-mcp/mcp-check.json",
+      "bytes": 264,
+      "sha256": "60786345e918acb0ae89aed648298b39b43d74e32b2ed4fd67284e48d27411cf",
+      "file_written_utc": "2026-11-18T03:43:14.464349+00:00"
+    },
+    {
+      "path": "usb-gnome-pass/byte-limits.json",
+      "bytes": 233,
+      "sha256": "46bb2aacd15f061854cf8d731b10f6cb6a3bd4764ca3fb75cc2f700e70ed36f5",
+      "file_written_utc": "2026-11-18T03:42:18.286227+00:00"
+    },
+    {
+      "path": "usb-gnome-pass/clipboard-idle-counters.json",
+      "bytes": 358,
+      "sha256": "b01f0b70f86e0af668f7ec3ffe5e80a696bc94312ec47062a8559f5f2c9b8192",
+      "file_written_utc": "2026-11-18T03:43:25.289874+00:00"
+    },
+    {
+      "path": "usb-gnome-pass/clipboard.json",
+      "bytes": 94,
+      "sha256": "ca916e472cade044ad2426b9030a0b03732a9efe4112bc34711d8d67eb16ef31",
+      "file_written_utc": "2026-11-18T03:42:08.023152+00:00"
+    },
+    {
+      "path": "usb-gnome-pass/gnome-motion.json",
+      "bytes": 2054,
+      "sha256": "60199001c6004b9b7306be8a37a969a0337b2ae529743b72567babe03a46b630",
+      "file_written_utc": "2026-11-18T03:43:25.290883+00:00"
+    },
+    {
+      "path": "usb-gnome-pass/motion-resized.frame.json",
+      "bytes": 400,
+      "sha256": "e2a963f20dab67d6099ea130ac911e1377b664c6f891c7d2f34125e9c1bafb27",
+      "file_written_utc": "2026-11-18T03:43:13.703520+00:00"
+    },
+    {
+      "path": "usb-gnome/pointer-device.txt",
+      "bytes": 308,
+      "sha256": "f2a1748032d83c2b69fcfc29c9aa19e7a19f118fe23f274f6aa3f5a655b3de36",
+      "file_written_utc": "2026-11-18T03:41:41.464996+00:00"
+    },
+    {
+      "path": "usb-gnome/shutdown-grabbed.json",
+      "bytes": 113,
+      "sha256": "cc1e70833421772d572851bd916fa8cc4c09eb62144c6fdbfa7272eb26e60559",
+      "file_written_utc": "2026-11-18T03:44:58.484738+00:00"
+    },
+    {
+      "path": "usb-gnome/ssh-identity.json",
+      "bytes": 416,
+      "sha256": "5249f393a72e91d2b23674984cc2cd9b4d57e329ce558b150a839ab540312eca",
+      "file_written_utc": "2026-11-18T03:41:40.822487+00:00"
+    },
+    {
+      "path": "usb-gnome/ssh-provisioning.txt",
+      "bytes": 227,
+      "sha256": "f2b72fdb14c7a7df47befb6dfe57a7f4682cdf0d3485d5731ea5c6dd9b40bb60",
+      "file_written_utc": "2026-11-18T03:41:40.789408+00:00"
+    },
+    {
+      "path": "usb-hyprland-input/guest-input.json",
+      "bytes": 5043,
+      "sha256": "acf8e6ba78cf98e54acdc7a8eb002e34e3012094068da3bedc942155974b23f2",
+      "file_written_utc": "2026-11-18T03:51:31.889934+00:00"
+    },
+    {
+      "path": "usb-hyprland-input/host-input.json",
+      "bytes": 989,
+      "sha256": "f05062f73b90d69400eda436658be8086730201484098c86c00f34248b8e946c",
+      "file_written_utc": "2026-11-18T03:51:31.900006+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/after-resize.frame.json",
+      "bytes": 400,
+      "sha256": "e73c287d781285111f33a50b83052b7927d148837e2d27396a4c29cbf84836c7",
+      "file_written_utc": "2026-11-18T03:49:56.185332+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/before-resize.frame.json",
+      "bytes": 400,
+      "sha256": "492aff0b96b08956157204722df07aaed588bd067a19cfcd9e9443d88bb8d08b",
+      "file_written_utc": "2026-11-18T03:49:51.915128+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/display-after-resize.json",
+      "bytes": 951,
+      "sha256": "e35448c0f48849a7525f020d27214f55f954160db05a87e8c77c7b9e493d5041",
+      "file_written_utc": "2026-11-18T03:49:55.431596+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/qt-clipboard-idle.json",
+      "bytes": 358,
+      "sha256": "559b55248926b01ddf8fef91e9eca775e657e7fa2603b2aff0de4cf5df34df94",
+      "file_written_utc": "2026-11-18T03:49:56.843838+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/qt-clipboard.json",
+      "bytes": 142,
+      "sha256": "73f951ff5ada91ba7b7f9b041a8ab9d65b08c34260db384c6aefaf747a20e5a3",
+      "file_written_utc": "2026-11-18T03:48:49.839703+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/qt-motion.json",
+      "bytes": 178,
+      "sha256": "eeaa4f6bef666b4a0351bb56d4bd862dbd1f136fad9fb4e91f06a885a82228e1",
+      "file_written_utc": "2026-11-18T03:50:16.670044+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/qt-renderer-and-motion.txt",
+      "bytes": 1747,
+      "sha256": "6f962334f93cea98ac4214eb8eba44d14530df2b533e43a2c88ec9cf4f58d5e7",
+      "file_written_utc": "2026-11-18T03:50:16.670583+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/recording/audit.json",
+      "bytes": 139,
+      "sha256": "5bf074ca101ccc275685b5d82633687f4a993552421109a0f4519a50528a75cb",
+      "file_written_utc": "2026-11-18T04:07:43.552458+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/resize-status.json",
+      "bytes": 652,
+      "sha256": "b3dc1b9b31a199525d10f85729b7d2b5e55f667d31f0d039fef46d764667644e",
+      "file_written_utc": "2026-11-18T03:49:53.572014+00:00"
+    },
+    {
+      "path": "usb-hyprland-qt/shutdown-grabbed.json",
+      "bytes": 113,
+      "sha256": "0cb41b6f496fb3c206fef01fd7dd36ebc1ba76354f4467092ee8b2ced4bfdd70",
+      "file_written_utc": "2026-11-18T03:52:13.497155+00:00"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+Enforcing
+drwx------. 2 root root system_u:object_r:sshd_var_run_t:s0 60 Nov 18 03:06 /run/ilex-dev/authorized_keys
+-rw-------. 1 root root system_u:object_r:ssh_home_t:s0     81 Nov 18 03:06 /run/ilex-dev/authorized_keys/root

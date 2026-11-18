@@ -1,0 +1,9 @@
+7.3.4-300.fc45.x86_64
+gnome-shell-51.1-1.fc45.x86_64
+mutter-51.1-1.fc45.x86_64
+mesa-dri-drivers-26.2.6-1.fc45.x86_64
+{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","metadata":{"name":"host"},"spec":{"bootOrder":"default","image":{"image":"localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc","transport":"registry"}},"status":{"booted":{"cachedUpdate":null,"composefs":null,"downloadOnly":false,"image":{"architecture":"amd64","image":{"image":"localhost/ilex:wt-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef.dev-a94d5bbf03ed93bc","transport":"registry"},"imageDigest":"sha256:47ba0b4fd31b507ffc83b2a10596b50c1516fc83705569f4acf88fcc66c5d06e","timestamp":"2026-11-18T02:31:39.814061706Z","version":"45.20261117.0"},"incompatible":false,"ostree":{"checksum":"89333d8659711abc11c5d121a70f11a19042d7f2778ed63ce66e36ec00088154","deploySerial":0,"stateroot":"default"},"pinned":false,"softRebootCapable":true,"store":"ostreeContainer"},"readOnly":false,"rollback":null,"rollbackQueued":false,"staged":null,"type":"bootcHost","usrOverlay":null}}Nov 18 03:00:33 fedora kernel: [drm] Initialized virtio_gpu 0.1.0 for 0000:00:01.0 on minor 1
+Nov 18 03:00:33 fedora kernel: fbcon: virtio_gpudrmfb (fb0) is primary device
+Nov 18 03:00:33 fedora kernel: virtio-pci 0000:00:01.0: [drm] fb0: virtio_gpudrmfb frame buffer device
+Nov 18 03:00:41 fedora gnome-shell[2539]: Added device '/dev/dri/card1' (virtio_gpu) using atomic mode setting.
+Nov 18 03:01:53 fedora gnome-shell[3915]: Added device '/dev/dri/card1' (virtio_gpu) using atomic mode setting.

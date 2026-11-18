@@ -1,0 +1,16 @@
+{
+  "stdio_initialize": true,
+  "tools_list": true,
+  "owned_vm_list": true,
+  "capabilities": true,
+  "before": [
+    1280,
+    800
+  ],
+  "stale_coordinates_rejected": true,
+  "fresh_screenshot_recovers": true,
+  "after": [
+    1596,
+    953
+  ]
+}

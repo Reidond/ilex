@@ -1,0 +1,96 @@
+[
+  {
+    "renderer": "virgl (AMD Radeon RX 9070 XT)",
+    "version": "OpenGL ES 3.2 Mesa 26.2.6",
+    "display_type": "GdkWaylandDisplay"
+  },
+  {
+    "frames": 344,
+    "elapsed_seconds": 5.00994814500001,
+    "callbacks_per_second_last5": 68.8
+  },
+  {
+    "set": true
+  },
+  {
+    "frames": 719,
+    "elapsed_seconds": 10.018342869000008,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "set": true
+  },
+  {
+    "frames": 1094,
+    "elapsed_seconds": 15.025700178000008,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "set": true
+  },
+  {
+    "frames": 1469,
+    "elapsed_seconds": 20.028248921,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 1842,
+    "elapsed_seconds": 25.030676661,
+    "callbacks_per_second_last5": 74.6
+  },
+  {
+    "frames": 2217,
+    "elapsed_seconds": 30.03175768300001,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 2591,
+    "elapsed_seconds": 35.04380085800001,
+    "callbacks_per_second_last5": 74.8
+  },
+  {
+    "frames": 2966,
+    "elapsed_seconds": 40.04489758000001,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 3340,
+    "elapsed_seconds": 45.045904701,
+    "callbacks_per_second_last5": 74.8
+  },
+  {
+    "frames": 3716,
+    "elapsed_seconds": 50.05915222099999,
+    "callbacks_per_second_last5": 75.2
+  },
+  {
+    "frames": 4089,
+    "elapsed_seconds": 55.060180441000014,
+    "callbacks_per_second_last5": 74.6
+  },
+  {
+    "frames": 4464,
+    "elapsed_seconds": 60.06103795899999,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 4840,
+    "elapsed_seconds": 65.07539142200001,
+    "callbacks_per_second_last5": 75.0
+  },
+  {
+    "frames": 5214,
+    "elapsed_seconds": 70.08553780800001,
+    "callbacks_per_second_last5": 74.8
+  },
+  {
+    "frames": 5581,
+    "elapsed_seconds": 75.093856062,
+    "callbacks_per_second_last5": 73.4
+  },
+  {
+    "frames": 5957,
+    "elapsed_seconds": 80.10623398899999,
+    "callbacks_per_second_last5": 75.0
+  }
+]

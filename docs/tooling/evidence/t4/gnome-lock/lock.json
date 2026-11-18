@@ -1,0 +1,5 @@
+{
+  "inactive_while_locked": true,
+  "no_transfers_while_locked": true,
+  "automatically_reactivated": true
+}

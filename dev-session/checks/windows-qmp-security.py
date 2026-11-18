@@ -20,6 +20,10 @@ a.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POIN
 a.SetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD]
 a.ConvertStringSidToSidW.argtypes = [W.LPCWSTR, C.POINTER(C.c_void_p)]
 a.GetLengthSid.argtypes = [C.c_void_p]
+a.GetSidSubAuthorityCount.argtypes = [C.c_void_p]
+a.GetSidSubAuthorityCount.restype = C.POINTER(C.c_ubyte)
+a.GetSidSubAuthority.argtypes = [C.c_void_p, W.DWORD]
+a.GetSidSubAuthority.restype = C.POINTER(W.DWORD)
 k.LocalFree.argtypes = [C.c_void_p]
 k.OpenThread.argtypes = [W.DWORD, W.BOOL, W.DWORD]
 k.OpenThread.restype = W.HANDLE
@@ -66,6 +70,13 @@ try:
             label = C.cast(data, C.POINTER(Label))
             label.contents.sid, label.contents.attributes = sid.value, 0x20
             assert a.SetTokenInformation(token, 25, data, size), C.get_last_error()
+            verified = C.create_string_buffer(256)
+            required = W.DWORD()
+            assert a.GetTokenInformation(token, 25, verified, len(verified), C.byref(required))
+            integrity = C.cast(verified, C.POINTER(Label)).contents.sid
+            count = a.GetSidSubAuthorityCount(integrity)[0]
+            integrity_rid = a.GetSidSubAuthority(integrity, count - 1)[0]
+            assert integrity_rid == 4096, 'Child token did not become low integrity'
             snapshot = k.CreateToolhelp32Snapshot(4, 0)
             entry = Thread(); entry.size = C.sizeof(entry)
             tids = []
@@ -88,6 +99,7 @@ try:
             results.append({'role': role, 'utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                             'acl': info[role], 'normal_before': True, 'low_integrity_sid': 'S-1-16-4096',
                             'parent_token_id': parent_id, 'child_token_id': child_id,
+                            'verified_child_integrity_rid': integrity_rid,
                             'low_client_exit': child.returncode, 'low_client_error': error,
                             'normal_after': True})
         finally:

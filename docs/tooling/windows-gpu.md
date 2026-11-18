@@ -41,7 +41,10 @@ launches of the same installed base. Closing SDL exits QEMU. Ctrl-C stops only
 this launch, requesting guest poweroff before an owned-process deadline.
 The Windows Job Object also contains the launch's helper processes. Logs and
 metadata remain in the checkout's runtime directory; ordinary overlays and
-run-specific access keys are removed after QEMU exits. Persistent disks remain
+run-specific access keys are removed after normal teardown. Forced launcher
+termination closes its Job Object and kills QEMU; the next launch of that
+owned purpose removes the dead run's keys, private sockets and ephemeral disk.
+Persistent disks remain
 under the checkout's state directory.
 
 `--purpose research` selects a separate owned overlay and control endpoint.
@@ -71,7 +74,11 @@ The qualified SDL runtime needs no custom keyboard hook.
 
 SDL advertises physical client dimensions through virtio EDID. The session
 observer debounces resize, checks the actual compositor mode over pinned SSH,
-and records `resize-status.json`. GNOME follows its preferred mode. The
+and records `resize-status.json`. Each probe has a five-second deadline;
+probing continues every two seconds after success or failure, including long
+periods at GDM. Session identity, compositor instance, connector EDID hashes
+and outputs are observed again, so login, re-login and compositor changes
+recover without another host resize. GNOME follows its preferred mode. The
 Hyprland adapter selects an advertised mode through `hyprctl` when needed.
 If its mode list is stale, the adapter can use the exact preferred timing
 from the matching DRM connector's checked EDID; it does not synthesize modes.
@@ -133,10 +140,20 @@ qemu-vdagent clipboard bridge is involved.
 
 Private `vm.json` identifies owner/run, PID creation time, exact HWND, runtime,
 disk and endpoints. Control and human-input QMP endpoints are independent
-`127.0.0.1` listeners, allocated with bind-race retries. vmctl commands serialize
+Windows AF_UNIX sockets in a new per-launch directory. Protected NTFS DACLs
+allow only the current user and SYSTEM before QEMU binds. The client opens
+no-follow directory/file handles, verifies the native socket reparse tag and
+every ACL entry, and retains those handles while connected. TCP endpoints
+are rejected; there is no debug TCP opt-in. AF_UNIX uses QEMU's reconnectable
+socket backend; the pinned QEMU pipe backend cannot reconnect clients.
+[Windows AF_UNIX permission checks](https://devblogs.microsoft.com/commandline/af_unix-comes-to-windows/)
+enforce the socket file's ACL at connect time. vmctl commands serialize
 the control connection, correlate QMP IDs, ignore asynchronous events and
-enforce absolute deadlines. QMP loopback has no authentication: other local
-users can reach a discovered port. ACL-protected named pipes are not qualified.
+enforce absolute deadlines. `qmp-security.json` records the verified SIDs.
+The zero-guest `qmp-self-check` e2e example and `windows-qmp-security.py`
+exercise reconnects and real connections from independently lowered child
+tokens; low-integrity clients must be refused by the OS. No accounts or host
+security settings are changed by that probe.
 
 Virgl screenshots use Windows Graphics Capture `CreateForWindow` for that
 owned HWND, cropped with physical DWM/client geometry. Every acquisition
@@ -144,9 +161,13 @@ creates a new pool, validates dimensions and requires a new compositor QPC
 timestamp. Capture never foregrounds, restores or captures the desktop.
 Resize invalidates an in-flight frame. Minimized/empty/stale acquisitions fail
 with a reason instead of returning an old PNG. A non-minimized PrintWindow
-fallback has a deadline, geometry/nonblack validation and a separate source
-label; at most one fallback worker can be outstanding. It cannot supply WGC's
-compositor timestamp. `screenshot` writes a `.frame.json` sidecar with identity,
+fallback has a deadline, geometry/nonblack validation and requires changed
+client pixels after its baseline acquisition. Static, black or unchanged
+PrintWindow output fails with `no fresh frame`. Successful captures record
+both content hashes and observation times, use `printwindow-content-change`
+as their source and leave compositor ticks null. Observation time is never
+used as proof of presentation. At most one fallback worker can be outstanding.
+`screenshot` writes a `.frame.json` sidecar with identity, freshness proof,
 timestamp, source, dimensions and generation. `wait-screen` uses fresh frames;
 equal pixels alone do not establish freshness.
 
@@ -163,6 +184,8 @@ those are application callback intervals, not input-to-photon measurements.
 `windows-mcp.py` exercises the real stdio MCP server and native captures. With
 `--resize`, it waits for a Cua window resize, checks that old screenshot
 coordinates are rejected, and recovers by acquiring a new screenshot.
+`windows-resize-recovery.py` keeps GDM stopped beyond the former retry window,
+then verifies delayed login and session changes at unchanged host dimensions.
 
 T4 merge acceptance requires the actual ilex GNOME image and the separate
 Fedora Hyprland/Qt research workload, renderer evidence, sustained motion and
