@@ -524,7 +524,7 @@ fn guest_json(vm: &qemu::Vm, artifacts: &Path, file: &str, script: &str) -> Resu
     Ok(value)
 }
 
-fn poweroff(fixture: &mut Fixture) -> Result<()> {
+fn poweroff(fixture: &mut Fixture, artifacts: &Path, label: &str) -> Result<()> {
     let vm = fixture.vm.running_mut()?;
     let _ = vm.ssh("systemctl poweroff");
     let start = Instant::now();
@@ -535,6 +535,7 @@ fn poweroff(fixture: &mut Fixture) -> Result<()> {
         );
         thread::sleep(Duration::from_millis(200));
     }
+    fixture.logs(artifacts, label)?;
     fixture.provider.stop(&mut fixture.vm)
 }
 
@@ -728,7 +729,7 @@ fn fallback(
     }
     guest_privacy(vm, artifacts, mode, credentials)?;
     fixture.logs(artifacts, mode)?;
-    poweroff(&mut fixture)?;
+    poweroff(&mut fixture, artifacts, mode)?;
     fixture.provider.destroy_owned(&mut fixture.vm)
 }
 
@@ -896,7 +897,7 @@ fn interrupted_repair(
     );
     guest_privacy(vm, artifacts, "interrupted-repaired", credentials)?;
     fixture.logs(artifacts, "interrupted-repaired")?;
-    poweroff(fixture)?;
+    poweroff(fixture, artifacts, "interrupted-repaired")?;
     Ok((recovery, after))
 }
 
@@ -975,7 +976,7 @@ fn same_tpm_mismatch(
     );
     guest_privacy(vm, artifacts, "same-tpm-mismatch", credentials)?;
     fixture.logs(artifacts, "same-tpm-mismatch")?;
-    poweroff(fixture)?;
+    poweroff(fixture, artifacts, "same-tpm-mismatch")?;
     // Restore only this stopped disposable firmware store; its TPM, LUKS
     // header and every enrolled slot remain intact throughout the negative.
     fs::write(vars, original_vars)?;
@@ -1166,7 +1167,9 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
                 .arg("40G"),
         )?;
         let mut config = VmConfig::new(
-            if preserve_data {
+            if interrupted {
+                "encrypted-interrupted"
+            } else if preserve_data {
                 "encrypted-space"
             } else {
                 "encrypted-install"
@@ -1342,14 +1345,14 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
                 &credentials,
             )?;
             stage = "cold_restart";
-            poweroff(&mut fixture)?;
+            poweroff(&mut fixture, &artifacts, "installed")?;
             fixture.disk_boot()?;
             let cold = artifacts.join("cold");
             fs::create_dir_all(&cold)?;
             assertions(&mut fixture, &cold, &expected, &installer_probe)?;
             guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
             fixture.logs(&artifacts, "cold")?;
-            poweroff(&mut fixture)?;
+            poweroff(&mut fixture, &artifacts, "cold")?;
             stage = "same_tpm_policy_mismatch";
             same_tpm_mismatch(
                 &ws,
