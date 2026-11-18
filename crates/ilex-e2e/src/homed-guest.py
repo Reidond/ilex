@@ -188,6 +188,11 @@ def main():
         assert not any(line.startswith(name + ":") for line in open("/etc/passwd"))
         assert run("getent", "passwd", name).startswith(name + ":")
         return "created encrypted home; NSS resolves identity without a passwd entry"
+    if action == "profile-empty-apps":
+        tty(name, secrets[0], "ilexctl profile apply andriishafar --install-apps && "
+            "flatpak remotes --user --columns=name,url | grep 'https://dl.flathub.org/repo/' && "
+            "test -z \"$(flatpak list --user --app --columns=application)\"")
+        return "an empty app profile still creates the user Flathub remote without downloading apps"
     if action == "collision":
         before = run("getent", "-s", "files", "passwd", "ilexmaint")
         try:

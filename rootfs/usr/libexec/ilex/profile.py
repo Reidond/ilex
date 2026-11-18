@@ -380,14 +380,14 @@ def prune_backups(args):
 
 
 def run(*args, **options):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=120, check=False, **options)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=options.pop("timeout", 120), check=False, **options)
     if result.returncode:
         # Do not echo subprocess output or user configuration into the journal.
         raise ValueError(f"{os.path.basename(args[0])} failed (exit {result.returncode})")
     return result.stdout.strip()
 
 
-def confined(home, directories, command, network=False, runtime=None, replace=False):
+def confined(home, directories, command, network=False, runtime=None, replace=False, timeout=120):
     """External writers see only pinned home subdirectories as writable.
 
     A path check alone cannot constrain the session's existing dconf service.
@@ -431,7 +431,7 @@ def confined(home, directories, command, network=False, runtime=None, replace=Fa
             for fd in descriptors:
                 os.set_inheritable(fd, True)
             os.execv(arguments[0], arguments)
-        return run(*arguments, pass_fds=descriptors)
+        return run(*arguments, pass_fds=descriptors, timeout=timeout)
 
 
 def dconf_service():
@@ -674,16 +674,36 @@ def apply(args):
         new = {"schema": STATE_SCHEMA, "profile": name, "revision": entry["revision"], "digest": entry["sha256"],
                "files": managed, "settings": setting_hashes}
         save_state(home, new, old_raw)
+        provided = []
         if args.install_apps:
+            directories = [".config/flatpak", ".local/share/flatpak", ".cache/flatpak"]
+            remote_ready = False
+            try:
+                confined(home, directories, [
+                    "/usr/bin/flatpak", "remote-add", "--user", "--if-not-exists",
+                    "flathub", "/usr/share/flatpak/remotes.d/flathub.flatpakrepo",
+                ])
+                remote_ready = True
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                conflicts.append("app remote flathub (unavailable; retry explicitly)")
             for app in data["apps"]["flatpaks"]:
                 try:
-                    confined(home, [".config/flatpak", ".local/share/flatpak", ".cache/flatpak"], [
+                    confined(home, [], ["/usr/bin/flatpak", "info", "--system", app["id"]])
+                    provided.append(app["id"])
+                    continue
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    pass
+                try:
+                    if not remote_ready:
+                        raise ValueError("user Flathub remote unavailable")
+                    confined(home, directories, [
                         "/usr/bin/flatpak", "--user", "install", "--app", "--or-update", "--noninteractive", "--", app["remote"], app["id"],
-                    ], network=True)
+                    ], network=True, timeout=1800)
                 except (OSError, ValueError, subprocess.TimeoutExpired):
                     conflicts.append(f"app {app['id']} (unavailable; retry explicitly)")
         backup_notice(home.backups.check(conflicts))
-        print(json.dumps({"profile": name, "revision": entry["revision"], "conflicts": conflicts}))
+        print(json.dumps({"profile": name, "revision": entry["revision"], "conflicts": conflicts,
+                          "provided_by_system": provided}))
         return 1 if conflicts else 0
     finally:
         if lock is not None:
@@ -704,7 +724,7 @@ def main():
     selection.add_argument("name", nargs="?")
     selection.add_argument("--selected", action="store_true")
     command.add_argument("--shell", choices=["gnome"])
-    command.add_argument("--install-apps", action="store_true", help="opt in to installing/updating user apps from an already configured flathub remote")
+    command.add_argument("--install-apps", action="store_true", help="configure your Flathub remote and install/update user apps, skipping system-provided apps")
     args = parser.parse_args()
     if args.command in {"list", "check"}:
         data = catalogue()

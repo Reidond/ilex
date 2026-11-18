@@ -86,7 +86,7 @@ enum ProfileCommand {
         /// Installed shell whose settings to apply
         #[arg(long, value_parser = ["gnome"])]
         shell: Option<String>,
-        /// Explicitly install/update apps from your configured user remote
+        /// Configure your Flathub remote and install/update user apps
         #[arg(long)]
         install_apps: bool,
     },

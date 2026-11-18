@@ -37,6 +37,12 @@ def fixture(root, code, apps=False):
             with contextlib.redirect_stdout(output):
                 result = module.apply(args)
             assert any(c.startswith('app ') for c in json.loads(output.getvalue())['conflicts'])
+            if gnome and not (home / '.local/share/flatpak').is_symlink():
+                result_json = json.loads(output.getvalue())
+                assert 'org.ilex.SystemProvided' in result_json['provided_by_system'], result_json
+                remotes = subprocess.check_output(['flatpak', 'remotes', '--user', '--columns=name,url'], text=True)
+                assert 'flathub\thttps://dl.flathub.org/repo/' in remotes, remotes
+                assert subprocess.run(['flatpak', 'info', '--user', 'org.ilex.SystemProvided'], capture_output=True).returncode != 0
         else:
             result = module.apply(args)
     except (ValueError, OSError):

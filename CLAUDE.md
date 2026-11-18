@@ -1004,7 +1004,9 @@ Optional `settings.toml` accepts `[gnome]` with `color-scheme` (`default`,
 (`12h`, `24h`). No command strings or arbitrary dconf paths are accepted.
 Optional `apps.toml` accepts `[[flatpaks]]` entries with an application `id`
 and `remote = "flathub"`. Apps install/update only on explicit `--install-apps`,
-using an already configured user remote; failures can be retried after login.
+after creating the user's Flathub remote from the committed trust file. System
+apps are skipped and reported in `provided_by_system` (provided by the system),
+so a profile does not duplicate them. Install failures can be retried after login.
 No network operation runs automatically or gates authentication.
 
 Initial `home/` files are deliberately restricted to `.gitignore`,

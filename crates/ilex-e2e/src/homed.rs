@@ -66,11 +66,25 @@ for name, text in [('v2', 'profile revision two\n'), ('rewritten-v2', 'rewritten
     data['revision'] = 2
     data['settings'] = {'gnome': {'color-scheme': 'default', 'clock-show-weekday': False}}
     data['files'] = {'.config/ilex/' + p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in [leaf, added]}
-    data['apps'] = {'flatpaks': [{'id': 'org.example.IlexMissing', 'remote': 'flathub'}]}
+    data['apps'] = {'flatpaks': [{'id': 'org.example.IlexMissing', 'remote': 'flathub'},
+                                {'id': 'org.ilex.SystemProvided', 'remote': 'flathub'}]}
     manifest.write_text(json.dumps(data))
     catalogue = {'schema': 1, 'profiles': [{'id': 'andriishafar', 'schema': 1, 'revision': 2, 'sha256': hashlib.sha256(manifest.read_bytes()).hexdigest()}]}
     (root / 'users.json').write_text(json.dumps(catalogue))
 PY"#)?;
+        // A tiny local system app proves the helper's skip path without any
+        // Flathub payload in this tier. It is never launched; no runtime needed.
+        vm.ssh_ok(r#"set -eu
+if command -v flatpak >/dev/null; then
+    mkdir -p /run/ilex-provided-app/files/bin
+    printf '#!/bin/sh\nexit 0\n' > /run/ilex-provided-app/files/bin/provided
+    chmod +x /run/ilex-provided-app/files/bin/provided
+    printf '[Application]\nname=org.ilex.SystemProvided\nruntime=org.gnome.Platform/x86_64/51\nsdk=org.gnome.Sdk/x86_64/51\ncommand=provided\n' > /run/ilex-provided-app/metadata
+    flatpak build-finish /run/ilex-provided-app
+    flatpak build-export /run/ilex-provided-repo /run/ilex-provided-app stable
+    flatpak remote-add --system --no-gpg-verify ilex-profile-fixture file:///run/ilex-provided-repo
+    flatpak install --system -y --noninteractive --no-deps --no-related ilex-profile-fixture org.ilex.SystemProvided
+fi"#)?;
         let identity: Value =
             serde_json::from_str(&vm.ssh_ok("cat /usr/share/ilex/users/andriishafar/user.json")?)?;
         let owner = identity["username"].as_str().context("profile username")?;
@@ -96,6 +110,10 @@ PY"#)?;
             &vm,
             json!({"action":"profile-relogin", "name":owner, "secrets":[secret]}),
         )?;
+        if common::selection()?.default_shell.as_deref() == Some("gnome") {
+            guest(&vm, json!({"action":"create", "name":"emptyappuser", "secrets":[secret]}))?;
+            guest(&vm, json!({"action":"profile-empty-apps", "name":"emptyappuser", "secrets":[secret]}))?;
+        }
         guest(&vm, json!({"action":"maintenance-recovery", "secrets":[maintenance]}))?;
         guest(&vm, json!({"action":"secret-audit", "secrets":[secret, maintenance]}))?;
         Ok(())
