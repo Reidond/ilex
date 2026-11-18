@@ -209,7 +209,15 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     };
     let disk = work.join("blank.qcow2");
     blank_disk(&disk)?;
-    let mut config = VmConfig::new(format!("iso-{name}"), &disk);
+    // Trial names keep Rust's underscores. Drop the redundant chooser prefix
+    // and use dashes for resource names, keeping Unix socket paths short.
+    let purpose = format!(
+        "iso-{}",
+        name.strip_prefix("chooser_")
+            .unwrap_or(name)
+            .replace('_', "-")
+    );
+    let mut config = VmConfig::new(purpose, &disk);
     config.memory = INSTALLER_MEMORY.into();
     config.vcpus = 4;
     config.usb_keyboard = kernel;
