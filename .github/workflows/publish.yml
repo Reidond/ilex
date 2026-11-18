@@ -71,7 +71,7 @@ on:
         options: [probe, kvm, tcg]
         default: probe
       encrypted_install:
-        description: Run the exact encrypted ISO install, recovery privacy and no-TPM fallback gate
+        description: Run both exact encrypted ISO storage modes, recovery privacy and no-TPM fallback
         type: boolean
         default: false
 
@@ -322,7 +322,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: encrypted-installer-evidence
-          path: ${{ runner.temp }}/security-artifacts/encrypted-install
+          path: |
+            ${{ runner.temp }}/security-artifacts/encrypted-install
+            ${{ runner.temp }}/security-artifacts/encrypted-existing-space
           if-no-files-found: error
           retention-days: 3
 

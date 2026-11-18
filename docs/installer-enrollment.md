@@ -149,6 +149,8 @@ The install deadline defaults to three hours for explicit TCG and can be set
 with positive `ILEX_ENCRYPTED_INSTALL_TIMEOUT` seconds. Missing qualification,
 missing evidence, failure and timeout remain **unqualified**, with a failed
 stage. The CI `encrypted_install=true` input selects the 6 GiB firmware profile
-and runs the exact encrypted gate; it is opt-in while being qualified.
+and requires both exact encrypted storage gates. Public evidence for automatic
+storage and existing free space is retained separately; the gate is opt-in
+while being qualified.
 Physical fTPM, firmware changes and actual kernel-upgrade/rollback behavior
 remain later qualification, never inferred from this fixture.
