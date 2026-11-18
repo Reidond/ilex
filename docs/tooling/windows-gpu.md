@@ -26,7 +26,10 @@ The native profile uses q35, `-cpu max`, four vCPUs, 8 GiB fixed guest RAM,
 nonsecure EDK2 and virtio disk/network/input. Graphics are exactly
 `-accel whpx,kernel-irqchip=off -device virtio-vga-gl -display
 sdl,gl=on,grab-mod=rctrl`. The child's private environment sets
-`SDL_WINDOWS_DPI_AWARENESS=permonitorv2`. GPU initialization failure is an
+`SDL_WINDOWS_DPI_AWARENESS=permonitorv2` and
+`SDL_WINDOW_ACTIVATE_WHEN_SHOWN=0`. The window opens without taking focus,
+avoiding SDL's startup grab/title deadlock when the pointer is already over it.
+GPU initialization failure is an
 error. `--no-gl` is an explicit software troubleshooting choice. This profile
 does not claim Secure Boot, a persistent TPM, accelerated Vulkan or video decode.
 
@@ -45,6 +48,9 @@ run `cargo xtask disk --development`, then copy the qcow2, `.disk.json` manifest
 and `.ilex-owner` receipt together. Import requires this checkout's owner and
 the exact SHA256 and preserves the original executor in image provenance.
 The normal builder delivery path remains the default.
+`remote resume --job <id>` reuses a completed development-disk collection,
+validates its checkout/job/source identity and checksum, and finishes local
+promotion without another transfer or builder startup.
 
 Admission waits for guest RAM plus a 14 GiB host reserve and a native VM slot
 (`ILEX_VM_SLOTS`, default four). Live available memory already includes the

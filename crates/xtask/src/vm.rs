@@ -17,11 +17,11 @@
 //!   - Elsewhere, a GTK window on the desktop. The guest follows the
 //!     window's size either way.
 //!
-//! The disk modes boot from a throwaway overlay, so the disk file stays
-//! pristine; `--persist` writes to it instead.
+//! The disk modes boot from a throwaway overlay. Windows `--persist` retains
+//! that writable overlay; the earlier Linux path writes to its installed disk.
 //!
-//! On Windows, `cargo xtask vm` builds the viewer and hands itself to WSL
-//! ([`crate::wsl`]).
+//! On Windows, installed VMs run natively through `crate::vm_windows` with
+//! SDL/WHPX and virgl. Ephemeral VMs retain the WSL path (`crate::wsl`).
 
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};

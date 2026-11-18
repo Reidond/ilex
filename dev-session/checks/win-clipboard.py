@@ -39,8 +39,10 @@ def read():
         user.CloseClipboard()
 
 
-def write(text):
-    assert len(text.encode('utf-8')) <= 262144 and '\0' not in text
+def write(text, allow_oversize=False):
+    # The negative e2e probe exceeds the production limit by one UTF-8 emoji.
+    limit = 262148 if allow_oversize else 262144
+    assert len(text.encode('utf-8')) <= limit and '\0' not in text
     data = text.encode('utf-16-le') + b'\0\0'
     handle = kernel.GlobalAlloc(2, len(data))
     pointer = kernel.GlobalLock(handle)

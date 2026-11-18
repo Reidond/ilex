@@ -411,7 +411,7 @@ elif args.operation in ['clipboard', 'relogin', 'lock']:
             clipboard.write(maximum)
             time.sleep(2)
             maximum_passed = read_text() == maximum
-            clipboard.write(oversize)
+            clipboard.write(oversize, allow_oversize=True)
             time.sleep(2)
             host_oversize_refused = read_text() == maximum
             baseline = 'ilex T4 bounded clipboard recovery ✓'
