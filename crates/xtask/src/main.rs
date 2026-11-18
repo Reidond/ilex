@@ -121,7 +121,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Apps(args) => apps::run(&ws, args),
         Cmd::Build(args) => build::run(&ws, args),
         Cmd::Rechunk(args) => rechunk::run(&ws, args),
-        // The VM stack lives in WSL2; --gui's window is ilex-viewer.exe.
+        // Installed Windows VMs use native WHPX; ephemeral guests retain WSL.
         Cmd::Vm(args) => {
             // Reject invalid selection before building the native viewer or
             // handing over to WSL. GUI prediction inspects Linux image labels.

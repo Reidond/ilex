@@ -144,6 +144,9 @@ input mode refuses to inject unless Cua has selected the exact foreground
 QEMU HWND. Injection uses physical `SendInput` scan codes with extended flags.
 `qt-motion.qml` records Qt `frameSwapped` intervals over a sustained workload;
 those are application callback intervals, not input-to-photon measurements.
+`windows-mcp.py` exercises the real stdio MCP server and native captures. With
+`--resize`, it waits for a Cua window resize, checks that old screenshot
+coordinates are rejected, and recovers by acquiring a new screenshot.
 
 T4 merge acceptance requires the actual ilex GNOME image and the separate
 Fedora Hyprland/Qt research workload, renderer evidence, sustained motion and
