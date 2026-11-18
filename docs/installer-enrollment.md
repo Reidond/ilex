@@ -123,6 +123,7 @@ ILEX_SHELLS=none cargo xtask security --self-check --accelerator tcg --memory 6G
 ILEX_SHELLS=none cargo xtask test disk::install
 ILEX_SECURITY_ACCELERATOR=tcg cargo xtask test security::encrypted_install
 ILEX_SECURITY_ACCELERATOR=tcg cargo xtask test security::encrypted_existing_space
+ILEX_SECURITY_ACCELERATOR=tcg cargo xtask test security::encrypted_interrupted
 ```
 
 `security::encrypted_install` builds/reuses `ILEX_ISO`, installs this candidate
@@ -145,7 +146,10 @@ password input, matching/replayed ISO and installed PCR 7, encrypted mount
 topology, crypttab/kargs, SELinux enforcing, no failed units, a cold restart
 and disposable first-boot PCR-mismatch and actual recovery-key unlocks. The
 first-boot negative has Secure Boot disabled and a different present TPM; it
-records/replays changed PCR 7 and retains fallback slots. A further negative
+records changed PCR 7 and its raw event log, and retains fallback slots. The
+strict positive replay requires Secure Boot authority events, which disabled
+Secure Boot omits; the negative does not weaken that qualification contract.
+A further negative
 changes only the stopped positive fixture's SecureBootEnable variable while
 keeping its original TPM and LUKS header. Both require a prompt, passphrase
 boot, unknown unlock method and no automatic reseal. A separate no-TPM
@@ -160,13 +164,13 @@ The guest's private virtual keyboard drives the normal local completion UI.
 It waits at two key-free screens for an explicit screenshot acknowledgement;
 the recovery key is never photographed. The guest encrypts its test-only copy
 to an ephemeral RSA-OAEP key whose private half stays in the host's private
-fixture. Decryption feeds locked, dump-disabled memory; keyboard input with
+fixture. Decryption feeds locked, dump-disabled memory; private console input with
 that exact saved key must unlock the installed initramfs on a different TPM.
 No plaintext recovery file is exported. Fingerprints of these high-entropy
 random fixture credentials let guest, host and CI scan both credentials
 without printing matches. Matching paths, lines and exception text are
 suppressed. Scans cover live/target kickstart locations, logs, state and
-journal exports; a poweroff unit repeats the live scan after Anaconda
+journal exports; an active test-only shutdown unit repeats the live scan after Anaconda
 finalisation, and installed/cold/negative guests scan the final target files.
 Recursive scans cover the staged and copied export sets and all CI artifact
 tiers after all trials, including gzip/xz/bzip2/zstd/ZIP contents. Image files are
