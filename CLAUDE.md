@@ -1464,7 +1464,8 @@ Linux `vm --disk` uses the graphical test machine (UEFI, 4K `virtio-vga`);
 Linux disk-booted VMs (also the `disk::` and `graphical::` tests) publish `qmp.sock`, `vnc.sock` and
 `vm.toml` in
 `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; native Windows publishes private
-`vm.json` with independent loopback QMP endpoints and PID/HWND identity in the
+`vm.json` with independent current-user/SYSTEM-only Windows AF_UNIX QMP
+endpoints and PID/HWND identity in the
 runtime directory printed by `xtask info`. `ilex-vmctl` attaches by slug
 (from the checkout you are in, or `--slug`) and never starts or stops VMs.
 

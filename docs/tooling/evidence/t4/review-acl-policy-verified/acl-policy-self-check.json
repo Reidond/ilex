@@ -1,0 +1,492 @@
+{
+  "control": {
+    "baseline": {
+      "ace_count": 2,
+      "aces": [
+        {
+          "flags": 16,
+          "inheritable": false,
+          "inherited": true,
+          "mask": 2032127,
+          "sid": "S-1-5-18",
+          "type": "allow"
+        },
+        {
+          "flags": 16,
+          "inheritable": false,
+          "inherited": true,
+          "mask": 2032127,
+          "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "type": "allow"
+        }
+      ],
+      "acl_verified": true,
+      "allowed_sids": [
+        "S-1-5-18",
+        "S-1-5-21-2519408406-910423453-1880906839-1001"
+      ],
+      "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "dacl_sddl": "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+      "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/control.sock",
+      "no_inheritable_aces": true,
+      "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "owner_verified": true,
+      "transport": "windows-af-unix"
+    },
+    "cases": [
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;WD)",
+        "case": "Everyone",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;BU)",
+        "case": "Users",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;AU)",
+        "case": "AuthenticatedUsers",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;BA)",
+        "case": "Administrators",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;AN)",
+        "case": "Anonymous",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+        "case": "duplicate-user",
+        "error": "QMP DACL must contain exactly two ACEs",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;SY)(A;;FR;;;SY)",
+        "case": "extra-ACE",
+        "error": "QMP DACL must contain exactly two ACEs",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FR;;;SY)",
+        "case": "incomplete-rights",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;OI;FA;;;SY)",
+        "case": "propagation-OI",
+        "outcome": "OS removed propagation flags",
+        "readback": {
+          "ace_count": 2,
+          "aces": [
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+              "type": "allow"
+            },
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-18",
+              "type": "allow"
+            }
+          ],
+          "acl_verified": true,
+          "allowed_sids": [
+            "S-1-5-18",
+            "S-1-5-21-2519408406-910423453-1880906839-1001"
+          ],
+          "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "dacl_sddl": "D:PAI(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;SY)",
+          "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/control.sock",
+          "no_inheritable_aces": true,
+          "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "owner_verified": true,
+          "transport": "windows-af-unix"
+        },
+        "rejected": false
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;CI;FA;;;SY)",
+        "case": "propagation-CI",
+        "outcome": "OS removed propagation flags",
+        "readback": {
+          "ace_count": 2,
+          "aces": [
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+              "type": "allow"
+            },
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-18",
+              "type": "allow"
+            }
+          ],
+          "acl_verified": true,
+          "allowed_sids": [
+            "S-1-5-18",
+            "S-1-5-21-2519408406-910423453-1880906839-1001"
+          ],
+          "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "dacl_sddl": "D:PAI(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;SY)",
+          "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/control.sock",
+          "no_inheritable_aces": true,
+          "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "owner_verified": true,
+          "transport": "windows-af-unix"
+        },
+        "rejected": false
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;OINP;FA;;;SY)",
+        "case": "propagation-OINP",
+        "outcome": "OS removed propagation flags",
+        "readback": {
+          "ace_count": 2,
+          "aces": [
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+              "type": "allow"
+            },
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-18",
+              "type": "allow"
+            }
+          ],
+          "acl_verified": true,
+          "allowed_sids": [
+            "S-1-5-18",
+            "S-1-5-21-2519408406-910423453-1880906839-1001"
+          ],
+          "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "dacl_sddl": "D:PAI(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;SY)",
+          "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/control.sock",
+          "no_inheritable_aces": true,
+          "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "owner_verified": true,
+          "transport": "windows-af-unix"
+        },
+        "rejected": false
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;OIIO;FA;;;SY)",
+        "case": "propagation-OIIO",
+        "error": "QMP DACL must contain exactly two ACEs",
+        "rejected": true
+      }
+    ],
+    "normalized_count": 3,
+    "rejected_count": 9,
+    "restored": {
+      "ace_count": 2,
+      "aces": [
+        {
+          "flags": 16,
+          "inheritable": false,
+          "inherited": true,
+          "mask": 2032127,
+          "sid": "S-1-5-18",
+          "type": "allow"
+        },
+        {
+          "flags": 16,
+          "inheritable": false,
+          "inherited": true,
+          "mask": 2032127,
+          "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "type": "allow"
+        }
+      ],
+      "acl_verified": true,
+      "allowed_sids": [
+        "S-1-5-18",
+        "S-1-5-21-2519408406-910423453-1880906839-1001"
+      ],
+      "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "dacl_sddl": "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+      "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/control.sock",
+      "no_inheritable_aces": true,
+      "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "owner_verified": true,
+      "transport": "windows-af-unix"
+    }
+  },
+  "input": {
+    "baseline": {
+      "ace_count": 2,
+      "aces": [
+        {
+          "flags": 16,
+          "inheritable": false,
+          "inherited": true,
+          "mask": 2032127,
+          "sid": "S-1-5-18",
+          "type": "allow"
+        },
+        {
+          "flags": 16,
+          "inheritable": false,
+          "inherited": true,
+          "mask": 2032127,
+          "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "type": "allow"
+        }
+      ],
+      "acl_verified": true,
+      "allowed_sids": [
+        "S-1-5-18",
+        "S-1-5-21-2519408406-910423453-1880906839-1001"
+      ],
+      "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "dacl_sddl": "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+      "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/input.sock",
+      "no_inheritable_aces": true,
+      "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "owner_verified": true,
+      "transport": "windows-af-unix"
+    },
+    "cases": [
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;WD)",
+        "case": "Everyone",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;BU)",
+        "case": "Users",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;AU)",
+        "case": "AuthenticatedUsers",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;BA)",
+        "case": "Administrators",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;AN)",
+        "case": "Anonymous",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+        "case": "duplicate-user",
+        "error": "QMP DACL must contain exactly two ACEs",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;SY)(A;;FR;;;SY)",
+        "case": "extra-ACE",
+        "error": "QMP DACL must contain exactly two ACEs",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FR;;;SY)",
+        "case": "incomplete-rights",
+        "error": "QMP ACL grants an unexpected principal or incomplete access",
+        "rejected": true
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;OI;FA;;;SY)",
+        "case": "propagation-OI",
+        "outcome": "OS removed propagation flags",
+        "readback": {
+          "ace_count": 2,
+          "aces": [
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+              "type": "allow"
+            },
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-18",
+              "type": "allow"
+            }
+          ],
+          "acl_verified": true,
+          "allowed_sids": [
+            "S-1-5-18",
+            "S-1-5-21-2519408406-910423453-1880906839-1001"
+          ],
+          "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "dacl_sddl": "D:PAI(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;SY)",
+          "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/input.sock",
+          "no_inheritable_aces": true,
+          "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "owner_verified": true,
+          "transport": "windows-af-unix"
+        },
+        "rejected": false
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;CI;FA;;;SY)",
+        "case": "propagation-CI",
+        "outcome": "OS removed propagation flags",
+        "readback": {
+          "ace_count": 2,
+          "aces": [
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+              "type": "allow"
+            },
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-18",
+              "type": "allow"
+            }
+          ],
+          "acl_verified": true,
+          "allowed_sids": [
+            "S-1-5-18",
+            "S-1-5-21-2519408406-910423453-1880906839-1001"
+          ],
+          "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "dacl_sddl": "D:PAI(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;SY)",
+          "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/input.sock",
+          "no_inheritable_aces": true,
+          "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "owner_verified": true,
+          "transport": "windows-af-unix"
+        },
+        "rejected": false
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;OINP;FA;;;SY)",
+        "case": "propagation-OINP",
+        "outcome": "OS removed propagation flags",
+        "readback": {
+          "ace_count": 2,
+          "aces": [
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+              "type": "allow"
+            },
+            {
+              "flags": 0,
+              "inheritable": false,
+              "inherited": false,
+              "mask": 2032127,
+              "sid": "S-1-5-18",
+              "type": "allow"
+            }
+          ],
+          "acl_verified": true,
+          "allowed_sids": [
+            "S-1-5-18",
+            "S-1-5-21-2519408406-910423453-1880906839-1001"
+          ],
+          "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "dacl_sddl": "D:PAI(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;;FA;;;SY)",
+          "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/input.sock",
+          "no_inheritable_aces": true,
+          "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "owner_verified": true,
+          "transport": "windows-af-unix"
+        },
+        "rejected": false
+      },
+      {
+        "applied_sddl": "D:P(A;;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)(A;OIIO;FA;;;SY)",
+        "case": "propagation-OIIO",
+        "error": "QMP DACL must contain exactly two ACEs",
+        "rejected": true
+      }
+    ],
+    "normalized_count": 3,
+    "rejected_count": 9,
+    "restored": {
+      "ace_count": 2,
+      "aces": [
+        {
+          "flags": 16,
+          "inheritable": false,
+          "inherited": true,
+          "mask": 2032127,
+          "sid": "S-1-5-18",
+          "type": "allow"
+        },
+        {
+          "flags": 16,
+          "inheritable": false,
+          "inherited": true,
+          "mask": 2032127,
+          "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "type": "allow"
+        }
+      ],
+      "acl_verified": true,
+      "allowed_sids": [
+        "S-1-5-18",
+        "S-1-5-21-2519408406-910423453-1880906839-1001"
+      ],
+      "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "dacl_sddl": "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+      "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/input.sock",
+      "no_inheritable_aces": true,
+      "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "owner_verified": true,
+      "transport": "windows-af-unix"
+    }
+  },
+  "qemu_exit_code": 1,
+  "schema": 1,
+  "self_check_passed": true,
+  "server_stopped_before_acl_mutation": true
+}

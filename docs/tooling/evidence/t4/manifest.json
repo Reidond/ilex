@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "exported_utc": "2026-11-18T11:29:39.989301+00:00",
+  "exported_utc": "2026-11-18T12:26:46.104915+00:00",
   "timestamp_note": "file_written_utc is the original artifact file timestamp; capture sidecars carry presentation/UTC acquisition metadata. Raw contents are copied byte for byte.",
   "files": [
     {
@@ -236,6 +236,156 @@
       "bytes": 200,
       "sha256": "993f3c3190eb3b87af097b14f02603520b58da8805badeb1dc430f7fcdedbe31",
       "file_written_utc": "2026-11-17T23:49:29.682022+00:00"
+    },
+    {
+      "path": "review-acl-policy-verified/acl-policy-self-check.json",
+      "bytes": 17649,
+      "sha256": "e86a6f9fd6528c8f9a1fe119d23f9efa88f716105001a39dee3380124e9d13b6",
+      "file_written_utc": "2026-11-18T12:11:52.238349+00:00"
+    },
+    {
+      "path": "review-acl-policy-verified/context.json",
+      "bytes": 277,
+      "sha256": "acc600194d029aadeb139407dcbdcddcd4aa7e6a47345613d0659633c2b26386",
+      "file_written_utc": "2026-11-18T12:11:50.712850+00:00"
+    },
+    {
+      "path": "review-acl-policy-verified/driver.stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:11:50.717448+00:00"
+    },
+    {
+      "path": "review-acl-policy-verified/driver.stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:11:50.716448+00:00"
+    },
+    {
+      "path": "review-acl-policy-verified/low-integrity.json",
+      "bytes": 4581,
+      "sha256": "efd74b0e1056d13945c86255d86a359dc5ec624854c06512089f2efab97a83c1",
+      "file_written_utc": "2026-11-18T12:11:52.172167+00:00"
+    },
+    {
+      "path": "review-acl-policy-verified/qemu-stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:11:51.547057+00:00"
+    },
+    {
+      "path": "review-acl-policy-verified/qemu-stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:11:51.547057+00:00"
+    },
+    {
+      "path": "review-acl-policy-verified/transport-ready.json",
+      "bytes": 2204,
+      "sha256": "064a9386a1d79a91258303dc99ca3e24e8c59099d55b32f6cc156770b82fb3ef",
+      "file_written_utc": "2026-11-18T12:11:51.672894+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/cleanup.json",
+      "bytes": 299,
+      "sha256": "cdd0929bb45ef0fcd8648c9cec3524e2e98def43ccb86c90258ebdbadab1ea1b",
+      "file_written_utc": "2026-11-18T12:20:29.762358+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/launch.json",
+      "bytes": 190,
+      "sha256": "62e25080075af32d899bd31a2ddb3724f83ca33b162685e45fdab791398dfecd",
+      "file_written_utc": "2026-11-18T12:13:14.067595+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/launcher.stderr.log",
+      "bytes": 2419,
+      "sha256": "ee21930febeb19f7a95f5edf143c3025a62ee624ad3304a979b7c58a5983ae0d",
+      "file_written_utc": "2026-11-18T12:18:19.200238+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/launcher.stdout.log",
+      "bytes": 475,
+      "sha256": "e6160dbf1922afd77dad7240d111ee5e5265696420069cd15950950cf0bec1be",
+      "file_written_utc": "2026-11-18T12:13:32.096716+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/poweroff.stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:17:32.981035+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/poweroff.stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:17:32.978016+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/qmp-security.json",
+      "bytes": 2159,
+      "sha256": "889a8294082657eaa151205f21deb3956547d8ad97c51ef82084243236cae51b",
+      "file_written_utc": "2026-11-18T12:13:34.626764+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/startup-check.json",
+      "bytes": 1993,
+      "sha256": "349e22e102f40e96791594586c20f04ca46895de63b16e253d5c21c4f58e6e55",
+      "file_written_utc": "2026-11-18T12:17:32.974015+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/teardown-status.json",
+      "bytes": 179,
+      "sha256": "33a48f7ebe0dde6a195fa75327782bec7fd27e0afbdb37b2b0c319221bc86eaf",
+      "file_written_utc": "2026-11-18T12:18:20.408651+00:00"
+    },
+    {
+      "path": "review-acl-startup-final/vm-identity.json",
+      "bytes": 256,
+      "sha256": "4f40e7eccfe1202601e80b7813121cc46f859ba4692d53344e68c08e3cc174e2",
+      "file_written_utc": "2026-11-18T12:26:45.196668+00:00"
+    },
+    {
+      "path": "review-acl-validation/checks.json",
+      "bytes": 473,
+      "sha256": "e9d3436d9c5022504b7b0d9cedc4c85d6c2336bd0bc9e6265441ba6d353c22c9",
+      "file_written_utc": "2026-11-18T12:26:45.195668+00:00"
+    },
+    {
+      "path": "review-acl-validation/clippy.stderr.log",
+      "bytes": 7217,
+      "sha256": "c164eec0bc0d770fc7b23837b15c9e243a36306fcec416144b84263407626d5d",
+      "file_written_utc": "2026-11-18T12:14:51.106563+00:00"
+    },
+    {
+      "path": "review-acl-validation/clippy.stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:11:52.559532+00:00"
+    },
+    {
+      "path": "review-acl-validation/example-build.stderr.log",
+      "bytes": 208,
+      "sha256": "b7aea2e3785147c3f1ba8a1c20506e695bfa6d0cc13820d66b3adb38eafcdb8e",
+      "file_written_utc": "2026-11-18T12:07:06.833176+00:00"
+    },
+    {
+      "path": "review-acl-validation/example-build.stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:07:03.076280+00:00"
+    },
+    {
+      "path": "review-acl-validation/launcher-build.stderr.log",
+      "bytes": 1281,
+      "sha256": "e94462eab47d4b1bf81bbe89bf2a9c97cb8eb010ff1a5c3678b67a9866bc573f",
+      "file_written_utc": "2026-11-18T12:08:35.310013+00:00"
+    },
+    {
+      "path": "review-acl-validation/launcher-build.stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T12:07:06.836176+00:00"
     },
     {
       "path": "review-admission-timeout-35072/result.json",
@@ -1323,5 +1473,6 @@
       "sha256": "7d88b130aea8e5339209dabc8df2212b0734b841652a8fd8d5a3bd3d14e35907",
       "file_written_utc": "2026-11-18T10:58:47.756651+00:00"
     }
-  ]
+  ],
+  "acl_followup_note": "All original 220 artifact bytes and manifest entries are preserved. Appended owner/DACL qualification uses no new Windows account. Low-integrity checks retain the same TokenUser SID."
 }

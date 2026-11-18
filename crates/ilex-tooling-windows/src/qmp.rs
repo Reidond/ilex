@@ -114,6 +114,14 @@ pub fn security(endpoint: &str) -> Result<Value> {
     Ok(crate::private_qmp::verify(endpoint)?.report.clone())
 }
 
+/// Mandatory for every native VM launch, before publishing its metadata.
+/// The same verifier also guards every subsequent client connection.
+pub(crate) fn startup_security(control: &str, input: &str) -> Result<Value> {
+    Ok(
+        serde_json::json!({"schema":1,"policy":"current-user-owner-and-two-non-propagating-allow-aces","checked_before_vm_metadata":true,"control":security(control)?,"input":security(input)?}),
+    )
+}
+
 /// One newly created, ACL-protected directory per launch attempt. AF_UNIX
 /// paths stay below the Windows sockaddr_un limit, independent of checkout.
 pub struct Endpoints {
@@ -240,11 +248,13 @@ pub fn transport_self_check(
             // Reconnection is part of the native CLI contract.
             Qmp::connect(endpoint)?.execute("query-status", serde_json::json!({}))?;
         }
+        let mut report = startup_security(&endpoints.control, &endpoints.input)?;
+        report["run"] = serde_json::json!(run);
+        report["pid"] = serde_json::json!(child.id());
+        report["reconnect_passed"] = serde_json::json!(true);
         crate::host::atomic(
             &artifacts.join("transport-ready.json"),
-            &serde_json::to_vec_pretty(
-                &serde_json::json!({"schema":1,"run":run,"pid":child.id(),"control":security(&endpoints.control)?,"input":security(&endpoints.input)?,"reconnect_passed":true}),
-            )?,
+            &serde_json::to_vec_pretty(&report)?,
         )?;
         let until = Instant::now() + Duration::from_secs(120);
         while Instant::now() < until && !artifacts.join("transport.stop").exists() {
@@ -257,7 +267,14 @@ pub fn transport_self_check(
         Ok(())
     })();
     let _ = child.kill();
-    let _ = child.wait();
+    let stopped = child.wait();
     drop(job);
-    result
+    result?;
+    let stopped = stopped.context("stopping disposable QEMU before ACL mutation")?;
+    let policies = serde_json::json!({"schema":1,"server_stopped_before_acl_mutation":true,"qemu_exit_code":stopped.code(),"control":crate::private_qmp::policy_self_check(&endpoints.control)?,"input":crate::private_qmp::policy_self_check(&endpoints.input)?,"self_check_passed":true});
+    crate::host::atomic(
+        &artifacts.join("acl-policy-self-check.json"),
+        &serde_json::to_vec_pretty(&policies)?,
+    )?;
+    Ok(())
 }

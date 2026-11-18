@@ -1,0 +1,11 @@
+{
+  "utc": "2026-11-18T12:20:29.7489393Z",
+  "run": "2392-1795004011982907100",
+  "launcherStopped": true,
+  "qemuStopped": true,
+  "initial30SecondWaitExpired": true,
+  "keysRemaining": [],
+  "socketsRemaining": [],
+  "ephemeralDiskRemaining": false,
+  "ephemeralVarsRemaining": false
+}

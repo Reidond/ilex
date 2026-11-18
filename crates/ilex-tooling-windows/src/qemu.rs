@@ -855,13 +855,15 @@ impl Vm {
                     ensure!(Instant::now() < until, "QEMU window/QMP startup timed out");
                     thread::sleep(Duration::from_millis(100));
                 }
-                host::atomic(&dir.join("vm.json"), &serde_json::to_vec_pretty(&info)?)?;
+                // Fail closed on either endpoint's owner/ACL before this run
+                // can be discovered by vmctl or the session helpers.
+                let mut security = qmp::startup_security(&info.qmp_endpoint, &info.input_endpoint)?;
+                security["run"] = json!(run);
                 host::atomic(
                     &dir.join("qmp-security.json"),
-                    &serde_json::to_vec_pretty(
-                        &json!({"schema":1,"run":run,"control":qmp::security(&info.qmp_endpoint)?,"input":qmp::security(&info.input_endpoint)?}),
-                    )?,
+                    &serde_json::to_vec_pretty(&security)?,
                 )?;
+                host::atomic(&dir.join("vm.json"), &serde_json::to_vec_pretty(&info)?)?;
                 Ok(info)
             })();
             match startup {

@@ -121,13 +121,14 @@ pub fn verify(endpoint: &str) -> Result<Access> {
                 && tag.ReparseTag == 0x80000023,
             "QMP endpoint is not a native AF_UNIX socket"
         );
+        let mut owner = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
         let status = GetSecurityInfo(
             socket.as_raw_handle().cast(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
             std::ptr::null_mut(),
             &mut dacl,
             std::ptr::null_mut(),
@@ -136,6 +137,14 @@ pub fn verify(endpoint: &str) -> Result<Access> {
         ensure!(status == ERROR_SUCCESS, "reading QMP ACL: {status}");
         let result = (|| -> Result<Value> {
             ensure!(!dacl.is_null(), "QMP null DACL refused");
+            let user = user_sid()?;
+            ensure!(!owner.is_null(), "QMP owner missing");
+            let owner = sid_string(owner)?;
+            ensure!(owner == user, "QMP owner must be the current user");
+            ensure!(
+                (*dacl).AceCount == 2,
+                "QMP DACL must contain exactly two ACEs"
+            );
             let mut raw_sddl = std::ptr::null_mut();
             ensure!(
                 ConvertSecurityDescriptorToStringSecurityDescriptorW(
@@ -153,27 +162,30 @@ pub fn verify(endpoint: &str) -> Result<Access> {
             }
             let dacl_sddl = String::from_utf16_lossy(std::slice::from_raw_parts(raw_sddl, length));
             LocalFree(raw_sddl.cast());
-            let user = user_sid()?;
             let mut allowed = Vec::new();
+            let mut entries = Vec::new();
             for index in 0..(*dacl).AceCount as u32 {
                 let mut raw = std::ptr::null_mut();
                 ensure!(GetAce(dacl, index, &mut raw) != 0, "reading QMP ACE");
-                let ace = &*(raw.cast::<ACCESS_ALLOWED_ACE>());
+                let header = &*(raw.cast::<ACE_HEADER>());
                 ensure!(
-                    ace.Header.AceType == 0 // ACCESS_ALLOWED_ACE_TYPE
-                        && u32::from(ace.Header.AceFlags) & INHERIT_ONLY_ACE == 0,
-                    "unexpected QMP ACE"
+                    header.AceType == 0 // ACCESS_ALLOWED_ACE_TYPE
+                        && usize::from(header.AceSize) >= std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+                        // ID records inherited provenance; it cannot propagate.
+                        // Reject OI, CI, NP, IO and every other ACE flag.
+                        && u32::from(header.AceFlags) & !INHERITED_ACE == 0,
+                    "unexpected QMP ACE type, size or inheritable flags"
                 );
+                let ace = &*(raw.cast::<ACCESS_ALLOWED_ACE>());
                 let sid = sid_string((&ace.SidStart as *const u32).cast_mut().cast())?;
                 ensure!(
-                    (sid == user || sid == "S-1-5-18")
-                        && ace.Mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS,
+                    (sid == user || sid == "S-1-5-18") && ace.Mask == FILE_ALL_ACCESS,
                     "QMP ACL grants an unexpected principal or incomplete access"
                 );
+                entries.push(json!({"sid":sid,"type":"allow","mask":ace.Mask,"flags":header.AceFlags,"inherited":u32::from(header.AceFlags) & INHERITED_ACE != 0,"inheritable":false}));
                 allowed.push(sid);
             }
             allowed.sort();
-            allowed.dedup();
             ensure!(
                 allowed.len() == 2
                     && allowed.contains(&user)
@@ -181,7 +193,7 @@ pub fn verify(endpoint: &str) -> Result<Access> {
                 "QMP ACL must allow only current user and SYSTEM"
             );
             Ok(
-                json!({"transport":"windows-af-unix","endpoint":endpoint,"current_user":user,"allowed_sids":allowed,"dacl_sddl":dacl_sddl,"ace_count":(*dacl).AceCount,"acl_verified":true}),
+                json!({"transport":"windows-af-unix","endpoint":endpoint,"current_user":user,"owner_sid":owner,"owner_verified":true,"allowed_sids":allowed,"dacl_sddl":dacl_sddl,"ace_count":(*dacl).AceCount,"aces":entries,"no_inheritable_aces":true,"acl_verified":true}),
             )
         })();
         LocalFree(descriptor.cast());
@@ -190,6 +202,149 @@ pub fn verify(endpoint: &str) -> Result<Access> {
             _socket: socket,
             report: result?,
         })
+    }
+}
+
+/// Real NTFS policy faults on sockets created by the transport e2e fixture.
+/// The caller must stop its disposable QEMU first: no permissive test ACL is
+/// ever applied to a listening endpoint. Restore the original DACL on errors.
+pub(crate) fn policy_self_check(endpoint: &str) -> Result<Value> {
+    let baseline = verify(endpoint)?;
+    let user = baseline.report["current_user"]
+        .as_str()
+        .context("fixture user SID missing")?;
+    let file = OpenOptions::new()
+        .access_mode(READ_CONTROL | WRITE_DAC)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(endpoint.strip_prefix("unix:").context("fixture endpoint")?)?;
+    let mut cases = Vec::new();
+    for (name, sid) in [
+        ("Everyone", "WD"),
+        ("Users", "BU"),
+        ("AuthenticatedUsers", "AU"),
+        ("Administrators", "BA"),
+        ("Anonymous", "AN"),
+    ] {
+        cases.push((
+            name.to_string(),
+            format!("D:P(A;;FA;;;{user})(A;;FA;;;{sid})"),
+        ));
+    }
+    cases.push((
+        "duplicate-user".into(),
+        format!("D:P(A;;FA;;;{user})(A;;FA;;;{user})"),
+    ));
+    cases.push((
+        "extra-ACE".into(),
+        format!("D:P(A;;FA;;;{user})(A;;FA;;;SY)(A;;FR;;;SY)"),
+    ));
+    cases.push((
+        "incomplete-rights".into(),
+        format!("D:P(A;;FA;;;{user})(A;;FR;;;SY)"),
+    ));
+    for flags in ["OI", "CI", "OINP", "OIIO"] {
+        cases.push((
+            format!("propagation-{flags}"),
+            format!("D:P(A;;FA;;;{user})(A;{flags};FA;;;SY)"),
+        ));
+    }
+    unsafe {
+        let handle = file.as_raw_handle().cast();
+        let mut original = std::ptr::null_mut();
+        let mut descriptor = std::ptr::null_mut();
+        ensure!(
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut original,
+                std::ptr::null_mut(),
+                &mut descriptor
+            ) == ERROR_SUCCESS,
+            "reading fixture DACL"
+        );
+        let result = (|| -> Result<Vec<Value>> {
+            let mut observations = Vec::new();
+            for (name, sddl) in cases {
+                let wide: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+                let mut changed = std::ptr::null_mut();
+                ensure!(
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        wide.as_ptr(),
+                        1,
+                        &mut changed,
+                        std::ptr::null_mut()
+                    ) != 0,
+                    "creating fixture descriptor"
+                );
+                let applied = (|| -> Result<()> {
+                    let mut present = 0;
+                    let mut defaulted = 0;
+                    let mut dacl = std::ptr::null_mut();
+                    ensure!(
+                        GetSecurityDescriptorDacl(changed, &mut present, &mut dacl, &mut defaulted)
+                            != 0
+                            && present != 0
+                            && !dacl.is_null(),
+                        "reading changed fixture DACL"
+                    );
+                    ensure!(
+                        SetSecurityInfo(
+                            handle,
+                            SE_FILE_OBJECT,
+                            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            dacl,
+                            std::ptr::null_mut()
+                        ) == ERROR_SUCCESS,
+                        "applying fixture DACL"
+                    );
+                    Ok(())
+                })();
+                LocalFree(changed.cast());
+                applied?;
+                match verify(endpoint) {
+                    Err(error) => observations.push(json!({"case":name,"applied_sddl":sddl,"rejected":true,"error":format!("{error:#}")})),
+                    Ok(access) => {
+                        // Windows may strip propagation bits from a file's
+                        // DACL. Record the actual safe readback, rather than
+                        // claiming that a flag absent on disk was rejected.
+                        ensure!(name.starts_with("propagation-")
+                            && access.report["aces"].as_array().is_some_and(|aces| aces.iter().all(|ace| ace["flags"].as_u64().is_some_and(|flags| flags & 15 == 0))),
+                            "accepted invalid fixture DACL {name}: {}", access.report);
+                        observations.push(json!({"case":name,"applied_sddl":sddl,"rejected":false,"outcome":"OS removed propagation flags","readback":access.report}));
+                    }
+                }
+            }
+            Ok(observations)
+        })();
+        // The fixture started with an inherited DACL. Reapply inheritance from
+        // its private parent, including when a negative case failed.
+        let restored = SetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            original,
+            std::ptr::null_mut(),
+        );
+        LocalFree(descriptor.cast());
+        ensure!(
+            restored == ERROR_SUCCESS,
+            "restoring fixture DACL: {restored}"
+        );
+        let cases = result?;
+        let rejected_count = cases.iter().filter(|case| case["rejected"] == true).count();
+        let normalized_count = cases.len() - rejected_count;
+        let restored = verify(endpoint)?.report;
+        Ok(
+            json!({"baseline":baseline.report,"cases":cases,"rejected_count":rejected_count,"normalized_count":normalized_count,"restored":restored}),
+        )
     }
 }
 

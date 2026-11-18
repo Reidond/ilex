@@ -1,0 +1,9 @@
+{
+  "launcher_pid": 2392,
+  "utc": "2026-11-18T12:13:14.0241799Z",
+  "purpose": "aclproof",
+  "desktopGiB": 8,
+  "reserveGiB": 14,
+  "new_accounts": false,
+  "ci_dispatch": false
+}

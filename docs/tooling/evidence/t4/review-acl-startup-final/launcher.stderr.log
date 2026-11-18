@@ -1,0 +1,33 @@
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+$ git rev-parse HEAD
+$ git status --porcelain --untracked-files=normal
+ilex: native WHPX VM ilex-t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef-aclproof; Right-Ctrl+G releases SDL grab
+ssh -p 59484 -i "C:\Users\reido\AppData\Local\Temp\ilex-vm\t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef\aclproof\2392-1795004011982907100\id_ed25519" -o StrictHostKeyChecking=yes -o UserKnownHostsFile="C:\Users\reido\AppData\Local\Temp\ilex-vm\t3-1c5289be-21--dbd3067e01986b91db87f88ad7a500ef\aclproof\2392-1795004011982907100\known_hosts" -o HostKeyAlias=ilex-dev-2392-1795004011982907100 root@127.0.0.1
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active
+ilex: dev clipboard channel disconnected; retrying while VM is active

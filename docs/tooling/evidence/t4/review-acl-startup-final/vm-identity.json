@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "owner": "64addbb8-4a8c-8d86-b005-4b17d6877a97",
+  "run": "2392-1795004011982907100",
+  "pid": 37120,
+  "process_start": "134394776132037573",
+  "hwnd": 362221052,
+  "purpose": "aclproof",
+  "display": "sdl-gl",
+  "gpu": true
+}

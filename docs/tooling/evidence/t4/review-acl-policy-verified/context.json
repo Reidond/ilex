@@ -1,0 +1,7 @@
+{
+  "utc": "2026-11-18T12:11:50.6739208Z",
+  "purpose": "real QEMU AF_UNIX owner/DACL self-check; zero guest RAM",
+  "new_accounts": false,
+  "ci_dispatch": false,
+  "propagation_note": "Windows-normalized ACEs are recorded as normalized readbacks, not as rejections"
+}

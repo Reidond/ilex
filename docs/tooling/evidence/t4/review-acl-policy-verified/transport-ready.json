@@ -1,0 +1,74 @@
+{
+  "checked_before_vm_metadata": true,
+  "control": {
+    "ace_count": 2,
+    "aces": [
+      {
+        "flags": 16,
+        "inheritable": false,
+        "inherited": true,
+        "mask": 2032127,
+        "sid": "S-1-5-18",
+        "type": "allow"
+      },
+      {
+        "flags": 16,
+        "inheritable": false,
+        "inherited": true,
+        "mask": 2032127,
+        "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+        "type": "allow"
+      }
+    ],
+    "acl_verified": true,
+    "allowed_sids": [
+      "S-1-5-18",
+      "S-1-5-21-2519408406-910423453-1880906839-1001"
+    ],
+    "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+    "dacl_sddl": "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+    "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/control.sock",
+    "no_inheritable_aces": true,
+    "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+    "owner_verified": true,
+    "transport": "windows-af-unix"
+  },
+  "input": {
+    "ace_count": 2,
+    "aces": [
+      {
+        "flags": 16,
+        "inheritable": false,
+        "inherited": true,
+        "mask": 2032127,
+        "sid": "S-1-5-18",
+        "type": "allow"
+      },
+      {
+        "flags": 16,
+        "inheritable": false,
+        "inherited": true,
+        "mask": 2032127,
+        "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+        "type": "allow"
+      }
+    ],
+    "acl_verified": true,
+    "allowed_sids": [
+      "S-1-5-18",
+      "S-1-5-21-2519408406-910423453-1880906839-1001"
+    ],
+    "current_user": "S-1-5-21-2519408406-910423453-1880906839-1001",
+    "dacl_sddl": "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+    "endpoint": "unix:C:/Users/reido/AppData/Local/ilex/qmp/14a1b71fbac6cceacb619512fe234030/input.sock",
+    "no_inheritable_aces": true,
+    "owner_sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+    "owner_verified": true,
+    "transport": "windows-af-unix"
+  },
+  "pid": 35300,
+  "policy": "current-user-owner-and-two-non-propagating-allow-aces",
+  "reconnect_passed": true,
+  "run": "40424-1795003910830350000",
+  "schema": 1
+}

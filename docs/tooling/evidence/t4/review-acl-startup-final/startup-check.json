@@ -1,0 +1,59 @@
+{
+  "utc": "2026-11-18T12:17:32.9597383Z",
+  "run": "2392-1795004011982907100",
+  "currentUserSid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+  "securityWrittenUtc": "2026-11-18T12:13:34.6267637Z",
+  "vmMetadataWrittenUtc": "2026-11-18T12:13:34.6287638Z",
+  "securityBeforeMetadata": true,
+  "independentDotNetReadback": [
+    {
+      "role": "control",
+      "owner": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "sddl": "O:S-1-5-21-2519408406-910423453-1880906839-1001G:S-1-5-21-2519408406-910423453-1880906839-1001D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+      "aces": [
+        {
+          "sid": "S-1-5-18",
+          "type": "Allow",
+          "mask": 2032127,
+          "inheritanceFlags": "None",
+          "propagationFlags": "None",
+          "isInherited": true
+        },
+        {
+          "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "type": "Allow",
+          "mask": 2032127,
+          "inheritanceFlags": "None",
+          "propagationFlags": "None",
+          "isInherited": true
+        }
+      ]
+    },
+    {
+      "role": "input",
+      "owner": "S-1-5-21-2519408406-910423453-1880906839-1001",
+      "sddl": "O:S-1-5-21-2519408406-910423453-1880906839-1001G:S-1-5-21-2519408406-910423453-1880906839-1001D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-2519408406-910423453-1880906839-1001)",
+      "aces": [
+        {
+          "sid": "S-1-5-18",
+          "type": "Allow",
+          "mask": 2032127,
+          "inheritanceFlags": "None",
+          "propagationFlags": "None",
+          "isInherited": true
+        },
+        {
+          "sid": "S-1-5-21-2519408406-910423453-1880906839-1001",
+          "type": "Allow",
+          "mask": 2032127,
+          "inheritanceFlags": "None",
+          "propagationFlags": "None",
+          "isInherited": true
+        }
+      ]
+    }
+  ],
+  "newAccounts": false,
+  "desktopGiB": 8,
+  "reserveGiB": 14
+}

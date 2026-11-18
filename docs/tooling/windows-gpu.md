@@ -151,19 +151,28 @@ qemu-vdagent clipboard bridge is involved.
 Private `vm.json` identifies owner/run, PID creation time, exact HWND, runtime,
 disk and endpoints. Control and human-input QMP endpoints are independent
 Windows AF_UNIX sockets in a new per-launch directory. Protected NTFS DACLs
-allow only the current user and SYSTEM before QEMU binds. The client opens
-no-follow directory/file handles, verifies the native socket reparse tag and
-every ACL entry, and retains those handles while connected. TCP endpoints
+allow only the current user and SYSTEM before QEMU binds. On every launch,
+the verifier requires the socket owner to equal the process TokenUser and
+exactly two full-access allow ACEs for that user and SYSTEM, with no propagation
+flags or other entries. Unexpected or unreadable security aborts startup before
+vm.json is published. Each client opens no-follow directory/file handles,
+repeats the owner/ACL and native socket reparse-tag checks, and retains those
+handles while connected. TCP endpoints
 are rejected; there is no debug TCP opt-in. AF_UNIX uses QEMU's reconnectable
 socket backend; the pinned QEMU pipe backend cannot reconnect clients.
 [Windows AF_UNIX permission checks](https://devblogs.microsoft.com/commandline/af_unix-comes-to-windows/)
 enforce the socket file's ACL at connect time. vmctl commands serialize
 the control connection, correlate QMP IDs, ignore asynchronous events and
-enforce absolute deadlines. `qmp-security.json` records the verified SIDs.
+enforce absolute deadlines. `qmp-security.json` records the owner and every
+verified ACE before vm.json is written.
 The zero-guest `qmp-self-check` e2e example and `windows-qmp-security.py`
-exercise reconnects and real connections from independently lowered child
-tokens; low-integrity clients must be refused by the OS. No accounts or host
-security settings are changed by that probe.
+exercise reconnects and raw connections from same-user low-integrity child
+tokens; both must be refused by the OS without production ACL preflight.
+The self-check also applies invalid DACLs to the stopped fixture's sockets and
+requires the verifier to reject them or record Windows' safe normalization.
+No cross-user live test or new Windows account is used; the orchestrator
+accepted the enumerated owner/DACL and mandatory startup enforcement as the
+substitute evidence. See the [raw evidence](windows-gpu-evidence.md).
 The firmware-only runtime activation probe uses this transport too. Its
 unchanged 256 MiB profile preallocates RAM while holding the shared host
 admission lock. Socket names use Windows' OS-known per-user Local AppData

@@ -1,0 +1,26 @@
+   Compiling strsim v0.11.1
+   Compiling once_cell_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling darling_core v0.20.11
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling anstyle-wincon v3.0.11
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.5
+   Compiling anstream v1.0.0
+   Compiling clap_lex v1.1.1
+   Compiling clap_builder v4.6.7
+   Compiling ilex-tooling-linux v0.1.0 (C:\Users\reido\.t3\worktrees\ilex\t3-1c5289be-21724cfe73ad0433\crates\ilex-tooling-linux)
+   Compiling darling_macro v0.20.11
+   Compiling darling v0.20.11
+   Compiling derive_builder_core v0.20.2
+   Compiling derive_builder_macro v0.20.2
+   Compiling derive_builder v0.20.2
+   Compiling pgp v0.21.1
+   Compiling clap_derive v4.6.7
+   Compiling clap v4.6.7
+   Compiling ilex-tooling-windows v0.1.0 (C:\Users\reido\.t3\worktrees\ilex\t3-1c5289be-21724cfe73ad0433\crates\ilex-tooling-windows)
+   Compiling ilex-devkit v0.1.0 (C:\Users\reido\.t3\worktrees\ilex\t3-1c5289be-21724cfe73ad0433\crates\ilex-devkit)
+   Compiling xtask v0.1.0 (C:\Users\reido\.t3\worktrees\ilex\t3-1c5289be-21724cfe73ad0433\crates\xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 28s

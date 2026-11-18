@@ -22,7 +22,7 @@ from runtime metadata and omit credential paths.
 | Repeated boot credentials, pin rejection and enforcing labels | [First boot](evidence/t4/builder-cold1/ssh-identity.json), [second boot](evidence/t4/builder-cold2/ssh-identity.json), [final GNOME boot](evidence/t4/usb-gnome/ssh-identity.json), [guest provisioning/labels](evidence/t4/usb-gnome/ssh-provisioning.txt). |
 | Grabbed shutdown and fixed resource policy | [GNOME shutdown timing](evidence/t4/usb-gnome/shutdown-grabbed.json), [Hyprland shutdown timing](evidence/t4/usb-hyprland-qt/shutdown-grabbed.json), [timestamped host capacity/configuration observations](evidence/t4/capacity.jsonl). |
 | Development helper isolation | [Ordinary image filesystem audit](evidence/t4/production-helper-audit.json), [private composition audit](evidence/t4/development-helper-audit.json). |
-| Review P1: ACLs, reconnects and low-integrity denial | [Pinned QEMU endpoints and raw DACL SDDL](evidence/t4/review-transport-acl/transport-ready.json), [real lowered-token connection results](evidence/t4/review-transport-acl/low-integrity.json). Both clients receive Windows error 10013; normal clients reconnect before and after. |
+| Earlier review P1: ACLs, reconnects and low-integrity denial | [Pinned QEMU endpoints and raw DACL SDDL](evidence/t4/review-transport-acl/transport-ready.json), [real lowered-token connection results](evidence/t4/review-transport-acl/low-integrity.json). Both same-user low-integrity clients receive Windows error 10013; normal clients reconnect before and after. The final raw connector and explicit TokenUser qualification are linked below. |
 | Review P1: long artifact-state paths, concurrent clients and listener audit | [Long-path context](evidence/t4/review-transport-known-folder/context.json), [lowered-token checks](evidence/t4/review-transport-known-folder/low-integrity.json), [held input connection](evidence/t4/review-dual-qmp/result.json), [simultaneous native vmctl check](evidence/t4/review-dual-qmp/vmctl-self-check.json), [actual VM TCP listeners](evidence/t4/review-dual-qmp/listeners.json). Only pinned SSH listens on TCP. [Isolated runtime activation](evidence/t4/review-runtime-activation-final.stdout.log) also passes with private QMP. |
 | Review P2: delayed GNOME login on the final observer | [Timestamped retries and physical client sizes](evidence/t4/review-late-login-final/timeline.jsonl), [result](evidence/t4/review-late-login-final/result.json), [Cua resize](evidence/t4/review-late-login-final/cua-resize.json), [native crop metadata](evidence/t4/review-late-login-final/after-login.frame.json). GDM stayed stopped for another 25 seconds after resize; session 1 → 40 recovered 1696×1003 without another host resize. The [earlier run](evidence/t4/review-late-login/result.json) also passed. |
 | Review P2: compositor switch and repeated session change | [GNOME → Hyprland result](evidence/t4/review-session-hyprland-fixed/result.json), [full trace](evidence/t4/review-session-hyprland-fixed/timeline.jsonl), [Hyprland re-login result](evidence/t4/review-session-relogin-fixed/result.json), [full trace](evidence/t4/review-session-relogin-fixed/timeline.jsonl). Sessions 1 → 256 → 269 preserved the 1596×953 physical client. The forced 1280×800 bootstrap mode triggered recovery counters 0 → 1 → 2, with no second host resize. |
@@ -32,7 +32,11 @@ from runtime metadata and omit credential paths.
 | Review normal teardown on the final runtime | [SendInput Ctrl-C](evidence/t4/review-lifecycle/ctrl-c-fixed/result.json), [Cua action](evidence/t4/review-lifecycle/ctrl-c-fixed/cua-action.json), [console/launcher relationship](evidence/t4/review-lifecycle/ctrl-c-fixed/console-processes.json), [ephemeral caption close](evidence/t4/review-lifecycle/close-window-fixed/result.json), [final GNOME caption close](evidence/t4/review-lifecycle/close-after-final-login/result.json), [Cua close action](evidence/t4/review-lifecycle/close-after-final-login/cua-action.json). Both processes exit 0, private keys/sockets disappear and stale attachment fails. Ctrl-C requests poweroff and completes teardown in 3.417 seconds without forced kill. |
 | Review forced launcher exit and restart | [Forced-exit process results](evidence/t4/review-lifecycle/forced-exit/result.json), [restart/reclamation and new pinned SSH](evidence/t4/review-lifecycle/restart-after-force/result.json), [fresh launch](evidence/t4/review-lifecycle/restart-after-force/launch.json). The owned job stops QEMU after launcher exit 37. The next launch removes the old keys, sockets and ephemeral disk/firmware, rotates both public keys and reuses the slot. |
 | Final cleanup and unchanged resource policy | [Final owned-process audit and builder configuration](evidence/t4/review-final-cleanup.json), [capacity observations](evidence/t4/capacity.jsonl), [admission timeout cleanup](evidence/t4/review-admission-timeout-35072/result.json), [owned Windows process audit](evidence/t4/review-owned-qemu-audit.json), [owned WSL resource audit](evidence/t4/review-owned-wsl-audit.json). Builder 16 GiB, desktop 8 GiB and reserve 14 GiB remain unchanged. |
-| Rebased compiler checks | [Exact source and exit codes](evidence/t4/review-clippy-results.json), [Windows clippy](evidence/t4/review-windows-clippy.stderr.log), [Linux clippy](evidence/t4/review-linux-clippy.stderr.log). xtask, vmctl and the e2e binary pass with warnings denied. No unit tests run. |
+| Earlier rebased compiler checks | [Exact source and exit codes](evidence/t4/review-clippy-results.json), [Windows clippy](evidence/t4/review-windows-clippy.stderr.log), [Linux clippy](evidence/t4/review-linux-clippy.stderr.log). xtask, vmctl and the e2e binary pass with warnings denied at the recorded source. No unit tests run. |
+| Final re-review: exact socket owner/DACL and policy faults | [Both enumerated socket descriptors](evidence/t4/review-acl-policy-verified/transport-ready.json), [real NTFS fault cases and restored descriptors](evidence/t4/review-acl-policy-verified/acl-policy-self-check.json), [driver output](evidence/t4/review-acl-policy-verified/driver.stdout.log). Each endpoint rejects nine invalid descriptors. Windows normalizes three propagation cases to safe descriptors; actual readbacks are recorded. QEMU is stopped before any fault descriptor is applied. |
+| Final re-review: raw same-user low-integrity denial | [TokenUser, integrity RID, raw connector results and normal reconnects](evidence/t4/review-acl-policy-verified/low-integrity.json), [probe context](evidence/t4/review-acl-policy-verified/context.json). The raw Winsock connector bypasses production ACL preflight. Both low-integrity connects return OS error 10013; the ordinary token receives a QMP greeting before and after. This is a mandatory-integrity check, not a cross-user live test. |
+| Final re-review: mandatory check on ordinary VM startup | [Startup security report](evidence/t4/review-acl-startup-final/qmp-security.json), [independent .NET owner/ACE readback and file timestamps](evidence/t4/review-acl-startup-final/startup-check.json), [owned VM identity](evidence/t4/review-acl-startup-final/vm-identity.json), [launch configuration](evidence/t4/review-acl-startup-final/launch.json), [teardown status](evidence/t4/review-acl-startup-final/teardown-status.json), [cleanup](evidence/t4/review-acl-startup-final/cleanup.json). Both endpoint checks precede publication of vm.json. The normal 8 GiB guest uses the frozen builder-delivered disk and exits without forced kill. |
+| Final re-review: current Windows compiler checks | [Exit codes and scope](evidence/t4/review-acl-validation/checks.json), [example build](evidence/t4/review-acl-validation/example-build.stderr.log), [launcher build](evidence/t4/review-acl-validation/launcher-build.stderr.log), [clippy](evidence/t4/review-acl-validation/clippy.stderr.log). Windows tooling, xtask and vmctl pass all-target clippy with warnings denied; formatting and probe syntax pass. No unit tests or CI dispatch. |
 
 The original desktop observations below predate the base-stack rewrite and
 identify their frozen installed disk/source explicitly. Post-review transport
@@ -43,8 +47,32 @@ build preserves the acknowledged target while EDID is unchanged. The final
 delayed-login, compositor-switch, repeated-session and lifecycle probes above
 all passed after capacity became available. These native regressions use the
 same explicitly identified builder-delivered installed base, with writable
-overlays. Later commits change the e2e fixtures and evidence; the Windows/Linux
-compiler logs identify the unchanged Rust implementation source.
+overlays. The final owner/DACL follow-up changes the Windows Rust verifier and
+reruns native builds and all-target clippy; the earlier Linux compiler logs
+remain evidence for their explicitly recorded source.
+
+For [re-review 5955882498](https://github.com/Reidond/ilex/pull/55#pullrequestreview-5955882498),
+the orchestrator accepted descriptor evidence instead of creating another
+Windows account on the owner's PC. No live cross-user test is claimed.
+The production verifier enumerates exactly two allow ACEs: the process
+TokenUser SID and SYSTEM, each with exactly FILE_ALL_ACCESS. It also requires
+the owner to equal TokenUser. Extra, duplicate or unexpected principals
+(including Everyone, Users, Authenticated Users, Administrators and anonymous),
+other ACE types, incomplete rights and propagation flags fail verification.
+The socket ACEs have no OI, CI, NP or IO flags. Their ID flag records inherited
+provenance, not permission to propagate, as defined by Microsoft's
+[ACE_HEADER documentation](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-ace_header).
+The private parent seeds the restricted socket DACL before QEMU binds.
+
+Every native VM launch runs this shared verifier on both endpoints and writes
+qmp-security.json before publishing vm.json. An unexpected or unreadable
+owner/DACL aborts startup through the existing process/credential cleanup path.
+Every client connection verifies again. The real startup record includes an
+independent .NET readback of both owners, all ACEs and non-propagating flags.
+The retained low-integrity probe explicitly proves that parent and child have
+the same TokenUser; its raw connector makes the OS denial observable without
+production preflight. All original 220 artifacts retain their exact bytes and
+manifest entries. CI dispatch for this follow-up belongs to the merge coordinator.
 
 The post-review Qt run recorded 6,750 frames in 90.232 seconds (about 74.8/s),
 with mean interval 13.350 ms, median 13 ms, p95 15 ms and p99 16 ms. Re-login

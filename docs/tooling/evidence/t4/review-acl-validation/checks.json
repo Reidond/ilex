@@ -1,0 +1,18 @@
+{
+  "utc": "2026-11-18T12:26:45.195667+00:00",
+  "source_parent": "db72eff70924209f081fd9aac9dbfd801306a5a0",
+  "native_example_build_exit": 0,
+  "native_launcher_build_exit": 0,
+  "windows_clippy_exit": 0,
+  "warnings_denied": true,
+  "format_check_exit": 0,
+  "python_syntax_exit": 0,
+  "unit_tests_run": false,
+  "ci_dispatched": false,
+  "clippy_packages": [
+    "ilex-tooling-windows",
+    "xtask",
+    "ilex-vmctl"
+  ],
+  "clippy_all_targets": true
+}
