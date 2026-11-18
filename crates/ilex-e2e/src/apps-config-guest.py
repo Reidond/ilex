@@ -30,5 +30,11 @@ timer = Path('/etc/systemd/system/timers.target.wants/ilex-apps.timer')
 assert timer.exists(), 'shell-free transitions also need cleanup'
 state = subprocess.run(['systemctl', 'is-enabled', 'flatpak-add-fedora-repos.service'], capture_output=True, text=True)
 assert state.stdout.strip() == 'disabled', state
+if any(shell['name'] == 'gnome' and shell.get('apps', {}).get('flatpak') for shell in image['shells']):
+    assert not Path('/usr/bin/firefox').exists()
+    for package in ['nautilus', 'ptyxis', 'gnome-control-center', 'gnome-software',
+                    'gnome-system-monitor', 'gnome-disk-utility', 'sushi',
+                    'papers-nautilus', 'papers-libs', 'papers-thumbnailer', 'papers-previewer']:
+        subprocess.run(['rpm', '-q', package], check=True)
 assert not Path('/var/lib/flatpak/app').exists(), 'default tests must not download Flathub apps'
 subprocess.run(['ilexctl', 'apps', '--self-check'], check=True)

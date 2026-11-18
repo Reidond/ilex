@@ -4,6 +4,30 @@ description = "GNOME on Wayland, signed in through GDM"
 [packages]
 # Public profile settings confine the session's dconf writer.
 install = ["@gnome-desktop", "gdm", "bubblewrap"]
+exclude = [
+    "gnome-text-editor", "gnome-calculator", "gnome-calendar",
+    "gnome-characters", "gnome-clocks", "gnome-connections", "gnome-contacts",
+    "gnome-font-viewer", "gnome-logs", "gnome-maps", "gnome-weather",
+    "baobab", "loupe", "papers", "snapshot", "decibels", "showtime",
+    "simple-scan", "gnome-boxes", "libsane-hpaio",
+    "sane-backends-drivers-scanners", "gnome-browser-connector",
+]
+
+[apps]
+# System-wide Flathub apps, installed by the installer and ilex-apps.timer.
+# Stable IDs also preserve Firefox's existing favourite and MIME handlers.
+flatpak = [
+    "org.gnome.TextEditor", "org.gnome.Calculator", "org.gnome.Calendar",
+    "org.gnome.clocks", "org.gnome.Weather", "org.gnome.Maps",
+    "org.gnome.Contacts", "org.gnome.Loupe", "org.gnome.Papers",
+    "org.gnome.Snapshot", "org.gnome.Characters", "org.gnome.font-viewer",
+    "org.gnome.baobab", "org.gnome.Connections", "org.gnome.Showtime",
+    "org.gnome.Decibels", "org.mozilla.firefox", "org.gnome.Logs",
+    "org.gnome.SimpleScan", "org.gnome.Boxes",
+]
+# Host integrations required by Files, print dialogs and Flatpak's triggers.
+# papers-nautilus and papers-libs stay through the desktop group.
+rpm = ["papers-thumbnailer", "papers-previewer", "desktop-file-utils", "xdg-utils"]
 
 [session]
 # The session file in /usr/share/wayland-sessions, without .desktop.

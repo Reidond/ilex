@@ -2,9 +2,6 @@
 # installed in the shells' transaction; the base has none of them.
 # A shell's own packages are in shells/<name>/shell.toml.
 
-[apps]
-install = ["firefox"]
-
 [updates]
 # notify-send for the update-ready notification.
 install = ["libnotify"]

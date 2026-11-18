@@ -410,7 +410,7 @@ installed first in every root image; `systemd-container` supplies the
 in the base so switching away from a shell can remove its old preinstalled
 apps from persistent `/var`. The base transaction omits weak dependencies;
 Flatpak's recommended desktop portal belongs to a shell. `shells/packages.toml`
-contains Firefox, libnotify and the PackageKit excludes, installed only
+contains libnotify and the PackageKit excludes, installed only
 with a shell. These and all selected shells' packages share a second transaction
 and image layer, with their combined excludes. A shell's excludes cannot prevent
 installation of a base package. The machine remains the last, squashed layer.
@@ -931,6 +931,22 @@ Ephemeral assertions parse the lists and trust file without Flathub traffic.
 The apps stack must merge together in one main push: the GNOME RPM removal
 alone would publish an image without a browser. The ilex shell itself is out
 of scope; its future KDE application list belongs to that shell's project.
+
+GNOME declares all 20 replacements, including Firefox, Logs, Scanner and
+Boxes. Files, Ptyxis, Settings, Software, System Monitor, Disks, Help and
+Sushi remain host RPMs. Papers keeps its Nautilus plugin, libraries,
+thumbnailer and print previewer. The browser connector is excluded because
+Flatpak Firefox cannot use its host native-messaging connector; GNOME
+Extensions remains available as a user Flatpak. There is no RPM Firefox
+profile migration (no deployed machine used one when this was introduced).
+
+Measured 2026-11-18 against the same Fedora bootc digest
+`81ada60d0dfec088b591672bce2945d6d7ac8e32e7f263eba188bdfa809fbc04`:
+the main baseline image is 5,009,428,787 bytes and the GNOME Flatpak stack image
+is 4,133,857,054 bytes (`podman image inspect .Size`, uncompressed), a reduction
+of 875,571,733 bytes (835.01 MiB). Flatpak payloads/runtimes live separately
+in `/var/lib/flatpak`; this is an OS image measurement, not total installed disk
+usage. The planning run estimated about 5.5 GB for those payloads.
 
 ## Public user profiles
 
