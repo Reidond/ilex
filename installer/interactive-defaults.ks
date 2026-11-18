@@ -63,10 +63,12 @@ mkdir -p /mnt/sysroot/var/lib/ilex/apps
 runtime_mounts > /mnt/sysroot/var/lib/ilex/apps/installer-mounts-before
 before=$?
 result=1
+attempted=0
 rm -f /mnt/sysroot/var/lib/ilex/apps/installer-pidns
 if [ -x /mnt/sysroot/usr/bin/ilexctl ] && [ -x /mnt/sysroot/usr/bin/flatpak ]; then
     if [ "$before" -eq 0 ]; then
         # Killing the PID namespace's init also kills detached descendants.
+        attempted=1
         timeout --kill-after=15s 1800 unshare --mount --pid --fork \
             --kill-child=KILL --propagation private \
             /usr/libexec/ilex-installer/preload-apps /mnt/sysroot
@@ -74,15 +76,19 @@ if [ -x /mnt/sysroot/usr/bin/ilexctl ] && [ -x /mnt/sysroot/usr/bin/flatpak ]; t
     fi
 else
     echo "This payload has no system apps helper; no Flatpaks to preload."
+    result=0
 fi
 runtime_mounts > /mnt/sysroot/var/lib/ilex/apps/installer-mounts-after
-python3 -I -S - <<'PY'
-import json,os,pathlib,time
+python3 -I -S - "$attempted" <<'PY'
+import json,os,pathlib,sys,time
 state=pathlib.Path('/mnt/sysroot/var/lib/ilex/apps')
 before=json.loads((state/'installer-mounts-before').read_text())
 after=json.loads((state/'installer-mounts-after').read_text())
 assert before['schema']==after['schema']==1,'invalid mount snapshot schema'
 assert before==after,'preload changed caller mounts or live installer status'
+if sys.argv[1]=='0':
+    print('Preload not attempted; caller mounts and live installer status unchanged.')
+    raise SystemExit(0)
 namespace=(state/'installer-pidns').read_text().strip()
 assert namespace.startswith('pid:[') and namespace.endswith(']'),namespace
 deadline=time.monotonic()+5
