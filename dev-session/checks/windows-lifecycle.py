@@ -8,6 +8,7 @@ import argparse
 import ctypes as C
 from ctypes import wintypes as W
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -62,7 +63,9 @@ try:
               'started_utc': datetime.now(timezone.utc).isoformat(),
               'launcher_pid': launcher_pid, 'launcher': launcher_identity,
               'qemu_pid': i['pid'], 'qemu': qemu_identity,
-              'qemu_hwnd': i['hwnd'], 'keys_present_before': True, 'sockets_present_before': True}
+              'qemu_hwnd': i['hwnd'], 'keys_present_before': True, 'sockets_present_before': True,
+              'public_key_sha256': {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                    for path in paths if path.suffix == '.pub'}}
     (a.out / 'ready.json').write_text(json.dumps(result, indent=2))
     started = time.monotonic()
     if a.mode == 'forced-exit':
