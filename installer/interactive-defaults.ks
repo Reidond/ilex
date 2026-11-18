@@ -32,3 +32,21 @@ xconfig --startxonboot
 %post --erroronfail
 sed -i -E '\|^[^#[:space:]]+[[:space:]]+/[[:space:]]|d' /etc/fstab
 %end
+
+# bootc's Anaconda payload does not install Flatpaks. Preload the chosen
+# composition's system apps in the installed root while its network is up.
+# Failure is non-fatal: retain the diagnostic and let ilex-apps.timer retry.
+%post --log=/var/log/anaconda/ilex-apps.log
+if [ -x /usr/bin/ilexctl ] && [ -x /usr/bin/flatpak ]; then
+    mkdir -p /var/lib/ilex/apps
+    timeout 1800 /usr/bin/ilexctl apps sync
+    result=$?
+    printf '%s\n' "$result" > /var/lib/ilex/apps/installer-result
+    if [ "$result" -ne 0 ]; then
+        echo "System apps are incomplete; ilex-apps.timer will retry after boot (exit $result)."
+    fi
+else
+    echo "This payload has no system apps helper; no Flatpaks to preload."
+fi
+exit 0
+%end

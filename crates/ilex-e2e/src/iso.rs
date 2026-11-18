@@ -862,6 +862,26 @@ fn installed_system(
     report.check("system reaches `running`", system_running(&vm));
     report.check("no failed units", no_failed_units(&vm));
     report.check("GDM is up", gdm(&mut vm, &ctl, artifacts));
+    report.check("installer preloaded the composition's system apps", (|| {
+        let evidence = vm.ssh_ok(r#"python3 - <<'PY'
+import json,pathlib,subprocess
+image=json.load(open('/usr/share/ilex/image.json'))
+machine=json.load(open('/usr/share/ilex/machine.json'))
+wanted=set()
+for entry in [*image['shells'],machine]:wanted.update(entry.get('apps',{}).get('flatpak',[]))
+if wanted:
+    assert pathlib.Path('/var/lib/ilex/apps/installer-result').read_text().strip()=='0'
+    state=json.load(open('/var/lib/ilex/apps/state.json'))
+    assert state['result']=='complete',state
+    for app in wanted:
+        assert subprocess.check_output(['flatpak','info','--system','--show-origin',app],text=True).strip()=='flathub',app
+    print(json.dumps(state,indent=2))
+else:
+    print('Published payload declares no system Flatpaks; preload is not applicable to this payload.')
+PY"#)?;
+        qemu::write_artifact(artifacts, "preloaded-apps.txt", &evidence)?;
+        Ok(())
+    })());
     report.check(
         "nonsecret versioned target setup handoff",
         (|| {

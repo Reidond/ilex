@@ -957,6 +957,17 @@ confined for the shell-owned Clocks/Weather integration settings.
 `publish.yml` runs only metadata checks by default; `apps=true` additionally
 qualifies `apps::install` and reports whether it ran in the run summary.
 
+The network installer always attempts `ilexctl apps sync` in its `%post`
+installed-root chroot, bounded to 30 minutes. It records the result under
+`/var/lib/ilex/apps/installer-result` and diagnostics in Anaconda's log. A
+transient failure is non-fatal and the boot timer retries. `iso::install`
+checks the marker, complete state and every system app's Flathub origin with
+the timer suppressed, proving preload rather than a post-boot download.
+As with all ISO assertions, this qualifies the published payload: until that
+payload declares apps, it explicitly reports preload as not applicable and
+does not establish the new chroot path. The native installer can invoke the
+same sync command later.
+
 The apps stack must merge together in one main push: the GNOME RPM removal
 alone would publish an image without a browser. The ilex shell itself is out
 of scope; its future KDE application list belongs to that shell's project.
