@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File},
-    io::Read,
-    net::TcpListener,
-    os::unix::fs::PermissionsExt,
+    io::{Read, Write},
+    net::{Shutdown, TcpListener},
+    os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -190,7 +190,12 @@ fn checkpoint() -> Result<()> {
             serde_json::to_vec_pretty(&caps)?,
         )?;
         let vm = provider.create(spec.clone())?;
-        let mut fixture = Fixture { provider, vm, spec };
+        let mut fixture = Fixture {
+            provider,
+            vm,
+            spec,
+            console: None,
+        };
         if !interrupted {
             stage = "first_installed_boot";
             fixture.disk_boot()?;
@@ -446,13 +451,107 @@ fn registry(ws: &Workspace, image: &str, work: &Path) -> Result<(Registry, Value
     ))
 }
 
+struct PrivateConsole {
+    input: UnixStream,
+    output: Option<thread::JoinHandle<std::io::Result<()>>>,
+    path: PathBuf,
+}
+impl PrivateConsole {
+    fn attach(info: &qemu::VmInfo) -> Result<Self> {
+        let path = info.dir.join("input.sock");
+        ensure!(!path.exists(), "private console endpoint already exists");
+        let mut qmp = ilex_devkit::qmp::Qmp::connect(&info.qmp_sock)?;
+        let devices = qmp.execute("query-chardev", json!({}))?;
+        ensure!(
+            devices
+                .as_array()
+                .context("invalid console inventory")?
+                .iter()
+                .any(|d| d["label"] == "serial0"
+                    && d["filename"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("file"))),
+            "expected the fixture's file-backed serial0"
+        );
+        // Keep the guest UART unchanged. This test-only backend has no QEMU
+        // logfile: a separate reader records outgoing guest bytes exclusively.
+        // Credential input never enters QMP, argv or that output writer.
+        qmp.execute("chardev-change", json!({"id":"serial0", "backend":{
+            "type":"socket", "data":{"addr":{"type":"unix","data":{"path":path}},"server":true,"wait":false}
+        }}))?;
+        let input = UnixStream::connect(&path)?;
+        input.set_write_timeout(Some(Duration::from_secs(10)))?;
+        let mut reader = input.try_clone()?;
+        let mut log = fs::OpenOptions::new()
+            .append(true)
+            .open(info.dir.join("serial.log"))?;
+        let output = thread::spawn(move || {
+            let mut buffer = [0u8; 8192];
+            let result = (|| {
+                loop {
+                    let length = match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(length) => length,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => return Err(error),
+                    };
+                    log.write_all(&buffer[..length])?;
+                }
+                log.sync_all()
+            })();
+            buffer.fill(0);
+            result
+        });
+        Ok(Self {
+            input,
+            output: Some(output),
+            path,
+        })
+    }
+    fn credential(&mut self, secret: &Secret) -> Result<()> {
+        self.input.write_all(secret.bytes())?;
+        self.input.write_all(b"\n")?;
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<()> {
+        // Called after QEMU exits: drain through EOF before copying logs.
+        if let Some(output) = self.output.take() {
+            output
+                .join()
+                .map_err(|_| anyhow::anyhow!("private console reader failed"))??;
+        }
+        let _ = fs::remove_file(&self.path);
+        Ok(())
+    }
+}
+impl Drop for PrivateConsole {
+    fn drop(&mut self) {
+        // Cancellation must also wake a reader when a failed VM is still up.
+        let _ = self.input.shutdown(Shutdown::Both);
+        if let Some(output) = self.output.take() {
+            let _ = output.join();
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 struct Fixture {
     provider: LinuxProvider,
     vm: LinuxVm,
     spec: VmSpec,
+    console: Option<PrivateConsole>,
 }
 impl Fixture {
+    fn private_console(&mut self) -> Result<()> {
+        self.console = Some(PrivateConsole::attach(&self.vm.running_mut()?.info)?);
+        Ok(())
+    }
     fn logs(&mut self, artifacts: &Path, label: &str) -> Result<()> {
+        if self.vm.running_mut()?.exited()?.is_some()
+            && let Some(mut console) = self.console.take()
+        {
+            console.finish()?;
+        }
         let info = &self.vm.running_mut()?.info;
         for file in ["serial.log", "qemu.log", "swtpm.log"] {
             if info.dir.join(file).is_file() {
@@ -466,6 +565,7 @@ impl Fixture {
     }
     fn disk_boot(&mut self) -> Result<()> {
         self.provider.stop(&mut self.vm)?;
+        self.console.take();
         self.spec.iso = None;
         self.spec.additional_disks.clear();
         self.vm = self.provider.create(self.spec.clone())?;
@@ -922,8 +1022,14 @@ fn fallback(
     };
     let provider = LinuxProvider::new(ws.clone())?;
     let vm = provider.create(spec.clone())?;
-    let mut fixture = Fixture { provider, vm, spec };
+    let mut fixture = Fixture {
+        provider,
+        vm,
+        spec,
+        console: None,
+    };
     fixture.provider.start(&mut fixture.vm)?;
+    fixture.private_console()?;
     let vm = fixture.vm.running_mut()?;
     let start = Instant::now();
     loop {
@@ -943,8 +1049,11 @@ fn fallback(
     }
     let ctl = Vmctl::from_info(vm.info.clone());
     ctl.save_screenshot(&artifacts.join(format!("{mode}-passphrase-prompt.png")))?;
-    ctl.type_text(std::str::from_utf8(credential.bytes())?)?;
-    ctl.key("ret")?;
+    fixture
+        .console
+        .as_mut()
+        .context("private console unavailable")?
+        .credential(credential)?;
     vm.wait_ssh(Duration::from_secs(900))?;
     let probe = guest_json(
         vm,
@@ -1101,6 +1210,7 @@ fn interrupted_repair(
     expected: &Value,
 ) -> Result<(Secret, Value)> {
     fixture.disk_boot()?;
+    fixture.private_console()?;
     let vm = fixture.vm.running_mut()?;
     let ctl = Vmctl::from_info(vm.info.clone());
     let start = Instant::now();
@@ -1120,8 +1230,11 @@ fn interrupted_repair(
         thread::sleep(Duration::from_secs(2));
     }
     ctl.save_screenshot(&artifacts.join("interrupted-first-boot-prompt.png"))?;
-    ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
-    ctl.key("ret")?;
+    fixture
+        .console
+        .as_mut()
+        .context("private console unavailable")?
+        .credential(passphrase)?;
     vm.wait_ssh(Duration::from_secs(1800))?;
     let bootc = guest_json(
         vm,
@@ -1301,6 +1414,7 @@ fn same_tpm_mismatch(
     let original_vars = fs::read(&vars)?;
     security::disable_fixture_secure_boot(ws, &negative)?;
     fixture.disk_boot()?;
+    fixture.private_console()?;
     let vm = fixture.vm.running_mut()?;
     let ctl = Vmctl::from_info(vm.info.clone());
     let start = Instant::now();
@@ -1320,8 +1434,11 @@ fn same_tpm_mismatch(
         thread::sleep(Duration::from_secs(2));
     }
     ctl.save_screenshot(&artifacts.join("same-tpm-pcr-mismatch-prompt.png"))?;
-    ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
-    ctl.key("ret")?;
+    fixture
+        .console
+        .as_mut()
+        .context("private console unavailable")?
+        .credential(passphrase)?;
     vm.wait_ssh(Duration::from_secs(1800))?;
     let probe = guest_json(
         vm,
@@ -1600,7 +1717,12 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
             read_only: false,
         });
         let vm = provider.create(spec.clone())?;
-        let mut fixture = Fixture { provider, vm, spec };
+        let mut fixture = Fixture {
+            provider,
+            vm,
+            spec,
+            console: None,
+        };
         stage = "installation";
         let deadline = Duration::from_secs(
             std::env::var("ILEX_ENCRYPTED_INSTALL_TIMEOUT")

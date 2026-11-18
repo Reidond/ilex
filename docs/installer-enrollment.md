@@ -173,6 +173,12 @@ tiers after all trials, including gzip/xz/bzip2/zstd/ZIP contents. Image files a
 excluded with header checks and the screenshot handshake; no OCR is claimed.
 Only public metadata, event logs, serial
 diagnostics and key-free screenshots enter `artifacts/encrypted-install/`.
+Initramfs fallback input uses a private Unix socket connected to the existing
+guest UART. A separate reader records guest output only; credential bytes do
+not enter QMP arguments or the log writer. This exercises the serial password
+agent selected by the fixture's console arguments. Local tty8 completion keeps
+its private keyboard and screenshot handshake. Both credentials still pass the
+final recursive log/export scan.
 Evidence is staged privately until the installer privacy gate and recursive
 artifact scan both pass. A failed run publishes its unqualified result and,
 when available, strictly validated fixed stage/error codes and booleans.
