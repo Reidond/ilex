@@ -103,6 +103,7 @@ cargo xtask build --shell none
 ILEX_SHELLS=none cargo xtask security --self-check --accelerator tcg --memory 6G
 ILEX_SHELLS=none cargo xtask test disk::install
 ILEX_SECURITY_ACCELERATOR=tcg cargo xtask test security::encrypted_install
+ILEX_SECURITY_ACCELERATOR=tcg cargo xtask test security::encrypted_existing_space
 ```
 
 `security::encrypted_install` builds/reuses `ILEX_ISO`, installs this candidate
@@ -112,6 +113,13 @@ gains that authority, scoped to the test registry; the shipped default reject
 and production signature policy stay intact. The installed digest must equal
 the signed candidate. This qualifies the produced ISO/candidate integration;
 it does not claim that a public GHCR composition or released ISO was tested.
+
+The separate `encrypted_existing_space` trial first creates a public sentinel
+partition on its owned blank disk, then installs with `clearpart --none` into
+the remaining space. It repeats the encrypted gates and checks the sentinel
+after first boot, cold restart and no-TPM fallback. Its VM identity and public
+evidence directory are separate from the empty-disk trial. Neither trial
+claims in-place conversion of an unencrypted filesystem.
 
 The fixture requires direct TPM evidence on the first installed boot, no
 password input, matching/replayed ISO and installed PCR 7, encrypted mount

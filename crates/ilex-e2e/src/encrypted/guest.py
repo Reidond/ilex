@@ -53,6 +53,26 @@ def prepare():
     SEED.mkdir()
     subprocess.run(['mount', '/dev/disk/by-label/OEMDRV', str(SEED)], check=True)
     config = json.loads((SEED / 'config.json').read_text())
+    if config.get('preserve_data', False):
+        # This fixture owns a freshly created blank vda. Seed one public data
+        # partition, then ask Anaconda to use only the remaining free space.
+        with open('/dev/vda', 'rb') as disk:
+            assert disk.read(4096) == bytes(4096), 'fixture disk is not blank'
+        subprocess.run(['sfdisk', '/dev/vda'],
+                       input=b'label: gpt\nstart=2048,size=524288,type=linux,name=ilex-e2e-keep\n',
+                       capture_output=True, check=True)
+        subprocess.run(['udevadm', 'settle'], check=True)
+        subprocess.run(['mkfs.ext4', '-q', '-F', '/dev/vda1'], capture_output=True, check=True)
+        mount = PRIVATE / 'preserved-data'
+        mount.mkdir()
+        subprocess.run(['mount', '/dev/vda1', str(mount)], check=True)
+        try:
+            with (mount / 'sentinel').open('w') as output:
+                output.write('ilex-public-sentinel-v1\n')
+                output.flush()
+                os.fsync(output.fileno())
+        finally:
+            subprocess.run(['umount', str(mount)], check=True)
     # Only the isolated test registry gains another signing authority. The
     # shipped default reject and production repository requirements remain.
     policy_path = pathlib.Path('/etc/containers/policy.json')

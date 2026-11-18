@@ -56,7 +56,11 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         .env("ILEX_IMAGE", &image)
         .env("ILEX_ROOT", &ws.root);
     // `iso::` exercises the installer and its published payload, independently of this image.
-    if args.filters.iter().any(|f| f.contains("iso") || f.contains("encrypted_install")) {
+    if args
+        .filters
+        .iter()
+        .any(|f| f.contains("iso") || f.contains("encrypted_"))
+    {
         prepare_iso(ws, &mut test)?;
     }
     cmd::run(&mut test)

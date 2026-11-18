@@ -27,7 +27,10 @@ use std::{
 const GUEST: &str = include_str!("encrypted/guest.py");
 
 pub fn trials() -> Vec<Trial> {
-    vec![common::trial("security::encrypted_install", run)]
+    vec![
+        common::trial("security::encrypted_install", || run(false)),
+        common::trial("security::encrypted_existing_space", || run(true)),
+    ]
 }
 
 struct Registry {
@@ -56,7 +59,11 @@ fn registry(ws: &Workspace, image: &str, work: &Path) -> Result<(Registry, Value
     let port = listener.local_addr()?.port();
     drop(listener);
     let owner = ws.identity()?.owner;
-    let name = ws.vm_name(&format!("enroll-registry-{}", std::process::id()));
+    let run = work
+        .file_name()
+        .and_then(|s| s.to_str())
+        .context("fixture run missing")?;
+    let name = ws.vm_name(&format!("enroll-registry-{run}"));
     let id = cmd::output(Command::new("podman").args([
         "run",
         "--rm",
@@ -191,6 +198,14 @@ python3 -I -S /run/ilex-encrypted-guest.py prepare
 python3 -I -S /run/ilex-encrypted-test/seed/guest.py finish
 %end
 "#;
+    let ks = if config["preserve_data"] == true {
+        ks.replace(
+            "clearpart --all --initlabel --drives=vda",
+            "clearpart --none",
+        )
+    } else {
+        ks.to_owned()
+    };
     fs::write(dir.join("ks.cfg"), ks)?;
     let seed = work.join("oemdrv.img");
     File::create(&seed)?.set_len(32 << 20)?;
@@ -387,7 +402,12 @@ fn no_tpm(
     )?;
     let mut spec = template.clone();
     spec.run.push_str("-no-tpm");
-    spec.purpose = "encrypted-no-tpm".into();
+    spec.purpose = if template.purpose == "encrypted-space" {
+        "space-no-tpm"
+    } else {
+        "encrypted-no-tpm"
+    }
+    .into();
     spec.tpm = TpmLifecycle::Off;
     // This negative has a separate identity. It measures fallback behavior and
     // cannot mint a passing T6 firmware/TPM qualification for a different profile.
@@ -501,6 +521,9 @@ fn no_tpm(
         "no-TPM completion changed LUKS slots/tokens"
     );
     vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; ilex-enroll layout --root /; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
+    if template.purpose == "encrypted-space" {
+        preserved_data(vm, artifacts)?;
+    }
     fixture.logs(artifacts, "no-tpm")?;
     poweroff(&mut fixture)?;
     fixture.provider.destroy_owned(&mut fixture.vm)
@@ -592,6 +615,9 @@ fn assertions(
         "unlock evidence differs from the enrolled token/slot"
     );
     vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; grep -qw 'rd.luks.options=tpm2-device=auto' /proc/cmdline; ! grep -q headless /etc/crypttab; test \"$(systemctl is-system-running --wait)\" = running; test -z \"$(systemctl --failed --no-legend --plain)\"; ilex-enroll --self-check")?;
+    if expected["preserve_data"] == true {
+        preserved_data(vm, artifacts)?;
+    }
     vm.ssh_ok(&format!("grep 'UUID={uuid}' /etc/crypttab | grep -q tpm2-device=auto; ! grep -q headless /proc/cmdline"))?;
     let topology = vm.ssh_ok("set -eu; lsblk --json --output NAME,TYPE,FSTYPE,UUID,MOUNTPOINTS; cat /etc/crypttab; cat /proc/cmdline; cat /proc/swaps; for path in /sysroot /var /boot /boot/efi; do findmnt --target \"$path\"; done")?;
     fs::write(artifacts.join("storage.txt"), topology)?;
@@ -627,9 +653,32 @@ fn clear_evidence(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run() -> Result<()> {
+fn preserved_data(vm: &qemu::Vm, artifacts: &Path) -> Result<()> {
+    vm.ssh_ok(
+        r#"set -eu
+device=/dev/disk/by-partlabel/ilex-e2e-keep
+test -b "$device"
+mkdir -p /run/ilex-preserved-check
+mount -o ro "$device" /run/ilex-preserved-check
+trap 'umount /run/ilex-preserved-check' EXIT
+test "$(cat /run/ilex-preserved-check/sentinel)" = ilex-public-sentinel-v1
+"#,
+    )?;
+    fs::write(
+        artifacts.join("preserved-data.json"),
+        b"{\"sentinel_preserved\":true,\"partition\":\"ilex-e2e-keep\"}\n",
+    )?;
+    Ok(())
+}
+
+fn run(preserve_data: bool) -> Result<()> {
     let ws = common::workspace()?;
-    let published = qemu::artifact_dir(&ws, "encrypted-install")?;
+    let tier = if preserve_data {
+        "encrypted-existing-space"
+    } else {
+        "encrypted-install"
+    };
+    let published = qemu::artifact_dir(&ws, tier)?;
     clear_evidence(&published)?;
     fs::write(
         published.join("result.json"),
@@ -659,7 +708,14 @@ fn run() -> Result<()> {
                 .arg(&disk)
                 .arg("40G"),
         )?;
-        let mut config = VmConfig::new("encrypted-install", &disk);
+        let mut config = VmConfig::new(
+            if preserve_data {
+                "encrypted-space"
+            } else {
+                "encrypted-install"
+            },
+            &disk,
+        );
         config.snapshot = false;
         config.memory = "6G".into();
         config.cdrom = Some(iso.clone());
@@ -684,7 +740,8 @@ fn run() -> Result<()> {
         caps.require(Capability::PersistentTpm)?; // Exact 6 GiB / 2 vCPU profile.
         stage = "fixture";
         let image = common::image()?;
-        let (_registry, expected) = registry(&ws, &image, &work)?;
+        let (_registry, mut expected) = registry(&ws, &image, &work)?;
+        expected["preserve_data"] = json!(preserve_data);
         fs::write(
             artifacts.join("candidate.json"),
             serde_json::to_vec_pretty(&expected)?,
@@ -802,7 +859,7 @@ fn run() -> Result<()> {
     fs::write(
         published.join("result.json"),
         serde_json::to_vec_pretty(
-            &json!({"qualification": if result.is_ok() {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|e|format!("{e:#}")), "scope":"exact ISO, signed local candidate, first installed boot; physical hardware remains unqualified"}),
+            &json!({"qualification": if result.is_ok() {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|e|format!("{e:#}")), "storage":if preserve_data {"existing-free-space"} else {"automatic-empty-disk"}, "scope":"exact ISO, signed local candidate, first installed boot; physical hardware remains unqualified"}),
         )?,
     )?;
     result
