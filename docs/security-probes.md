@@ -40,7 +40,7 @@ equivalent test. At first boot, warm reboot and cold restart it requires:
 - Nonzero SHA-256 PCR 7 and T6 event-log replay matching the live PCR, including
   meaningful policy and authority events. No fixed PCR value is prescribed.
 - The exact selected OCI manifest digest in `bootc status`, and ilex's
-  generated composition matching all five image selection labels. A stale
+  generated composition matching all three image selection labels. A stale
   `ILEX_DISK` is a failure, including when it still boots successfully.
 - A public TPM-bound test credential decrypting after warm/cold restart,
   proving persistent TPM identity as well as PCR continuity.

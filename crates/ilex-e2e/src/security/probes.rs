@@ -129,42 +129,29 @@ PY"#,
         control,
         artifacts,
         &format!("{label}-ilex.json"),
-        "ilex-agent config --json",
+        "ilexctl system config --json",
     )?;
     ensure!(
-        config["image"]["schema"] == 1 && config["machine"]["schema"] == 1,
+        config["schema"] == 1 && config["image"]["schema"] == 1 && config["machine"]["schema"] == 1,
         "guest lacks ilex configuration schema 1"
     );
-    for (key, default_key, names, default) in [
-        (
-            "shells",
-            "default-shell",
-            &expected.shells,
-            &expected.default_shell,
-        ),
-        (
-            "design-systems",
-            "default-design-system",
-            &expected.design_systems,
-            &expected.default_design_system,
-        ),
-    ] {
-        let actual = config["image"][key]
-            .as_array()
-            .context("guest configuration list missing")?;
-        ensure!(
-            actual
-                .iter()
-                .map(|v| v["name"].as_str())
-                .collect::<Vec<_>>()
-                == names.iter().map(|s| Some(s.as_str())).collect::<Vec<_>>(),
-            "guest {key} differs from candidate labels"
-        );
-        ensure!(
-            config["image"][default_key] == serde_json::to_value(default)?,
-            "guest default {key} differs from candidate labels"
-        );
-    }
+    let actual = config["image"]["shells"]
+        .as_array()
+        .context("guest configuration shells missing")?;
+    ensure!(
+        actual.iter().map(|v| v["name"].as_str()).collect::<Vec<_>>()
+            == expected.shells.iter().map(|s| Some(s.as_str())).collect::<Vec<_>>(),
+        "guest shells differ from candidate labels"
+    );
+    ensure!(
+        config["image"]["default-shell"] == serde_json::to_value(&expected.default_shell)?,
+        "guest default shell differs from candidate labels"
+    );
+    ensure!(
+        config["image"].get("design-systems").is_none()
+            && config["image"].get("default-design-system").is_none(),
+        "guest configuration reintroduced removed design-system metadata"
+    );
     ensure!(
         config["machine"]["name"] == expected.machine,
         "guest machine differs from candidate labels"

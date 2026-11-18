@@ -229,7 +229,7 @@ cargo xtask info               # resource identity, selection and available conf
 
 PR 17's consumer checks and backend requirements are documented in
 [`docs/security-probes.md`](docs/security-probes.md). Guest probes also require
-kernel lockdown, the selected manifest digest and all five ilex composition
+kernel lockdown, the selected manifest digest and all three ilex composition
 labels after each boot. The common image's signed in-tree amdgpu module must
 load under lockdown with no unsigned-module taint (including RX 9070 XT PCI
 alias coverage); this does not qualify physical GPU rendering. These checks
