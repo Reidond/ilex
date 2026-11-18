@@ -713,7 +713,7 @@ jobs:
   # digest, so the next run's upgrade tier restores it instead of spending ~14
   # minutes installing v1. One disk (~5 GB) at a time: older ones are deleted.
   v1-disk:
-    if: inputs.v1_disk
+    if: inputs.v1_disk && !inputs.encrypted_install
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60
     permissions:

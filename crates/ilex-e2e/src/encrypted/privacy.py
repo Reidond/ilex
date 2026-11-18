@@ -6,16 +6,28 @@ screenshots have a separate key-free handshake, and no OCR claim is made.
 """
 import hashlib
 import bz2
+import ctypes
 import gzip
 import json
 import lzma
 import os
 import pathlib
 import re
+import resource
 import stat
 import subprocess
 import sys
 import zipfile
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None
+
+READ_ERRORS = (OSError, EOFError, lzma.LZMAError, zipfile.BadZipFile)
+if zstd:
+    READ_ERRORS += (zstd.ZstdError,)
 
 PATTERNS = {
     48: re.compile(rb'(?=([a-z]{48}))'),
@@ -84,7 +96,10 @@ def scan(roots, fingerprints, journal=False):
                         check_stream(source)
                     opener = (gzip.open if header.startswith(b'\x1f\x8b') else
                               bz2.open if header.startswith(b'BZh') else
-                              lzma.open if header.startswith(b'\xfd7zXZ\x00') else None)
+                              lzma.open if header.startswith(b'\xfd7zXZ\x00') else
+                              zstd.open if zstd and header.startswith(b'\x28\xb5\x2f\xfd') else None)
+                    if header.startswith(b'\x28\xb5\x2f\xfd') and zstd is None:
+                        result['read_errors'] += 1
                     if opener:
                         with opener(path, 'rb') as source:
                             check_stream(source)
@@ -95,7 +110,7 @@ def scan(roots, fingerprints, journal=False):
                                     with archive.open(member) as source:
                                         check_stream(source)
                     result['files_scanned'] += 1
-                except (OSError, EOFError, lzma.LZMAError, zipfile.BadZipFile):
+                except READ_ERRORS:
                     result['read_errors'] += 1
     if journal:
         output = subprocess.run(['journalctl', '--no-pager', '-o', 'export'],
@@ -106,10 +121,16 @@ def scan(roots, fingerprints, journal=False):
 
 
 if __name__ == '__main__':
-    root = pathlib.Path(sys.argv[1])
-    fingerprints = []
-    for path in root.rglob('*credentials.json'):
-        fingerprints.extend(json.loads(path.read_text()))
-    result = scan([root], fingerprints)
+    try:
+        root = pathlib.Path(sys.argv[1])
+        fingerprints = []
+        for path in root.rglob('*credentials.json'):
+            fingerprints.extend(json.loads(path.read_text()))
+        result = scan([root], fingerprints)
+    except Exception:
+        # A malformed archive or filename may contain credential material.
+        # CI must fail without rendering exception text, paths or source data.
+        result = {'schema': 2, 'secret_found': False, 'read_errors': 1,
+                  'verification_failed': True}
     print(json.dumps(result))
     raise SystemExit(1 if result['secret_found'] or result['read_errors'] else 0)

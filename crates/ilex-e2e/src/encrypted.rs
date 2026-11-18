@@ -341,7 +341,7 @@ fn artifact_privacy(roots: &[&Path], credentials: &Value) -> Result<Value> {
 
 fn guest_privacy(vm: &qemu::Vm, artifacts: &Path, label: &str, credentials: &Value) -> Result<()> {
     let script = format!(
-        "__name__ = 'ilex_private_matcher'\n{PRIVACY}\nprint(json.dumps(scan(['/etc', '/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/var/lib/ilex', '/var/roothome', '/root'], json.loads({:?}), journal=True)))",
+        "__name__ = 'ilex_private_matcher'\n{PRIVACY}\nprint(json.dumps(scan(['/etc', '/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/var/lib/ilex', '/var/roothome', '/root', '/var/lib/systemd/coredump', '/var/spool/abrt', '/run/anaconda', '/run/ilex-enroll'], json.loads({:?}), journal=True)))",
         credentials.to_string()
     );
     let command = format!("python3 -I -S -c '{}'", script.replace('\'', "'\\''"));
@@ -550,6 +550,7 @@ fn fallback(
     credentials: &Value,
     installer_probe: &Value,
     original_tokens: &Value,
+    expected: &Value,
     mode: &str,
 ) -> Result<()> {
     let disk = work.join(format!("{mode}.qcow2"));
@@ -650,8 +651,31 @@ fn fallback(
         "cat /run/ilex/root-unlock.json",
     )?;
     ensure!(
-        evidence["method"] == "unknown",
+        evidence["method"] == "unknown"
+            && evidence["uuid"] == original_tokens["uuid"]
+            && evidence["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim(),
         "fallback was incorrectly labeled as TPM unlock"
+    );
+    let layout = guest_json(
+        vm,
+        artifacts,
+        &format!("{mode}-layout.json"),
+        "ilex-enroll layout --root /",
+    )?;
+    ensure!(
+        layout["uuid"] == evidence["uuid"],
+        "fallback evidence does not describe encrypted root"
+    );
+    let bootc = guest_json(
+        vm,
+        artifacts,
+        &format!("{mode}-bootc.json"),
+        "bootc status --json",
+    )?;
+    ensure!(
+        bootc["status"]["booted"]["image"]["imageDigest"] == expected["digest"]
+            && bootc["spec"]["image"]["signature"] == "containerPolicy",
+        "fallback boot did not use the exact enforcing candidate"
     );
     // Reuse acknowledged recovery during a local completion retry with no
     // TPM. This must defer to passphrase-only mode without generating a key
@@ -739,6 +763,7 @@ fn interrupted_repair(
     passphrase: &Secret,
     credentials: &mut Value,
     original_tokens: &Value,
+    expected: &Value,
 ) -> Result<(Secret, Value)> {
     fixture.disk_boot()?;
     let vm = fixture.vm.running_mut()?;
@@ -763,6 +788,18 @@ fn interrupted_repair(
     ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
     ctl.key("ret")?;
     vm.wait_ssh(Duration::from_secs(1800))?;
+    let bootc = guest_json(
+        vm,
+        artifacts,
+        "interrupted-bootc.json",
+        "bootc status --json",
+    )?;
+    ensure!(
+        bootc["status"]["booted"]["image"]["imageDigest"] == expected["digest"]
+            && bootc["spec"]["image"]["signature"] == "containerPolicy",
+        "interrupted boot did not use the exact enforcing candidate"
+    );
+    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; ilex-enroll layout --root /")?;
     let state = guest_json(
         vm,
         artifacts,
@@ -1295,6 +1332,7 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
             &credentials,
             &installer_probe,
             &original_tokens,
+            &expected,
             "pcr-mismatch",
         )?;
         stage = "recovery_key_boot";
@@ -1308,6 +1346,7 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
             &credentials,
             &installer_probe,
             &original_tokens,
+            &expected,
             "recovery",
         )?;
         if interrupted {
@@ -1318,6 +1357,7 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
                 &passphrase,
                 &mut credentials,
                 &original_tokens,
+                &expected,
             )?;
             stage = "reissued_recovery_key_boot";
             fallback(
@@ -1330,6 +1370,7 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
                 &credentials,
                 &installer_probe,
                 &repaired_tokens,
+                &expected,
                 "reissued-recovery",
             )?;
         } else {
@@ -1374,6 +1415,7 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
                 &credentials,
                 &installer_probe,
                 &original_tokens,
+                &expected,
                 "no-tpm",
             )?;
         }

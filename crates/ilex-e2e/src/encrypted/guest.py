@@ -33,11 +33,14 @@ def privacy_module():
 
 
 def scan_roots():
-    roots = ['/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/root', str(PUBLIC)]
+    roots = ['/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/root',
+             '/run/anaconda', '/run/ilex-enroll', '/var/lib/systemd/coredump',
+             '/var/spool/abrt', str(PUBLIC)]
     for target in ['/mnt/sysroot', '/mnt/sysimage']:
         roots.extend(target + suffix for suffix in
                      ['/etc', '/var/log', '/var/tmp', '/var/roothome',
-                      '/var/lib/anaconda', '/var/lib/ilex'])
+                      '/var/lib/anaconda', '/var/lib/ilex', '/var/lib/systemd/coredump',
+                      '/var/spool/abrt'])
     return roots
 
 ERRORS = {
@@ -300,6 +303,18 @@ def drive():
                 assert report['secret_found'], 'private matcher self-check failed'
                 check.unlink()
                 assert not matcher['scan']([check_dir], [matcher['fingerprint'](value)])['secret_found']
+                for codec in ['gzip', 'lzma', 'bz2', 'zstd', 'zipfile']:
+                    check = check_dir / codec
+                    if codec == 'zipfile':
+                        with matcher[codec].ZipFile(check, 'w', compression=matcher[codec].ZIP_DEFLATED) as archive:
+                            archive.writestr('private-fixture.log', value)
+                    else:
+                        assert matcher[codec] is not None, 'private decompressor unavailable'
+                        check.write_bytes(matcher[codec].compress(value))
+                    report = matcher['scan']([check_dir], [matcher['fingerprint'](value)])
+                    assert report['secret_found'] and not report['read_errors'], 'private compressed matcher failed'
+                    check.unlink()
+                check = check_dir / 'not-an-image.png'
         finally:
             check.unlink(missing_ok=True)
             check_dir.rmdir()
@@ -331,6 +346,10 @@ def drive():
             tokens = json.loads(output.stdout)
             assert len(tokens['slots']) == 2 and len(tokens['tokens']) == 1
             assert tokens['tokens'][0]['type'] == 'systemd-recovery'
+            assert '0' in tokens['slots']
+            assert tokens['tokens'][0]['id'] == str(state['recovery']['token'])
+            assert tokens['tokens'][0]['keyslots'] == [str(state['recovery']['slot'])]
+            assert sorted(p.name for p in (root / 'var/lib/ilex/security').iterdir()) == ['enrollment.json']
             (PUBLIC / 'interrupted-tokens.json').write_text(json.dumps(tokens))
             (PRIVATE / 'driver-done').touch()
             finish()

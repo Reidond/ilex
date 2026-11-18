@@ -169,7 +169,7 @@ suppressed. Scans cover live/target kickstart locations, logs, state and
 journal exports; a poweroff unit repeats the live scan after Anaconda
 finalisation, and installed/cold/negative guests scan the final target files.
 Recursive scans cover the staged and copied export sets and all CI artifact
-tiers after all trials, including gzip/xz/bzip2/ZIP contents. Image files are
+tiers after all trials, including gzip/xz/bzip2/zstd/ZIP contents. Image files are
 excluded with header checks and the screenshot handshake; no OCR is claimed.
 Only public metadata, event logs, serial
 diagnostics and key-free screenshots enter `artifacts/encrypted-install/`.
