@@ -29,11 +29,291 @@ const GUEST: &str = include_str!("encrypted/guest.py");
 const PRIVACY: &str = include_str!("encrypted/privacy.py");
 
 pub fn trials() -> Vec<Trial> {
-    vec![
+    let mut trials = vec![
         common::trial("security::encrypted_install", || run(false, false)),
         common::trial("security::encrypted_existing_space", || run(true, false)),
         common::trial("security::encrypted_interrupted", || run(false, true)),
-    ]
+    ];
+    if std::env::var_os("ILEX_ENROLLMENT_CHECKPOINT").is_some() {
+        // Explicit local diagnosis, outside CI's security::encrypted_ filter.
+        // Even successful boot proofs cannot promote an incomplete ISO gate.
+        trials.push(common::trial("security::enrollment_checkpoint", checkpoint));
+    }
+    trials
+}
+
+fn restore_files(source: &Path, target: &Path) -> Result<()> {
+    for file in evidence_files(source)? {
+        let destination = target.join(file.strip_prefix(source)?);
+        fs::create_dir_all(
+            destination
+                .parent()
+                .context("checkpoint file has no parent")?,
+        )?;
+        fs::copy(file, destination)?;
+    }
+    Ok(())
+}
+
+fn checkpoint() -> Result<()> {
+    ilex_enroll::harden()?;
+    let ws = common::workspace()?;
+    let state_dir = ws.ensure_state()?.canonicalize()?;
+    let source = PathBuf::from(
+        std::env::var_os("ILEX_ENROLLMENT_CHECKPOINT").context("checkpoint required")?,
+    )
+    .canonicalize()?;
+    ensure!(
+        source.starts_with(&state_dir),
+        "checkpoint must belong to this checkout's state"
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(source.join("checkpoint.json"))?)?;
+    let run = receipt["run"].as_str().context("checkpoint run missing")?;
+    let (pid, nonce) = run.split_once('-').context("invalid checkpoint run")?;
+    ensure!(
+        run.len() < 80
+            && !pid.is_empty()
+            && !nonce.is_empty()
+            && pid.bytes().all(|b| b.is_ascii_digit())
+            && nonce.bytes().all(|b| b.is_ascii_digit())
+            && source.file_name().and_then(|p| p.to_str()) == Some(run),
+        "invalid checkpoint run"
+    );
+    ensure!(
+        receipt["owner"] == ws.identity()?.owner
+            && receipt["stage"] == "checkpoint-complete"
+            && receipt["qemu_exit_status"] == 0,
+        "owned cleanly stopped installer checkpoint required"
+    );
+    ensure!(
+        !Path::new("/proc").join(pid).exists(),
+        "original test process must finish before checkpoint diagnosis"
+    );
+    let work = state_dir.join("encrypted-fixtures").join(run);
+    let bundle = state_dir.join("security").join(run);
+    ensure!(
+        !work.exists() && !bundle.exists(),
+        "checkpoint diagnosis must not overwrite active fixture state"
+    );
+    let original_manifest: Value =
+        serde_json::from_slice(&fs::read(source.join("bundle/bundle.json"))?)?;
+    ensure!(
+        original_manifest["owner"] == receipt["owner"]
+            && original_manifest["run"] == run
+            && original_manifest["disk"].as_str() == work.join("root.qcow2").to_str(),
+        "checkpoint bundle identity differs"
+    );
+    fs::create_dir(&work)?;
+    fs::set_permissions(&work, fs::Permissions::from_mode(0o700))?;
+    let mut bundle_created = false;
+    let mut restored = false;
+    let mut cleanup_spec = None;
+    let mut core_proven = false;
+    let mut stage = "restore";
+    let mut credentials = Value::Null;
+    let artifacts = work.join("evidence");
+    let published = qemu::artifact_dir(&ws, "enrollment-checkpoint")?;
+    clear_evidence(&published)?;
+    let mut result = (|| -> Result<()> {
+        restore_files(&source.join("work"), &work)?;
+        fs::create_dir(&bundle)?;
+        bundle_created = true;
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o700))?;
+        restore_files(&source.join("bundle"), &bundle)?;
+        restored = true;
+        let expected: Value = serde_json::from_slice(&fs::read(artifacts.join("candidate.json"))?)?;
+        ensure!(
+            expected["interrupt_completion"] != true,
+            "this diagnostic requires completed TPM enrollment"
+        );
+        let seed = work.join("oemdrv.img");
+        let passphrase = Secret::read(File::open(work.join("seed/passphrase"))?.into())?;
+        let recovery = recovery_secret(&seed, &work)?;
+        credentials = fingerprints(&[&passphrase, &recovery]);
+        let recorded: Value =
+            serde_json::from_slice(&extract(&seed, &artifacts, "credentials.json")?)?;
+        ensure!(
+            recorded == credentials,
+            "checkpoint credential fingerprints differ"
+        );
+        let installer_probe: Value =
+            serde_json::from_slice(&extract(&seed, &artifacts, "probe.json")?)?;
+        ensure!(
+            installer_probe["verdict"] == "eligible",
+            "checkpoint installer was not eligible"
+        );
+        let replay = security::replay_pcr7(&extract(&seed, &artifacts, "eventlog.bin")?)?;
+        ensure!(
+            installer_probe["pcr7"] == replay.sha256,
+            "checkpoint installer replay differs"
+        );
+        let tokens: Value = serde_json::from_slice(&extract(&seed, &artifacts, "tokens.json")?)?;
+        let disk = work.join("root.qcow2");
+        let mut config = VmConfig::new(
+            original_manifest["purpose"]
+                .as_str()
+                .context("checkpoint purpose missing")?,
+            &disk,
+        );
+        config.snapshot = false;
+        config.memory = "6G".into();
+        let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
+        spec.run = run.to_string();
+        spec.accelerator = match std::env::var("ILEX_SECURITY_ACCELERATOR").as_deref() {
+            Ok("tcg") => Accelerator::Tcg,
+            Ok("kvm") => Accelerator::Native,
+            _ => bail!("explicit checkpoint accelerator required"),
+        };
+        spec.secure_boot = Requirement::Required;
+        spec.tpm = TpmLifecycle::Persistent {
+            bundle_id: run.to_string(),
+        };
+        cleanup_spec = Some(spec.clone());
+        let provider = LinuxProvider::new(ws.clone())?;
+        let caps = provider.probe(&spec)?;
+        caps.require(Capability::FirmwareEnforcement)?;
+        caps.require(Capability::PersistentTpm)?;
+        fs::write(
+            artifacts.join("checkpoint-backend.json"),
+            serde_json::to_vec_pretty(&caps)?,
+        )?;
+        let vm = provider.create(spec.clone())?;
+        let mut fixture = Fixture { provider, vm, spec };
+        stage = "first_installed_boot";
+        fixture.disk_boot()?;
+        let booted = assertions(&mut fixture, &artifacts, &expected, &installer_probe);
+        fixture.logs(&artifacts, "checkpoint-installed")?;
+        booted?;
+        core_proven = true;
+        guest_privacy(
+            fixture.vm.running_mut()?,
+            &artifacts,
+            "checkpoint-after-finalisation",
+            &credentials,
+        )?;
+        stage = "cold_restart";
+        poweroff(&mut fixture, &artifacts, "checkpoint-installed")?;
+        fixture.disk_boot()?;
+        let cold = artifacts.join("cold");
+        fs::create_dir_all(&cold)?;
+        assertions(&mut fixture, &cold, &expected, &installer_probe)?;
+        guest_privacy(
+            fixture.vm.running_mut()?,
+            &cold,
+            "checkpoint-cold",
+            &credentials,
+        )?;
+        poweroff(&mut fixture, &artifacts, "checkpoint-cold")?;
+        stage = "same_tpm_policy_mismatch";
+        same_tpm_mismatch(
+            &ws,
+            &mut fixture,
+            &artifacts,
+            &passphrase,
+            &credentials,
+            &installer_probe,
+            &tokens,
+        )?;
+        // The frozen original disk has never had an installed boot. It is
+        // backing-only for these separate first-boot mismatch/recovery guests.
+        let frozen = source.join("work/root.qcow2");
+        stage = "pcr_mismatch_first_boot";
+        fallback(
+            &ws,
+            &frozen,
+            &fixture.spec,
+            &work,
+            &artifacts,
+            &passphrase,
+            &credentials,
+            &installer_probe,
+            &tokens,
+            &expected,
+            "pcr-mismatch",
+        )?;
+        stage = "recovery_key_boot";
+        fallback(
+            &ws,
+            &frozen,
+            &fixture.spec,
+            &work,
+            &artifacts,
+            &recovery,
+            &credentials,
+            &installer_probe,
+            &tokens,
+            &expected,
+            "recovery",
+        )?;
+        stage = "no_tpm_fallback";
+        fallback(
+            &ws,
+            &disk,
+            &fixture.spec,
+            &work,
+            &artifacts,
+            &passphrase,
+            &credentials,
+            &installer_probe,
+            &tokens,
+            &expected,
+            "no-tpm",
+        )?;
+        fixture.provider.destroy_owned(&mut fixture.vm)?;
+        stage = "post_install_gates_complete";
+        Ok(())
+    })();
+    // Preserve only privacy-checked metadata on a partial diagnostic. Raw
+    // failure logs/screens remain private, as for the full installer gate.
+    if credentials.is_array() {
+        let export = (|| -> Result<()> {
+            artifact_privacy(&[&artifacts], &credentials)?;
+            for file in evidence_files(&artifacts)? {
+                if !matches!(
+                    file.extension().and_then(|s| s.to_str()),
+                    Some("json" | "bin")
+                ) {
+                    continue;
+                }
+                let target = published.join(file.strip_prefix(&artifacts)?);
+                fs::create_dir_all(target.parent().context("checkpoint export has no parent")?)?;
+                fs::copy(file, target)?;
+            }
+            let privacy = artifact_privacy(&[&published], &credentials)?;
+            fs::write(
+                published.join("final-artifact-privacy.json"),
+                serde_json::to_vec_pretty(&privacy)?,
+            )?;
+            Ok(())
+        })();
+        if export.is_err() {
+            clear_evidence(&published)?;
+            result = Err(anyhow::anyhow!("checkpoint privacy/export failed"));
+            stage = "privacy_export";
+            core_proven = false;
+        }
+    }
+    if bundle_created && bundle.exists() {
+        if let Some(spec) = cleanup_spec {
+            security::destroy_bundle(&ws, &spec).context("owned checkpoint cleanup failed")?;
+        } else {
+            // No VM was created: this is only our incomplete restore.
+            fs::remove_dir_all(&bundle)?;
+        }
+    }
+    fs::remove_dir_all(&work)?;
+    fs::write(
+        published.join("result.json"),
+        serde_json::to_vec_pretty(&json!({
+        "qualification":"unqualified", "scope":"owned completed-installer checkpoint; this diagnosis cannot qualify the original live finalisation privacy gate",
+            "core_boot_proof":if core_proven {"passed"} else {"unproven"}, "post_install_gates":if result.is_ok() {"passed"} else {"unqualified"},
+            "stage":stage, "source_run":run, "source_harness":receipt["source_head"], "restored_original_tpm_and_vars":restored,
+            "error":result.as_ref().err().map(|_|"private diagnostic details suppressed")
+        }))?,
+    )?;
+    bail!(
+        "checkpoint diagnostic completed at {stage}; full encrypted installer qualification remains unqualified"
+    )
 }
 
 struct Registry {

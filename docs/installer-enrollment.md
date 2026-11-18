@@ -204,3 +204,15 @@ must measure the 6 GiB/two-vCPU contract before the encrypted tests. A KVM SMM
 failure remains unqualified; explicit TCG is a separately measured alternative.
 Physical fTPM, firmware changes and actual kernel-upgrade/rollback behavior
 remain later qualification, never inferred from this fixture.
+
+For a failed test-only finalisation scanner, an owned checkpoint taken after
+the installer QEMU exited successfully can diagnose the installed boot without
+repeating the import. `ILEX_ENROLLMENT_CHECKPOINT=<owned-state-checkpoint>` with
+`cargo xtask test security::enrollment_checkpoint` restores the original disk,
+TPM and firmware bundle only after the original controller has exited. It
+requires the exact qualified 6 GiB/two-vCPU backend, authenticates the private
+credential fingerprints, then runs first/cold boot and fallback gates. It
+refuses foreign state and existing fixture paths. The result and exit status
+always remain **unqualified** for the complete installer; any direct core boot
+proof is reported separately. This opt-in diagnostic is outside CI's
+`security::encrypted_` filter and cannot replace the full ISO qualification.
