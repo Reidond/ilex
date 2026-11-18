@@ -717,15 +717,17 @@ fn resize_crash(direction: &str) -> Result<()> {
             );
         }
         // A hardware reset, without guest shutdown, sync or a new overlay.
-        let mut qmp = Qmp::connect(&vm.info.qmp_sock)?;
-        qmp.execute("stop", json!({}))?;
-        ensure!(
-            qmp.execute("query-status", json!({}))?["running"] == false,
-            "QEMU did not pause"
-        );
-        qmp.execute("system_reset", json!({}))?;
-        qmp.execute("cont", json!({}))?;
-        drop(qmp);
+        {
+            // Close the QMP connection before waiting for the new boot.
+            let mut qmp = Qmp::connect(&vm.info.qmp_sock)?;
+            qmp.execute("stop", json!({}))?;
+            ensure!(
+                qmp.execute("query-status", json!({}))?["running"] == false,
+                "QEMU did not pause"
+            );
+            qmp.execute("system_reset", json!({}))?;
+            qmp.execute("cont", json!({}))?;
+        }
         vm.wait_for(
             "new boot after interrupted homed resize",
             &format!(
