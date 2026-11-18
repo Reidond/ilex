@@ -932,9 +932,17 @@ Ephemeral assertions parse the lists and trust file without Flathub traffic.
 
 `cargo xtask test apps::` opts into an enforcing installed disk and real
 Flathub downloads: offline timer/backoff with the internet NIC down and a
-restricted SSH management NIC, real installation, list additions/removals,
+restricted SSH management NIC, automatic recovery without a manual start,
+an interrupted real pull that resumes below 8 GiB free, real installation,
+list additions/removals (including removal below the free-space margin),
 manual declines, unavailable IDs, retained app data, reboot fast path, real
-updates after rolling an app back, polkit denial and a real per-user install.
+updates after rolling apps back, retained partial-update history across a
+retry, polkit denial and a real per-user install. Set
+`ILEX_APPS_SHELL_FREE_IMAGE` to a locally built shell-free generic image and
+run `apps::shell_free_switch` separately to qualify a real `bootc switch`:
+the new deployment's timer removes former preinstalls while keeping manual
+system apps, the user installation and home data. Its image is transferred
+into the disposable guest's local container store; nothing is published.
 `graphical::apps` is registered only when explicitly named. It logs into GNOME
 with a homed wheel account, checks MIME handlers, launches Text Editor, Papers
 and Firefox, persists a real Flatpak setting in the encrypted home, verifies
