@@ -127,13 +127,18 @@ def prepare():
     # Anaconda calls poweroff only after its finalisation. This test-only unit
     # scans that final live/target log and kickstart set before unmounting it.
     unit = pathlib.Path('/run/systemd/system/ilex-private-final-scan.service')
+    # Keep an active oneshot until shutdown. Stop ordering is reversed: with
+    # Before=anaconda and After=the seed mount, ExecStop runs after Anaconda
+    # stops but before the seed is unmounted. A new poweroff-start job alone
+    # would race the mount's stop job and could lose the final report.
     unit.write_text('[Unit]\nDefaultDependencies=no\n'
-                    'After=anaconda.service anaconda-direct.service\n'
-                    'Before=umount.target poweroff.target\n'
-                    '[Service]\nType=oneshot\nTimeoutStartSec=1800\nExecStart=/usr/bin/python3 -I -S '
-                    + str(SEED / 'guest.py') + ' finalise\n')
+                    'Before=anaconda.service anaconda-direct.service shutdown.target\n'
+                    'Conflicts=shutdown.target\nRequiresMountsFor=' + str(SEED) + '\n'
+                    '[Service]\nType=oneshot\nRemainAfterExit=yes\n'
+                    'TimeoutStopSec=1800\nExecStart=/usr/bin/true\n'
+                    'ExecStop=/usr/bin/python3 -I -S ' + str(SEED / 'guest.py') + ' finalise\n')
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
-    subprocess.run(['systemctl', 'add-wants', 'poweroff.target', unit.name], check=True)
+    subprocess.run(['systemctl', 'start', unit.name], check=True)
     marker('PREPARED')
 
 
