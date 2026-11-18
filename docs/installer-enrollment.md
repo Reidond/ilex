@@ -35,7 +35,6 @@ unlock/output descriptors, captures cryptenroll output privately and returns
 only token/slot ids. `tpm` accepts an owned unlock descriptor, authenticates
 it, checks eligibility and the target tool versions, and reads the token back.
 The future native installer can link the library; PR 19 can use this CLI.
-The later `ilexctl` rename is outside this change.
 
 Credential authentication excludes external token handlers and filters out
 built-in tokens before testing the supplied descriptor. An already available
