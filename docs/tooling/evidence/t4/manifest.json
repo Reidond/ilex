@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "exported_utc": "2026-11-18T05:23:23.400162+00:00",
+  "exported_utc": "2026-11-18T05:38:21.032889+00:00",
   "timestamp_note": "file_written_utc is the original artifact file timestamp; capture sidecars carry presentation/UTC acquisition metadata. Raw contents are copied byte for byte.",
   "files": [
     {
@@ -107,9 +107,9 @@
     },
     {
       "path": "capacity.jsonl",
-      "bytes": 25265,
-      "sha256": "2ca9eda35f5434c7f8ba8699bafb85530896cd497be0febdc6e1f0c70a0c39bf",
-      "file_written_utc": "2026-11-18T05:21:54.458519+00:00"
+      "bytes": 26689,
+      "sha256": "63b2bc0fa6ce5a31c2c1ed2559227903485130e7789c6779b01f990e24849bea",
+      "file_written_utc": "2026-11-18T05:38:06.378213+00:00"
     },
     {
       "path": "default-builder-delivery.json",
@@ -242,6 +242,30 @@
       "bytes": 813,
       "sha256": "af9e1b1b549fc2f52a82af1b33df090b8a1108ba946dc6cffd815a0aa5914ab2",
       "file_written_utc": "2026-11-18T05:00:05.628195+00:00"
+    },
+    {
+      "path": "review-transport-acl/low-integrity.json",
+      "bytes": 1940,
+      "sha256": "feed5c2042f5d0b42644a71a6005a3bb1ff75246d9498c1e8a4e6d0be2a6f2de",
+      "file_written_utc": "2026-11-18T05:36:38.612845+00:00"
+    },
+    {
+      "path": "review-transport-acl/qemu-stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T05:36:19.830964+00:00"
+    },
+    {
+      "path": "review-transport-acl/qemu-stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "file_written_utc": "2026-11-18T05:36:19.830964+00:00"
+    },
+    {
+      "path": "review-transport-acl/transport-ready.json",
+      "bytes": 1045,
+      "sha256": "42caa09ad8a020b3c635d1291d196f2a5d4b0dae5bb27f8b2a43fae32b63c150",
+      "file_written_utc": "2026-11-18T05:36:19.973031+00:00"
     },
     {
       "path": "review-transport-final/low-integrity.json",

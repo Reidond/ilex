@@ -123,6 +123,23 @@ pub fn verify(endpoint: &str) -> Result<Access> {
         ensure!(status == ERROR_SUCCESS, "reading QMP ACL: {status}");
         let result = (|| -> Result<Value> {
             ensure!(!dacl.is_null(), "QMP null DACL refused");
+            let mut raw_sddl = std::ptr::null_mut();
+            ensure!(
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut raw_sddl,
+                    std::ptr::null_mut(),
+                ) != 0,
+                "reading QMP DACL SDDL"
+            );
+            let mut length = 0;
+            while *raw_sddl.add(length) != 0 {
+                length += 1;
+            }
+            let dacl_sddl = String::from_utf16_lossy(std::slice::from_raw_parts(raw_sddl, length));
+            LocalFree(raw_sddl.cast());
             let user = user_sid()?;
             let mut allowed = Vec::new();
             for index in 0..(*dacl).AceCount as u32 {
@@ -151,7 +168,7 @@ pub fn verify(endpoint: &str) -> Result<Access> {
                 "QMP ACL must allow only current user and SYSTEM"
             );
             Ok(
-                json!({"transport":"windows-af-unix","endpoint":endpoint,"current_user":user,"allowed_sids":allowed,"acl_verified":true}),
+                json!({"transport":"windows-af-unix","endpoint":endpoint,"current_user":user,"allowed_sids":allowed,"dacl_sddl":dacl_sddl,"ace_count":(*dacl).AceCount,"acl_verified":true}),
             )
         })();
         LocalFree(descriptor.cast());

@@ -22,7 +22,7 @@ from runtime metadata and omit credential paths.
 | Repeated boot credentials, pin rejection and enforcing labels | [First boot](evidence/t4/builder-cold1/ssh-identity.json), [second boot](evidence/t4/builder-cold2/ssh-identity.json), [final GNOME boot](evidence/t4/usb-gnome/ssh-identity.json), [guest provisioning/labels](evidence/t4/usb-gnome/ssh-provisioning.txt). |
 | Grabbed shutdown and fixed resource policy | [GNOME shutdown timing](evidence/t4/usb-gnome/shutdown-grabbed.json), [Hyprland shutdown timing](evidence/t4/usb-hyprland-qt/shutdown-grabbed.json), [timestamped host capacity/configuration observations](evidence/t4/capacity.jsonl). |
 | Development helper isolation | [Ordinary image filesystem audit](evidence/t4/production-helper-audit.json), [private composition audit](evidence/t4/development-helper-audit.json). |
-| Review P1: ACLs, reconnects and low-integrity denial | [Pinned QEMU endpoints and verified ACLs](evidence/t4/review-transport-final/transport-ready.json), [real lowered-token connection results](evidence/t4/review-transport-final/low-integrity.json). Both clients receive Windows error 10013; normal clients reconnect before and after. |
+| Review P1: ACLs, reconnects and low-integrity denial | [Pinned QEMU endpoints and raw DACL SDDL](evidence/t4/review-transport-acl/transport-ready.json), [real lowered-token connection results](evidence/t4/review-transport-acl/low-integrity.json). Both clients receive Windows error 10013; normal clients reconnect before and after. |
 
 The original desktop observations below predate the base-stack rewrite and
 identify their frozen installed disk/source explicitly. Post-review transport
