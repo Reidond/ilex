@@ -46,7 +46,7 @@ fn inventory(ws: &Workspace) -> Result<SourceManifest> {
             "crates",
             "build",
             "shells",
-            "design-systems",
+            "users",
             "machines",
             "installer",
         ],
