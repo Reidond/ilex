@@ -119,7 +119,9 @@ secret values are scanned against installer/target logs, journal and public
 evidence without printing matches. Only public metadata, event logs, serial
 diagnostics and key-free screenshots enter `artifacts/encrypted-install/`.
 Evidence is staged privately until the installer privacy gate and recursive
-artifact scan both pass. A failed run publishes its unqualified result only.
+artifact scan both pass. A failed run publishes its unqualified result and,
+when available, strictly validated fixed stage/error codes and booleans.
+Raw failure logs, screen cells and exception text remain private.
 Disks, firmware/TPM state, private answers and signing keys are removed.
 
 The install deadline defaults to three hours for explicit TCG and can be set

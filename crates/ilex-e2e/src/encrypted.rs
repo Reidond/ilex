@@ -11,6 +11,7 @@ use ilex_devkit::{
 };
 use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File},
@@ -213,6 +214,89 @@ fn extract(seed: &Path, artifacts: &Path, file: &str) -> Result<Vec<u8>> {
     );
     fs::write(artifacts.join(format!("installer-{file}")), &output.stdout)?;
     Ok(output.stdout)
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FailureSnapshot {
+    schema: u8,
+    phase: String,
+    drive_step: String,
+    errno: Option<u16>,
+    helper_errno: Option<u16>,
+    uinput_loaded: bool,
+    tty8_mode: Option<u8>,
+    target_exists: bool,
+    layout: String,
+    helper_errors: Vec<String>,
+    passphrase_prompt: bool,
+    recovery_prompt: bool,
+    confirmation_prompt: bool,
+    ready_prompt: bool,
+}
+
+fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
+    // Failure evidence bypasses the full privacy gate only after strict field,
+    // code and numeric validation. Never export raw debugfs output or errors.
+    let output = Command::new("debugfs")
+        .args(["-R", "cat /public/failure.json"])
+        .arg(seed)
+        .output()?;
+    ensure!(output.status.success() && output.stdout.len() <= 4096);
+    let snapshot: FailureSnapshot = serde_json::from_slice(&output.stdout)?;
+    ensure!(snapshot.schema == 1);
+    ensure!(["prepare", "drive", "finish"].contains(&snapshot.phase.as_str()));
+    ensure!(
+        [
+            "not-started",
+            "uinput-load",
+            "uinput-open",
+            "uinput-create",
+            "input-observe",
+            "wait-passphrase",
+            "capture-before-input",
+            "enter-passphrase",
+            "wait-recovery",
+            "acknowledge-recovery",
+            "wait-ready",
+            "capture-confirmation",
+            "wait-final-scan",
+        ]
+        .contains(&snapshot.drive_step.as_str())
+    );
+    ensure!(
+        [
+            "not-present",
+            "encrypted",
+            "unencrypted",
+            "error",
+            "unavailable"
+        ]
+        .contains(&snapshot.layout.as_str())
+    );
+    ensure!(snapshot.errno.is_none_or(|value| value <= 4095));
+    ensure!(snapshot.helper_errno.is_none_or(|value| value <= 4095));
+    ensure!(snapshot.tty8_mode.is_none_or(|value| value <= 3));
+    ensure!(snapshot.helper_errors.len() <= 9);
+    ensure!(snapshot.helper_errors.iter().all(|code| {
+        [
+            "var-unencrypted",
+            "root-layout",
+            "boot-encrypted",
+            "crypttab",
+            "swap",
+            "text-console",
+            "tty-required",
+            "tool-failed",
+            "memory-lock",
+        ]
+        .contains(&code.as_str())
+    }));
+    fs::write(
+        published.join("failure.json"),
+        serde_json::to_vec_pretty(&snapshot)?,
+    )?;
+    Ok(())
 }
 
 fn install(fixture: &mut Fixture, artifacts: &Path, deadline: Duration) -> Result<()> {
@@ -556,8 +640,8 @@ fn run() -> Result<()> {
     let work = ws.ensure_state()?.join("encrypted-fixtures").join(&run);
     fs::create_dir_all(&work)?;
     fs::set_permissions(&work, fs::Permissions::from_mode(0o700))?;
-    // Until both privacy gates pass, even failure diagnostics remain inside
-    // the private fixture directory. CI always uploads only `published`.
+    // Until both privacy gates pass, raw diagnostics remain inside the private
+    // fixture directory. CI always uploads only `published`.
     let artifacts = work.join("evidence");
     fs::create_dir(&artifacts)?;
     let start = Instant::now();
@@ -619,6 +703,12 @@ fn run() -> Result<()> {
         );
         let installed = install(&mut fixture, &artifacts, deadline);
         fixture.logs(&artifacts, "installer")?;
+        if installed.is_err() {
+            fixture.provider.stop(&mut fixture.vm)?;
+            // A missing/invalid snapshot adds no public data and never masks
+            // the original failed qualification.
+            let _ = failure_snapshot(&seed_path, &published);
+        }
         installed?;
         fixture.provider.stop(&mut fixture.vm)?;
         let installer_probe: Value =

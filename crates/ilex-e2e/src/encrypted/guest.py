@@ -21,6 +21,19 @@ import termios
 PRIVATE = pathlib.Path('/run/ilex-encrypted-test')
 SEED = PRIVATE / 'seed'
 PUBLIC = SEED / 'public'
+DRIVE_STEP = 'not-started'
+
+ERRORS = {
+    'var-unencrypted': b'/var does not share encrypted root',
+    'root-layout': b'requires one LUKS2 ancestor and btrfs root',
+    'boot-encrypted': b'ESP and /boot must be outside LUKS',
+    'crypttab': b'root crypttab is ambiguous or contains a keyfile',
+    'swap': b'disk swap',
+    'text-console': b'completion requires a text-mode virtual console',
+    'tty-required': b'completion requires the reserved local tty',
+    'tool-failed': b'enrollment tool failed',
+    'memory-lock': b'cannot lock secret memory',
+}
 
 
 def harden():
@@ -85,6 +98,62 @@ def wait_for(text, deadline=300):
         time.sleep(0.2)
 
 
+def failure_snapshot(error):
+    """Export only fixed codes/booleans; never an exception, log or screen."""
+    observed = set()
+    helper_errno = None
+    for path in pathlib.Path('/tmp').glob('ks-script-*.log'):
+        if path.is_symlink() or not path.is_file():
+            continue
+        with path.open('rb') as source:
+            data = source.read(2 * 1024 * 1024)
+        if b'ilex-enroll:' not in data:
+            continue
+        observed.update(code for code, text in ERRORS.items() if text in data)
+        match = re.search(rb'os error ([0-9]{1,3})', data)
+        if match:
+            helper_errno = int(match.group(1))
+    root = pathlib.Path('/mnt/sysroot')
+    if not (root / 'etc').is_dir():
+        root = pathlib.Path('/mnt/sysimage')
+    layout = 'not-present'
+    if root.is_dir():
+        try:
+            result = subprocess.run(['ilex-enroll', 'layout', '--root', str(root)],
+                                    capture_output=True, timeout=30)
+            if result.returncode:
+                layout = 'error'
+                observed.update(code for code, text in ERRORS.items() if text in result.stderr)
+            else:
+                layout = 'unencrypted' if json.loads(result.stdout) is None else 'encrypted'
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            layout = 'unavailable'
+    mode = None
+    try:
+        tty = os.open('/dev/tty8', os.O_RDWR | os.O_NOCTTY)
+        try:
+            mode = struct.unpack('i', fcntl.ioctl(tty, 0x4b3b, bytes(4)))[0]
+        finally:
+            os.close(tty)
+    except OSError:
+        pass
+    cells = screen()
+    report = {'schema': 1, 'phase': sys.argv[1], 'drive_step': DRIVE_STEP,
+              'errno': error.errno if isinstance(error, OSError) else None,
+              'helper_errno': helper_errno, 'uinput_loaded': pathlib.Path('/sys/module/uinput').exists(),
+              'tty8_mode': mode, 'target_exists': (root / 'etc').is_dir(), 'layout': layout,
+              'helper_errors': sorted(observed),
+              'passphrase_prompt': b'Re-enter the disk passphrase' in cells,
+              'recovery_prompt': b'Press Enter when it is saved offline.' in cells,
+              'confirmation_prompt': b'Enter the saved recovery key to confirm' in cells,
+              'ready_prompt': b'Installation completion is ready.' in cells}
+    with (PUBLIC / 'failure.json').open('w') as output:
+        json.dump(report, output)
+        output.flush()
+        os.fsync(output.fileno())
+    os.sync()
+
+
 def scan(secrets):
     roots = ['/tmp', '/var/log', '/root', '/mnt/sysroot/var/log',
              '/mnt/sysroot/var/roothome', str(PUBLIC)]
@@ -108,8 +177,12 @@ def scan(secrets):
 
 
 def drive():
+    global DRIVE_STEP
+    DRIVE_STEP = 'uinput-load'
     subprocess.run(['modprobe', 'uinput'], check=True)
+    DRIVE_STEP = 'uinput-open'
     keyboard = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK)
+    DRIVE_STEP = 'uinput-create'
     # Linux uinput ABI. This device exists only in this disposable guest.
     fcntl.ioctl(keyboard, 0x40045564, 1)  # UI_SET_EVBIT(EV_KEY)
     codes = dict(zip('abcdefghijklmnopqrstuvwxyz',
@@ -121,6 +194,7 @@ def drive():
         fcntl.ioctl(keyboard, 0x40045565, code)
     os.write(keyboard, struct.pack('80sHHHHI', b'ilex-private-test-keyboard', 3, 1, 1, 1, 0) + bytes(1024))
     fcntl.ioctl(keyboard, 0x5501)  # UI_DEV_CREATE
+    DRIVE_STEP = 'input-observe'
     input_fds = [os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
                  for path in pathlib.Path('/dev/input').glob('event*')]
 
@@ -151,22 +225,30 @@ def drive():
 
     try:
         passphrase = (SEED / 'passphrase').read_bytes()
+        DRIVE_STEP = 'wait-passphrase'
         wait_for(b'Re-enter the disk passphrase')
+        DRIVE_STEP = 'capture-before-input'
         safe_capture('COMPLETION-SAFE-SCREEN')
+        DRIVE_STEP = 'enter-passphrase'
         type_private(passphrase)
+        DRIVE_STEP = 'wait-recovery'
         wait_for(b'Press Enter when it is saved offline.')
         # Read character cells privately. Never take a screenshot while the
         # key is visible and never send the key to the host or serial console.
         match = re.search(rb'[cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}', screen())
         assert match is not None, 'recovery key was not shown locally'
         recovery = match.group(0)
+        DRIVE_STEP = 'acknowledge-recovery'
         type_private(b'')
         wait_for(b'Enter the saved recovery key to confirm')
         type_private(recovery)
+        DRIVE_STEP = 'wait-ready'
         wait_for(b'Recovery key saved and privately verified.')
         assert recovery not in screen()
+        DRIVE_STEP = 'capture-confirmation'
         safe_capture('RECOVERY-SAFE-SCREEN')
         type_private(b'')
+        DRIVE_STEP = 'wait-final-scan'
         while not (PRIVATE / 'final-scan').exists():
             time.sleep(0.2)
         result = scan([passphrase, recovery])
@@ -206,8 +288,12 @@ if __name__ == '__main__':
     harden()
     try:
         {'prepare': prepare, 'drive': drive, 'finish': finish}[sys.argv[1]]()
-    except Exception:
+    except Exception as error:
         # Do not include exception repr: an input or tool failure may contain a
         # credential. Public artifacts expose only the failed phase.
+        try:
+            failure_snapshot(error)
+        except Exception:
+            pass
         marker('FAILED-' + sys.argv[1])
         raise SystemExit(1)
