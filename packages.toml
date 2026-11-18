@@ -1,6 +1,6 @@
 # Packages of the base: every ilex image has them, with or without a shell.
 # Keep it small: fedora-bootc plus ilex's own files. `cargo xtask build --shell
-# none` enforces a budget of 256 MiB over fedora-bootc (see CLAUDE.md).
+# none` enforces a budget of 322 MiB over fedora-bootc (see CLAUDE.md).
 # Tables as in shells/packages.toml:
 #   install = packages and @groups to install
 #   exclude = packages kept out even when a group pulls them in (dnf --exclude)

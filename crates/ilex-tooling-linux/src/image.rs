@@ -6,10 +6,9 @@ use std::{path::PathBuf, process::Command};
 const KACHE_HOST_MOUNT: &str = "/kache-host";
 pub const BASE_IMAGE: &str = "quay.io/fedora/fedora-bootc:45";
 pub const BUILDER_IMAGE: &str = "quay.io/fedora/fedora:45";
-// Keep headless Flatpak for preinstall cleanup after a shell-free switch.
-// Required libraries and regenerated SELinux policy exceed 128 MiB;
-// recommendations stay in shells and app payloads remain in /var.
-const BASE_BUDGET: u64 = 256 * 1024 * 1024;
+// The shell-free build with Flatpak and the crypt/TPM initramfs grew 305.12 MiB
+// over Fedora bootc. Round up and reserve another 16 MiB for Fedora updates.
+const BASE_BUDGET_MIB: u64 = 322;
 pub fn build(
     ws: &Workspace,
     request: &BuildRequest,
@@ -123,7 +122,7 @@ pub fn build(
     if let Some(base_size) = base_size {
         let size = image_size(&image)?;
         let growth = size.saturating_sub(base_size);
-        if growth > BASE_BUDGET {
+        if growth > BASE_BUDGET_MIB * 1024 * 1024 {
             // Name the tag twice: `podman untag image` alone removes all its
             // tags. A rejected build must not be reused by the next test run.
             cmd::run(Command::new("podman").args(["untag", &image, &image]))
@@ -131,7 +130,7 @@ pub fn build(
             bail!(
                 "base size budget exceeded: {image} is {size} bytes ({:.2} MiB), \
                  fedora-bootc is {base_size} bytes ({:.2} MiB); \
-                 growth {:.2} MiB exceeds the 256 MiB budget. \
+                 growth {:.2} MiB exceeds the {BASE_BUDGET_MIB} MiB budget. \
                  Move packages to a shell or machine, or justify a budget change in a commit",
                 size as f64 / 1048576.0,
                 base_size as f64 / 1048576.0,
@@ -139,7 +138,7 @@ pub fn build(
             );
         }
         eprintln!(
-            "base size: {:.2} MiB, fedora-bootc {:.2} MiB, growth {:.2} MiB (budget 256 MiB)",
+            "base size: {:.2} MiB, fedora-bootc {:.2} MiB, growth {:.2} MiB (budget {BASE_BUDGET_MIB} MiB)",
             size as f64 / 1048576.0,
             base_size as f64 / 1048576.0,
             growth as f64 / 1048576.0

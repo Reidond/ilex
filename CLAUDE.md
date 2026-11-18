@@ -12,7 +12,7 @@ layer on that root. Rust tooling, e2e-only tests on QEMU via bcvk.
 
 ```sh
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
-cargo xtask build --shell none # small base → localhost/ilex:<tag>.s-none (256 MiB growth budget)
+cargo xtask build --shell none # small base → localhost/ilex:<tag>.s-none (322 MiB growth budget)
 cargo xtask build --machine ms-7c35 # build the base, then its machine layer
 cargo xtask build --machine ms-7c35 --on <image> # only a machine layer on an existing image
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
@@ -426,12 +426,13 @@ and image layer, with their combined excludes. A shell's excludes cannot prevent
 installation of a base package. The machine remains the last, squashed layer.
 
 `cargo xtask build` checks every root built without shells against the local
-fedora-bootc image: growth must be at most **256 MiB** (uncompressed `.Size`).
-The former 128 MiB budget cannot accommodate Fedora's required Flatpak
-libraries and regenerated SELinux policy. Retaining its headless client and
-timer guarantees cleanup after a shell-free switch; no app payload is added.
-Measured 2026-11-18: the cleanup-capable base is 2,213,021,459 bytes against
-Fedora bootc's 2,010,765,876 bytes, a 192.89 MiB increase within that budget.
+fedora-bootc image using Podman's uncompressed `.Size`. The shell-free build
+with headless Flatpak, regenerated SELinux policy and the crypt/TPM initramfs
+measured 2,334,252,793 bytes against Fedora bootc's 2,014,310,965 bytes, an
+increase of 305.12 MiB. The **322 MiB** budget rounds that growth up to the
+next whole MiB and adds 16 MiB for Fedora updates. Keeping the Flatpak client
+and timer allows preinstall cleanup after a shell-free switch. App payloads
+remain in `/var`.
 The error includes both sizes and removes only the rejected build's tag, so a
 later test cannot reuse it. Packages that exceed the budget belong in a
 shell or machine, or need a justified budget change in a commit. The base adds
@@ -2247,7 +2248,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 
 ## Conventions
 
-- `packages.toml` belongs to the base and stays within its 256 MiB growth
+- `packages.toml` belongs to the base and stays within its 322 MiB growth
   budget; desktop-wide dependencies belong in `shells/packages.toml`. Both
   transactions precede ilex files, configuration and overlays.
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one

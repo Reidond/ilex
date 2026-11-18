@@ -84,30 +84,20 @@ fallback prompts; a successful path without direct method evidence records
 PR 19 owns later verification and fallback repair. No boot service in PR 18
 automatically reseals or generates recovery material.
 
-The base growth gate increases **128 → 192 MiB** against this stack's base:
-64 MiB more allowance (50%). The 160 MiB gate was an intermediate PR 18 change.
-After rebasing onto
-main's homed/ilexctl base, the bare image measured 2090.87 MiB versus Fedora's
-1917.62 MiB, growth 173.26 MiB. The earlier pre-rebase image grew 151.84 MiB.
-The measured growth exceeds the original 128 MiB allowance by 45.26 MiB.
-Layer accounting for this checkout's bare build is approximately:
+The rebased shell-free build with Flatpak and enrollment measured
+2,334,252,793 bytes in Podman's uncompressed `.Size` against 2,014,310,965
+bytes for `quay.io/fedora/fedora-bootc:45` at digest
+`sha256:a14fce7d40c31ad2f924444c2d7d3424a9f4617c561ea1ef729df9c5e3205455`.
+The 319,941,828-byte increase (305.12 MiB) sets the **322 MiB** growth limit.
+Rounding up to a whole MiB and adding 16 MiB leaves 16.88 MiB for Fedora
+updates. That replaces the apps stack's 256 MiB limit and the earlier 192 MiB
+enrollment-only limit. The ISO has a separate 2 GiB limit.
 
-| Layer group | MiB |
-| --- | ---: |
-| Rebuilt generic dracut crypt/TPM initramfs and tool manifest | 110.92 |
-| Complete base package transaction, including existing main support | 37.52 |
-| Configuration, including SELinux/homed | 20.69 |
-| Copied helpers, generated files and build plans | 4.14 |
-| Total growth over Fedora bootc | 173.26 |
-
-The replacement initramfs includes cryptsetup fallback, the TPM token plugin,
-tpm2-tss/libcrypto, TPM drivers and ilex-enroll, over the inherited Fedora
-archive. This is layer accounting, not a claim of 173 MiB of new RPMs. The
-explicit security requests are cryptsetup, tpm2-tss, systemd-udev, dracut and
-kbd; some were already present, including systemd-udev through homed.
-Security and homed support belong in the bare base. The combined footprint
-requires the bounded increase; the
-192 MiB limit stays enforced, and the ISO keeps its separate 2 GiB limit.
+The generic initramfs layer carries cryptsetup fallback, the TPM token plugin,
+tpm2-tss/libcrypto, TPM drivers and ilex-enroll alongside Fedora's inherited
+archive. The base requests cryptsetup, tpm2-tss, systemd-udev, dracut and kbd.
+Flatpak and its dependencies remain in the base for cleanup after a shell-free
+switch.
 
 ## Qualification
 
