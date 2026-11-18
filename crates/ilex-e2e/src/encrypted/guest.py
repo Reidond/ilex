@@ -133,7 +133,7 @@ def prepare():
     # would race the mount's stop job and could lose the final report.
     unit.write_text('[Unit]\nDefaultDependencies=no\n'
                     'Before=anaconda.service anaconda-direct.service shutdown.target\n'
-                    'Conflicts=shutdown.target\nRequiresMountsFor=' + str(SEED) + '\n'
+                    'Conflicts=shutdown.target\nRequiresMountsFor=' + str(SEED) + ' /tmp /var/log /var/lib/anaconda\n'
                     '[Service]\nType=oneshot\nRemainAfterExit=yes\n'
                     'TimeoutStopSec=1800\nExecStart=/usr/bin/true\n'
                     'ExecStop=/usr/bin/python3 -I -S ' + str(SEED / 'guest.py') + ' finalise\n')
