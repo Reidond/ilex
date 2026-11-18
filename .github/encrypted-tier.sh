@@ -19,7 +19,8 @@ export ILEX_SECURITY_ACCELERATOR
 ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
 case "$ILEX_SECURITY_ACCELERATOR" in kvm|tcg) ;; *) exit 1 ;; esac
 cargo xtask security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
-timeout --signal=TERM --kill-after=30s 175m cargo xtask test security::encrypted_
+# Each case uses the exact qualified 6 GiB profile and its own private fixture.
+timeout --signal=TERM --kill-after=30s 175m cargo xtask test security::encrypted_ -- --test-threads 1
 python3 - "$ILEX_ARTIFACTS" <<'PY'
 import json, pathlib, sys
 for tier in ('encrypted-install', 'encrypted-existing-space'):
