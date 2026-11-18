@@ -403,21 +403,20 @@ fn wait(ws: &Workspace, transport: &Transport, job: &Job, dir: &Path, cancel: bo
                     },
                     &[],
                 )?;
-                ensure!(
-                    !bytes.is_empty()
-                        && bytes.len() as u64 <= end - offset[i]
-                        && reply["sha256"] == digest(&bytes),
-                    "log transfer checksum/size mismatch"
-                );
-                let mut file = logs.append(&format!("{name}.log"))?;
-                file.file.write_all(&bytes)?;
-                file.file.sync_all()?;
+                let count = receive::append_log(
+                    &logs,
+                    &format!("{name}.log"),
+                    offset[i],
+                    end,
+                    reply["sha256"].as_str().context("missing log checksum")?,
+                    &bytes,
+                )?;
                 if i == 0 && !paths {
-                    std::io::stdout().write_all(&bytes)?;
+                    std::io::stdout().write_all(&bytes[..count])?;
                 } else {
-                    std::io::stderr().write_all(&bytes)?;
+                    std::io::stderr().write_all(&bytes[..count])?;
                 }
-                offset[i] += bytes.len() as u64;
+                offset[i] += count as u64;
             }
         }
         if !status["result"].is_null() {

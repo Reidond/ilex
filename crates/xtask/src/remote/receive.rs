@@ -200,6 +200,34 @@ pub fn collect(
     Ok(delivered)
 }
 
+/// A live log can grow between status and fetch. Verify the whole fetched block,
+/// but publish only the advertised prefix; the next poll fetches its suffix.
+pub fn append_log(
+    directory: &Directory,
+    name: &str,
+    offset: u64,
+    end: u64,
+    checksum: &str,
+    bytes: &[u8],
+) -> Result<usize> {
+    ensure!(offset < end && end <= MAX_LOG, "remote log size limit");
+    ensure!(
+        !bytes.is_empty()
+            && bytes.len() <= transport::MAX_REPLY_PAYLOAD_BYTES
+            && checksum == ilex_devkit::core::digest(bytes),
+        "log transfer checksum/size mismatch"
+    );
+    let count = bytes.len().min(usize::try_from(end - offset)?);
+    let mut file = directory.append(name)?;
+    ensure!(
+        file.file.metadata()?.len() == offset,
+        "local log offset changed"
+    );
+    file.file.write_all(&bytes[..count])?;
+    file.file.sync_all()?;
+    Ok(count)
+}
+
 pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
     use std::{fs, process::Command};
     let state = ws.ensure_state()?;
@@ -314,6 +342,48 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
         fs::read(directory.path.join("logs/stdout.log"))? == b"firstsecond",
         "native append stream mismatch"
     );
+    let growing = b"firstsecond";
+    let first = append_log(
+        &directory,
+        "logs/growing.log",
+        0,
+        5,
+        &ilex_devkit::core::digest(growing),
+        growing,
+    )?;
+    ensure!(
+        first == 5 && fs::read(directory.path.join("logs/growing.log"))? == b"first",
+        "log growth escaped its advertised prefix"
+    );
+    let suffix = &growing[first..];
+    append_log(
+        &directory,
+        "logs/growing.log",
+        5,
+        11,
+        &ilex_devkit::core::digest(suffix),
+        suffix,
+    )?;
+    ensure!(
+        fs::read(directory.path.join("logs/growing.log"))? == growing,
+        "growing log suffix lost or duplicated"
+    );
+    ensure!(
+        append_log(&directory, "logs/growing.log", 11, 12, "invalid", b"x").is_err(),
+        "accepted bad log checksum"
+    );
+    ensure!(
+        append_log(
+            &directory,
+            "logs/growing.log",
+            11,
+            MAX_LOG + 1,
+            &ilex_devkit::core::digest(b"x"),
+            b"x"
+        )
+        .is_err(),
+        "accepted log over limit"
+    );
     ensure!(
         fs::read(directory.path.join("artifacts/valid.log"))? == bytes,
         "positive receiver mismatch"
@@ -409,7 +479,7 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"invalid_manifests_refused":refused,"complete_manifest_validation":true,"positive_receive":true,"native_append_stream":true,"atomic_existing_replacement":true,"chunk_limit":true,"fetch_payload_limit_bytes":transport::MAX_REPLY_PAYLOAD_BYTES,"large_artifact_bytes":large_bytes.len(),"large_artifact_blocks":large_blocks,"oversized_fetch_refused":true,"count_and_aggregate_limits":true,"log_and_metadata_limits":true,"duplicate_case_and_directory_aliases":true,"receiver_junction_refused":true,"in_place_reparse_race":reparse_race,"hardlink_refused":true,"held_directory_cannot_be_replaced":true,"control_sentinel_unchanged":true,"handle_rename":true,"explicit_state_output_refused":true,"root":root})
+            &json!({"invalid_manifests_refused":refused,"complete_manifest_validation":true,"positive_receive":true,"native_append_stream":true,"growing_log_prefix_only":true,"growing_log_suffix_recovered":true,"log_bad_checksum_and_limit_refused":true,"atomic_existing_replacement":true,"chunk_limit":true,"fetch_payload_limit_bytes":transport::MAX_REPLY_PAYLOAD_BYTES,"large_artifact_bytes":large_bytes.len(),"large_artifact_blocks":large_blocks,"oversized_fetch_refused":true,"count_and_aggregate_limits":true,"log_and_metadata_limits":true,"duplicate_case_and_directory_aliases":true,"receiver_junction_refused":true,"in_place_reparse_race":reparse_race,"hardlink_refused":true,"held_directory_cannot_be_replaced":true,"control_sentinel_unchanged":true,"handle_rename":true,"explicit_state_output_refused":true,"root":root})
         )?
     );
     drop(original);
