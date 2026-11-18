@@ -34,19 +34,30 @@ sed -i -E '\|^[^#[:space:]]+[[:space:]]+/[[:space:]]|d' /etc/fstab
 %end
 
 # bootc's Anaconda payload does not install Flatpaks. Preload the chosen
-# composition's system apps in the installed root while its network is up.
+# composition's system apps using the installed root's binaries and state.
+# A bootc %post chroot lacks /dev/null. Set up runtime binds from
+# the installer in a private mount namespace, leaving no mounts behind.
 # Failure is non-fatal: retain the diagnostic and let ilex-apps.timer retry.
-%post --log=/var/log/anaconda/ilex-apps.log
-if [ -x /usr/bin/ilexctl ] && [ -x /usr/bin/flatpak ]; then
-    mkdir -p /var/lib/ilex/apps
-    timeout 1800 /usr/bin/ilexctl apps sync
+%post --nochroot --log=/mnt/sysroot/var/log/anaconda/ilex-apps.log
+runtime_mounts() {
+    for path in dev proc sys run; do
+        findmnt --kernel --mountpoint "/mnt/sysroot/$path" \
+            --noheadings --raw --output ID,TARGET,SOURCE,FSTYPE || :
+    done
+}
+mkdir -p /mnt/sysroot/var/lib/ilex/apps
+runtime_mounts > /mnt/sysroot/var/lib/ilex/apps/installer-mounts-before
+if [ -x /mnt/sysroot/usr/bin/ilexctl ] && [ -x /mnt/sysroot/usr/bin/flatpak ]; then
+    timeout 1800 unshare --mount --propagation private \
+        /usr/libexec/ilex-installer/preload-apps /mnt/sysroot
     result=$?
-    printf '%s\n' "$result" > /var/lib/ilex/apps/installer-result
+    printf '%s\n' "$result" > /mnt/sysroot/var/lib/ilex/apps/installer-result
     if [ "$result" -ne 0 ]; then
         echo "System apps are incomplete; ilex-apps.timer will retry after boot (exit $result)."
     fi
 else
     echo "This payload has no system apps helper; no Flatpaks to preload."
 fi
+runtime_mounts > /mnt/sysroot/var/lib/ilex/apps/installer-mounts-after
 exit 0
 %end

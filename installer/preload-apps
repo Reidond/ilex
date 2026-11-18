@@ -1,0 +1,21 @@
+#!/bin/bash
+# Run by unshare from Anaconda's --nochroot %post. A bootc deployment has
+# empty runtime directories: Rust's captured subprocesses need /dev/null,
+# and Flatpak/OSTree need /proc (including the kernel boot ID) and /sys.
+set -euo pipefail
+
+target=${1:?installed root required}
+echo "Preloading system apps in $target (private mount namespace)."
+for path in dev/null proc/sys/kernel/random/boot_id; do
+    if [ ! -e "$target/$path" ]; then
+        echo "Target runtime /$path is absent before the bind mounts."
+    fi
+done
+
+# Include the live resolver's /run files without replacing target DNS config.
+# Recursive binds retain /dev/pts, /dev/shm and other runtime submounts.
+# All mounts disappear with this namespace, on success or failure.
+for path in dev proc sys run; do
+    mount --verbose --rbind "/$path" "$target/$path"
+done
+exec chroot "$target" /usr/bin/ilexctl apps sync

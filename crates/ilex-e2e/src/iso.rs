@@ -38,6 +38,25 @@ const DISK_SIZE: &str = "40G";
 /// Printed on the serial console by the kickstart's `%post` once the payload
 /// is installed; its absence means the installer gave up.
 const INSTALL_DONE: &str = "ILEX-INSTALL-DONE";
+/// Fixed artifact names: guest serial records may not choose arbitrary paths.
+const INSTALLER_LOGS: &[(&str, &str)] = &[
+    ("ilex-apps.log", "/var/log/anaconda/ilex-apps.log"),
+    ("program.log", "/var/log/anaconda/program.log"),
+    ("anaconda.log", "/var/log/anaconda/anaconda.log"),
+    ("installer-apps-state.json", "/var/lib/ilex/apps/state.json"),
+    (
+        "installer-apps-result.txt",
+        "/var/lib/ilex/apps/installer-result",
+    ),
+    (
+        "installer-mounts-before.txt",
+        "/var/lib/ilex/apps/installer-mounts-before",
+    ),
+    (
+        "installer-mounts-after.txt",
+        "/var/lib/ilex/apps/installer-mounts-after",
+    ),
+];
 
 /// Test-only answers, delivered on a disk labelled `OEMDRV` (Anaconda reads
 /// `ks.cfg` from it without any boot argument). Anaconda only reads the
@@ -68,7 +87,33 @@ print("ILEX-PRODUCT", get_product_values())
 PY
 %end
 
-%post --nochroot
+%post --nochroot --erroronfail
+# Preserve Anaconda-owned mounts; the preload must leave the same mount IDs.
+set -e
+python3 - > /dev/ttyS0 2>&1 <<'PY'
+import json
+from pathlib import Path
+# Capture before assertions/poweroff, even if the installed system cannot boot.
+for name, path in [
+    ('ilex-apps.log', 'var/log/anaconda/ilex-apps.log'),
+    ('program.log', 'var/log/anaconda/program.log'),
+    ('anaconda.log', 'var/log/anaconda/anaconda.log'),
+    ('installer-apps-state.json', 'var/lib/ilex/apps/state.json'),
+    ('installer-apps-result.txt', 'var/lib/ilex/apps/installer-result'),
+    ('installer-mounts-before.txt', 'var/lib/ilex/apps/installer-mounts-before'),
+    ('installer-mounts-after.txt', 'var/lib/ilex/apps/installer-mounts-after'),
+]:
+    try:
+        text = (Path('/mnt/sysroot') / path).read_text(errors='replace')
+        print('ILEX-INSTALLER-LOG ' + json.dumps({'name': name, 'text': text}), flush=True)
+    except OSError as error:
+        print(f'ILEX-INSTALLER-LOG-ERROR {name}: {error}', flush=True)
+state = Path('/mnt/sysroot/var/lib/ilex/apps')
+before = (state / 'installer-mounts-before').read_text()
+after = (state / 'installer-mounts-after').read_text()
+assert before == after, f'preload changed runtime mounts: before={before!r}, after={after!r}'
+print('ILEX-PRELOAD-MOUNTS-CLEAN')
+PY
 echo ILEX-INSTALL-DONE > /dev/ttyS0
 %end
 "#;
@@ -734,6 +779,8 @@ fn unattended_install(
             }
             if started.elapsed() > timeout {
                 let _ = ctl.save_screenshot(&artifacts.join("02-install-timeout.png"));
+                let console = fs::read_to_string(&serial).unwrap_or_default();
+                let _ = save_installer_serial(artifacts, &console);
                 bail!(
                     "the install did not finish within {timeout:?} (serial log: {})",
                     serial.display()
@@ -746,7 +793,13 @@ fn unattended_install(
             started.elapsed()
         );
         let console = fs::read_to_string(&serial).unwrap_or_default();
-        if console.contains("ILEX-CHOOSER") {
+        let preload_log = save_installer_serial(artifacts, &console)?;
+        // Diagnostic JSON can quote kickstart text, including these markers.
+        // Only actual control lines may establish installation completion.
+        let mut control = console
+            .lines()
+            .filter(|line| !line.starts_with("ILEX-INSTALLER-LOG"));
+        if control.clone().any(|line| line.contains("ILEX-CHOOSER")) {
             bail!("OEMDRV kickstart did not skip the chooser: {console}");
         }
         let reason = if std::env::var_os("ILEX_ISO_EXPECT").is_some() {
@@ -756,23 +809,33 @@ fn unattended_install(
         } else {
             "no machine configuration matches this computer"
         };
-        if !console.contains(&format!("ILEX-COMPOSITION {chosen} ({reason})")) {
+        if !control
+            .clone()
+            .any(|line| line.contains(&format!("ILEX-COMPOSITION {chosen} ({reason})")))
+        {
             bail!("installer selected an unexpected composition: {console}");
         }
-        let _ = fs::write(artifacts.join("installer-serial.txt"), &console);
         if !status.success() {
             bail!("the installer VM exited with {status}");
         }
         // A failed install also powers the machine off (`poweroff`); only the
         // `%post` of a finished one prints this.
-        if !console.contains(INSTALL_DONE) {
+        if !control.clone().any(|line| line.trim() == INSTALL_DONE) {
             bail!(
                 "the installer powered off without finishing the install (no {INSTALL_DONE} on the serial console; see 06-installing.png)"
             );
         }
+        if !preload_log {
+            bail!("installer did not mirror its preload log to serial");
+        }
+        if !control
+            .clone()
+            .any(|line| line.trim() == "ILEX-PRELOAD-MOUNTS-CLEAN")
+        {
+            bail!("installer did not verify cleanup of the preload's runtime mounts");
+        }
         // The kickstart's `%pre` printed Anaconda's own idea of the product.
-        let product = console
-            .lines()
+        let product = control
             .find_map(|l| {
                 l.split_once("ILEX-PRODUCT ")
                     .map(|(_, rest)| rest.trim().to_string())
@@ -854,6 +917,9 @@ fn installed_system(
     };
     let ctl = Vmctl::from_info(vm.info.clone());
     report.check("installed system boots and accepts SSH", Ok(()));
+    // Collect before assertions: a failed preload must retain its own output,
+    // not just the first-boot journal (the apps timer is suppressed here).
+    report.check("installer logs are saved", installer_logs(&vm, artifacts));
 
     report.check(
         "bootc tracks the target image",
@@ -870,7 +936,8 @@ machine=json.load(open('/usr/share/ilex/machine.json'))
 wanted=set()
 for entry in [*image['shells'],machine]:wanted.update(entry.get('apps',{}).get('flatpak',[]))
 if wanted:
-    assert pathlib.Path('/var/lib/ilex/apps/installer-result').read_text().strip()=='0'
+    result=pathlib.Path('/var/lib/ilex/apps/installer-result').read_text().strip()
+    assert result=='0',f'installer preload exited {result}; see ilex-apps.log'
     state=json.load(open('/var/lib/ilex/apps/state.json'))
     assert state['result']=='complete',state
     for app in wanted:
@@ -927,6 +994,50 @@ PY"#)?;
                 &String::from_utf8_lossy(&journal.stdout),
             );
         }
+    }
+    Ok(())
+}
+
+/// The installer sends these before shutdown; SSH collection later refreshes
+/// them, but cannot be the only source when installation or first boot fails.
+fn save_installer_serial(artifacts: &Path, console: &str) -> Result<bool> {
+    qemu::write_artifact(artifacts, "installer-serial.txt", console)?;
+    let mut preload_log = false;
+    for record in console.lines().filter_map(|line| {
+        serde_json::from_str::<serde_json::Value>(line.strip_prefix("ILEX-INSTALLER-LOG ")?)
+            .ok()
+    }) {
+        if let (Some(name), Some(text)) = (record["name"].as_str(), record["text"].as_str())
+            && INSTALLER_LOGS.iter().any(|(allowed, _)| *allowed == name)
+        {
+            qemu::write_artifact(artifacts, name, text)?;
+            preload_log |= name == "ilex-apps.log";
+        }
+    }
+    Ok(preload_log)
+}
+
+fn installer_logs(vm: &Vm, artifacts: &Path) -> Result<()> {
+    let mut failures = Vec::new();
+    for &(name, path) in INSTALLER_LOGS {
+        match vm.ssh_ok(&format!("cat {path}")) {
+            Ok(log) => qemu::write_artifact(artifacts, name, &log)?,
+            Err(error) => {
+                qemu::write_artifact(
+                    artifacts,
+                    &format!("{name}.error.txt"),
+                    &format!("{error:#}"),
+                )?;
+                // Older payloads can have no apps helper or state. Anaconda's
+                // logs, including the shipped %post's log, must still exist.
+                if path.starts_with("/var/log/anaconda/") {
+                    failures.push(format!("{path}: {error:#}"));
+                }
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!("could not collect installer logs: {}", failures.join("\n"));
     }
     Ok(())
 }

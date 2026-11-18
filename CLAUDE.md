@@ -958,12 +958,25 @@ confined for the shell-owned Clocks/Weather integration settings.
 `publish.yml` runs only metadata checks by default; `apps=true` additionally
 qualifies `apps::install` and reports whether it ran in the run summary.
 
-The network installer always attempts `ilexctl apps sync` in its `%post`
-installed-root chroot, bounded to 30 minutes. It records the result under
+The network installer always attempts `ilexctl apps sync`, bounded to 30 minutes.
+Its `--nochroot` `%post` enters a private mount namespace, recursively binds
+the installer's `/dev`, `/proc`, `/sys` and `/run` into the installed root,
+then chroots to run that payload's helper and Flatpak against its own `/var`.
+A bootc post-install chroot lacks `/dev/null` (Rust's captured subprocesses
+fail with ENOENT). Flatpak/OSTree also needs `/proc/sys/kernel/random/boot_id`;
+the helper explicitly supplies the runtime filesystems rather than relying
+on Anaconda's partial setup.
+The live `/run` also supplies resolver state without changing target DNS config;
+the temporary mounts disappear with the namespace. It records the result under
 `/var/lib/ilex/apps/installer-result` and diagnostics in Anaconda's log. A
 transient failure is non-fatal and the boot timer retries. `iso::install`
 checks the marker, complete state and every system app's Flathub origin with
 the timer suppressed, proving preload rather than a post-boot download.
+Before assertions it saves `ilex-apps.log`, Anaconda's `program.log` and
+`anaconda.log`, and the apps state/result beside the screenshots in the ISO
+artifact directory. Installer serial output is retained on timeouts too.
+The test compares runtime mount IDs before/after preload, allowing Anaconda's
+existing `/proc` mount while requiring the preload's binds to stay private.
 As with all ISO assertions, this qualifies the published payload: until that
 payload declares apps, it explicitly reports preload as not applicable and
 does not establish the new chroot path. The native installer can invoke the
