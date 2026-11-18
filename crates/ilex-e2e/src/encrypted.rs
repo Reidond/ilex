@@ -277,7 +277,7 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
     ensure!(snapshot.errno.is_none_or(|value| value <= 4095));
     ensure!(snapshot.helper_errno.is_none_or(|value| value <= 4095));
     ensure!(snapshot.tty8_mode.is_none_or(|value| value <= 3));
-    ensure!(snapshot.helper_errors.len() <= 9);
+    ensure!(snapshot.helper_errors.len() <= 11);
     ensure!(snapshot.helper_errors.iter().all(|code| {
         [
             "var-unencrypted",
@@ -289,6 +289,8 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
             "tty-required",
             "tool-failed",
             "memory-lock",
+            "btrfs-devices",
+            "btrfs-inspect",
         ]
         .contains(&code.as_str())
     }));

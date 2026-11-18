@@ -1,6 +1,7 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::os::{fd::AsRawFd, unix::fs::FileTypeExt};
 
 #[derive(Serialize, Deserialize)]
 pub struct Layout {
@@ -8,12 +9,12 @@ pub struct Layout {
     pub device: std::path::PathBuf,
 }
 
-fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
+pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
     let mount = json(
         Command::new("/usr/bin/findmnt")
-            .args(["--json", "--target"])
+            .args(["--json", "--evaluate", "--nofsroot", "--target"])
             .arg(path)
-            .args(["--output", "MAJ:MIN,FSTYPE"]),
+            .args(["--output", "MAJ:MIN,SOURCE,FSTYPE"]),
     )?;
     let mounts = mount["filesystems"].as_array().context("mount not found")?;
     ensure!(mounts.len() == 1, "ambiguous mount");
@@ -21,13 +22,47 @@ fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
     if matches!(fstype, "overlay" | "composefs") {
         return Ok((fstype.into(), BTreeSet::new()));
     }
-    let number = mounts[0]["maj:min"]
-        .as_str()
-        .context("mount has no block device")?;
-    ensure!(
-        number.bytes().all(|b| b.is_ascii_digit() || b == b':'),
-        "invalid mount device"
-    );
+    let device = if fstype == "btrfs" {
+        // Btrfs mount MAJ:MIN is an anonymous superblock number (e.g. 0:37),
+        // not a block device. SOURCE without its subvolume suffix identifies
+        // the backing device. Refuse multiple/missing devices rather than
+        // examining just one member of an only partly encrypted filesystem.
+        let file = fs::File::open(path)?;
+        let mut info = [0u64; 128];
+        // BTRFS_IOC_FS_INFO: _IOR(0x94, 31, 1024-byte fs_info_args).
+        // SAFETY: this is an aligned, zeroed 1024-byte kernel output buffer;
+        // flags are zero. num_devices is the second u64 in the stable UAPI.
+        ensure!(
+            unsafe {
+                libc::ioctl(
+                    file.as_raw_fd(),
+                    0x8400941f as libc::c_ulong,
+                    info.as_mut_ptr(),
+                )
+            } == 0,
+            "cannot inspect Btrfs devices"
+        );
+        ensure!(info[1] == 1, "requires single-device Btrfs filesystem");
+        let source = Path::new(
+            mounts[0]["source"]
+                .as_str()
+                .context("Btrfs source missing")?,
+        );
+        ensure!(
+            source.starts_with("/dev") && fs::metadata(source)?.file_type().is_block_device(),
+            "Btrfs source is not a block device"
+        );
+        source.to_path_buf()
+    } else {
+        let number = mounts[0]["maj:min"]
+            .as_str()
+            .context("mount has no block device")?;
+        ensure!(
+            number.bytes().all(|b| b.is_ascii_digit() || b == b':'),
+            "invalid mount device"
+        );
+        Path::new("/dev/block").join(number)
+    };
     let blocks = json(
         Command::new("/usr/bin/lsblk")
             .args([
@@ -37,7 +72,7 @@ fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
                 "--output",
                 "NAME,TYPE,FSTYPE,UUID",
             ])
-            .arg(format!("/dev/block/{number}")),
+            .arg(device),
     )?;
     fn collect(node: &Value, out: &mut BTreeSet<String>) -> Result<()> {
         if node["fstype"] == "crypto_LUKS" {

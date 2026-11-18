@@ -88,45 +88,11 @@ pub fn record_root(root: &Path) -> Result<()> {
     // Separate /var might not yet be mounted; use only the root block ancestry.
     let nested = root.join("sysroot");
     let physical = if nested.is_dir() { &nested } else { root };
-    let mount = json(
-        Command::new("/usr/bin/findmnt")
-            .args(["--json", "--target"])
-            .arg(physical)
-            .args(["--output", "MAJ:MIN"]),
-    )?;
-    let number = mount["filesystems"][0]["maj:min"]
-        .as_str()
-        .context("root block mount unavailable")?;
-    let tree = json(
-        Command::new("/usr/bin/lsblk")
-            .args(["--json", "--inverse", "--output", "FSTYPE,UUID"])
-            .arg(format!("/dev/block/{number}")),
-    )?;
-    fn find(node: &Value, uuids: &mut Vec<String>) {
-        if node["fstype"] == "crypto_LUKS"
-            && let Some(uuid) = node["uuid"].as_str()
-        {
-            uuids.push(uuid.into());
-        }
-        if let Some(children) = node["children"].as_array() {
-            for child in children {
-                find(child, uuids);
-            }
-        }
-    }
-    let mut uuids = Vec::new();
-    for node in tree["blockdevices"]
-        .as_array()
-        .context("no root ancestors")?
-    {
-        find(node, &mut uuids);
-    }
-    uuids.sort();
-    uuids.dedup();
+    let (_, uuids) = super::layout::ancestors(physical)?;
     if uuids.len() != 1 {
         return Ok(());
     }
-    let uuid = &uuids[0];
+    let uuid = uuids.iter().next().unwrap();
     let source = Path::new("/run/ilex/unlock").join(format!("{uuid}.json"));
     if !source.exists() {
         record(uuid, "unknown", None, None)?;

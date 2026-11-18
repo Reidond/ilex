@@ -33,6 +33,8 @@ ERRORS = {
     'tty-required': b'completion requires the reserved local tty',
     'tool-failed': b'enrollment tool failed',
     'memory-lock': b'cannot lock secret memory',
+    'btrfs-devices': b'requires single-device Btrfs filesystem',
+    'btrfs-inspect': b'cannot inspect Btrfs devices',
 }
 
 

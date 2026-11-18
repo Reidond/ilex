@@ -292,6 +292,9 @@ pub fn self_check() -> Result<()> {
         Path::new("/run/ostree-booted").exists() || Path::new("/run/ilex-test-guest").exists(),
         "self-check requires a booted test guest"
     );
+    // Exercise the actual mounted root, including Btrfs's anonymous mount
+    // number and subvolume source. Loopback recovery alone cannot cover it.
+    discover(Path::new("/"))?;
     let dir = Path::new("/run").join(format!("ilex-enroll-check-{}", std::process::id()));
     fs::create_dir(&dir)?;
     let image = dir.join("luks.img");

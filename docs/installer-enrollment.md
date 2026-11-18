@@ -3,9 +3,14 @@
 Anaconda still owns partitioning and deployment. Select LUKS2 encryption in
 its storage page and keep a separate maintenance administrator. The chooser
 handles public composition data only. ESP and `/boot` remain outside LUKS;
-root and `/var` must have the same single encrypted ancestor, with no disk
-swap or crypttab keyfile. Unsupported or ambiguous encrypted layouts stop
+root must use single-device Btrfs, and root and `/var` must share one encrypted
+ancestor, with no disk swap or crypttab keyfile. Unsupported or ambiguous encrypted layouts stop
 completion instead of guessing a partition.
+
+Btrfs mount major/minor numbers identify anonymous superblocks, not block
+devices. Discovery uses the evaluated backing source without its subvolume
+suffix and checks the kernel's Btrfs device count before walking block ancestry.
+The initramfs root-method recorder uses the same discovery path.
 
 The final `%post --nochroot` starts local completion on reserved **tty8**,
 then returns to Anaconda's GUI on VT6. The helper rejects a graphics-mode VT.
