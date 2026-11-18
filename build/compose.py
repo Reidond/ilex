@@ -174,10 +174,10 @@ def machine_matches(path, data):
 
 
 def generic(path):
-    data = table(path, "", load(path), {"name", "description", "packages", "match"})
+    data = table(path, "", load(path), {"name", "description", "packages", "apps", "match"})
     identity(path, data)
     machine_matches(path, data)
-    for key in ("packages",):
+    for key in ("packages", "apps"):
         if key in data:
             fail(path, key, "is not allowed for generic")
     if (path.parent / "rootfs").exists() or (path.parent / "rootfs").is_symlink():
@@ -187,7 +187,7 @@ def generic(path):
 
 def machine(args):
     path, out = args.dir / "machine.toml", args.out
-    data = table(path, "", load(path), {"name", "description", "packages", "match"})
+    data = table(path, "", load(path), {"name", "description", "packages", "apps", "match"})
     identity(path, data)
     machine_matches(path, data)
     data.pop("match", None)
@@ -195,6 +195,7 @@ def machine(args):
     if value in {"generic", "latest", "main", "rechunked", "upgrade", "base"} or value.startswith(("candidate", "sha", "wt-")):
         fail(path, "name", f"'{value}' is reserved and cannot name a machine layer")
     package_set = packages(path, "packages", data.setdefault("packages", {}))
+    app_set = apps(path, data)
     overlays = []
     overlay = args.dir / "rootfs"
     if overlay.exists() or overlay.is_symlink():
@@ -204,10 +205,13 @@ def machine(args):
         overlays.append({"name": label, "directory": directory})
     with Tree(out / "install/generated", "generated files", create=True) as generated:
         generated.write("usr/share/ilex/machine.json", json_bytes({"schema": 1, **data}))
+        preinstall(generated, "machine", value, app_set["flatpak"])
     with Tree(out / "install", "installation staging", create=True) as staging:
         staging.write("overlays.json", json_bytes(overlays))
         staging.write("install-files.py", Path(__file__).with_name("image_tree.py").read_bytes())
-    arguments = package_set.get("install", []) + [f"--exclude={p}" for p in package_set.get("exclude", [])]
+    arguments = (package_set.get("install", []) + app_set["rpm"] +
+                 (["flatpak"] if app_set["flatpak"] else []) +
+                 [f"--exclude={p}" for p in package_set.get("exclude", [])])
     with Tree(out / "build", "package staging", create=True) as build:
         build.write("packages.args", "".join(p + "\n" for p in arguments).encode("utf-8"))
         build.write("install-packages.sh", Path(__file__).with_name("install-packages.sh").read_bytes())

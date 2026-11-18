@@ -19,6 +19,16 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     bash /tmp/ilex-build/install-packages.sh ilex-var-machine.conf
 COPY --from=compose /out/install/ /tmp/ilex-compose/
 RUN python3 -I -S /tmp/ilex-compose/install-files.py --payload /tmp/ilex-compose --phase generated
+RUN if command -v flatpak >/dev/null; then \
+        mkdir -p /usr/share/flatpak/preinstall.d && \
+        for list in /usr/share/ilex/apps/machine-*.preinstall; do \
+            [ ! -f "$list" ] || cp "$list" "/usr/share/flatpak/preinstall.d/50-ilex-$(basename "$list")"; \
+        done && \
+        systemctl preset flatpak-add-fedora-repos.service && \
+        if [ -n "$(find /usr/share/flatpak/preinstall.d -name '50-ilex-*.preinstall' -print -quit)" ]; then \
+            systemctl enable ilex-apps.timer; \
+        fi; \
+    fi
 RUN for directory in /tmp /var/tmp; do \
         actual="$(stat -c '%a %u:%g' "$directory")"; \
         if [ "$actual" != '1777 0:0' ]; then \

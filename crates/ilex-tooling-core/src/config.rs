@@ -191,7 +191,7 @@ pub fn machine_manifest(root: &Path, name: &str) -> Result<toml::Table> {
         bail!("machines/{name}/machine.toml: name must equal directory name {name:?}");
     }
     for key in table.keys() {
-        if !["name", "description", "packages", "match"].contains(&key.as_str()) {
+        if !["name", "description", "packages", "apps", "match"].contains(&key.as_str()) {
             bail!("machines/{name}/machine.toml: `{key}` is an unknown key");
         }
     }

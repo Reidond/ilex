@@ -409,7 +409,7 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         ))?
         .ok("shell session and compositor")?;
         // Compare all declared manifest fields, including packages.
-        let declared = serde_json::to_value(&manifest)?;
+        let declared = app_manifest(&manifest)?;
         for (key, value) in declared
             .as_object()
             .context("shell manifest is not an object")?
@@ -443,7 +443,11 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         "machine.json must not contain installer-only match metadata".into()
     })?;
     let machine = common::manifest("machines", &selection.machine, "machine.toml")?;
-    let declared = serde_json::to_value(&machine)?;
+    let declared = if selection.machine == "generic" {
+        serde_json::to_value(&machine)?
+    } else {
+        app_manifest(&machine)?
+    };
     for (key, value) in declared
         .as_object()
         .context("machine manifest is not an object")?
@@ -564,6 +568,17 @@ fn check_overlay_absent(
         println!("     unselected {configuration}: overlay {destination} absent");
     }
     Ok(())
+}
+
+fn app_manifest(manifest: &toml::Table) -> Result<Value> {
+    let mut value = serde_json::to_value(manifest)?;
+    let apps = value.as_object_mut().context("manifest must be a table")?
+        .entry("apps").or_insert_with(|| serde_json::json!({}));
+    for key in ["flatpak", "rpm"] {
+        apps.as_object_mut().context("apps must be a table")?
+            .entry(key).or_insert_with(|| serde_json::json!([]));
+    }
+    Ok(value)
 }
 
 fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {

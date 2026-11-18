@@ -183,7 +183,9 @@ pub fn check_greeter() -> Result<()> {
 }
 
 pub fn check_packages() -> Result<()> {
-    installed_packages(&machine()?["packages"], "machine")
+    let machine = machine()?;
+    installed_packages(&machine["packages"], "machine")?;
+    installed_apps_rpm(&machine)
 }
 
 pub fn check_base_packages() -> Result<()> {
@@ -191,7 +193,20 @@ pub fn check_base_packages() -> Result<()> {
 }
 
 pub fn check_shell_packages() -> Result<()> {
-    installed_packages(&image()?["shell-packages"], "shell")
+    let image = image()?;
+    installed_packages(&image["shell-packages"], "shell")?;
+    for shell in list(&image, "shells")? {
+        installed_packages(&shell["packages"], "shell")?;
+        installed_apps_rpm(shell)?;
+    }
+    Ok(())
+}
+
+fn installed_apps_rpm(manifest: &Value) -> Result<()> {
+    if let Some(rpms) = manifest["apps"].get("rpm") {
+        installed_packages(&json!({"install": rpms}), "app")?;
+    }
+    Ok(())
 }
 
 fn installed_packages(packages: &Value, part: &str) -> Result<()> {

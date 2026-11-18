@@ -701,8 +701,9 @@ The name is the board's model number, lowercased: DMI's system product is
 | Display | AOC U27G3X, 3840x2160 at 160 Hz, EDID size 60 x 34 cm (27.2 inches, 162 DPI) |
 
 `machines/ms-7c35/machine.toml` adds `steam-devices`, `gamemode`, `gamescope` and
-`mangohud`. Steam itself is a Flatpak the person installs from Flathub; it is
-not in the image. The host's `steam-devices` udev rules give it controller
+`mangohud`. `[apps] flatpak = ["com.valvesoftware.Steam"]` preinstalls Steam
+system-wide from Flathub; its payload lives in `/var/lib/flatpak`, outside the
+image. The host's `steam-devices` udev rules give it controller
 access, and Flatpak clients reach the host's GameMode daemon through the
 GameMode portal.
 
@@ -734,7 +735,7 @@ extensions. Their branch must match Steam's installed runtime, shown by
 `flatpak info --show-runtime com.valvesoftware.Steam` (currently `26.08`):
 
 ```sh
-flatpak install flathub \
+flatpak install --user flathub \
   org.freedesktop.Platform.VulkanLayer.gamescope//26.08 \
   org.freedesktop.Platform.VulkanLayer.MangoHud//26.08
 ```
@@ -967,6 +968,13 @@ As with all ISO assertions, this qualifies the published payload: until that
 payload declares apps, it explicitly reports preload as not applicable and
 does not establish the new chroot path. The native installer can invoke the
 same sync command later.
+
+Machines accept the same optional `[apps] flatpak` and `rpm` lists as shells
+(generic has no machine additions). Machine app RPMs join its transaction;
+Flatpak is included when the machine declares Flatpaks, even on a shell-free
+base. A generated `machine-<name>.preinstall` joins the shell lists and enables
+the root timer. `ms-7c35` declares Steam through this path. `xtask apps --check`
+checks machine IDs too; configuration/self-check assertions include them.
 
 The apps stack must merge together in one main push: the GNOME RPM removal
 alone would publish an image without a browser. The ilex shell itself is out

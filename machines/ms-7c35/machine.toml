@@ -20,7 +20,7 @@ board_vendor = "Micro-Star International Co., Ltd."
 board_name = "MEG X570 UNIFY (MS-7C35)"
 
 [packages]
-# Steam itself is a Flatpak the person installs; it is not in the image.
+# Steam itself is a system Flatpak declared below; its payload stays in /var.
 # steam-devices: udev rules so Steam (also as a Flatpak) can use controllers.
 # gamemode: while a game requests it, performance governor, split-lock
 # mitigation off where supported, screensaver inhibition, and default
@@ -29,3 +29,6 @@ board_name = "MEG X570 UNIFY (MS-7C35)"
 # mangohud: host overlay for native programs and gamescope's mangoapp overlay.
 # Per-game use inside Flatpak Steam needs matching VulkanLayer extensions.
 install = ["steam-devices", "gamemode", "gamescope", "mangohud"]
+
+[apps]
+flatpak = ["com.valvesoftware.Steam"]
