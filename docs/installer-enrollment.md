@@ -37,6 +37,12 @@ it, checks eligibility and the target tool versions, and reads the token back.
 The future native installer can link the library; PR 19 can use this CLI.
 The later `ilexctl` rename is outside this change.
 
+Credential authentication excludes external token handlers and filters out
+built-in tokens before testing the supplied descriptor. An already available
+TPM/keyring token must not turn an incorrect passphrase into successful
+authentication. The guest self-check proves this with a working automatic
+keyring token and distinct correct/incorrect credential descriptors.
+
 Eligibility requires SecureBoot=1, SetupMode=0, TPM2, a nonzero SHA-256 PCR 7
 matching event-log replay, the qualified systemd 262 format, matching live/target
 RPM versions and the target unlock-stack marker. The initial allowlist is

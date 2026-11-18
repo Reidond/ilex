@@ -199,11 +199,15 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
     state["reason"] = json!(reason);
     write_state(&state_path, &state)?;
     let setup_path = root.join("etc/ilex/setup.json");
+    let setup_permissions = fs::metadata(&setup_path)?.permissions();
     let mut setup: Value = serde_json::from_slice(&fs::read(&setup_path)?)?;
     ensure!(setup["schema"] == 1, "unsupported setup schema");
     setup["security"]["tpm"] = json!({"requested":"auto", "capability":capability.verdict,
         "reason":reason, "status": if state["state"] == "pending" { "enrolled-unverified" } else { "passphrase-only" }});
     write_state(&setup_path, &setup)?;
+    // setup.json is the existing public, nonsecret PR16 contract. Enrollment
+    // state stays 0600; updating setup must retain its original permissions.
+    fs::set_permissions(&setup_path, setup_permissions)?;
     console.clear()?;
     console.say("Recovery key saved and privately verified.\r\n\r\n")?;
     console.say(if state["state"] == "pending" {
@@ -231,6 +235,10 @@ fn configure_crypttab(root: &Path, uuid: &str) -> Result<()> {
     for line in original.lines() {
         let mut fields: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
         if fields.get(1) == Some(&source) && !line.trim_start().starts_with('#') {
+            // crypttab permits omitting the key-file column (implicit none).
+            if fields.len() == 2 {
+                fields.push("none".into());
+            }
             let mut options: Vec<&str> = fields
                 .get(3)
                 .map_or("", String::as_str)
@@ -409,6 +417,7 @@ pub fn self_check() -> Result<()> {
                 device.authenticate(bad).is_err(),
                 "incorrect credential accepted"
             );
+            token_auth_self_check(&device, &pass)?;
             println!(
                 "ilex-enroll self-check: LUKS2, private FD handoff, recovery and retained passphrase passed"
             );
@@ -425,6 +434,92 @@ pub fn self_check() -> Result<()> {
     fs::remove_dir_all(&dir)?;
     result
 }
+
+fn token_auth_self_check(device: &Device, pass: &Secret) -> Result<()> {
+    // A real in-kernel keyring token is an available automatic unlock route.
+    // The credential API must still reject a wrong FD. No TPM is accessed.
+    let name = std::ffi::CString::new(format!("ilex-enroll-self-check-{}", std::process::id()))?;
+    // SAFETY: KEYCTL_JOIN_SESSION_KEYRING (1) creates a private session for
+    // this test process and its children; the caller's session is unchanged.
+    let session = unsafe { libc::syscall(libc::SYS_keyctl, 1, name.as_ptr()) };
+    ensure!(session >= 0, "self-check session keyring unavailable");
+    // SAFETY: constant type, NUL-terminated description and a live bounded
+    // secret buffer. add_key copies exactly len bytes to this session keyring.
+    let key = unsafe {
+        libc::syscall(
+            libc::SYS_add_key,
+            c"user".as_ptr(),
+            name.as_ptr(),
+            pass.bytes().as_ptr(),
+            pass.bytes().len(),
+            session,
+        )
+    };
+    ensure!(key >= 0, "self-check keyring credential unavailable");
+    let result = (|| -> Result<()> {
+        ensure!(
+            Command::new("cryptsetup")
+                .args(["token", "add", "--key-description"])
+                .arg(name.to_str()?)
+                .args(["--key-slot", "0"])
+                .arg(device.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?
+                .success(),
+            "self-check keyring token enrollment failed"
+        );
+        let current = status(device)?;
+        let token = current["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["type"] == "luks2-keyring")
+            .context("self-check keyring token missing")?["id"]
+            .as_str()
+            .context("self-check keyring token identity missing")?;
+        ensure!(
+            Command::new("cryptsetup")
+                .args([
+                    "open",
+                    "--test-passphrase",
+                    "--token-only",
+                    "--token-id",
+                    token
+                ])
+                .arg(device.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?
+                .success(),
+            "self-check automatic token did not unlock"
+        );
+        ensure!(
+            device
+                .authenticate(secret_fd(b"ilex-deliberately-incorrect-passphrase")?)
+                .is_err(),
+            "automatic token bypassed credential authentication"
+        );
+        device.authenticate(pass.fd()?)?;
+        Ok(())
+    })();
+    // SAFETY: revoke (3) and unlink (9) only the key created above, from the
+    // newly created session. Never alter any preexisting key or keyring.
+    let (revoked, unlinked) = unsafe {
+        (
+            libc::syscall(libc::SYS_keyctl, 3, key),
+            libc::syscall(libc::SYS_keyctl, 9, key, session),
+        )
+    };
+    result?;
+    ensure!(
+        revoked >= 0 && unlinked >= 0,
+        "self-check keyring cleanup failed"
+    );
+    println!("ilex-enroll self-check: supplied FD required despite an available automatic token");
+    Ok(())
+}
+
 fn inherit(command: &mut Command, key: &OwnedFd) {
     use std::os::unix::process::CommandExt;
     let fd = key.as_raw_fd();

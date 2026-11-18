@@ -95,6 +95,11 @@ impl Device {
                 "--test-passphrase",
                 "--type",
                 "luks2",
+                // open otherwise tries available tokens before the key file.
+                // Exclude external plugins and every built-in token type so
+                // success proves the supplied credential itself was accepted.
+                "--disable-external-tokens",
+                "--token-type=none",
                 "--key-file",
                 "/proc/self/fd/3",
             ])

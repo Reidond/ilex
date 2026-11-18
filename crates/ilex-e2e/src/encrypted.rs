@@ -500,7 +500,7 @@ fn no_tpm(
         tokens_after == tokens_before,
         "no-TPM completion changed LUKS slots/tokens"
     );
-    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; ilex-enroll layout --root /; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
+    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; ilex-enroll layout --root /; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
     fixture.logs(artifacts, "no-tpm")?;
     poweroff(&mut fixture)?;
     fixture.provider.destroy_owned(&mut fixture.vm)
@@ -591,7 +591,7 @@ fn assertions(
             && evidence["slot"] == state["tpm"]["slot"],
         "unlock evidence differs from the enrolled token/slot"
     );
-    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; grep -qw 'rd.luks.options=tpm2-device=auto' /proc/cmdline; ! grep -q headless /etc/crypttab; test \"$(systemctl is-system-running --wait)\" = running; test -z \"$(systemctl --failed --no-legend --plain)\"; ilex-enroll --self-check")?;
+    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; grep -qw 'rd.luks.options=tpm2-device=auto' /proc/cmdline; ! grep -q headless /etc/crypttab; test \"$(systemctl is-system-running --wait)\" = running; test -z \"$(systemctl --failed --no-legend --plain)\"; ilex-enroll --self-check")?;
     vm.ssh_ok(&format!("grep 'UUID={uuid}' /etc/crypttab | grep -q tpm2-device=auto; ! grep -q headless /proc/cmdline"))?;
     let topology = vm.ssh_ok("set -eu; lsblk --json --output NAME,TYPE,FSTYPE,UUID,MOUNTPOINTS; cat /etc/crypttab; cat /proc/cmdline; cat /proc/swaps; for path in /sysroot /var /boot /boot/efi; do findmnt --target \"$path\"; done")?;
     fs::write(artifacts.join("storage.txt"), topology)?;
