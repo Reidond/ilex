@@ -10,14 +10,45 @@ pub struct Layout {
 }
 
 pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
+    // Anaconda stacks bind mounts at the deployment root. findmnt --target
+    // on util-linux 2.42 returns every matching mount, including hidden ones.
+    // Ask the kernel which mount the opened directory actually belongs to;
+    // neither mount-table order nor the anonymous Btrfs device number proves it.
+    let file = fs::File::open(path).context("opening mount path")?;
+    // SAFETY: statx is a plain C output structure; zero initializes every field.
+    let mut mount_info: libc::statx = unsafe { std::mem::zeroed() };
+    // SAFETY: the descriptor stays open; AT_EMPTY_PATH queries that descriptor,
+    // and statx writes into a correctly sized, aligned output structure.
+    ensure!(
+        unsafe {
+            libc::statx(
+                file.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_EMPTY_PATH,
+                libc::STATX_MNT_ID,
+                &mut mount_info,
+            )
+        } == 0
+            && mount_info.stx_mask & libc::STATX_MNT_ID != 0,
+        "cannot identify containing mount"
+    );
     let mount = json(
         Command::new("/usr/bin/findmnt")
-            .args(["--json", "--evaluate", "--nofsroot", "--target"])
-            .arg(path)
-            .args(["--output", "MAJ:MIN,SOURCE,FSTYPE"]),
+            .args([
+                "--json",
+                "--evaluate",
+                "--nofsroot",
+                "--kernel=mountinfo",
+                "--id",
+            ])
+            .arg(mount_info.stx_mnt_id.to_string())
+            .args(["--output", "MAJ:MIN,SOURCE,FSTYPE,ID"]),
     )?;
     let mounts = mount["filesystems"].as_array().context("mount not found")?;
-    ensure!(mounts.len() == 1, "ambiguous mount");
+    ensure!(
+        mounts.len() == 1 && mounts[0]["id"].as_u64() == Some(mount_info.stx_mnt_id),
+        "ambiguous mount"
+    );
     let fstype = mounts[0]["fstype"].as_str().unwrap_or_default();
     if matches!(fstype, "overlay" | "composefs") {
         return Ok((fstype.into(), BTreeSet::new()));
@@ -27,7 +58,6 @@ pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
         // not a block device. SOURCE without its subvolume suffix identifies
         // the backing device. Refuse multiple/missing devices rather than
         // examining just one member of an only partly encrypted filesystem.
-        let file = fs::File::open(path)?;
         let mut info = [0u64; 128];
         // BTRFS_IOC_FS_INFO: _IOR(0x94, 31, 1024-byte fs_info_args).
         // SAFETY: this is an aligned, zeroed 1024-byte kernel output buffer;

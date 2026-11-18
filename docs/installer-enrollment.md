@@ -11,6 +11,9 @@ Btrfs mount major/minor numbers identify anonymous superblocks, not block
 devices. Discovery uses the evaluated backing source without its subvolume
 suffix and checks the kernel's Btrfs device count before walking block ancestry.
 The initramfs root-method recorder uses the same discovery path.
+The kernel mount ID of an opened directory selects its visible mount, so
+Anaconda's stacked bind mounts cannot select a hidden mount or make an
+otherwise valid encrypted layout ambiguous.
 
 The final `%post --nochroot` starts local completion on reserved **tty8**,
 then returns to Anaconda's GUI on VT6. The helper rejects a graphics-mode VT.

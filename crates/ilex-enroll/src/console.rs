@@ -302,7 +302,28 @@ pub fn self_check() -> Result<()> {
     );
     // Exercise the actual mounted root, including Btrfs's anonymous mount
     // number and subvolume source. Loopback recovery alone cannot cover it.
-    discover(Path::new("/"))?;
+    let layout = serde_json::to_value(discover(Path::new("/"))?)?;
+    if Path::new("/run/ostree-booted").exists() {
+        // Reproduce Anaconda's overmounted sysroot in a private child mount
+        // namespace. The guest's own mounts and unlock evidence stay untouched.
+        let overmounted = Command::new("unshare")
+            .args([
+                "--mount",
+                "--fork",
+                "--propagation",
+                "private",
+                "/bin/sh",
+                "-ec",
+                "mount --bind /sysroot /sysroot; mount --bind /sysroot /sysroot; /usr/bin/ilex-enroll layout --root /",
+            ])
+            .output()?;
+        ensure!(
+            overmounted.status.success()
+                && serde_json::from_slice::<Value>(&overmounted.stdout)
+                    .is_ok_and(|observed| observed == layout),
+            "overmounted root discovery differs"
+        );
+    }
     let dir = Path::new("/run").join(format!("ilex-enroll-check-{}", std::process::id()));
     fs::create_dir(&dir)?;
     let image = dir.join("luks.img");

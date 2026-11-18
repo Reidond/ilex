@@ -35,6 +35,8 @@ ERRORS = {
     'memory-lock': b'cannot lock secret memory',
     'btrfs-devices': b'requires single-device Btrfs filesystem',
     'btrfs-inspect': b'cannot inspect Btrfs devices',
+    'mount-selection': b'ambiguous mount',
+    'mount-id': b'cannot identify containing mount',
 }
 
 
