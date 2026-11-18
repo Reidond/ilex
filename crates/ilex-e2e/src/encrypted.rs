@@ -1644,8 +1644,16 @@ fn assertions(
         failed.as_array().is_some_and(Vec::is_empty),
         "installed system health: failed units"
     );
-    vm.ssh_ok("test \"$(systemctl is-system-running --wait)\" = running")
-        .context("installed system health")?;
+    let health = vm.ssh("systemctl is-system-running --wait")?;
+    let state = String::from_utf8_lossy(&health.stdout).trim().to_string();
+    fs::write(
+        artifacts.join("system-health.json"),
+        serde_json::to_vec_pretty(&json!({"state":state,"success":health.status.success()}))?,
+    )?;
+    ensure!(
+        health.status.success() && state == "running",
+        "installed system health"
+    );
     vm.ssh_ok("ilex-enroll --self-check")
         .context("installed enrollment self-check")?;
     if expected["preserve_data"] == true {
