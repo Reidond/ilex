@@ -2054,7 +2054,7 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
                 .parse()?,
         );
         let installed = install(&mut fixture, &artifacts, deadline, interrupted);
-        fixture.logs(&artifacts, "installer")?;
+        let installer_logs = fixture.logs(&artifacts, "installer");
         if installed.is_err() {
             fixture.provider.stop(&mut fixture.vm)?;
             // A missing/invalid snapshot adds no public data and never masks
@@ -2062,6 +2062,7 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
             let _ = failure_snapshot(&seed_path, &published);
         }
         installed?;
+        installer_logs?;
         fixture.provider.stop(&mut fixture.vm)?;
         stage = "installer_evidence";
         let recovery =
