@@ -1,21 +1,33 @@
 #[cfg(target_os = "windows")]
 pub fn image() -> (Vec<u8>, Vec<u8>) {
-    // Microsoft x64 ABI: RDX is EFI_SYSTEM_TABLE*. Call the firmware's
-    // ConOut->OutputString with its own interface and a UTF-16 marker.
-    let mut code = vec![
-        0x48, 0x8b, 0x42, 0x40, // mov rax, [rdx+0x40] (ConOut)
-        0x48, 0x89, 0xc1, // mov rcx, rax
-        0x48, 0x8d, 0x15, 13, 0, 0, 0, // lea rdx, [rip+13]
-        0x48, 0x83, 0xec, 0x28, // sub rsp, 0x28 (ABI shadow space and alignment)
-        0xff, 0x50, 8, // call [rax+8] (OutputString)
-        0x48, 0x83, 0xc4, 0x28, // add rsp, 0x28
-        0xeb, 0xfe, // jmp $
-    ];
-    code.extend(
-        "ILEX UNSIGNED EXECUTED\r\n\0"
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes),
-    );
+    // Microsoft x64 ABI: save EFI_SYSTEM_TABLE* in RBX. Reserve shadow
+    // space and an EFI_INPUT_KEY at RSP+0x20. There is no OS on this disk.
+    let mut code = vec![0x48, 0x89, 0xd3, 0x48, 0x83, 0xec, 0x38];
+    fn print(code: &mut Vec<u8>) -> usize {
+        code.extend([0x48, 0x8b, 0x4b, 0x40, 0x48, 0x8d, 0x15]);
+        let displacement = code.len();
+        code.extend([0, 0, 0, 0, 0xff, 0x51, 8]); // ConOut->OutputString
+        displacement
+    }
+    let executed = print(&mut code);
+    code.extend([
+        0x48, 0x8b, 0x4b, 0x30, // mov rcx, [rbx+0x30] (ConIn)
+        0x48, 0x8d, 0x54, 0x24, 0x20, // lea rdx, [rsp+0x20] (key)
+        0xff, 0x51, 8, // call [rcx+8] (ReadKeyStroke)
+        0x48, 0x85, 0xc0, // test rax, rax
+        0x75, 0xef, // nonzero status: poll again
+        0x66, 0x81, 0x7c, 0x24, 0x22, b'k', 0, 0x75, 0xe6, // other key: poll again
+    ]);
+    let accepted = print(&mut code);
+    code.extend([0xeb, 0xfe]); // stall on the observable result
+    for (offset, marker) in [
+        (executed, "ILEX UNSIGNED EXECUTED\r\n\0"),
+        (accepted, "ILEX UEFI KEY RECEIVED\r\n\0"),
+    ] {
+        let relative = (code.len() - offset - 4) as i32;
+        code[offset..offset + 4].copy_from_slice(&relative.to_le_bytes());
+        code.extend(marker.encode_utf16().flat_map(u16::to_le_bytes));
+    }
     let payload = unsigned_efi(&code);
     assert!(
         payload[0x98 + 112 + 4 * 8..0x98 + 112 + 5 * 8]

@@ -30,7 +30,9 @@ pub fn available_memory() -> Result<u64> {
     Ok(memory.ullAvailPhys)
 }
 pub fn hash_file(path: &Path) -> Result<String> {
-    let mut f = File::open(path)?;
+    hash_reader(File::open(path)?)
+}
+pub fn hash_reader(mut f: impl Read) -> Result<String> {
     let mut digest = Sha256::new();
     let mut buf = [0u8; 128 * 1024];
     loop {
@@ -151,6 +153,12 @@ pub fn output_owned(command: &mut Command, stderr: Stdio) -> Result<Output> {
 }
 /// All PowerShell inputs are argument values or JSON files, never interpolated code.
 pub fn powershell(script: &Path, request: &Path) -> Command {
+    let mut c = powershell_script(script);
+    c.arg("-Request").arg(request);
+    c
+}
+
+pub fn powershell_script(script: &Path) -> Command {
     let mut c = Command::new("powershell.exe");
     // A PowerShell 7 caller may export its module path. Windows PowerShell must
     // resolve its own inbox ACL/Hyper-V modules, rather than loading PS7 binaries.
@@ -163,9 +171,7 @@ pub fn powershell(script: &Path, request: &Path) -> Command {
         "Bypass",
         "-File",
     ])
-    .arg(script)
-    .arg("-Request")
-    .arg(request);
+    .arg(script);
     c
 }
 pub fn secure_dir(path: &Path) -> Result<()> {

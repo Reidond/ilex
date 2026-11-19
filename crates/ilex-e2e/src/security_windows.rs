@@ -13,12 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "security/gen2_install.rs"]
+mod install;
 #[path = "security/probes.rs"]
 mod probes;
 #[path = "security/unsigned.rs"]
 mod unsigned;
 
-const RECOVERY: &str = "ilex-gen2-recovery-410625\n";
 const READY: Duration = Duration::from_secs(420);
 const BOOT: Duration = Duration::from_secs(120);
 const CREDENTIAL: &str = "/var/tmp/ilex-gen2.cred";
@@ -29,6 +30,31 @@ pub fn trial() -> Trial {
     Trial::test("security::firmware", || {
         run().map_err(|e| format!("{e:#}").into())
     })
+}
+
+pub fn transition_trial() -> Trial {
+    Trial::test("security::iso_transition", || {
+        (|| -> Result<()> {
+            transport::install_cancel_handler()?;
+            let ws = Workspace::discover()?;
+            let resources: Resources =
+                serde_json::from_str(&std::env::var("ILEX_GEN2_RESOURCES")?)?;
+            let provider = Provider::new(ws.identity()?, &ws.ensure_state()?)?;
+            let artifacts = ilex_devkit::qemu::artifact_dir(&ws, "gen2-iso-transition")?;
+            install::transition(&ws, &provider, resources, &verified_iso()?, &artifacts)
+        })()
+        .map_err(|e| format!("{e:#}").into())
+    })
+}
+
+fn verified_iso() -> Result<PathBuf> {
+    let iso = PathBuf::from(std::env::var_os("ILEX_ISO").context("missing exact installer ISO")?);
+    let hash = file_digest(&iso)?;
+    ensure!(
+        hash.eq_ignore_ascii_case(&format!("sha256:{}", std::env::var("ILEX_ISO_SHA256")?)),
+        "installer ISO hash mismatch"
+    );
+    Ok(iso)
 }
 
 fn run() -> Result<()> {
@@ -51,8 +77,18 @@ fn run() -> Result<()> {
     let mut record = provider.begin_qualification(&spec, &artifacts)?;
     let start = Instant::now();
     let mut stage = "media";
-    let result = qualify(&ws, &provider, spec, &artifacts, &selection, &mut stage);
+    let resources = spec.resources.clone();
+    let mut result = qualify(&ws, &provider, spec, &artifacts, &selection, &mut stage);
     record.finish(&result)?;
+    if result.is_ok() {
+        stage = "live_runtime";
+        result = qualify_live(&ws, &provider, resources, &artifacts);
+        if result.is_err() {
+            record.finish(&result)?;
+        } else {
+            stage = "complete";
+        }
+    }
     write(&artifacts, "qualification.json", record.evidence())?;
     write(
         &artifacts,
@@ -131,152 +167,184 @@ fn qualify(
     provider.destroy_owned(&mut vm)?;
     drop(vm);
 
-    let media = Media::new(&ws.ensure_state()?.join("gen2"), &spec.run)?;
-    *stage = "unsigned_control";
-    unsigned_control(ws, provider, artifacts, &media, &spec.resources)?;
-
-    *stage = "installed_disk";
-    let parent = provider.installed_parent(&source, &disk.location.sha256)?;
-    spec.boot = BootSource::Disk {
-        path: parent,
-        format: DiskFormat::Vhdx,
-        writable: true,
-    };
-    spec.network = NetworkIntent::User { ssh: true };
-    spec.ssh = Some(SshProvisioning {
-        user: "root".into(),
-        public_key: String::new(),
-        recipe_hash: disk.provisioning_hash.clone(),
-    });
-    let mut vm = provider.create(spec.clone())?;
-    let start = Instant::now();
-    provider.start(&mut vm)?;
-    let positive = provider.inspect(&vm)?;
-    let first_config = vm.status()?;
-    write(artifacts, "positive-vm.json", &first_config)?;
-    *stage = "pre_ssh_keyboard";
-    let (first_id, prompt) = recovery(&vm, artifacts, "recovery-prompt")?;
-    let first_elapsed = start.elapsed().as_secs_f64();
-    *stage = "guest_measurements";
-    probes::guest(&vm, artifacts, "first", digest, selection)?;
-    probes::amdgpu(&vm, artifacts)?;
-    let diagnostics = exec(
-        &vm,
-        "set -eu; for module in hv_vmbus hv_storvsc hv_netvsc; do test -d /sys/module/$module; done; lsmod; rpm -q bootc shim-x64 grub2-efi-x64 systemd kernel-core; bootctl status --no-pager; lsblk -o NAME,TRAN,FSTYPE; uname -r",
-    )?;
-    fs::write(artifacts.join("guest.txt"), diagnostics)?;
-    let session = gen2::wait(BOOT, || {
-        let frame = vm.capture()?;
-        ensure!(
-            image(&frame).fingerprint() != image(&prompt).fingerprint()
-                && !image(&frame).is_blank(),
-            "waiting for the Linux console after recovery"
-        );
-        Ok(frame)
-    })?;
-    save_frame(artifacts, "linux-session", &session, None)?;
-    fs::write(
-        artifacts.join("linux-pointer.txt"),
-        vm.qualify_pointer(&session, session.width / 3, session.height / 3)?,
-    )?;
-    vm.capabilities()?.require(Capability::SessionPointer)?;
-    write(artifacts, "linux-control.json", &vm.capabilities()?)?;
-
-    *stage = "tpm_warm_and_cold";
-    exec(&vm, SEAL)?;
-    unseal(&vm)?;
-    let ciphertext = media.0.join("sealed.cred");
-    vm.download(CREDENTIAL, &ciphertext)?;
-    let sealed_hash = file_digest(&ciphertext)?;
-    let start = Instant::now();
-    let warm_id = vm.reboot(&first_id, READY)?;
-    let warm_elapsed = start.elapsed().as_secs_f64();
-    probes::guest(&vm, artifacts, "warm", digest, selection)?;
-    unseal(&vm)?;
-    vm.poweroff(BOOT)?;
-    provider.stop(&mut vm)?;
-    let start = Instant::now();
-    provider.start(&mut vm)?;
-    let cold_id = vm.wait_ssh(Some(&warm_id), READY)?;
-    let cold_elapsed = start.elapsed().as_secs_f64();
-    probes::guest(&vm, artifacts, "cold", digest, selection)?;
-    unseal(&vm)?;
-    let cold_config = vm.status()?;
-    write(artifacts, "cold-vm.json", &cold_config)?;
-    // The local protector is a host wrapping blob. Successful unseal with
-    // the original credential proves that the TPM seed survived power-off.
-    ensure!(
-        provider.inspect(&vm)? == positive && first_id != cold_id,
-        "cold boot did not preserve the VM UUID with a distinct guest boot"
-    );
-    let positive_measurement: Value =
-        serde_json::from_slice(&fs::read(artifacts.join("cold-pcr7.json"))?)?;
-    let cold = vm.capture()?;
-    save_frame(artifacts, "cold-boot", &cold, None)?;
-    provider.destroy_owned(&mut vm)?;
-    drop(vm);
-
-    *stage = "fresh_tpm";
-    let mut fresh_spec = gen2::spec(
-        &ws.identity()?,
-        "security-fresh-tpm",
+    *stage = "iso_to_disk";
+    install::transition(
+        ws,
+        provider,
         spec.resources.clone(),
-        spec.boot.clone(),
+        &verified_iso()?,
+        artifacts,
     )?;
-    fresh_spec.network = spec.network.clone();
-    fresh_spec.ssh = spec.ssh.clone();
-    fresh_spec.security_launch = SecurityLaunch::QualificationFixture;
-    let mut fresh = provider.create(fresh_spec)?;
-    let start = Instant::now();
-    provider.start(&mut fresh)?;
-    let (_, _) = recovery(&fresh, artifacts, "fresh-recovery-prompt")?;
-    let fresh_elapsed = start.elapsed().as_secs_f64();
-    probes::guest(&fresh, artifacts, "fresh", digest, selection)?;
-    let fresh_measurement: Value =
-        serde_json::from_slice(&fs::read(artifacts.join("fresh-pcr7.json"))?)?;
-    let fresh_config = fresh.status()?;
-    ensure!(
-        fresh_config["id"] != cold_config["id"]
-            && fresh_config["protector_sha256"] != cold_config["protector_sha256"]
-            && fresh_measurement["sha256"] == positive_measurement["sha256"],
-        "fresh-vTPM negative must differ in identity while matching PCR7"
-    );
-    fresh.upload(&ciphertext, CREDENTIAL)?;
-    let uploaded = exec(&fresh, "sha256sum /var/tmp/ilex-gen2.cred")?;
-    ensure!(
-        String::from_utf8(uploaded)?.split_whitespace().next()
-            == sealed_hash.strip_prefix("sha256:"),
-        "negative used a different sealed credential"
-    );
-    let failure = exec(
-        &fresh,
-        &format!(
-            "set +e; diagnostic=$({UNSEAL} 2>&1 >/dev/null); code=$?; test \"$code\" -ne 0 && printf '%s\\n' \"$diagnostic\""
-        ),
-    )?;
-    ensure!(
-        String::from_utf8_lossy(&failure)
-            .to_ascii_lowercase()
-            .contains("tpm"),
-        "fresh vTPM produced an unrelated failure"
-    );
-    fs::write(artifacts.join("fresh-unseal.txt"), failure)?;
-    write(artifacts, "fresh-vm.json", &fresh_config)?;
-    provider.destroy_owned(&mut fresh)?;
-    drop(fresh);
+    let mut media = Media::new(&ws.ensure_state()?.join("gen2"), &spec.run)?;
+    let secret = format!("q-{}", gen2::random_id()?);
+    let secret_digest = ilex_devkit::core::digest(secret.as_bytes());
+    let result = (|| -> Result<()> {
+        *stage = "disk_validation";
+        validate_external_storage(provider, &disk, &media, artifacts)?;
+        *stage = "unsigned_control";
+        unsigned_control(ws, provider, artifacts, &mut media, &spec.resources)?;
 
-    media.cleanup()?;
-    *stage = "complete";
+        *stage = "installed_disk";
+        let parent = provider.installed_parent(&disk)?;
+        spec.boot = BootSource::Disk {
+            path: parent,
+            format: DiskFormat::Vhdx,
+            writable: true,
+        };
+        spec.network = NetworkIntent::User { ssh: true };
+        spec.ssh = Some(SshProvisioning {
+            user: "root".into(),
+            public_key: String::new(),
+            recipe_hash: disk.provisioning_hash.clone(),
+        });
+        media.track(&spec.run);
+        let mut vm = provider.create_recovery_fixture(spec.clone(), &secret_digest[7..])?;
+        let start = Instant::now();
+        provider.start(&mut vm)?;
+        let positive = provider.inspect(&vm)?;
+        let first_config = vm.status()?;
+        write(artifacts, "positive-vm.json", &first_config)?;
+        *stage = "pre_ssh_keyboard";
+        let (first_id, prompt) = recovery(&vm, artifacts, "recovery-prompt", &secret)?;
+        let first_elapsed = start.elapsed().as_secs_f64();
+        *stage = "guest_measurements";
+        probes::guest(&vm, artifacts, "first", digest, selection)?;
+        probes::amdgpu(&vm, artifacts)?;
+        let diagnostics = exec(
+            &vm,
+            "set -eu; for module in hv_vmbus hv_storvsc hv_netvsc; do test -d /sys/module/$module; done; lsmod; rpm -q bootc shim-x64 grub2-efi-x64 systemd kernel-core; bootctl status --no-pager; lsblk -o NAME,TRAN,FSTYPE; uname -r",
+        )?;
+        fs::write(artifacts.join("guest.txt"), diagnostics)?;
+        let session = gen2::wait(BOOT, || {
+            let frame = vm.capture()?;
+            ensure!(
+                image(&frame).fingerprint() != image(&prompt).fingerprint()
+                    && !image(&frame).is_blank(),
+                "waiting for the Linux console after recovery"
+            );
+            Ok(frame)
+        })?;
+        save_frame(artifacts, "linux-session", &session, None)?;
+        fs::write(
+            artifacts.join("linux-pointer.txt"),
+            vm.qualify_pointer(&session, session.width / 3, session.height * 2 / 3)?,
+        )?;
+        fs::write(
+            artifacts.join("session-keyboard.txt"),
+            vm.qualify_session_keyboard()?,
+        )?;
+        let controls = vm.capabilities()?;
+        controls.require(Capability::SessionPointer)?;
+        controls.require(Capability::SessionKeyboard)?;
+        write(artifacts, "linux-control.json", &vm.capabilities()?)?;
+
+        *stage = "tpm_warm_and_cold";
+        exec(&vm, SEAL)?;
+        unseal(&vm)?;
+        let ciphertext = media.0.join("sealed.cred");
+        vm.download(CREDENTIAL, &ciphertext)?;
+        let sealed_hash = file_digest(&ciphertext)?;
+        let start = Instant::now();
+        let warm_id = vm.reboot(&first_id, READY)?;
+        let warm_elapsed = start.elapsed().as_secs_f64();
+        probes::guest(&vm, artifacts, "warm", digest, selection)?;
+        unseal(&vm)?;
+        vm.poweroff(BOOT)?;
+        provider.stop(&mut vm)?;
+        let start = Instant::now();
+        provider.start(&mut vm)?;
+        let cold_id = vm.wait_ssh(Some(&warm_id), READY)?;
+        let cold_elapsed = start.elapsed().as_secs_f64();
+        probes::guest(&vm, artifacts, "cold", digest, selection)?;
+        unseal(&vm)?;
+        let cold_config = vm.status()?;
+        write(artifacts, "cold-vm.json", &cold_config)?;
+        // The local protector is a host wrapping blob. Successful unseal with
+        // the original credential proves that the TPM seed survived power-off.
+        ensure!(
+            provider.inspect(&vm)? == positive && first_id != cold_id,
+            "cold boot did not preserve the VM UUID with a distinct guest boot"
+        );
+        let positive_measurement: Value =
+            serde_json::from_slice(&fs::read(artifacts.join("cold-pcr7.json"))?)?;
+        let cold = vm.capture()?;
+        save_frame(artifacts, "cold-boot", &cold, None)?;
+        provider.destroy_owned(&mut vm)?;
+        drop(vm);
+
+        *stage = "fresh_tpm";
+        let mut fresh_spec = gen2::spec(
+            &ws.identity()?,
+            "security-fresh-tpm",
+            spec.resources.clone(),
+            spec.boot.clone(),
+        )?;
+        fresh_spec.network = spec.network.clone();
+        fresh_spec.ssh = spec.ssh.clone();
+        fresh_spec.security_launch = SecurityLaunch::QualificationFixture;
+        media.track(&fresh_spec.run);
+        let mut fresh = provider.create_recovery_fixture(fresh_spec, &secret_digest[7..])?;
+        let start = Instant::now();
+        provider.start(&mut fresh)?;
+        let (_, _) = recovery(&fresh, artifacts, "fresh-recovery-prompt", &secret)?;
+        let fresh_elapsed = start.elapsed().as_secs_f64();
+        probes::guest(&fresh, artifacts, "fresh", digest, selection)?;
+        let fresh_measurement: Value =
+            serde_json::from_slice(&fs::read(artifacts.join("fresh-pcr7.json"))?)?;
+        let fresh_config = fresh.status()?;
+        ensure!(
+            fresh_config["id"] != cold_config["id"]
+                && fresh_config["protector_sha256"] != cold_config["protector_sha256"]
+                && fresh_measurement["sha256"] == positive_measurement["sha256"],
+            "fresh-vTPM negative must differ in identity while matching PCR7"
+        );
+        fresh.upload(&ciphertext, CREDENTIAL)?;
+        let uploaded = exec(&fresh, "sha256sum /var/tmp/ilex-gen2.cred")?;
+        ensure!(
+            String::from_utf8(uploaded)?.split_whitespace().next()
+                == sealed_hash.strip_prefix("sha256:"),
+            "negative used a different sealed credential"
+        );
+        let failure = exec(
+            &fresh,
+            &format!(
+                "set +e; diagnostic=$({UNSEAL} 2>&1 >/dev/null); code=$?; test \"$code\" -ne 0 && printf '%s\\n' \"$diagnostic\""
+            ),
+        )?;
+        let diagnostic = String::from_utf8_lossy(&failure).to_ascii_lowercase();
+        ensure!(
+            diagnostic.contains("0x0000018b")
+                && diagnostic.contains("failed to unseal secret using tpm2"),
+            "fresh vTPM did not reject the copied credential with TPM_RC_HANDLE"
+        );
+        exec(&fresh, "rm /var/tmp/ilex-gen2.cred")?;
+        exec(&fresh, SEAL)?;
+        unseal(&fresh)?;
+        fs::write(artifacts.join("fresh-unseal.txt"), failure)?;
+        write(artifacts, "fresh-vm.json", &fresh_config)?;
+        provider.destroy_owned(&mut fresh)?;
+        drop(fresh);
+
+        write(
+            artifacts,
+            "milestones.json",
+            &json!({
+                "resources":spec.resources,"installer_to_chooser_seconds":iso_elapsed,"installer_vm":booted.vm,
+                "first_ssh_seconds":first_elapsed,"warm_ssh_seconds":warm_elapsed,"cold_ssh_seconds":cold_elapsed,
+                "fresh_ssh_seconds":fresh_elapsed,"first_boot":first_id,"warm_boot":warm_id,"cold_boot":cold_id,
+                "positive_vm":positive,"credential_sha256":sealed_hash,"cleanup":"All test VM UUIDs absent; owned VHDX/firmware/vTPM directories deleted"
+            }),
+        )?;
+        Ok(())
+    })();
+    media.finish(provider, result)?;
+    let files = grep_secret(artifacts, &secret)?;
     write(
         artifacts,
-        "milestones.json",
-        &json!({
-            "resources":spec.resources,"installer_to_chooser_seconds":iso_elapsed,"installer_vm":booted.vm,
-            "first_ssh_seconds":first_elapsed,"warm_ssh_seconds":warm_elapsed,"cold_ssh_seconds":cold_elapsed,
-            "fresh_ssh_seconds":fresh_elapsed,"first_boot":first_id,"warm_boot":warm_id,"cold_boot":cold_id,
-            "positive_vm":positive,"credential_sha256":sealed_hash,"cleanup":"All test VM UUIDs absent; owned VHDX/firmware/vTPM directories deleted"
-        }),
+        "input-privacy.json",
+        &json!({"files":files,"plaintext_matches":0,"png_ocr_matches":0,"capture_blocked_after_send":true}),
     )?;
+    *stage = "complete";
     Ok(())
 }
 
@@ -284,7 +352,7 @@ fn unsigned_control(
     ws: &Workspace,
     provider: &Provider,
     artifacts: &Path,
-    media: &Media,
+    media: &mut Media,
     resources: &Resources,
 ) -> Result<()> {
     let raw = media.0.join("unsigned.raw");
@@ -316,6 +384,7 @@ fn unsigned_control(
         } else {
             Requirement::Off
         };
+        media.track(&control.run);
         let mut vm = provider.create(control)?;
         let start = Instant::now();
         provider.start(&mut vm)?;
@@ -327,6 +396,12 @@ fn unsigned_control(
                 ocr.contains("ilex unsigned executed")
             }
         })?;
+        if !enabled {
+            vm.key(&Input::Chord { codes: vec![0x25] })?;
+            wait_screen(&vm, artifacts, "uefi-keyboard", BOOT, |ocr| {
+                ocr.contains("ilex uefi key received")
+            })?;
+        }
         controls.push(json!({"secure_boot":enabled,"elapsed_seconds":start.elapsed().as_secs_f64(),"vm":frame.vm}));
         provider.destroy_owned(&mut vm)?;
     }
@@ -334,6 +409,155 @@ fn unsigned_control(
         artifacts,
         "unsigned-controls.json",
         &json!({"controls":controls,"payload_sha256":ilex_devkit::core::digest(&payload)}),
+    )
+}
+
+fn validate_external_storage(
+    provider: &Provider,
+    original: &DiskArtifact,
+    media: &Media,
+    artifacts: &Path,
+) -> Result<()> {
+    use ilex_tooling_windows::runtime;
+    let runtime_dir = runtime::fetch()?;
+    for args in [
+        vec!["create", "-f", "raw", "backing.raw", "1M"],
+        vec![
+            "create",
+            "-f",
+            "qcow2",
+            "-F",
+            "raw",
+            "-b",
+            "backing.raw",
+            "backed.qcow2",
+            "1M",
+        ],
+        vec![
+            "create",
+            "-f",
+            "qcow2",
+            "-o",
+            "data_file=external.raw",
+            "external.qcow2",
+            "1M",
+        ],
+    ] {
+        ilex_devkit::cmd::run(
+            runtime::command(&runtime_dir, "qemu-img.exe")
+                .current_dir(&media.0)
+                .args(args),
+        )?;
+    }
+    for (name, reason) in [
+        ("backed.qcow2", "qcow2 has backing storage"),
+        ("external.qcow2", "qcow2 has an external data file"),
+    ] {
+        let mut artifact = original.clone();
+        artifact.location.path = media.0.join(name);
+        artifact.location.sha256 = file_digest(&artifact.location.path)?;
+        artifact.virtual_bytes = 1 << 20;
+        ensure!(
+            provider
+                .installed_parent(&artifact)
+                .is_err_and(|e| e.to_string() == reason),
+            "delivered external-storage fixture was not rejected before conversion"
+        );
+    }
+    write(
+        artifacts,
+        "qcow2-validation.json",
+        &json!({"backing_file_rejected":true,"external_data_rejected":true}),
+    )
+}
+
+fn qualify_live(
+    ws: &Workspace,
+    provider: &Provider,
+    resources: Resources,
+    artifacts: &Path,
+) -> Result<()> {
+    let spec = gen2::spec(
+        &ws.identity()?,
+        "security-live-status",
+        resources,
+        BootSource::BlankDisk {
+            bytes: 1 << 30,
+            format: DiskFormat::Vhdx,
+        },
+    )?;
+    provider
+        .probe(&spec)?
+        .require(Capability::FirmwareEnforcement)?;
+    let mut vm = provider.create(spec)?;
+    provider.start(&mut vm)?;
+    let running = vm.capabilities()?;
+    running.require(Capability::FirmwareEnforcement)?;
+    running.require(Capability::PersistentTpm)?;
+    provider.stop(&mut vm)?;
+    let stopped = vm.capabilities()?;
+    ensure!(
+        stopped.runtime == VmRuntimeStatus::Stopped
+            && [Capability::FirmwareEnforcement, Capability::PersistentTpm]
+                .iter()
+                .all(|cap| stopped.require(*cap).is_err()
+                    && stopped.features.get(cap) != Some(&CapabilityStatus::Available)),
+        "live stopped VM advertised historical capabilities"
+    );
+    write(
+        artifacts,
+        "live-runtime.json",
+        &json!({"running":running,"stopped":stopped}),
+    )?;
+    // Windows sharing without DELETE holds the sidecar just long enough
+    // to verify that a failed release retains its allocation journal.
+    use std::os::windows::fs::OpenOptionsExt;
+    provider.start(&mut vm)?;
+    let handle = vm.handle();
+    let admission =
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("missing LOCALAPPDATA")?)
+            .join("ilex/admission");
+    let mut receipt = None;
+    for entry in fs::read_dir(admission)? {
+        let path = entry?.path();
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".gen2.json"))
+            && let Ok(bytes) = fs::read(&path)
+            && let Ok(resource) = serde_json::from_slice::<OwnedResource>(&bytes)
+            && resource.owner == handle.owner
+            && resource.opaque_id == handle.opaque_id
+        {
+            ensure!(
+                receipt.replace(path).is_none(),
+                "ambiguous owned slot receipt"
+            );
+        }
+    }
+    let receipt = receipt.context("no slot receipt for live fixture")?;
+    let sharing = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(&receipt)?;
+    ensure!(
+        provider.destroy_owned(&mut vm).is_err(),
+        "sharing fault did not block receipt removal"
+    );
+    drop(vm);
+    ensure!(
+        receipt.try_exists()?,
+        "slot receipt disappeared during injected fault"
+    );
+    drop(sharing);
+    provider.cleanup_run(&handle.run)?;
+    ensure!(
+        !receipt.try_exists()?,
+        "reconciliation left an owned slot receipt"
+    );
+    write(
+        artifacts,
+        "slot-recovery.json",
+        &json!({"vm":handle,"deleted_vm":true,"receipt_reconciled":true}),
     )
 }
 
@@ -356,7 +580,7 @@ fn unseal(vm: &Vm) -> Result<()> {
     Ok(())
 }
 
-fn recovery(vm: &Vm, artifacts: &Path, label: &str) -> Result<(String, Frame)> {
+fn recovery(vm: &Vm, artifacts: &Path, label: &str, secret: &str) -> Result<(String, Frame)> {
     let prompt = wait_screen(vm, artifacts, label, READY, |ocr| {
         ocr.starts_with("ilex gen") && ocr.contains("recovery key")
     })?;
@@ -365,16 +589,21 @@ fn recovery(vm: &Vm, artifacts: &Path, label: &str) -> Result<(String, Frame)> {
         "SSH accepted before recovery input"
     );
     vm.key(&Input::Text {
-        text: RECOVERY.into(),
+        text: format!("{secret}\n"),
         layout: "us".into(),
         sensitive: true,
     })?;
-    let boot = vm.wait_ssh(None, READY)?;
-    let receipt = exec(vm, "cat /var/lib/ilex-gen2/recovery-ok")?;
     ensure!(
-        String::from_utf8(receipt)?.trim() == boot,
-        "SSH did not follow recovery input on the same guest boot"
+        vm.capture()
+            .is_err_and(|error| error.to_string().contains("capture withheld")),
+        "sensitive input did not withhold captures"
     );
+    vm.audit_console_state(secret.as_bytes())?;
+    let boot = vm.wait_ssh(None, READY)?;
+    vm.acknowledge_sensitive_input(
+        &["cat".into(), "/var/lib/ilex-gen2/recovery-ok".into()],
+        format!("{boot}\n").as_bytes(),
+    )?;
     Ok((boot, prompt))
 }
 
@@ -396,7 +625,7 @@ fn wait_screen(
         let normalized = words.to_ascii_lowercase();
         let accepted = matches(&normalized);
         last = Some((frame, words));
-        ensure!(accepted, "waiting for {label}; last OCR: {normalized:?}");
+        ensure!(accepted, "waiting for expected screen {label}");
         Ok(())
     });
     let (frame, words) = last.context("no WMI screenshot decoded")?;
@@ -406,12 +635,20 @@ fn wait_screen(
 }
 
 fn ocr(engine: &windows::Media::Ocr::OcrEngine, frame: &Frame) -> Result<String> {
+    ocr_pixels(engine, &frame.pixels, frame.width, frame.height)
+}
+
+fn ocr_pixels(
+    engine: &windows::Media::Ocr::OcrEngine,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<String> {
     use windows::{
         Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap},
         Storage::Streams::DataWriter,
     };
-    let bgra: Vec<_> = frame
-        .pixels
+    let bgra: Vec<_> = pixels
         .as_chunks::<3>()
         .0
         .iter()
@@ -422,10 +659,45 @@ fn ocr(engine: &windows::Media::Ocr::OcrEngine, frame: &Frame) -> Result<String>
     let bitmap = SoftwareBitmap::CreateCopyFromBuffer(
         &writer.DetachBuffer()?,
         BitmapPixelFormat::Bgra8,
-        frame.width as i32,
-        frame.height as i32,
+        width as i32,
+        height as i32,
     )?;
     Ok(engine.RecognizeAsync(&bitmap)?.join()?.Text()?.to_string())
+}
+
+fn grep_secret(root: &Path, secret: &str) -> Result<usize> {
+    use windows::{Globalization::Language, Media::Ocr::OcrEngine, core::HSTRING};
+    let engine =
+        OcrEngine::TryCreateFromLanguage(&Language::CreateLanguage(&HSTRING::from("en-US"))?)?;
+    let utf16: Vec<_> = secret.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut pending = vec![root.to_owned()];
+    let mut scanned = 0;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            let bytes = fs::read(entry.path())?;
+            ensure!(
+                [secret.as_bytes(), &utf16]
+                    .iter()
+                    .all(|needle| !bytes.windows(needle.len()).any(|window| window == *needle)),
+                "sensitive canary found in qualification artifacts"
+            );
+            if entry.path().extension().is_some_and(|ext| ext == "png") {
+                let frame = ilex_vmctl::Frame::decode(&bytes)?;
+                let text = ocr_pixels(&engine, &frame.rgb, frame.width, frame.height)?;
+                ensure!(
+                    !text.to_ascii_lowercase().contains(secret),
+                    "sensitive canary found in screenshot pixels"
+                );
+            }
+            scanned += 1;
+        }
+    }
+    Ok(scanned)
 }
 
 fn image(frame: &Frame) -> ilex_vmctl::Frame {
@@ -459,22 +731,48 @@ fn write(root: &Path, name: &str, value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-struct Media(PathBuf);
+struct Media(PathBuf, Vec<String>);
 impl Media {
     fn new(root: &Path, run: &str) -> Result<Self> {
         let dir = root.join(format!("media-{run}"));
         fs::create_dir(&dir)?;
-        Ok(Self(dir))
+        Ok(Self(dir, Vec::new()))
     }
-    fn cleanup(&self) -> Result<()> {
-        // No recursive delete while a child VHDX may still reference a parent.
-        for name in ["unsigned.raw", "unsigned.vhdx", "sealed.cred"] {
-            let file = self.0.join(name);
-            if file.try_exists()? {
-                fs::remove_file(file)?;
+    fn track(&mut self, run: &str) {
+        self.1.push(run.to_owned());
+    }
+    fn finish(&self, provider: &Provider, result: Result<()>) -> Result<()> {
+        let cleanup = (|| -> Result<()> {
+            for run in &self.1 {
+                provider.reconcile_if_present(run)?;
             }
+            for name in [
+                "unsigned.raw",
+                "unsigned.vhdx",
+                "sealed.cred",
+                "answers.iso",
+                "oemdrv/ks.cfg",
+                "backing.raw",
+                "backed.qcow2",
+                "external.qcow2",
+                "external.raw",
+            ] {
+                let file = self.0.join(name);
+                if file.try_exists()? {
+                    fs::remove_file(file)?;
+                }
+            }
+            if self.0.join("oemdrv").try_exists()? {
+                fs::remove_dir(self.0.join("oemdrv"))?;
+            }
+            fs::remove_dir(&self.0)?;
+            Ok(())
+        })();
+        match (result, cleanup) {
+            (Err(work), Err(teardown)) => {
+                Err(work.context(format!("retained media {}: {teardown:#}", self.0.display())))
+            }
+            (work, cleanup) => work.and(cleanup),
         }
-        fs::remove_dir(&self.0)?;
-        Ok(())
     }
 }

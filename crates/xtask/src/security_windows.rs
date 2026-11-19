@@ -8,6 +8,7 @@ use ilex_tooling_windows::gen2;
 use std::{path::PathBuf, process::Command};
 
 const TRIAL: &str = "security::firmware";
+const TRANSITION: &str = "security::iso_transition";
 
 pub fn run(ws: &Workspace, args: crate::security::Args) -> Result<()> {
     ensure!(
@@ -73,11 +74,11 @@ pub fn partition(
     for filter in args.filters.drain(..) {
         if filter.contains("security") {
             ensure!(
-                if exact {
-                    TRIAL == filter
+                [TRIAL, TRANSITION].iter().any(|trial| if exact {
+                    *trial == filter
                 } else {
-                    TRIAL.contains(&filter)
-                },
+                    trial.contains(&filter)
+                }),
                 "Windows security trial {filter:?} unavailable"
             );
             native.push(filter);
@@ -144,9 +145,16 @@ fn native(ws: &Workspace, args: crate::test::Args, memory: &str) -> Result<()> {
         )?;
         probe.security_launch = ilex_devkit::core::SecurityLaunch::QualificationFixture;
         provider.validate(&probe)?;
-        let disk = crate::remote::gen2_disk(ws, &args, image)?;
-        test.env("ILEX_GEN2_DISK", &disk)
-            .env("ILEX_GEN2_SELECTION", serde_json::to_string(&selection)?)
+        let exact = args.test_args.iter().any(|arg| arg == "--exact");
+        if args
+            .filters
+            .iter()
+            .any(|f| if exact { f == TRIAL } else { TRIAL.contains(f) })
+        {
+            let disk = crate::remote::gen2_disk(ws, &args, image)?;
+            test.env("ILEX_GEN2_DISK", disk);
+        }
+        test.env("ILEX_GEN2_SELECTION", serde_json::to_string(&selection)?)
             .env("ILEX_GEN2_RESOURCES", serde_json::to_string(&resources)?)
             .env("ILEX_ISO", iso)
             .env("ILEX_ISO_SHA256", declared);
@@ -158,7 +166,7 @@ fn native(ws: &Workspace, args: crate::test::Args, memory: &str) -> Result<()> {
 /// vTPM from launch until cleanup. A console client is only an attachment.
 pub fn vm(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resolved) -> Result<()> {
     use ilex_devkit::core::{NetworkIntent, SshProvisioning, VmControl};
-    use std::{fs, time::Duration};
+    use std::time::Duration;
     if args.print_image {
         println!("{}", crate::dev_image::reference(ws, &resolved.image, true));
         return Ok(());
@@ -192,66 +200,79 @@ pub fn vm(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resolv
         },
         args.image,
     )?;
-    let media = state.join("gen2").join(format!("media-{}", spec.run));
-    fs::create_dir(&media)?;
-    let parent = media.join("installed.vhdx");
-    let result = (|| -> Result<()> {
-        gen2::vhdx(&source, &parent, "qcow2")?;
-        spec.boot = BootSource::Disk {
-            path: parent.clone(),
-            format: DiskFormat::Vhdx,
-            writable: true,
-        };
-        spec.network = NetworkIntent::User { ssh: true };
-        spec.ssh = Some(SshProvisioning {
-            user: "root".into(),
-            public_key: String::new(),
-            recipe_hash: ilex_devkit::core::digest(b"ilex-gen2-v1;seed-host-key;seed-access-key"),
-        });
-        let mut vm = provider.create(spec)?;
+    let receipt = source
+        .parent()
+        .and_then(std::path::Path::parent)
+        .context("missing Gen2 disk collection")?
+        .join("disk.windows.json");
+    let artifact: ilex_devkit::core::DiskArtifact =
+        serde_json::from_slice(&std::fs::read(receipt)?)?;
+    ensure!(
+        artifact.location.path == source,
+        "Gen2 disk receipt does not match the delivery"
+    );
+    let parent = provider.installed_parent(&artifact)?;
+    spec.boot = BootSource::Disk {
+        path: parent,
+        format: DiskFormat::Vhdx,
+        writable: true,
+    };
+    spec.network = NetworkIntent::User { ssh: true };
+    spec.ssh = Some(SshProvisioning {
+        user: "root".into(),
+        public_key: String::new(),
+        recipe_hash: artifact.provisioning_hash,
+    });
+    let mut vm = provider.create(spec)?;
+    let work = (|| -> Result<()> {
         provider.start(&mut vm)?;
         eprintln!(
-            "Gen2 VM {}. Enter the disposable fixture key ilex-gen2-recovery-410625 at its recovery prompt.",
+            "Gen2 VM {}. The disposable console response is documented in windows-gen2.md.",
             vm.name()
         );
         eprintln!(
             "Console control from this checkout uses ilex-vmctl --vm {}.",
             vm.purpose()
         );
-        let work = (|| -> Result<()> {
-            let _viewer = if args.gui {
-                Some(
-                    Command::new("vmconnect.exe")
-                        .arg("localhost")
-                        .arg(vm.name())
-                        .spawn()?,
-                )
-            } else {
-                None
-            };
-            vm.wait_ssh(None, Duration::from_secs(420))?;
-            if !args.command.is_empty() {
-                use std::io::Write;
-                std::io::stdout().write_all(&vm.guest_exec(&args.command)?)?;
-            } else if !args.gui {
-                vm.interactive()?;
-            } else {
-                let mut viewer = _viewer.unwrap();
-                while viewer.try_wait()?.is_none() && !ilex_tooling_windows::transport::cancelled()
-                {
-                    std::thread::sleep(Duration::from_millis(250));
-                }
+        let viewer = if args.gui {
+            Some(
+                Command::new("vmconnect.exe")
+                    .arg("localhost")
+                    .arg(vm.name())
+                    .spawn()?,
+            )
+        } else {
+            None
+        };
+        let boot = vm.wait_ssh(None, Duration::from_secs(420))?;
+        vm.acknowledge_sensitive_input(
+            &["cat".into(), "/var/lib/ilex-gen2/recovery-ok".into()],
+            format!("{boot}\n").as_bytes(),
+        )?;
+        let frame = vm.capture()?;
+        if let Err(error) = vm.qualify_pointer(&frame, frame.width / 3, frame.height * 2 / 3) {
+            eprintln!("Gen2 pointer remains unqualified: {error:#}");
+        }
+        if let Err(error) = vm.qualify_session_keyboard() {
+            eprintln!("Gen2 session keyboard remains unqualified: {error:#}");
+        }
+        if !args.command.is_empty() {
+            use std::io::Write;
+            std::io::stdout().write_all(&vm.guest_exec(&args.command)?)?;
+        } else if let Some(mut viewer) = viewer {
+            while viewer.try_wait()?.is_none() && !ilex_tooling_windows::transport::cancelled() {
+                std::thread::sleep(Duration::from_millis(250));
             }
-            Ok(())
-        })();
-        provider.destroy_owned(&mut vm)?;
-        work
+        } else {
+            vm.interactive()?;
+        }
+        Ok(())
     })();
-    if result.is_ok() {
-        fs::remove_file(parent)?;
-        fs::remove_dir(media)?;
-    } else {
-        eprintln!("Gen2 media retained at {}", media.display());
+    let cleanup = provider.destroy_owned(&mut vm);
+    match (work, cleanup) {
+        (Err(work), Err(teardown)) => {
+            Err(work.context(format!("Gen2 teardown also failed: {teardown:#}")))
+        }
+        (work, cleanup) => work.and(cleanup),
     }
-    result
 }

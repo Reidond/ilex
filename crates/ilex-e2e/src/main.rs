@@ -42,12 +42,13 @@ mod upgrade;
 fn main() {
     let (filters, rest) = split_filters(std::env::args().skip(1));
     let args = Arguments::from_iter(std::iter::once("e2e".to_string()).chain(rest));
-    let trial = security_windows::trial();
-    let trials = if filters.iter().any(|f| matches(&args, &trial, f)) {
-        vec![trial]
-    } else {
-        vec![]
-    };
+    let trials = [
+        security_windows::trial(),
+        security_windows::transition_trial(),
+    ]
+    .into_iter()
+    .filter(|trial| filters.iter().any(|f| matches(&args, trial, f)))
+    .collect();
     libtest_mimic::run(&args, trials).exit();
 }
 

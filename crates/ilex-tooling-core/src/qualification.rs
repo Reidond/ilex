@@ -215,3 +215,24 @@ pub fn apply(caps: &mut VmCapabilities, qualification: SecurityQualification) {
     }
     caps.qualification = Some(qualification);
 }
+
+/// Historical qualification is effective on live handles only while running.
+/// Provider probes may report an exact profile independently of a VM.
+pub fn restrict_live(caps: &mut VmCapabilities) {
+    if matches!(caps.runtime, VmRuntimeStatus::Running) {
+        return;
+    }
+    for feature in [Capability::FirmwareEnforcement, Capability::PersistentTpm] {
+        caps.features.insert(
+            feature,
+            CapabilityStatus::NotYetQualified(format!("runtime is {:?}", caps.runtime)),
+        );
+    }
+    if let Some(record) = &mut caps.qualification {
+        record.outcome = match &caps.runtime {
+            VmRuntimeStatus::Failed(reason) => QualificationStatus::Failed(reason.clone()),
+            _ if matches!(record.outcome, QualificationStatus::Failed(_)) => record.outcome.clone(),
+            _ => QualificationStatus::Unknown,
+        };
+    }
+}

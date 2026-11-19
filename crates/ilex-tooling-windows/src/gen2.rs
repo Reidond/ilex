@@ -7,6 +7,7 @@ use ilex_tooling_core::*;
 use serde_json::{Value, json};
 use std::{
     fs::{self, File},
+    io::{Read, Seek, SeekFrom, Write},
     net::Ipv4Addr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -96,6 +97,7 @@ impl Provider {
                     lease: None,
                     slot: None,
                     removed: false,
+                    installation_media: None,
                     view: Mutex::default(),
                 };
                 let status = vm.status()?;
@@ -119,7 +121,7 @@ impl Provider {
             }
         }
         SecurityProfile {
-            protocol: 1,
+            protocol: 2,
             accelerator: spec.accelerator,
             resources: spec.resources.clone(),
             cpu_model: "hyperv-native".into(),
@@ -134,7 +136,16 @@ impl Provider {
         }
     }
 
-    pub fn installed_parent(&self, source: &Path, checksum: &str) -> Result<PathBuf> {
+    pub fn installed_parent(&self, artifact: &DiskArtifact) -> Result<PathBuf> {
+        check_version(artifact.schema)?;
+        ensure!(
+            artifact.format == DiskFormat::Qcow2
+                && artifact.location.executor_id
+                    == format!("windows-owner:{}", self.identity.owner),
+            "invalid Gen2 installed-disk receipt"
+        );
+        let source = &artifact.location.path;
+        let checksum = &artifact.location.sha256;
         let hash = checksum
             .strip_prefix("sha256:")
             .context("Gen2 source checksum needs SHA256")?;
@@ -142,11 +153,21 @@ impl Provider {
             hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid Gen2 source checksum"
         );
-        host::verify(source, hash)?;
+        let mut delivered = bound_file(source)?;
+        ensure!(
+            host::hash_reader(&mut delivered.file)? == hash,
+            "Gen2 delivered disk checksum mismatch"
+        );
+        delivered.file.rewind()?;
         let work = self.state.join("parents");
         fs::create_dir_all(&work)?;
         let runtime_lock = runtime::status()?.lock_sha256;
-        let key = digest(format!("gen2-v1:{checksum}:{runtime_lock}").as_bytes());
+        let virtual_bytes = verify_qcow2_header(&mut delivered.file)?;
+        ensure!(
+            virtual_bytes == artifact.virtual_bytes,
+            "qcow2 virtual size differs from receipt"
+        );
+        let key = digest(format!("gen2-standalone-v2:{checksum}:{runtime_lock}").as_bytes());
         let base = &key[7..];
         let parent = work.join(format!("{base}.vhdx"));
         let receipt = parent.with_extension("json");
@@ -156,7 +177,7 @@ impl Provider {
             ensure!(
                 recorded["schema"] == 1
                     && recorded["owner"] == self.identity.owner
-                    && recorded["source_sha256"] == checksum
+                    && recorded["source_sha256"] == checksum.as_str()
                     && recorded["runtime"] == runtime_lock,
                 "Gen2 immutable parent receipt mismatch"
             );
@@ -172,9 +193,9 @@ impl Provider {
                 "unreceipted Gen2 parent; inspect {}",
                 parent.display()
             );
-            let temporary = work.join(format!("{}.vhdx", uuid()?));
+            let temporary = work.join(format!("{}.vhdx", random_id()?));
             let built = (|| -> Result<()> {
-                vhdx(source, &temporary, "qcow2")?;
+                convert(source, &temporary, "qcow2", Some(hash))?;
                 let sha256 = host::hash_file(&temporary)?;
                 fs::rename(&temporary, &parent)?;
                 host::atomic(
@@ -190,6 +211,164 @@ impl Provider {
             built?;
         }
         Ok(parent)
+    }
+
+    /// Attach OEMDRV as an ISO or as an immutable VHDX with a private child.
+    pub fn create_installer(&self, spec: VmSpec, answers: &Path) -> Result<Vm> {
+        ensure!(
+            spec.iso.is_some() && matches!(spec.boot, BootSource::BlankDisk { .. }),
+            "Gen2 installer needs an ISO and blank target"
+        );
+        ensure!(
+            matches!(
+                answers.extension().and_then(|e| e.to_str()),
+                Some("iso" | "vhdx")
+            ),
+            "OEMDRV must be ISO or VHDX"
+        );
+        self.create_with_media(spec, Some(answers), None)
+    }
+
+    /// Build the optional Anaconda OEMDRV DVD from a caller-owned directory.
+    pub fn write_oemdrv(&self, source: &Path, output: &Path) -> Result<()> {
+        let work = output
+            .parent()
+            .context("OEMDRV needs an owned output directory")?;
+        let _source = Directory::open(source)?;
+        let _target = Directory::open(work)?;
+        ensure!(
+            source.parent() == Some(work),
+            "OEMDRV sources must be beside the output"
+        );
+        request(
+            &self.state,
+            work,
+            "seed",
+            json!({"seed_directory":source, "seed":output, "label":"OEMDRV"}),
+        )?;
+        Ok(())
+    }
+
+    /// Switch the original powered-off VM to its installed disk, with no
+    /// firmware, disk or vTPM recreation. Retrying an interrupted eject is safe.
+    pub fn boot_installed(&self, vm: &mut Vm, keep_ssh_seed: bool) -> Result<VmHandle> {
+        ensure!(
+            vm.lease.is_some()
+                && vm.spec.iso.is_some()
+                && matches!(vm.spec.boot, BootSource::BlankDisk { .. }),
+            "expected owned Gen2 installer handle"
+        );
+        let handle = self.inspect(vm)?;
+        let seed = keep_ssh_seed.then(|| vm.dir.join("seed.iso"));
+        let status = vm.call(
+            "installed-boot",
+            json!({
+                "disk":vm.dir.join("fixture.vhdx"),
+                "answer_disk":vm.dir.join("answers.vhdx"),
+                "answers":vm.installation_media,
+                "iso":vm.spec.iso,
+                "seed":seed,
+                "original_seed":vm.dir.join("seed.iso"),
+            }),
+        )?;
+        vm.assert_configuration(&status)?;
+        Ok(handle)
+    }
+
+    /// Supply only the recovery digest to the disposable installed-disk fixture.
+    pub fn create_recovery_fixture(&self, spec: VmSpec, digest: &str) -> Result<Vm> {
+        ensure!(
+            spec.ssh.is_some()
+                && digest.len() == 64
+                && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid recovery fixture digest"
+        );
+        self.create_with_media(spec, None, Some(digest))
+    }
+
+    fn create_with_media(
+        &self,
+        spec: VmSpec,
+        answers: Option<&Path>,
+        recovery_digest: Option<&str>,
+    ) -> Result<Vm> {
+        self.validate(&spec)?;
+        let run = spec.run.clone();
+        let dir = self.state.join(&run[..12]);
+        fs::create_dir(&dir)?;
+        let prepare = (|| -> Result<Vm> {
+            let lease = host::lock(&dir.join("lease.lock"))?;
+            host::atomic(&dir.join("spec.json"), &serde_json::to_vec(&spec)?)?;
+            let profile = self.profile(&spec);
+            fs::write(dir.join("profile.json"), serde_json::to_vec(&profile)?)?;
+            let mut resource = OwnedResource {
+                schema: SCHEMA_VERSION,
+                owner: spec.owner.clone(),
+                run: spec.run.clone(),
+                provider: PROVIDER.into(),
+                opaque_id: String::new(),
+                created_unix_ms: now()?,
+                paths: vec![dir.clone()],
+            };
+            host::atomic(&dir.join("intent.json"), &serde_json::to_vec(&resource)?)?;
+            let (parent, blank) = match &spec.boot {
+                BootSource::Disk { path, .. } => (Some(regular_file(path)?), 0),
+                BootSource::BlankDisk { bytes, .. } => (None, *bytes),
+                _ => unreachable!(),
+            };
+            let iso = spec.iso.as_deref().map(regular_file).transpose()?;
+            let answers = answers.map(regular_file).transpose()?;
+            let seed = spec
+                .ssh
+                .as_ref()
+                .map(|ssh| prepare_seed(&dir, &spec.run, ssh, recovery_digest))
+                .transpose()?;
+            let receipt = dir.join("resource.json");
+            let mut body = owned_request(&self.identity, &spec, &resource, &dir);
+            body.as_object_mut().unwrap().extend(json!({
+                "receipt":receipt, "disk":dir.join("fixture.vhdx"), "parent":parent, "blank_bytes":blank,
+                "iso":iso, "answers":answers, "network":!matches!(spec.network, NetworkIntent::Isolated),
+                "seed":seed, "seed_directory":dir.join("seed"),
+                "secure_boot":spec.secure_boot == Requirement::Required, "tpm":spec.tpm != TpmLifecycle::Off,
+                "memory_bytes":spec.resources.memory_bytes, "vcpus":spec.resources.vcpus,
+            }).as_object().unwrap().clone());
+            let created = request(&self.state, &dir, "create", body);
+            if let Ok(bytes) = fs::read(&receipt) {
+                resource = serde_json::from_slice(&bytes)?;
+                self.check_resource(&resource, &spec, &dir)?;
+            }
+            let status = created?;
+            self.check_resource(&resource, &spec, &dir)?;
+            let vm = Vm {
+                identity: self.identity.clone(),
+                spec,
+                state: self.state.clone(),
+                dir: dir.clone(),
+                resource,
+                lease: Some(lease),
+                slot: None,
+                removed: false,
+                profile,
+                installation_media: answers,
+                view: Mutex::default(),
+            };
+            vm.assert_configuration(&status)?;
+            if seed.is_some() {
+                remove_tree(&dir, &dir.join("seed"))?;
+                fs::remove_file(dir.join("host"))?;
+            }
+            Ok(vm)
+        })();
+        if prepare.is_err() && dir.exists() {
+            if dir.join("intent.json").try_exists()? {
+                if let Err(error) = self.cleanup_run(&run) {
+                    eprintln!("Gen2 cleanup: {error:#}; retained run {run}");
+                }
+            } else {
+                remove_tree(&self.state, &dir)?;
+            }
+        }
+        prepare
     }
 
     pub fn begin_qualification(
@@ -219,20 +398,39 @@ impl Provider {
         check_version(spec.schema)?;
         self.identity.authorize(&spec.owner)?;
         ensure!(spec.run == run, "Gen2 cleanup run mismatch");
-        let resource: OwnedResource = serde_json::from_slice(&fs::read(dir.join("resource.json"))?)
-            .context("Gen2 allocation has no UUID receipt; retained for inspection")?;
         validate_vm_purpose(&spec.purpose)?;
-        self.check_resource(&resource, &spec, &dir)?;
-        request(
-            &self.state,
-            &dir,
-            "destroy",
-            owned_request(&self.identity, &spec, &resource, &dir),
-        )?;
-        reconcile_slots(&resource)?;
+        let receipt = dir.join("resource.json");
+        let resource: OwnedResource = if receipt.try_exists()? {
+            let resource = serde_json::from_slice(&fs::read(receipt)?)?;
+            self.check_resource(&resource, &spec, &dir)?;
+            resource
+        } else {
+            let intent: OwnedResource =
+                serde_json::from_slice(&fs::read(dir.join("intent.json"))?)?;
+            intent.authorize(&self.identity, run, "")?;
+            ensure!(
+                intent.provider == PROVIDER && intent.paths == [dir.as_path()],
+                "invalid Gen2 allocation intent"
+            );
+            intent
+        };
+        let mut body = owned_request(&self.identity, &spec, &resource, &dir);
+        body["disk"] = json!(dir.join("fixture.vhdx"));
+        request(&self.state, &dir, "reconcile", body)?;
+        if !resource.opaque_id.is_empty() {
+            reconcile_slots(&resource)?;
+        }
         drop(_lease);
         drop(_bound);
         remove_tree(&self.state, &dir)
+    }
+
+    pub fn reconcile_if_present(&self, run: &str) -> Result<()> {
+        check_run(run)?;
+        if self.state.join(&run[..12]).try_exists()? {
+            self.cleanup_run(run)?;
+        }
+        Ok(())
     }
 
     fn check_resource(&self, resource: &OwnedResource, spec: &VmSpec, dir: &Path) -> Result<()> {
@@ -254,7 +452,7 @@ pub fn spec(
     resources: Resources,
     boot: BootSource,
 ) -> Result<VmSpec> {
-    let run = uuid()?;
+    let run = random_id()?;
     Ok(VmSpec {
         schema: SCHEMA_VERSION,
         owner: identity.owner.clone(),
@@ -292,6 +490,7 @@ pub struct Vm {
     slot: Option<Slot>,
     removed: bool,
     profile: SecurityProfile,
+    installation_media: Option<PathBuf>,
     view: Mutex<((u32, u32), u64)>,
 }
 
@@ -304,6 +503,60 @@ impl Vm {
     }
     pub fn generation(&self) -> u64 {
         self.view.lock().unwrap().1
+    }
+    /// Release capture only after an authenticated guest-side acknowledgement
+    /// that the no-echo prompt consumed the input and the display is safe.
+    pub fn acknowledge_sensitive_input(&self, check: &[String], expected: &[u8]) -> Result<()> {
+        ensure!(
+            self.lease.is_some() && !expected.is_empty(),
+            "sensitive display acknowledgement requires the owning VM and a public marker"
+        );
+        let _console = host::lock(&self.dir.join("console.lock"))?;
+        let actual = self
+            .guest_exec(check)
+            .map_err(|_| anyhow::anyhow!("sensitive console acknowledgement failed"))?;
+        ensure!(
+            actual == expected,
+            "missing sensitive console acknowledgement"
+        );
+        let latch = self.dir.join("sensitive-display");
+        if latch.try_exists()? {
+            fs::remove_file(latch)?;
+        }
+        Ok(())
+    }
+
+    /// Latch screenshot redaction before a guest displays or receives a secret.
+    pub fn conceal_console(&self) -> Result<()> {
+        let _console = host::lock(&self.dir.join("console.lock"))?;
+        self.latch_capture()
+    }
+
+    fn latch_capture(&self) -> Result<()> {
+        File::create(self.dir.join("sensitive-display"))?.sync_all()?;
+        Ok(())
+    }
+
+    /// Inspect controller files during the live, redacted input self-check.
+    /// Guest disks and provisioning keys are not controller diagnostics.
+    pub fn audit_console_state(&self, secret: &[u8]) -> Result<()> {
+        ensure!(!secret.is_empty(), "privacy probe requires a canary");
+        let _console = host::lock(&self.dir.join("console.lock"))?;
+        for entry in fs::read_dir(&self.dir)? {
+            let file = entry?.path();
+            if matches!(
+                file.extension().and_then(|s| s.to_str()),
+                Some("json" | "ps1" | "log")
+            ) {
+                let bytes = fs::read(file)?;
+                ensure!(
+                    !bytes.windows(secret.len()).any(|window| window == secret)
+                        && !bytes.windows(8).any(|window| window == b"\"events\""),
+                    "Gen2 controller state contains sensitive keyboard evidence"
+                );
+            }
+        }
+        Ok(())
     }
     pub fn interactive(&self) -> Result<()> {
         let (mut ssh, endpoint) = self.ssh_command("ssh.exe")?;
@@ -448,36 +701,74 @@ impl Vm {
 
     /// Acknowledgement of a WMI method alone is insufficient. The fixture
     /// observes guest input events for this exact button and position first.
-    pub fn qualify_pointer(&mut self, frame: &Frame, x: u32, y: u32) -> Result<Vec<u8>> {
+    pub fn qualify_pointer(&self, frame: &Frame, x: u32, y: u32) -> Result<Vec<u8>> {
         self.guest_exec(&[
             "sh".into(),
             "-c".into(),
             "test -e /sys/module/hid_hyperv; grep -q 'Microsoft Vmbus HID' /proc/bus/input/devices"
                 .into(),
         ])?;
+        ensure!(
+            frame.width > 1 && frame.height > 1 && x < frame.width && y < frame.height,
+            "invalid Gen2 pointer probe"
+        );
+        let x_axis = x * 32767 / (frame.width - 1);
+        let y_axis = y * 32767 / (frame.height - 1);
+        ensure!(
+            x_axis.abs_diff(y_axis) > 128,
+            "use independent pointer targets on X and Y"
+        );
+        let result = self.observe_input(
+            &["pointer".into(), x_axis.to_string(), y_axis.to_string()],
+            || self.click(frame, frame.generation, x, y),
+        )?;
+        self.attest_input("pointer-boot")?;
+        Ok(result)
+    }
+
+    pub fn qualify_session_keyboard(&self) -> Result<Vec<u8>> {
+        self.guest_exec(&[
+            "systemctl".into(),
+            "is-active".into(),
+            "display-manager.service".into(),
+        ])?;
+        let result = self.observe_input(&["keyboard".into()], || {
+            self.key(&Input::Chord { codes: vec![0x58] })
+        })?;
+        self.attest_input("keyboard-boot")?;
+        Ok(result)
+    }
+
+    fn observe_input(
+        &self,
+        arguments: &[String],
+        send: impl FnOnce() -> Result<()>,
+    ) -> Result<Vec<u8>> {
         let (mut ssh, target) = self.ssh_command("ssh.exe")?;
+        let mut script = vec![
+            "python3".into(),
+            "-I".into(),
+            "-c".into(),
+            include_str!("gen2-input.py").into(),
+        ];
+        script.extend_from_slice(arguments);
         let (job, mut child) = host::spawn_owned(
             ssh.arg(target)
-                .arg(shell_command(&[
-                    "python3".into(),
-                    "-I".into(),
-                    "-c".into(),
-                    include_str!("gen2-mouse.py").into(),
-                ])?)
+                .arg(shell_command(&script)?)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
         )?;
         use std::io::{BufRead, BufReader, Read};
-        let mut stdout = BufReader::new(child.stdout.take().context("no mouse probe stdout")?);
+        let mut stdout = BufReader::new(child.stdout.take().context("no input probe stdout")?);
         let mut ready = String::new();
         let setup = (|| -> Result<_> {
             stdout.read_line(&mut ready)?;
             ensure!(
                 ready.trim() == "ready",
-                "guest mouse probe did not become ready"
+                "guest input probe did not become ready"
             );
-            self.click(frame, frame.generation, x, y)?;
+            send()?;
             let mut evidence = Vec::new();
             stdout.read_to_end(&mut evidence)?;
             Ok(evidence)
@@ -495,23 +786,24 @@ impl Vm {
         let status = child.wait_with_output()?;
         ensure!(
             status.status.success() && !bytes.is_empty(),
-            "Linux did not receive both Hyper-V pointer axes and button events: {}",
+            "Linux did not receive the expected Hyper-V input: {}",
             String::from_utf8_lossy(&status.stderr)
         );
-        let boot = self.guest_exec(&["cat".into(), "/proc/sys/kernel/random/boot_id".into()])?;
-        host::atomic(&self.dir.join("pointer-boot"), &boot)?;
         Ok(bytes)
     }
 
-    fn pointer_available(&self) -> bool {
+    fn attest_input(&self, receipt: &str) -> Result<()> {
+        let boot = self.guest_exec(&["cat".into(), "/proc/sys/kernel/random/boot_id".into()])?;
+        host::atomic(&self.dir.join(receipt), &boot)
+    }
+
+    fn input_available(&self, receipt: &str) -> bool {
         // Attached clients verify the journaled delivery against the live boot.
         // Mere existence of Msvm_SyntheticMouse never qualifies preboot input.
-        fs::read(self.dir.join("pointer-boot"))
-            .ok()
-            .is_some_and(|boot| {
-                self.guest_exec(&["cat".into(), "/proc/sys/kernel/random/boot_id".into()])
-                    .is_ok_and(|current| current == boot)
-            })
+        fs::read(self.dir.join(receipt)).ok().is_some_and(|boot| {
+            self.guest_exec(&["cat".into(), "/proc/sys/kernel/random/boot_id".into()])
+                .is_ok_and(|current| current == boot)
+        })
     }
 
     fn click(&self, frame: &Frame, generation: u64, x: u32, y: u32) -> Result<()> {
@@ -533,9 +825,10 @@ impl Vm {
             self.call("destroy", json!({}))?;
             self.removed = true;
         }
-        if let Some(slot) = self.slot.take() {
+        if let Some(slot) = &self.slot {
             slot.release(&self.resource)?;
         }
+        self.slot = None;
         self.lease = None;
         if self.dir.exists() {
             remove_tree(&self.state, &self.dir)?;
@@ -639,87 +932,7 @@ impl VmProvider for Provider {
     }
 
     fn create(&self, spec: VmSpec) -> Result<Vm> {
-        self.validate(&spec)?;
-        let run = spec.run.clone();
-        let dir = self.state.join(&run[..12]);
-        fs::create_dir(&dir)?;
-        let prepare = (|| -> Result<Vm> {
-            let lease = host::lock(&dir.join("lease.lock"))?;
-            fs::write(dir.join("spec.json"), serde_json::to_vec(&spec)?)?;
-            let profile = self.profile(&spec);
-            fs::write(dir.join("profile.json"), serde_json::to_vec(&profile)?)?;
-            let mut resource = OwnedResource {
-                schema: SCHEMA_VERSION,
-                owner: spec.owner.clone(),
-                run: spec.run.clone(),
-                provider: PROVIDER.into(),
-                opaque_id: String::new(),
-                created_unix_ms: now()?,
-                paths: vec![dir.clone()],
-            };
-            let (parent, blank) = match &spec.boot {
-                BootSource::Disk { path, .. } => (Some(regular_file(path)?), 0),
-                BootSource::BlankDisk { bytes, .. } => (None, *bytes),
-                _ => unreachable!(),
-            };
-            let iso = spec.iso.as_deref().map(regular_file).transpose()?;
-            let seed = spec
-                .ssh
-                .as_ref()
-                .map(|ssh| prepare_seed(&dir, &spec.run, ssh))
-                .transpose()?;
-            let receipt = dir.join("resource.json");
-            let mut body = owned_request(&self.identity, &spec, &resource, &dir);
-            body.as_object_mut().unwrap().extend(json!({
-                "receipt":receipt, "disk":dir.join("fixture.vhdx"), "parent":parent, "blank_bytes":blank,
-                "iso":iso, "network":!matches!(spec.network, NetworkIntent::Isolated),
-                "seed":seed, "seed_directory":dir.join("seed"),
-                "secure_boot":spec.secure_boot == Requirement::Required, "tpm":spec.tpm != TpmLifecycle::Off,
-                "memory_bytes":spec.resources.memory_bytes, "vcpus":spec.resources.vcpus,
-            }).as_object().unwrap().clone());
-            let created = request(&self.state, &dir, "create", body);
-            if let Ok(bytes) = fs::read(&receipt) {
-                resource = serde_json::from_slice(&bytes)?;
-                self.check_resource(&resource, &spec, &dir)?;
-            }
-            let status = created?;
-            self.check_resource(&resource, &spec, &dir)?;
-            let vm = Vm {
-                identity: self.identity.clone(),
-                spec,
-                state: self.state.clone(),
-                dir: dir.clone(),
-                resource,
-                lease: Some(lease),
-                slot: None,
-                removed: false,
-                profile,
-                view: Mutex::default(),
-            };
-            vm.assert_configuration(&status)?;
-            if seed.is_some() {
-                remove_tree(&dir, &dir.join("seed"))?;
-                fs::remove_file(dir.join("host"))?;
-            }
-            Ok(vm)
-        })();
-        if prepare.is_err() && dir.exists() {
-            // A known UUID is recoverable. Preserve a failed allocation's
-            // intent when a helper disappeared before publishing its UUID.
-            if dir.join("resource.json").is_file() {
-                if let Err(error) = self.cleanup_run(&run) {
-                    eprintln!("Gen2 cleanup: {error:#}");
-                }
-            } else if !dir.join("config").try_exists()? {
-                remove_tree(&self.state, &dir)?;
-            } else {
-                eprintln!(
-                    "Gen2 allocation has no UUID receipt; retained {}",
-                    dir.display()
-                );
-            }
-        }
-        prepare
+        self.create_with_media(spec, None, None)
     }
 
     fn start(&self, vm: &mut Vm) -> Result<VmHandle> {
@@ -753,9 +966,10 @@ impl VmProvider for Provider {
         ensure!(vm.lease.is_some(), "attached Gen2 controls cannot stop VMs");
         self.inspect(vm)?;
         vm.call("stop", json!({}))?;
-        if let Some(slot) = vm.slot.take() {
+        if let Some(slot) = &vm.slot {
             slot.release(&vm.resource)?;
         }
+        vm.slot = None;
         vm.view.lock().unwrap().0 = (0, 0);
         Ok(())
     }
@@ -809,7 +1023,8 @@ impl VmControl for Vm {
             Some("Paused" | "Saved") => VmRuntimeStatus::Paused(status["state"].to_string()),
             _ => VmRuntimeStatus::Unknown,
         };
-        let session_pointer = caps.runtime == VmRuntimeStatus::Running && self.pointer_available();
+        let session_pointer =
+            caps.runtime == VmRuntimeStatus::Running && self.input_available("pointer-boot");
         caps.phase = if caps.runtime != VmRuntimeStatus::Running {
             BootPhase::Unknown
         } else if session_pointer {
@@ -822,6 +1037,20 @@ impl VmControl for Vm {
             &mut caps,
             qualification::load(&path, &self.spec.owner, &self.profile)?,
         );
+        qualification::restrict_live(&mut caps);
+        if caps.runtime == VmRuntimeStatus::Running && self.input_available("keyboard-boot") {
+            caps.features
+                .insert(Capability::SessionKeyboard, CapabilityStatus::Available);
+        }
+        if caps.phase == BootPhase::Boot
+            && caps
+                .qualification
+                .as_ref()
+                .is_some_and(|q| q.outcome == QualificationStatus::Passed)
+        {
+            caps.features
+                .insert(Capability::PrebootKeyboard, CapabilityStatus::Available);
+        }
         if session_pointer {
             caps.features
                 .insert(Capability::SessionPointer, CapabilityStatus::Available);
@@ -832,6 +1061,11 @@ impl VmControl for Vm {
     }
 
     fn capture(&self) -> Result<Frame> {
+        let _console = host::lock(&self.dir.join("console.lock"))?;
+        ensure!(
+            !self.dir.join("sensitive-display").try_exists()?,
+            "Gen2 capture withheld after sensitive console input"
+        );
         let reply = self.call("capture", json!({}))?;
         let width: u32 = reply["width"]
             .as_u64()
@@ -920,17 +1154,28 @@ impl VmControl for Vm {
                 }
             }
         };
-        self.call("keys", json!({"events":events, "leave_held":matches!(input, Input::PhysicalKey {down:true,..})}))
-            .map(|_| ())
-            .map_err(|e| match input {
-                Input::Text {sensitive:true,..} => anyhow::anyhow!("Gen2 sensitive keyboard input failed"),
-                _ => e,
-            })
+        let _console = host::lock(&self.dir.join("console.lock"))?;
+        let sensitive = matches!(
+            input,
+            Input::Text {
+                sensitive: true,
+                ..
+            }
+        );
+        if sensitive {
+            // Publish the redaction latch before sending any keystroke. It
+            // persists across controller processes and failed sends.
+            self.latch_capture()?;
+        }
+        let mut body = owned_request(&self.identity, &self.spec, &self.resource, &self.dir);
+        body["events"] = json!(events);
+        body["leave_held"] = json!(matches!(input, Input::PhysicalKey { down: true, .. }));
+        request_inner(&self.dir, "keys", body, sensitive).map(|_| ())
     }
 
     fn pointer(&self, frame: &Frame, generation: u64, x: u32, y: u32) -> Result<()> {
         ensure!(
-            self.pointer_available(),
+            self.input_available("pointer-boot"),
             "Gen2 mouse has not been qualified in this guest boot"
         );
         self.click(frame, generation, x, y)
@@ -975,8 +1220,16 @@ fn capabilities(spec: &VmSpec) -> VmCapabilities {
             unavailable("Gen2 has no qualified accelerated GPU"),
         ),
         (Screenshot, Available),
-        (PrebootKeyboard, Available),
-        (SessionKeyboard, Available),
+        (
+            PrebootKeyboard,
+            NotYetQualified("requires a passing UEFI keystroke test".into()),
+        ),
+        (
+            SessionKeyboard,
+            NotYetQualified(
+                "requires a graphical Linux keyboard delivery probe on this boot".into(),
+            ),
+        ),
         (
             PrebootPointer,
             unavailable("synthetic mouse is a Linux session capability"),
@@ -1050,37 +1303,60 @@ fn owned_request(
         "notes":format!("ilex-gen2:{}/{}", spec.owner,spec.run)})
 }
 
-fn request(state: &Path, dir: &Path, operation: &str, mut body: Value) -> Result<Value> {
-    let script = state.join(format!(
-        "controller-{}.ps1",
-        &digest(include_bytes!("../assets/gen2.ps1"))[7..23]
-    ));
-    // Every invocation gets its own private files. The controller is never
-    // substituted by an untrusted artifact or built from input strings.
-    let nonce = uuid()?;
-    let script = dir.join(format!(
-        "{nonce}-{}",
-        script.file_name().unwrap().to_string_lossy()
-    ));
-    let path = dir.join(format!("{nonce}.json"));
+fn request(_state: &Path, dir: &Path, operation: &str, body: Value) -> Result<Value> {
+    request_inner(dir, operation, body, false)
+}
+
+fn request_inner(dir: &Path, operation: &str, mut body: Value, redact: bool) -> Result<Value> {
+    let script = dir.join(format!("{}-controller.ps1", random_id()?));
     let fields = body.as_object_mut().unwrap();
     fields.insert("operation".into(), json!(operation));
     fields.insert("schema".into(), json!(SCHEMA_VERSION));
-    let output = (|| -> Result<_> {
-        fs::write(&script, include_bytes!("../assets/gen2.ps1"))?;
-        fs::write(&path, serde_json::to_vec(&body)?)?;
-        host::output_owned(&mut host::powershell(&script, &path), Stdio::piped())
+    let result = (|| -> Result<Value> {
+        File::create_new(&script)?.write_all(include_bytes!("../assets/gen2.ps1"))?;
+        let mut command = host::powershell_script(&script);
+        let output = || {
+            if redact {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            }
+        };
+        let (_job, mut child) = host::spawn_owned(
+            command
+                .stdin(Stdio::piped())
+                .stdout(output())
+                .stderr(output()),
+        )?;
+        // This anonymous pipe is the only transport for request data. In
+        // particular, key events never enter argv, a file, or a PS command.
+        let sent = serde_json::to_writer(
+            child.stdin.take().context("opening Gen2 request pipe")?,
+            &body,
+        );
+        let output = child.wait_with_output()?;
+        if redact {
+            ensure!(
+                sent.is_ok() && output.status.success(),
+                "Gen2 sensitive keyboard input failed"
+            );
+            return Ok(json!({}));
+        }
+        ensure!(
+            output.status.success(),
+            "Gen2 {operation}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        sent?;
+        serde_json::from_slice(&output.stdout)
+            .with_context(|| format!("decoding Gen2 {operation} reply"))
     })();
-    let _ = fs::remove_file(path);
     let _ = fs::remove_file(script);
-    let output = output?;
-    ensure!(
-        output.status.success(),
-        "Gen2 {operation}: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("decoding Gen2 {operation} reply"))
+    if redact {
+        result.map_err(|_| anyhow::anyhow!("Gen2 sensitive keyboard input failed"))
+    } else {
+        result
+    }
 }
 
 fn regular_file(path: &Path) -> Result<PathBuf> {
@@ -1094,6 +1370,15 @@ fn regular_file(path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn bound_file(path: &Path) -> Result<crate::received::BoundFile> {
+    let dir = Directory::open(path.parent().context("artifact has no parent")?)?;
+    dir.read(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .context("invalid artifact filename")?,
+    )
+}
+
 fn remove_tree(root: &Path, dir: &Path) -> Result<()> {
     ensure!(
         dir.parent() == Some(root),
@@ -1103,7 +1388,12 @@ fn remove_tree(root: &Path, dir: &Path) -> Result<()> {
     fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))
 }
 
-fn prepare_seed(dir: &Path, alias: &str, ssh: &SshProvisioning) -> Result<PathBuf> {
+fn prepare_seed(
+    dir: &Path,
+    alias: &str,
+    ssh: &SshProvisioning,
+    recovery_digest: Option<&str>,
+) -> Result<PathBuf> {
     let seed = dir.join("seed");
     fs::create_dir(&seed)?;
     for key in ["access", "host"] {
@@ -1129,6 +1419,9 @@ fn prepare_seed(dir: &Path, alias: &str, ssh: &SshProvisioning) -> Result<PathBu
     )?;
     fs::copy(dir.join("host"), seed.join("host.key"))?;
     fs::copy(dir.join("access.pub"), seed.join("access.pub"))?;
+    if let Some(digest) = recovery_digest {
+        fs::write(seed.join("recovery.sha256"), digest)?;
+    }
     Ok(dir.join("seed.iso"))
 }
 
@@ -1137,7 +1430,7 @@ struct Slot {
     receipt: PathBuf,
 }
 impl Slot {
-    fn release(self, resource: &OwnedResource) -> Result<()> {
+    fn release(&self, resource: &OwnedResource) -> Result<()> {
         ensure!(
             same_allocation(&self.receipt, resource)?,
             "Gen2 slot receipt changed"
@@ -1261,7 +1554,7 @@ fn now() -> Result<u64> {
         .as_millis()
         .try_into()?)
 }
-fn uuid() -> Result<String> {
+pub fn random_id() -> Result<String> {
     let id = unsafe { windows::Win32::System::Com::CoCreateGuid()? };
     Ok(format!("{id:?}")
         .trim_matches(['{', '}'])
@@ -1318,20 +1611,77 @@ fn ascii_vk(byte: u8) -> Result<(u32, bool)> {
 /// Convert a verified installed qcow2 into a standalone parent, retaining the
 /// remote immutable source. Hyper-V receives a new writable child per fixture.
 pub fn vhdx(source: &Path, destination: &Path, format: &str) -> Result<()> {
+    convert(source, destination, format, None)
+}
+
+/// Inspect the raw header before starting QEMU, so even its read-only info
+/// command cannot resolve a hostile external file. Validate extension bounds
+/// within the first cluster and reject backing storage and external data.
+fn verify_qcow2_header(file: &mut File) -> Result<u64> {
+    let mut header = [0; 104];
+    file.read_exact(&mut header)?;
+    let field = |offset| u32::from_be_bytes(header[offset..offset + 4].try_into().unwrap());
+    let wide = |offset| u64::from_be_bytes(header[offset..offset + 8].try_into().unwrap());
+    ensure!(
+        &header[..4] == b"QFI\xfb" && matches!(field(4), 2 | 3),
+        "expected qcow2 v2/v3 header"
+    );
+    ensure!(wide(8) == 0 && field(16) == 0, "qcow2 has backing storage");
+    let cluster_bits = field(20);
+    ensure!(
+        (9..=21).contains(&cluster_bits) && wide(24) > 0,
+        "invalid qcow2 cluster or virtual size"
+    );
+    let limit = 1u64 << cluster_bits;
+    let start = if field(4) == 2 {
+        72
+    } else {
+        ensure!(wide(72) & 4 == 0, "qcow2 has an external data file");
+        u64::from(field(100))
+    };
+    ensure!(
+        start % 8 == 0 && start >= if field(4) == 2 { 72 } else { 104 } && start <= limit - 8,
+        "invalid qcow2 extension offset"
+    );
+    let mut offset = start;
+    loop {
+        file.seek(SeekFrom::Start(offset))?;
+        let mut entry = [0; 8];
+        file.read_exact(&mut entry)?;
+        let (kind, len) = (
+            u32::from_be_bytes(entry[..4].try_into().unwrap()),
+            u32::from_be_bytes(entry[4..].try_into().unwrap()),
+        );
+        if kind == 0 {
+            ensure!(len == 0, "invalid qcow2 extension terminator");
+            break;
+        }
+        ensure!(
+            kind != 0x4441_5441 && kind != 0xe279_2aca,
+            "qcow2 has external storage metadata"
+        );
+        offset += 8 + u64::from(len).next_multiple_of(8);
+        ensure!(offset <= limit - 8, "invalid qcow2 extension size");
+    }
+    Ok(wide(24))
+}
+
+fn convert(source: &Path, destination: &Path, format: &str, checksum: Option<&str>) -> Result<()> {
     ensure!(
         matches!(format, "raw" | "qcow2"),
         "invalid Gen2 conversion format"
     );
-    let source = regular_file(source)?;
+    let source = std::path::absolute(source)?;
+    let mut original = bound_file(&source)?;
     let work = destination
         .parent()
         .context("Gen2 conversion has no output directory")?;
-    let _bound = Directory::open(work)?;
+    let bound = Directory::open(work)?;
     let target = destination
         .file_name()
         .context("Gen2 conversion has no output filename")?;
     let runtime = runtime::fetch()?;
-    let staged = work.join(format!("convert-{}.{}", &uuid()?[..12], format));
+    let staged = work.join(format!("convert-{}.{}", &random_id()?[..12], format));
     let input = if source.parent() == Some(work) {
         &source
     } else {
@@ -1340,20 +1690,50 @@ pub fn vhdx(source: &Path, destination: &Path, format: &str) -> Result<()> {
     let conversion = (|| -> Result<()> {
         if input == &staged {
             ensure!(
-                transport::available_space(work)? >= fs::metadata(&source)?.len() * 2 + 30 * GIB,
+                transport::available_space(work)? >= original.file.metadata()?.len() * 2 + 30 * GIB,
                 "Gen2 conversion needs space for staging and its VHDX plus the 30 GiB reserve"
             );
-            fs::copy(&source, &staged)?;
+            let expected = if let Some(hash) = checksum {
+                hash.into()
+            } else {
+                let hash = host::hash_reader(&mut original.file)?;
+                original.file.rewind()?;
+                hash
+            };
+            let mut output = File::create_new(&staged)?;
+            std::io::copy(&mut original.file, &mut output)?;
+            drop(output);
+            host::verify(&staged, &expected)?;
+        }
+        let leaf = input
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("invalid Gen2 input filename")?;
+        let mut input_guard = bound.read(leaf)?;
+        if format == "qcow2" {
+            let virtual_bytes = verify_qcow2_header(&mut input_guard.file)?;
+            let info = host::output_owned(
+                runtime::command(&runtime, "qemu-img.exe")
+                    .current_dir(work)
+                    .args(["info", "-f", "qcow2", "--output=json", leaf]),
+                Stdio::piped(),
+            )?;
+            ensure!(info.status.success(), "inspecting standalone qcow2 failed");
+            let info: Value = serde_json::from_slice(&info.stdout)?;
             ensure!(
-                host::hash_file(&source)? == host::hash_file(&staged)?,
-                "Gen2 input changed during staging"
+                info["format"] == "qcow2"
+                    && info["virtual-size"] == virtual_bytes
+                    && info["backing-filename"].is_null()
+                    && info["full-backing-filename"].is_null()
+                    && info["format-specific"]["data"]["data-file"].is_null(),
+                "qcow2 inspection rejected external storage or inconsistent format/size"
             );
         }
         host::command_ok(
             runtime::command(&runtime, "qemu-img.exe")
                 .current_dir(work)
                 .args(["convert", "-S", "4096", "-f", format, "-O", "vhdx"])
-                .arg(input.file_name().context("Gen2 input has no filename")?)
+                .arg(leaf)
                 .arg(target),
         )
     })();

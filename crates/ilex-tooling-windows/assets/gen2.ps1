@@ -1,19 +1,39 @@
-param([Parameter(Mandatory=$true)][string]$Request)
+param()
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$r = Get-Content -LiteralPath $Request -Raw -Encoding UTF8 | ConvertFrom-Json
+$inputPipe = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.Encoding]::UTF8)
+$r = $inputPipe.ReadToEnd() | ConvertFrom-Json
+$inputPipe.Dispose()
 if ($r.schema -ne 1) { throw 'Unsupported Gen2 request schema' }
 $ns = 'root/virtualization/v2'
+
+function Test-Allocation($vm) {
+    $vm.Name -ceq $r.name -and $vm.Generation -eq 2 -and
+        [IO.Path]::GetFullPath($vm.Path) -eq (Join-Path $r.config $r.name)
+}
 
 function Get-OwnedVM {
     [guid]$id = $r.resource.opaque_id
     if ($id -eq [guid]::Empty) { throw 'Gen2 allocation has no recorded VM UUID' }
     $vm = Get-VM -Id $id -ErrorAction Stop
-    if ($vm.Name -cne $r.name -or $vm.Notes -cne $r.notes -or $vm.Generation -ne 2 -or
-        [IO.Path]::GetFullPath($vm.Path) -ne (Join-Path $r.config $r.name)) {
+    if (!(Test-Allocation $vm) -or $vm.Notes -cne $r.notes) {
         throw 'Gen2 VM receipt does not match the registered allocation'
     }
     $vm
+}
+
+function Assert-LocalGuardian {
+    $store = 'Cert:\LocalMachine\Shielded VM Local Certificates'
+    if (!(Test-Path -LiteralPath $store)) {
+        throw 'Hyper-V local guardian certificate store is missing. Preparing a guardian changes host state and is outside this provider.'
+    }
+    $now = Get-Date
+    $usable = @(Get-ChildItem -LiteralPath $store | Where-Object { $_.HasPrivateKey -and $_.NotBefore -le $now -and $_.NotAfter -gt $now })
+    foreach ($kind in @('Signing', 'Encryption')) {
+        if (!@($usable | Where-Object Subject -like "CN=Shielded VM $kind Certificate (UntrustedGuardian)*").Count) {
+            throw "Hyper-V local guardian is missing a usable $kind certificate. This provider requires an already-prepared host."
+        }
+    }
 }
 
 function Device($system, [string]$class) {
@@ -74,7 +94,7 @@ public static class IlexGen2Iso {
 '@
     $iso = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
     $iso.FileSystemsToCreate = 3
-    $iso.VolumeName = 'ILEX_GEN2'
+    $iso.VolumeName = if ($r.label) { $r.label } else { 'ILEX_GEN2' }
     $iso.Root.AddTree($r.seed_directory, $false)
     [IlexGen2Iso]::Save($iso.CreateResultImage().ImageStream, $r.seed)
 }
@@ -98,6 +118,7 @@ switch ($r.operation) {
     'create' {
         $vm = $null
         try {
+            if ($r.tpm) { Assert-LocalGuardian }
             if (@(Get-VM | Where-Object Name -eq $r.name).Count) { throw 'Gen2 name already registered' }
             if ($r.parent) { New-VHD -Path $r.disk -ParentPath $r.parent -Differencing | Out-Null }
             else { New-VHD -Path $r.disk -SizeBytes ([uint64]$r.blank_bytes) -Dynamic | Out-Null }
@@ -108,16 +129,27 @@ switch ($r.operation) {
             }
             if ($r.network) { $options.SwitchName = 'Default Switch' }
             $vm = New-VM @options
-            Set-VM -VM $vm -Notes $r.notes -AutomaticCheckpointsEnabled $false -CheckpointType Disabled -AutomaticStartAction Nothing
             $r.resource.opaque_id = [string]$vm.Id
-            # Save the UUID before enabling firmware security or attaching any media.
-            [IO.File]::WriteAllText($r.receipt, ($r.resource | ConvertTo-Json -Depth 4 -Compress))
+            # Publish the UUID atomically before labeling/configuring the VM.
+            $partial = $r.receipt + '.partial'
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($r.resource | ConvertTo-Json -Depth 4 -Compress))
+            $file = [IO.File]::Open($partial, 'CreateNew', 'Write', 'None')
+            try { $file.Write($bytes, 0, $bytes.Length); $file.Flush($true) }
+            finally { $file.Dispose() }
+            [IO.File]::Move($partial, $r.receipt)
+            Set-VM -VM $vm -Notes $r.notes -AutomaticCheckpointsEnabled $false -CheckpointType Disabled -AutomaticStartAction Nothing
             Set-VMMemory -VM $vm -DynamicMemoryEnabled $false -StartupBytes ([uint64]$r.memory_bytes)
             Set-VMProcessor -VM $vm -Count ([int]$r.vcpus)
             if (!$r.network) { Get-VMNetworkAdapter -VM $vm | Remove-VMNetworkAdapter }
             $boot = Get-VMHardDiskDrive -VM $vm
             if ($r.iso) { $boot = Add-VMDvdDrive -VM $vm -Path $r.iso -Passthru }
             if ($r.seed) { Add-VMDvdDrive -VM $vm -Path $r.seed }
+            if ($r.answers -like '*.iso') { Add-VMDvdDrive -VM $vm -Path $r.answers }
+            if ($r.answers -like '*.vhdx') {
+                $answerDisk = Join-Path ([IO.Path]::GetDirectoryName($r.disk)) 'answers.vhdx'
+                New-VHD -Path $answerDisk -ParentPath $r.answers -Differencing | Out-Null
+                Add-VMHardDiskDrive -VM $vm -Path $answerDisk
+            }
             $sb = if ($r.secure_boot) { 'On' } else { 'Off' }
             Set-VMFirmware -VM $vm -EnableSecureBoot $sb -SecureBootTemplate MicrosoftUEFICertificateAuthority -FirstBootDevice $boot
             if ($r.tpm) {
@@ -140,6 +172,51 @@ switch ($r.operation) {
         break
     }
     'seed' { Write-Seed; '{}' ; break }
+    'installed-boot' {
+        $vm = Get-OwnedVM
+        if ($vm.State -ne 'Off') { throw 'Gen2 installation media may only change when powered off' }
+        $disks = @(Get-VMHardDiskDrive -VM $vm)
+        $target = @($disks | Where-Object Path -eq $r.disk)
+        if ($target.Count -ne 1 -or @($disks | Where-Object { $_.Path -ne $r.disk -and $_.Path -ne $r.answer_disk }).Count) {
+            throw 'Gen2 installed target or answer disk differs from the owned media'
+        }
+        $dvds = @(Get-VMDvdDrive -VM $vm)
+        if (@($dvds | Where-Object { $_.Path -and $_.Path -notin @($r.iso, $r.answers, $r.original_seed) }).Count) {
+            throw 'Gen2 installer has unexpected DVD media'
+        }
+        foreach ($dvd in $dvds) { if (!$r.seed -or $dvd.Path -ne $r.seed) { Remove-VMDvdDrive -VMDvdDrive $dvd } }
+        foreach ($disk in $disks) { if ($disk.Path -eq $r.answer_disk) { Remove-VMHardDiskDrive -VMHardDiskDrive $disk } }
+        Set-VMFirmware -VM $vm -BootOrder @($target[0])
+        $order = @((Get-VMFirmware -VM $vm).BootOrder)
+        if ($order.Count -ne 1 -or $order[0].Device.Path -ne $r.disk) { throw 'Gen2 installed disk boot order verification failed' }
+        Status (Get-OwnedVM) | ConvertTo-Json -Compress
+        break
+    }
+    'reconcile' {
+        $expected = Join-Path $r.config $r.name
+        $matches = @(Get-VM | Where-Object {
+            $_.Name -eq $r.name -or $_.Path -eq $expected -or
+                ($r.resource.opaque_id -and [string]$_.Id -eq $r.resource.opaque_id)
+        })
+        if ($matches.Count -eq 0) { '{}'; break }
+        if ($matches.Count -ne 1) { throw 'Ambiguous Gen2 creation intent' }
+        $vm = $matches[0]
+        if (!(Test-Allocation $vm) -or ($r.resource.opaque_id -and [string]$vm.Id -ne $r.resource.opaque_id)) {
+            throw 'Gen2 creation intent conflicts with an existing VM'
+        }
+        if (!$r.resource.opaque_id -or $vm.Notes -cne $r.notes) {
+            $disks = @(Get-VMHardDiskDrive -VM $vm)
+            if (($vm.Notes -and $vm.Notes -cne $r.notes) -or $vm.State -ne 'Off' -or
+                $disks.Count -ne 1 -or $disks[0].Path -ne $r.disk) {
+                throw 'Incomplete Gen2 allocation cannot be attributed safely'
+            }
+        }
+        if ($vm.State -ne 'Off') { Stop-VM -VM $vm -TurnOff -Confirm:$false }
+        Remove-VM -VM $vm -Force
+        if (@(Get-VM | Where-Object Id -eq $vm.Id).Count) { throw 'Interrupted Gen2 VM still registered' }
+        '{}'
+        break
+    }
     'status' { Status (Get-OwnedVM) | ConvertTo-Json -Compress; break }
     'start' { Start-VM -VM (Get-OwnedVM); '{}' ; break }
     'stop' {

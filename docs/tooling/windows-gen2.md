@@ -21,6 +21,13 @@ expected digest. The harness verifies the ISO byte-for-byte and boots it
 against a blank 32 GiB VHDX. It stops at the ilex chooser. Encrypted
 installation and enrollment are covered by the later part-4 tier.
 
+Hyper-V's local vTPM protector uses the machine's signing and encryption
+certificates in the **Shielded VM Local Certificates** store. First use
+can create this host-wide pair. The provider checks for the usable local pair
+before allocating a vTPM and reports a missing guardian as a host prerequisite.
+Prepared hosts reuse the pair across VMs. Fixture teardown removes its own
+protector and vTPM state. The shared certificates belong to the host.
+
 The default Gen2 profile uses fixed 6 GiB, two vCPUs and the existing Default
 Switch. It accepts 2–6 GiB and up to four vCPUs; use
 `ILEX_SECURITY_MEMORY` and `ILEX_SECURITY_VCPUS` to qualify another exact
@@ -36,7 +43,24 @@ guest virtual console before SSH becomes available. The guest records its
 boot ID when it accepts the key. A private read-only seed ISO provides an
 ephemeral client key and pinned host identity to the installed fixture.
 Both private keys stay in the checkout's local VM state. A separate guest
-boots the exact installer ISO from its SCSI DVD drive.
+boots the exact installer ISO from its SCSI DVD drive. The installer test uses
+the same consumer API as PR 18. Call `Provider::create_installer` with the
+unchanged ISO on the spec, a blank VHDX target and OEMDRV as an ISO or a VHDX.
+After Anaconda powers off, call `Provider::boot_installed` on the original
+handle. The provider verifies the powered-off UUID and attached disks, ejects
+installation media and sets the original VHDX as the sole boot device.
+The optional SSH seed can remain attached. The test seals a TPM-bound credential
+in Anaconda's live system, writes it to the target, and unseals it after booting
+the installed system on that same VM.
+
+Private keyboard events travel over an anonymous pipe. The controller latches
+screenshot redaction before sending any sensitive event, including when the
+send fails. A consumer can latch it earlier with `Vm::conceal_console`, for
+example before the guest displays a newly generated recovery key. The owning
+harness can release capture through `Vm::acknowledge_sensitive_input` after
+checking an authenticated, public guest acknowledgement that the console is
+safe. Use `ilex-vmctl type --stdin` for private text from a pipe. The normal
+text command accepts public input in argv.
 
 The tier reads the guest Secure Boot variables, lockdown and SHA-256 TPM
 event log over pinned SSH. It reuses the Linux PCR 7 replay and ilex identity

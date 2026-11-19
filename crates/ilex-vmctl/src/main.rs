@@ -74,7 +74,11 @@ enum Cmd {
     },
     /// Type TEXT on a US keyboard
     Type {
-        text: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        text: Option<String>,
+        /// Read private text from stdin and withhold screenshots until guest acknowledgement
+        #[arg(long)]
+        stdin: bool,
         /// Press Return afterwards
         #[arg(long)]
         enter: bool,
@@ -195,8 +199,21 @@ fn run(cli: Cli) -> Result<()> {
         } => vm.click(x, y, Button::parse(&button)?, if double { 2 } else { 1 })?,
         Cmd::Move { x, y } => vm.move_to(x, y)?,
         Cmd::Scroll { x, y, amount, up } => vm.scroll(x, y, up, amount)?,
-        Cmd::Type { text, enter } => {
-            vm.type_text(&text)?;
+        Cmd::Type { text, stdin, enter } => {
+            if stdin {
+                use std::io::{IsTerminal, Read};
+                let stream = std::io::stdin();
+                anyhow::ensure!(!stream.is_terminal(), "supply private input through a pipe");
+                let mut value = String::new();
+                stream
+                    .take(129)
+                    .read_to_string(&mut value)
+                    .map_err(|_| anyhow::anyhow!("reading private keyboard input failed"))?;
+                anyhow::ensure!(value.len() <= 128, "private keyboard input too long");
+                vm.type_sensitive(&value)?;
+            } else {
+                vm.type_text(&text.context("missing keyboard input")?)?;
+            }
             if enter {
                 vm.key("Return")?;
             }

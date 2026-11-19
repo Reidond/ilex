@@ -181,8 +181,22 @@ impl Attached {
             Self::Gen2(vm) => vm.key(&core::Input::Text {
                 text: text.into(),
                 layout: "us".into(),
+                sensitive: false,
+            }),
+        }
+    }
+    pub fn type_sensitive(&self, text: &str) -> Result<()> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Gen2(vm) => vm.key(&core::Input::Text {
+                text: text.into(),
+                layout: "us".into(),
                 sensitive: true,
             }),
+            Self::Qemu(_) => {
+                let _ = text;
+                bail!("private stdin input requires the Gen2 backend")
+            }
         }
     }
     pub fn key(&self, combo: &str) -> Result<()> {

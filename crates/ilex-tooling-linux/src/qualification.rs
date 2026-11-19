@@ -154,21 +154,5 @@ pub fn runtime(info: &crate::qemu::VmInfo, caps: &mut VmCapabilities) {
             ),
         }
     }
-    if !matches!(caps.runtime, VmRuntimeStatus::Running) {
-        for feature in [Capability::FirmwareEnforcement, Capability::PersistentTpm] {
-            caps.features.insert(
-                feature,
-                CapabilityStatus::NotYetQualified(format!("runtime is {:?}", caps.runtime)),
-            );
-        }
-        if let Some(record) = &mut caps.qualification {
-            record.outcome = match &caps.runtime {
-                VmRuntimeStatus::Failed(reason) => QualificationStatus::Failed(reason.clone()),
-                _ if matches!(record.outcome, QualificationStatus::Failed(_)) => {
-                    record.outcome.clone()
-                }
-                _ => QualificationStatus::Unknown,
-            };
-        }
-    }
+    ilex_tooling_core::qualification::restrict_live(caps);
 }
