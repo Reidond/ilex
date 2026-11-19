@@ -70,6 +70,49 @@ def marker(text):
         console.write('ILEX-ENCRYPTED-' + text + '\n')
 
 
+def mirror_diagnostics():
+    # Mirror bounded, redacted text on the installer UART. Enrollment still
+    # reads credentials only from its reserved local virtual console.
+    scope = {'__name__': 'ilex_fixture_diagnostics'}
+    exec((SEED / 'diagnostics.py').read_text(), scope)
+    sources = {name: pathlib.Path('/tmp') / name for name in
+               ('anaconda.log', 'program.log', 'storage.log', 'packaging.log')}
+    sources['driver.log'] = PRIVATE / 'driver.log'
+    root = pathlib.Path('/mnt/sysroot')
+    if not (root / 'etc').is_dir():
+        root = pathlib.Path('/mnt/sysimage')
+    sources['preload.log'] = root / 'var/log/anaconda/ilex-apps.log'
+    records = {name: scope['tail'](path) for name, path in sources.items()}
+    post_logs = sorted(pathlib.Path('/tmp').glob('ks-script-*.log'))
+    records['post.log'] = b'\n'.join(scope['tail'](path) for path in post_logs[-12:])
+    if (root / 'etc').is_dir():
+        try:
+            result = subprocess.run(['ilex-enroll', 'layout', '--root', str(root)],
+                                    capture_output=True, timeout=15)
+            records['post.log'] += b'\n' + result.stderr
+            layout = json.loads(result.stdout) if result.returncode == 0 else None
+            if layout and re.fullmatch('[0-9a-f-]{36}', layout['uuid']):
+                dump = subprocess.run(['cryptsetup', 'luksDump', '/dev/disk/by-uuid/' + layout['uuid']],
+                                      capture_output=True, timeout=15)
+                records['luksDump.txt'] = dump.stdout + dump.stderr
+        except (OSError, KeyError, ValueError, subprocess.TimeoutExpired):
+            pass
+    with (PRIVATE / 'diagnostic-uart.lock').open('wb') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open('/dev/ttyS0', 'wb') as serial:
+            for name, data in records.items():
+                scope['emit'](serial, name, data)
+
+
+def diagnostic_loop():
+    while True:
+        try:
+            mirror_diagnostics()
+        except Exception:
+            pass
+        time.sleep(120)
+
+
 def prepare():
     PRIVATE.mkdir(mode=0o700)
     SEED.mkdir()
@@ -139,6 +182,10 @@ def prepare():
                     'ExecStop=/usr/bin/python3 -I -S ' + str(SEED / 'guest.py') + ' finalise\n')
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     subprocess.run(['systemctl', 'start', unit.name], check=True)
+    subprocess.run(['systemd-run', '--quiet', '--no-block',
+                    '--unit=ilex-encrypted-diagnostic-serial',
+                    '/usr/bin/python3', '-I', '-S', str(SEED / 'guest.py'), 'diagnostics'],
+                   capture_output=True)
     marker('PREPARED')
 
 
@@ -219,11 +266,17 @@ def scan():
 
 
 def finalise():
+    marker('FINALISER-STARTED')
+    try:
+        mirror_diagnostics()
+    except Exception:
+        pass
     result = scan()
     result['phase'] = 'anaconda-poweroff-after-finalisation'
     (PUBLIC / 'finaliser-leak-scan.json').write_text(json.dumps(result))
     os.sync()
     assert not result['secret_found'] and not result['read_errors'], 'private final scan failed'
+    marker('FINALISER-DONE')
 
 
 def drive():
@@ -288,6 +341,7 @@ def drive():
         match = re.search(rb'[cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}', screen())
         assert match is not None, 'recovery key was not shown locally'
         recovery = match.group(0)
+        DRIVE_STEP = 'export-recovery'
         # Only an OAEP envelope leaves this guest. Its throwaway private key
         # stays in the host's 0700 fixture; decrypted bytes go to locked memory.
         envelope = subprocess.run(
@@ -327,6 +381,7 @@ def drive():
             [matcher['fingerprint'](value) for value in [passphrase, recovery]]))
         config = json.loads((SEED / 'config.json').read_text())
         if config.get('interrupt_completion', False):
+            DRIVE_STEP = 'interrupt-completion'
             # Kill the shipped completion after its recovery slot/state commit,
             # before acknowledgement or TPM enrollment. No fake helper or ISO.
             found = []
@@ -388,10 +443,23 @@ def finish():
     ]:
         output = subprocess.run(command, capture_output=True, check=True)
         (PUBLIC / name).write_bytes(output.stdout)
-    (PUBLIC / 'eventlog.bin').write_bytes(pathlib.Path('/sys/kernel/security/tpm0/binary_bios_measurements').read_bytes())
+    if not json.loads((SEED / 'config.json').read_text()).get('local_diagnostic'):
+        (PUBLIC / 'eventlog.bin').write_bytes(pathlib.Path('/sys/kernel/security/tpm0/binary_bios_measurements').read_bytes())
     (PUBLIC / 'enrollment.json').write_bytes((root / 'var/lib/ilex/security/enrollment.json').read_bytes())
     (PUBLIC / 'setup.json').write_bytes((root / 'etc/ilex/setup.json').read_bytes())
     state = json.loads((PUBLIC / 'enrollment.json').read_text())
+    layout = json.loads((PUBLIC / 'layout.json').read_text())
+    assert layout['uuid'] == state['uuid'], 'preload/enrollment changed the encrypted root layout'
+    apps = root / 'var/lib/ilex/apps'
+    before = json.loads((apps / 'installer-mounts-before').read_text())
+    after = json.loads((apps / 'installer-mounts-after').read_text())
+    assert before == after, 'preload changed the installer mount namespace'
+    cleanup = (apps / 'installer-cleanup-result').read_text().strip()
+    assert cleanup == '0', 'preload namespace cleanup failed'
+    (PUBLIC / 'preload-check.json').write_text(json.dumps({
+        'unchanged_mounts': True, 'cleanup': 0, 'root_uuid': layout['uuid'],
+        'apps_result': int((apps / 'installer-result').read_text()),
+    }))
     tokens = subprocess.run(['ilex-enroll', 'status', '--json', '--device',
                              '/dev/disk/by-uuid/' + state['uuid']], capture_output=True, check=True)
     (PUBLIC / 'tokens.json').write_bytes(tokens.stdout)
@@ -402,6 +470,10 @@ def finish():
     result = scan()
     (PUBLIC / 'leak-scan.json').write_text(json.dumps(result))
     assert not result['secret_found'] and not result['read_errors'], 'private scan failed; details suppressed'
+    try:
+        mirror_diagnostics()
+    except Exception:
+        pass
     os.sync()
     marker('DONE')
 
@@ -409,12 +481,17 @@ def finish():
 if __name__ == '__main__':
     harden()
     try:
-        {'prepare': prepare, 'drive': drive, 'finish': finish, 'finalise': finalise}[sys.argv[1]]()
+        {'prepare': prepare, 'drive': drive, 'finish': finish, 'finalise': finalise,
+         'diagnostics': diagnostic_loop}[sys.argv[1]]()
     except Exception as error:
         # Do not include exception repr: an input or tool failure may contain a
         # credential. Public artifacts expose only the failed phase.
         try:
             failure_snapshot(error)
+        except Exception:
+            pass
+        try:
+            mirror_diagnostics()
         except Exception:
             pass
         marker('FAILED-' + sys.argv[1])

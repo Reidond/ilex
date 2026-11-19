@@ -27,13 +27,32 @@ use std::{
 
 const GUEST: &str = include_str!("encrypted/guest.py");
 const PRIVACY: &str = include_str!("encrypted/privacy.py");
+const DIAGNOSTICS: &str = include_str!("encrypted/diagnostics.py");
 
 pub fn trials() -> Vec<Trial> {
     let mut trials = vec![
-        common::trial("security::encrypted_install", || run(false, false)),
-        common::trial("security::encrypted_existing_space", || run(true, false)),
-        common::trial("security::encrypted_interrupted", || run(false, true)),
+        common::trial("security::encrypted_install", || run(false, false, false)),
+        common::trial("security::encrypted_existing_space", || {
+            run(true, false, false)
+        }),
+        common::trial("security::encrypted_interrupted", || {
+            run(false, true, false)
+        }),
     ];
+    if std::env::var_os("ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS").is_some() {
+        trials.push(common::trial(
+            "security::enrollment_diagnostic_install",
+            || run(false, false, true),
+        ));
+        trials.push(common::trial(
+            "security::enrollment_diagnostic_existing_space",
+            || run(true, false, true),
+        ));
+        trials.push(common::trial(
+            "security::enrollment_diagnostic_interrupted",
+            || run(false, true, true),
+        ));
+    }
     if std::env::var_os("ILEX_ENROLLMENT_CHECKPOINT").is_some() {
         // Explicit local diagnosis, outside CI's security::encrypted_ filter.
         // Even successful boot proofs cannot promote an incomplete ISO gate.
@@ -593,6 +612,7 @@ fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Secret)> {
     fs::write(dir.join("config.json"), serde_json::to_vec(config)?)?;
     fs::write(dir.join("guest.py"), GUEST)?;
     fs::write(dir.join("privacy.py"), PRIVACY)?;
+    fs::write(dir.join("diagnostics.py"), DIAGNOSTICS)?;
     // Test-only transport: no recovery plaintext is written to host media.
     let private_key = work.join("recovery.pem");
     ensure!(
@@ -753,6 +773,43 @@ fn failure_code(error: &anyhow::Error) -> Value {
             b"did not request fallback authentication",
             "fallback-prompt",
         ),
+        (
+            b"encrypted ISO installation did not finish",
+            "installer-exit",
+        ),
+        (
+            b"private encrypted fixture failed",
+            "installer-guest-failure",
+        ),
+        (
+            b"encrypted installer deadline exceeded",
+            "installer-timeout",
+        ),
+        (b"read installer recovery envelope", "recovery-envelope"),
+        (b"finaliser-leak-scan.json", "installer-finaliser-evidence"),
+        (
+            b"private guest secret scan failed",
+            "installer-privacy-scan",
+        ),
+        (b"no-TPM mode was not preserved", "no-tpm-probe"),
+        (b"start no-TPM completion", "no-tpm-unit-start"),
+        (
+            b"wait for no-TPM passphrase prompt",
+            "no-tpm-completion-prompt",
+        ),
+        (
+            b"wait for no-TPM completion confirmation",
+            "no-tpm-completion-confirmation",
+        ),
+        (b"verify no-TPM completion exit", "no-tpm-completion-exit"),
+        (
+            b"no-TPM completion did not preserve",
+            "no-tpm-completion-state",
+        ),
+        (
+            b"no-TPM completion changed LUKS",
+            "no-tpm-completion-tokens",
+        ),
         (b"did not accept SSH", "ssh-deadline"),
         (b"qemu exited", "guest-exited"),
         (b"QMP command", "qmp-deadline"),
@@ -811,6 +868,33 @@ fn artifact_privacy(roots: &[&Path], credentials: &Value) -> Result<Value> {
         serde_json::to_string(roots)?,
         credentials.to_string()
     ))
+}
+
+fn diagnostics(artifacts: &Path, output: &Path, credentials: &Value) -> Result<()> {
+    let mut command = Command::new("python3");
+    command.args(["-I", "-S", "-c", DIAGNOSTICS]).arg(output);
+    for file in [
+        "installer-serial.log",
+        "installer-qemu.log",
+        "installer-swtpm.log",
+        "no-tpm-serial.log",
+        "no-tpm-qemu.log",
+        "no-tpm-unit-journal.txt",
+        "no-tpm-luksDump.txt",
+        "no-tpm-failed-units.txt",
+        "host-fixture-error.txt",
+        "installer-leak-scan.json",
+        "installer-finaliser-leak-scan.json",
+        "installer-probe.json",
+    ] {
+        command.arg(artifacts.join(file));
+    }
+    ensure!(
+        command.output()?.status.success(),
+        "could not format private diagnostics"
+    );
+    artifact_privacy(&[output], credentials)?;
+    Ok(())
 }
 
 fn guest_privacy(vm: &qemu::Vm, artifacts: &Path, label: &str, credentials: &Value) -> Result<()> {
@@ -880,7 +964,7 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
     ensure!(output.status.success() && output.stdout.len() <= 4096);
     let snapshot: FailureSnapshot = serde_json::from_slice(&output.stdout)?;
     ensure!(snapshot.schema == 1);
-    ensure!(["prepare", "drive", "finish"].contains(&snapshot.phase.as_str()));
+    ensure!(["prepare", "drive", "finish", "finalise"].contains(&snapshot.phase.as_str()));
     ensure!(
         [
             "not-started",
@@ -892,6 +976,8 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
             "capture-before-input",
             "enter-passphrase",
             "wait-recovery",
+            "export-recovery",
+            "interrupt-completion",
             "acknowledge-recovery",
             "wait-ready",
             "capture-confirmation",
@@ -1039,8 +1125,8 @@ fn fallback(
     // Runtime paths include the owner-qualified checkout slug. Keep QMP and
     // swtpm Unix sockets within sockaddr_un even for the interrupted case.
     let family = match template.purpose.as_str() {
-        "encrypted-space" => "s",
-        "encrypted-interrupted" => "i",
+        "encrypted-space" | "ed-s" => "s",
+        "encrypted-interrupted" | "ed-i" => "i",
         _ => "a",
     };
     let suffix = match mode {
@@ -1050,15 +1136,17 @@ fn fallback(
         "no-tpm" => "no-tpm",
         _ => bail!("unknown fallback case"),
     };
-    spec.purpose = format!("enroll-{family}-{suffix}");
+    let local_diagnostic = template.secure_boot == Requirement::Off;
+    let prefix = if local_diagnostic { "ed" } else { "enroll" };
+    spec.purpose = format!("{prefix}-{family}-{suffix}");
     spec.iso = None;
     spec.additional_disks.clear();
-    spec.secure_boot = if mode == "pcr-mismatch" {
+    spec.secure_boot = if mode == "pcr-mismatch" || local_diagnostic {
         Requirement::Off
     } else {
         Requirement::Required
     };
-    spec.tpm = if mode == "no-tpm" {
+    spec.tpm = if mode == "no-tpm" || local_diagnostic {
         TpmLifecycle::Off
     } else {
         TpmLifecycle::Persistent {
@@ -1082,6 +1170,56 @@ fn fallback(
         console: None,
     };
     fixture.provider.start(&mut fixture.vm)?;
+    let result = check_fallback(
+        &mut fixture,
+        artifacts,
+        credential,
+        credentials,
+        installer_probe,
+        original_tokens,
+        expected,
+        mode,
+        family == "s",
+        local_diagnostic,
+    );
+    if mode == "no-tpm"
+        && let Ok(vm) = fixture.vm.running_mut()
+    {
+        save_fallback_output(
+            vm,
+            artifacts,
+            "no-tpm-unit-journal.txt",
+            "journalctl -b -u ilex-enroll-no-tpm-completion.service --no-pager -n 200 -o short-monotonic",
+        );
+        save_fallback_output(
+            vm,
+            artifacts,
+            "no-tpm-failed-units.txt",
+            "systemctl --failed --no-legend --plain",
+        );
+    }
+    if result.is_err() {
+        let _ = fixture.logs(artifacts, mode);
+    }
+    result?;
+    fixture.logs(artifacts, mode)?;
+    poweroff(&mut fixture, artifacts, mode)?;
+    fixture.provider.destroy_owned(&mut fixture.vm)
+}
+
+#[allow(clippy::too_many_arguments)] // Assertions for a single disposable fallback VM.
+fn check_fallback(
+    fixture: &mut Fixture,
+    artifacts: &Path,
+    credential: &Secret,
+    credentials: &Value,
+    installer_probe: &Value,
+    original_tokens: &Value,
+    expected: &Value,
+    mode: &str,
+    preserve_data: bool,
+    local_diagnostic: bool,
+) -> Result<()> {
     fixture.private_console()?;
     let vm = fixture.vm.running_mut()?;
     let start = Instant::now();
@@ -1114,9 +1252,19 @@ fn fallback(
         &format!("{mode}-probe.json"),
         "ilex-enroll probe --json",
     )?;
-    if mode == "no-tpm" {
+    let deferred_reason = if local_diagnostic {
+        "secure-boot-off"
+    } else {
+        "no-tpm"
+    };
+    if mode == "no-tpm" || local_diagnostic {
+        let firmware_matches = if local_diagnostic {
+            probe["secure_boot"] != true
+        } else {
+            probe["secure_boot"] == true
+        };
         ensure!(
-            probe["secure_boot"] == true && probe["tpm2"] == false && probe["reason"] == "no-tpm",
+            firmware_matches && probe["tpm2"] == false && probe["reason"] == deferred_reason,
             "no-TPM mode was not preserved"
         );
     } else if mode == "pcr-mismatch" {
@@ -1140,8 +1288,8 @@ fn fallback(
         fs::write(
             artifacts.join("mismatch-pcr.json"),
             serde_json::to_vec_pretty(&json!({"pcr7":pcr,
-                "installer_pcr7":installer_probe["pcr7"],
-                "secure_boot":false,"tpm2":true,"qualification":"unqualified"}))?,
+            "installer_pcr7":installer_probe["pcr7"],
+            "secure_boot":false,"tpm2":true,"qualification":"unqualified"}))?,
         )?;
     } else {
         ensure!(
@@ -1209,19 +1357,27 @@ fn fallback(
         &format!("{mode}-tokens-before.json"),
         &token_command,
     )?;
+    if mode == "no-tpm" {
+        save_fallback_output(
+            vm,
+            artifacts,
+            "no-tpm-luksDump.txt",
+            &format!("cryptsetup luksDump /dev/disk/by-uuid/{uuid}"),
+        );
+    }
     ensure!(
         tokens_before == *original_tokens,
         "fallback boot changed slots/tokens or resealed automatically"
     );
     if mode == "no-tpm" {
-        vm.ssh_ok("chvt 8; systemd-run --quiet --remain-after-exit --unit=ilex-enroll-no-tpm-completion /usr/bin/ilex-enroll complete --root / --tty /dev/tty8")?;
-        vm.ssh_ok("timeout 60 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
+        vm.ssh_ok("chvt 8; systemd-run --quiet --remain-after-exit --unit=ilex-enroll-no-tpm-completion /usr/bin/ilex-enroll complete --root / --tty /dev/tty8").context("start no-TPM completion")?;
+        vm.ssh_ok("timeout 60 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'").context("wait for no-TPM passphrase prompt")?;
         ctl.type_text(std::str::from_utf8(credential.bytes())?)?;
         ctl.key("ret")?;
-        vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
+        vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'").context("wait for no-TPM completion confirmation")?;
         ctl.save_screenshot(&artifacts.join(format!("{mode}-passphrase-only.png")))?;
         ctl.key("ret")?;
-        vm.ssh_ok("set -eu; timeout 30 sh -c 'until test \"$(systemctl show -p SubState --value ilex-enroll-no-tpm-completion)\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value ilex-enroll-no-tpm-completion)\" = success; systemctl stop ilex-enroll-no-tpm-completion")?;
+        vm.ssh_ok("set -eu; timeout 30 sh -c 'until test \"$(systemctl show -p SubState --value ilex-enroll-no-tpm-completion)\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value ilex-enroll-no-tpm-completion)\" = success; systemctl stop ilex-enroll-no-tpm-completion").context("verify no-TPM completion exit")?;
         let after = guest_json(
             vm,
             artifacts,
@@ -1236,7 +1392,7 @@ fn fallback(
         )?;
         ensure!(
             after["state"] == "unavailable"
-                && after["reason"] == "no-tpm"
+                && after["reason"] == deferred_reason
                 && after["recovery"] == before["recovery"]
                 && setup["security"]["tpm"]["status"] == "passphrase-only",
             "no-TPM completion did not preserve passphrase-only mode"
@@ -1253,13 +1409,19 @@ fn fallback(
         );
     }
     vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; ilex-enroll layout --root /; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
-    if template.purpose == "encrypted-space" {
+    if preserve_data {
         preserved_data(vm, artifacts)?;
     }
     guest_privacy(vm, artifacts, mode, credentials)?;
-    fixture.logs(artifacts, mode)?;
-    poweroff(&mut fixture, artifacts, mode)?;
-    fixture.provider.destroy_owned(&mut fixture.vm)
+    Ok(())
+}
+
+fn save_fallback_output(vm: &qemu::Vm, artifacts: &Path, file: &str, command: &str) {
+    if let Ok(output) = vm.ssh(command) {
+        let mut text = output.stdout;
+        text.extend(output.stderr);
+        let _ = fs::write(artifacts.join(file), text);
+    }
 }
 
 fn interrupted_repair(
@@ -1683,6 +1845,15 @@ fn evidence_files(directory: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn copy_evidence(source: &Path, destination: &Path) -> Result<()> {
+    for path in evidence_files(source)? {
+        let target = destination.join(path.strip_prefix(source)?);
+        fs::create_dir_all(target.parent().context("evidence has no parent")?)?;
+        fs::copy(path, target)?;
+    }
+    Ok(())
+}
+
 fn clear_evidence(directory: &Path) -> Result<()> {
     // This is only the namespace returned for this checkout's encrypted tier.
     // Remove stale evidence so a failed retry cannot inherit an earlier green.
@@ -1715,10 +1886,20 @@ test "$(cat /run/ilex-preserved-check/sentinel)" = ilex-public-sentinel-v1
     Ok(())
 }
 
-fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
+fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result<()> {
     ilex_enroll::harden()?;
+    ensure!(
+        !local_diagnostic || std::env::var_os("CI").is_none(),
+        "local diagnostic is outside the hosted qualification"
+    );
     let ws = common::workspace()?;
-    let tier = if interrupted {
+    let tier = if local_diagnostic && interrupted {
+        "enrollment-diagnostic-interrupted"
+    } else if local_diagnostic && preserve_data {
+        "enrollment-diagnostic-existing-space"
+    } else if local_diagnostic {
+        "enrollment-diagnostic-install"
+    } else if interrupted {
         "encrypted-interrupted"
     } else if preserve_data {
         "encrypted-existing-space"
@@ -1757,12 +1938,13 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
                 .arg("40G"),
         )?;
         let mut config = VmConfig::new(
-            if interrupted {
-                "encrypted-interrupted"
-            } else if preserve_data {
-                "encrypted-space"
-            } else {
-                "encrypted-install"
+            match (local_diagnostic, interrupted, preserve_data) {
+                (true, true, _) => "ed-i",
+                (true, false, true) => "ed-s",
+                (true, false, false) => "ed-a",
+                (false, true, _) => "encrypted-interrupted",
+                (false, false, true) => "encrypted-space",
+                (false, false, false) => "encrypted-install",
             },
             &disk,
         );
@@ -1776,28 +1958,34 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
             Ok("kvm") | Err(_) => Accelerator::Native,
             Ok(_) => bail!("explicit kvm/tcg accelerator required"),
         };
-        spec.secure_boot = Requirement::Required;
-        spec.tpm = TpmLifecycle::Persistent {
-            bundle_id: run.clone(),
-        };
+        if !local_diagnostic {
+            spec.secure_boot = Requirement::Required;
+            spec.tpm = TpmLifecycle::Persistent {
+                bundle_id: run.clone(),
+            };
+        }
         let provider = LinuxProvider::new(ws.clone())?;
         let caps = provider.probe(&spec)?;
         fs::write(
             artifacts.join("backend.json"),
             serde_json::to_vec_pretty(&caps)?,
         )?;
-        caps.require(Capability::FirmwareEnforcement)?;
-        caps.require(Capability::PersistentTpm)?; // Exact 6 GiB / 2 vCPU profile.
+        if !local_diagnostic {
+            caps.require(Capability::FirmwareEnforcement)?;
+            caps.require(Capability::PersistentTpm)?; // Exact 6 GiB / 2 vCPU profile.
+        }
         stage = "fixture";
         let image = common::image()?;
         let (_registry, mut expected) = registry(&ws, &image, &work)?;
         expected["preserve_data"] = json!(preserve_data);
         expected["interrupt_completion"] = json!(interrupted);
+        expected["local_diagnostic"] = json!(local_diagnostic);
         fs::write(
             artifacts.join("candidate.json"),
             serde_json::to_vec_pretty(&expected)?,
         )?;
         let (seed_path, passphrase) = seed(&work, &expected)?;
+        credentials = fingerprints(&[&passphrase]);
         spec.additional_disks.push(ilex_devkit::core::AttachedDisk {
             path: seed_path.clone(),
             format: ilex_devkit::core::DiskFormat::Raw,
@@ -1827,7 +2015,9 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
         }
         installed?;
         fixture.provider.stop(&mut fixture.vm)?;
-        let recovery = recovery_secret(&seed_path, &work)?;
+        stage = "installer_evidence";
+        let recovery =
+            recovery_secret(&seed_path, &work).context("read installer recovery envelope")?;
         credentials = fingerprints(&[&passphrase, &recovery]);
         let recorded: Value =
             serde_json::from_slice(&extract(&seed_path, &artifacts, "credentials.json")?)?;
@@ -1837,19 +2027,26 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
         );
         let installer_probe: Value =
             serde_json::from_slice(&extract(&seed_path, &artifacts, "probe.json")?)?;
-        ensure!(
-            installer_probe["verdict"] == "eligible",
-            "installer probe unavailable"
-        );
-        let replay = security::replay_pcr7(&extract(&seed_path, &artifacts, "eventlog.bin")?)?;
-        ensure!(
-            installer_probe["pcr7"] == replay.sha256,
-            "installer PCR replay mismatch"
-        );
-        fs::write(
-            artifacts.join("installer-replay.json"),
-            serde_json::to_vec_pretty(&replay)?,
-        )?;
+        if local_diagnostic {
+            ensure!(
+                installer_probe["secure_boot"] != true && installer_probe["tpm2"] == false,
+                "local diagnostic guest must use nonsecure firmware and no TPM"
+            );
+        } else {
+            ensure!(
+                installer_probe["verdict"] == "eligible",
+                "installer probe unavailable"
+            );
+            let replay = security::replay_pcr7(&extract(&seed_path, &artifacts, "eventlog.bin")?)?;
+            ensure!(
+                installer_probe["pcr7"] == replay.sha256,
+                "installer PCR replay mismatch"
+            );
+            fs::write(
+                artifacts.join("installer-replay.json"),
+                serde_json::to_vec_pretty(&replay)?,
+            )?;
+        }
         for file in [
             "layout.json",
             "enrollment.json",
@@ -1858,6 +2055,7 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
             "leak-scan.json",
             "finaliser-leak-scan.json",
             "tokens.json",
+            "preload-check.json",
         ] {
             extract(&seed_path, &artifacts, file)?;
         }
@@ -1879,20 +2077,41 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
         }
         let original_tokens: Value =
             serde_json::from_slice(&fs::read(artifacts.join("installer-tokens.json"))?)?;
-        stage = "pcr_mismatch_first_boot";
-        fallback(
-            &ws,
-            &disk,
-            &fixture.spec,
-            &work,
-            &artifacts,
-            &passphrase,
-            &credentials,
-            &installer_probe,
-            &original_tokens,
-            &expected,
-            "pcr-mismatch",
-        )?;
+        if local_diagnostic && !interrupted {
+            stage = "diagnostic_fallback";
+            fallback(
+                &ws,
+                &disk,
+                &fixture.spec,
+                &work,
+                &artifacts,
+                &passphrase,
+                &credentials,
+                &installer_probe,
+                &original_tokens,
+                &expected,
+                "no-tpm",
+            )?;
+            fixture.provider.destroy_owned(&mut fixture.vm)?;
+            stage = "diagnostic_complete";
+            return Ok(());
+        }
+        if !local_diagnostic {
+            stage = "pcr_mismatch_first_boot";
+            fallback(
+                &ws,
+                &disk,
+                &fixture.spec,
+                &work,
+                &artifacts,
+                &passphrase,
+                &credentials,
+                &installer_probe,
+                &original_tokens,
+                &expected,
+                "pcr-mismatch",
+            )?;
+        }
         stage = "recovery_key_boot";
         fallback(
             &ws,
@@ -1991,13 +2210,42 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
         stage = "complete";
         Ok(())
     })();
+    if let Err(error) = &result {
+        let _ = fs::write(
+            published.join("failure-code.json"),
+            serde_json::to_vec_pretty(&failure_code(error))?,
+        );
+        let _ = fs::write(
+            artifacts.join("host-fixture-error.txt"),
+            format!("{error:#}\n"),
+        );
+    }
+    if credentials.is_array() {
+        let diagnostic_text = artifacts.join("diagnostics");
+        let target = published.join("diagnostics");
+        let capture = (|| {
+            diagnostics(&artifacts, &diagnostic_text, &credentials)?;
+            if result.is_err() && !evidence_files(&diagnostic_text)?.is_empty() {
+                copy_evidence(&diagnostic_text, &target)?;
+                artifact_privacy(&[&target], &credentials)?;
+            }
+            Ok::<(), anyhow::Error>(())
+        })();
+        if capture.is_err() {
+            for directory in [&diagnostic_text, &target] {
+                if directory.exists() {
+                    clear_evidence(directory)?;
+                }
+            }
+            let _ = fs::write(
+                published.join("diagnostics-unavailable.json"),
+                b"{\"reason\":\"capture or privacy verification failed\"}\n",
+            );
+        }
+    }
     if result.is_ok() {
         let export = (|| -> Result<()> {
-            for path in evidence_files(&artifacts)? {
-                let target = published.join(path.strip_prefix(&artifacts)?);
-                fs::create_dir_all(target.parent().context("evidence has no parent")?)?;
-                fs::copy(path, target)?;
-            }
+            copy_evidence(&artifacts, &published)?;
             // Scan the actual copied/exported set too, including other CI
             // artifact tiers. The workflow repeats this gate after all cases.
             let root = std::env::var_os("ILEX_ARTIFACTS")
@@ -2021,7 +2269,7 @@ fn run(preserve_data: bool, interrupted: bool) -> Result<()> {
     fs::write(
         published.join("result.json"),
         serde_json::to_vec_pretty(
-            &json!({"qualification": if result.is_ok() {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|_|"private failure details suppressed"), "storage":if preserve_data {"existing-free-space"} else if interrupted {"interrupted-completion"} else {"automatic-empty-disk"}, "scope":"exact ISO, signed local candidate, installed boot; physical hardware remains unqualified"}),
+            &json!({"qualification": if result.is_ok() && !local_diagnostic {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|_|"private failure details suppressed"), "storage":if preserve_data {"existing-free-space"} else if interrupted {"interrupted-completion"} else {"automatic-empty-disk"}, "scope":if local_diagnostic {"local nonsecure guest with no TPM"} else {"exact ISO, signed local candidate, installed boot; physical hardware remains unqualified"}}),
         )?,
     )?;
     result.map_err(|_| {

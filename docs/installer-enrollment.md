@@ -178,9 +178,20 @@ its private keyboard and screenshot handshake. Both credentials still pass the
 final recursive log/export scan.
 Evidence is staged privately until the installer privacy gate and recursive
 artifact scan both pass. A failed run publishes its unqualified result and,
-when available, strictly validated fixed stage/error codes and booleans.
-Raw failure logs, screen cells and exception text remain private.
+when available, validated error codes and redacted diagnostic excerpts. The
+fixture mirrors bounded tails of Anaconda's program, storage, packaging and
+kickstart logs over serial. It also captures the preload and enrollment
+output, LUKS header metadata and the no-TPM completion unit's journal. The
+diagnostic export redacts both generated credential formats before applying
+the fingerprint scan. Screen cells and unfiltered exception text stay private.
 Disks, firmware/TPM state, private answers and signing keys are removed.
+
+To diagnose installation and fallback locally, point `ILEX_ISO` and
+`ILEX_IMAGE` at this checkout's installer and candidate and run
+`ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS=1 cargo xtask test security::enrollment_diagnostic_ -- --test-threads 1`.
+These trials use a firmware profile with Secure Boot off and no TPM. They
+retain an unqualified result and run outside the hosted filter. Use explicit
+TCG qualification for a local Secure Boot run with the hosted memory profile.
 
 The install deadline defaults to three hours for explicit TCG and can be set
 with positive `ILEX_ENCRYPTED_INSTALL_TIMEOUT` seconds. Missing qualification,
