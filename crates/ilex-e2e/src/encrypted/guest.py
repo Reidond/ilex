@@ -12,6 +12,7 @@ import pathlib
 import re
 import resource
 import select
+import shlex
 import signal
 import struct
 import subprocess
@@ -369,9 +370,11 @@ def missing_mounts(expected):
 
 
 def hold_interrupted_target_mounts():
+    global DRIVE_STEP
     # Anaconda can detach its target /var bind during shutdown independently
     # of systemd's stop job. Retain references to the same mounted directories
     # and their nested mounts so late writes remain visible through teardown.
+    DRIVE_STEP = 'bind-interrupted-target'
     FINAL_SCAN_TARGETS.mkdir()
     canonical = {}
     pinned = {}
@@ -388,20 +391,33 @@ def hold_interrupted_target_mounts():
             assert os.path.samestat(resolved.stat(), alias.stat()), 'wrong interrupted target bind'
             canonical[resolved] = str(alias)
         pinned[root] = canonical[resolved]
+    DRIVE_STEP = 'verify-interrupted-target-binds'
     mounts = pinned_mounts()
     assert pinned and set(pinned.values()) <= mounts.keys(), 'interrupted target bind missing'
+    DRIVE_STEP = 'order-interrupted-target-binds'
     drop_in = SYSTEMD_UNITS / (FINAL_SCAN_UNIT + '.d')
     drop_in.mkdir()
     (drop_in / '10-interrupted-target.conf').write_text(
         '[Unit]\nRequiresMountsFor=' + ' '.join(
             json.dumps(path.replace('%', '%%'), ensure_ascii=False) for path in sorted(mounts)) + '\n')
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
-    ordered = set(subprocess.check_output(['systemctl', 'show', '-p', 'After', '--value',
-                                           FINAL_SCAN_UNIT], text=True).split())
+    # systemctl quotes unit names whose escaped path contains backslashes.
+    ordered = set(shlex.split(subprocess.check_output(
+        ['systemctl', 'show', '-p', 'After', '--value', FINAL_SCAN_UNIT], text=True)))
+    missing = []
     for path in mounts:
         unit = subprocess.check_output(['systemd-escape', '--path', '--suffix=mount', path],
                                        text=True).strip()
-        assert unit in ordered, 'interrupted target bind lacks shutdown ordering'
+        if unit not in ordered:
+            missing.append(path)
+    if missing:
+        matcher = privacy_module()
+        labels = {alias: root for root, alias in pinned.items()}
+        print(json.dumps({'rule': 'mount-order-missing',
+                          'paths': [matcher['public_path'](path, labels) for path in missing],
+                          'manager_namespace': os.readlink('/proc/self/ns/mnt') ==
+                          os.readlink('/proc/1/ns/mnt')}), flush=True)
+        raise RuntimeError('interrupted target bind lacks shutdown ordering')
     (PRIVATE / 'interrupted-target-mounts.json').write_text(
         json.dumps({'paths': pinned, 'mounts': mounts}))
 
@@ -587,6 +603,7 @@ def drive():
             finally:
                 os.close(pidfd)
             marker('INTERRUPTION-EXITED')
+            DRIVE_STEP = 'check-interrupted-slots'
             root = pathlib.Path('/mnt/sysroot')
             state = json.loads((root / 'var/lib/ilex/security/enrollment.json').read_text())
             assert state['state'] == 'recovery-incomplete'
