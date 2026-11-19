@@ -741,14 +741,10 @@ fn grep_secret(root: &Path, secret: &str, envelope: Option<&[u8]>) -> Result<usi
     let engine =
         OcrEngine::TryCreateFromLanguage(&Language::CreateLanguage(&HSTRING::from("en-US"))?)?;
     let utf16: Vec<_> = secret.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    ensure!(
-        fs::symlink_metadata(root)?.is_dir(),
-        "missing artifact directory"
-    );
-    let mut pending = vec![(root.to_owned(), Directory::open(root)?)];
+    let mut pending = vec![Directory::open_existing(root)?];
     let mut scanned = 0;
-    while let Some((path, directory)) = pending.pop() {
-        for entry in fs::read_dir(path)? {
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory.path)? {
             let entry = entry?;
             let path = entry.path();
             let meta = fs::symlink_metadata(&path)?;
@@ -758,7 +754,7 @@ fn grep_secret(root: &Path, secret: &str, envelope: Option<&[u8]>) -> Result<usi
             let name = entry.file_name();
             let name = name.to_str().context("invalid artifact filename")?;
             if meta.is_dir() {
-                pending.push((path, directory.child(name)?));
+                pending.push(directory.child(name)?);
                 continue;
             }
             if !meta.is_file() {

@@ -18,6 +18,7 @@ use windows_sys::Win32::Storage::FileSystem::*;
 pub struct Directory {
     pub path: PathBuf,
     _guards: Vec<File>,
+    create_directories: bool,
 }
 pub struct BoundFile {
     pub file: File,
@@ -239,11 +240,24 @@ fn open_relative(
 
 impl Directory {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_root(path, true)
+    }
+
+    /// Open existing artifacts for reading on a local drive or UNC share.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        Self::open_root(path, false)
+    }
+
+    fn open_root(path: &Path, create_directories: bool) -> Result<Self> {
         let absolute = std::path::absolute(path)?;
         let mut parts = absolute.components();
-        let prefix = parts.next().context("artifact root has no volume")?;
+        let Component::Prefix(prefix) = parts.next().context("artifact root has no volume")? else {
+            anyhow::bail!("artifact root has no volume");
+        };
         ensure!(
-            matches!(prefix, Component::Prefix(p) if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))),
+            matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+                || (!create_directories
+                    && matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))),
             "unsafe Windows output volume"
         );
         let root = parts.next().context("artifact root is not absolute")?;
@@ -263,6 +277,7 @@ impl Directory {
         Self {
             path: volume,
             _guards: vec![handle],
+            create_directories,
         }
         .descend(parts.as_path())
     }
@@ -274,6 +289,7 @@ impl Directory {
                 .iter()
                 .map(File::try_clone)
                 .collect::<std::io::Result<Vec<_>>>()?,
+            create_directories: self.create_directories,
         };
         check(result._guards.last().context("missing root handle")?, true)?;
         for part in path.components() {
@@ -295,7 +311,11 @@ impl Directory {
                 name,
                 FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
-                OPEN_IF,
+                if self.create_directories {
+                    OPEN_IF
+                } else {
+                    OPEN
+                },
                 true,
             )
             .with_context(|| {
@@ -314,6 +334,10 @@ impl Directory {
         self.descend(Path::new(name))
     }
     fn file(&self, name: &str, create: bool, append: bool) -> Result<BoundFile> {
+        ensure!(
+            self.create_directories || !(create || append),
+            "artifact directory is read-only"
+        );
         relative(name)?;
         let path = Path::new(name);
         let parent = self.descend(path.parent().unwrap())?;
