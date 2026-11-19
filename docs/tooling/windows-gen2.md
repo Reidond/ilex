@@ -18,8 +18,9 @@ cargo xtask test security::firmware ephemeral:: -- --test-threads 1
 
 A matching `ilex-installer.iso.sha256` next to the ISO also supplies the
 expected digest. The harness verifies the ISO byte-for-byte and boots it
-against a blank 32 GiB VHDX. It stops at the ilex chooser. Encrypted
-installation and enrollment are covered by the later part-4 tier.
+against a blank 32 GiB VHDX. One trial reaches the ilex chooser. A separate
+trial installs the selected image and checks that the vTPM survives the
+disk boot. The part-4 tier covers encrypted installation and enrollment.
 
 Hyper-V's local vTPM protector uses the machine's signing and encryption
 certificates in the **Shielded VM Local Certificates** store. First use
@@ -32,10 +33,12 @@ The default Gen2 profile uses fixed 6 GiB, two vCPUs and the existing Default
 Switch. It accepts 2–6 GiB and up to four vCPUs; use
 `ILEX_SECURITY_MEMORY` and `ILEX_SECURITY_VCPUS` to qualify another exact
 profile. Gen2 and WHPX share the native slots and the 14 GiB host memory
-reserve. An interrupted Gen2 launcher leaves its slot receipt and exact UUID
-for reconciliation. Use `cargo xtask security --cleanup-run <run UUID>`
-from the owning checkout after the launcher exits. A missing or mismatched
-allocation receipt requires inspection.
+reserve. An interrupted Gen2 launcher leaves its creation intent and slot
+receipt for reconciliation. Use `cargo xtask security --cleanup-run <run UUID>`
+from the owning checkout after the launcher exits. If registration finished
+before the UUID receipt was written, cleanup checks the private VM path,
+name, generation, and target disk. An ambiguous or mismatched allocation
+requires inspection.
 
 The disk-only fixture adds an unpublished SSH and keyboard probe layer to
 the chosen ilex image. The test delivers a disposable US-layout key to the
@@ -46,6 +49,8 @@ Both private keys stay in the checkout's local VM state. A separate guest
 boots the exact installer ISO from its SCSI DVD drive. The installer test uses
 the same consumer API as PR 18. Call `Provider::create_installer` with the
 unchanged ISO on the spec, a blank VHDX target and OEMDRV as an ISO or a VHDX.
+For a raw OEMDRV image, use `gen2::vhdx(raw, destination, "raw")` first. The
+Gen2 target is the first Hyper-V SCSI disk (`sda` in the installer).
 After Anaconda powers off, call `Provider::boot_installed` on the original
 handle. The provider verifies the powered-off UUID and attached disks, ejects
 installation media and sets the original VHDX as the sole boot device.
@@ -83,8 +88,9 @@ ilex-vmctl --vm secure screenshot -o secure.png
 ilex-vmctl --vm secure type ilex-gen2-recovery-410625 --enter
 ```
 
-`vm --secure` requires an already qualified profile. It prints the fixture
-key before opening a pinned SSH session. Add `--gui` to open VMConnect.
+`vm --secure` requires an already qualified profile. The example above
+sends the public fixture response before the pinned SSH session starts.
+Add `--gui` to open VMConnect.
 `ilex-vmctl` and its MCP server attach to a journaled Gen2 guest. Hyper-V's
 CIM console supplies capture and keyboard input. xtask owns the lifecycle.
 

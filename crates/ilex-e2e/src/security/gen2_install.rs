@@ -1,4 +1,4 @@
-use super::{BOOT, Media, READY, exec, file_digest, wait_screen, write};
+use super::{BOOT, Media, READY, exec, file_digest, save_frame, wait_screen, write};
 use anyhow::{Result, ensure};
 use ilex_devkit::{Workspace, core::*};
 use ilex_tooling_windows::gen2::{self, Provider};
@@ -80,10 +80,20 @@ pub fn transition(
         );
         let boot = vm.wait_ssh(None, READY)?;
         let installed_boot = start.elapsed().as_secs_f64();
+        let status = exec(&vm, "bootc status --format json")?;
+        let bootc: serde_json::Value = serde_json::from_slice(&status)?;
+        let deployment = &bootc["status"]["booted"]["image"];
+        let manifest = deployment["imageDigest"].as_str().unwrap_or_default();
+        ensure!(
+            deployment["image"]["signature"] == "containerPolicy"
+                && manifest.starts_with("sha256:")
+                && manifest.len() == 71,
+            "installed deployment did not retain its verified image origin"
+        );
+        fs::write(artifacts.join("transition-bootc.json"), &status)?;
         let trace = exec(
             &vm,
             r#"set -eu
-bootc status --format json
 cat /var/lib/ilex-gen2/installer-boot
 test -c /dev/tpmrm0
 test "$(od -An -tu1 -j4 -N1 /sys/firmware/efi/efivars/SecureBoot-*)" -eq 1
@@ -110,9 +120,10 @@ test "$(lsblk -dn -o TYPE | grep -c rom || :)" -eq 0
         write(
             artifacts,
             "transition.json",
-            &json!({"vm":handle,"installer_boot":installer_boot,"installed_boot":boot,
+            &json!({"vm":handle,"installer_boot":installer_boot,"installed_boot":boot,"manifest_digest":manifest,
             "install_seconds":installed,"disk_to_ssh_seconds":installed_boot,"unsealed":true,"settings":vm.status()?}),
         )?;
+        save_frame(artifacts, "transition-installed", &vm.capture()?, None)?;
         vm.poweroff(BOOT)?;
         provider.destroy_owned(&mut vm)
     })();

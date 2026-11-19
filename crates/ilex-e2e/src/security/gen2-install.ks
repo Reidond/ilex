@@ -1,5 +1,10 @@
-# Unmodified release ISO and its signed network payload.
-%include /usr/share/anaconda/interactive-defaults.ks
+# Select the release ISO's signed network payload through its own chooser
+# helper. The transition fixture has no dependency on optional app preload.
+%pre --erroronfail
+python3 -I -S /usr/libexec/ilex-installer/ilex-installer-choice apply
+%end
+%include /tmp/ilex-bootc.ks
+xconfig --startxonboot
 graphical
 lang en_US.UTF-8
 keyboard us
@@ -10,6 +15,11 @@ clearpart --all --initlabel
 autopart
 poweroff
 
+%post --erroronfail
+# Match the installed bootc mount configuration from interactive-defaults.ks.
+sed -i -E '\|^[^#[:space:]]+[[:space:]]+/[[:space:]]|d' /etc/fstab
+%end
+
 %post --nochroot --erroronfail
 set -eu
 umask 077
@@ -18,6 +28,8 @@ seed=$(mktemp -d /run/ilex-gen2-install.XXXXXXXX)
 trap 'if mountpoint -q "$seed"; then umount "$seed"; fi; rmdir "$seed"' EXIT
 mount -t iso9660 -o ro,nosuid,nodev,noexec LABEL=ILEX_GEN2 "$seed"
 install -d -m 0700 "$root/var/lib/ilex-gen2"
+test -c /dev/tpmrm0
+test "$(od -An -tu1 -j4 -N1 /sys/firmware/efi/efivars/SecureBoot-*)" -eq 1
 # Bind this transition control to the TPM identity. The separate firmware
 # fixture covers PCR7 policy, and PR18 exercises PCR-bound LUKS enrollment.
 printf ilex-gen2-installer-proof |

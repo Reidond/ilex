@@ -727,11 +727,13 @@ impl Vm {
     }
 
     pub fn qualify_session_keyboard(&self) -> Result<Vec<u8>> {
-        self.guest_exec(&[
-            "systemctl".into(),
-            "is-active".into(),
-            "display-manager.service".into(),
-        ])?;
+        wait(Duration::from_secs(60), || {
+            self.guest_exec(&[
+                "systemctl".into(),
+                "is-active".into(),
+                "display-manager.service".into(),
+            ])
+        })?;
         let result = self.observe_input(&["keyboard".into()], || {
             self.key(&Input::Chord { codes: vec![0x58] })
         })?;
@@ -1025,9 +1027,11 @@ impl VmControl for Vm {
         };
         let session_pointer =
             caps.runtime == VmRuntimeStatus::Running && self.input_available("pointer-boot");
+        let session_keyboard =
+            caps.runtime == VmRuntimeStatus::Running && self.input_available("keyboard-boot");
         caps.phase = if caps.runtime != VmRuntimeStatus::Running {
             BootPhase::Unknown
-        } else if session_pointer {
+        } else if session_pointer || session_keyboard {
             BootPhase::Session
         } else {
             BootPhase::Boot
@@ -1038,7 +1042,7 @@ impl VmControl for Vm {
             qualification::load(&path, &self.spec.owner, &self.profile)?,
         );
         qualification::restrict_live(&mut caps);
-        if caps.runtime == VmRuntimeStatus::Running && self.input_available("keyboard-boot") {
+        if session_keyboard {
             caps.features
                 .insert(Capability::SessionKeyboard, CapabilityStatus::Available);
         }
@@ -1688,7 +1692,7 @@ fn convert(source: &Path, destination: &Path, format: &str, checksum: Option<&st
         &staged
     };
     let conversion = (|| -> Result<()> {
-        if input == &staged {
+        let staged_hash = if input == &staged {
             ensure!(
                 transport::available_space(work)? >= original.file.metadata()?.len() * 2 + 30 * GIB,
                 "Gen2 conversion needs space for staging and its VHDX plus the 30 GiB reserve"
@@ -1702,14 +1706,22 @@ fn convert(source: &Path, destination: &Path, format: &str, checksum: Option<&st
             };
             let mut output = File::create_new(&staged)?;
             std::io::copy(&mut original.file, &mut output)?;
-            drop(output);
-            host::verify(&staged, &expected)?;
-        }
+            Some(expected)
+        } else {
+            None
+        };
         let leaf = input
             .file_name()
             .and_then(|name| name.to_str())
             .context("invalid Gen2 input filename")?;
         let mut input_guard = bound.read(leaf)?;
+        if let Some(expected) = staged_hash {
+            ensure!(
+                host::hash_reader(&mut input_guard.file)? == expected,
+                "Gen2 staged input checksum mismatch"
+            );
+            input_guard.file.rewind()?;
+        }
         if format == "qcow2" {
             let virtual_bytes = verify_qcow2_header(&mut input_guard.file)?;
             let info = host::output_owned(
