@@ -56,8 +56,8 @@ pub fn run(args: Args) -> Result<()> {
         }
         Command::Rechunk(a) => crate::rechunk::run(&ws, a),
         Command::Disk(a) => {
-            let disk = crate::disk::ensure(&ws, &a)?;
-            crate::disk::write_metadata(&ws, &a, &disk)?;
+            let (disk, image) = crate::disk::ensure(&ws, &a)?;
+            crate::disk::write_metadata(&ws, &a, &disk, &image)?;
             println!("{}", disk.display());
             Ok(())
         }

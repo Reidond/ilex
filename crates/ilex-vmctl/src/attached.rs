@@ -1,6 +1,6 @@
 //! Frontend dispatch for QMP and the owned Hyper-V console.
 use crate::{Button, Frame, Vmctl, WaitCond, backend};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, bail};
 use ilex_devkit::{
     Workspace,
     core::{self, VmControl, VmHandle},
@@ -25,7 +25,7 @@ impl Attached {
                     .into_iter()
                     .filter(|v| purpose.is_none_or(|p| v.purpose == p))
                     .count();
-                ensure!(
+                anyhow::ensure!(
                     qemu + candidates.len() == 1,
                     "several native VMs match; choose --vm"
                 );
@@ -151,7 +151,7 @@ impl Attached {
             Self::Qemu(vm) => vm.click(x, y, button, count),
             #[cfg(target_os = "windows")]
             Self::Gen2(vm) => {
-                ensure!(
+                anyhow::ensure!(
                     button == Button::Left && count == 1,
                     "Gen2 supports a single left click"
                 );
@@ -261,7 +261,7 @@ fn scancode(key: &str) -> Result<u32> {
         "f12" => 0x58,
         function if function.starts_with('f') && function.len() > 1 => {
             let n: u32 = function[1..].parse()?;
-            ensure!((1..=10).contains(&n), "unsupported Gen2 function key");
+            anyhow::ensure!((1..=10).contains(&n), "unsupported Gen2 function key");
             0x3a + n
         }
         _ => {

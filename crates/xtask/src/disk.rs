@@ -99,15 +99,15 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     if args.self_check {
         return check::run(ws);
     }
-    let path = ensure(ws, &args)?;
-    write_metadata(ws, &args, &path)?;
+    let (path, image) = ensure(ws, &args)?;
+    write_metadata(ws, &args, &path, &image)?;
     println!("{}", path.display());
     Ok(())
 }
 
-/// Write the disk for `args` (or reuse an up-to-date one) and return its path.
+/// Write the disk for `args` (or reuse one) and return its path and image.
 /// The image must already be built (`cargo xtask build`).
-pub fn ensure(ws: &Workspace, args: &Args) -> Result<PathBuf> {
+pub fn ensure(ws: &Workspace, args: &Args) -> Result<(PathBuf, String)> {
     let image = if let Some(gen2) = &args.gen2 {
         let base = crate::test::image_under_test_with_reference(
             ws,
@@ -130,7 +130,7 @@ pub fn ensure(ws: &Workspace, args: &Args) -> Result<PathBuf> {
             resolved.image
         }
     };
-    ensure_image(ws, args, &image)
+    Ok((ensure_image(ws, args, &image)?, image))
 }
 
 /// `vm` checked its resolved base already; do not read selection again for
@@ -149,13 +149,7 @@ pub fn ensure_image(ws: &Workspace, args: &Args, image: &str) -> Result<PathBuf>
 }
 
 /// Authenticated installed-disk manifest, shared by local and remote delivery.
-pub fn write_metadata(ws: &Workspace, a: &Args, disk: &std::path::Path) -> Result<()> {
-    let resolved = a.selection.resolve(ws, a.image.as_deref(), None)?;
-    let image = if a.development || a.gen2.is_some() {
-        crate::dev_image::reference(ws, &resolved.image, a.gen2.is_some())
-    } else {
-        resolved.image
-    };
+pub fn write_metadata(ws: &Workspace, a: &Args, disk: &std::path::Path, image: &str) -> Result<()> {
     let info = ilex_devkit::cmd::output(
         std::process::Command::new("qemu-img")
             .args(["info", "--output=json"])
@@ -185,9 +179,9 @@ pub fn write_metadata(ws: &Workspace, a: &Args, disk: &std::path::Path) -> Resul
     virtual_bytes: info["virtual-size"].as_u64().unwrap(),
     allocated_bytes: info["actual-size"].as_u64().context("disk allocation size missing")?,
     sector_bytes: 512,
-    image: core::ImageIdentity { executor_id: executor.clone(), local_reference: image.clone(),
-        immutable_id: ilex_devkit::bcvk::image_id(&image)?,
-        registry_digest: Some(ilex_devkit::image::image_digest(&image)?).filter(|s| !s.is_empty()),
+    image: core::ImageIdentity { executor_id: executor.clone(), local_reference: image.into(),
+        immutable_id: ilex_devkit::bcvk::image_id(image)?,
+        registry_digest: Some(ilex_devkit::image::image_digest(image)?).filter(|s| !s.is_empty()),
         architecture: core::Architecture::X86_64 },
     install_recipe_hash: core::digest(serde_json::to_vec(&serde_json::json!({"bcvk":"0.22.0","format":format,"size":a.size,"firmware":"uefi"}))?.as_slice()),
     firmware: core::Firmware::Uefi,
