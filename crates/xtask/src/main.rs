@@ -9,9 +9,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ilex_devkit::Workspace;
 
+mod apps;
 mod build;
 mod builder;
-mod apps;
 mod changed;
 mod dev_image;
 mod disk;
@@ -26,8 +26,10 @@ mod registry;
 mod remote;
 mod remote_worker;
 mod runtime;
-mod select;
 mod security;
+#[cfg(target_os = "windows")]
+mod security_windows;
+mod select;
 mod test;
 mod tool;
 mod vm;
@@ -126,6 +128,14 @@ fn run(cmd: Cmd) -> Result<()> {
             // Reject invalid selection before building the native viewer or
             // handing over to WSL. GUI prediction inspects Linux image labels.
             let resolved = args.resolve(&ws)?;
+            if args.secure {
+                #[cfg(target_os = "windows")]
+                return security_windows::vm(&ws, args, resolved);
+                #[cfg(not(target_os = "windows"))]
+                anyhow::bail!(
+                    "vm --secure selects the Windows Hyper-V provider; use xtask security on Linux"
+                );
+            }
             #[cfg(target_os = "windows")]
             if args.gui || args.disk {
                 return vm_windows::run(&ws, args, resolved);

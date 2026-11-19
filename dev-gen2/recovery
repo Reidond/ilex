@@ -1,0 +1,12 @@
+#!/usr/bin/bash
+set -eu
+chvt 1
+stty -echo
+trap 'stty echo' EXIT
+printf '\033[2J\033[HILEX GEN2 RECOVERY KEY\r\n'
+IFS= read -r -t 360 recovery
+# Public, single-purpose fixture input. There is no LUKS or user password here.
+[[ "$recovery" == ilex-gen2-recovery-410625 ]]
+install -d -m 0700 /var/lib/ilex-gen2
+printf '%s\n' "$(cat /proc/sys/kernel/random/boot_id)" > /var/lib/ilex-gen2/recovery-ok
+printf 'RECOVERY KEY ACCEPTED\r\n'

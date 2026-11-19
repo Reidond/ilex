@@ -11,6 +11,7 @@
 //! The CLI (`main.rs`) and the MCP server ([`mcp`]) are thin wrappers; the
 //! e2e `graphical::` tier uses the same library.
 
+pub mod attached;
 pub mod backend;
 pub mod image;
 pub mod keys;
@@ -153,13 +154,16 @@ impl Vmctl {
             // Provisioning is separate from profile evidence and current QMP state.
             if self.info.accelerator == Accelerator::Tcg {
                 caps.provider = "linux-qemu-tcg".into();
-                caps.features.insert(Capability::Start, CapabilityStatus::Available);
+                caps.features
+                    .insert(Capability::Start, CapabilityStatus::Available);
             }
             if self.info.secure_boot {
-                caps.provisioning.insert(Capability::FirmwareEnforcement, CapabilityStatus::Available);
+                caps.provisioning
+                    .insert(Capability::FirmwareEnforcement, CapabilityStatus::Available);
             }
             if self.info.persistent_tpm {
-                caps.provisioning.insert(Capability::PersistentTpm, CapabilityStatus::Available);
+                caps.provisioning
+                    .insert(Capability::PersistentTpm, CapabilityStatus::Available);
             }
             ilex_devkit::qualification::runtime(&self.info, &mut caps);
         }
@@ -358,41 +362,51 @@ impl Vmctl {
     /// Poll screenshots until `cond` holds or `timeout` passes. Returns the
     /// frame that satisfied it (PNG bytes and decoded).
     pub fn wait_screen(&self, cond: &WaitCond, timeout: Duration) -> Result<(Vec<u8>, Frame)> {
-        let cond = cond.normalized();
-        let started = Instant::now();
-        let mut first: Option<u64> = None;
-        let mut last: Option<(u64, Instant)> = None;
-        loop {
-            let png = self.screenshot_png()?;
-            let frame = Frame::decode(&png)?;
-            let fp = frame.fingerprint();
-            first.get_or_insert(fp);
-            let since = match last {
-                Some((prev, since)) if prev == fp => since,
-                _ => Instant::now(),
-            };
-            last = Some((fp, since));
-
-            let ok = (!cond.nonblank || !frame.is_blank())
-                && cond.size.is_none_or(|s| s == (frame.width, frame.height))
-                && (!cond.changed || Some(fp) != first)
-                && cond.stable.is_none_or(|s| since.elapsed() >= s);
-            if ok {
-                return Ok((png, frame));
-            }
-            if started.elapsed() > timeout {
-                bail!(
-                    "screen did not reach {cond:?} within {timeout:?} (last frame {}x{}, {:.1}% one colour; \
-                     a size that never changes means the guest never switched modes)",
-                    frame.width,
-                    frame.height,
-                    frame.dominant_fraction() * 100.0
-                );
-            }
-            thread::sleep(Duration::from_millis(1000));
-        }
+        wait_screen(cond, timeout, || self.screenshot_png())
     }
+}
 
+fn wait_screen(
+    cond: &WaitCond,
+    timeout: Duration,
+    mut capture: impl FnMut() -> Result<Vec<u8>>,
+) -> Result<(Vec<u8>, Frame)> {
+    let cond = cond.normalized();
+    let started = Instant::now();
+    let mut first: Option<u64> = None;
+    let mut last: Option<(u64, Instant)> = None;
+    loop {
+        let png = capture()?;
+        let frame = Frame::decode(&png)?;
+        let fp = frame.fingerprint();
+        first.get_or_insert(fp);
+        let since = match last {
+            Some((prev, since)) if prev == fp => since,
+            _ => Instant::now(),
+        };
+        last = Some((fp, since));
+
+        let ok = (!cond.nonblank || !frame.is_blank())
+            && cond.size.is_none_or(|s| s == (frame.width, frame.height))
+            && (!cond.changed || Some(fp) != first)
+            && cond.stable.is_none_or(|s| since.elapsed() >= s);
+        if ok {
+            return Ok((png, frame));
+        }
+        if started.elapsed() > timeout {
+            bail!(
+                "screen did not reach {cond:?} within {timeout:?} (last frame {}x{}, {:.1}% one colour; \
+                     a size that never changes means the guest never switched modes)",
+                frame.width,
+                frame.height,
+                frame.dominant_fraction() * 100.0
+            );
+        }
+        thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+impl Vmctl {
     // ----- pointer -----
 
     /// SDL can letterbox while the guest is still changing modes. Its human

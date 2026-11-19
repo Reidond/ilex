@@ -9,7 +9,10 @@ use std::{process::Stdio, thread, time::Duration};
 
 pub fn run(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resolved) -> Result<()> {
     if args.print_image {
-        println!("{}", crate::dev_image::reference(ws, &resolved.image));
+        println!(
+            "{}",
+            crate::dev_image::reference(ws, &resolved.image, false)
+        );
         return Ok(());
     }
     transport::install_cancel_handler()?;

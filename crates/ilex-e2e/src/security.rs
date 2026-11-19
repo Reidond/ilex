@@ -22,6 +22,7 @@ use std::{
 };
 
 mod probes;
+mod unsigned;
 
 pub fn trials() -> Vec<Trial> {
     vec![common::trial("security::firmware", run)]
@@ -237,7 +238,7 @@ fn qualify(
     let disk = vmtest::disk(ws)?;
     *stage = "platform";
     let mut fixture = Fixture::new(ws, &disk, "security-firmware", accelerator, true, true)?;
-    let mut qualification = ilex_devkit::qualification::Run::begin(ws, &fixture.spec, artifacts)?;
+    let mut qualification = ilex_devkit::qualification::begin(ws, &fixture.spec, artifacts)?;
     let mut result = (|| -> Result<()> {
         let caps = fixture.provider.probe(&fixture.spec)?;
         fs::write(
@@ -513,7 +514,7 @@ fn unsigned_control(
     stage: &mut &'static str,
 ) -> Result<()> {
     *stage = "platform";
-    let payload = unsigned_efi();
+    let payload = unsigned::serial_payload();
     ensure!(
         payload[0x98 + 112 + 4 * 8..0x98 + 112 + 5 * 8]
             .iter()
@@ -522,7 +523,7 @@ fn unsigned_control(
     );
     fs::write(artifacts.join("unsigned.efi"), &payload)?;
     let source = artifacts.join("unsigned.img");
-    fs::write(&source, fat_disk(&payload))?;
+    fs::write(&source, unsigned::fat_disk(&payload))?;
     let mut run = |secure| -> Result<serde_json::Value> {
         let label = if secure {
             "unsigned-on"
@@ -612,109 +613,4 @@ fn unsigned_control(
     })();
     fs::remove_file(source)?;
     result
-}
-
-/// Minimal position-independent x64 EFI application. It emits a serial marker
-/// and loops. Generated PE32+ has no Authenticode directory or external tools.
-fn unsigned_efi() -> Vec<u8> {
-    let mut b = vec![0u8; 1024];
-    fn u16(b: &mut [u8], at: usize, v: u16) {
-        b[at..at + 2].copy_from_slice(&v.to_le_bytes());
-    }
-    fn u32(b: &mut [u8], at: usize, v: u32) {
-        b[at..at + 4].copy_from_slice(&v.to_le_bytes());
-    }
-    b[..2].copy_from_slice(b"MZ");
-    u32(&mut b, 0x3c, 0x80);
-    b[0x80..0x84].copy_from_slice(b"PE\0\0");
-    u16(&mut b, 0x84, 0x8664);
-    u16(&mut b, 0x86, 1);
-    u16(&mut b, 0x94, 240);
-    u16(&mut b, 0x96, 0x22);
-    let o = 0x98;
-    u16(&mut b, o, 0x20b);
-    u32(&mut b, o + 4, 512);
-    u32(&mut b, o + 16, 0x1000);
-    u32(&mut b, o + 20, 0x1000);
-    b[o + 24..o + 32].copy_from_slice(&0x400000u64.to_le_bytes());
-    u32(&mut b, o + 32, 4096);
-    u32(&mut b, o + 36, 512);
-    u16(&mut b, o + 40, 6);
-    u16(&mut b, o + 48, 1);
-    u32(&mut b, o + 56, 8192);
-    u32(&mut b, o + 60, 512);
-    u16(&mut b, o + 68, 10);
-    u32(&mut b, o + 108, 16);
-    let s = o + 240;
-    b[s..s + 8].copy_from_slice(b".text\0\0\0");
-    u32(&mut b, s + 8, 512);
-    u32(&mut b, s + 12, 4096);
-    u32(&mut b, s + 16, 512);
-    u32(&mut b, s + 20, 512);
-    u32(&mut b, s + 36, 0x60000020);
-    let mut code = vec![0x66, 0xba, 0xf8, 0x03]; // mov dx, 0x3f8
-    for byte in b"ILEX-UNSIGNED-EXECUTED\r\n" {
-        code.extend([0xb0, *byte, 0xee]);
-    }
-    code.extend([0xeb, 0xfe]);
-    b[512..512 + code.len()].copy_from_slice(&code);
-    b
-}
-
-/// An MBR ESP/FAT16 fixture, avoiding loop mounts or privileged host installs.
-fn fat_disk(payload: &[u8]) -> Vec<u8> {
-    let offset = 2048 * 512;
-    let sectors = 32768usize;
-    let mut disk = vec![0u8; offset + sectors * 512];
-    disk[446 + 4] = 0xef;
-    disk[454..458].copy_from_slice(&2048u32.to_le_bytes());
-    disk[458..462].copy_from_slice(&(sectors as u32).to_le_bytes());
-    disk[510..512].copy_from_slice(&[0x55, 0xaa]);
-    let b = &mut disk[offset..];
-    b[..3].copy_from_slice(&[0xeb, 0x3c, 0x90]);
-    b[3..11].copy_from_slice(b"ILEXTEST");
-    b[11..13].copy_from_slice(&512u16.to_le_bytes());
-    b[13] = 4;
-    b[14..16].copy_from_slice(&1u16.to_le_bytes());
-    b[16] = 2;
-    b[17..19].copy_from_slice(&512u16.to_le_bytes());
-    b[19..21].copy_from_slice(&(sectors as u16).to_le_bytes());
-    b[21] = 0xf8;
-    b[22..24].copy_from_slice(&32u16.to_le_bytes());
-    b[24..26].copy_from_slice(&63u16.to_le_bytes());
-    b[26..28].copy_from_slice(&255u16.to_le_bytes());
-    b[28..32].copy_from_slice(&2048u32.to_le_bytes());
-    b[36] = 0x80;
-    b[38] = 0x29;
-    b[39..43].copy_from_slice(&1u32.to_le_bytes());
-    b[43..54].copy_from_slice(b"ILEX EFI   ");
-    b[54..62].copy_from_slice(b"FAT16   ");
-    b[510..512].copy_from_slice(&[0x55, 0xaa]);
-    for fat in [512, 33 * 512] {
-        for (i, value) in [0xfff8u16, 0xffff, 0xffff, 0xffff, 0xffff]
-            .iter()
-            .enumerate()
-        {
-            b[fat + i * 2..fat + i * 2 + 2].copy_from_slice(&value.to_le_bytes());
-        }
-    }
-    fn entry(b: &mut [u8], at: usize, name: &[u8; 11], dir: bool, cluster: u16, size: u32) {
-        b[at..at + 11].copy_from_slice(name);
-        b[at + 11] = if dir { 0x10 } else { 0x20 };
-        b[at + 26..at + 28].copy_from_slice(&cluster.to_le_bytes());
-        b[at + 28..at + 32].copy_from_slice(&size.to_le_bytes());
-    }
-    entry(b, 65 * 512, b"EFI        ", true, 2, 0);
-    let data = 97 * 512;
-    entry(b, data, b"BOOT       ", true, 3, 0);
-    entry(
-        b,
-        data + 2048,
-        b"BOOTX64 EFI",
-        false,
-        4,
-        payload.len() as u32,
-    );
-    b[data + 4096..data + 4096 + payload.len()].copy_from_slice(payload);
-    disk
 }

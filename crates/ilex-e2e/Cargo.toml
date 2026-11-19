@@ -18,6 +18,12 @@ harness = false
 ilex-devkit.workspace = true
 anyhow.workspace = true
 libtest-mimic.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 toml = "1"
 ilex-vmctl = { path = "../ilex-vmctl" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+ilex-tooling-windows.workspace = true
+crc32fast = "1"
+windows = { version = "0.62", features = ["Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams"] }

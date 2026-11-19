@@ -234,7 +234,8 @@ labels after each boot. The common image's signed in-tree amdgpu module must
 load under lockdown with no unsigned-module taint (including RX 9070 XT PCI
 alias coverage); this does not qualify physical GPU rendering. These checks
 use the existing `VmControl` interface and T6 qualification records. Native
-Windows security remains unavailable pending tooling T5's Hyper-V provider.
+Windows uses the [Hyper-V Gen2 security provider](docs/tooling/windows-gen2.md)
+with the same profile and capability types.
 `cargo xtask security --require-qualified --memory 2G` asserts an existing
 exact-profile record without starting a VM; `--self-check --memory 2G` measures
 that profile. Failures retain an unqualified result with the failing stage,
@@ -252,8 +253,9 @@ security prerequisites. Its result is explicitly `not_yet_qualified` until
 the booted-guest tier passes. `cargo xtask security --self-check` runs
 `security::firmware` against this checkout's image (`ILEX_IMAGE` can select
 the CI candidate). `--accelerator tcg` explicitly selects emulation; a failed
-KVM/SMM probe never silently changes accelerators. On Windows run these
-Linux-backend commands inside the existing WSL executor.
+KVM/SMM probe never silently changes accelerators. On Windows the security
+subcommand selects native Gen2 and accepts the exact signed installer via
+`ILEX_ISO`.
 
 The shared `VmSpec` remains the contract for part 4: `secure_boot=required`
 and `tpm=persistent { bundle_id }`, with a writable owned disk, UEFI and no
@@ -1333,9 +1335,9 @@ T3 also routes native Windows `build`, `test`, `disk`, `iso`, `tool` and `rechun
 to that builder automatically, calling idempotent `builder up` as needed.
 Install a changed controller with `builder update`; a recipe mismatch fails
 rather than executing an older controller. Accept its verified update with
-`builder accept-update`. Native security/homed tiers require T5; explicit native
-filters fail before submission. Existing legacy filter unions and trailing
-harness arguments run in Linux. Never remove the shared builder as ordinary
+`builder accept-update`. The explicit `security::firmware` tier runs on native
+Hyper-V Gen2, and legacy filters in the same invocation run in the Linux
+builder. The Windows homed tier remains unavailable. Never remove the shared builder as ordinary
 checkout cleanup.
 
 ```powershell

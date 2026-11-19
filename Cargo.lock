@@ -1335,11 +1335,15 @@ name = "ilex-e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "ilex-devkit",
+ "ilex-tooling-windows",
  "ilex-vmctl",
  "libtest-mimic",
+ "serde",
  "serde_json",
  "toml",
+ "windows",
 ]
 
 [[package]]

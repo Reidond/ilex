@@ -13,13 +13,12 @@
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
-use crate::backend as qemu;
 use anyhow::{Context, Result, bail};
 use ilex_devkit::Workspace;
 use ilex_devkit::qemu::base64;
 use serde_json::{Value, json};
 
-use crate::{Button, Vmctl, WaitCond};
+use crate::{Button, WaitCond, attached::Attached};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const DEFAULT_MAX_EDGE: u32 = 1568;
@@ -117,15 +116,15 @@ impl Server {
         }
     }
 
-    fn vm(&self, args: &Value) -> Result<Vmctl> {
+    fn vm(&self, args: &Value) -> Result<Attached> {
         let ws = self.workspace(args)?;
         let purpose = args["vm"].as_str().or(self.default_vm.as_deref());
-        Vmctl::attach(&ws, purpose)
+        Attached::attach(&ws, purpose)
     }
 
     /// Screen pixels per screenshot pixel; takes a screenshot to find out
     /// when none was returned yet.
-    fn scale(&mut self, vm: &Vmctl) -> Result<f64> {
+    fn scale(&mut self, vm: &Attached) -> Result<f64> {
         if self.mapping_invalidated {
             bail!(
                 "take a new screenshot before using screenshot coordinates after a resize or VM change"
@@ -150,7 +149,7 @@ impl Server {
     }
 
     /// Convert tool coordinates to screen pixels.
-    fn point(&mut self, vm: &Vmctl, args: &Value) -> Result<(u32, u32)> {
+    fn point(&mut self, vm: &Attached, args: &Value) -> Result<(u32, u32)> {
         let x = args["x"].as_f64().context("`x` is required")?;
         let y = args["y"].as_f64().context("`y` is required")?;
         let scale = if args["space"].as_str() == Some("screen") {
@@ -167,32 +166,18 @@ impl Server {
     fn run_tool(&mut self, name: &str, args: &Value) -> Result<Vec<Value>> {
         match name {
             "capabilities" => Ok(vec![text(&serde_json::to_string_pretty(
-                &self.vm(args)?.capabilities(),
+                &self.vm(args)?.capabilities()?,
             )?)]),
             "vm_list" => {
                 let ws = self.workspace(args)?;
-                let vms = qemu::running_vms(&ws);
+                let vms = Attached::list(&ws)?;
                 if vms.is_empty() {
                     return Ok(vec![text(&format!(
                         "No VM running for `{}`. Boot one with `cargo xtask vm --disk` (headless) or `--gui`.",
                         ws.slug
                     ))]);
                 }
-                let lines: Vec<String> = vms
-                    .iter()
-                    .map(|v| {
-                        format!(
-                            "{} ({}): display {}, configured {}x{}, ssh: {}",
-                            v.purpose,
-                            v.name,
-                            v.display,
-                            v.width,
-                            v.height,
-                            v.ssh_command_line()
-                        )
-                    })
-                    .collect();
-                Ok(vec![text(&lines.join("\n"))])
+                Ok(vec![text(&vms.join("\n"))])
             }
             "screenshot" => {
                 let vm = self.vm(args)?;
@@ -274,7 +259,7 @@ impl Server {
         }
     }
 
-    fn screenshot_result(&mut self, vm: &Vmctl, max_edge: u32) -> Result<Vec<Value>> {
+    fn screenshot_result(&mut self, vm: &Attached, max_edge: u32) -> Result<Vec<Value>> {
         let png = vm.screenshot_png()?;
         let frame = crate::Frame::decode(&png)?;
         let content = self.image_content(&frame, &png, max_edge)?;

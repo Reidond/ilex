@@ -654,6 +654,7 @@ impl Vm {
             for index in 0..limit {
                 if let Some(guard) =
                     host::try_lock(&admission_dir.join(format!("slot-{index}.lock")))?
+                    && !crate::gen2::slot_reserved(&admission_dir, index)?
                 {
                     slot = Some(guard);
                     break;

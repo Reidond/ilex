@@ -103,6 +103,15 @@ fn delivered_disk(ws: &Workspace, directory: &Path, request: &Job) -> Result<Pat
         .context("invalid disk path")?
         .replace('\\', "/");
     let _held = attempt.read(&relative)?;
+    if matches!(&request.command, Command::Disk(a) if a.gen2.is_some()) {
+        ensure!(
+            artifact.provisioning_hash == digest(b"ilex-gen2-v1;seed-host-key;seed-access-key")
+                && artifact.location.executor_id == format!("windows-owner:{}", identity.owner)
+                && artifact.location.sha256 == hash_file(&artifact.location.path)?,
+            "delivered Gen2 disk ownership, provisioning, or hash mismatch"
+        );
+        return Ok(artifact.location.path);
+    }
     ilex_tooling_windows::qemu::cache_delivered_disk(artifact, &identity, &ws.state_dir())
 }
 
@@ -144,7 +153,7 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
     )?;
     let mut staged = source::stage(ws)?;
     let mut inputs = BTreeMap::new();
-    if matches!(command, Command::Test(_))
+    if matches!(&command, Command::Test(a) if a.filters.iter().any(|f| f.contains("iso")))
         && let Some(iso) = std::env::var_os("ILEX_ISO").filter(|s| !s.is_empty())
     {
         let iso = PathBuf::from(iso);
@@ -343,7 +352,7 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
             let job: Job = control_json(&control, "request.json")?;
             ensure!(job.job == id, "local job identity mismatch");
             ws.identity()?.authorize(&job.snapshot.identity.owner)?;
-            if matches!(&job.command, Command::Disk(a) if a.development) {
+            if matches!(&job.command, Command::Disk(a) if a.development || a.gen2.is_some()) {
                 match control.read("collection.json") {
                     Ok(receipt) => {
                         drop(receipt);
@@ -619,7 +628,7 @@ fn wait(
         }
         .into());
     }
-    if matches!(&job.command, Command::Disk(a) if a.development) {
+    if matches!(&job.command, Command::Disk(a) if a.development || a.gen2.is_some()) {
         let disk = delivered_disk(ws, dir, job)?;
         println!("{}", disk.display());
         return Ok(Some(disk));

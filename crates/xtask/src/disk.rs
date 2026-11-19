@@ -65,6 +65,16 @@ pub struct Args {
     #[arg(long)]
     #[serde(default)]
     pub development: bool,
+    /// Internal request from the Windows security harness to the builder.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gen2: Option<Gen2>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Gen2 {
+    pub build: bool,
+    pub no_pull: bool,
 }
 
 /// The command line's defaults, for `xtask vm --disk`, which writes its disk
@@ -80,6 +90,7 @@ impl Default for Args {
             out: None,
             size: DEFAULT_SIZE.into(),
             development: false,
+            gen2: None,
         }
     }
 }
@@ -97,12 +108,27 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 /// Write the disk for `args` (or reuse an up-to-date one) and return its path.
 /// The image must already be built (`cargo xtask build`).
 pub fn ensure(ws: &Workspace, args: &Args) -> Result<PathBuf> {
-    let resolved = args.selection.resolve(ws, args.image.as_deref(), None)?;
-    resolved.require_match()?;
-    let image = if args.development {
-        crate::dev_image::ensure(ws, &resolved.image)?
+    let image = if let Some(gen2) = &args.gen2 {
+        let base = crate::test::image_under_test_with_reference(
+            ws,
+            &crate::test::Args {
+                selection: args.selection.clone(),
+                build: gen2.build,
+                no_pull: gen2.no_pull,
+                filters: vec![],
+                test_args: vec![],
+            },
+            args.image.clone(),
+        )?;
+        crate::dev_image::ensure(ws, &base, true)?
     } else {
-        resolved.image
+        let resolved = args.selection.resolve(ws, args.image.as_deref(), None)?;
+        resolved.require_match()?;
+        if args.development {
+            crate::dev_image::ensure(ws, &resolved.image, false)?
+        } else {
+            resolved.image
+        }
     };
     ensure_image(ws, args, &image)
 }
@@ -125,8 +151,8 @@ pub fn ensure_image(ws: &Workspace, args: &Args, image: &str) -> Result<PathBuf>
 /// Authenticated installed-disk manifest, shared by local and remote delivery.
 pub fn write_metadata(ws: &Workspace, a: &Args, disk: &std::path::Path) -> Result<()> {
     let resolved = a.selection.resolve(ws, a.image.as_deref(), None)?;
-    let image = if a.development {
-        crate::dev_image::reference(ws, &resolved.image)
+    let image = if a.development || a.gen2.is_some() {
+        crate::dev_image::reference(ws, &resolved.image, a.gen2.is_some())
     } else {
         resolved.image
     };
@@ -167,7 +193,7 @@ pub fn write_metadata(ws: &Workspace, a: &Args, disk: &std::path::Path) -> Resul
     firmware: core::Firmware::Uefi,
     // The base remains unenrolled. The existing QEMU fixture injects
     // its public key through systemd credentials at each test boot.
-    provisioning_hash: if a.development { core::digest(b"ilex-dev-session-v2;fwcfg-host-key;fwcfg-access-key") } else { core::digest(b"unenrolled-base;qemu-systemd-ssh-credentials-v1") },
+    provisioning_hash: if a.gen2.is_some() { core::digest(b"ilex-gen2-v1;seed-host-key;seed-access-key") } else if a.development { core::digest(b"ilex-dev-session-v2;fwcfg-host-key;fwcfg-access-key") } else { core::digest(b"unenrolled-base;qemu-systemd-ssh-credentials-v1") },
     location: core::ArtifactLocation { executor_id: executor, path: disk.to_path_buf(), sha256: checksum },
 };
     std::fs::write(

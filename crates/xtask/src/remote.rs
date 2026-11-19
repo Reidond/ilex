@@ -29,6 +29,27 @@ pub fn development_disk(
     .ok_or_else(|| anyhow::anyhow!("development disk was not delivered"))
 }
 
+#[cfg(target_os = "windows")]
+pub fn gen2_disk(
+    ws: &Workspace,
+    args: &crate::test::Args,
+    image: Option<String>,
+) -> Result<std::path::PathBuf> {
+    client::execute(
+        ws,
+        Command::Disk(crate::disk::Args {
+            selection: args.selection.clone(),
+            image,
+            gen2: Some(crate::disk::Gen2 {
+                build: args.build,
+                no_pull: args.no_pull,
+            }),
+            ..Default::default()
+        }),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("Gen2 disk was not delivered"))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(
     tag = "operation",
@@ -129,6 +150,17 @@ pub fn route(ws: &Workspace, cmd: crate::Cmd) -> Result<Option<crate::Cmd>> {
             crate::Cmd::Disk(a) => Command::Disk(a),
             crate::Cmd::Iso(a) if !a.due => Command::Iso(a),
             crate::Cmd::Tool(a) => Command::Tool(a),
+            crate::Cmd::Test(a) if a.filters.iter().any(|f| f.contains("security")) => {
+                let (legacy, native) = crate::security_windows::partition(a)?;
+                // Both groups run once, even if the first reports a failure.
+                let linux = legacy.map_or(Ok(()), |a| {
+                    client::execute(ws, Command::Test(a)).map(|_| ())
+                });
+                let windows = crate::security_windows::test(ws, native);
+                linux?;
+                windows?;
+                return Ok(None);
+            }
             crate::Cmd::Test(a) => Command::Test(a),
             other => return Ok(Some(other)),
         };

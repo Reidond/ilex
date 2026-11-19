@@ -4,6 +4,8 @@ pub mod builder;
 #[cfg(target_os = "windows")]
 pub mod capture;
 #[cfg(target_os = "windows")]
+pub mod gen2;
+#[cfg(target_os = "windows")]
 mod host;
 #[cfg(target_os = "windows")]
 mod private_qmp;

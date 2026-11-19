@@ -1,0 +1,21 @@
+#!/usr/bin/bash
+set -eu
+umask 077
+dir=/run/ilex-gen2
+install -d -m 0700 "$dir"
+if test -e /run/ostree-booted; then
+    mountpoint="$(mktemp -d /run/ilex-gen2-seed.XXXXXXXX)"
+    trap 'if mountpoint -q "$mountpoint"; then umount "$mountpoint"; fi; rmdir "$mountpoint"' EXIT
+    udevadm settle --timeout=20
+    mount -t iso9660 -o ro,nosuid,nodev,noexec LABEL=ILEX_GEN2 "$mountpoint"
+    install -m 0600 "$mountpoint/host.key" "$dir/ssh_host_ed25519_key"
+    install -m 0600 "$mountpoint/access.pub" "$dir/root"
+elif ! test -e "$dir/ssh_host_ed25519_key"; then
+    # bcvk installs from an ephemeral boot with its ordinary SSH credentials.
+    ssh-keygen -q -t ed25519 -N '' -f "$dir/ssh_host_ed25519_key"
+fi
+if test -e /sys/fs/selinux/enforce; then
+    chcon system_u:object_r:sshd_var_run_t:s0 "$dir"
+    chcon system_u:object_r:sshd_key_t:s0 "$dir/ssh_host_ed25519_key"
+    if test -e "$dir/root"; then chcon system_u:object_r:ssh_home_t:s0 "$dir/root"; fi
+fi

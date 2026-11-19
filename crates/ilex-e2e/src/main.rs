@@ -9,7 +9,7 @@
 #[cfg(target_os = "linux")]
 use std::panic::{self, AssertUnwindSafe};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use libtest_mimic::{Arguments, Trial};
 
 #[cfg(target_os = "linux")]
@@ -31,16 +31,29 @@ mod homed;
 mod iso;
 #[cfg(target_os = "linux")]
 mod security;
+#[cfg(target_os = "windows")]
+mod security_windows;
 #[cfg(target_os = "linux")]
 mod tool;
 #[cfg(target_os = "linux")]
 mod upgrade;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
 fn main() {
-    eprintln!(
-        "legacy e2e fixtures require Linux; on Windows use cargo xtask test to run them in the builder (native security harness follows in T5)"
-    );
+    let (filters, rest) = split_filters(std::env::args().skip(1));
+    let args = Arguments::from_iter(std::iter::once("e2e".to_string()).chain(rest));
+    let trial = security_windows::trial();
+    let trials = if filters.iter().any(|f| matches(&args, &trial, f)) {
+        vec![trial]
+    } else {
+        vec![]
+    };
+    libtest_mimic::run(&args, trials).exit();
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn main() {
+    eprintln!("ilex e2e requires Linux or Windows");
     std::process::exit(1);
 }
 
@@ -117,7 +130,7 @@ fn main() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn matches(args: &Arguments, trial: &Trial, filter: &str) -> bool {
     if args.exact {
         trial.name() == filter
@@ -128,7 +141,7 @@ fn matches(args: &Arguments, trial: &Trial, filter: &str) -> bool {
 
 /// Split the command line into positional name filters and everything else
 /// (flags and their values), which goes to libtest-mimic.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn split_filters(args: impl Iterator<Item = String>) -> (Vec<String>, Vec<String>) {
     const TAKES_VALUE: &[&str] = &[
         "--test-threads",

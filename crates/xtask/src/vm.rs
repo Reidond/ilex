@@ -58,6 +58,9 @@ pub struct Args {
     /// Boot the installed disk image (UEFI, 4K virtio-vga) instead of an ephemeral VM
     #[arg(long)]
     pub disk: bool,
+    /// Use the qualified native Hyper-V Gen2 firmware and vTPM profile
+    #[arg(long, conflicts_with_all = ["persist", "apps", "no_apps", "no_gl"])]
+    pub secure: bool,
     /// Installed disk plus a native SDL/WHPX window on Windows (GTK on Linux)
     #[arg(long)]
     pub gui: bool,

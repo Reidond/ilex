@@ -1,0 +1,16 @@
+[Unit]
+Description=Hyper-V pre-SSH keyboard qualification
+ConditionPathExists=/run/ostree-booted
+ConditionPathExists=!/var/lib/ilex-gen2/recovery-ok
+After=local-fs.target systemd-vconsole-setup.service
+Before=getty@tty1.service display-manager.service sshd.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=420
+TTYPath=/dev/tty1
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=journal
+ExecStart=/usr/libexec/ilex-gen2-recovery
+RemainAfterExit=yes

@@ -1,0 +1,10 @@
+ARG BASE
+FROM ${BASE}
+# Disposable provider fixtures only. Production and WHPX images never use this layer.
+LABEL ilex.development="gen2"
+COPY sshd.conf /etc/ssh/sshd_config.d/00-ilex-gen2.conf
+COPY sshd.service.conf /usr/lib/systemd/system/sshd.service.d/ilex-gen2.conf
+COPY recovery.service /usr/lib/systemd/system/ilex-gen2-recovery.service
+COPY --chmod=755 provision /usr/libexec/ilex-gen2-provision
+COPY --chmod=755 recovery /usr/libexec/ilex-gen2-recovery
+RUN bootc container lint --fatal-warnings

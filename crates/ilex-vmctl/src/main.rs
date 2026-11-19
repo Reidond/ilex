@@ -11,14 +11,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilex_devkit::Workspace;
-use ilex_vmctl::backend as qemu;
-use ilex_vmctl::{Button, Vmctl, WaitCond, mcp};
+use ilex_vmctl::{Button, WaitCond, attached::Attached, mcp};
 
 #[derive(Parser)]
 #[command(
     name = "ilex-vmctl",
     version,
-    about = "Screenshots and input for ilex VMs (QMP)"
+    about = "Screenshots and input for ilex VMs"
 )]
 struct Cli {
     /// Worktree slug of the VM to attach to (default: the checkout you are in; see `cargo xtask info`)
@@ -142,47 +141,29 @@ fn run(cli: Cli) -> Result<()> {
     }
     let ws = workspace(&cli.slug)?;
     if let Cmd::List = cli.cmd {
-        let vms = qemu::running_vms(&ws);
+        let vms = Attached::list(&ws)?;
         if vms.is_empty() {
             println!("no VM running for `{}`", ws.slug);
         }
         for v in vms {
-            println!(
-                "{}\t{}\tpid {}\t{}x{} {}\t{}",
-                v.purpose,
-                v.name,
-                v.pid,
-                v.width,
-                v.height,
-                v.display,
-                v.ssh_command_line()
-            );
+            println!("{v}");
         }
         return Ok(());
     }
-    let vm = Vmctl::attach(&ws, cli.vm.as_deref())?;
+    let vm = Attached::attach(&ws, cli.vm.as_deref())?;
     match cli.cmd {
         Cmd::List | Cmd::Mcp => unreachable!(),
         Cmd::Display => {
-            #[cfg(target_os = "windows")]
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&ilex_tooling_windows::session::display_info(
-                    &vm.info, None
-                )?)?
-            );
-            #[cfg(not(target_os = "windows"))]
-            anyhow::bail!("display mode inspection is provided by the native Windows dev session");
+            println!("{}", serde_json::to_string_pretty(&vm.display()?)?);
         }
         Cmd::SelfCheck => {
-            use ilex_devkit::core::VmControl;
             let first = vm.capture()?;
             std::thread::sleep(Duration::from_millis(100));
             let second = vm.capture()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
-                    &serde_json::json!({"schema":1,"vm":vm.handle(),"qmp":vm.status()?,"first_timestamp_ms":first.captured_unix_ms,"second_timestamp_ms":second.captured_unix_ms,"size":[second.width,second.height],"generation":second.generation,"coordinate_space":second.coordinate_space,"fresh":second.captured_unix_ms > first.captured_unix_ms,"capabilities":vm.capabilities()})
+                    &serde_json::json!({"schema":1,"vm":vm.handle(),"qmp":vm.status()?,"first_timestamp_ms":first.captured_unix_ms,"second_timestamp_ms":second.captured_unix_ms,"size":[second.width,second.height],"generation":second.generation,"coordinate_space":second.coordinate_space,"fresh":second.captured_unix_ms > first.captured_unix_ms,"capabilities":vm.capabilities()?})
                 )?
             );
             anyhow::ensure!(
@@ -191,13 +172,13 @@ fn run(cli: Cli) -> Result<()> {
             );
         }
         Cmd::Capabilities { json } => {
-            let capabilities = vm.capabilities();
+            let capabilities = vm.capabilities()?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&capabilities)?);
             } else {
                 println!(
                     "{}: {}",
-                    vm.info.name,
+                    vm.name(),
                     serde_json::to_string_pretty(&capabilities)?
                 );
             }

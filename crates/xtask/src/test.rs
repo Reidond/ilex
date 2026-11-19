@@ -84,6 +84,14 @@ fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
 /// The image to test, building it first when needed.
 fn image_under_test(ws: &Workspace, args: &Args) -> Result<String> {
     let requested = std::env::var("ILEX_IMAGE").ok().filter(|s| !s.is_empty());
+    image_under_test_with_reference(ws, args, requested)
+}
+
+pub(crate) fn image_under_test_with_reference(
+    ws: &Workspace,
+    args: &Args,
+    requested: Option<String>,
+) -> Result<String> {
     let resolved = args.selection.resolve(ws, requested.as_deref(), None)?;
     let machine_layer = args
         .selection

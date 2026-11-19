@@ -4,6 +4,7 @@ pub mod capability;
 pub mod config;
 pub mod identity;
 pub mod installer;
+pub mod qualification;
 pub mod request;
 pub mod snapshot;
 pub mod state;
