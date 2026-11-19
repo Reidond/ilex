@@ -173,9 +173,10 @@ diagnostics and key-free screenshots enter `artifacts/encrypted-install/`.
 Initramfs fallback input uses a private Unix socket connected to the existing
 guest UART. A separate reader records guest output only; credential bytes do
 not enter QMP arguments or the log writer. This exercises the serial password
-agent selected by the fixture's console arguments. Local tty8 completion keeps
-its private keyboard and screenshot handshake. Both credentials still pass the
-final recursive log/export scan.
+agent selected by the fixture's console arguments. Installed-guest retries
+and recovery reissue use the same private UART to feed a test-only virtual
+keyboard on VT8. The screenshot handshake still protects the recovery screen.
+Both credentials pass the final recursive log/export scan.
 Evidence is staged privately until the installer privacy gate and recursive
 artifact scan both pass. A failed run publishes its unqualified result and,
 when available, validated error codes and redacted diagnostic excerpts. The

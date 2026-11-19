@@ -1084,6 +1084,28 @@ fn guest_json(vm: &qemu::Vm, artifacts: &Path, file: &str, script: &str) -> Resu
     Ok(value)
 }
 
+fn type_at_vt(vm: &qemu::Vm, console: &mut PrivateConsole, credential: &Secret) -> Result<()> {
+    // Only the helper and the expected byte count cross SSH. The credential
+    // travels on the output-only-logged UART, then through the guest keyboard.
+    let script = format!(
+        "__name__ = 'ilex_fixture_vt_input'\n{GUEST}\nharden()\nvt_input({})",
+        credential.bytes().len()
+    );
+    let command = format!(
+        "set -eu; systemctl stop serial-getty@ttyS0.service; \
+        install -d -m 0700 /run/ilex-encrypted-test; \
+        rm -f /run/ilex-encrypted-test/vt-input-ready; \
+        systemd-run --quiet --remain-after-exit --unit=ilex-encrypted-vt-input \
+        /usr/bin/python3 -I -S -c '{}'",
+        script.replace('\'', "'\\''")
+    );
+    ensure!(vm.ssh(&command)?.status.success(), "start private VT input");
+    vm.ssh_ok("timeout 30 sh -c 'until test -f /run/ilex-encrypted-test/vt-input-ready; do sleep 0.2; done'")?;
+    console.credential(credential)?;
+    vm.ssh_ok("set -eu; timeout 45 sh -c 'until test \"$(systemctl show -p SubState --value ilex-encrypted-vt-input)\" = exited; do test \"$(systemctl show -p ActiveState --value ilex-encrypted-vt-input)\" != failed || exit 1; sleep 0.2; done'; test \"$(systemctl show -p Result --value ilex-encrypted-vt-input)\" = success; systemctl stop ilex-encrypted-vt-input; rm -f /run/ilex-encrypted-test/vt-input-ready")?;
+    Ok(())
+}
+
 fn poweroff(fixture: &mut Fixture, artifacts: &Path, label: &str) -> Result<()> {
     let vm = fixture.vm.running_mut()?;
     let _ = vm.ssh("systemctl poweroff");
@@ -1374,8 +1396,14 @@ fn check_fallback(
     if mode == "no-tpm" {
         vm.ssh_ok("chvt 8; systemd-run --quiet --remain-after-exit --unit=ilex-enroll-no-tpm-completion /usr/bin/ilex-enroll complete --root / --tty /dev/tty8").context("start no-TPM completion")?;
         vm.ssh_ok("timeout 60 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'").context("wait for no-TPM passphrase prompt")?;
-        ctl.type_text(std::str::from_utf8(credential.bytes())?)?;
-        ctl.key("ret")?;
+        type_at_vt(
+            vm,
+            fixture
+                .console
+                .as_mut()
+                .context("private console unavailable")?,
+            credential,
+        )?;
         vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'").context("wait for no-TPM completion confirmation")?;
         ctl.save_screenshot(&artifacts.join(format!("{mode}-passphrase-only.png")))?;
         ctl.key("ret")?;
@@ -1514,8 +1542,14 @@ fn interrupted_repair(
     // request explicit authenticated reissue; it must never show it again.
     vm.ssh_ok("chvt 8; systemd-run --quiet --unit=ilex-interrupted-retry /usr/bin/ilex-enroll complete --root / --tty /dev/tty8")?;
     vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
-    ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
-    ctl.key("ret")?;
+    type_at_vt(
+        vm,
+        fixture
+            .console
+            .as_mut()
+            .context("private console unavailable")?,
+        passphrase,
+    )?;
     vm.ssh_ok("timeout 180 sh -c 'until test \"$(systemctl show -p Result --value ilex-interrupted-retry)\" = exit-code; do sleep 1; done'; systemctl reset-failed ilex-interrupted-retry")?;
     let unchanged = guest_json(
         vm,
@@ -1526,8 +1560,14 @@ fn interrupted_repair(
     ensure!(unchanged == before, "ordinary retry changed fallback slots");
     vm.ssh_ok("systemd-run --quiet --remain-after-exit --unit=ilex-interrupted-reissue /usr/bin/ilex-enroll complete --root / --tty /dev/tty8 --reissue-recovery")?;
     vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
-    ctl.type_text(std::str::from_utf8(passphrase.bytes())?)?;
-    ctl.key("ret")?;
+    type_at_vt(
+        vm,
+        fixture
+            .console
+            .as_mut()
+            .context("private console unavailable")?,
+        passphrase,
+    )?;
     vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Press Enter when it is saved offline.\" /dev/vcs8; do sleep 1; done'")?;
     // Capture cells privately, move the key into locked host memory and erase
     // the transient buffers. Neither cells nor the key become an artifact or
@@ -1560,8 +1600,14 @@ fn interrupted_repair(
     )?;
     ctl.key("ret")?;
     vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Enter the saved recovery key to confirm\" /dev/vcs8; do sleep 1; done'")?;
-    ctl.type_text(std::str::from_utf8(recovery.bytes())?)?;
-    ctl.key("ret")?;
+    type_at_vt(
+        vm,
+        fixture
+            .console
+            .as_mut()
+            .context("private console unavailable")?,
+        &recovery,
+    )?;
     vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
     let mut cleared = vm.ssh("cat /dev/vcs8")?;
     let key_visible = cleared
