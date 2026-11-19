@@ -153,7 +153,7 @@ fn qualify(
         spec.resources.clone(),
         spec.boot.clone(),
     )?;
-    installer.iso = Some(iso);
+    installer.iso = Some(iso.clone());
     installer.network = NetworkIntent::User { ssh: false };
     installer.security_launch = SecurityLaunch::QualificationFixture;
     let mut vm = provider.create(installer)?;
@@ -167,14 +167,6 @@ fn qualify(
     provider.destroy_owned(&mut vm)?;
     drop(vm);
 
-    *stage = "iso_to_disk";
-    install::transition(
-        ws,
-        provider,
-        spec.resources.clone(),
-        &verified_iso()?,
-        artifacts,
-    )?;
     let mut media = Media::new(&ws.ensure_state()?.join("gen2"), &spec.run)?;
     let secret = format!("q-{}", gen2::random_id()?);
     let secret_digest = ilex_devkit::core::digest(secret.as_bytes());
@@ -338,6 +330,8 @@ fn qualify(
         Ok(())
     })();
     media.finish(provider, result)?;
+    *stage = "iso_to_disk";
+    install::transition(ws, provider, spec.resources, &iso, artifacts)?;
     let files = grep_secret(artifacts, &secret)?;
     write(
         artifacts,
@@ -399,7 +393,8 @@ fn unsigned_control(
         if !enabled {
             vm.key(&Input::Chord { codes: vec![0x25] })?;
             wait_screen(&vm, artifacts, "uefi-keyboard", BOOT, |ocr| {
-                ocr.contains("ilex uefi key received")
+                // Windows OCR reads the firmware font's V as U here.
+                ocr.contains("ilex uefi key received") || ocr.contains("ilex uefi key receiued")
             })?;
         }
         controls.push(json!({"secure_boot":enabled,"elapsed_seconds":start.elapsed().as_secs_f64(),"vm":frame.vm}));
