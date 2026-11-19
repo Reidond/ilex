@@ -21,6 +21,10 @@ expected digest. The harness verifies the ISO byte-for-byte and boots it
 against a blank 32 GiB VHDX. One trial reaches the ilex chooser. A separate
 trial installs the selected image and checks that the vTPM survives the
 disk boot. The part-4 tier covers encrypted installation and enrollment.
+The writable OEMDRV trial uses OpenSSL and `mke2fs`/`debugfs` on `PATH`.
+On hosts with those ext4 tools in an existing WSL distro, set
+`ILEX_GEN2_EXT4_WSL` to its name. Only the fixture's offline ext4 operations
+use those tools. The guest runs directly on Hyper-V.
 
 Hyper-V's local vTPM protector uses the machine's signing and encryption
 certificates in the **Shielded VM Local Certificates** store. First use
@@ -58,14 +62,25 @@ The optional SSH seed can remain attached. The test seals a TPM-bound credential
 in Anaconda's live system, writes it to the target, and unseals it after booting
 the installed system on that same VM.
 
+For writable OEMDRV, Gen2 attaches a private writable copy of the supplied
+standalone VHDX. After the powered-off transition detaches OEMDRV and before
+starting the installed disk, call `Provider::with_installer_evidence` with
+the original VM and a reader callback. It receives a raw snapshot inside
+the VM's protected state for the duration of the callback. The provider
+removes the snapshot afterward and preserves the input VHDX. PR 18 reads
+`/recovery.oaep` through its private OAEP handling and selects evidence from
+`/public` under its existing privacy gate. Keep the raw volume and recovery
+envelope in private fixture state.
+
 Private keyboard events travel over an anonymous pipe. The controller latches
 screenshot redaction before sending any sensitive event, including when the
-send fails. A consumer can latch it earlier with `Vm::conceal_console`, for
-example before the guest displays a newly generated recovery key. The owning
-harness can release capture through `Vm::acknowledge_sensitive_input` after
-checking an authenticated, public guest acknowledgement that the console is
-safe. Use `ilex-vmctl type --stdin` for private text from a pipe. The normal
-text command accepts public input in argv.
+send fails. Keep the generation returned by `Vm::send_sensitive_text` or
+`Vm::conceal_console`, for example before a guest displays a newly generated
+recovery key. Pass that generation and its authenticated, public guest marker
+to `Vm::acknowledge_sensitive_input`. A superseded generation leaves capture
+withheld. Live capability reports reflect that state. `ilex-vmctl type --stdin`
+sends private text and starts its own redaction generation. The normal text
+command accepts public input in argv.
 
 The tier reads the guest Secure Boot variables, lockdown and SHA-256 TPM
 event log over pinned SSH. It reuses the Linux PCR 7 replay and ilex identity
@@ -84,12 +99,13 @@ unavailable. From the owning checkout:
 ```powershell
 cargo xtask vm --secure --memory 6G
 ilex-vmctl --vm secure capabilities --json
-ilex-vmctl --vm secure screenshot -o secure.png
 ilex-vmctl --vm secure type ilex-gen2-recovery-410625 --enter
+ilex-vmctl --vm secure screenshot -o secure.png
 ```
 
 `vm --secure` requires an already qualified profile. The example above
-sends the public fixture response before the pinned SSH session starts.
+sends the public fixture response before the pinned SSH session starts. Wait
+for the session before taking a screenshot.
 Add `--gui` to open VMConnect.
 `ilex-vmctl` and its MCP server attach to a journaled Gen2 guest. Hyper-V's
 CIM console supplies capture and keyboard input. xtask owns the lifecycle.

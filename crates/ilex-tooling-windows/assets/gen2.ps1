@@ -147,7 +147,12 @@ switch ($r.operation) {
             if ($r.answers -like '*.iso') { Add-VMDvdDrive -VM $vm -Path $r.answers }
             if ($r.answers -like '*.vhdx') {
                 $answerDisk = Join-Path ([IO.Path]::GetDirectoryName($r.disk)) 'answers.vhdx'
-                New-VHD -Path $answerDisk -ParentPath $r.answers -Differencing | Out-Null
+                $source = Get-VHD -Path $r.answers
+                if ($source.VhdFormat -ne 'VHDX' -or $source.VhdType -notin @('Fixed','Dynamic') -or $source.ParentPath -or $source.Attached) {
+                    throw 'Gen2 OEMDRV requires an offline standalone VHDX'
+                }
+                [IO.File]::Copy($r.answers, $answerDisk, $false)
+                [IO.File]::SetAttributes($answerDisk, [IO.FileAttributes]::Normal)
                 Add-VMHardDiskDrive -VM $vm -Path $answerDisk
             }
             $sb = if ($r.secure_boot) { 'On' } else { 'Off' }
@@ -190,6 +195,19 @@ switch ($r.operation) {
         $order = @((Get-VMFirmware -VM $vm).BootOrder)
         if ($order.Count -ne 1 -or $order[0].Device.Path -ne $r.disk) { throw 'Gen2 installed disk boot order verification failed' }
         Status (Get-OwnedVM) | ConvertTo-Json -Compress
+        break
+    }
+    'installer-evidence' {
+        $vm = Get-OwnedVM
+        if ($vm.State -ne 'Off') { throw 'Gen2 installer evidence requires a powered-off VM' }
+        if (@(Get-VMHardDiskDrive -VM $vm | Where-Object Path -eq $r.answer_disk).Count) {
+            throw 'Detach the Gen2 OEMDRV with the installed boot transition before collecting evidence'
+        }
+        $disk = Get-VHD -Path $r.answer_disk
+        if ($disk.VhdFormat -ne 'VHDX' -or $disk.VhdType -notin @('Fixed','Dynamic') -or $disk.ParentPath -or $disk.Attached) {
+            throw 'Gen2 installer evidence disk must be detached and standalone'
+        }
+        '{}'
         break
     }
     'reconcile' {

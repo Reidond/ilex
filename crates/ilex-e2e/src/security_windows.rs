@@ -79,26 +79,25 @@ fn run() -> Result<()> {
     let mut stage = "media";
     let resources = spec.resources.clone();
     let mut result = qualify(&ws, &provider, spec, &artifacts, &selection, &mut stage);
-    record.finish(&result)?;
     if result.is_ok() {
         stage = "live_runtime";
-        result = qualify_live(&ws, &provider, resources, &artifacts);
-        if result.is_err() {
-            record.finish(&result)?;
-        } else {
+        result = qualify_live(&ws, &provider, resources, &artifacts, &record);
+        if result.is_ok() {
             stage = "complete";
         }
     }
-    write(&artifacts, "qualification.json", record.evidence())?;
-    write(
-        &artifacts,
-        "result.json",
-        &json!({
-            "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(),
-            "qualification":if result.is_ok() {"passed"} else {"unqualified"},
-            "error":result.as_ref().err().map(|e| format!("{e:#}"))
-        }),
-    )?;
+    record.finish_with(&result, |evidence| {
+        write(&artifacts, "qualification.json", evidence)?;
+        write(
+            &artifacts,
+            "result.json",
+            &json!({
+                "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(),
+                "qualification":if result.is_ok() {"passed"} else {"unqualified"},
+                "error":result.as_ref().err().map(|e| format!("{e:#}"))
+            }),
+        )
+    })?;
     result
 }
 
@@ -217,14 +216,17 @@ fn qualify(
             Ok(frame)
         })?;
         save_frame(artifacts, "linux-session", &session, None)?;
-        fs::write(
-            artifacts.join("linux-pointer.txt"),
-            vm.qualify_pointer(&session, session.width / 3, session.height * 2 / 3)?,
-        )?;
-        fs::write(
-            artifacts.join("session-keyboard.txt"),
-            vm.qualify_session_keyboard()?,
-        )?;
+        let pointer = vm.qualify_pointer(&session, session.width / 3, session.height * 2 / 3)?;
+        let keyboard = vm.qualify_session_keyboard()?;
+        let first_marker = format!("boot {first_id}\n");
+        ensure!(
+            [&pointer, &keyboard]
+                .iter()
+                .all(|proof| proof.starts_with(first_marker.as_bytes())),
+            "input probes did not identify their observing boot"
+        );
+        fs::write(artifacts.join("linux-pointer.txt"), pointer)?;
+        fs::write(artifacts.join("session-keyboard.txt"), keyboard)?;
         let controls = vm.capabilities()?;
         controls.require(Capability::SessionPointer)?;
         controls.require(Capability::SessionKeyboard)?;
@@ -239,6 +241,18 @@ fn qualify(
         let start = Instant::now();
         let warm_id = vm.reboot(&first_id, READY)?;
         let warm_elapsed = start.elapsed().as_secs_f64();
+        let warm_caps = vm.capabilities()?;
+        ensure!(
+            [Capability::SessionKeyboard, Capability::SessionPointer]
+                .iter()
+                .all(|cap| warm_caps.require(*cap).is_err()),
+            "a later boot inherited an earlier input receipt"
+        );
+        write(
+            artifacts,
+            "input-boot.json",
+            &json!({"observed_boot":first_id,"next_boot":warm_id,"stale_receipts_rejected":true}),
+        )?;
         probes::guest(&vm, artifacts, "warm", digest, selection)?;
         unseal(&vm)?;
         vm.poweroff(BOOT)?;
@@ -471,6 +485,7 @@ fn qualify_live(
     provider: &Provider,
     resources: Resources,
     artifacts: &Path,
+    record: &qualification::Run,
 ) -> Result<()> {
     let spec = gen2::spec(
         &ws.identity()?,
@@ -481,16 +496,29 @@ fn qualify_live(
             format: DiskFormat::Vhdx,
         },
     )?;
-    provider
-        .probe(&spec)?
-        .require(Capability::FirmwareEnforcement)?;
-    let mut vm = provider.create(spec)?;
+    let probe = || -> Result<VmCapabilities> {
+        let caps = provider.probe(&spec)?;
+        ensure!(
+            caps.require(Capability::FirmwareEnforcement).is_err()
+                && caps.require(Capability::PersistentTpm).is_err()
+                && caps
+                    .qualification
+                    .as_ref()
+                    .is_some_and(|q| q.outcome == QualificationStatus::Qualifying),
+            "provider exposed a pass during final live checks"
+        );
+        Ok(caps)
+    };
+    probe()?;
+    let mut fixture = spec.clone();
+    fixture.security_launch = SecurityLaunch::QualificationFixture;
+    let mut vm = provider.create(fixture)?;
     provider.start(&mut vm)?;
-    let running = vm.capabilities()?;
+    let running = vm.provisional_capabilities(record)?;
     running.require(Capability::FirmwareEnforcement)?;
     running.require(Capability::PersistentTpm)?;
     provider.stop(&mut vm)?;
-    let stopped = vm.capabilities()?;
+    let stopped = vm.provisional_capabilities(record)?;
     ensure!(
         stopped.runtime == VmRuntimeStatus::Stopped
             && [Capability::FirmwareEnforcement, Capability::PersistentTpm]
@@ -502,7 +530,7 @@ fn qualify_live(
     write(
         artifacts,
         "live-runtime.json",
-        &json!({"running":running,"stopped":stopped}),
+        &json!({"running":running,"stopped":stopped,"provider_during_checks":probe()?}),
     )?;
     // Windows sharing without DELETE holds the sidecar just long enough
     // to verify that a failed release retains its allocation journal.
@@ -549,6 +577,7 @@ fn qualify_live(
         !receipt.try_exists()?,
         "reconciliation left an owned slot receipt"
     );
+    probe()?;
     write(
         artifacts,
         "slot-recovery.json",
@@ -583,22 +612,61 @@ fn recovery(vm: &Vm, artifacts: &Path, label: &str, secret: &str) -> Result<(Str
         vm.guest_exec(&["true".into()]).is_err(),
         "SSH accepted before recovery input"
     );
-    vm.key(&Input::Text {
-        text: format!("{secret}\n"),
-        layout: "us".into(),
-        sensitive: true,
-    })?;
+    let redaction = vm.send_sensitive_text(format!("{secret}\n"))?;
     ensure!(
         vm.capture()
             .is_err_and(|error| error.to_string().contains("capture withheld")),
         "sensitive input did not withhold captures"
     );
     vm.audit_console_state(secret.as_bytes())?;
+    ensure!(
+        vm.capabilities()?.require(Capability::Screenshot).is_err(),
+        "capability report offered a withheld screenshot"
+    );
     let boot = vm.wait_ssh(None, READY)?;
-    vm.acknowledge_sensitive_input(
-        &["cat".into(), "/var/lib/ilex-gen2/recovery-ok".into()],
-        format!("{boot}\n").as_bytes(),
-    )?;
+    let check = ["cat".into(), "/var/lib/ilex-gen2/recovery-ok".into()];
+    let marker = format!("{boot}\n");
+    if label == "recovery-prompt" {
+        let attached = Provider::active(Workspace::discover()?.identity()?)?
+            .into_iter()
+            .find(|attached| attached.handle() == vm.handle())
+            .context("missing attached recovery test VM")?;
+        // An attached controller can supersede the original recovery even
+        // after the guest marker has been written. This sends only Return.
+        let newer = attached.send_sensitive_text("\n".into())?;
+        ensure!(
+            !vm.acknowledge_sensitive_input(&redaction, &check, marker.as_bytes())?,
+            "an old acknowledgement cleared newer input"
+        );
+        ensure!(
+            attached
+                .capabilities()?
+                .require(Capability::Screenshot)
+                .is_err()
+                && attached.capture().is_err(),
+            "attached client could capture during a newer redaction"
+        );
+        let clear = [
+            "sh".into(),
+            "-ec".into(),
+            r"printf '\033[2J\033[H' > /dev/tty1; printf cleared".into(),
+        ];
+        ensure!(
+            vm.acknowledge_sensitive_input(&newer, &clear, b"cleared")?,
+            "current redaction acknowledgement failed"
+        );
+        attached.capabilities()?.require(Capability::Screenshot)?;
+        write(
+            artifacts,
+            "capture-generation.json",
+            &json!({"stale_ack_rejected":true,"attached_capture_withheld":true,"current_ack_restored_capture":true}),
+        )?;
+    } else {
+        ensure!(
+            vm.acknowledge_sensitive_input(&redaction, &check, marker.as_bytes())?,
+            "recovery redaction was superseded"
+        );
+    }
     Ok((boot, prompt))
 }
 
@@ -746,7 +814,10 @@ impl Media {
                 "unsigned.vhdx",
                 "sealed.cred",
                 "answers.iso",
+                "answers.raw",
+                "answers.vhdx",
                 "oemdrv/ks.cfg",
+                "oemdrv/recovery.pub",
                 "backing.raw",
                 "backed.qcow2",
                 "external.qcow2",

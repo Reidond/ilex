@@ -225,6 +225,7 @@ pub fn vm(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resolv
     });
     let mut vm = provider.create(spec)?;
     let work = (|| -> Result<()> {
+        let recovery = vm.conceal_console()?;
         provider.start(&mut vm)?;
         eprintln!(
             "Gen2 VM {}. The disposable console response is documented in windows-gen2.md.",
@@ -245,13 +246,18 @@ pub fn vm(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resolv
             None
         };
         let boot = vm.wait_ssh(None, Duration::from_secs(420))?;
-        vm.acknowledge_sensitive_input(
+        let acknowledged = vm.acknowledge_sensitive_input(
+            &recovery,
             &["cat".into(), "/var/lib/ilex-gen2/recovery-ok".into()],
             format!("{boot}\n").as_bytes(),
         )?;
-        let frame = vm.capture()?;
-        if let Err(error) = vm.qualify_pointer(&frame, frame.width / 3, frame.height * 2 / 3) {
-            eprintln!("Gen2 pointer remains unqualified: {error:#}");
+        if acknowledged {
+            let frame = vm.capture()?;
+            if let Err(error) = vm.qualify_pointer(&frame, frame.width / 3, frame.height * 2 / 3) {
+                eprintln!("Gen2 pointer remains unqualified: {error:#}");
+            }
+        } else {
+            eprintln!("Gen2 capture remains withheld for newer private input");
         }
         if let Err(error) = vm.qualify_session_keyboard() {
             eprintln!("Gen2 session keyboard remains unqualified: {error:#}");

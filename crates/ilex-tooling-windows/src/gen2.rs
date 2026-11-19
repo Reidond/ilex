@@ -121,7 +121,7 @@ impl Provider {
             }
         }
         SecurityProfile {
-            protocol: 2,
+            protocol: 3,
             accelerator: spec.accelerator,
             resources: spec.resources.clone(),
             cpu_model: "hyperv-native".into(),
@@ -213,7 +213,7 @@ impl Provider {
         Ok(parent)
     }
 
-    /// Attach OEMDRV as an ISO or as an immutable VHDX with a private child.
+    /// Attach OEMDRV as an ISO or make a private writable copy of its VHDX.
     pub fn create_installer(&self, spec: VmSpec, answers: &Path) -> Result<Vm> {
         ensure!(
             spec.iso.is_some() && matches!(spec.boot, BootSource::BlankDisk { .. }),
@@ -275,6 +275,50 @@ impl Provider {
         Ok(handle)
     }
 
+    /// Read the detached, guest-written OEMDRV as a raw disk before booting
+    /// the installed system. The snapshot lives in private provider state
+    /// for the callback only. Callers extract their private recovery envelope
+    /// and select evidence under their own publication policy.
+    pub fn with_installer_evidence<T>(
+        &self,
+        vm: &mut Vm,
+        read: impl FnOnce(&Path) -> Result<T>,
+    ) -> Result<T> {
+        ensure!(
+            vm.lease.is_some()
+                && vm.installation_media.as_deref().and_then(Path::extension)
+                    == Some(std::ffi::OsStr::new("vhdx")),
+            "Gen2 installer evidence requires an owned writable OEMDRV"
+        );
+        self.inspect(vm)?;
+        let source = vm.dir.join("answers.vhdx");
+        vm.call("installer-evidence", json!({"answer_disk":source}))?;
+        let _source = bound_file(&source)?;
+        let private = vm.dir.join(format!("installer-evidence-{}", random_id()?));
+        fs::create_dir(&private)?;
+        let raw = private.join("oemdrv.raw");
+        let result = (|| {
+            let runtime_dir = runtime::fetch()?;
+            let output = host::output_owned(
+                runtime::command(&runtime_dir, "qemu-img.exe")
+                    .current_dir(&vm.dir)
+                    .args(["convert", "-f", "vhdx", "-O", "raw", "answers.vhdx"])
+                    .arg(&raw),
+                Stdio::null(),
+            )?;
+            ensure!(output.status.success(), "Gen2 OEMDRV readback failed");
+            read(&raw)
+        })();
+        let cleanup = remove_tree(&vm.dir, &private);
+        match (result, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => {
+                Err(error.context(format!("private OEMDRV cleanup failed: {cleanup:#}")))
+            }
+        }
+    }
+
     /// Supply only the recovery digest to the disposable installed-disk fixture.
     pub fn create_recovery_fixture(&self, spec: VmSpec, digest: &str) -> Result<Vm> {
         ensure!(
@@ -318,6 +362,7 @@ impl Provider {
             };
             let iso = spec.iso.as_deref().map(regular_file).transpose()?;
             let answers = answers.map(regular_file).transpose()?;
+            let _answers = answers.as_deref().map(bound_file).transpose()?;
             let seed = spec
                 .ssh
                 .as_ref()
@@ -494,6 +539,12 @@ pub struct Vm {
     view: Mutex<((u32, u32), u64)>,
 }
 
+/// A private display generation scoped to one VM and one concealment.
+pub struct ConsoleRedaction {
+    vm: String,
+    generation: String,
+}
+
 impl Vm {
     pub fn purpose(&self) -> &str {
         &self.spec.purpose
@@ -506,12 +557,16 @@ impl Vm {
     }
     /// Release capture only after an authenticated guest-side acknowledgement
     /// that the no-echo prompt consumed the input and the display is safe.
-    pub fn acknowledge_sensitive_input(&self, check: &[String], expected: &[u8]) -> Result<()> {
+    pub fn acknowledge_sensitive_input(
+        &self,
+        redaction: &ConsoleRedaction,
+        check: &[String],
+        expected: &[u8],
+    ) -> Result<bool> {
         ensure!(
-            self.lease.is_some() && !expected.is_empty(),
+            self.lease.is_some() && redaction.vm == self.resource.opaque_id && !expected.is_empty(),
             "sensitive display acknowledgement requires the owning VM and a public marker"
         );
-        let _console = host::lock(&self.dir.join("console.lock"))?;
         let actual = self
             .guest_exec(check)
             .map_err(|_| anyhow::anyhow!("sensitive console acknowledgement failed"))?;
@@ -519,22 +574,37 @@ impl Vm {
             actual == expected,
             "missing sensitive console acknowledgement"
         );
+        let _console = host::lock(&self.dir.join("console.lock"))?;
         let latch = self.dir.join("sensitive-display");
-        if latch.try_exists()? {
-            fs::remove_file(latch)?;
+        if !latch.try_exists()? || fs::read(&latch)? != redaction.generation.as_bytes() {
+            return Ok(false);
         }
-        Ok(())
+        fs::remove_file(latch)?;
+        Ok(true)
     }
 
     /// Latch screenshot redaction before a guest displays or receives a secret.
-    pub fn conceal_console(&self) -> Result<()> {
+    pub fn conceal_console(&self) -> Result<ConsoleRedaction> {
         let _console = host::lock(&self.dir.join("console.lock"))?;
         self.latch_capture()
     }
 
-    fn latch_capture(&self) -> Result<()> {
-        File::create(self.dir.join("sensitive-display"))?.sync_all()?;
-        Ok(())
+    fn latch_capture(&self) -> Result<ConsoleRedaction> {
+        let generation = random_id()?;
+        host::atomic(&self.dir.join("sensitive-display"), generation.as_bytes())?;
+        Ok(ConsoleRedaction {
+            vm: self.resource.opaque_id.clone(),
+            generation,
+        })
+    }
+
+    pub fn send_sensitive_text(&self, text: String) -> Result<ConsoleRedaction> {
+        self.send_key(&Input::Text {
+            text,
+            layout: "us".into(),
+            sensitive: true,
+        })?
+        .context("sensitive input did not obtain a display generation")
     }
 
     /// Inspect controller files during the live, redacted input self-check.
@@ -719,10 +789,10 @@ impl Vm {
             "use independent pointer targets on X and Y"
         );
         let result = self.observe_input(
+            "pointer-boot",
             &["pointer".into(), x_axis.to_string(), y_axis.to_string()],
             || self.click(frame, frame.generation, x, y),
         )?;
-        self.attest_input("pointer-boot")?;
         Ok(result)
     }
 
@@ -734,15 +804,14 @@ impl Vm {
                 "display-manager.service".into(),
             ])
         })?;
-        let result = self.observe_input(&["keyboard".into()], || {
+        self.observe_input("keyboard-boot", &["keyboard".into()], || {
             self.key(&Input::Chord { codes: vec![0x58] })
-        })?;
-        self.attest_input("keyboard-boot")?;
-        Ok(result)
+        })
     }
 
     fn observe_input(
         &self,
+        receipt: &str,
         arguments: &[String],
         send: impl FnOnce() -> Result<()>,
     ) -> Result<Vec<u8>> {
@@ -791,12 +860,17 @@ impl Vm {
             "Linux did not receive the expected Hyper-V input: {}",
             String::from_utf8_lossy(&status.stderr)
         );
+        let boot = std::str::from_utf8(&bytes)?
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("boot "))
+            .context("input observer did not report its boot")?;
+        check_run(boot)?;
+        // This ID comes from the same observer as the evdev events. A reboot
+        // between its exit and the local write cannot attest the next boot.
+        let _console = host::lock(&self.dir.join("console.lock"))?;
+        host::atomic(&self.dir.join(receipt), format!("{boot}\n").as_bytes())?;
         Ok(bytes)
-    }
-
-    fn attest_input(&self, receipt: &str) -> Result<()> {
-        let boot = self.guest_exec(&["cat".into(), "/proc/sys/kernel/random/boot_id".into()])?;
-        host::atomic(&self.dir.join(receipt), &boot)
     }
 
     fn input_available(&self, receipt: &str) -> bool {
@@ -806,6 +880,65 @@ impl Vm {
             self.guest_exec(&["cat".into(), "/proc/sys/kernel/random/boot_id".into()])
                 .is_ok_and(|current| current == boot)
         })
+    }
+
+    fn send_key(&self, input: &Input) -> Result<Option<ConsoleRedaction>> {
+        input.validate()?;
+        let event = |code, down, delay| json!({"code":code,"down":down,"delay":delay});
+        let mut events = Vec::new();
+        match input {
+            Input::PhysicalKey { code, down } => events.push(event(scan_to_vk(*code)?, *down, 0)),
+            Input::Chord { codes } => {
+                let vk = codes
+                    .iter()
+                    .copied()
+                    .map(scan_to_vk)
+                    .collect::<Result<Vec<_>>>()?;
+                for &code in &vk {
+                    events.push(event(code, true, 80));
+                }
+                for &code in vk.iter().rev() {
+                    events.push(event(code, false, 25));
+                }
+            }
+            Input::Text { text, layout, .. } => {
+                ensure!(
+                    layout == "us" && text.len() <= 128,
+                    "Gen2 supports batches of up to 128 US-ASCII keystrokes"
+                );
+                for b in text.bytes() {
+                    let (code, shift) = ascii_vk(b)?;
+                    if shift {
+                        events.push(event(0x10, true, 15));
+                    }
+                    events.push(event(code, true, 35));
+                    events.push(event(code, false, 15));
+                    if shift {
+                        events.push(event(0x10, false, 15));
+                    }
+                }
+            }
+        };
+        let _console = host::lock(&self.dir.join("console.lock"))?;
+        let sensitive = matches!(
+            input,
+            Input::Text {
+                sensitive: true,
+                ..
+            }
+        );
+        let redaction = if sensitive {
+            // Publish the redaction latch before sending any keystroke. It
+            // persists across controller processes and failed sends.
+            Some(self.latch_capture()?)
+        } else {
+            None
+        };
+        let mut body = owned_request(&self.identity, &self.spec, &self.resource, &self.dir);
+        body["events"] = json!(events);
+        body["leave_held"] = json!(matches!(input, Input::PhysicalKey { down: true, .. }));
+        request_inner(&self.dir, "keys", body, sensitive)?;
+        Ok(redaction)
     }
 
     fn click(&self, frame: &Frame, generation: u64, x: u32, y: u32) -> Result<()> {
@@ -1011,10 +1144,22 @@ impl Vm {
         );
         Ok(())
     }
-}
+    pub fn provisional_capabilities(&self, run: &qualification::Run) -> Result<VmCapabilities> {
+        let record = run.provisional_pass()?;
+        ensure!(
+            self.lease.is_some()
+                && self.spec.security_launch == SecurityLaunch::QualificationFixture
+                && self.profile == record.profile
+                && record
+                    .evidence
+                    .as_ref()
+                    .is_some_and(|e| e.owner == self.spec.owner),
+            "provisional capabilities require an owned qualification fixture of the exact profile"
+        );
+        self.live_capabilities(record)
+    }
 
-impl VmControl for Vm {
-    fn capabilities(&self) -> Result<VmCapabilities> {
+    fn live_capabilities(&self, record: SecurityQualification) -> Result<VmCapabilities> {
         let status = self.status()?;
         self.assert_configuration(&status)?;
         let mut caps = capabilities(&self.spec);
@@ -1036,11 +1181,7 @@ impl VmControl for Vm {
         } else {
             BootPhase::Boot
         };
-        let path = qualification::record_path(&self.state, &self.profile)?;
-        qualification::apply(
-            &mut caps,
-            qualification::load(&path, &self.spec.owner, &self.profile)?,
-        );
+        qualification::apply(&mut caps, record);
         qualification::restrict_live(&mut caps);
         if session_keyboard {
             caps.features
@@ -1059,9 +1200,31 @@ impl VmControl for Vm {
             caps.features
                 .insert(Capability::SessionPointer, CapabilityStatus::Available);
         }
-        let size = self.view.lock().unwrap().0;
-        caps.screenshot_dimensions = (size.0 != 0).then_some(size);
+        let _console = host::lock(&self.dir.join("console.lock"))?;
+        if self.dir.join("sensitive-display").try_exists()? {
+            caps.features.insert(
+                Capability::Screenshot,
+                CapabilityStatus::Unavailable(
+                    "capture withheld after sensitive console input".into(),
+                ),
+            );
+        } else if caps.runtime != VmRuntimeStatus::Running {
+            caps.features.insert(
+                Capability::Screenshot,
+                CapabilityStatus::Unavailable("capture requires a running VM".into()),
+            );
+        } else {
+            let size = self.view.lock().unwrap().0;
+            caps.screenshot_dimensions = (size.0 != 0).then_some(size);
+        }
         Ok(caps)
+    }
+}
+
+impl VmControl for Vm {
+    fn capabilities(&self) -> Result<VmCapabilities> {
+        let path = qualification::record_path(&self.state, &self.profile)?;
+        self.live_capabilities(qualification::load(&path, &self.spec.owner, &self.profile)?)
     }
 
     fn capture(&self) -> Result<Frame> {
@@ -1122,59 +1285,7 @@ impl VmControl for Vm {
     }
 
     fn key(&self, input: &Input) -> Result<()> {
-        input.validate()?;
-        let event = |code, down, delay| json!({"code":code,"down":down,"delay":delay});
-        let mut events = Vec::new();
-        match input {
-            Input::PhysicalKey { code, down } => events.push(event(scan_to_vk(*code)?, *down, 0)),
-            Input::Chord { codes } => {
-                let vk = codes
-                    .iter()
-                    .copied()
-                    .map(scan_to_vk)
-                    .collect::<Result<Vec<_>>>()?;
-                for &code in &vk {
-                    events.push(event(code, true, 80));
-                }
-                for &code in vk.iter().rev() {
-                    events.push(event(code, false, 25));
-                }
-            }
-            Input::Text { text, layout, .. } => {
-                ensure!(
-                    layout == "us" && text.len() <= 128,
-                    "Gen2 supports batches of up to 128 US-ASCII keystrokes"
-                );
-                for b in text.bytes() {
-                    let (code, shift) = ascii_vk(b)?;
-                    if shift {
-                        events.push(event(0x10, true, 15));
-                    }
-                    events.push(event(code, true, 35));
-                    events.push(event(code, false, 15));
-                    if shift {
-                        events.push(event(0x10, false, 15));
-                    }
-                }
-            }
-        };
-        let _console = host::lock(&self.dir.join("console.lock"))?;
-        let sensitive = matches!(
-            input,
-            Input::Text {
-                sensitive: true,
-                ..
-            }
-        );
-        if sensitive {
-            // Publish the redaction latch before sending any keystroke. It
-            // persists across controller processes and failed sends.
-            self.latch_capture()?;
-        }
-        let mut body = owned_request(&self.identity, &self.spec, &self.resource, &self.dir);
-        body["events"] = json!(events);
-        body["leave_held"] = json!(matches!(input, Input::PhysicalKey { down: true, .. }));
-        request_inner(&self.dir, "keys", body, sensitive).map(|_| ())
+        self.send_key(input).map(|_| ())
     }
 
     fn pointer(&self, frame: &Frame, generation: u64, x: u32, y: u32) -> Result<()> {

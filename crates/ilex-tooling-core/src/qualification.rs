@@ -3,6 +3,7 @@ use crate::*;
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::{self, File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -53,7 +54,10 @@ fn locked(path: &Path) -> Result<File> {
 }
 fn write(path: &Path, record: &Record) -> Result<()> {
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(record)?)?;
+    let mut file = File::create(&temporary)?;
+    file.write_all(&serde_json::to_vec_pretty(record)?)?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(temporary, path)?;
     Ok(())
 }
@@ -112,6 +116,15 @@ impl Run {
         })
     }
     pub fn finish(&mut self, result: &Result<()>) -> Result<()> {
+        self.finish_with(result, |_| Ok(()))
+    }
+
+    /// Persist the final record only after the caller has written its evidence.
+    pub fn finish_with(
+        &mut self,
+        result: &Result<()>,
+        evidence: impl FnOnce(&SecurityQualification) -> Result<()>,
+    ) -> Result<()> {
         let _lock = locked(&self.path)?;
         let current = load(
             &self.path,
@@ -139,9 +152,21 @@ impl Run {
             .as_mut()
             .unwrap()
             .recorded_unix_ms = now()?;
+        evidence(&self.record.qualification)?;
         write(&self.path, &self.record)?;
         self.finished = true;
         Ok(())
+    }
+
+    /// Exercise live restrictions without publishing a provider-wide verdict.
+    pub fn provisional_pass(&self) -> Result<SecurityQualification> {
+        ensure!(
+            !self.finished && self.record.qualification.outcome == QualificationStatus::Qualifying,
+            "provisional evidence requires a pending qualification"
+        );
+        let mut provisional = self.record.qualification.clone();
+        provisional.outcome = QualificationStatus::Passed;
+        Ok(provisional)
     }
     pub fn evidence(&self) -> &SecurityQualification {
         &self.record.qualification
