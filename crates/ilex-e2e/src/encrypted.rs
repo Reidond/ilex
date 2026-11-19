@@ -1155,7 +1155,9 @@ fn fallback(
     };
     // This negative has a separate identity. It measures fallback behavior and
     // cannot mint a passing T6 firmware/TPM qualification for a different profile.
-    spec.security_launch = ilex_devkit::core::SecurityLaunch::QualificationFixture;
+    if !local_diagnostic {
+        spec.security_launch = ilex_devkit::core::SecurityLaunch::QualificationFixture;
+    }
     spec.boot = ilex_devkit::core::BootSource::Disk {
         path: disk,
         format: ilex_devkit::core::DiskFormat::Qcow2,
