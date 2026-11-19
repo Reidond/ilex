@@ -131,10 +131,11 @@ fn qualify(
     provider.destroy_owned(&mut vm)?;
     drop(vm);
 
-    *stage = "installed_disk";
-    // These files are outside evidence so a large disposable disk cannot be
-    // accidentally attached to a PR. Parent deletion follows guest teardown.
     let media = Media::new(&ws.ensure_state()?.join("gen2"), &spec.run)?;
+    *stage = "unsigned_control";
+    unsigned_control(ws, provider, artifacts, &media, &spec.resources)?;
+
+    *stage = "installed_disk";
     let parent = provider.installed_parent(&source, &disk.location.sha256)?;
     spec.boot = BootSource::Disk {
         path: parent,
@@ -188,13 +189,11 @@ fn qualify(
     vm.download(CREDENTIAL, &ciphertext)?;
     let sealed_hash = file_digest(&ciphertext)?;
     let start = Instant::now();
-    vm.reboot()?;
-    let warm_id = vm.wait_ssh(Some(&first_id), READY)?;
+    let warm_id = vm.reboot(&first_id, READY)?;
     let warm_elapsed = start.elapsed().as_secs_f64();
     probes::guest(&vm, artifacts, "warm", digest, selection)?;
     unseal(&vm)?;
-    vm.guest_exec(&["systemctl".into(), "--no-block".into(), "poweroff".into()])?;
-    vm.wait_off(BOOT)?;
+    vm.poweroff(BOOT)?;
     provider.stop(&mut vm)?;
     let start = Instant::now();
     provider.start(&mut vm)?;
@@ -266,7 +265,28 @@ fn qualify(
     provider.destroy_owned(&mut fresh)?;
     drop(fresh);
 
-    *stage = "unsigned_control";
+    media.cleanup()?;
+    *stage = "complete";
+    write(
+        artifacts,
+        "milestones.json",
+        &json!({
+            "resources":spec.resources,"installer_to_chooser_seconds":iso_elapsed,"installer_vm":booted.vm,
+            "first_ssh_seconds":first_elapsed,"warm_ssh_seconds":warm_elapsed,"cold_ssh_seconds":cold_elapsed,
+            "fresh_ssh_seconds":fresh_elapsed,"first_boot":first_id,"warm_boot":warm_id,"cold_boot":cold_id,
+            "positive_vm":positive,"credential_sha256":sealed_hash,"cleanup":"All test VM UUIDs absent; owned VHDX/firmware/vTPM directories deleted"
+        }),
+    )?;
+    Ok(())
+}
+
+fn unsigned_control(
+    ws: &Workspace,
+    provider: &Provider,
+    artifacts: &Path,
+    media: &Media,
+    resources: &Resources,
+) -> Result<()> {
     let raw = media.0.join("unsigned.raw");
     let parent = media.0.join("unsigned.vhdx");
     let (payload, image) = unsigned::image();
@@ -282,7 +302,7 @@ fn qualify(
         let mut control = gen2::spec(
             &ws.identity()?,
             label,
-            spec.resources.clone(),
+            resources.clone(),
             BootSource::Disk {
                 path: parent.clone(),
                 format: DiskFormat::Vhdx,
@@ -314,20 +334,7 @@ fn qualify(
         artifacts,
         "unsigned-controls.json",
         &json!({"controls":controls,"payload_sha256":ilex_devkit::core::digest(&payload)}),
-    )?;
-    media.cleanup()?;
-    *stage = "complete";
-    write(
-        artifacts,
-        "milestones.json",
-        &json!({
-            "resources":spec.resources,"installer_to_chooser_seconds":iso_elapsed,"installer_vm":booted.vm,
-            "first_ssh_seconds":first_elapsed,"warm_ssh_seconds":warm_elapsed,"cold_ssh_seconds":cold_elapsed,
-            "fresh_ssh_seconds":fresh_elapsed,"first_boot":first_id,"warm_boot":warm_id,"cold_boot":cold_id,
-            "positive_vm":positive,"credential_sha256":sealed_hash,"cleanup":"All test VM UUIDs absent; owned VHDX/firmware/vTPM directories deleted"
-        }),
-    )?;
-    Ok(())
+    )
 }
 
 fn exec(vm: &Vm, script: &str) -> Result<Vec<u8>> {

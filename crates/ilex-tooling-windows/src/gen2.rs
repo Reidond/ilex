@@ -432,10 +432,18 @@ impl Vm {
         })
     }
 
-    pub fn reboot(&mut self) -> Result<()> {
-        self.guest_exec(&["systemctl".into(), "--no-block".into(), "reboot".into()])?;
+    pub fn reboot(&mut self, old_boot: &str, timeout: Duration) -> Result<String> {
+        let requested =
+            self.guest_exec(&["systemctl".into(), "--no-block".into(), "reboot".into()]);
         self.view.lock().unwrap().0 = (0, 0);
-        Ok(())
+        let boot = self.wait_ssh(Some(old_boot), timeout);
+        power_transition(requested, boot)
+    }
+
+    pub fn poweroff(&self, timeout: Duration) -> Result<()> {
+        let requested =
+            self.guest_exec(&["systemctl".into(), "--no-block".into(), "poweroff".into()]);
+        power_transition(requested, self.wait_off(timeout))
     }
 
     /// Acknowledgement of a WMI method alone is insufficient. The fixture
@@ -702,8 +710,13 @@ impl VmProvider for Provider {
                 if let Err(error) = self.cleanup_run(&run) {
                     eprintln!("Gen2 cleanup: {error:#}");
                 }
-            } else if !dir.join("config/Virtual Machines").exists() {
+            } else if !dir.join("config").try_exists()? {
                 remove_tree(&self.state, &dir)?;
+            } else {
+                eprintln!(
+                    "Gen2 allocation has no UUID receipt; retained {}",
+                    dir.display()
+                );
             }
         }
         prepare
@@ -1231,6 +1244,15 @@ fn shell_command(argv: &[String]) -> Result<String> {
         .map(|s| format!("'{}'", s.replace('\'', "'\\''")))
         .collect::<Vec<_>>()
         .join(" "))
+}
+
+fn power_transition<T>(requested: Result<Vec<u8>>, observed: Result<T>) -> Result<T> {
+    // sshd may be stopped before it can acknowledge a successful power request.
+    // The observed VM state or changed authenticated boot ID is authoritative.
+    observed.map_err(|error| match requested {
+        Ok(_) => error,
+        Err(request) => error.context(format!("power request also failed: {request:#}")),
+    })
 }
 
 fn now() -> Result<u64> {

@@ -35,8 +35,8 @@ the chosen ilex image. The test delivers a disposable US-layout key to the
 guest virtual console before SSH becomes available. The guest records its
 boot ID when it accepts the key. A private read-only seed ISO provides an
 ephemeral client key and pinned host identity to the installed fixture.
-The shared Fedora builder receives neither private key. The ISO installer
-boot uses the exact supplied installer media and does not load the probe layer.
+Both private keys stay in the checkout's local VM state. A separate guest
+boots the exact installer ISO from its SCSI DVD drive.
 
 The tier reads the guest Secure Boot variables, lockdown and SHA-256 TPM
 event log over pinned SSH. It reuses the Linux PCR 7 replay and ilex identity
@@ -61,8 +61,8 @@ ilex-vmctl --vm secure type ilex-gen2-recovery-410625 --enter
 
 `vm --secure` requires an already qualified profile. It prints the fixture
 key before opening a pinned SSH session. Add `--gui` to open VMConnect.
-`ilex-vmctl` and its MCP server attach to a journaled Gen2 guest without
-starting or stopping it. Gen2 capture and keyboard do not require VMConnect.
+`ilex-vmctl` and its MCP server attach to a journaled Gen2 guest. Hyper-V's
+CIM console supplies capture and keyboard input. xtask owns the lifecycle.
 
 Evidence lands in `<state dir>/artifacts/gen2-security/<run UUID>` or the
 corresponding tier under `ILEX_ARTIFACTS`. A profile qualifies only after
