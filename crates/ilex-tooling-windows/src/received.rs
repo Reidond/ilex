@@ -4,15 +4,17 @@
 //! already anchored operation. Existing links are rejected before data I/O.
 use anyhow::{Context, Result, ensure};
 use std::os::windows::{
-    ffi::OsStrExt,
+    ffi::{OsStrExt, OsStringExt},
     fs::OpenOptionsExt,
     io::{AsRawHandle, FromRawHandle},
 };
 use std::{
+    ffi::OsString,
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf, Prefix},
 };
+use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
 use windows_sys::Win32::Storage::FileSystem::*;
 
 pub struct Directory {
@@ -23,6 +25,10 @@ pub struct Directory {
 pub struct BoundFile {
     pub file: File,
     _parent: Directory,
+}
+pub struct DirectoryEntry {
+    pub name: String,
+    pub is_directory: bool,
 }
 #[repr(C)]
 struct IoStatus {
@@ -238,6 +244,83 @@ fn open_relative(
     Ok(file)
 }
 
+fn read_directory_entries(handle: &File) -> Result<Vec<DirectoryEntry>> {
+    use std::mem::{offset_of, size_of_val};
+    const NAME: usize = offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+    let mut buffer = [0u64; 2048]; // Directory records require 8-byte alignment.
+    let mut class = FileIdBothDirectoryRestartInfo;
+    let mut entries = Vec::new();
+    loop {
+        buffer.fill(0);
+        let size = size_of_val(&buffer);
+        // The API fills a chain of records in this caller-owned buffer.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                handle.as_raw_handle().cast(),
+                class,
+                buffer.as_mut_ptr().cast(),
+                size as u32,
+            )
+        } == 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                return Ok(entries);
+            }
+            return Err(error).context("enumerating artifact directory by handle");
+        }
+        class = FileIdBothDirectoryInfo;
+        // The initialized u64 storage can also be read as bytes.
+        let mut remaining =
+            unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), size) };
+        loop {
+            ensure!(remaining.len() >= NAME, "truncated directory record");
+            let field = |at| u32::from_le_bytes(remaining[at..at + 4].try_into().unwrap());
+            let next = field(offset_of!(FILE_ID_BOTH_DIR_INFO, NextEntryOffset)) as usize;
+            let length = field(offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength)) as usize;
+            let attributes = field(offset_of!(FILE_ID_BOTH_DIR_INFO, FileAttributes));
+            ensure!(
+                length > 0 && length.is_multiple_of(2) && length <= remaining.len() - NAME,
+                "invalid directory entry name length"
+            );
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+                let name: Vec<u16> = remaining[NAME..NAME + length]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_le_bytes)
+                    .collect();
+                let name = String::from_utf16(&name).context("invalid artifact filename")?;
+                if name != "." && name != ".." {
+                    entries.push(DirectoryEntry {
+                        name,
+                        is_directory: attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                    });
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            ensure!(
+                next.is_multiple_of(8) && next >= NAME + length && next <= remaining.len(),
+                "invalid next directory record offset"
+            );
+            remaining = &remaining[next..];
+        }
+    }
+}
+
+fn normalize_unc_marker(path: &Path) -> Option<PathBuf> {
+    let marker = path.as_os_str().as_encoded_bytes().get(..8)?;
+    if marker == br"\\?\UNC\" || !marker.eq_ignore_ascii_case(br"\\?\UNC\") {
+        return None;
+    }
+    let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
+    wide[4..7].copy_from_slice(&[b'U'.into(), b'N'.into(), b'C'.into()]);
+    Some(OsString::from_wide(&wide).into())
+}
+
 impl Directory {
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_root(path, true)
@@ -249,24 +332,29 @@ impl Directory {
     }
 
     fn open_root(path: &Path, create_directories: bool) -> Result<Self> {
-        let absolute = std::path::absolute(path)?;
+        let normalized = normalize_unc_marker(path);
+        let absolute = std::path::absolute(normalized.as_deref().unwrap_or(path))?;
         let mut parts = absolute.components();
         let Component::Prefix(prefix) = parts.next().context("artifact root has no volume")? else {
             anyhow::bail!("artifact root has no volume");
         };
+        let unc = matches!(
+            prefix.kind(),
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share)
+                if !server.is_empty() && !share.is_empty()
+        );
         ensure!(
             matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
-                || (!create_directories
-                    && matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))),
+                || (!create_directories && unc),
             "unsafe Windows output volume"
         );
-        let root = parts.next().context("artifact root is not absolute")?;
+        let root = parts.next();
         ensure!(
-            matches!(root, Component::RootDir),
+            matches!(root, Some(Component::RootDir)) || (unc && root.is_none()),
             "artifact root is not absolute"
         );
         let mut volume = PathBuf::from(prefix.as_os_str());
-        volume.push(root.as_os_str());
+        volume.push(r"\");
         let handle = OpenOptions::new()
             .read(true)
             .access_mode(FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
@@ -332,6 +420,15 @@ impl Directory {
     pub fn child(&self, name: &str) -> Result<Self> {
         relative(name)?;
         self.descend(Path::new(name))
+    }
+
+    /// List regular entries on the held directory handle, skipping reparse points.
+    pub fn entries(&mut self) -> Result<Vec<DirectoryEntry>> {
+        let handle = self._guards.last().context("missing directory handle")?;
+        check(handle, true)?;
+        let entries = read_directory_entries(handle)?;
+        check(handle, true)?;
+        Ok(entries)
     }
     fn file(&self, name: &str, create: bool, append: bool) -> Result<BoundFile> {
         ensure!(
@@ -468,7 +565,13 @@ pub fn self_check_reparse_race(held: &Directory, target: &Directory) -> Result<s
                 == std::fs::canonicalize(std::env::temp_dir())?,
         "reparse fault injection requires the disposable receiver self-check tree"
     );
-    check(held._guards.last().unwrap(), true)?;
+    let held_handle = held._guards.last().unwrap();
+    check(held_handle, true)?;
+    ensure!(
+        read_directory_entries(held_handle)?.is_empty()
+            && !read_directory_entries(target._guards.last().unwrap())?.is_empty(),
+        "enumeration race fixture requires an empty original and a populated target"
+    );
     let file = OpenOptions::new()
         .access_mode(FILE_WRITE_ATTRIBUTES)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
@@ -504,8 +607,10 @@ pub fn self_check_reparse_race(held: &Directory, target: &Directory) -> Result<s
     let mut mutation = ReparseMutation { file, active: true };
     // Inject *after* the parent's normal attribute check and before the exact
     // syscall used in production. No second path lookup may follow this tag.
+    let listing = read_directory_entries(held_handle);
+    let enumeration_confined = listing.as_ref().map_or(true, Vec::is_empty);
     let opened = open_relative_raw(
-        held._guards.last().unwrap(),
+        held_handle,
         std::ffi::OsStr::new("race-probe.bin"),
         FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
         0,
@@ -519,17 +624,18 @@ pub fn self_check_reparse_race(held: &Directory, target: &Directory) -> Result<s
             .downcast_ref::<std::io::Error>()
             .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
     });
-    let parent_rejected = check(held._guards.last().unwrap(), true).is_err();
+    let parent_rejected = check(held_handle, true).is_err();
     mutation.clear()?;
-    check(held._guards.last().unwrap(), true)?;
+    check(held_handle, true)?;
     let original = !opened_ok || held.read("race-probe.bin").is_ok();
     ensure!(
-        outside_absent && parent_rejected && original,
-        "in-place junction redirected native child creation"
+        enumeration_confined && outside_absent && parent_rejected && original,
+        "in-place junction redirected native directory I/O"
     );
     Ok(
         serde_json::json!({"tag_mutation_succeeded":true,"raw_relative_open_succeeded":opened_ok,
-        "outside_entry_absent":outside_absent,"parent_recheck_rejected":parent_rejected,"relative_open_confined":original,"tag_cleanup_verified":true}),
+        "outside_entry_absent":outside_absent,"parent_recheck_rejected":parent_rejected,"relative_open_confined":original,
+        "handle_enumeration_succeeded":listing.is_ok(),"handle_enumeration_confined":enumeration_confined,"tag_cleanup_verified":true}),
     )
 }
 fn ioctl(file: &File, code: u32, bytes: &[u8]) -> Result<()> {

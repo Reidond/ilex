@@ -11,7 +11,6 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::Read,
-    os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -733,7 +732,6 @@ fn ocr_pixels(
 
 fn grep_secret(root: &Path, secret: &str, envelope: Option<&[u8]>) -> Result<usize> {
     use windows::{Globalization::Language, Media::Ocr::OcrEngine, core::HSTRING};
-    const REPARSE_POINT: u32 = 0x400;
     ensure!(
         !secret.is_empty() && envelope.is_none_or(|bytes| !bytes.is_empty()),
         "privacy scan requires nonempty patterns"
@@ -743,25 +741,14 @@ fn grep_secret(root: &Path, secret: &str, envelope: Option<&[u8]>) -> Result<usi
     let utf16: Vec<_> = secret.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let mut pending = vec![Directory::open_existing(root)?];
     let mut scanned = 0;
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory.path)? {
-            let entry = entry?;
-            let path = entry.path();
-            let meta = fs::symlink_metadata(&path)?;
-            if meta.file_attributes() & REPARSE_POINT != 0 {
-                continue;
-            }
-            let name = entry.file_name();
-            let name = name.to_str().context("invalid artifact filename")?;
-            if meta.is_dir() {
-                pending.push(directory.child(name)?);
-                continue;
-            }
-            if !meta.is_file() {
+    while let Some(mut directory) = pending.pop() {
+        for entry in directory.entries()? {
+            if entry.is_directory {
+                pending.push(directory.child(&entry.name)?);
                 continue;
             }
             let mut bytes = Vec::new();
-            directory.read(name)?.file.read_to_end(&mut bytes)?;
+            directory.read(&entry.name)?.file.read_to_end(&mut bytes)?;
             ensure!(
                 [secret.as_bytes(), &utf16]
                     .iter()
@@ -776,7 +763,10 @@ fn grep_secret(root: &Path, secret: &str, envelope: Option<&[u8]>) -> Result<usi
                     "private OEMDRV envelope was published as an artifact"
                 );
             }
-            if path.extension().is_some_and(|ext| ext == "png") {
+            if Path::new(&entry.name)
+                .extension()
+                .is_some_and(|ext| ext == "png")
+            {
                 let frame = ilex_vmctl::Frame::decode(&bytes)?;
                 let text = ocr_pixels(&engine, &frame.rgb, frame.width, frame.height)?;
                 ensure!(
