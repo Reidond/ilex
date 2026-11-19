@@ -45,6 +45,7 @@ pub fn trials() -> Vec<Trial> {
         trial("ephemeral::agent_self_check", || {
             GROUP.run(agent_self_check)
         }),
+        trial("ephemeral::enrollment_layout", || GROUP.run(enrollment_layout)),
         trial("ephemeral::ilexctl", || GROUP.run(ilexctl)),
         trial("ephemeral::image_under_test", || {
             GROUP.run(image_under_test)
@@ -58,6 +59,17 @@ pub fn trials() -> Vec<Trial> {
         trial("ephemeral::apps_plan", || GROUP.run(apps_plan)),
         trial("ephemeral::user_profiles", || GROUP.run(user_profiles)),
     ]
+}
+
+fn enrollment_layout(vm: &EphemeralVm) -> Result<()> {
+    let script = ilex_devkit::qemu::base64(include_bytes!("encrypted/mixed-layout.sh"));
+    let out = vm
+        .ssh(&format!(
+            "printf %s {script} | base64 -d | unshare --mount --propagation private bash -se"
+        ))?
+        .ok("mixed encrypted and plaintext layouts")?;
+    println!("{}", out.stdout);
+    Ok(())
 }
 
 fn ilexctl(vm: &EphemeralVm) -> Result<()> {

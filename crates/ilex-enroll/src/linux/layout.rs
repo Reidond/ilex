@@ -1,7 +1,11 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::os::{fd::AsRawFd, unix::fs::FileTypeExt};
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{FileTypeExt, MetadataExt},
+};
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
 pub struct Layout {
@@ -9,7 +13,7 @@ pub struct Layout {
     pub device: std::path::PathBuf,
 }
 
-pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
+fn mounted_devices(path: &Path) -> Result<(String, Vec<PathBuf>)> {
     // Anaconda stacks bind mounts at the deployment root. findmnt --target
     // on util-linux 2.42 returns every matching mount, including hidden ones.
     // Ask the kernel which mount the opened directory actually belongs to;
@@ -34,15 +38,9 @@ pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
     );
     let mount = json(
         Command::new("/usr/bin/findmnt")
-            .args([
-                "--json",
-                "--evaluate",
-                "--nofsroot",
-                "--kernel=mountinfo",
-                "--id",
-            ])
+            .args(["--json", "--kernel=mountinfo", "--id"])
             .arg(mount_info.stx_mnt_id.to_string())
-            .args(["--output", "MAJ:MIN,SOURCE,FSTYPE,ID"]),
+            .args(["--output", "MAJ:MIN,FSTYPE,ID"]),
     )?;
     let mounts = mount["filesystems"].as_array().context("mount not found")?;
     ensure!(
@@ -51,17 +49,15 @@ pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
     );
     let fstype = mounts[0]["fstype"].as_str().unwrap_or_default();
     if matches!(fstype, "overlay" | "composefs") {
-        return Ok((fstype.into(), BTreeSet::new()));
+        return Ok((fstype.into(), Vec::new()));
     }
-    let device = if fstype == "btrfs" {
-        // Btrfs mount MAJ:MIN is an anonymous superblock number (e.g. 0:37),
-        // not a block device. SOURCE without its subvolume suffix identifies
-        // the backing device. Refuse multiple/missing devices rather than
-        // examining just one member of an only partly encrypted filesystem.
+    if fstype == "btrfs" {
+        // Btrfs reports an anonymous mount device and only one mount source.
+        // Use the opened filesystem's FSID to find all its block devices.
         let mut info = [0u64; 128];
         // BTRFS_IOC_FS_INFO: _IOR(0x94, 31, 1024-byte fs_info_args).
         // SAFETY: this is an aligned, zeroed 1024-byte kernel output buffer;
-        // flags are zero. num_devices is the second u64 in the stable UAPI.
+        // flags are zero. num_devices and the 16-byte FSID follow max_id.
         ensure!(
             unsafe {
                 libc::ioctl(
@@ -72,27 +68,56 @@ pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
             } == 0,
             "cannot inspect Btrfs devices"
         );
-        ensure!(info[1] == 1, "requires single-device Btrfs filesystem");
-        let source = Path::new(
-            mounts[0]["source"]
-                .as_str()
-                .context("Btrfs source missing")?,
-        );
+        let mut fsid = String::with_capacity(36);
+        use std::fmt::Write;
+        for (index, byte) in info[2]
+            .to_ne_bytes()
+            .into_iter()
+            .chain(info[3].to_ne_bytes())
+            .enumerate()
+        {
+            if [4, 6, 8, 10].contains(&index) {
+                fsid.push('-');
+            }
+            write!(fsid, "{byte:02x}")?;
+        }
+        let mut devices = BTreeSet::new();
+        for member in fs::read_dir(Path::new("/sys/fs/btrfs").join(fsid).join("devices"))
+            .context("cannot inspect Btrfs devices")?
+        {
+            let number = fs::read_to_string(member?.path().join("dev"))?;
+            ensure!(
+                devices.insert(block_path(number.trim())?),
+                "duplicate Btrfs device"
+            );
+        }
         ensure!(
-            source.starts_with("/dev") && fs::metadata(source)?.file_type().is_block_device(),
-            "Btrfs source is not a block device"
+            !devices.is_empty() && devices.len() as u64 == info[1],
+            "missing or unaccounted Btrfs devices"
         );
-        source.to_path_buf()
-    } else {
-        let number = mounts[0]["maj:min"]
-            .as_str()
-            .context("mount has no block device")?;
-        ensure!(
-            number.bytes().all(|b| b.is_ascii_digit() || b == b':'),
-            "invalid mount device"
-        );
-        Path::new("/dev/block").join(number)
-    };
+        return Ok((fstype.into(), devices.into_iter().collect()));
+    }
+    let number = mounts[0]["maj:min"]
+        .as_str()
+        .context("mount has no block device")?;
+    Ok((fstype.into(), vec![block_path(number)?]))
+}
+
+fn block_path(number: &str) -> Result<PathBuf> {
+    let (major, minor) = number.split_once(':').context("invalid mount device")?;
+    ensure!(
+        major.parse::<u32>().is_ok() && minor.parse::<u32>().is_ok(),
+        "invalid mount device"
+    );
+    let path = Path::new("/dev/block").join(number);
+    ensure!(
+        fs::metadata(&path)?.file_type().is_block_device(),
+        "mount device is not a block device"
+    );
+    Ok(path)
+}
+
+fn block_ancestry(device: &Path) -> Result<Value> {
     let blocks = json(
         Command::new("/usr/bin/lsblk")
             .args([
@@ -104,6 +129,63 @@ pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
             ])
             .arg(device),
     )?;
+    let blocks = blocks["blockdevices"]
+        .as_array()
+        .context("missing block ancestors")?;
+    ensure!(blocks.len() == 1, "ambiguous block ancestry");
+    Ok(blocks[0].clone())
+}
+
+fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
+    let children = mapping["children"]
+        .as_array()
+        .context("backing device is not a direct dm-crypt LUKS2 mapping")?;
+    ensure!(
+        mapping["type"] == "crypt" && children.len() == 1 && children[0]["fstype"] == "crypto_LUKS",
+        "backing device is not a direct dm-crypt LUKS2 mapping"
+    );
+    let backing = Path::new(
+        children[0]["name"]
+            .as_str()
+            .context("LUKS backing device missing")?,
+    );
+    let uuid = children[0]["uuid"]
+        .as_str()
+        .context("LUKS ancestor has no UUID")?;
+    let by_uuid = Path::new("/dev/disk/by-uuid").join(uuid);
+    ensure!(
+        fs::metadata(&by_uuid)?.rdev() == fs::metadata(backing)?.rdev(),
+        "LUKS UUID resolves to a different device"
+    );
+
+    let number = device.file_name().context("crypt mapping number missing")?;
+    let sysfs = Path::new("/sys/dev/block").join(number).join("dm");
+    let dm_uuid = fs::read_to_string(sysfs.join("uuid"))?;
+    ensure!(
+        dm_uuid.starts_with(&format!("CRYPT-LUKS2-{}-", uuid.replace('-', ""))),
+        "crypt mapping is not bound to its LUKS2 UUID"
+    );
+    let name = fs::read_to_string(sysfs.join("name"))?;
+    let status = run(Command::new("/usr/sbin/cryptsetup")
+        .arg("status")
+        .arg(name.trim()))?;
+    ensure!(
+        String::from_utf8_lossy(&status.stdout)
+            .lines()
+            .any(|line| line
+                .trim()
+                .strip_prefix("type:")
+                .is_some_and(|kind| kind.trim() == "LUKS2")),
+        "backing device is not an active dm-crypt LUKS2 mapping"
+    );
+    run(Command::new("/usr/sbin/cryptsetup")
+        .args(["isLuks", "--type", "luks2"])
+        .arg(backing))?;
+    Ok(())
+}
+
+pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
+    let (fstype, devices) = mounted_devices(path)?;
     fn collect(node: &Value, out: &mut BTreeSet<String>) -> Result<()> {
         if node["fstype"] == "crypto_LUKS" {
             out.insert(
@@ -121,16 +203,23 @@ pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
         Ok(())
     }
     let mut uuids = BTreeSet::new();
-    for block in blocks["blockdevices"]
-        .as_array()
-        .context("missing block ancestors")?
-    {
+    let trees = devices
+        .iter()
+        .map(|device| block_ancestry(device))
+        .collect::<Result<Vec<_>>>()?;
+    for block in &trees {
         collect(block, &mut uuids)?;
     }
-    Ok((
-        mounts[0]["fstype"].as_str().unwrap_or_default().into(),
-        uuids,
-    ))
+    if !uuids.is_empty() {
+        for (device, tree) in devices.iter().zip(&trees) {
+            verify_luks_member(device, tree)?;
+        }
+    }
+    ensure!(
+        fstype != "btrfs" || devices.len() == 1,
+        "requires single-device Btrfs filesystem"
+    );
+    Ok((fstype, uuids))
 }
 
 /// Refuse layouts with plaintext /var, encrypted boot, stacked or ambiguous
