@@ -56,14 +56,19 @@ def matches(data, expected, found):
                 break
 
 
-def public_path(path):
+def public_path(path, labels=None):
     # A path itself can contain the secret. Redact before truncating it. JSON
     # escapes control characters so a name cannot inject a serial log record.
+    path = os.fsdecode(path)
+    for alias, original in (labels or {}).items():
+        if path == alias or path.startswith(alias + '/'):
+            path = original + path[len(alias):]
+            break
     return PRIVATE_NAME.sub(b'[redacted]', os.fsencode(path)).decode(
         'utf-8', 'replace')[:160]
 
 
-def scan(roots, fingerprints, journal=False):
+def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=None):
     assert fingerprints and all(f['length'] in PATTERNS and
                                re.fullmatch('[0-9a-f]{64}', f['sha256'])
                                for f in fingerprints)
@@ -79,7 +84,7 @@ def scan(roots, fingerprints, journal=False):
         if len(result['findings']) == 24:
             result['findings_omitted'] += 1
             return
-        result['findings'].append({'rule': rule, 'path': public_path(path),
+        result['findings'].append({'rule': rule, 'path': public_path(path, path_labels),
                                    'region': region, **details})
 
     def unreadable(path, region, error=None, **details):
@@ -106,6 +111,20 @@ def scan(roots, fingerprints, journal=False):
     def walk_error(error):
         unreadable(error.filename or 'scan-root', 'directory-walk', error)
 
+    def journalctl(region, *args):
+        try:
+            return subprocess.run(['journalctl', *args], capture_output=True, check=True,
+                                  timeout=60)
+        except subprocess.CalledProcessError as error:
+            unreadable('system-journal', region, returncode=error.returncode)
+        except subprocess.TimeoutExpired:
+            unreadable('system-journal', region, error_code='timeout')
+        except OSError as error:
+            unreadable('system-journal', region, error)
+        return None
+
+    if sync_journal:
+        journalctl('journal-sync', '--sync')
     for root in roots:
         # Several target locations are optional (e.g. /var/lib/anaconda on
         # bootc). An existing directory that cannot be walked still fails.
@@ -159,14 +178,8 @@ def scan(roots, fingerprints, journal=False):
                 except READ_ERRORS as error:
                     unreadable(path, region, error)
     if journal:
-        try:
-            output = subprocess.run(['journalctl', '--no-pager', '-o', 'export'],
-                                    capture_output=True, check=True)
-        except subprocess.CalledProcessError as error:
-            unreadable('system-journal', 'journal-export', returncode=error.returncode)
-        except OSError as error:
-            unreadable('system-journal', 'journal-export', error)
-        else:
+        output = journalctl('journal-export', '--no-pager', '-o', 'export')
+        if output is not None:
             check_stream(io.BytesIO(output.stdout), 'system-journal', 'journal-export')
             result['journal_scanned'] = True
     return result

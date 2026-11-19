@@ -23,6 +23,9 @@ import tty
 PRIVATE = pathlib.Path('/run/ilex-encrypted-test')
 SEED = PRIVATE / 'seed'
 PUBLIC = SEED / 'public'
+SYSTEMD_UNITS = pathlib.Path('/run/systemd/system')
+FINAL_SCAN_UNIT = 'ilex-private-final-scan.service'
+FINAL_SCAN_TARGETS = PRIVATE / 'final-scan-targets'
 DRIVE_STEP = 'not-started'
 KEY_CODES = dict(zip(b'abcdefghijklmnopqrstuvwxyz',
                      [30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
@@ -181,13 +184,13 @@ def prepare():
     PUBLIC.mkdir(mode=0o700)
     # Anaconda calls poweroff only after its finalisation. This test-only unit
     # scans that final live/target log and kickstart set before unmounting it.
-    unit = pathlib.Path('/run/systemd/system/ilex-private-final-scan.service')
+    unit = SYSTEMD_UNITS / FINAL_SCAN_UNIT
     # Keep an active oneshot until shutdown. Stop ordering is reversed: with
-    # Before=anaconda and After=the seed mount, ExecStop runs after Anaconda
-    # stops but before the seed is unmounted. A new poweroff-start job alone
-    # would race the mount's stop job and could lose the final report.
+    # ExecStop runs after Anaconda stops and before the seed, log mounts and
+    # journald are stopped. A new poweroff-start job alone could race teardown.
     unit.write_text('[Unit]\nDefaultDependencies=no\n'
                     'Before=anaconda.service anaconda-direct.service shutdown.target\n'
+                    'After=systemd-journald.service systemd-journal-flush.service\n'
                     'Conflicts=shutdown.target\nRequiresMountsFor=' + str(SEED) + ' /tmp /var/log /var/lib/anaconda\n'
                     '[Service]\nType=oneshot\nRemainAfterExit=yes\n'
                     'TimeoutStopSec=1800\nExecStart=/usr/bin/true\n'
@@ -303,8 +306,31 @@ def scan_report(name, phase):
     stats = memory_sample()
     start = time.monotonic()
     try:
+        pinned = {}
+        mounts = {}
+        if name == 'finaliser-leak-scan.json' and (PRIVATE / 'interruption-requested').exists():
+            scope = json.loads((PRIVATE / 'interrupted-target-mounts.json').read_text())
+            pinned, mounts = scope['paths'], scope['mounts']
+            assert pinned and mounts, 'interrupted target mount snapshot missing'
+        roots = list(dict.fromkeys(pinned.get(root, root) for root in scan_roots()))
+        labels = {alias: root for root, alias in pinned.items()}
+        before = missing_mounts(mounts)
         fingerprints = json.loads((PUBLIC / 'credentials.json').read_text())
-        result = privacy_module()['scan'](scan_roots(), fingerprints, journal=True)
+        matcher = privacy_module()
+        result = matcher['scan'](roots, fingerprints, journal=True,
+                                 sync_journal=name == 'finaliser-leak-scan.json',
+                                 path_labels=labels)
+        if mounts:
+            after = missing_mounts(mounts)
+            result.update(target_directories_checked=len(labels),
+                          target_mounts_retained=not (before or after))
+            for absent, region in ((before, 'before-shutdown-scan'), (after, 'after-shutdown-scan')):
+                for path in sorted(absent):
+                    result['findings'].append({'rule': 'scan-scope-changed',
+                                               'path': matcher['public_path'](path, labels),
+                                               'region': region})
+            if before or after:
+                result['read_errors'] += 1
     except Exception as error:
         result = {'schema': 2, 'files_scanned': 0, 'images_excluded': 0,
                   'read_errors': 1, 'journal_scanned': False, 'secret_found': False,
@@ -322,6 +348,62 @@ def scan_report(name, phase):
 def require_private(result):
     assert not result['secret_found'] and not result['read_errors'] and result['journal_scanned'], (
         'private guest scan failed')
+
+
+def pinned_mounts():
+    mounts = {}
+    prefix = str(FINAL_SCAN_TARGETS) + '/'
+    for line in pathlib.Path('/proc/self/mountinfo').read_text(errors='surrogateescape').splitlines():
+        fields = line.split(' ', 5)
+        path = re.sub(r'\\([0-7]{3})', lambda encoded: chr(int(encoded[1], 8)), fields[4])
+        if path.startswith(prefix):
+            mounts[path] = int(fields[0])
+    return mounts
+
+
+def missing_mounts(expected):
+    if not expected:
+        return set()
+    current = pinned_mounts()
+    return {path for path, mount_id in expected.items() if current.get(path) != mount_id}
+
+
+def hold_interrupted_target_mounts():
+    # Anaconda can detach its target /var bind during shutdown independently
+    # of systemd's stop job. Retain references to the same mounted directories
+    # and their nested mounts so late writes remain visible through teardown.
+    FINAL_SCAN_TARGETS.mkdir()
+    canonical = {}
+    pinned = {}
+    for root in scan_roots():
+        source = pathlib.Path(root)
+        if not root.startswith('/mnt/') or not source.is_dir():
+            continue
+        resolved = source.resolve(strict=True)
+        if resolved not in canonical:
+            alias = FINAL_SCAN_TARGETS / str(len(canonical))
+            alias.mkdir()
+            subprocess.run(['mount', '--rbind', str(resolved), str(alias)], check=True)
+            subprocess.run(['mount', '--make-rprivate', str(alias)], check=True)
+            assert os.path.samestat(resolved.stat(), alias.stat()), 'wrong interrupted target bind'
+            canonical[resolved] = str(alias)
+        pinned[root] = canonical[resolved]
+    mounts = pinned_mounts()
+    assert pinned and set(pinned.values()) <= mounts.keys(), 'interrupted target bind missing'
+    drop_in = SYSTEMD_UNITS / (FINAL_SCAN_UNIT + '.d')
+    drop_in.mkdir()
+    (drop_in / '10-interrupted-target.conf').write_text(
+        '[Unit]\nRequiresMountsFor=' + ' '.join(
+            json.dumps(path.replace('%', '%%'), ensure_ascii=False) for path in sorted(mounts)) + '\n')
+    subprocess.run(['systemctl', 'daemon-reload'], check=True)
+    ordered = set(subprocess.check_output(['systemctl', 'show', '-p', 'After', '--value',
+                                           FINAL_SCAN_UNIT], text=True).split())
+    for path in mounts:
+        unit = subprocess.check_output(['systemd-escape', '--path', '--suffix=mount', path],
+                                       text=True).strip()
+        assert unit in ordered, 'interrupted target bind lacks shutdown ordering'
+    (PRIVATE / 'interrupted-target-mounts.json').write_text(
+        json.dumps({'paths': pinned, 'mounts': mounts}))
 
 
 def finalise():
@@ -497,8 +579,14 @@ def drive():
             # before acknowledgement or TPM enrollment. No fake helper or ISO.
             found = completion_pids()
             assert len(found) == 1, 'ambiguous completion process'
-            os.kill(found[0], signal.SIGKILL)
-            time.sleep(2)
+            (PRIVATE / 'interruption-requested').touch()
+            pidfd = os.pidfd_open(found[0])
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                assert select.select([pidfd], [], [], 60)[0], 'completion did not exit after SIGKILL'
+            finally:
+                os.close(pidfd)
+            marker('INTERRUPTION-EXITED')
             root = pathlib.Path('/mnt/sysroot')
             state = json.loads((root / 'var/lib/ilex/security/enrollment.json').read_text())
             assert state['state'] == 'recovery-incomplete'
@@ -514,6 +602,7 @@ def drive():
             assert tokens['tokens'][0]['keyslots'] == [str(state['recovery']['slot'])]
             assert sorted(p.name for p in (root / 'var/lib/ilex/security').iterdir()) == ['enrollment.json']
             (PUBLIC / 'interrupted-tokens.json').write_text(json.dumps(tokens))
+            hold_interrupted_target_mounts()
             (PRIVATE / 'driver-done').touch()
             finish()
             subprocess.run(['systemctl', 'poweroff'], check=True)

@@ -204,7 +204,14 @@ The install deadline defaults to three hours for explicit TCG and can be set
 with positive `ILEX_ENCRYPTED_INSTALL_TIMEOUT` seconds. Missing qualification,
 missing evidence, failure and timeout remain **unqualified**, with a failed
 stage. The interrupted trial kills the shipped completion while its first
-recovery key is visible, before acknowledgement/TPM enrollment. It boots with
+recovery key is visible, before acknowledgement/TPM enrollment, and waits for
+the killed helper to exit. An interrupted installer leaves the target
+mounted. Anaconda can detach its target `/var` bind independently of systemd
+while the shutdown scan runs. The fixture holds private recursive binds of
+the target scan directories and orders the shutdown scan before their
+unmount. They expose writes to the same filesystem through the end of the
+scan. The scanner also synchronizes journald after Anaconda stops and
+while the journal is still available. The trial then boots with
 the passphrase and the unacknowledged recovery key, checks the incomplete
 state and intact slots, verifies an ordinary retry refuses implicit reissue,
 then performs authenticated explicit reissue and boots with the new key. No
