@@ -27,6 +27,7 @@ PUBLIC = SEED / 'public'
 SYSTEMD_UNITS = pathlib.Path('/run/systemd/system')
 FINAL_SCAN_UNIT = 'ilex-private-final-scan.service'
 FINAL_SCAN_TARGETS = PRIVATE / 'final-scan-targets'
+INSTALL_TARGETS = ('/mnt/sysroot', '/mnt/sysimage')
 DRIVE_STEP = 'not-started'
 KEY_CODES = dict(zip(b'abcdefghijklmnopqrstuvwxyz',
                      [30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
@@ -46,7 +47,7 @@ def scan_roots():
     roots = ['/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/root',
              '/run/anaconda', '/run/ilex', '/run/ilex-enroll', '/var/lib/systemd/coredump',
              '/var/spool/abrt', str(PUBLIC)]
-    for target in ['/mnt/sysroot', '/mnt/sysimage']:
+    for target in INSTALL_TARGETS:
         roots.extend(target + suffix for suffix in
                      ['/etc', '/var/log', '/var/tmp', '/var/roothome',
                       '/var/lib/anaconda', '/var/lib/ilex', '/var/lib/systemd/coredump',
@@ -64,6 +65,7 @@ ERRORS = {
     'tool-failed': b'enrollment tool failed',
     'memory-lock': b'cannot lock secret memory',
     'btrfs-devices': b'requires single-device Btrfs filesystem',
+    'luks-backing': b'backing device is not a direct dm-crypt LUKS2 mapping',
     'btrfs-inspect': b'cannot inspect Btrfs devices',
     'mount-selection': b'ambiguous mount',
     'mount-id': b'cannot identify containing mount',
@@ -313,7 +315,7 @@ def scan_report(name, phase):
             scope = json.loads((PRIVATE / 'interrupted-target-mounts.json').read_text())
             pinned, mounts = scope['paths'], scope['mounts']
             assert pinned and mounts, 'interrupted target mount snapshot missing'
-        roots = list(dict.fromkeys(pinned.get(root, root) for root in scan_roots()))
+        roots = list(dict.fromkeys(scan_paths(pinned)))
         labels = {alias: root for root, alias in pinned.items()}
         before = missing_mounts(mounts)
         fingerprints = json.loads((PUBLIC / 'credentials.json').read_text())
@@ -323,7 +325,8 @@ def scan_report(name, phase):
                                  path_labels=labels)
         if mounts:
             after = missing_mounts(mounts)
-            result.update(target_directories_checked=len(labels),
+            result.update(target_directories_checked=sum(
+                              is_target_root(root) for root in scan_roots()),
                           target_mounts_retained=not (before or after))
             for absent, region in ((before, 'before-shutdown-scan'), (after, 'after-shutdown-scan')):
                 for path in sorted(absent):
@@ -369,28 +372,55 @@ def missing_mounts(expected):
     return {path for path, mount_id in expected.items() if current.get(path) != mount_id}
 
 
+def is_target_root(root):
+    return any(root.startswith(target + '/') for target in INSTALL_TARGETS)
+
+
+def scan_paths(pinned):
+    for root in scan_roots():
+        if not pinned or not is_target_root(root):
+            yield root
+            continue
+        path = pathlib.Path(root)
+        parent = next((directory for directory in path.parents if str(directory) in pinned), None)
+        if root in pinned:
+            parent = path
+        assert parent is not None, 'target scan path has no retained ancestor'
+        alias = pathlib.Path(pinned[str(parent)])
+        retained = alias / path.relative_to(parent)
+        assert retained.resolve().is_relative_to(alias), 'target scan path escaped retained mount'
+        yield str(retained)
+
+
 def hold_interrupted_target_mounts():
     global DRIVE_STEP
     # Anaconda can detach its target /var bind during shutdown independently
-    # of systemd's stop job. Retain references to the same mounted directories
-    # and their nested mounts so late writes remain visible through teardown.
+    # of systemd's stop job. Pin the target parents so directories created
+    # later still resolve on the retained filesystem during shutdown.
     DRIVE_STEP = 'bind-interrupted-target'
     FINAL_SCAN_TARGETS.mkdir()
     canonical = {}
     pinned = {}
-    for root in scan_roots():
-        source = pathlib.Path(root)
-        if not root.startswith('/mnt/') or not source.is_dir():
-            continue
+    parents = set()
+    for target in map(pathlib.Path, INSTALL_TARGETS):
+        assert target.is_dir(), 'installer target mount missing'
+        for scope in ('etc', 'var'):
+            directory = target / scope
+            parents.add(directory if directory.is_dir() else target)
+    for source in sorted(parents):
         resolved = source.resolve(strict=True)
         if resolved not in canonical:
             alias = FINAL_SCAN_TARGETS / str(len(canonical))
             alias.mkdir()
-            subprocess.run(['mount', '--rbind', str(resolved), str(alias)], check=True)
+            # When a parent is absent, the target root supplies its future
+            # directory without cloning the installer's /dev, /proc or /sys.
+            mode = '--bind' if str(source) in INSTALL_TARGETS else '--rbind'
+            subprocess.run(['mount', mode, str(resolved), str(alias)], check=True)
             subprocess.run(['mount', '--make-rprivate', str(alias)], check=True)
             assert os.path.samestat(resolved.stat(), alias.stat()), 'wrong interrupted target bind'
             canonical[resolved] = str(alias)
-        pinned[root] = canonical[resolved]
+        pinned[str(source)] = canonical[resolved]
+    list(scan_paths(pinned))  # Require coverage for every target scan path.
     DRIVE_STEP = 'verify-interrupted-target-binds'
     mounts = pinned_mounts()
     assert pinned and set(pinned.values()) <= mounts.keys(), 'interrupted target bind missing'

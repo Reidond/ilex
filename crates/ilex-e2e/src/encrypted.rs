@@ -1016,6 +1016,7 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
             "tool-failed",
             "memory-lock",
             "btrfs-devices",
+            "luks-backing",
             "btrfs-inspect",
             "mount-selection",
             "mount-id",

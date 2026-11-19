@@ -7,9 +7,12 @@ root must use single-device Btrfs, and root and `/var` must share one encrypted
 ancestor, with no disk swap or crypttab keyfile. Unsupported or ambiguous encrypted layouts stop
 completion instead of guessing a partition.
 
-Btrfs mount major/minor numbers identify anonymous superblocks, not block
-devices. Discovery uses the evaluated backing source without its subvolume
-suffix and checks the kernel's Btrfs device count before walking block ancestry.
+Btrfs mount major/minor numbers identify anonymous superblocks. Discovery uses
+the mounted filesystem's kernel FSID to enumerate every member in sysfs and
+checks the set against the kernel's device count. Each encrypted member must
+be an active dm-crypt mapping of its verified LUKS2 backing device. A
+single-member Btrfs above a linear map spanning encrypted and plaintext
+storage is rejected, as is a filesystem with mixed Btrfs members.
 The initramfs root-method recorder uses the same discovery path.
 The kernel mount ID of an opened directory selects its visible mount, so
 Anaconda's stacked bind mounts cannot select a hidden mount or make an
@@ -187,8 +190,9 @@ when available, validated error codes and redacted diagnostic excerpts. The
 fixture mirrors bounded tails of Anaconda's program, storage, packaging and
 kickstart logs over serial. It also captures the preload and enrollment
 output, LUKS header metadata and the no-TPM completion unit's journal. The
-diagnostic export redacts both generated credential formats before applying
-the fingerprint scan. Scan reports also travel over the installer serial
+diagnostic export redacts both generated credential formats, including line
+wraps, before taking bounded tails and applying the fingerprint scan. Scan
+reports also travel over the installer serial
 channel and record guest memory, writeback, swap and pressure counters.
 Screen cells and unfiltered exception text stay private.
 Disks, firmware/TPM state, private answers and signing keys are removed.
@@ -207,10 +211,11 @@ stage. The interrupted trial kills the shipped completion while its first
 recovery key is visible, before acknowledgement/TPM enrollment, and waits for
 the killed helper to exit. An interrupted installer leaves the target
 mounted. Anaconda can detach its target `/var` bind independently of systemd
-while the shutdown scan runs. The fixture holds private recursive binds of
-the target scan directories and orders the shutdown scan before their
-unmount. They expose writes to the same filesystem through the end of the
-scan. The scanner also synchronizes journald after Anaconda stops and
+while the shutdown scan runs. The fixture retains the target scan parents and
+orders the shutdown scan before their unmount. Scan roots resolve under those
+parents even if a directory appears after the bind. Mount identity checks
+cover the retained parents and their submounts before and after the scan.
+The scanner also synchronizes journald after Anaconda stops and
 while the journal is still available. The trial then boots with
 the passphrase and the unacknowledged recovery key, checks the incomplete
 state and intact slots, verifies an ordinary retry refuses implicit reissue,
