@@ -46,6 +46,7 @@ pub(super) fn run(ws: &Workspace) -> Result<()> {
     }
     let id = "a".repeat(64);
     let source = format!("sha256:{id}");
+    let digest = format!("sha256:{}", "b".repeat(64));
     let alias_file = root.join("alias-id");
     let calls = root.join("calls");
     fs::write(&calls, b"")?;
@@ -54,7 +55,8 @@ pub(super) fn run(ws: &Workspace) -> Result<()> {
         r#"#!/bin/bash
 set -eu
 last=${!#}
-case "$1 $2" in
+case "$1 ${2:-}" in
+  '--version ') echo 'podman version 0.0.0 (fixture)' ;;
   'info --format') echo info >> "$CHECK_ROOT/calls"; echo "$CHECK_ROOT/store" ;;
   'image exists')
     if [ "$last" = "$CHECK_SOURCE" ]; then exit 0; fi
@@ -62,6 +64,7 @@ case "$1 $2" in
     test -f "$CHECK_ROOT/alias-id" ;;
   'image inspect')
     if [ "$last" = "$CHECK_SOURCE" ]; then
+      if [ "$4" = '{{.Digest}}' ]; then echo "$CHECK_DIGEST"; exit 0; fi
       if [ "$CHECK_MODE" = source-error ]; then echo 'injected source inspect error' >&2; exit 125; fi
       if [ "$CHECK_MODE" = source-mismatch ]; then echo wrong; else echo "${CHECK_SOURCE#sha256:}"; fi
     else
@@ -86,7 +89,7 @@ if [ "$CHECK_MODE" = gated ]; then
     sleep 0.05
   done
 fi
-touch "${!#}"
+qemu-img create -q -f qcow2 "${!#}" 1M
 "#,
     )?;
     for name in ["podman", "bcvk"] {
@@ -104,7 +107,7 @@ touch "${!#}"
     let command = |mode: &str, out: &str, runtime: &str| {
         let mut c = Command::new(&exe);
         c.current_dir(&ws.root)
-            .args(["disk", "--image", &source, "--out"])
+            .args(["disk", "--image", &source, "--size", "1M", "--out"])
             .arg(root.join(out))
             .env("ILEX_ROOT", &ws.root)
             .env("ILEX_STATE_DIR", root.join("state"))
@@ -112,6 +115,7 @@ touch "${!#}"
             .env("PATH", &path)
             .env("CHECK_ROOT", &root)
             .env("CHECK_SOURCE", &source)
+            .env("CHECK_DIGEST", &digest)
             .env("CHECK_MODE", mode)
             .env_remove("ILEX_SHELLS")
             .env_remove("ILEX_MACHINE")
@@ -152,6 +156,16 @@ touch "${!#}"
         Duration::from_secs(20),
     )?;
     ensure!(baseline.success(), "fresh allocation failed: {baseline:?}");
+    let manifest: ilex_devkit::core::DiskArtifact =
+        serde_json::from_slice(&fs::read(root.join("disk.qcow2.disk.json"))?)?;
+    ensure!(
+        manifest.format == ilex_devkit::core::DiskFormat::Qcow2
+            && manifest.virtual_bytes == 1024 * 1024
+            && manifest.image.immutable_id == id
+            && manifest.image.registry_digest.as_deref() == Some(digest.as_str())
+            && manifest.location.sha256 == super::hash_file(&root.join("disk.qcow2"))?,
+        "wrong fixture disk manifest"
+    );
     let receipts = root.join("state").join(&ws.slug).join("image-aliases");
     let receipt_path = fs::read_dir(&receipts)?
         .next()
@@ -256,6 +270,7 @@ touch "${!#}"
             "exists_exit_125_rejected": true, "source_validated_before_tag": true,
             "unreceipted_same_id_rejected": true, "foreign_receipt_and_wrong_id_rejected": true,
             "receipted_reuse_without_retag": true, "different_outputs_and_runtime_roots_serialized": true,
+            "standalone_qcow2_manifest_validated": true,
             "backend": "disposable CLI fault injection; no real images or guests"
         }))?
     );

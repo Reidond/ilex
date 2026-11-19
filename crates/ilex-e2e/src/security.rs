@@ -233,11 +233,8 @@ fn qualify(
         420
     });
     *stage = "disk_delivery";
-    // 4 GiB / 2 vCPUs by default; diagnostic sizes must be explicit.
-    let disk = {
-        let _install_slot = ilex_devkit::slots::acquire(&ws.vm_name("security-install"))?;
-        vmtest::disk(ws)?
-    };
+    // The disk installer leases its own slot. Finish before starting the guest.
+    let disk = vmtest::disk(ws)?;
     *stage = "platform";
     let mut fixture = Fixture::new(ws, &disk, "security-firmware", accelerator, true, true)?;
     let mut qualification = ilex_devkit::qualification::Run::begin(ws, &fixture.spec, artifacts)?;
