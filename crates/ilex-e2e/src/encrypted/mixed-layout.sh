@@ -26,7 +26,7 @@ plaintext=$(losetup --find --show "$scratch/plaintext")
 disposable=$(losetup --find --show "$scratch/disposable")
 
 printf %s ilex-disposable-layout-check |
-    cryptsetup luksFormat --type luks2 --batch-mode --pbkdf pbkdf2 +        --pbkdf-force-iterations 1000 --key-file - "$encrypted"
+    cryptsetup luksFormat --type luks2 --batch-mode --pbkdf pbkdf2 --pbkdf-force-iterations 1000 --key-file - "$encrypted"
 printf %s ilex-disposable-layout-check |
     cryptsetup open --key-file - "$encrypted" "$mapper"
 udevadm settle
@@ -47,8 +47,10 @@ reject_layout() {
 # This is the review's counterexample to collecting only the set of LUKS UUIDs.
 encrypted_sectors=$(blockdev --getsz "$crypt")
 plaintext_sectors=$(blockdev --getsz "$plaintext")
-printf '0 %s linear %s 0\n%s %s linear %s 0\n' +    "$encrypted_sectors" "$crypt" "$encrypted_sectors" "$plaintext_sectors" "$plaintext" |
-    dmsetup create "$linear"
+{
+    printf '0 %s linear %s 0\n' "$encrypted_sectors" "$crypt"
+    printf '%s %s linear %s 0\n' "$encrypted_sectors" "$plaintext_sectors" "$plaintext"
+} | dmsetup create "$linear"
 mkfs.btrfs -q -f "/dev/mapper/$linear"
 mount "/dev/mapper/$linear" "$mountpoint"
 reject_layout

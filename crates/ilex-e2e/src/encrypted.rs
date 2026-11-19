@@ -2119,12 +2119,19 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
         }
         let scan: Value =
             serde_json::from_slice(&fs::read(artifacts.join("installer-leak-scan.json"))?)?;
-        for scan in [
-            scan,
-            serde_json::from_slice(&fs::read(
-                artifacts.join("installer-finaliser-leak-scan.json"),
-            )?)?,
-        ] {
+        let final_scan: Value = serde_json::from_slice(&fs::read(
+            artifacts.join("installer-finaliser-leak-scan.json"),
+        )?)?;
+        if interrupted {
+            ensure!(
+                final_scan["target_mounts_retained"] == true
+                    && final_scan["target_directories_checked"]
+                        .as_u64()
+                        .is_some_and(|count| count > 0),
+                "interrupted shutdown did not retain the target scan roots"
+            );
+        }
+        for scan in [scan, final_scan] {
             ensure!(
                 scan["secret_found"] == false
                     && scan["journal_scanned"] == true
