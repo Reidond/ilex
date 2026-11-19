@@ -968,6 +968,7 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
     ensure!(
         [
             "not-started",
+            "wait-enrollment-start",
             "uinput-load",
             "uinput-open",
             "uinput-create",

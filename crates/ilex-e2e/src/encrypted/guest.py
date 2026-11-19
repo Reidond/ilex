@@ -343,8 +343,27 @@ def vt_input(length):
         os.close(keyboard)
 
 
+def completion_pids():
+    found = []
+    for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            args = path.read_bytes().split(b'\0')
+        except OSError:
+            continue
+        if (path.parent.name != str(os.getpid()) and args and
+                args[0].endswith(b'/ilex-enroll') and b'complete' in args):
+            found.append(int(path.parent.name))
+    return found
+
+
 def drive():
     global DRIVE_STEP
+    # This %post starts before Flatpak preload. Its independent download
+    # deadline can consume the whole passphrase wait on slow guests. The
+    # host still enforces the overall install deadline.
+    DRIVE_STEP = 'wait-enrollment-start'
+    while not completion_pids():
+        time.sleep(0.5)
     keyboard = open_keyboard()
     DRIVE_STEP = 'input-observe'
     input_fds = [os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
@@ -425,15 +444,7 @@ def drive():
             DRIVE_STEP = 'interrupt-completion'
             # Kill the shipped completion after its recovery slot/state commit,
             # before acknowledgement or TPM enrollment. No fake helper or ISO.
-            found = []
-            for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):
-                try:
-                    args = path.read_bytes().split(b'\0')
-                except OSError:
-                    continue
-                if (path.parent.name != str(os.getpid()) and args and
-                        args[0].endswith(b'/ilex-enroll') and b'complete' in args):
-                    found.append(int(path.parent.name))
+            found = completion_pids()
             assert len(found) == 1, 'ambiguous completion process'
             os.kill(found[0], signal.SIGKILL)
             time.sleep(2)

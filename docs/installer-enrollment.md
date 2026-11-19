@@ -153,7 +153,9 @@ booted guest creates one disposable loopback LUKS2 volume and exercises real
 inherited-FD authentication, recovery, retained passphrase and wrong-password
 rejection. There are no unit tests.
 
-The guest's private virtual keyboard drives the normal local completion UI.
+The guest starts its private virtual keyboard when the shipped completion
+process appears. The overall install deadline covers the earlier Flatpak
+preload, and the prompt deadline starts with enrollment.
 It waits at two key-free screens for an explicit screenshot acknowledgement;
 the recovery key is never photographed. The guest encrypts its test-only copy
 to an ephemeral RSA-OAEP key whose private half stays in the host's private
