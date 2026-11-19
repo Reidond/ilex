@@ -164,18 +164,7 @@ test ! -e /dev/disk/by-label/OEMDRV
             "install_seconds":installed,"disk_to_ssh_seconds":installed_boot,"unsealed":true,"settings":vm.status()?}),
         )?;
         save_frame(artifacts, "transition-installed", &vm.capture()?, None)?;
-        let scanned = grep_secret(artifacts, std::str::from_utf8(&canary)?)?;
-        for entry in fs::read_dir(artifacts)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                ensure!(
-                    !fs::read(entry.path())?
-                        .windows(envelope.len())
-                        .any(|bytes| bytes == envelope),
-                    "private OEMDRV envelope was published as an artifact"
-                );
-            }
-        }
+        let scanned = grep_secret(artifacts, std::str::from_utf8(&canary)?, Some(&envelope))?;
         write(
             artifacts,
             "oemdrv-readback.json",

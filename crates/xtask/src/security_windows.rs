@@ -252,8 +252,10 @@ pub fn vm(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resolv
             format!("{boot}\n").as_bytes(),
         )?;
         if acknowledged {
-            let frame = vm.capture()?;
-            if let Err(error) = vm.qualify_pointer(&frame, frame.width / 3, frame.height * 2 / 3) {
+            let pointer = vm.capture().and_then(|frame| {
+                vm.qualify_pointer(&frame, frame.width / 3, frame.height * 2 / 3)
+            });
+            if let Err(error) = pointer {
                 eprintln!("Gen2 pointer remains unqualified: {error:#}");
             }
         } else {

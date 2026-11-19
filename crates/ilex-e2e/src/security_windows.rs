@@ -3,12 +3,15 @@ use anyhow::{Context, Result, ensure};
 use ilex_devkit::{Workspace, config::Selection, core::*};
 use ilex_tooling_windows::{
     gen2::{self, Provider, Vm},
+    received::Directory,
     transport,
 };
 use libtest_mimic::Trial;
 use serde_json::{Value, json};
 use std::{
     fs,
+    io::Read,
+    os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -346,7 +349,7 @@ fn qualify(
     media.finish(provider, result)?;
     *stage = "iso_to_disk";
     install::transition(ws, provider, spec.resources, &iso, artifacts)?;
-    let files = grep_secret(artifacts, &secret)?;
+    let files = grep_secret(artifacts, &secret, None)?;
     write(
         artifacts,
         "input-privacy.json",
@@ -728,28 +731,56 @@ fn ocr_pixels(
     Ok(engine.RecognizeAsync(&bitmap)?.join()?.Text()?.to_string())
 }
 
-fn grep_secret(root: &Path, secret: &str) -> Result<usize> {
+fn grep_secret(root: &Path, secret: &str, envelope: Option<&[u8]>) -> Result<usize> {
     use windows::{Globalization::Language, Media::Ocr::OcrEngine, core::HSTRING};
+    const REPARSE_POINT: u32 = 0x400;
+    ensure!(
+        !secret.is_empty() && envelope.is_none_or(|bytes| !bytes.is_empty()),
+        "privacy scan requires nonempty patterns"
+    );
     let engine =
         OcrEngine::TryCreateFromLanguage(&Language::CreateLanguage(&HSTRING::from("en-US"))?)?;
     let utf16: Vec<_> = secret.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let mut pending = vec![root.to_owned()];
+    ensure!(
+        fs::symlink_metadata(root)?.is_dir(),
+        "missing artifact directory"
+    );
+    let mut pending = vec![(root.to_owned(), Directory::open(root)?)];
     let mut scanned = 0;
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(directory)? {
+    while let Some((path, directory)) = pending.pop() {
+        for entry in fs::read_dir(path)? {
             let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                pending.push(entry.path());
+            let path = entry.path();
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.file_attributes() & REPARSE_POINT != 0 {
                 continue;
             }
-            let bytes = fs::read(entry.path())?;
+            let name = entry.file_name();
+            let name = name.to_str().context("invalid artifact filename")?;
+            if meta.is_dir() {
+                pending.push((path, directory.child(name)?));
+                continue;
+            }
+            if !meta.is_file() {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            directory.read(name)?.file.read_to_end(&mut bytes)?;
             ensure!(
                 [secret.as_bytes(), &utf16]
                     .iter()
                     .all(|needle| !bytes.windows(needle.len()).any(|window| window == *needle)),
                 "sensitive canary found in qualification artifacts"
             );
-            if entry.path().extension().is_some_and(|ext| ext == "png") {
+            if let Some(envelope) = envelope {
+                ensure!(
+                    !bytes
+                        .windows(envelope.len())
+                        .any(|window| window == envelope),
+                    "private OEMDRV envelope was published as an artifact"
+                );
+            }
+            if path.extension().is_some_and(|ext| ext == "png") {
                 let frame = ilex_vmctl::Frame::decode(&bytes)?;
                 let text = ocr_pixels(&engine, &frame.rgb, frame.width, frame.height)?;
                 ensure!(
