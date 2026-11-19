@@ -1,13 +1,15 @@
 """Private credential matcher shared by guest, host fixture and CI export gate.
 
 Only high-entropy, randomly generated test credentials may be fingerprinted.
-Neither a matching path, line nor credential is returned. Images are excluded;
+Failures identify the scan region and credential kind without reporting matching
+bytes, exception text, or unredacted names. Images are excluded;
 screenshots have a separate key-free handshake, and no OCR claim is made.
 """
 import hashlib
 import bz2
 import ctypes
 import gzip
+import io
 import json
 import lzma
 import os
@@ -34,6 +36,9 @@ PATTERNS = {
     71: re.compile(rb'(?=([cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}))'),
 }
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.ppm'}
+SECRET_KINDS = {48: 'disk-passphrase', 71: 'recovery-key'}
+PRIVATE_NAME = re.compile(
+    rb'[a-z]{48,}|(?i:[cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7})')
 
 
 def fingerprint(value):
@@ -41,13 +46,21 @@ def fingerprint(value):
     return {'length': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
 
 
-def contains(data, fingerprints):
+def matches(data, expected, found):
     for length, pattern in PATTERNS.items():
-        expected = {f['sha256'] for f in fingerprints if f['length'] == length}
-        if expected and any(hashlib.sha256(m.group(1)).hexdigest() in expected
-                            for m in pattern.finditer(data)):
-            return True
-    return False
+        if length in found or not expected[length]:
+            continue
+        for match in pattern.finditer(data):
+            if hashlib.sha256(match.group(1)).hexdigest() in expected[length]:
+                yield length, match.start(1)
+                break
+
+
+def public_path(path):
+    # A path itself can contain the secret. Redact before truncating it. JSON
+    # escapes control characters so a name cannot inject a serial log record.
+    return PRIVATE_NAME.sub(b'[redacted]', os.fsencode(path)).decode(
+        'utf-8', 'replace')[:160]
 
 
 def scan(roots, fingerprints, journal=False):
@@ -56,10 +69,43 @@ def scan(roots, fingerprints, journal=False):
                                for f in fingerprints)
     result = {'schema': 2, 'files_scanned': 0, 'images_excluded': 0,
               'read_errors': 0, 'journal_scanned': False, 'secret_found': False,
-              'credentials_checked': len(fingerprints)}
+              'credentials_checked': len(fingerprints), 'findings': [],
+              'findings_omitted': 0}
+    expected = {length: {f['sha256'] for f in fingerprints if f['length'] == length}
+                for length in PATTERNS}
     seen = set()
-    def unreadable(_error):
+
+    def finding(rule, path, region, **details):
+        if len(result['findings']) == 24:
+            result['findings_omitted'] += 1
+            return
+        result['findings'].append({'rule': rule, 'path': public_path(path),
+                                   'region': region, **details})
+
+    def unreadable(path, region, error=None, **details):
         result['read_errors'] += 1
+        if error is not None:
+            details['error'] = type(error).__name__
+            details['errno'] = getattr(error, 'errno', None)
+        finding('scan-read-error', path, region, **details)
+
+    def check_stream(source, path, region):
+        previous = b''
+        offset = 0
+        found = set()
+        while chunk := source.read(1024 * 1024):
+            data = previous + chunk
+            for length, start in matches(data, expected, found):
+                found.add(length)
+                result['secret_found'] = True
+                finding('credential-fingerprint-match', path, region,
+                        secret_kind=SECRET_KINDS[length], offset=offset - len(previous) + start)
+            offset += len(chunk)
+            previous = data[-70:]
+
+    def walk_error(error):
+        unreadable(error.filename or 'scan-root', 'directory-walk', error)
+
     for root in roots:
         # Several target locations are optional (e.g. /var/lib/anaconda on
         # bootc). An existing directory that cannot be walked still fails.
@@ -67,17 +113,19 @@ def scan(roots, fingerprints, journal=False):
             pathlib.Path(root).stat()
         except FileNotFoundError:
             continue
-        except OSError:
-            result['read_errors'] += 1
+        except OSError as error:
+            unreadable(root, 'scan-root', error)
             continue
-        for directory, _, files in os.walk(root, followlinks=False, onerror=unreadable):
+        for directory, _, files in os.walk(root, followlinks=False, onerror=walk_error):
             for name in files:
                 path = pathlib.Path(directory) / name
+                region = 'file-metadata'
                 try:
                     info = path.lstat()
                     if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) in seen:
                         continue
                     seen.add((info.st_dev, info.st_ino))
+                    region = 'file-header'
                     with path.open('rb') as source:
                         header = source.read(12)
                     if path.suffix.lower() in IMAGE_SUFFIXES and (
@@ -86,37 +134,41 @@ def scan(roots, fingerprints, journal=False):
                         result['images_excluded'] += 1
                         continue
 
-                    def check_stream(source):
-                        previous = b''
-                        while chunk := source.read(1024 * 1024):
-                            data = previous + chunk
-                            result['secret_found'] |= contains(data, fingerprints)
-                            previous = data[-70:]
+                    region = 'file-bytes'
                     with path.open('rb') as source:
-                        check_stream(source)
+                        check_stream(source, path, region)
                     opener = (gzip.open if header.startswith(b'\x1f\x8b') else
                               bz2.open if header.startswith(b'BZh') else
                               lzma.open if header.startswith(b'\xfd7zXZ\x00') else
                               zstd.open if zstd and header.startswith(b'\x28\xb5\x2f\xfd') else None)
                     if header.startswith(b'\x28\xb5\x2f\xfd') and zstd is None:
-                        result['read_errors'] += 1
+                        unreadable(path, 'zstd', error_code='decompressor-unavailable')
                     if opener:
+                        region = opener.__module__
                         with opener(path, 'rb') as source:
-                            check_stream(source)
+                            check_stream(source, path, region)
                     elif header.startswith(b'PK\x03\x04'):
+                        region = 'zip-directory'
                         with zipfile.ZipFile(path) as archive:
-                            for member in archive.infolist():
+                            for index, member in enumerate(archive.infolist()):
                                 if not member.is_dir():
+                                    region = f'zip-member-{index}'
                                     with archive.open(member) as source:
-                                        check_stream(source)
+                                        check_stream(source, path, region)
                     result['files_scanned'] += 1
-                except READ_ERRORS:
-                    result['read_errors'] += 1
+                except READ_ERRORS as error:
+                    unreadable(path, region, error)
     if journal:
-        output = subprocess.run(['journalctl', '--no-pager', '-o', 'export'],
-                                capture_output=True, check=True)
-        result['secret_found'] |= contains(output.stdout, fingerprints)
-        result['journal_scanned'] = True
+        try:
+            output = subprocess.run(['journalctl', '--no-pager', '-o', 'export'],
+                                    capture_output=True, check=True)
+        except subprocess.CalledProcessError as error:
+            unreadable('system-journal', 'journal-export', returncode=error.returncode)
+        except OSError as error:
+            unreadable('system-journal', 'journal-export', error)
+        else:
+            check_stream(io.BytesIO(output.stdout), 'system-journal', 'journal-export')
+            result['journal_scanned'] = True
     return result
 
 

@@ -11,6 +11,7 @@ PREFIX = b'ILEX-ENCRYPTED-LOG '
 INSTALLER_LOGS = (
     'anaconda.log', 'program.log', 'storage.log', 'packaging.log',
     'post.log', 'preload.log', 'driver.log', 'luksDump.txt',
+    'leak-scan.json', 'finaliser-leak-scan.json',
 )
 
 

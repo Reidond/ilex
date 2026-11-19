@@ -76,6 +76,16 @@ def marker(text):
         console.write('ILEX-ENCRYPTED-' + text + '\n')
 
 
+def emit_diagnostics(records):
+    scope = {'__name__': 'ilex_fixture_diagnostics'}
+    exec((SEED / 'diagnostics.py').read_text(), scope)
+    with (PRIVATE / 'diagnostic-uart.lock').open('wb') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open('/dev/ttyS0', 'wb') as serial:
+            for name, data in records.items():
+                scope['emit'](serial, name, data)
+
+
 def mirror_diagnostics():
     # Mirror bounded, redacted text on the installer UART. Enrollment still
     # reads credentials only from its reserved local virtual console.
@@ -103,11 +113,7 @@ def mirror_diagnostics():
                 records['luksDump.txt'] = dump.stdout + dump.stderr
         except (OSError, KeyError, ValueError, subprocess.TimeoutExpired):
             pass
-    with (PRIVATE / 'diagnostic-uart.lock').open('wb') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        with open('/dev/ttyS0', 'wb') as serial:
-            for name, data in records.items():
-                scope['emit'](serial, name, data)
+    emit_diagnostics(records)
 
 
 def diagnostic_loop():
@@ -266,9 +272,56 @@ def failure_snapshot(error):
     os.sync()
 
 
-def scan():
-    fingerprints = json.loads((PUBLIC / 'credentials.json').read_text())
-    return privacy_module()['scan'](scan_roots(), fingerprints, journal=True)
+def memory_sample():
+    sample = {}
+    sources = {
+        '/proc/meminfo': ('MemTotal', 'MemAvailable', 'Dirty', 'Writeback', 'SwapTotal', 'SwapFree'),
+        '/proc/vmstat': ('oom_kill', 'pswpin', 'pswpout'),
+    }
+    for path, keys in sources.items():
+        try:
+            for line in pathlib.Path(path).read_text().splitlines():
+                key, value, *_ = line.split()
+                if key.rstrip(':') in keys:
+                    sample[key.rstrip(':')] = int(value)
+        except (OSError, ValueError):
+            pass
+    try:
+        sample['zram_devices'] = sum(line.startswith('/dev/zram')
+                                     for line in pathlib.Path('/proc/swaps').read_text().splitlines())
+        sample['memory_pressure_us'] = {
+            kind: int(total)
+            for kind, total in re.findall(r'^(some|full) .* total=(\d+)$',
+                                          pathlib.Path('/proc/pressure/memory').read_text(), re.M)
+        }
+    except OSError:
+        pass
+    return sample
+
+
+def scan_report(name, phase):
+    stats = memory_sample()
+    start = time.monotonic()
+    try:
+        fingerprints = json.loads((PUBLIC / 'credentials.json').read_text())
+        result = privacy_module()['scan'](scan_roots(), fingerprints, journal=True)
+    except Exception as error:
+        result = {'schema': 2, 'files_scanned': 0, 'images_excluded': 0,
+                  'read_errors': 1, 'journal_scanned': False, 'secret_found': False,
+                  'credentials_checked': 0, 'findings': [
+                      {'rule': 'verification-error', 'path': 'installer',
+                       'region': phase, 'error': type(error).__name__}]}
+    result.update(phase=phase, elapsed_seconds=round(time.monotonic() - start, 3),
+                  memory_before=stats, memory_after=memory_sample())
+    report = json.dumps(result, ensure_ascii=False).encode()
+    (PUBLIC / name).write_bytes(report)
+    emit_diagnostics({name: report})
+    return result
+
+
+def require_private(result):
+    assert not result['secret_found'] and not result['read_errors'] and result['journal_scanned'], (
+        'private guest scan failed')
 
 
 def finalise():
@@ -277,11 +330,9 @@ def finalise():
         mirror_diagnostics()
     except Exception:
         pass
-    result = scan()
-    result['phase'] = 'anaconda-poweroff-after-finalisation'
-    (PUBLIC / 'finaliser-leak-scan.json').write_text(json.dumps(result))
+    result = scan_report('finaliser-leak-scan.json', 'anaconda-poweroff-after-finalisation')
     os.sync()
-    assert not result['secret_found'] and not result['read_errors'], 'private final scan failed'
+    require_private(result)
     marker('FINALISER-DONE')
 
 
@@ -519,9 +570,7 @@ def finish():
     while not (PRIVATE / 'driver-done').exists():
         assert time.monotonic() - start < 120, 'private leak scan failed or timed out'
         time.sleep(0.2)
-    result = scan()
-    (PUBLIC / 'leak-scan.json').write_text(json.dumps(result))
-    assert not result['secret_found'] and not result['read_errors'], 'private scan failed; details suppressed'
+    require_private(scan_report('leak-scan.json', 'installer-checkpoint'))
     try:
         mirror_diagnostics()
     except Exception:

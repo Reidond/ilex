@@ -2061,6 +2061,9 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
             // A missing/invalid snapshot adds no public data and never masks
             // the original failed qualification.
             let _ = failure_snapshot(&seed_path, &published);
+            for file in ["leak-scan.json", "finaliser-leak-scan.json"] {
+                let _ = extract(&seed_path, &artifacts, file);
+            }
         }
         installed?;
         installer_logs?;

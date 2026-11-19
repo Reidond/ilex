@@ -163,8 +163,10 @@ fixture. Decryption feeds locked, dump-disabled memory; private console input wi
 that exact saved key must unlock the installed initramfs on a different TPM.
 No plaintext recovery file is exported. Fingerprints of these high-entropy
 random fixture credentials let guest, host and CI scan both credentials
-without printing matches. Matching paths, lines and exception text are
-suppressed. Scans cover live/target kickstart locations, logs, state and
+without printing credential bytes. Failure reports include scan counters,
+the rule, a redacted path or journal region, and the credential kind and offset
+for a fingerprint match. They suppress matching content and exception text.
+Scans cover live/target kickstart locations, logs, state and
 journal exports; an active test-only shutdown unit repeats the live scan after Anaconda
 finalisation, and installed/cold/negative guests scan the final target files.
 Recursive scans cover the staged and copied export sets and all CI artifact
@@ -186,7 +188,9 @@ fixture mirrors bounded tails of Anaconda's program, storage, packaging and
 kickstart logs over serial. It also captures the preload and enrollment
 output, LUKS header metadata and the no-TPM completion unit's journal. The
 diagnostic export redacts both generated credential formats before applying
-the fingerprint scan. Screen cells and unfiltered exception text stay private.
+the fingerprint scan. Scan reports also travel over the installer serial
+channel and record guest memory, writeback, swap and pressure counters.
+Screen cells and unfiltered exception text stay private.
 Disks, firmware/TPM state, private answers and signing keys are removed.
 
 To diagnose installation and fallback locally, point `ILEX_ISO` and
