@@ -1036,6 +1036,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "ilex-agent",
+ "ilex-enroll",
 ]
 
 [[package]]

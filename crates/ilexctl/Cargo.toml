@@ -15,3 +15,6 @@ dev = []
 clap.workspace = true
 clap_complete = "4"
 ilex-agent = { path = "../ilex-agent" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ilex-enroll = { path = "../ilex-enroll" }

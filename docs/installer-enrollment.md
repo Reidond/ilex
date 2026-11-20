@@ -124,6 +124,43 @@ archive. The base requests cryptsetup, tpm2-tss, systemd-udev, dracut and kbd.
 Flatpak and its dependencies remain in the base for cleanup after a shell-free
 switch.
 
+## Verify and repair after boot
+
+`sudo ilexctl security verify` reports the current boot's unlock result as
+JSON. The installed service runs it at boot and persists the result under
+`/var/lib/ilex/security/enrollment.json`. Verification requires the current
+boot ID, the active encrypted root UUID and a matching enrolled token and
+keyslot. The initramfs records `tpm2` from a successful token-only activation.
+On the qualified Anaconda mapping it can also record `fallback` after the
+stock Plymouth or console password agent opens the volume. Unrecognized
+options, other token types or missing evidence leave verification pending.
+
+After a fallback boot, run `sudo ilexctl security repair` and switch to
+tty8 with Ctrl+Alt+F8. Enter the disk passphrase or saved recovery key at
+the hidden prompt. The initramfs credential is discarded after unlock, so
+repair asks again in the installed system. Repair defers without a prompt
+when Secure Boot is off or TPM/PCR support is unavailable. A successful
+repair returns pending. Power off and start the machine, then check that
+`ilexctl security verify` reports `verified`.
+
+Completion, explicit recovery reissue and repair pass through the same
+authenticated receipt reconciliation. Fresh reissue budgets numeric LUKS2
+keyslots, contiguous keyslot-area byte ranges and token IDs for both
+enrollments. The TPM helper seals on a disposable LUKS2 header. Before a
+write to the real header, ilex commits the planned identifiers and a
+protected credential, or the fingerprints of the TPM slot and token it
+will retire. The authenticated fallback then identifies an interrupted
+allocation on retry, even after a change to the TPM. The disk passphrase
+and acknowledged recovery slots survive replacement. A slot already
+orphaned by an older unjournaled enrollment needs manual identification
+before it can be reclaimed.
+
+Automatic enrollment uses PCR 7 in the SHA-256 bank without a PIN.
+Systemd supports TPM+PIN for deployments that want a boot prompt and can
+manage PIN lockout and recovery. This ilex workflow qualifies the no-PIN
+policy. Keep the disk passphrase and saved recovery key available for
+changes to firmware, Secure Boot policy or TPM identity.
+
 ## Qualification
 
 Run only from this checkout's namespace. First build/qualify the exact 6 GiB,

@@ -1,6 +1,7 @@
 //! First try one validated TPM token via cryptsetup's token-only operation.
 //! Success is direct evidence of the mapping's creation, not a journal guess or
-//! a later unseal trial. Any other successful path is conservatively unknown.
+//! a later unseal trial. For a qualified header we can also restrict the
+//! stock password agent to keyboard credentials and record fallback.
 use super::*;
 use std::{os::unix::process::CommandExt, process::ExitStatus};
 
@@ -14,6 +15,13 @@ fn record(uuid: &str, method: &str, token: Option<&str>, slot: Option<u32>) -> R
         }),
     )
 }
+
+fn record_best_effort(uuid: &str, method: &str, token: Option<&str>, slot: Option<u32>) {
+    if record(uuid, method, token, slot).is_err() {
+        eprintln!("ilex: unlock evidence could not be written");
+    }
+}
+
 pub fn attach(args: &[String]) -> Result<ExitStatus> {
     ensure!(
         Path::new("/etc/initrd-release").exists(),
@@ -30,6 +38,8 @@ pub fn attach(args: &[String]) -> Result<ExitStatus> {
     .ok()
     .and_then(|o| String::from_utf8(o.stdout).ok())
     .map(|s| s.trim().to_string());
+    let options = args.get(4).map_or("", String::as_str);
+    let mut password_only = false;
     if let Some(uuid) = &uuid {
         // If the mapping predates this invocation its method is unknown.
         if !Path::new("/dev/mapper").join(name).exists()
@@ -42,21 +52,16 @@ pub fn attach(args: &[String]) -> Result<ExitStatus> {
                     .arg(path),
             )
             && let Some(tokens) = header["tokens"].as_object()
+            && options.split(',').all(|o| {
+                matches!(
+                    o,
+                    "" | "luks" | "x-initrd.attach" | "tpm2-device=auto" | "discard"
+                )
+            })
         {
             for (id, token) in tokens {
                 if validate_token(token).is_err() {
                     continue;
-                }
-                let options = args.get(4).map_or("", String::as_str);
-                // Do not silently discard crypttab semantics. Anaconda's root
-                // options are the only qualified set for the fast path.
-                if !options.split(',').all(|o| {
-                    matches!(
-                        o,
-                        "" | "luks" | "x-initrd.attach" | "tpm2-device=auto" | "discard"
-                    )
-                }) {
-                    break;
                 }
                 let mut command = Command::new("/usr/sbin/cryptsetup");
                 command.args(["open", "--type", "luks2", "--token-only", "--token-id", id]);
@@ -64,21 +69,63 @@ pub fn attach(args: &[String]) -> Result<ExitStatus> {
                     command.arg("--allow-discards");
                 }
                 if run(command.arg(path).arg(name)).is_ok() {
-                    record(uuid, "tpm2", Some(id), Some(super::enroll::slot(token)?))?;
+                    record_best_effort(uuid, "tpm2", Some(id), Some(super::enroll::slot(token)?));
                     return Command::new("/usr/bin/true")
                         .status()
                         .context("returning TPM success");
                 }
             }
+            // This is the installed Anaconda mapping, with no configured or
+            // discovered keyfile/credential and no third-party token policy.
+            // Retain stock systemd for all other cases, with unknown evidence.
+            password_only = name == &format!("luks-{uuid}")
+                && super::layout::verify_header_cipher(&header).is_ok()
+                && tokens
+                    .values()
+                    .all(|t| t["type"] == "systemd-recovery" || validate_token(t).is_ok())
+                && ["/etc/cryptsetup-keys.d", "/run/cryptsetup-keys.d"]
+                    .iter()
+                    .all(|dir| {
+                        Path::new(dir)
+                            .join(format!("{name}.key"))
+                            .symlink_metadata()
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    })
+                && std::env::var_os("CREDENTIALS_DIRECTORY").is_none_or(|dir| {
+                    Path::new(&dir)
+                        .join("cryptsetup.passphrase")
+                        .symlink_metadata()
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                });
         }
     }
-    // Stock systemd retains Plymouth/console passphrase fallback. It may also
-    // use other configured tokens; absent structured proof we say unknown.
-    let result = Command::new(ORIGINAL).args(args).status()?;
+    let mut command = Command::new(ORIGINAL);
+    if password_only {
+        // Keep Plymouth and the stock recovery-key handling, without
+        // retrying TPM invisibly or passing the password through a cache.
+        let options = options
+            .split(',')
+            .filter(|option| !option.is_empty() && *option != "tpm2-device=auto")
+            .chain(["luks", "password-cache=no"])
+            .collect::<Vec<_>>()
+            .join(",");
+        command
+            .args(&args[..3])
+            .args(["none", &options])
+            .env("SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE", "0");
+    } else {
+        command.args(args);
+    }
+    let result = command.status()?;
     if result.success()
         && let Some(uuid) = uuid
     {
-        record(&uuid, "unknown", None, None)?;
+        let method = if password_only && Path::new("/dev/mapper").join(name).exists() {
+            "fallback"
+        } else {
+            "unknown"
+        };
+        record_best_effort(&uuid, method, None, None);
     }
     Ok(result)
 }

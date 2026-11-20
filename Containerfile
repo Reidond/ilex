@@ -157,6 +157,7 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify /usr/lib/dracut/modules.d/91ilex-
     chmod 4755 /usr/libexec/drupe/drupe-enter && \
     systemctl set-default "$(python3 -I -S -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
     systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service systemd-homed.service ilex-enrollment-report.service && \
+    systemctl preset ilex-security-verify.service && \
     systemctl --global enable ilex-profile.service && \
     systemctl enable ilex-apps.timer && \
     systemctl preset flatpak-add-fedora-repos.service && \

@@ -12,10 +12,20 @@ pub use secret::{Secret, harden, secret_fd};
 mod probe;
 pub use probe::{Probe, probe, tool_manifest, tool_versions};
 mod enroll;
-pub use enroll::{Device, Enrollment, recovery, status, tpm, validate_token};
+pub use enroll::{Device, Enrollment, recovery, status, validate_token};
 mod layout;
 pub use layout::{Layout, discover, recovery_layout};
 pub mod initrd;
+mod pending;
+mod transaction;
+pub use transaction::{
+    Reconciled, SecurityState, acknowledged_recovery, eligibility, recorded_recovery,
+    recovery_record,
+};
+mod crypt;
+pub mod local;
+mod verify;
+pub use verify::verify;
 
 /// Never propagate a subprocess's output in an error: cryptenroll's recovery
 /// stdout is a secret, and even an unexpected error must remain safe to log.
@@ -48,6 +58,19 @@ fn run_with_input(command: &mut Command, input: Stdio) -> Result<Output> {
     Ok(output)
 }
 
+fn header(path: &Path) -> Result<Value> {
+    let value = json(
+        Command::new("/usr/sbin/cryptsetup")
+            .args(["luksDump", "--dump-json-metadata"])
+            .arg(path),
+    )?;
+    ensure!(
+        value["keyslots"].is_object() && value["tokens"].is_object(),
+        "not LUKS2"
+    );
+    Ok(value)
+}
+
 fn json(command: &mut Command) -> Result<Value> {
     let mut output = run(command)?;
     let value = serde_json::from_slice(&output.stdout).context("invalid tool JSON");
@@ -59,21 +82,34 @@ fn json(command: &mut Command) -> Result<Value> {
 /// never shipped as image content. Callers must hold the completion lock.
 pub fn write_state(path: &Path, value: &Value) -> Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let parent = path.parent().context("state has no parent")?;
-    let existed = parent.exists();
-    fs::create_dir_all(parent)?;
+    let missing: Vec<_> = parent.ancestors().take_while(|p| !p.exists()).collect();
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
     ensure!(
         !fs::symlink_metadata(parent)?.file_type().is_symlink(),
         "state directory is a symlink"
     );
-    if !existed {
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    for directory in missing.into_iter().rev() {
+        fs::File::open(
+            directory
+                .parent()
+                .context("state directory has no parent")?,
+        )?
+        .sync_all()?;
     }
-    let temporary = parent.join(format!(".enrollment-{}", std::process::id()));
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("invalid state filename")?;
+    let temporary = parent.join(format!("{name}.tmp"));
     let mut file = fs::OpenOptions::new()
         .write(true)
-        .create_new(true)
+        .create(true)
+        .truncate(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&temporary)?;
