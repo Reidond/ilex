@@ -4,7 +4,7 @@ use ilex_devkit::Workspace;
 
 #[cfg(not(target_os = "linux"))]
 pub(super) fn run(_: &Workspace) -> Result<serde_json::Value> {
-    bail!("build self-check requires the Linux Podman backend; run in FedoraLinux-45 on WSL")
+    bail!("build self-check requires the Linux Podman backend")
 }
 
 #[cfg(target_os = "linux")]

@@ -1,7 +1,20 @@
 #!/bin/bash
 # SSH forced-command and sole sudo entry point. A finite protocol, never eval.
 set -euo pipefail
-if [ "$(id -u)" != 0 ]; then exec sudo /usr/local/libexec/ilex-builder-control; fi
+if [ "$(id -u)" != 0 ]; then
+    [ "$#" -eq 0 ] || exit 64
+    if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+        if [[ "$SSH_ORIGINAL_COMMAND" =~ ^terminal\ ([0-9a-f-]{36})\ ([0-9a-f-]{36})$ ]]; then
+            exec sudo /usr/local/libexec/ilex-builder-control terminal "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        fi
+        exit 64
+    fi
+    exec sudo /usr/local/libexec/ilex-builder-control
+fi
+if [ "$#" -ne 0 ]; then
+    [ "$#" -eq 3 ] && [ "$1" = terminal ] && [ -t 0 ] && [ -t 1 ] || exit 64
+    exec /usr/bin/python3 -I -S /usr/local/libexec/ilex-builder-jobs --terminal "$2" "$3"
+fi
 # sudo deliberately preserves this one bounded operation value via an argument-free
 # stdin frame, not arbitrary environment or host shell strings.
 IFS= read -r op

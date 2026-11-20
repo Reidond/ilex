@@ -171,7 +171,7 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
         .map_or(spec.image.as_str(), |alias| alias.reference());
     let mut bcvk = Command::new("bcvk");
     // Installation boots a real VM too. Share the same slots as tests instead
-    // of allocating it outside the cap on a busy WSL/native Linux host.
+    // of allocating it outside the cap on a busy Linux host.
     let _install_slot = slots::acquire(&format!("{}disk-install", ws.vm_prefix()))?;
     let logs = ws
         .ensure_runtime()?
@@ -381,22 +381,16 @@ pub enum Display {
     None,
     /// A GTK window for a human. The guest follows the window's size.
     Gtk,
-    /// A GTK window on a private X server ([`VmConfig::x_display`]) that
-    /// [`crate::display::Bridge`] serves to `ilex-viewer.exe`, plus a second
-    /// QMP socket (`input.sock`) for the bridge's input.
-    Viewer,
 }
 
-/// Can this host render a guest's OpenGL (virgl) on a GPU? WSL2 has Mesa's
-/// D3D12 driver on `/dev/dxg`; elsewhere a DRM render node is needed.
+/// Virgl rendering on Linux requires a DRM render node.
 pub fn host_gl() -> bool {
-    Path::new("/dev/dxg").exists()
-        || fs::read_dir("/dev/dri")
-            .map(|dir| {
-                dir.flatten()
-                    .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
-            })
-            .unwrap_or(false)
+    fs::read_dir("/dev/dri")
+        .map(|dir| {
+            dir.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -417,14 +411,12 @@ pub struct VmConfig {
     pub width: u32,
     pub height: u32,
     pub display: Display,
-    /// With [`Display::Gtk`] or [`Display::Viewer`]: give the guest a
+    /// With [`Display::Gtk`]: give the guest a
     /// 3D-capable `virtio-vga-gl` whose OpenGL the host renders (virgl),
     /// instead of llvmpipe in the guest. QEMU then has no VNC server and QMP
-    /// `screendump` can't capture the screen (the viewer's bridge can). See
+    /// `screendump` can't capture the screen. See
     /// [`host_gl`].
     pub gl: bool,
-    /// With [`Display::Viewer`]: the X display (`:N`) QEMU's window goes to.
-    pub x_display: Option<String>,
     /// An install ISO attached as a CD-ROM. Firmware tries the disk first and
     /// falls through to the CD when the disk is empty.
     pub cdrom: Option<PathBuf>,
@@ -461,7 +453,6 @@ impl VmConfig {
             height: 800,
             display: Display::None,
             gl: false,
-            x_display: None,
             cdrom: None,
             secondary_serial: false,
             usb_keyboard: false,
@@ -513,9 +504,7 @@ impl Vm {
         if spec.accelerator == ilex_tooling_core::Accelerator::Native
             && !Path::new("/dev/kvm").exists()
         {
-            bail!(
-                "/dev/kvm not found: booting VMs needs KVM (on Windows, run inside WSL2 with nested virtualization)"
-            );
+            bail!("/dev/kvm not found: booting VMs needs KVM");
         }
         let name = ws.vm_name(&config.purpose);
         ws.ensure_state()?;
@@ -692,20 +681,25 @@ impl Vm {
         }
         let gl = config.gl && config.display != Display::None;
         let vga = if gl { "virtio-vga-gl" } else { "virtio-vga" };
-        qemu
-            .arg("-device")
-            .arg(format!("{vga},xres={},yres={}", config.width, config.height))
+        qemu.arg("-device")
+            .arg(format!(
+                "{vga},xres={},yres={}",
+                config.width, config.height
+            ))
             .args(["-device", "virtio-tablet-pci"]);
         if config.usb_keyboard {
             qemu.args(["-device", "qemu-xhci", "-device", "usb-kbd"]);
         } else {
             qemu.args(["-device", "virtio-keyboard-pci"]);
         }
-        qemu
-            .args(["-object", "rng-random,id=rng0,filename=/dev/urandom"])
+        qemu.args(["-object", "rng-random,id=rng0,filename=/dev/urandom"])
             .args(["-device", "virtio-rng-pci,rng=rng0"])
             .arg("-netdev")
-            .arg(if config.isolated_ssh { "user,id=net0".to_string() } else { format!("user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22") })
+            .arg(if config.isolated_ssh {
+                "user,id=net0".to_string()
+            } else {
+                format!("user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22")
+            })
             .args(["-device", "virtio-net-pci,netdev=net0,id=internet"])
             .arg("-smbios")
             .arg(format!(
@@ -746,40 +740,6 @@ impl Vm {
             }
             Display::Gtk => {
                 qemu.args(["-display", if gl { "gtk,gl=on" } else { "gtk" }]);
-                gui_env(&mut qemu, gl);
-            }
-            Display::Viewer => {
-                let x = config
-                    .x_display
-                    .as_deref()
-                    .context("Display::Viewer needs VmConfig::x_display")?;
-                qemu.args([
-                    "-display",
-                    if gl {
-                        "gtk,gl=on,show-menubar=off"
-                    } else {
-                        "gtk,show-menubar=off"
-                    },
-                ])
-                .arg("-qmp")
-                .arg(format!(
-                    "unix:{},server=on,wait=off",
-                    dir.join("input.sock").display()
-                ))
-                // The guest's SPICE agent port, for the bridge's clipboard
-                // sharing (crate::vdagent).
-                .args(["-device", "virtio-serial-pci", "-chardev"])
-                .arg(format!(
-                    "socket,id=vdagent,path={},server=on,wait=off",
-                    dir.join("vdagent.sock").display()
-                ))
-                .args([
-                    "-device",
-                    "virtserialport,chardev=vdagent,name=com.redhat.spice.0",
-                ])
-                .env("DISPLAY", x)
-                .env("GDK_BACKEND", "x11")
-                .env_remove("WAYLAND_DISPLAY");
             }
         }
 
@@ -834,7 +794,6 @@ impl Vm {
                 Display::None => "none",
                 Display::Gtk if gl => "gtk-gl",
                 Display::Gtk => "gtk",
-                Display::Viewer => "viewer",
             }
             .to_string(),
         };
@@ -994,32 +953,6 @@ impl Drop for Vm {
         if let Some(overlay) = &self.overlay {
             let _ = fs::remove_file(overlay);
         }
-    }
-}
-
-/// Point the GTK window at WSLg when this is WSL.
-///
-/// With GL the window is a Wayland client of WSLg. Through XWayland, Mesa's
-/// D3D12 driver (no DRI3 there) keeps presenting the window's first height
-/// after it grows, and everything below stays garbage; GTK's own GL widget
-/// on Wayland doesn't. Without GL, GTK on XWayland is the long-tested path.
-fn gui_env(qemu: &mut Command, gl: bool) {
-    const WSLG_WAYLAND: &str = "/mnt/wslg/runtime-dir/wayland-0";
-    const WSLG_X11: &str = "/mnt/wslg/.X11-unix/X0";
-    if gl && Path::new(WSLG_WAYLAND).exists() {
-        // libwayland takes an absolute WAYLAND_DISPLAY as the socket path.
-        qemu.env("GDK_BACKEND", "wayland")
-            .env("WAYLAND_DISPLAY", WSLG_WAYLAND)
-            .env_remove("DISPLAY");
-        return;
-    }
-    let have_display = std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
-        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty());
-    if !have_display && Path::new(WSLG_X11).exists() {
-        qemu.env("DISPLAY", ":0");
-    }
-    if Path::new(WSLG_X11).exists() {
-        qemu.env("GDK_BACKEND", "x11");
     }
 }
 

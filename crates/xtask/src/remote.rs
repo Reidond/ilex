@@ -50,6 +50,20 @@ pub fn gen2_disk(
     .ok_or_else(|| anyhow::anyhow!("Gen2 disk was not delivered"))
 }
 
+#[cfg(target_os = "windows")]
+pub fn import_kache(ws: &Workspace, archive: std::path::PathBuf, version: String) -> Result<()> {
+    let sha256 = crate::disk::hash_file(&archive)?;
+    client::execute(
+        ws,
+        Command::ImportKache {
+            archive: Some(archive),
+            version,
+            sha256,
+        },
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(
     tag = "operation",
@@ -64,6 +78,13 @@ pub enum Command {
     Iso(crate::iso::Args),
     Tool(crate::tool::Args),
     Test(crate::test::Args),
+    Vm(crate::vm::Args),
+    ImportKache {
+        #[serde(skip)]
+        archive: Option<std::path::PathBuf>,
+        version: String,
+        sha256: String,
+    },
     Export {
         image: Option<String>,
         output: Option<std::path::PathBuf>,
@@ -150,6 +171,7 @@ pub fn route(ws: &Workspace, cmd: crate::Cmd) -> Result<Option<crate::Cmd>> {
             crate::Cmd::Disk(a) => Command::Disk(a),
             crate::Cmd::Iso(a) if !a.due => Command::Iso(a),
             crate::Cmd::Tool(a) => Command::Tool(a),
+            crate::Cmd::Vm(a) if !a.disk && !a.gui && !a.secure && !a.print_image => Command::Vm(a),
             crate::Cmd::Test(a) if a.filters.iter().any(|f| f.contains("security")) => {
                 let (legacy, native) = crate::security_windows::partition(a)?;
                 // Both groups run once, even if the first reports a failure.

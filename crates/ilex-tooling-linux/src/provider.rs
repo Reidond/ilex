@@ -62,11 +62,11 @@ pub fn capabilities(display: &str, dimensions: (u32, u32)) -> VmCapabilities {
     );
     features.insert(
         GpuRendering,
-        if display == "gtk-gl" || display == "viewer-gl" {
+        if display == "gtk-gl" {
             if qemu::host_gl() {
                 Available
             } else {
-                Unavailable("no DRM render node or WSL GPU device".into())
+                Unavailable("no DRM render node".into())
             }
         } else {
             Unavailable("this VM has software virtio-vga".into())
@@ -74,11 +74,7 @@ pub fn capabilities(display: &str, dimensions: (u32, u32)) -> VmCapabilities {
     );
     features.insert(
         Clipboard,
-        if display.starts_with("viewer") {
-            Available
-        } else {
-            Unavailable("clipboard is only provided by the existing WSL viewer bridge".into())
-        },
+        Unavailable("clipboard integration is unavailable on Linux VMs".into()),
     );
     if display == "gtk-gl" {
         features.insert(
@@ -88,7 +84,7 @@ pub fn capabilities(display: &str, dimensions: (u32, u32)) -> VmCapabilities {
     }
     if !cfg!(target_os = "linux") {
         for status in features.values_mut() {
-            *status = Unavailable("Linux backend must run in Linux/WSL".into());
+            *status = Unavailable("Linux backend requires Linux".into());
         }
     } else if let Err(error) = std::fs::OpenOptions::new()
         .read(true)
@@ -114,14 +110,7 @@ pub fn capabilities(display: &str, dimensions: (u32, u32)) -> VmCapabilities {
         vm_id: None,
         phase: BootPhase::Unknown,
         features,
-        screenshot_source: can_capture.then(|| {
-            if display.starts_with("viewer") {
-                "wsl-display-bridge"
-            } else {
-                "qmp-screendump"
-            }
-            .into()
-        }),
+        screenshot_source: can_capture.then(|| "qmp-screendump".into()),
         screenshot_dimensions: can_capture.then_some(dimensions),
         text_layout: Some("US physical keyboard; ASCII text only".into()),
     }
@@ -222,15 +211,7 @@ pub fn validate_config(ws: &Workspace, config: &VmConfig) -> Result<VmSpec> {
             config.display != Display::None,
             "GPU rendering requires a graphical display"
         );
-        capabilities(
-            if config.display == Display::Viewer {
-                "viewer-gl"
-            } else {
-                "gtk-gl"
-            },
-            (config.width, config.height),
-        )
-        .require(Capability::GpuRendering)?;
+        capabilities("gtk-gl", (config.width, config.height)).require(Capability::GpuRendering)?;
     }
     Ok(spec)
 }

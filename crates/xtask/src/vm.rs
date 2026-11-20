@@ -9,35 +9,21 @@
 //!   Attach to it with `ilex-vmctl` (QMP) or a VNC viewer.
 //! - `--gui`: the same plus a window to watch and use. When the host has a
 //!   GPU the guest gets one too (virgl: `virtio-vga-gl`).
-//!   - In WSL, the window is `ilex-viewer.exe`, a native Windows window:
-//!     QEMU draws into a private Xvfb, [`ilex_devkit::display`] serves it to
-//!     the viewer, and the viewer sends back the keyboard (the Windows key
-//!     included), pointer and clipboard. `ilex-vmctl` screenshots come from
-//!     the same frames.
-//!   - Elsewhere, a GTK window on the desktop. The guest follows the
-//!     window's size either way.
+//!   - On Linux, GTK opens a window on the desktop.
 //!
 //! The disk modes boot from a throwaway overlay. Windows `--persist` retains
 //! that writable overlay; the earlier Linux path writes to its installed disk.
 //!
 //! On Windows, installed VMs run natively through `crate::vm_windows` with
-//! SDL/WHPX and virgl. Ephemeral VMs retain the WSL path (`crate::wsl`).
+//! SDL/WHPX and virgl. Ephemeral VMs run on the Linux builder.
 
-#[cfg(target_os = "linux")]
-use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
-use std::process::Child;
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::thread;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
-use anyhow::Context;
 use anyhow::{Result, bail};
-#[cfg(target_os = "linux")]
-use ilex_devkit::display::{Bridge, Xvfb};
 #[cfg(target_os = "linux")]
 use ilex_devkit::qemu::{self, Display, Vm, VmConfig};
 use ilex_devkit::{Workspace, cmd, slots};
@@ -45,14 +31,14 @@ use ilex_devkit::{Workspace, cmd, slots};
 #[cfg(target_os = "linux")]
 use crate::disk;
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Args {
     #[command(flatten)]
     pub selection: crate::select::Args,
     /// Image tag or reference to boot (defaults to this checkout's image)
     #[arg(long)]
     pub image: Option<String>,
-    /// Print the image to boot (GUI inspects machine labels; no build or boot)
+    /// Print the image to boot without building or booting
     #[arg(long)]
     pub print_image: bool,
     /// Boot the installed disk image (UEFI, 4K virtio-vga) instead of an ephemeral VM
@@ -103,55 +89,16 @@ impl Args {
     }
 }
 
-/// Add the clipboard agent only to a generic image. An existing machine image
-/// is used unchanged; composing machines requires an explicit future schema.
-fn viewer_image(ws: &Workspace, resolved: &crate::select::Resolved, build: bool) -> Result<String> {
-    resolved.require_match()?;
-    let machine = ilex_devkit::machine::image_machine_label(&resolved.image)?;
-    if machine.as_deref() == Some("generic") {
-        if build {
-            ilex_devkit::machine::build(
-                ws,
-                &resolved.image,
-                &ws.root.join("machines/vm"),
-                None,
-                &[],
-            )
-        } else {
-            ilex_devkit::machine::image_ref(ws, &resolved.image, "vm")
-        }
-    } else {
-        if machine.as_deref() != Some("vm") {
-            let description =
-                machine.map_or_else(|| "unlabelled".into(), |name| format!("machine `{name}`"));
-            eprintln!(
-                "viewer clipboard needs machine `vm`; booting {description} image {} as it is",
-                resolved.image
-            );
-        }
-        Ok(resolved.image.clone())
-    }
-}
-
 pub fn run(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Result<()> {
     if args.print_image {
-        #[cfg(target_os = "linux")]
-        let viewer = args.gui && in_wsl();
-        #[cfg(not(target_os = "linux"))]
-        let viewer = args.gui && cfg!(windows);
-        let image = if viewer {
-            viewer_image(ws, &resolved, false)?
-        } else {
-            resolved.image
-        };
-        println!("{image}");
+        println!("{}", resolved.image);
         return Ok(());
     }
     if args.disk || args.gui {
         #[cfg(target_os = "linux")]
         return run_disk(ws, args, resolved);
         #[cfg(not(target_os = "linux"))]
-        bail!("--disk/--gui run in WSL2 (see CLAUDE.md)");
+        bail!("installed VMs require the Linux or native Windows VM backend");
     }
     resolved.require_match()?;
     run_ephemeral(ws, args, resolved.image)
@@ -182,24 +129,43 @@ fn run_ephemeral(ws: &Workspace, args: Args, image: String) -> Result<()> {
     cmd::run(&mut bcvk)
 }
 
+pub fn run_remote(ws: &Workspace, args: Args) -> Result<()> {
+    use ilex_devkit::bcvk::{EphemeralOpts, EphemeralVm};
+
+    anyhow::ensure!(
+        !(args.gui || args.disk || args.secure || args.print_image || args.persist),
+        "only ephemeral VMs run on the builder"
+    );
+    let resolved = args.resolve(ws)?;
+    resolved.require_match()?;
+    let name = ws.vm_name(args.purpose.as_deref().unwrap_or("vm"));
+    let vm = EphemeralVm::boot(
+        &name,
+        &resolved.image,
+        &EphemeralOpts {
+            memory: args.memory.unwrap_or_else(|| "4G".into()),
+            vcpus: args.vcpus.unwrap_or(4),
+            ..Default::default()
+        },
+    )?;
+    let mut ssh = Command::new("bcvk");
+    ssh.args(["ephemeral", "ssh", vm.name()]);
+    if !args.command.is_empty() {
+        ssh.arg("--").args(args.command);
+    }
+    cmd::run(&mut ssh)
+}
+
 #[cfg(target_os = "linux")]
 fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Result<()> {
-    let viewer = args.gui && in_wsl();
     // `ILEX_DISK` boots a ready-made disk (same override the e2e tiers honour).
     let disk = match std::env::var_os("ILEX_DISK").filter(|p| !p.is_empty()) {
         Some(path) => path.into(),
         None => {
-            let image = if viewer {
-                viewer_image(ws, &resolved, true)?
-            } else {
-                resolved.require_match()?;
-                resolved.image
-            };
-            disk::ensure_image(ws, &disk::Args::default(), &image)?
+            resolved.require_match()?;
+            disk::ensure_image(ws, &disk::Args::default(), &resolved.image)?
         }
     };
-
-    let xvfb = if viewer { Some(Xvfb::start()?) } else { None };
 
     let purpose = args
         .purpose
@@ -212,12 +178,11 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
     if let Some(memory) = &args.memory {
         config.memory = memory.clone();
     }
-    config.display = match (args.gui, &xvfb) {
-        (false, _) => Display::None,
-        (true, Some(_)) => Display::Viewer,
-        (true, None) => Display::Gtk,
+    config.display = if args.gui {
+        Display::Gtk
+    } else {
+        Display::None
     };
-    config.x_display = xvfb.as_ref().map(|x| x.display.clone());
     config.gl = args.gui && !args.no_gl && qemu::host_gl();
 
     let mut vm = Vm::boot(ws, &config)?;
@@ -231,9 +196,6 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
         eprintln!("  gpu:    virgl (the host renders the guest's OpenGL)");
     }
     match config.display {
-        Display::Viewer => eprintln!(
-            "  vmctl:  ilex-vmctl screenshot   (frames from the display bridge, input over QMP)"
-        ),
         Display::Gtk if config.gl => eprintln!(
             "  vmctl:  input only (QMP {}): QEMU can't take screenshots of virgl output",
             info.qmp_sock.display()
@@ -247,62 +209,14 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
         }
     }
 
-    let _bridge;
-    let mut viewer_proc = None;
-    if let Some(x) = &xvfb {
-        let bridge = Bridge::start(x, &info.dir).context("starting the display bridge")?;
-        let ep = &bridge.endpoint;
-        let viewer_args = [
-            "--connect".to_string(),
-            ep.addr.to_string(),
-            "--token".into(),
-            ep.token.clone(),
-            "--title".into(),
-            info.name.clone(),
-        ];
-        // `cargo xtask vm` on Windows reads this line and starts the window.
-        eprintln!("{VIEWER_LINE}{}", viewer_args.join(" "));
-        if std::env::var_os("ILEX_VIEWER_ON_WINDOWS").is_none() {
-            match viewer_exe(ws).map(|exe| spawn_viewer(&exe, &viewer_args)) {
-                Some(Ok(child)) => viewer_proc = Some(child),
-                Some(Err(e)) => {
-                    eprintln!("  window: {e:#}; run `cargo xtask vm --gui` from Windows instead")
-                }
-                None => eprintln!(
-                    "  window: run `cargo xtask vm --gui` from Windows, or there: ilex-viewer.exe {}",
-                    viewer_args.join(" ")
-                ),
-            }
-        }
-        _bridge = bridge;
-    }
-
     if args.command.is_empty() {
         eprintln!("  close the window or press Ctrl-C to stop the VM");
         let status = loop {
             if let Some(status) = vm.exited()? {
                 break status;
             }
-            if let Some(child) = &mut viewer_proc
-                && let Some(status) = child.try_wait()?
-            {
-                // The window closed (and asked QEMU to quit): give it a
-                // moment, then make sure.
-                if !status.success() {
-                    eprintln!("ilex-viewer exited with {status}");
-                }
-                thread::sleep(Duration::from_secs(2));
-                if vm.exited()?.is_none() {
-                    eprintln!("stopping the VM");
-                }
-                drop(vm);
-                return Ok(());
-            }
             thread::sleep(Duration::from_millis(200));
         };
-        if let Some(mut child) = viewer_proc {
-            let _ = child.kill();
-        }
         eprintln!("qemu exited with {status}");
         return Ok(());
     }
@@ -318,39 +232,8 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
     Ok(())
 }
 
-/// Is this Linux the WSL2 distro of a Windows machine?
-#[cfg(target_os = "linux")]
-fn in_wsl() -> bool {
-    std::env::var_os("WSL_DISTRO_NAME").is_some()
-        || Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
-}
-
-/// The stderr line that carries the viewer's arguments to `cargo xtask vm`
-/// on Windows ([`crate::wsl`]).
-pub const VIEWER_LINE: &str = "ilex-viewer: ";
-
-/// `ilex-viewer.exe` in the checkout's Windows target directory.
-#[cfg(target_os = "linux")]
-fn viewer_exe(ws: &Workspace) -> Option<PathBuf> {
-    ["debug", "release"]
-        .map(|p| ws.root.join("target").join(p).join("ilex-viewer.exe"))
-        .into_iter()
-        .find(|p| p.is_file())
-}
-
-/// Start the Windows program from WSL through interop. (That needs the
-/// execute bit, which this repo's WSL setup leaves off for `/mnt/c` files,
-/// hence the Windows side starting it normally.)
-#[cfg(target_os = "linux")]
-fn spawn_viewer(exe: &Path, args: &[String]) -> Result<Child> {
-    Command::new(exe)
-        .args(args)
-        .spawn()
-        .with_context(|| format!("starting {}", exe.display()))
-}
-
 /// Half the host's threads, at least 4 and at most 8: GNOME under virgl and
-/// the window's frame copies want more than the tests' 4.
+/// the desktop workload can use more than the tests' 4.
 #[cfg(target_os = "linux")]
 fn gui_vcpus() -> u32 {
     let threads = thread::available_parallelism().map_or(8, |n| n.get() as u32);

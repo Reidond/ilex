@@ -74,7 +74,7 @@ pub fn require(tool: &str) -> Result<()> {
         return Ok(());
     }
     let hint = if cfg!(windows) {
-        " — on Windows run xtask inside the WSL2 Linux box (see CLAUDE.md)"
+        " — this operation requires Linux"
     } else {
         ""
     };

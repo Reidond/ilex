@@ -1,4 +1,4 @@
-//! Pinned, argument-free SSH transport for the builder's finite job protocol.
+//! Pinned SSH for the builder's finite job protocol and guest terminal.
 use crate::{
     builder::{self, BuilderEndpoint},
     host,
@@ -38,6 +38,16 @@ pub fn install_cancel_handler() -> Result<()> {
 }
 pub fn cancelled() -> bool {
     CANCEL.load(Ordering::SeqCst)
+}
+pub fn remove_cancel_handler() -> Result<()> {
+    ensure!(
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_event), 0)
+        } != 0,
+        "removing job cancellation handler: {}",
+        std::io::Error::last_os_error()
+    );
+    Ok(())
 }
 pub fn available_space(path: &std::path::Path) -> Result<u64> {
     let ancestor = path
@@ -161,6 +171,23 @@ impl Transport {
         self.rpc(TransferOperation::Submit { request }, &[])
             .map(|r| r.0)
     }
+    pub fn terminal(&self, owner: &str, job: &str) -> Result<()> {
+        use std::io::IsTerminal;
+
+        ensure!(
+            std::io::stdin().is_terminal(),
+            "ephemeral VM shell needs a terminal"
+        );
+        // OpenSSH handles Windows console modes and window size negotiation.
+        let (_lease, mut child) = host::spawn_owned(self.ssh("-t").args(["terminal", owner, job]))
+            .context("opening the builder guest terminal")?;
+        let status = child.wait()?;
+        ensure!(
+            status.success(),
+            "builder guest terminal exited with {status}"
+        );
+        Ok(())
+    }
     pub fn rpc<Job: serde::Serialize>(
         &self,
         operation: TransferOperation<'_, Job>,
@@ -175,45 +202,10 @@ impl Transport {
             payload.len() <= ilex_tooling_core::CHUNK_BYTES,
             "oversized transfer chunk"
         );
-        let endpoint = &self.endpoint;
-        let mut ssh = Command::new("ssh.exe");
         use std::os::windows::process::CommandExt;
+        let mut ssh = self.ssh("-T");
         ssh.creation_flags(0x08000000); // CREATE_NO_WINDOW: Ctrl-C belongs to xtask.
-        ssh.args(["-T", "-F", "NUL", "-i"])
-            .arg(&endpoint.identity_file)
-            .args([
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "PasswordAuthentication=no",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-o",
-                "GlobalKnownHostsFile=NUL",
-                "-o",
-                "ForwardAgent=no",
-                "-o",
-                "ClearAllForwardings=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "ServerAliveInterval=10",
-                "-o",
-                "ServerAliveCountMax=3",
-                "-o",
-                "LogLevel=ERROR",
-            ])
-            .arg("-o")
-            .arg(format!(
-                "UserKnownHostsFile={}",
-                endpoint.known_hosts_file.display()
-            ))
-            .arg("-o")
-            .arg(format!("HostKeyAlias={}", endpoint.host_key_alias))
-            .arg(format!("{}@{}", endpoint.user, endpoint.address))
-            .stdin(Stdio::piped())
+        ssh.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // There is deliberately no SSH remote-command argument.
@@ -285,6 +277,44 @@ impl Transport {
             "truncated builder reply"
         );
         Ok((reply["value"].clone(), data))
+    }
+
+    fn ssh(&self, terminal: &str) -> Command {
+        let endpoint = &self.endpoint;
+        let mut ssh = Command::new("ssh.exe");
+        ssh.args([terminal, "-F", "NUL", "-i"])
+            .arg(&endpoint.identity_file)
+            .args([
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "PasswordAuthentication=no",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "GlobalKnownHostsFile=NUL",
+                "-o",
+                "ForwardAgent=no",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=10",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                "LogLevel=ERROR",
+            ])
+            .args([
+                "-o",
+                &format!("UserKnownHostsFile={}", endpoint.known_hosts_file.display()),
+            ])
+            .args(["-o", &format!("HostKeyAlias={}", endpoint.host_key_alias)])
+            .arg(format!("{}@{}", endpoint.user, endpoint.address));
+        ssh
     }
 }
 

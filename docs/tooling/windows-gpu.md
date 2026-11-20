@@ -19,8 +19,8 @@ ilex-vmctl mcp
 `vm --gui` asks the T3 builder for an installed development qcow2, verifies
 the delivered disk manifest and SHA256, and runs the pinned T2 QEMU locally.
 Image builds run on the builder; QEMU and vmctl run directly on Windows. `vm --disk` also uses
-native WHPX, with a software headless display. The Linux GTK/KVM path and the
-explicit WSL viewer/ephemeral path remain available until T7.
+native WHPX, with a software headless display. Native Linux uses GTK/KVM.
+Plain Windows `vm` opens an ephemeral guest terminal on the builder.
 
 The native profile uses q35, `-cpu max`, four vCPUs, 8 GiB fixed guest RAM,
 nonsecure EDK2, virtio disk/network/keyboard and a USB absolute tablet. The
@@ -52,7 +52,7 @@ Persistent disks remain
 under the checkout's state directory.
 
 `--purpose research` selects a separate owned overlay and control endpoint.
-An explicit `ILEX_DISK` can import a disk from the still-supported WSL path:
+An explicit `ILEX_DISK` accepts a validated development disk from Linux:
 run `cargo xtask disk --development`, then copy the qcow2, `.disk.json` manifest
 and `.ilex-owner` receipt together. Import requires this checkout's owner and
 the exact SHA256 and preserves the original executor in image provenance.
@@ -63,7 +63,7 @@ promotion without another transfer or builder startup.
 
 Admission waits for guest RAM plus a 14 GiB host reserve and a native VM slot
 (`ILEX_VM_SLOTS`, default four). Live available memory already includes the
-fixed builder, WSL and other applications; nested builder RAM is not counted
+fixed builder and other applications; nested builder RAM is not counted
 again. Builder and native startup share a byte-range lock; native guest RAM
 is preallocated before that lock is released. Resource sizes are never reduced
 to get past admission. The shared

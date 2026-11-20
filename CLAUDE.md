@@ -13,12 +13,12 @@ layer on that root. Rust tooling, e2e-only tests on QEMU via bcvk.
 ```sh
 cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
 cargo xtask build --shell none # small base → localhost/ilex:<tag>.s-none (256 MiB growth budget)
-cargo xtask build --machine vm # build the base, then localhost/ilex:<tag>.m-vm
-cargo xtask build --machine vm --on <image> # only a machine layer on an existing image
+cargo xtask build --machine ms-7c35 # build the base, then its machine layer
+cargo xtask build --machine ms-7c35 --on <image> # only a machine layer on an existing image
 cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
-                               # on Windows: run `cargo xtask vm` in PowerShell, not in WSL
-cargo xtask vm --gui --print-image # inspect selection and show the image to boot, without building
+                               # on Windows: ephemeral VM on the builder, native window with --gui
+cargo xtask vm --gui --print-image # show the selected image without building
 cargo xtask info               # resource identity, selection and available configurations
 ```
 
@@ -32,7 +32,7 @@ cargo xtask info               # resource identity, selection and available conf
   A linked-worktree call discovers and registers its actual primary through
   Git's common directory, so the normal primary is registered without opening
   that checkout or setting configuration. Later clones keep owner-qualified
-  names. Windows and WSL share `%ProgramData%/ilex/tooling/main-claims`;
+  names. Windows uses `%ProgramData%/ilex/tooling/main-claims`;
   native Linux uses `/var/lib/ilex-tooling/main-claims`. Claims and releases are
   immutable, atomically published records. A missing checkout's claim is
   released only by the explicit command below. `canonicalCheckout` is no longer used.
@@ -93,9 +93,8 @@ cargo xtask info               # resource identity, selection and available conf
   upgrade fixture alias (preserving bcvk's warm-up cache); explicit legacy v1
   remains unmodified and is never implicitly adopted.
   Ordinary upgrade VMs keep `uefi-insecure` firmware.
-  Secure Boot requires SMM; the measured WSL kernel supports it
-  (`KVM_CAP_X86_SMM=1`). Probe each host rather than inferring capability
-  from nested virtualization. The separate security tier qualifies enforcement.
+  Secure Boot under KVM requires SMM. Probe `KVM_CAP_X86_SMM` on the Linux host.
+  On Windows, the separate Gen2 security tier qualifies enforcement.
   On v2 the same VM checks signature enforcement: v2's `ilex-sigpolicy.service`
   left the containers-storage origin alone at boot; the origin is pointed at
   the installer composition unverified (the state older ISO installs leave),
@@ -474,7 +473,6 @@ the authority for the image's name. Publications add no image label or file.
 | Base | `T.s-none` | `base` (always listed) | root | yes |
 | Base + GNOME | `T` | `generic.gnome` | root | yes |
 | Base + GNOME + ms-7c35 | `T.m-ms-7c35` | `ms-7c35.gnome` | layer on `generic.gnome` | no |
-| Base + GNOME + vm | `T.m-vm` | none (unlisted) | layer | no |
 | Base + ms-7c35 | `T.s-none.m-ms-7c35` | `ms-7c35`, only if listed with `shells = []` | layer on `base` | no |
 | Base + GNOME + ilex (future) | `T.s-gnome.s-ilex` | `generic.gnome.ilex`, once listed | root | yes |
 
@@ -589,14 +587,9 @@ upgrade and switch. Other machine defaults (udev, sysctl, unit drop-ins) go in
 `rootfs/usr/` too. No replacement list exists.
 
 `build`, `test`, `vm` and `disk` accept `--machine <name>`, overriding
-`ILEX_MACHINE`, then `generic`. In WSL `vm --gui` adds `vm` (spice-vdagent for
-clipboard) only when the selected image is generic. An already selected machine
-image is booted unchanged: `--machine vm` and `--image <own .m-vm>` reuse it;
-another machine prints that the viewer's clipboard needs machine `vm`.
-An explicit older image without an `ilex.machine` label also boots unchanged
-with that clipboard message. It is still refused as a machine-layer base.
-`--print-image` inspects labels to apply this same decision without building or
-booting. Native Windows inspection resolves the development image without starting a VM.
+`ILEX_MACHINE`, then `generic`. Native Windows `vm --gui` installs the
+selected composition with a disposable development overlay. `--print-image`
+reports the selected reference without building or booting.
 The implicit tag is `<checkout tag>[.s-<shell>...].m-<machine>`. A layer built
 on an explicit base, including a digest or another repository's image, always
 gets a local tag in this checkout's namespace: `<checkout tag>.b-<16 hex SHA-256
@@ -1193,8 +1186,9 @@ restored vs compiled.
   and the builder reads it only when present, so a plain `podman build` and CI
   work without it (`--no-host-kache` skips it). After a host `cargo build
   --release -p ilexctl --no-default-features` with kache set up (`cargo install kache && kache
-  init`, once per machine; inside WSL on Windows), the image build restores
-  those crates instead of compiling them.
+  init`, once per Linux host), the image build can restore those crates.
+  On Windows, the host store is in the Linux builder. An exported Linux
+  cache can be imported using the [migration guide](docs/tooling/windows-migration.md).
 - To bump kache, change the version in the URL and the sha256 in the
   Containerfile (`gh release view vX.Y.Z -R kunobi-ninja/kache --json assets`).
 
@@ -1205,7 +1199,7 @@ build requests/results, disk artifacts, VM specs/handles, capabilities, RGB
 frames/input and versioned state/remote envelopes. It has no platform path or
 hypervisor policy. Host and guest architectures are separate. The current Linux
 backend qualifies native x86_64 only; unsupported requests fail before launch.
-The `ilex-devkit` facade preserves the Linux/WSL API, handoff and viewer.
+The `ilex-devkit` facade re-exports the portable contracts and Linux tooling.
 
 ```sh
 cargo xtask info --json                 # identity, source manifest, paths, capabilities
@@ -1226,9 +1220,8 @@ the allocation policy above). All other primary/linked/T3 checkouts include thei
 canonical owner hash, even for short, valid Git worktree names; missing Git
 metadata can never acquire `main` and cannot authorize mutations.
 The canonical native checkout path plus common Git directory
-produce a stable UUIDv8 owner. Windows and its WSL mount resolve to that same
-identity. A remote snapshot carries that original identity explicitly; it must
-not rediscover ownership from its builder-side directory.
+produce a stable UUIDv8 owner. The Windows sender passes that identity
+explicitly in each remote snapshot.
 
 Local image builds pass typed requests to the Linux executor. A source manifest
 covers Git modes, working bytes, untracked inputs and tracked deletions; it
@@ -1322,9 +1315,9 @@ timestamp, viewport and resize generation; stale pointer mappings fail. The
 existing CLI/MCP screenshot coordinates stay in framebuffer/downscaled pixels.
 Firmware enforcement, persistent TPM and suspend remain explicitly unavailable
 or unqualified for ordinary Linux defaults; no security capability is silently
-weakened. WSL removal and native Windows providers belong to later tooling PRs.
+weakened.
 
-## Windows: builder commands and WSL compatibility
+## Windows development tooling
 
 The infrastructure commands run natively: run `cargo xtask
 runtime fetch|status|update|self-check` and `cargo xtask builder
@@ -1333,6 +1326,7 @@ builder, pinned acquisition, SSH identity, owned cleanup and update recovery are
 documented in [Windows builder tooling](docs/tooling/windows-builder.md).
 T3 also routes native Windows `build`, `test`, `disk`, `iso`, `tool` and `rechunk`
 to that builder automatically, calling idempotent `builder up` as needed.
+Run all Windows commands from native PowerShell in the checkout.
 Install a changed controller with `builder update`; a recipe mismatch fails
 rather than executing an older controller. Accept its verified update with
 `builder accept-update`. The explicit `security::firmware` tier runs on native
@@ -1344,6 +1338,8 @@ checkout cleanup.
 cargo xtask builder up --memory-gib 16 --cpus 8 --wait-for-memory-seconds 10800
 cargo xtask builder update --wait-for-memory-seconds 10800
 cargo xtask build
+cargo xtask vm
+cargo xtask vm -- uname -r
 cargo xtask test ephemeral:: disk:: upgrade:: graphical:: tool:: -- --test-threads 1
 cargo xtask remote snapshot
 cargo xtask remote self-check
@@ -1364,8 +1360,7 @@ source digest come from Windows; the copy cannot become `main`. Both executors
 retain the existing clean Git-tree fingerprint encoding and use the same
 versioned working-input encoding when dirty.
 
-Pinned, argument-free SSH carries finite versioned requests and typed command
-fields. Only explicit image/selection, legacy test and ISO assertion controls
+Pinned SSH carries finite versioned requests and typed command fields. Only explicit image/selection, legacy test and ISO assertion controls
 are forwarded. Host PATH/HOME/state, agents, CI and registry/signing credentials
 are not. Podman, kache and Cargo caches remain in the builder. Cargo outputs are
 separate by owner, architecture/toolchain and immutable snapshot. OCI export
@@ -1381,8 +1376,9 @@ Console logs use libvirt's labelled log tree before artifact collection.
 Ctrl-C cancels only the job's systemd cgroup. `remote cancel` sends an
 owner-validated cancellation independently of the running client's lock and
 returns its acknowledgement; the original client collects evidence, or use
-`remote resume`. Dropped SSH/client loss leaves the job running. Neither path
-stops the builder. Logs and frozen artifacts return even after failure.
+`remote resume`. Finite jobs can continue after an SSH disconnect. An
+interactive ephemeral VM follows the lifetime of its attached terminal. Logs
+and frozen artifacts return even after failure.
 
 Windows control files stay in `<state dir>/remote/jobs/<UUID>/`. All builder
 data, including job request/context copies and results, is untrusted and goes
@@ -1423,46 +1419,23 @@ unlocked user session. Right-Ctrl+G escapes SDL grab. See
 [Windows GPU development](docs/tooling/windows-gpu.md) for lifecycle, memory,
 resolution, capture limitations and acceptance commands.
 
-The existing ephemeral `vm` compatibility path still uses the
-`FedoraLinux-45` WSL2 distro (nested virtualization gives it `/dev/kvm`).
-The previous direct WSL commands remain available (WSL translates the cwd):
+| Windows command | Backend |
+| --- | --- |
+| `build`, `rechunk`, `disk`, `iso`, `tool` | Managed Fedora builder with rootful Podman |
+| `test ephemeral::` and the ordinary Linux tiers | Managed Fedora builder with nested KVM |
+| `vm`, `vm -- <command>` | Ephemeral bcvk guest on the builder, with SSH terminal or streamed command output |
+| `vm --gui`, `vm --disk` | Native WHPX, with SDL and virgl for `--gui` |
+| `security`, `test security::firmware`, `vm --secure` | Native [Hyper-V Gen2](docs/tooling/windows-gen2.md) |
 
-```sh
-wsl -d FedoraLinux-45 -u root -e bash -lc 'cargo xtask build'
-```
-
-- `-e bash -lc` matters: `-e` skips WSL's outer shell (which would expand
-  `$VARS` too early), and the login shell sources
-  `/etc/profile.d/ilex-dev.sh`, which points `CARGO_TARGET_DIR` at the Linux
-  filesystem for `/mnt/*` checkouts.
-- In Git Bash, prefix with `MSYS_NO_PATHCONV=1` when passing Linux paths.
-- Image builds and VM boots take minutes: run them in the background.
-- `cargo check`/`clippy` work natively on Windows too, for quick feedback.
-  `cargo clippy --workspace --all-targets` works on Windows and Linux; the
-  `config::` fixtures that create Unix modes and symlinks are compiled on Unix
-  and run in WSL on Windows.
-- Without `--gui`/`--disk`, run `cargo xtask vm` on Windows itself (PowerShell or
-  Git Bash, in the checkout). It hands itself to the distro (`wsl.exe -d
-  FedoraLinux-45 -u root --cd <checkout> -e bash -lc 'cargo xtask vm …'`;
-  `ILEX_WSL_DISTRO` names another). `--gui` and `--disk` use the native
-  provider documented above. Direct graphical commands inside WSL retain
-  their compatibility viewer; see "The WSL compatibility window" below.
-  `ILEX_SHELLS` and `ILEX_MACHINE` reach the ephemeral WSL path through `WSLENV`.
-  Selection is validated natively before entering WSL.
-- Nothing here uses WSLg any more. It is unreliable on this machine: on most
-  starts of WSL 2.7 it fails to open its shared memory with Windows
-  (`/mnt/wslg/weston.log`: `rdp_allocate_shared_memory: Failed to open …`,
-  `use_gfxredir = 0`; microsoft/WSL#40618), and then every Linux window only
-  gets a `[WARN:COPY MODE] …` taskbar button and is never drawn, until WSL
-  starts again (`wsl --shutdown`). It also mounts `/tmp/.X11-unix`
-  read-only, so an Xvfb in WSL is only reachable on its abstract socket.
+See [Windows migration](docs/tooling/windows-migration.md) for inventory,
+optional cache import and the owner's retirement checklist.
 
 ## Driving VMs with ilex-vmctl
 
 `cargo xtask disk` writes the installed qcow2 (`bcvk to-disk`). On Windows,
 `vm --disk` boots a native headless WHPX VM and `--gui` selects SDL/virgl.
 Linux `vm --disk` uses the graphical test machine (UEFI, 4K `virtio-vga`);
-`--gui` adds GTK on a Linux desktop or the compatibility viewer inside WSL.
+`--gui` opens GTK on a Linux desktop.
 Linux disk-booted VMs (also the `disk::` and `graphical::` tests) publish `qmp.sock`, `vnc.sock` and
 `vm.toml` in
 `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; native Windows publishes private
@@ -1486,8 +1459,6 @@ and `click` takes coordinates in that downscaled image:
 
 ```sh
 claude mcp add --transport stdio ilex-vm -- ilex-vmctl mcp
-# Explicit WSL compatibility VMs (run that controller inside WSL):
-claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e bash -lc 'ilex-vmctl mcp'
 ```
 
 - QMP serves one client at a time; vmctl connects per command, so an agent
@@ -1502,101 +1473,10 @@ claude mcp add --transport stdio ilex-vm -- wsl.exe -d FedoraLinux-45 -u root -e
   when the image's default shell is not `gnome`, including `--shell none`.
 - The SSH test key and the throwaway disk overlays live in the state dir;
   `cargo xtask vm --disk` prints the exact `ssh` command line.
-- On Linux/WSL, `--gui` gives the guest a GPU when the host has one (`/dev/dxg` in WSL, a
-  DRM render node elsewhere; `--no-gl` opts out): `virtio-vga-gl` with
-  `-display gtk,gl=on`, so virglrenderer renders the guest's OpenGL on the
-  host (in WSL through Mesa's D3D12 driver on the Windows GPU), and half the
-  host's threads as vCPUs (4 to 8). QEMU allows no VNC server next to a GL
-  display, and QMP `screendump` fails on virgl output ("no surface"): in WSL
-  `ilex-vmctl screenshot` takes the display bridge's frames instead
-  (`screen.sock`, `vm.toml` says `display = "viewer"`); a GL GTK window on a
-  Linux desktop (`display = "gtk-gl"`) takes vmctl input but no screenshots.
-
-## The WSL compatibility window
-
-Explicit `cargo xtask vm --gui` in WSL keeps its compatibility path until T7.
-It doesn't open a Linux window; the VM's window is
-`ilex-viewer.exe` (`crates/ilex-viewer`), a native Windows program, fed by a
-display bridge in `xtask vm` (`crates/ilex-tooling-linux/src/display.rs`, protocol
-in `viewer.rs`):
-
-- QEMU draws into a private Xvfb (`-display gtk,gl=on,show-menubar=off`;
-  Mesa's D3D12 driver renders there too, and nothing tears on resize). The
-  bridge watches the Xvfb root with XDamage and reads damaged rectangles
-  straight from Xvfb's framebuffer, which `-fbdir` keeps as a memory-mapped
-  XWD file on `/dev/shm` (`GetImage` took 11 ms for a 2800x1750 frame and
-  stalled the single-threaded Xvfb meanwhile). It compares them in 64x64
-  tiles with what the viewer has and sends only changed tiles, raw BGRX, on
-  a thread of their own, over TCP to WSL's own address (Windows reaches it at
-  ~2.4 GiB/s; the `localhost` relay manages ~550 MiB/s). A token printed with
-  the address keeps others out.
-- Measured with GNOME's overview toggled every 0.35 s through QMP, 2800x1750:
-  the guest presents 75 fps, the viewer receives and draws 37-41 frames/s
-  (the overview rests part of each cycle; about 55 during the motion), the
-  bridge spends ~7 ms per frame; the WSLg window managed 32.5 the same way.
-  The limit now is QEMU getting frames onto the Xvfb (a GPU readback and a
-  20 MB `XPutImage` each). Typing and pointer work: ~50 frames/s, a few
-  MiB/s. `cargo xtask` is a dev build, so the workspace's `profile.dev`
-  optimizes ilex-devkit, ilex-viewer and all dependencies (unoptimized, the
-  same path managed 6 frames/s).
-- The viewer (winit + softbuffer) draws them 1:1: its window's size becomes
-  the QEMU window's size on the Xvfb, which QEMU hands to the guest (EDID),
-  so the guest's resolution follows the window. The guest's pointer image
-  comes over XFixes and becomes the window's own cursor.
-- Keyboard: a `WH_KEYBOARD_LL` hook takes every key while the window has
-  focus and swallows it, so the Windows key, Alt+Tab, Ctrl+Esc reach GNOME
-  instead of Windows (Ctrl+Alt+Del can't be hooked). The hook lives in a
-  helper process (`ilex-viewer --keyboard-hook <hwnd>`, started by the
-  viewer, ends with the window) that writes keys to the viewer over a pipe:
-  Windows didn't call a hook in the process that owns the foreground window
-  (only while another process had a hook too), and a hook on a busy UI
-  thread would hit `LowLevelHooksTimeout`, after which Windows drops it for
-  good. Keys that reach the window anyway are forwarded from winit's key
-  events by scan code, so typing never depends on the hook. Keys travel as
-  QEMU qnums, which are Windows' set-1 `scanCode` plus `0x80` for extended
-  keys, so there is no keymap: the guest's layout decides. Losing focus
-  releases every held key. Pointer and keys go to QEMU on a QMP socket of
-  the bridge's own (`input.sock`), so `ilex-vmctl` keeps `qmp.sock`. To
-  test the hook from a script, send keys with `keybd_event`/`SendInput`
-  (the input stream hooks see); a tool that posts window messages bypasses
-  it and only exercises the fallback.
-- After a while on GNOME's lock screen the guest turns the display off and
-  the window shows QEMU's "Display output is not active"; moving the
-  pointer over the window or pressing a key wakes it. While the guest
-  catches up with a resized window, the viewer stretches its last frame
-  (and scales the pointer) instead of showing it in a corner.
-- Clipboard (text, both ways): on a generic image `--gui` installs machine `vm`
-  (`spice-vdagent`) through `machines/Containerfile`, tagged `<checkout tag>.m-vm` for the default
-  base (explicit bases follow the local `.b-<hash>` rule above), never
-  published, rebuilt only when the base or machine inputs change,
-  per its `ilex.machine-key` label, because every rebuild's new digest makes bcvk
-  install the disk again. Existing machine images are used unchanged; only `vm`
-  supplies the viewer's clipboard agent. QEMU puts the guest's SPICE agent port on
-  `vdagent.sock`, and the bridge speaks the agent protocol itself
-  (`vdagent.rs`). QEMU's own `qemu-vdagent` chardev doesn't work here:
-  `spice-vdagentd` reads EOF from it ("lost spice client connection") and
-  drops everything, and QEMU's GTK clipboard is broken on Wayland hosts
-  (qemu-project/qemu#1455). Two guest quirks the bridge works around:
-  `spice-vdagentd` closes and reopens the port whenever the session agent
-  changes (GDM to the user's session) and needs our capabilities again, so
-  the bridge announces until it answers and re-offers on every guest
-  announcement; and mutter's first fetch of a new X11 clipboard owner's
-  text comes back empty, so each Windows copy is offered twice, 500 ms
-  apart (else the first paste in GNOME pastes nothing).
-  Old checkout-owned `...-vm` images can be removed by their own tag with
-  `podman rmi`; do not prune the shared container storage.
-- Closing the window quits QEMU; QEMU exiting closes the window.
-  `ILEX_VIEWER_STATS=1 cargo xtask vm --gui` makes the viewer print frames
-  received and drawn per second, the bridge its frames per second and
-  milliseconds per step (`WSLENV` carries the variable over), and logs the
-  guest agent's messages.
-- GPU paravirtualization is virgl (OpenGL). Vulkan in the guest (Venus over
-  the same virtio-gpu) is untried: WSL has a host Vulkan, Mesa's Dozen on
-  D3D12 (`Microsoft Direct3D12 (<GPU>)`, Vulkan 1.2, external memory fds),
-  and Fedora's virglrenderer includes Venus, but it needs blob resources
-  (`blob=true,hostmem=…` and memfd-backed guest RAM), and Dozen isn't a
-  conformant driver. VA-API video through Mesa's D3D12 driver doesn't
-  initialize in WSL (no `/dev/dri`).
+- On Linux, `--gui` selects virgl when a DRM render node is available.
+  QMP input works with GTK virgl. For QMP screenshots, use `--disk` or
+  `--gui --no-gl`. Windows SDL screenshots use the exact client area of
+  the VM window.
 
 ## Developer tools: drupe
 
@@ -2273,8 +2153,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   `bwrap-userns-restrict` AppArmor profile: it attaches to any
   `/usr/bin/bwrap` by path, even inside an unconfined container, and its
   `unpriv_bwrap` child denies the setuid/chown/sys_admin osbuild's sandbox
-  needs ("mount: … permission denied"; WSL has no AppArmor, so local builds
-  never see it). `/var/lib/containers`, `/var/cache/image-builder` and
+  needs ("mount: … permission denied"). `/var/lib/containers`, `/var/cache/image-builder` and
   `TMPDIR` live on volumes under `/mnt`. `xtask iso` does the same locally: when
   the `image-builder` on `PATH` is older than 89 (or missing) it builds
   `installer/image-builder/Containerfile` and runs image-builder from that
@@ -2336,15 +2215,9 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 
 ### One-time GitHub setup (the user runs this, not an agent)
 
-1. Repository secrets, from Git Bash (the key and password go through the
-   pipe, never to the terminal):
-
-   ```sh
-   MSYS_NO_PATHCONV=1 wsl.exe -d FedoraLinux-45 -u root -e cat /root/ilex-secrets/cosign.key \
-     | gh secret set COSIGN_PRIVATE_KEY --repo Reidond/ilex
-   MSYS_NO_PATHCONV=1 wsl.exe -d FedoraLinux-45 -u root -e cat /root/ilex-secrets/cosign.password \
-     | gh secret set COSIGN_PASSWORD --repo Reidond/ilex
-   ```
+1. The owner supplies the GitHub Actions `COSIGN_PRIVATE_KEY` and
+   `COSIGN_PASSWORD` secrets from their private backup. Signing credentials
+   stay outside the development tooling and builder.
 
 2. Make the `ilex` ghcr package public so machines and the installer need no
    credentials. The package only exists after the first publish: run the

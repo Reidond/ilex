@@ -27,6 +27,7 @@ const ENVIRONMENT: &[&str] = &[
     "ILEX_ISO_DIGEST",
     "ILEX_ISO_INSTALL_TIMEOUT",
     "ILEX_VM_SLOTS",
+    "ILEX_KACHE_IMPORT",
 ];
 type Rpc<'a> = TransferOperation<'a, Job>;
 
@@ -153,6 +154,10 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
     )?;
     let mut staged = source::stage(ws)?;
     let mut inputs = BTreeMap::new();
+    if let Command::ImportKache { archive, .. } = &mut command {
+        let archive = archive.take().context("missing local kache archive")?;
+        inputs.insert("kache".into(), staged.file(&archive)?);
+    }
     if matches!(&command, Command::Test(a) if a.filters.iter().any(|f| f.contains("iso")))
         && let Some(iso) = std::env::var_os("ILEX_ISO").filter(|s| !s.is_empty())
     {
@@ -259,6 +264,13 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
             "started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
         }))?,
     )?;
+    if matches!(&job.command, Command::Vm(args) if args.command.is_empty()) {
+        transport::remove_cancel_handler()?;
+        let terminal = transport.terminal(&job.snapshot.identity.owner, &job.job);
+        transport::install_cancel_handler()?;
+        let result = wait(ws, &transport, &job, &job_dir, terminal.is_err());
+        return terminal.and(result);
+    }
     wait(ws, &transport, &job, &job_dir, false)
 }
 
@@ -386,6 +398,15 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
 }
 
 fn validate(ws: &Workspace, command: &Command) -> Result<()> {
+    if let Command::Vm(args) = command {
+        use std::io::IsTerminal;
+        args.resolve(ws)?;
+        ensure!(!args.persist, "--persist only applies to --disk/--gui");
+        ensure!(
+            !args.command.is_empty() || std::io::stdin().is_terminal(),
+            "ephemeral VM shell needs a terminal or a command after --"
+        );
+    }
     if let Command::Iso(args) = command {
         // CI is deliberately absent from the remote environment. Apply the
         // existing local-only testing-tag rule before crossing that boundary.

@@ -18,6 +18,8 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import traceback
 import uuid
@@ -34,7 +36,7 @@ ENV = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin',
 ALLOWED_ENV = {'ILEX_IMAGE', 'ILEX_UPGRADE_FROM', 'ILEX_SHELLS', 'ILEX_MACHINE',
                'ILEX_UPGRADE_PREPARE', 'ILEX_SIGPOLICY_LEGACY', 'ILEX_TOOL_REBUILD',
                'ILEX_ISO_MACHINE', 'ILEX_ISO_EXPECT', 'ILEX_ISO_TARGET',
-               'ILEX_ISO_DIGEST', 'ILEX_ISO_INSTALL_TIMEOUT', 'ILEX_VM_SLOTS'}
+               'ILEX_ISO_DIGEST', 'ILEX_ISO_INSTALL_TIMEOUT', 'ILEX_VM_SLOTS', 'ILEX_KACHE_IMPORT'}
 
 
 def encode(value):
@@ -322,8 +324,48 @@ def running(unit):
     return state in {'active', 'activating', 'deactivating', 'reloading'}
 
 
+def interactive(spec):
+    command = spec['command']
+    return command['operation'] == 'vm' and not command['args']['command']
+
+
+def launch(spec, terminal=False):
+    owner, job = spec['snapshot']['identity']['owner'], spec['job']
+    command = ['systemd-run', '--quiet', '--unit=' + service(job),
+               '--description=ilex-job schema=1 owner=' + owner + ' job=' + job,
+               '--property=Type=exec', '--property=KillMode=control-group',
+               '--property=TimeoutStopSec=45', '--property=SendSIGKILL=yes']
+    if terminal:
+        command += ['--pty', '--collect']
+    command += ['/usr/bin/python3', '-I', '-S', '/usr/local/libexec/ilex-builder-jobs',
+                '--run', owner, job]
+    if terminal:
+        return subprocess.run(command, env=ENV | {'TERM': os.environ.get('TERM', 'xterm')}).returncode
+    checked(command)
+    return 0
+
+
+def terminal(owner, job):
+    path, spec = load_job({'owner': owner, 'job': job})
+    with lock('/run/lock/ilex-builder-jobs.lock', shared=True), lock(path / 'terminal.lock', wait=False):
+        assert interactive(spec), 'job has no guest terminal'
+        assert read_json(path / 'state.json')['state'] == 'queued', 'terminal job was already started'
+        assert not running(service(job)), 'terminal job is already running'
+        def disconnect(_signum, _frame):
+            raise InterruptedError('guest terminal disconnected')
+        signal.signal(signal.SIGHUP, disconnect)
+        signal.signal(signal.SIGTERM, disconnect)
+        try:
+            return launch(spec, terminal=True)
+        finally:
+            if running(service(job)):
+                description = checked(['systemctl', 'show', '-p', 'Description', '--value', service(job)]).decode().strip()
+                assert description == 'ilex-job schema=1 owner=' + owner + ' job=' + job, 'job unit ownership changed'
+                checked(['systemctl', 'stop', service(job)])
+
+
 def submit(spec):
-    assert spec['schema'] == 1 and spec['command']['operation'] in {'build', 'rechunk', 'disk', 'iso', 'tool', 'test', 'export', 'self_check'}, 'unsupported job schema/operation'
+    assert spec['schema'] == 1 and spec['command']['operation'] in {'build', 'rechunk', 'disk', 'iso', 'tool', 'test', 'vm', 'import_kache', 'export', 'self_check'}, 'unsupported job schema/operation'
     assert set(spec['environment']) <= ALLOWED_ENV, 'environment not allowlisted'
     assert all(isinstance(v, str) and len(v) < 16384 and '\x00' not in v for v in spec['environment'].values()), 'invalid environment value'
     snapshot = spec['snapshot']
@@ -340,12 +382,8 @@ def submit(spec):
         atomic(path / 'context.json', encode({'schema': 1, 'root': str(root), 'identity': snapshot['identity'], 'source': snapshot['source']}))
         atomic(path / 'state.json', encode({'state': 'queued', 'exit_code': None}))
         try:
-            checked(['systemd-run', '--quiet', '--unit=' + service(spec['job']),
-                     '--description=ilex-job schema=1 owner=' + owner + ' job=' + spec['job'],
-                     '--property=Type=exec', '--property=KillMode=control-group',
-                     '--property=TimeoutStopSec=45', '--property=SendSIGKILL=yes',
-                     '/usr/bin/python3', '-I', '-S', '/usr/local/libexec/ilex-builder-jobs',
-                     '--run', owner, spec['job']])
+            if not interactive(spec):
+                launch(spec)
         except BaseException:
             atomic(path / 'state.json', encode({'state': 'failed', 'exit_code': 1}))
             raise
@@ -355,7 +393,15 @@ def submit(spec):
 def capacity(spec):
     # One full build/test at a time on 16 GiB; smaller tool jobs may share.
     kind = spec['command']['operation']
-    weight = {'tool': 4, 'self_check': 4, 'export': 4, 'disk': 10, 'rechunk': 8}.get(kind, 12) * 1024**3
+    weight = {'tool': 4, 'self_check': 4, 'export': 4, 'disk': 10, 'rechunk': 8, 'import_kache': 4}.get(kind, 12) * 1024**3
+    cpus = min(4, os.cpu_count())
+    if kind == 'vm':
+        args = spec['command']['args']
+        size = re.fullmatch(r'([1-9][0-9]*)([KMGTP]?)', (args['memory'] or '4G').upper())
+        assert size, 'invalid ephemeral VM memory'
+        weight = int(size[1]) * 1024**{'K': 1, 'M': 2, '': 2, 'G': 3, 'T': 4, 'P': 5}[size[2]] + 2 * 1024**3
+        cpus = args['vcpus'] if args['vcpus'] is not None else 4
+        assert isinstance(cpus, int) and 0 < cpus <= os.cpu_count(), 'ephemeral vCPUs exceed builder capacity'
     total = int(next(l.split()[1] for l in Path('/proc/meminfo').read_text().splitlines() if l.startswith('MemTotal:'))) * 1024
     assert weight <= total - 2 * 1024**3, 'builder is too small for this operation; use builder up --memory-gib 16 while off'
     cap = min(4, max(1, total // (8 * 1024**3)))
@@ -375,9 +421,9 @@ def capacity(spec):
                     assert previous['job'] == lease.parent.name and previous['snapshot']['identity']['owner'] == lease.parent.parent.name
                     cleanup_resources(lease.parent, previous)
                     lease.unlink(missing_ok=True)
-            if len(active) < cap and sum(x['bytes'] for x in active) + weight <= total - 2 * 1024**3 and sum(x['cpus'] for x in active) + min(4, os.cpu_count()) <= os.cpu_count():
+            if len(active) < cap and sum(x['bytes'] for x in active) + weight <= total - 2 * 1024**3 and sum(x['cpus'] for x in active) + cpus <= os.cpu_count():
                 atomic(job_path(spec['snapshot']['identity']['owner'], spec['job']) / 'lease.json',
-                       encode({'bytes': weight, 'cpus': min(4, os.cpu_count()), 'unit': service(spec['job'])}))
+                       encode({'bytes': weight, 'cpus': cpus, 'unit': service(spec['job'])}))
                 return
         time.sleep(2)
 
@@ -390,7 +436,7 @@ def artifact_inventory(path, state, include_state=True):
     operation = read_json(path / 'request.json')['command']['operation']
     outputs = {'build': {'jobs'}, 'rechunk': {'jobs'}, 'disk': {'disks'},
                'iso': {'iso'}, 'tool': {'tools/images', 'tools/keys'},
-               'export': {'exports'}, 'self_check': set()}
+               'export': {'exports'}, 'self_check': set(), 'vm': set(), 'import_kache': set()}
     for root, prefix in roots:
         if not include_state and prefix != 'job':
             continue
@@ -525,6 +571,65 @@ def cleanup_resources(path, spec):
         checked(['podman', 'rm', '--force', '--time', '5', identity])
 
 
+def kache_version(root):
+    return next(line.split('=', 1)[1] for line in (root / 'Containerfile').read_text().splitlines()
+                if line.startswith('ARG KACHE_VERSION='))
+
+
+def import_kache(root, spec):
+    args = spec['command']['args']
+    assert args['version'] == kache_version(root), 'cache version must match Containerfile'
+    key = sha(args['sha256'])
+    chunks = spec['inputs']['kache']
+    assert set(spec['inputs']) == {'kache'} and chunks, 'missing kache archive'
+    owner = owner_dir(spec['snapshot'])
+    parent = owner / 'kache-imports'
+    parent.mkdir(exist_ok=True)
+    destination = parent / key
+    receipt = {'schema': 1, 'sha256': args['sha256'], 'version': args['version'],
+               'target': 'x86_64-linux', 'owner': spec['snapshot']['identity']['owner']}
+    if destination.exists():
+        assert read_json(destination / 'receipt.json') == receipt, 'cache import identity mismatch'
+        assert (destination / 'store/index.db').is_file(), 'imported cache index missing'
+        return receipt
+    reserve(2 * sum(chunk_path(chunk).stat().st_size for chunk in chunks))
+    with tempfile.TemporaryDirectory(prefix='.import-', dir=parent) as tmp:
+        archive = Path(tmp) / 'cache.tar'
+        candidate = Path(tmp) / 'candidate'
+        store = candidate / 'store'
+        store.mkdir(parents=True)
+        join_chunks(chunks, archive)
+        with archive.open('rb') as stream:
+            assert hashlib.file_digest(stream, 'sha256').hexdigest() == key, 'cache archive changed in transfer'
+        with tarfile.open(archive, 'r:') as entries:
+            for member in entries:
+                name = member.name.removeprefix('./')
+                if member.isdir() and name in {'', '.'}:
+                    continue
+                name = relative(name)
+                assert not private(name), 'private data is not a cache input'
+                output = store / name
+                if member.isdir():
+                    output.mkdir(parents=True, exist_ok=True)
+                else:
+                    assert member.isfile() and not member.issparse(), 'cache archive must contain regular files and directories'
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    with entries.extractfile(member) as src, output.open('xb') as out:
+                        shutil.copyfileobj(src, out)
+                        out.flush()
+                        os.fsync(out.fileno())
+        index = store / 'index.db'
+        assert index.is_file() and index.stat().st_size, 'archive is missing the cache index'
+        atomic(candidate / 'receipt.json', encode(receipt))
+        candidate.rename(destination)
+        fd = os.open(parent, os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    return receipt
+
+
 def execute(owner, job):
     path, spec = load_job({'owner': owner, 'job': job})
     state = owner_dir(spec['snapshot']) / 'state' / spec['snapshot']['identity']['slug']
@@ -564,7 +669,8 @@ def execute(owner, job):
                 'CARGO_TARGET_DIR': str(BASE / 'cargo/targets' / owner / ('x86_64-linux-' + hashlib.sha256(checked(['rustc', '-vV'])).hexdigest()[:16]) / root.name),
                 'CARGO_BUILD_JOBS': str(min(4, os.cpu_count())), 'ILEX_VM_SLOTS': '1',
             }
-            for name, chunks in spec.get('inputs', {}).items():
+            operation = spec['command']['operation']
+            for name, chunks in ({} if operation == 'import_kache' else spec['inputs']).items():
                 assert name in {'iso', 'catalogue'}, 'unsupported input artifact'
                 target = path / 'inputs' / ('ilex-installer.iso' if name == 'iso' else 'compositions.json')
                 target.parent.mkdir(exist_ok=True)
@@ -573,9 +679,23 @@ def execute(owner, job):
                     env['ILEX_ISO'] = str(target)
             Path(env['XDG_RUNTIME_DIR']).mkdir(mode=0o700, exist_ok=True)
             atomic(path / 'state.json', encode({'state': 'running', 'exit_code': None}))
+            if operation == 'import_kache':
+                operation_started = time.monotonic()
+                atomic(path / 'stdout.log', encode(import_kache(root, spec)) + b'\n')
+                operation_seconds = time.monotonic() - operation_started
+                code = 0
+                return
+            if operation == 'build' and 'ILEX_KACHE_IMPORT' in env:
+                cache = owner_dir(spec['snapshot']) / 'kache-imports' / sha(env['ILEX_KACHE_IMPORT'])
+                receipt = read_json(cache / 'receipt.json')
+                assert receipt['sha256'] == env['ILEX_KACHE_IMPORT'] and receipt['owner'] == owner, 'cache import identity mismatch'
+                assert receipt['version'] == kache_version(root) and receipt['target'] == 'x86_64-linux', 'cache import profile mismatch'
+                assert (cache / 'store/index.db').is_file(), 'imported cache index missing'
+                env['KACHE_CACHE_DIR'] = str(cache / 'store')
             with (path / 'stdout.log').open('ab', buffering=0) as out, (path / 'stderr.log').open('ab', buffering=0) as err:
+                attached = interactive(spec)
                 compile_started = time.monotonic()
-                compile_result = subprocess.run(['cargo', 'build', '--locked', '-p', 'xtask'], cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=err, stderr=err)
+                compile_result = subprocess.run(['cargo', 'build', '--locked', '-p', 'xtask'], cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=None if attached else err, stderr=None if attached else err)
                 compile_seconds = time.monotonic() - compile_started
                 if compile_result.returncode:
                     code = compile_result.returncode
@@ -583,7 +703,9 @@ def execute(owner, job):
                     binary = Path(env['CARGO_TARGET_DIR']) / 'debug/xtask'
                     operation_started = time.monotonic()
                     code = subprocess.run([str(binary), 'remote-worker', '--request', str(path / 'request.json')],
-                                          cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err).returncode
+                                          cwd=root, env=env | ({'TERM': os.environ.get('TERM', 'xterm')} if attached else {}),
+                                          stdin=None if attached else subprocess.DEVNULL,
+                                          stdout=None if attached else out, stderr=None if attached else err).returncode
                     operation_seconds = time.monotonic() - operation_started
     except BaseException as error:
         with (path / 'stderr.log').open('ab') as err:
@@ -721,6 +843,8 @@ def request(frame, payload):
 
 def main():
     os.umask(0o077)
+    if len(sys.argv) == 4 and sys.argv[1] == '--terminal':
+        sys.exit(terminal(ident(sys.argv[2]), ident(sys.argv[3])))
     if len(sys.argv) == 4 and sys.argv[1] == '--run':
         execute(ident(sys.argv[2]), ident(sys.argv[3]))
         return

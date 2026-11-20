@@ -16,7 +16,7 @@ use libtest_mimic::{Arguments, Trial};
 mod apps;
 #[cfg(target_os = "linux")]
 mod common;
-// Fixtures preserve Unix modes and symlinks; these tiers run in WSL on Windows.
+// Fixtures preserve Unix modes and symlinks; Windows runs these tiers on the builder.
 #[cfg(target_os = "linux")]
 mod config;
 #[cfg(target_os = "linux")]

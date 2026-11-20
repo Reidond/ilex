@@ -19,6 +19,7 @@ mod doctor;
 mod identity;
 mod info;
 mod iso;
+mod migrate;
 mod prepare_publish;
 mod publish;
 mod rechunk;
@@ -35,7 +36,6 @@ mod tool;
 mod vm;
 #[cfg(target_os = "windows")]
 mod vm_windows;
-mod wsl;
 
 #[derive(Parser)]
 #[command(
@@ -55,6 +55,8 @@ enum Cmd {
     RemoteWorker(remote_worker::Args),
     /// Provision and maintain the native Windows Hyper-V Fedora builder
     Builder(builder::Args),
+    /// Import an explicitly exported development cache into the Windows builder
+    Migrate(migrate::Args),
     /// Fetch or inspect the pinned per-user portable Windows QEMU runtime
     Runtime(runtime::Args),
     /// Check configured Flatpaks against Flathub without downloading apps
@@ -106,7 +108,7 @@ fn run(cmd: Cmd) -> Result<()> {
     if let Cmd::Identity(args) = &cmd {
         return identity::run(args);
     }
-    // Infrastructure commands work outside a checkout and never discover WSL.
+    // Infrastructure commands work outside a checkout.
     let cmd = match cmd {
         Cmd::RemoteWorker(args) => return remote_worker::run(args),
         Cmd::Builder(args) => return builder::run(args),
@@ -119,14 +121,12 @@ fn run(cmd: Cmd) -> Result<()> {
     };
     match cmd {
         Cmd::Remote(args) => remote::run(&ws, args),
+        Cmd::Migrate(args) => migrate::run(&ws, args),
         Cmd::RemoteWorker(_) => unreachable!("handled before workspace discovery"),
         Cmd::Apps(args) => apps::run(&ws, args),
         Cmd::Build(args) => build::run(&ws, args),
         Cmd::Rechunk(args) => rechunk::run(&ws, args),
-        // Installed Windows VMs use native WHPX; ephemeral guests retain WSL.
         Cmd::Vm(args) => {
-            // Reject invalid selection before building the native viewer or
-            // handing over to WSL. GUI prediction inspects Linux image labels.
             let resolved = args.resolve(&ws)?;
             if args.secure {
                 #[cfg(target_os = "windows")]
@@ -140,15 +140,7 @@ fn run(cmd: Cmd) -> Result<()> {
             if args.gui || args.disk {
                 return vm_windows::run(&ws, args, resolved);
             }
-            match ilex_devkit::host_backend() {
-                ilex_devkit::HostBackend::Windows => {
-                    wsl::forward(&ws.root, args.gui && !args.print_image)
-                }
-                ilex_devkit::HostBackend::Linux => vm::run(&ws, args, resolved),
-                ilex_devkit::HostBackend::Unsupported => {
-                    anyhow::bail!("no VM backend implemented for this host")
-                }
-            }
+            vm::run(&ws, args, resolved)
         }
         Cmd::Disk(args) => disk::run(&ws, args),
         Cmd::Test(args) => test::run(&ws, args),

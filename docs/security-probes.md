@@ -8,7 +8,7 @@ installer integration and recovery are later work.
 ## Running and interpreting the probes
 
 Run `cargo xtask info` first. Only use this checkout's image, disk and VM
-namespace. On the existing WSL executor:
+namespace. On a native Linux executor:
 
 ```sh
 cargo xtask build --shell none
@@ -28,8 +28,7 @@ nothing and does not upgrade provisioning availability into qualification.
 It checks backend evidence; it does not certify any newly selected image.
 `--self-check` explicitly starts a qualification fixture, invalidates an old
 pass before measurement, and only records a pass after all assertions finish.
-Native Windows reports unsupported/unqualified JSON and exits nonzero until
-the tooling T5 provider is delivered. Run Linux diagnostics inside Linux/WSL.
+Native Windows uses the [Hyper-V Gen2 provider](tooling/windows-gen2.md).
 
 The tier boots the actual selected ilex image through its installed Fedora
 shim/GRUB/kernel chain. A direct kernel boot or Fedora cloud image is not an

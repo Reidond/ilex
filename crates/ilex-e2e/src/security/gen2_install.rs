@@ -4,7 +4,6 @@ use ilex_devkit::{Workspace, core::*};
 use ilex_tooling_windows::gen2::{self, Provider};
 use serde_json::json;
 use std::{
-    ffi::OsString,
     fs,
     io::Write,
     path::Path,
@@ -46,10 +45,10 @@ pub fn transition(
         let raw_answers = media.0.join("answers.raw");
         fs::File::create(&raw_answers)?.set_len(32 << 20)?;
         ensure!(
-            ext4_command("mke2fs")
+            Command::new("mke2fs.exe")
                 .args(["-q", "-t", "ext4", "-F", "-L", "OEMDRV", "-d"])
-                .arg(ext4_path(&files)?)
-                .arg(ext4_path(&raw_answers)?)
+                .arg(&files)
+                .arg(&raw_answers)
                 .output()?
                 .status
                 .success(),
@@ -176,36 +175,6 @@ test ! -e /dev/disk/by-label/OEMDRV
     media.finish(provider, result)
 }
 
-fn ext4_command(name: &str) -> Command {
-    if let Some(distro) = std::env::var_os("ILEX_GEN2_EXT4_WSL") {
-        let mut command = Command::new("wsl.exe");
-        command
-            .arg("--distribution")
-            .arg(distro)
-            .args(["--exec", &format!("/usr/sbin/{name}")]);
-        command
-    } else {
-        Command::new(format!("{name}.exe"))
-    }
-}
-
-fn ext4_path(path: &Path) -> Result<OsString> {
-    let Some(distro) = std::env::var_os("ILEX_GEN2_EXT4_WSL") else {
-        return Ok(path.as_os_str().into());
-    };
-    let output = Command::new("wsl.exe")
-        .arg("--distribution")
-        .arg(distro)
-        .args(["--exec", "wslpath", "-a", "-u"])
-        .arg(path)
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "could not resolve the ext4 fixture path"
-    );
-    Ok(String::from_utf8(output.stdout)?.trim().into())
-}
-
 fn recovery_key(files: &Path) -> Result<Vec<u8>> {
     let private = Command::new("openssl.exe")
         .args([
@@ -248,9 +217,9 @@ struct OemdrvEvidence {
 
 fn read_evidence(raw: &Path, private_key: &[u8]) -> Result<OemdrvEvidence> {
     let extract = |entry: &str| -> Result<Vec<u8>> {
-        let output = ext4_command("debugfs")
+        let output = Command::new("debugfs.exe")
             .args(["-R", &format!("cat {entry}")])
-            .arg(ext4_path(raw)?)
+            .arg(raw)
             .output()?;
         ensure!(
             output.status.success() && !output.stdout.is_empty(),

@@ -14,10 +14,6 @@ use crate::git;
 /// Local repository every build is tagged into.
 pub const IMAGE_REPO: &str = "localhost/ilex";
 
-// `/run/user/0/ilex-vm/<slug>/graphical/vdagent.sock` adds 43 bytes to the
-// slug: 48 leaves 16 bytes spare below Linux's 107-byte socket path limit.
-// `ilex-<slug>-ephemeral` also fits the 63-character hostname budget.
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     /// Root of this checkout (the directory holding `Containerfile`).
@@ -88,7 +84,7 @@ impl Workspace {
         }
     }
 
-    /// Native identity survives Windows-to-WSL handoff. The Linux executor
+    /// The Linux executor
     /// never derives a second owner from the translated mount path.
     pub fn identity(&self) -> Result<CheckoutIdentity> {
         if let Some(context) = crate::source::remote_context(&self.root)? {
@@ -183,7 +179,7 @@ impl Workspace {
     /// Per-checkout persistent state (disk images, test artifacts):
     /// `$ILEX_STATE_DIR` or `$XDG_CACHE_HOME/ilex` or `~/.cache/ilex`, then `/<slug>`.
     /// Kept outside the checkout so it never lands in a build context and,
-    /// on WSL, stays on the Linux filesystem.
+    /// on Linux, stays on the local Linux filesystem.
     pub fn state_dir(&self) -> PathBuf {
         state_root().join(self.state_slug())
     }
@@ -347,8 +343,7 @@ fn state_root() -> PathBuf {
 }
 
 /// Git keeps linked worktree names unique under `.git/worktrees/<name>`.
-/// Split both path separators: a Windows-created `.git` file is also read
-/// in WSL. Other gitfiles (submodules, separate git dirs) are not worktrees.
+/// Other gitfiles (submodules, separate git dirs) are not worktrees.
 fn worktree_name(root: &Path) -> Option<String> {
     let target = git::dotgit_target(root)?;
     let mut parts = target.trim_end_matches(['/', '\\']).rsplit(['/', '\\']);
@@ -356,17 +351,10 @@ fn worktree_name(root: &Path) -> Option<String> {
     (parts.next()? == "worktrees").then(|| name.to_string())
 }
 
-/// Canonical native path key. WSL translation belongs to this compatibility
-/// backend, never to core. Windows path identity is case-insensitive.
+/// Canonical native path key. Windows path identity is case-insensitive.
 pub(crate) fn native_path(path: &Path) -> String {
     let path = path.to_string_lossy().replace('\\', "/");
     let path = path.strip_prefix("//?/").unwrap_or(&path);
-    if let Some(rest) = path.strip_prefix("/mnt/") {
-        let bytes = rest.as_bytes();
-        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'/' {
-            return format!("{}:/{}", &rest[..1], &rest[2..]).to_ascii_lowercase();
-        }
-    }
     if path.as_bytes().get(1) == Some(&b':') {
         path.to_ascii_lowercase()
     } else {

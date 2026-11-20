@@ -64,6 +64,10 @@ pub fn run(args: Args) -> Result<()> {
         Command::Iso(a) => crate::iso::run(&ws, a),
         Command::Tool(a) => crate::tool::run(&ws, a),
         Command::Test(a) => crate::test::run(&ws, a),
+        Command::Vm(a) => crate::vm::run_remote(&ws, a),
+        Command::ImportKache { .. } => {
+            anyhow::bail!("cache import is handled by the builder runner")
+        }
         Command::Export { image, output } => {
             ensure!(output.is_none(), "export destination must stay on Windows");
             let image = ws.resolve_image(image.as_deref());

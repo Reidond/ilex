@@ -73,6 +73,10 @@ install -m 0755 /var/lib/ilex-builder/bcvk-x86_64-unknown-linux-gnu /usr/local/b
 install -m 0755 /var/lib/ilex-builder/builder-control.sh /usr/local/libexec/ilex-builder-control
 install -m 0755 /var/lib/ilex-builder/smoke.sh /usr/local/libexec/ilex-builder-smoke
 # @ILEX_JOB_RUNNER@
+# Keep the forced command and forwarding restrictions while allowing the
+# dedicated terminal operation to relay a real SSH PTY.
+sed -i 's@^restrict,command="/usr/local/libexec/ilex-builder-control" @restrict,pty,command="/usr/local/libexec/ilex-builder-control" @' \
+    /home/ilex/.ssh/authorized_keys
 printf 'ilex ALL=(root) NOPASSWD: /usr/local/libexec/ilex-builder-control\n' >/etc/sudoers.d/ilex-builder
 chmod 0440 /etc/sudoers.d/ilex-builder
 visudo -cf /etc/sudoers.d/ilex-builder

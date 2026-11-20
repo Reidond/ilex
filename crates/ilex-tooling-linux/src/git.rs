@@ -1,27 +1,16 @@
 //! Git queries for labels and fingerprints.
-//!
-//! On a Windows machine the stack runs in WSL2 against the checkout under
-//! `/mnt/c`. A Claude worktree created by Windows git has a `.git` file that
-//! says `gitdir: C:/...`, which Linux git can't follow, so [`git`] points
-//! `GIT_DIR` at the `/mnt/<drive>/...` translation of it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
 
 use crate::cmd;
 
-/// A `git` command rooted at `root`, with the WSL gitdir fix applied.
+/// A `git` command rooted at `root`, using the native checkout.
 pub fn git(root: &Path) -> Command {
     let mut c = Command::new("git");
     c.current_dir(root);
-    if let Some(gitdir) = wsl_gitdir(root) {
-        c.env("GIT_DIR", gitdir)
-            .env("GIT_WORK_TREE", root)
-            // Windows checkouts carry no exec bits; don't report mode changes.
-            .args(["-c", "core.fileMode=false"]);
-    }
     c
 }
 
@@ -60,30 +49,9 @@ pub fn tree_hash(root: &Path, path: &str) -> Result<String> {
     cmd::output(git(root).args(["rev-parse", &format!("HEAD:{path}")]))
 }
 
-fn wsl_gitdir(root: &Path) -> Option<PathBuf> {
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    translate_windows_path(&dotgit_target(root)?)
-}
-
-/// Read a `.git` file's target without resolving it: Windows paths must also
-/// be readable when the checkout is accessed from WSL.
+/// Read a gitfile target to identify linked worktrees.
 pub(crate) fn dotgit_target(root: &Path) -> Option<String> {
     let dotgit = std::fs::read_to_string(root.join(".git")).ok()?;
     let target = dotgit.strip_prefix("gitdir:")?.trim();
     (!target.is_empty()).then(|| target.to_string())
-}
-
-/// `C:/Users/x` or `C:\Users\x` → `/mnt/c/Users/x`.
-fn translate_windows_path(p: &str) -> Option<PathBuf> {
-    let b = p.as_bytes();
-    if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || !matches!(b[2], b'/' | b'\\') {
-        return None;
-    }
-    let drive = (b[0] as char).to_ascii_lowercase();
-    Some(PathBuf::from(format!(
-        "/mnt/{drive}{}",
-        p[2..].replace('\\', "/")
-    )))
 }

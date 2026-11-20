@@ -14,7 +14,7 @@ impl Qmp {
         anyhow::bail!("Linux QMP transport requires Linux")
     }
     pub fn connect(_: &std::path::Path) -> anyhow::Result<Self> {
-        anyhow::bail!("Linux QMP transport requires Linux; run ilex-vmctl in WSL (see CLAUDE.md)")
+        anyhow::bail!("Linux QMP transport requires Linux")
     }
     pub fn execute(&mut self, _: &str, _: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         anyhow::bail!("Linux QMP transport is unavailable on this host")

@@ -438,7 +438,7 @@ pub struct LibvirtOpts {
     /// container storage, so locally built images can be upgraded to.
     pub update_from_host: bool,
     /// Firmware: bcvk's default, Secure Boot, needs SMM, which KVM cannot
-    /// provide under nested virtualization (WSL2): the domain is paused with
+    /// provide on some nested virtualization profiles: the domain is paused with
     /// "KVM: entry failed". `uefi-insecure` works everywhere.
     pub firmware: String,
     /// Extra `bcvk libvirt run` arguments.

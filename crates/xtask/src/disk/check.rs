@@ -5,7 +5,7 @@ use ilex_devkit::Workspace;
 
 #[cfg(not(target_os = "linux"))]
 pub(super) fn run(_: &Workspace) -> Result<()> {
-    anyhow::bail!("disk alias self-check requires Linux; run in FedoraLinux-45 on WSL")
+    anyhow::bail!("disk alias self-check requires Linux")
 }
 
 #[cfg(target_os = "linux")]

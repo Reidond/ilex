@@ -1,4 +1,4 @@
-//! Persistent canonical-repository name allocation, shared by Windows and WSL.
+//! Persistent canonical-repository name allocation for the local host.
 use anyhow::{Context, Result, ensure};
 use ilex_tooling_core::{CheckoutIdentity, SCHEMA_VERSION, check_version, digest};
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,6 @@ use std::{
     env, fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -36,9 +35,7 @@ pub struct MainClaim {
     pub owner: String,
     pub repository_id: String,
     pub checkout_id: String,
-    /// Native spelling preserves case for Windows paths inspected from WSL.
     pub checkout: String,
-    pub wsl_distro: Option<String>,
 }
 
 pub struct MainClaims {
@@ -57,28 +54,6 @@ impl MainClaims {
         let root = if cfg!(windows) {
             PathBuf::from(env::var_os("ProgramData").context("ProgramData is missing")?)
                 .join("ilex/tooling/main-claims")
-        } else if env::var_os("WSL_DISTRO_NAME").is_some() {
-            if let Some(windows) = crate::cmd::probe(windows_command("cmd.exe").args([
-                "/d",
-                "/c",
-                "echo",
-                "%ProgramData%",
-            ])) {
-                host_path(&windows).join("ilex/tooling/main-claims")
-            } else {
-                // Interop can be disabled. Discover a unique mounted Windows
-                // ProgramData instead of running an executable or guessing C:.
-                let roots: Vec<_> = fs::read_dir("/mnt")?
-                    .filter_map(Result::ok)
-                    .map(|d| d.path().join("ProgramData"))
-                    .filter(|p| p.is_dir())
-                    .collect();
-                ensure!(
-                    roots.len() == 1,
-                    "cannot locate one shared ProgramData with interop disabled; refusing an ambiguous main registry"
-                );
-                roots[0].join("ilex/tooling/main-claims")
-            }
         } else {
             PathBuf::from("/var/lib/ilex-tooling/main-claims")
         };
@@ -110,7 +85,7 @@ impl MainClaims {
                 );
                 ensure!(
                     derived.owner == claim.owner
-                        && crate::workspace::native_path(&host_path(&claim.checkout))
+                        && crate::workspace::native_path(Path::new(&claim.checkout))
                             == claim.checkout_id,
                     "main claim identity mismatch; refusing reassignment"
                 );
@@ -153,8 +128,7 @@ impl MainClaims {
     }
 
     // An immutable generation is published fully written with an atomic hard
-    // link. This works across Windows/WSL without relying on flock/LockFileEx
-    // interoperability. Releases append a receipt; they never unlink a newer
+    // link. Releases append a receipt; they never unlink a newer
     // claimant's file, even if two operators release concurrently.
     fn publish(&self, destination: &Path, bytes: &[u8]) -> Result<bool> {
         fs::create_dir_all(self.records())?;
@@ -210,9 +184,6 @@ impl MainClaims {
                 owner: candidate.owner.clone(),
                 repository_id: candidate.repository_id.clone(),
                 checkout_id: candidate.checkout_id.clone(),
-                wsl_distro: (!is_windows_path(&native))
-                    .then(|| env::var("WSL_DISTRO_NAME").ok())
-                    .flatten(),
                 checkout: native,
             };
             if self.publish(
@@ -260,76 +231,17 @@ impl MainClaims {
 
 impl MainClaim {
     pub fn checkout_exists(&self) -> Result<bool> {
-        if is_windows_path(&self.checkout)
-            || self.wsl_distro.as_deref() == env::var("WSL_DISTRO_NAME").ok().as_deref()
-                && !cfg!(windows)
-        {
-            return host_path(&self.checkout).try_exists().map_err(Into::into);
-        }
-        if let Some(distro) = &self.wsl_distro {
-            let result = windows_command("wsl.exe")
-                .args([
-                    "-d",
-                    distro,
-                    "-u",
-                    "root",
-                    "-e",
-                    "/usr/bin/test",
-                    "-e",
-                    &self.checkout,
-                ])
-                .output()?;
-            ensure!(
-                result.status.success()
-                    || result.status.code() == Some(1)
-                        && result.stderr.is_empty()
-                        && result.stdout.is_empty(),
-                "cannot verify the registered WSL checkout; refusing release"
-            );
-            return Ok(result.status.success());
-        }
-        anyhow::bail!(
-            "cannot inspect this checkout from this host; release its claim on its hosting machine"
-        )
+        let checkout = Path::new(&self.checkout);
+        // Legacy registries may contain a checkout from a different host.
+        ensure!(
+            checkout.is_absolute() && (cfg!(windows) || !self.checkout.starts_with("//")),
+            "cannot inspect this checkout from this host; refusing release"
+        );
+        checkout.try_exists().map_err(Into::into)
     }
 }
 
-fn is_windows_path(path: &str) -> bool {
-    path.as_bytes().get(1) == Some(&b':')
-}
 fn native_spelling(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
-    let text = text.strip_prefix("//?/").unwrap_or(&text);
-    if let Some(rest) = text.strip_prefix("/mnt/")
-        && rest.as_bytes().get(1) == Some(&b'/')
-        && rest.as_bytes()[0].is_ascii_alphabetic()
-    {
-        return format!("{}:/{}", rest[..1].to_ascii_uppercase(), &rest[2..]);
-    }
-    text.into()
-}
-pub(crate) fn host_path(path: &str) -> PathBuf {
-    if !cfg!(windows) && is_windows_path(path) {
-        return PathBuf::from(format!(
-            "/mnt/{}{}",
-            path[..1].to_ascii_lowercase(),
-            path[2..].replace('\\', "/")
-        ));
-    }
-    PathBuf::from(path)
-}
-
-fn windows_command(name: &str) -> Command {
-    if !cfg!(windows) {
-        // WSL installations may deliberately omit Windows directories from PATH.
-        // The command still resolves host environment values rather than guessing
-        // which mounted drive contains ProgramData.
-        for drive in b'a'..=b'z' {
-            let path = PathBuf::from(format!("/mnt/{}/Windows/System32/{name}", drive as char));
-            if path.is_file() {
-                return Command::new(path);
-            }
-        }
-    }
-    Command::new(name)
+    text.strip_prefix("//?/").unwrap_or(&text).into()
 }
