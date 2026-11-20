@@ -52,10 +52,23 @@ impl SecurityState {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        let Some(value): Option<Value> = read(&path)? else {
+        let value: Value = read(&path)?.context("enrollment state disappeared during lookup")?;
+        ensure!(value["schema"] == 1, "unsupported enrollment state schema");
+        if legacy_unbound(&value) {
             return Ok(None);
-        };
-        Ok((value["schema"] == 1 && value["uuid"].is_string()).then_some(Self { path, value }))
+        }
+        ensure!(
+            value["uuid"].as_str().is_some_and(|uuid| uuid.len() == 36
+                && uuid.bytes().enumerate().all(|(index, byte)| {
+                    if [8, 13, 18, 23].contains(&index) {
+                        byte == b'-'
+                    } else {
+                        byte.is_ascii_hexdigit()
+                    }
+                })),
+            "invalid enrollment state UUID"
+        );
+        Ok(Some(Self { path, value }))
     }
 
     pub fn recovery_pending(&self) -> Result<bool> {
@@ -159,29 +172,50 @@ impl Device {
     }
 
     pub(super) fn guard_recovery_allocation(&self) -> Result<()> {
-        for root in [Path::new("/"), Path::new("/mnt/sysroot")] {
-            let state = SecurityState::read_bound(root).ok().flatten();
+        for root in [Path::new("/"), installer_root()?] {
+            let state = SecurityState::read_bound(root).with_context(|| {
+                format!("cannot read root enrollment state under {}", root.display())
+            })?;
+            let has_receipt = || -> Result<bool> {
+                let dir = root.join("var/lib/ilex/security");
+                for name in [".pending-recovery.json", ".pending-tpm.json"] {
+                    let path = dir.join(name);
+                    if path.try_exists().with_context(|| {
+                        format!("cannot check enrollment receipt {}", path.display())
+                    })? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
             let blocked = match state {
-                Some(state) if state.value["uuid"] == self.uuid => {
+                Some(state)
+                    if state.value["uuid"]
+                        .as_str()
+                        .is_some_and(|uuid| uuid.eq_ignore_ascii_case(&self.uuid)) =>
+                {
                     let needs_tpm = state.value["tpm"].is_null()
                         && matches!(
                             state.value["state"].as_str(),
                             Some("pending" | "error" | "recovery-incomplete")
                         );
-                    needs_tpm || state.recovery_pending()? || state.tpm_pending()?
+                    needs_tpm || has_receipt()?
                 }
-                Some(_) => false,
-                None => {
+                None if has_receipt()? => {
                     // The initial recovery receipt can be durable before the
                     // first state write. In that window resolve the root UUID.
-                    let dir = root.join("var/lib/ilex/security");
-                    (dir.join(".pending-recovery.json").exists()
-                        || dir.join(".pending-tpm.json").exists())
-                        && recovery_layout(root)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|layout| layout.uuid == self.uuid)
+                    let context = || {
+                        format!(
+                            "cannot identify LUKS2 root for enrollment receipt under {}",
+                            root.display()
+                        )
+                    };
+                    let layout = recovery_layout(root)
+                        .with_context(context)?
+                        .with_context(context)?;
+                    layout.uuid.eq_ignore_ascii_case(&self.uuid)
                 }
+                _ => false,
             };
             ensure!(
                 !blocked,
