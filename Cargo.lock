@@ -952,7 +952,9 @@ dependencies = [
 name = "ilex-enroll"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
+ "argon2",
  "clap",
  "libc",
  "serde",

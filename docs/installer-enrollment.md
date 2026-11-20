@@ -36,13 +36,20 @@ qualification gate, including when supplied private unattended answers are used.
 
 The completion hook retains every existing slot. A key becomes acknowledged
 only after you re-enter it and the helper verifies that it unlocks the disk.
-On an unsupported encrypted layout, an ordinary retry after an interrupted
-display asks for the disk passphrase, shows a replacement key, and waits for
-confirmation. For a TPM-eligible layout, switch to VT8 and run
-`ilex-enroll complete --root /mnt/sysroot --tty /dev/tty8 --reissue-recovery`.
-Use `--root /` on the installed system. Explicit reissue is also available for
-an unsupported encrypted layout. It adds a slot and retains the disk passphrase
-and earlier slots.
+After an interruption or a mistyped confirmation, switch to VT8 and run
+`ilex-enroll complete --root /mnt/sysroot --tty /dev/tty8`. Use `--root /` on the
+installed system. Enter the disk passphrase to see the same pending key again.
+The helper keeps a passphrase-protected receipt on the encrypted volume until
+you confirm the key. If you already have a confirmed key, ordinary completion
+can still use it.
+
+Add `--reissue-recovery` to request a new key or resume an interrupted explicit
+reissue. Reissue keeps the previously confirmed key and its acknowledgement
+until you confirm the replacement. It retains the disk passphrase and earlier
+slots. Completion checks for the slots it still needs before allocating any.
+If eligible TPM enrollment is pending, a new recovery key needs two free slots.
+With only one free slot and a confirmed key, use ordinary completion to reserve
+the remaining slot for TPM enrollment.
 
 `crates/ilex-enroll` is the reusable library and CLI. `recovery` accepts owned
 unlock/output descriptors, captures cryptenroll output privately and returns
@@ -82,8 +89,8 @@ The public `/etc/ilex/setup.json` retains schema 1.
 - `passphrase-only` means TPM enrollment was skipped, for example because
   Secure Boot is off, the TPM is unavailable, or the encrypted layout is
   unsupported. Use the disk passphrase or a confirmed recovery key. If a
-  display was interrupted, use the passphrase and complete reissue before
-  relying on the new key.
+  display was interrupted, use the passphrase to resume confirmation before
+  relying on the pending key.
 - `unavailable` means the inspected plaintext mapper layout has no verified
   LUKS recovery device. First boot refers you to the existing storage recovery
   procedure. No recovery key is generated in this case.
@@ -239,9 +246,12 @@ cover the retained parents and their submounts before and after the scan.
 The scanner also synchronizes journald after Anaconda stops and
 while the journal is still available. The trial then boots with
 the passphrase and the unacknowledged recovery key, checks the incomplete
-state and intact slots, verifies an ordinary retry refuses implicit reissue,
-then performs authenticated explicit reissue and boots with the new key. No
-test helper replaces the enrollment executable or the ISO.
+state and intact slots, confirms the same key on ordinary retry, then performs
+authenticated explicit reissue and boots with the new key. The automatic
+storage trial also tests that reissue leaves the last free Btrfs slot for TPM
+enrollment. The encrypted LVM diagnostic interrupts the last-slot display,
+mistypes the confirmation, then confirms that key and boots with it. These
+trials use the shipped enrollment executable and ISO.
 
 The CI `encrypted_install=true` input forces build, rechunk, VM setup and exact
 6 GiB firmware qualification even with `test=false` and unchanged inputs. The

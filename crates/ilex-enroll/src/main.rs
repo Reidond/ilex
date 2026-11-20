@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
 mod console;
+#[cfg(target_os = "linux")]
+mod pending;
 
 #[cfg(target_os = "linux")]
 fn main() {

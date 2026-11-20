@@ -119,20 +119,110 @@ impl Device {
         Ok(())
     }
 
-    pub fn ensure_recovery_slot_available(&self) -> Result<()> {
-        ensure_free_slot(&self.header()?)
+    pub fn ensure_free_slots(&self, required: usize) -> Result<()> {
+        ensure_free_slots(&self.header()?, required)
+    }
+
+    pub fn plan_recovery(&self) -> Result<Enrollment> {
+        let header = self.header()?;
+        let free_id = |field: &str| {
+            (0..32)
+                .find(|id| header[field].get(id.to_string()).is_none())
+                .with_context(|| format!("no free LUKS2 identifier in {field}"))
+        };
+        Ok(Enrollment {
+            token: free_id("tokens")?,
+            slot: free_id("keyslots")?,
+        })
+    }
+
+    /// Install or resume the exact preplanned recovery slot. The caller
+    /// persisted the protected key before allocation.
+    pub fn complete_recovery_slot(
+        &self,
+        enrollment: &Enrollment,
+        unlock: &Secret,
+        key: &Secret,
+    ) -> Result<()> {
+        ensure!(
+            enrollment.slot < 32 && enrollment.token < 32,
+            "invalid recovery slot plan"
+        );
+        let slot_id = enrollment.slot.to_string();
+        let token_id = enrollment.token.to_string();
+        let token = serde_json::json!({"type":"systemd-recovery", "keyslots":[&slot_id]});
+        let before = self.header()?;
+        let existing_token = before["tokens"].get(&token_id);
+        ensure!(
+            existing_token.is_none_or(|old| old == &token),
+            "planned recovery token was reused"
+        );
+        ensure!(
+            before["tokens"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .all(|(id, value)| {
+                    id == &token_id
+                        || !value["keyslots"]
+                            .as_array()
+                            .is_some_and(|slots| slots.iter().any(|slot| slot == &slot_id))
+                }),
+            "planned recovery slot belongs to a different token"
+        );
+        if before["keyslots"].get(&slot_id).is_none() {
+            ensure!(existing_token.is_none(), "pending recovery slot missing");
+            ensure_free_slots(&before, 1)?;
+            let unlock_fd = unlock.fd()?;
+            let mut command = Command::new("/usr/sbin/cryptsetup");
+            command
+                .args([
+                    "luksAddKey",
+                    "--batch-mode",
+                    "--key-file",
+                    "/proc/self/fd/3",
+                    "--new-key-slot",
+                ])
+                .arg(&slot_id)
+                .arg(self.path())
+                .arg("-");
+            key_command(&mut command, &unlock_fd);
+            run_with_input(&mut command, Stdio::from(key.fd()?))?;
+        }
+        self.authenticate_slot(key.fd()?, enrollment.slot)?;
+        if existing_token.is_none() {
+            run_with_input(
+                Command::new("/usr/sbin/cryptsetup")
+                    .args(["token", "import", "--json-file", "-", "--token-id"])
+                    .arg(&token_id)
+                    .arg(self.path()),
+                Stdio::from(secret_fd(&serde_json::to_vec(&token)?)?),
+            )?;
+        }
+        let after = self.header()?;
+        preserve_entries(&before, &after)?;
+        ensure!(
+            after["tokens"].get(&token_id) == Some(&token),
+            "pending recovery token missing"
+        );
+        Ok(())
     }
 }
 
-fn ensure_free_slot(header: &Value) -> Result<()> {
+fn ensure_free_slots(header: &Value, required: usize) -> Result<()> {
     // LUKS2 exposes slot IDs 0 through 31. Allocation may still fail if a
     // header with a smaller keyslot area runs out of storage first.
     let slots = header["keyslots"]
         .as_object()
         .context("missing LUKS2 keyslots")?;
+    let available = 32usize.saturating_sub(slots.len());
     ensure!(
-        slots.len() < 32,
-        "LUKS2 has no free keyslot for a recovery key. Existing recovery acknowledgement is unchanged."
+        required != 1 || available > 0,
+        "LUKS2 has no free keyslot for the remaining enrollment. Existing recovery acknowledgement is unchanged."
+    );
+    ensure!(
+        available >= required,
+        "Completion needs {required} free LUKS2 keyslots, including the slot for pending TPM enrollment; {available} available. Existing recovery acknowledgement is unchanged."
     );
     Ok(())
 }
@@ -194,7 +284,7 @@ pub fn status(device: &Device) -> Result<Value> {
     Ok(serde_json::json!({"schema":1, "uuid":device.uuid,
         "slots":header["keyslots"].as_object().context("missing slots")?.keys().collect::<Vec<_>>(), "tokens":tokens}))
 }
-fn new_enrollment(before: &Value, after: &Value, kind: &str) -> Result<Enrollment> {
+fn preserve_entries(before: &Value, after: &Value) -> Result<()> {
     // All old slots and tokens must survive unchanged; never wipe or replace.
     for field in ["keyslots", "tokens"] {
         for (id, old) in before[field].as_object().context("invalid LUKS header")? {
@@ -204,6 +294,11 @@ fn new_enrollment(before: &Value, after: &Value, kind: &str) -> Result<Enrollmen
             );
         }
     }
+    Ok(())
+}
+
+fn new_enrollment(before: &Value, after: &Value, kind: &str) -> Result<Enrollment> {
+    preserve_entries(before, after)?;
     let added: Vec<_> = after["tokens"]
         .as_object()
         .context("missing tokens")?
@@ -232,7 +327,7 @@ pub fn recovery(device: &Device, unlock: OwnedFd, key_out: OwnedFd) -> Result<En
     let key = Secret::read(unlock)?.fd()?;
     device.authenticate(key.try_clone()?)?;
     let before = device.header()?;
-    ensure_free_slot(&before)?;
+    ensure_free_slots(&before, 1)?;
     // A retry must inspect/acknowledge an existing key, or explicitly reissue it
     // in an authenticated UI. This primitive never deletes existing recovery.
     let mut command = Command::new("/usr/bin/systemd-cryptenroll");
@@ -307,6 +402,7 @@ pub fn tpm(
             slot: slot(token)?,
         });
     }
+    ensure_free_slots(&before, 1).context("TPM enrollment needs a free keyslot")?;
     let mut command = Command::new("/usr/bin/systemd-cryptenroll");
     command
         .args([

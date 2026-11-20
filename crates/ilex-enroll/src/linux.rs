@@ -20,6 +20,10 @@ pub mod initrd;
 /// Never propagate a subprocess's output in an error: cryptenroll's recovery
 /// stdout is a secret, and even an unexpected error must remain safe to log.
 fn run(command: &mut Command) -> Result<Output> {
+    run_with_input(command, Stdio::null())
+}
+
+fn run_with_input(command: &mut Command, input: Stdio) -> Result<Output> {
     command
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin")
@@ -29,7 +33,7 @@ fn run(command: &mut Command) -> Result<Output> {
         .env("SYSTEMD_COLORS", "0")
         .env("SYSTEMD_URLIFY", "0")
         .env("SYSTEMD_ASK_PASSWORD_KEYRING_TIMEOUT_SEC", "0")
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut output = command.output().context("starting enrollment tool")?;

@@ -603,6 +603,8 @@ def layout_retry_probe():
     assert json.loads(subprocess.check_output(status)) == before
     masked.rmdir()
 
+    DRIVE_STEP = 'leave-one-lvm-slot'
+    before = fill_luks_slots(str(device), leave=1)
     DRIVE_STEP = 'retry-legacy-unbound-state'
     state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     state_path.write_text(json.dumps({'schema': 1, 'uuid': None, 'state': 'unavailable',
@@ -625,18 +627,34 @@ def layout_retry_probe():
         assert state['recovery']['acknowledged'] is False
         assert state['recovery']['displayed_and_acknowledged'] is False
         observed = json.loads(subprocess.check_output(status))
-        assert set(before['slots']) < set(observed['slots']) and len(observed['slots']) == 2
+        assert set(before['slots']) < set(observed['slots']) and len(observed['slots']) == 32
         assert len(observed['tokens']) == 1 and observed['tokens'][0]['type'] == 'systemd-recovery'
         token = observed['tokens'][0]
         assert token['id'] == str(state['recovery']['token'])
         assert token['keyslots'] == [str(state['recovery']['slot'])]
         assert setup_record() == setup_before
         save_recovery_envelope(first_key, 'layout-interrupted.oaep')
-        (PRIVATE / 'layout-interrupted-fingerprint.json').write_text(
-            json.dumps(privacy_module()['fingerprint'](first_key)))
+        receipt = state_path.with_name('.pending-recovery.json')
+        sealed = receipt.read_bytes()
+        header_cmd = ['cryptsetup', 'luksDump', '--dump-json-metadata', str(device)]
+        header = subprocess.check_output(header_cmd)
+        DRIVE_STEP = 'mistype-lvm-confirmation-with-full-header'
+        attempt = subprocess.Popen([*completion, '--reissue-recovery'],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        wait_for(b'Re-enter the disk passphrase', deadline=120)
+        type_private(keyboard, (SEED / 'passphrase').read_bytes())
+        assert recovery_on_screen() == first_key, 'pending LVM key changed on retry'
+        type_private(keyboard, b'')
+        wait_for(b'Enter the saved recovery key to confirm')
+        type_private(keyboard, b'wrong-confirmation')
+        _, errors = attempt.communicate(timeout=60)
+        assert attempt.returncode and b'recovery verification failed' in errors
+        assert json.loads(state_path.read_text()) == state and receipt.read_bytes() == sealed
+        assert subprocess.check_output(header_cmd) == header and setup_record() == setup_before
         (PUBLIC / 'layout-retry.json').write_text(json.dumps({
             'discovery_failure_retryable': True, 'legacy_uuid_bound': True,
-            'display_interrupted_before_acknowledgement': True, 'original_token': token,
+            'display_interrupted_before_acknowledgement': True,
+            'mistype_with_no_free_slot': True, 'original_token': token,
         }))
     finally:
         if attempt.poll() is None:
@@ -648,6 +666,108 @@ def layout_retry_probe():
             console.write(b'\x1b[2J\x1b[3J\x1b[H')
         subprocess.run(['stty', 'echo', '-F', '/dev/tty8'], check=True)
         subprocess.run(['chvt', '6'], check=True)
+
+
+def tpm_slot_budget_probe():
+    if not json.loads((SEED / 'config.json').read_text()).get('tpm_slot_budget'):
+        return
+    global DRIVE_STEP
+    DRIVE_STEP = 'prepare-acknowledged-btrfs-recovery'
+    root = pathlib.Path('/mnt/sysroot')
+    state_path = root / 'var/lib/ilex/security/enrollment.json'
+    setup_path = root / 'etc/ilex/setup.json'
+    if not setup_path.exists():
+        # This runs before the generated post writes the complete setup record.
+        setup_path.parent.mkdir(parents=True, exist_ok=True)
+        setup_path.write_text('{"schema":1}')
+    complete = ['ilex-enroll', 'complete', '--root', str(root), '--tty', '/dev/tty8']
+    capability = json.loads(subprocess.check_output(['ilex-enroll', 'probe', '--json']))
+    assert capability['verdict'] == 'eligible'
+    mask = PRIVATE / 'disabled-unlock-stack'
+    mask.write_text('{}')
+    unlock_stack = root / 'usr/lib/ilex/security/unlock.json'
+    passphrase = (SEED / 'passphrase').read_bytes()
+    subprocess.run(['chvt', '8'], check=True)
+    keyboard = open_keyboard()
+    # Defer TPM for the first completion only, using a private mount. The
+    # resumed completion sees the shipped marker and uses the real TPM.
+    attempt = subprocess.Popen(
+        ['unshare', '--mount', '--propagation', 'private', '/bin/sh', '-ec',
+         'mount --bind "$1" "$2"; shift 2; exec "$@"', 'ilex-probe',
+         str(mask), str(unlock_stack), *complete],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_for(b'Re-enter the disk passphrase', deadline=120)
+        type_private(keyboard, passphrase)
+        recovery = recovery_on_screen()
+        type_private(keyboard, b'')
+        wait_for(b'Enter the saved recovery key to confirm')
+        type_private(keyboard, recovery)
+        wait_for(b'Recovery key saved and privately verified.')
+        type_private(keyboard, b'')
+        assert attempt.wait(timeout=60) == 0
+    finally:
+        if attempt.poll() is None:
+            attempt.kill()
+            attempt.wait(timeout=30)
+        fcntl.ioctl(keyboard, 0x5502)
+        os.close(keyboard)
+        subprocess.run(['chvt', '6'], check=True)
+        mask.unlink()
+    state = json.loads(state_path.read_text())
+    assert state['reason'] == 'unlock-stack-missing' and state['tpm'] is None
+    assert state['recovery']['displayed_and_acknowledged']
+    DRIVE_STEP = 'leave-one-btrfs-slot-for-tpm'
+    device = '/dev/disk/by-uuid/' + state['uuid']
+    before = fill_luks_slots(device, leave=1)
+    assert len(before['slots']) == 31 and len(before['tokens']) == 1
+    assert before['tokens'][0]['type'] == 'systemd-recovery'
+    dump = ['cryptsetup', 'luksDump', '--dump-json-metadata', device]
+    header = subprocess.check_output(dump)
+    setup = setup_path.read_bytes()
+    DRIVE_STEP = 'refuse-btrfs-reissue-with-one-free-slot'
+    refusal = subprocess.run([*complete, '--reissue-recovery'], capture_output=True, timeout=30)
+    assert refusal.returncode and b'needs 2 free LUKS2 keyslots' in refusal.stderr
+    assert json.loads(state_path.read_text()) == state and setup_path.read_bytes() == setup
+    assert subprocess.check_output(dump) == header
+    save_recovery_envelope(recovery, 'recovery.oaep')
+    check_and_record_credentials(passphrase, recovery)
+    (PUBLIC / 'tpm-slot-budget.json').write_text(json.dumps({
+        'before': before, 'reissue_refused_before_prompt': True, 'header_unchanged': True,
+    }))
+
+
+def check_and_record_credentials(passphrase, recovery):
+    matcher = privacy_module()
+    # Both matchers must catch overlapping candidates across a read boundary
+    # inside this VM. The intentional private probe is never a log/export.
+    check_dir = PRIVATE / 'matcher-self-check'
+    check_dir.mkdir()
+    check = check_dir / 'not-an-image.png'
+    try:
+        for value in [passphrase, recovery]:
+            check.write_bytes(b'X' * (1024 * 1024 - 3) + value)
+            report = matcher['scan']([check_dir], [matcher['fingerprint'](value)])
+            assert report['secret_found'], 'private matcher self-check failed'
+            check.unlink()
+            assert not matcher['scan']([check_dir], [matcher['fingerprint'](value)])['secret_found']
+            for codec in ['gzip', 'lzma', 'bz2', 'zstd', 'zipfile']:
+                check = check_dir / codec
+                if codec == 'zipfile':
+                    with matcher[codec].ZipFile(check, 'w', compression=matcher[codec].ZIP_DEFLATED) as archive:
+                        archive.writestr('private-fixture.log', value)
+                else:
+                    assert matcher[codec] is not None, 'private decompressor unavailable'
+                    check.write_bytes(matcher[codec].compress(value))
+                report = matcher['scan']([check_dir], [matcher['fingerprint'](value)])
+                assert report['secret_found'] and not report['read_errors'], 'private compressed matcher failed'
+                check.unlink()
+            check = check_dir / 'not-an-image.png'
+    finally:
+        check.unlink(missing_ok=True)
+        check_dir.rmdir()
+    fingerprints = [matcher['fingerprint'](value) for value in [passphrase, recovery]]
+    (PUBLIC / 'credentials.json').write_text(json.dumps(fingerprints))
 
 
 def drive():
@@ -681,6 +801,7 @@ def drive():
         raise RuntimeError('public screenshot handshake timed out')
 
     try:
+        config = json.loads((SEED / 'config.json').read_text())
         passphrase = (SEED / 'passphrase').read_bytes()
         DRIVE_STEP = 'wait-passphrase'
         wait_for(b'Re-enter the disk passphrase')
@@ -688,6 +809,13 @@ def drive():
         safe_capture('COMPLETION-SAFE-SCREEN')
         DRIVE_STEP = 'enter-passphrase'
         type_private(keyboard, passphrase)
+        if config.get('tpm_slot_budget'):
+            DRIVE_STEP = 'finish-tpm-with-reserved-slot'
+            wait_for(b'TPM enrolled to PCR 7 (SHA-256).')
+            safe_capture('RECOVERY-SAFE-SCREEN')
+            type_private(keyboard, b'')
+            (PRIVATE / 'driver-done').touch()
+            return
         DRIVE_STEP = 'wait-recovery'
         # Read character cells privately. Never take a screenshot while the
         # key is visible and never send the key to the host or serial console.
@@ -696,40 +824,7 @@ def drive():
         # Only an OAEP envelope leaves this guest. Its throwaway private key
         # stays in the host's 0700 fixture; decrypted bytes go to locked memory.
         save_recovery_envelope(recovery, 'recovery.oaep')
-        matcher = privacy_module()
-        # Both matchers must catch overlapping candidates across a read boundary
-        # inside this VM. The intentional private probe is never a log/export.
-        check_dir = PRIVATE / 'matcher-self-check'
-        check_dir.mkdir()
-        check = check_dir / 'not-an-image.png'
-        try:
-            for value in [passphrase, recovery]:
-                check.write_bytes(b'X' * (1024 * 1024 - 3) + value)
-                report = matcher['scan']([check_dir], [matcher['fingerprint'](value)])
-                assert report['secret_found'], 'private matcher self-check failed'
-                check.unlink()
-                assert not matcher['scan']([check_dir], [matcher['fingerprint'](value)])['secret_found']
-                for codec in ['gzip', 'lzma', 'bz2', 'zstd', 'zipfile']:
-                    check = check_dir / codec
-                    if codec == 'zipfile':
-                        with matcher[codec].ZipFile(check, 'w', compression=matcher[codec].ZIP_DEFLATED) as archive:
-                            archive.writestr('private-fixture.log', value)
-                    else:
-                        assert matcher[codec] is not None, 'private decompressor unavailable'
-                        check.write_bytes(matcher[codec].compress(value))
-                    report = matcher['scan']([check_dir], [matcher['fingerprint'](value)])
-                    assert report['secret_found'] and not report['read_errors'], 'private compressed matcher failed'
-                    check.unlink()
-                check = check_dir / 'not-an-image.png'
-        finally:
-            check.unlink(missing_ok=True)
-            check_dir.rmdir()
-        fingerprints = [matcher['fingerprint'](value) for value in [passphrase, recovery]]
-        previous = PRIVATE / 'layout-interrupted-fingerprint.json'
-        if previous.exists():
-            fingerprints.append(json.loads(previous.read_text()))
-        (PUBLIC / 'credentials.json').write_text(json.dumps(fingerprints))
-        config = json.loads((SEED / 'config.json').read_text())
+        check_and_record_credentials(passphrase, recovery)
         if config.get('interrupt_completion', False):
             DRIVE_STEP = 'interrupt-completion'
             # Kill the shipped completion after its recovery slot/state commit,
@@ -758,7 +853,8 @@ def drive():
             assert '0' in tokens['slots']
             assert tokens['tokens'][0]['id'] == str(state['recovery']['token'])
             assert tokens['tokens'][0]['keyslots'] == [str(state['recovery']['slot'])]
-            assert sorted(p.name for p in (root / 'var/lib/ilex/security').iterdir()) == ['enrollment.json']
+            assert sorted(p.name for p in (root / 'var/lib/ilex/security').iterdir()) == [
+                '.pending-recovery.json', 'enrollment.json']
             (PUBLIC / 'interrupted-tokens.json').write_text(json.dumps(tokens))
             hold_interrupted_target_mounts()
             (PRIVATE / 'driver-done').touch()
@@ -783,22 +879,29 @@ def drive():
             os.close(fd)
 
 
-def full_slot_probe(root, state):
-    global DRIVE_STEP
-    DRIVE_STEP = 'fill-luks2-keyslots'
-    device = '/dev/disk/by-uuid/' + state['uuid']
+def fill_luks_slots(device, leave):
     status = ['ilex-enroll', 'status', '--json', '--device', device]
     slots = set(json.loads(subprocess.check_output(status))['slots'])
+    free = sorted(set(map(str, range(32))) - slots, key=int)
+    assert len(free) >= leave
     pass_file = str(SEED / 'passphrase')
-    for slot in sorted(set(map(str, range(32))) - slots, key=int):
+    for slot in free[:len(free) - leave]:
         # Reuse the fixture's passphrase; only this disposable guest is filled.
         result = subprocess.run(
             ['cryptsetup', 'luksAddKey', '--batch-mode', '--pbkdf', 'pbkdf2',
              '--pbkdf-force-iterations', '1000', '--key-file', pass_file,
              '--new-key-slot', slot, device, pass_file], capture_output=True, timeout=60)
         assert result.returncode == 0, f'could not fill fixture slot {slot}'
-    full = subprocess.check_output(status)
-    assert set(json.loads(full)['slots']) == set(map(str, range(32)))
+    observed = json.loads(subprocess.check_output(status))
+    assert set(observed['slots']) == slots.union(free[:len(free) - leave])
+    return observed
+
+
+def full_slot_probe(root, state):
+    global DRIVE_STEP
+    DRIVE_STEP = 'fill-luks2-keyslots'
+    device = '/dev/disk/by-uuid/' + state['uuid']
+    full = fill_luks_slots(device, leave=0)
     dump = ['cryptsetup', 'luksDump', '--dump-json-metadata', device]
     header = subprocess.check_output(dump)
     enrollment_path = root / 'var/lib/ilex/security/enrollment.json'
@@ -823,7 +926,7 @@ def full_slot_probe(root, state):
         'ordinary_completion_passed': True, 'acknowledged_recovery_unchanged': True,
         'luks_header_unchanged': True,
     }))
-    return full
+    return json.dumps(full).encode()
 
 
 def finish():
@@ -871,10 +974,23 @@ def finish():
     if config.get('layout_refusal'):
         observed = json.loads(tokens.stdout)
         original = json.loads((PUBLIC / 'layout-retry.json').read_text())['original_token']
-        assert len(observed['slots']) == 3 and len(observed['tokens']) == 2
-        assert original in observed['tokens'] and state['recovery']['token'] != int(original['id'])
+        assert len(observed['slots']) == 32 and observed['tokens'] == [original]
+        assert state['recovery']['token'] == int(original['id'])
+        assert not (root / 'var/lib/ilex/security/.pending-recovery.json').exists()
         (PUBLIC / 'tokens.json').write_bytes(full_slot_probe(root, state))
     else:
+        if config.get('tpm_slot_budget'):
+            proof_path = PUBLIC / 'tpm-slot-budget.json'
+            proof = json.loads(proof_path.read_text())
+            before = proof['before']
+            after = json.loads(tokens.stdout)
+            assert len(after['slots']) == 32 and set(before['slots']) < set(after['slots'])
+            assert before['tokens'][0] in after['tokens'] and len(after['tokens']) == 2
+            assert state['state'] == 'pending' and state['recovery']['displayed_and_acknowledged']
+            assert state['recovery']['token'] == int(before['tokens'][0]['id'])
+            assert any(token['type'] == 'systemd-tpm2' and token['pcr7_sha256'] for token in after['tokens'])
+            proof['ordinary_tpm_completion_passed'] = True
+            proof_path.write_text(json.dumps(proof))
         (PUBLIC / 'tokens.json').write_bytes(tokens.stdout)
     start = time.monotonic()
     while not (PRIVATE / 'driver-done').exists():
@@ -893,7 +1009,7 @@ if __name__ == '__main__':
     harden()
     try:
         {'prepare': prepare, 'drive': drive, 'finish': finish, 'finalise': finalise,
-         'layout-retry-probe': layout_retry_probe,
+         'layout-retry-probe': layout_retry_probe, 'tpm-slot-budget-probe': tpm_slot_budget_probe,
          'diagnostics': diagnostic_loop}[sys.argv[1]]()
     except Exception as error:
         # Do not include exception repr: an input or tool failure may contain a

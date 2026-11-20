@@ -656,6 +656,7 @@ fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Secret)> {
     // signature enforcement. No passphrase bytes occur in ks.cfg or scripts.
     let ks = r#"%post --nochroot --erroronfail
 python3 -I -S /run/ilex-encrypted-test/seed/guest.py layout-retry-probe
+python3 -I -S /run/ilex-encrypted-test/seed/guest.py tpm-slot-budget-probe
 python3 -I -S /run/ilex-encrypted-test/seed/guest.py drive > /run/ilex-encrypted-test/driver.log 2>&1 &
 %end
 %include /usr/share/anaconda/interactive-defaults.ks
@@ -1519,12 +1520,9 @@ fn check_fallback(
                 && tokens_before["slots"]
                     .as_array()
                     .is_some_and(|slots| slots.len() == 32)
-                && tokens_before["tokens"]
-                    .as_array()
-                    .is_some_and(|tokens| tokens.len() == 2
-                        && tokens
-                            .iter()
-                            .all(|token| token["type"] == "systemd-recovery")),
+                && tokens_before["tokens"].as_array().is_some_and(
+                    |tokens| tokens.len() == 1 && tokens[0]["type"] == "systemd-recovery"
+                ),
             "unsupported installation did not defer TPM enrollment and retain recovery"
         );
         vm.ssh_ok("set -eu; for attempt in 1 2; do report=$(timeout 30 ilex-enroll complete --root / --tty /dev/tty8 2>&1); printf '%s\n' \"$report\" | grep -F 'Installation can finish'; done; ! grep -Fq tpm2-device= /etc/crypttab")?;
@@ -1650,38 +1648,115 @@ fn interrupted_repair(
         before == *original_tokens,
         "interrupted boot left half-enrolled slots or tokens"
     );
-    vm.ssh_ok("python3 -I -S -c 'import pathlib; assert sorted(p.name for p in pathlib.Path(\"/var/lib/ilex/security\").iterdir()) == [\"enrollment.json\"]'")?;
+    vm.ssh_ok("python3 -I -S -c 'import pathlib; assert sorted(p.name for p in pathlib.Path(\"/var/lib/ilex/security\").iterdir()) == [\".pending-recovery.json\", \"enrollment.json\"]'")?;
     guest_privacy(vm, artifacts, "interrupted-after-finalisation", credentials)?;
-    // Ordinary retry must refuse the unacknowledged slot, preserve it and
-    // request explicit authenticated reissue; it must never show it again.
-    vm.ssh_ok("chvt 8; systemd-run --quiet --unit=ilex-interrupted-retry /usr/bin/ilex-enroll complete --root / --tty /dev/tty8")?;
-    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
-    type_at_vt(
+    let console = fixture
+        .console
+        .as_mut()
+        .context("private console unavailable")?;
+    let resumed = confirm_interrupted_key(vm, &ctl, console, passphrase, None)?;
+    ensure!(
+        credentials[1]["sha256"] == security::hash(resumed.bytes()),
+        "ordinary retry did not show the pending key again"
+    );
+    let resumed_state = guest_json(
         vm,
-        fixture
-            .console
-            .as_mut()
-            .context("private console unavailable")?,
-        passphrase,
+        artifacts,
+        "interrupted-resumed-state.json",
+        "cat /var/lib/ilex/security/enrollment.json",
     )?;
-    vm.ssh_ok("timeout 180 sh -c 'until test \"$(systemctl show -p Result --value ilex-interrupted-retry)\" = exit-code; do sleep 1; done'; systemctl reset-failed ilex-interrupted-retry")?;
-    let unchanged = guest_json(
+    ensure!(
+        resumed_state["recovery"]["displayed_and_acknowledged"] == true
+            && resumed_state["recovery"]["slot"] == state["recovery"]["slot"]
+            && resumed_state["recovery"]["token"] == state["recovery"]["token"],
+        "ordinary retry did not acknowledge the original pending slot"
+    );
+    vm.ssh_ok("test ! -e /var/lib/ilex/security/.pending-recovery.json")?;
+    let resumed_tokens = guest_json(
         vm,
         artifacts,
         "interrupted-retry-tokens.json",
         &token_command,
     )?;
-    ensure!(unchanged == before, "ordinary retry changed fallback slots");
-    vm.ssh_ok("systemd-run --quiet --remain-after-exit --unit=ilex-interrupted-reissue /usr/bin/ilex-enroll complete --root / --tty /dev/tty8 --reissue-recovery")?;
-    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
-    type_at_vt(
+    ensure!(
+        resumed_tokens["tokens"]
+            .as_array()
+            .is_some_and(|tokens| tokens
+                .iter()
+                .filter(|token| token["type"] == "systemd-recovery")
+                .eq(before["tokens"].as_array().unwrap())),
+        "ordinary retry changed the recovery token"
+    );
+    let recovery = confirm_interrupted_key(
         vm,
-        fixture
-            .console
-            .as_mut()
-            .context("private console unavailable")?,
+        &ctl,
+        console,
         passphrase,
+        Some(&artifacts.join("interrupted-reissue-confirmed.png")),
     )?;
+    ensure!(
+        recovery.bytes() != resumed.bytes(),
+        "explicit reissue reused the confirmed key"
+    );
+    credentials
+        .as_array_mut()
+        .context("missing credentials")?
+        .push(json!({"length":71,"sha256":security::hash(recovery.bytes())}));
+    fs::write(
+        artifacts.join("installer-credentials.json"),
+        serde_json::to_vec_pretty(credentials)?,
+    )?;
+    let after = guest_json(
+        vm,
+        artifacts,
+        "interrupted-reissue-tokens.json",
+        &token_command,
+    )?;
+    for field in ["slots", "tokens"] {
+        let retained = after[field]
+            .as_array()
+            .context("missing reissue inventory")?;
+        ensure!(
+            resumed_tokens[field]
+                .as_array()
+                .context("missing prior inventory")?
+                .iter()
+                .all(|entry| retained.contains(entry)),
+            "reissue removed an existing LUKS {field} entry"
+        );
+    }
+    let repaired = guest_json(
+        vm,
+        artifacts,
+        "interrupted-repaired-state.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    ensure!(
+        repaired["recovery"]["acknowledged"] == true
+            && repaired["recovery"]["slot"] != state["recovery"]["slot"],
+        "explicit reissue did not preserve the original recovery story"
+    );
+    guest_privacy(vm, artifacts, "interrupted-repaired", credentials)?;
+    fixture.logs(artifacts, "interrupted-repaired")?;
+    poweroff(fixture, artifacts, "interrupted-repaired")?;
+    Ok((recovery, after))
+}
+
+fn confirm_interrupted_key(
+    vm: &qemu::Vm,
+    ctl: &Vmctl,
+    console: &mut PrivateConsole,
+    passphrase: &Secret,
+    screenshot: Option<&Path>,
+) -> Result<Secret> {
+    let (unit, flag) = if screenshot.is_some() {
+        ("ilex-interrupted-reissue", "--reissue-recovery")
+    } else {
+        ("ilex-interrupted-retry", "")
+    };
+    vm.ssh_ok(&format!("chvt 8; systemd-run --quiet --remain-after-exit --unit={unit} /usr/bin/ilex-enroll complete --root / --tty /dev/tty8 {flag}"))?;
+    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
+    type_at_vt(vm, console, passphrase)?;
     vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Press Enter when it is saved offline.\" /dev/vcs8; do sleep 1; done'")?;
     // Capture cells privately, move the key into locked host memory and erase
     // the transient buffers. Neither cells nor the key become an artifact or
@@ -1700,28 +1775,13 @@ fn interrupted_repair(
                 }
             })
         })
-        .context("reissued recovery key not shown locally")?;
+        .context("recovery key not shown locally")?;
     let recovery = Secret::read(ilex_enroll::secret_fd(key)?)?;
     cells.stdout.fill(0);
     cells.stderr.fill(0);
-    credentials
-        .as_array_mut()
-        .context("missing credentials")?
-        .push(json!({"length":71,"sha256":security::hash(recovery.bytes())}));
-    fs::write(
-        artifacts.join("installer-credentials.json"),
-        serde_json::to_vec_pretty(credentials)?,
-    )?;
     ctl.key("ret")?;
     vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Enter the saved recovery key to confirm\" /dev/vcs8; do sleep 1; done'")?;
-    type_at_vt(
-        vm,
-        fixture
-            .console
-            .as_mut()
-            .context("private console unavailable")?,
-        &recovery,
-    )?;
+    type_at_vt(vm, console, &recovery)?;
     vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
     let mut cleared = vm.ssh("cat /dev/vcs8")?;
     let key_visible = cleared
@@ -1733,56 +1793,14 @@ fn interrupted_repair(
     cleared.stderr.fill(0);
     ensure!(
         readable && !key_visible,
-        "reissued recovery screen was not cleared; screenshot suppressed"
+        "recovery screen was not cleared; screenshot suppressed"
     );
-    ctl.save_screenshot(&artifacts.join("interrupted-reissue-confirmed.png"))?;
+    if let Some(path) = screenshot {
+        ctl.save_screenshot(path)?;
+    }
     ctl.key("ret")?;
-    vm.ssh_ok("timeout 120 sh -c 'until test \"$(systemctl show -p SubState --value ilex-interrupted-reissue)\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value ilex-interrupted-reissue)\" = success; systemctl stop ilex-interrupted-reissue")?;
-    let after = guest_json(
-        vm,
-        artifacts,
-        "interrupted-reissue-tokens.json",
-        &token_command,
-    )?;
-    for slot in before["slots"]
-        .as_array()
-        .context("missing original slots")?
-    {
-        ensure!(
-            after["slots"]
-                .as_array()
-                .context("missing repaired slots")?
-                .contains(slot),
-            "reissue removed an original fallback slot"
-        );
-    }
-    for token in before["tokens"]
-        .as_array()
-        .context("missing original tokens")?
-    {
-        ensure!(
-            after["tokens"]
-                .as_array()
-                .context("missing repaired tokens")?
-                .contains(token),
-            "reissue replaced an original recovery token"
-        );
-    }
-    let repaired = guest_json(
-        vm,
-        artifacts,
-        "interrupted-repaired-state.json",
-        "cat /var/lib/ilex/security/enrollment.json",
-    )?;
-    ensure!(
-        repaired["recovery"]["acknowledged"] == true
-            && repaired["recovery"]["slot"] != state["recovery"]["slot"],
-        "explicit reissue did not preserve the original recovery story"
-    );
-    guest_privacy(vm, artifacts, "interrupted-repaired", credentials)?;
-    fixture.logs(artifacts, "interrupted-repaired")?;
-    poweroff(fixture, artifacts, "interrupted-repaired")?;
-    Ok((recovery, after))
+    vm.ssh_ok(&format!("timeout 120 sh -c 'until test \"$(systemctl show -p SubState --value {unit})\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value {unit})\" = success; systemctl stop {unit}"))?;
+    Ok(recovery)
 }
 
 fn same_tpm_mismatch(
@@ -2170,6 +2188,8 @@ fn run_layout(
         expected["interrupt_completion"] = json!(interrupted);
         expected["local_diagnostic"] = json!(local_diagnostic);
         expected["layout_refusal"] = json!(layout_refusal);
+        let tpm_slot_budget = !local_diagnostic && !interrupted && !preserve_data;
+        expected["tpm_slot_budget"] = json!(tpm_slot_budget);
         fs::write(
             artifacts.join("candidate.json"),
             serde_json::to_vec_pretty(&expected)?,
@@ -2216,16 +2236,16 @@ fn run_layout(
         if layout_refusal {
             let interrupted = recovery_secret_named(&seed_path, &work, "layout-interrupted.oaep")?;
             ensure!(
-                interrupted.bytes() != recovery.bytes(),
-                "LVM retry did not issue a replacement"
+                interrupted.bytes() == recovery.bytes(),
+                "LVM retry did not resume the pending key in the last slot"
             );
-            credentials = fingerprints(&[&passphrase, &recovery, &interrupted]);
             let proof: Value =
                 serde_json::from_slice(&extract(&seed_path, &artifacts, "layout-retry.json")?)?;
             ensure!(
                 proof["discovery_failure_retryable"] == true
                     && proof["legacy_uuid_bound"] == true
-                    && proof["display_interrupted_before_acknowledgement"] == true,
+                    && proof["display_interrupted_before_acknowledgement"] == true
+                    && proof["mistype_with_no_free_slot"] == true,
                 "unsupported-layout retry proof incomplete"
             );
             let full: Value =
@@ -2237,6 +2257,19 @@ fn run_layout(
                     && full["acknowledged_recovery_unchanged"] == true
                     && full["luks_header_unchanged"] == true,
                 "full-slot recovery retry proof incomplete"
+            );
+        }
+        if tpm_slot_budget {
+            let proof: Value =
+                serde_json::from_slice(&extract(&seed_path, &artifacts, "tpm-slot-budget.json")?)?;
+            ensure!(
+                proof["before"]["slots"]
+                    .as_array()
+                    .is_some_and(|slots| slots.len() == 31)
+                    && proof["reissue_refused_before_prompt"] == true
+                    && proof["header_unchanged"] == true
+                    && proof["ordinary_tpm_completion_passed"] == true,
+                "one-free-slot TPM completion proof incomplete"
             );
         }
         let mut export_fingerprints = vec![
@@ -2302,7 +2335,7 @@ fn run_layout(
                 scan["secret_found"] == false
                     && scan["journal_scanned"] == true
                     && scan["read_errors"] == 0
-                    && scan["credentials_checked"] == if layout_refusal { 3 } else { 2 },
+                    && scan["credentials_checked"] == 2,
                 "private guest secret scan failed"
             );
         }
