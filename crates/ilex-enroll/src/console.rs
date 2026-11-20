@@ -168,6 +168,9 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
             return Ok(());
         }
     }
+    if !acknowledged || reissue {
+        device.ensure_recovery_slot_available()?;
+    }
     let mut console = Console::open(tty)?;
     console.clear()?;
     console.say("ilex encrypted installation — local completion\r\n\r\nThe administrator account is for maintenance and recovery.\r\nThe disk passphrase remains a recovery option.\r\n\r\n")?;
@@ -196,18 +199,22 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
             !recovery_exists || reissue || refused,
             "recovery was interrupted; rerun local completion with --reissue-recovery; existing slots and passphrase preserved"
         );
-        state["state"] = json!("recovery-incomplete");
-        if state["recovery"].is_object() {
-            state["recovery"]["acknowledged"] = json!(false);
-            state["recovery"]["displayed_and_acknowledged"] = json!(false);
-        }
-        write_state(&state_path, &state)?;
         let mut output = out_fd()?;
         let enrolled = recovery(&device, passphrase.fd()?, output.try_clone()?.into())?;
-        state["recovery"] = json!({"token":enrolled.token, "slot":enrolled.slot, "acknowledged":false, "displayed_and_acknowledged":false});
-        write_state(&state_path, &state)?;
         output.seek(SeekFrom::Start(0))?;
         let key = Secret::read(output.into())?;
+        device.authenticate_slot(key.fd()?, enrolled.slot)?;
+        let mut replacement = json!({
+            "token":enrolled.token, "slot":enrolled.slot,
+            "acknowledged":false, "displayed_and_acknowledged":false
+        });
+        if !acknowledged {
+            state["state"] = json!("recovery-incomplete");
+            state["recovery"] = replacement.clone();
+            write_state(&state_path, &state)?;
+        }
+        // With an acknowledged key, the durable record still points to the
+        // old slot even if this display or its confirmation is interrupted.
         console.say("\r\nWrite this recovery key on paper or store it offline.\r\nIt is shown once, only on this local console. Do not photograph it.\r\n\r\n")?;
         console.file.write_all(key.bytes())?;
         console.say("\r\n\r\nPress Enter when it is saved offline.\r\n")?;
@@ -219,9 +226,10 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
             confirmation.bytes() == key.bytes(),
             "recovery verification failed; passphrase retained"
         );
-        device.authenticate(confirmation.fd()?)?;
-        state["recovery"]["acknowledged"] = json!(true);
-        state["recovery"]["displayed_and_acknowledged"] = json!(true);
+        device.authenticate_slot(confirmation.fd()?, enrolled.slot)?;
+        replacement["acknowledged"] = json!(true);
+        replacement["displayed_and_acknowledged"] = json!(true);
+        state["recovery"] = replacement;
         write_state(&state_path, &state)?;
         // key/confirmation are erased on scope exit. Explicit reissue is
         // additive; retiring old recovery slots is an authenticated later task.

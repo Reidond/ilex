@@ -783,6 +783,49 @@ def drive():
             os.close(fd)
 
 
+def full_slot_probe(root, state):
+    global DRIVE_STEP
+    DRIVE_STEP = 'fill-luks2-keyslots'
+    device = '/dev/disk/by-uuid/' + state['uuid']
+    status = ['ilex-enroll', 'status', '--json', '--device', device]
+    slots = set(json.loads(subprocess.check_output(status))['slots'])
+    pass_file = str(SEED / 'passphrase')
+    for slot in sorted(set(map(str, range(32))) - slots, key=int):
+        # Reuse the fixture's passphrase; only this disposable guest is filled.
+        result = subprocess.run(
+            ['cryptsetup', 'luksAddKey', '--batch-mode', '--pbkdf', 'pbkdf2',
+             '--pbkdf-force-iterations', '1000', '--key-file', pass_file,
+             '--new-key-slot', slot, device, pass_file], capture_output=True, timeout=60)
+        assert result.returncode == 0, f'could not fill fixture slot {slot}'
+    full = subprocess.check_output(status)
+    assert set(json.loads(full)['slots']) == set(map(str, range(32)))
+    dump = ['cryptsetup', 'luksDump', '--dump-json-metadata', device]
+    header = subprocess.check_output(dump)
+    enrollment_path = root / 'var/lib/ilex/security/enrollment.json'
+    setup_path = root / 'etc/ilex/setup.json'
+    enrollment = enrollment_path.read_bytes()
+    setup = setup_path.read_bytes()
+    complete = ['ilex-enroll', 'complete', '--root', str(root), '--tty', '/dev/tty8']
+
+    DRIVE_STEP = 'refuse-full-slot-reissue'
+    refusal = subprocess.run([*complete, '--reissue-recovery'], capture_output=True, timeout=20)
+    assert refusal.returncode != 0 and b'LUKS2 has no free keyslot' in refusal.stderr
+    assert enrollment_path.read_bytes() == enrollment and setup_path.read_bytes() == setup
+    assert subprocess.check_output(dump) == header
+
+    DRIVE_STEP = 'retry-with-acknowledged-key'
+    retry = subprocess.run(complete, capture_output=True, check=True, timeout=20)
+    assert b'Installation can finish.' in retry.stderr and b'saved recovery key' in retry.stderr
+    assert enrollment_path.read_bytes() == enrollment and setup_path.read_bytes() == setup
+    assert subprocess.check_output(dump) == header
+    (PUBLIC / 'full-slot.json').write_text(json.dumps({
+        'occupied_slots': 32, 'reissue_refused_before_prompt': True,
+        'ordinary_completion_passed': True, 'acknowledged_recovery_unchanged': True,
+        'luks_header_unchanged': True,
+    }))
+    return full
+
+
 def finish():
     root = pathlib.Path('/mnt/sysroot')
     config = json.loads((SEED / 'config.json').read_text())
@@ -830,7 +873,9 @@ def finish():
         original = json.loads((PUBLIC / 'layout-retry.json').read_text())['original_token']
         assert len(observed['slots']) == 3 and len(observed['tokens']) == 2
         assert original in observed['tokens'] and state['recovery']['token'] != int(original['id'])
-    (PUBLIC / 'tokens.json').write_bytes(tokens.stdout)
+        (PUBLIC / 'tokens.json').write_bytes(full_slot_probe(root, state))
+    else:
+        (PUBLIC / 'tokens.json').write_bytes(tokens.stdout)
     start = time.monotonic()
     while not (PRIVATE / 'driver-done').exists():
         assert time.monotonic() - start < 120, 'private leak scan failed or timed out'

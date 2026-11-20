@@ -87,27 +87,54 @@ impl Device {
         Ok(value)
     }
     pub fn authenticate(&self, credential: OwnedFd) -> Result<()> {
+        self.authenticate_with_slot(credential, None)
+    }
+
+    pub fn authenticate_slot(&self, credential: OwnedFd, slot: u32) -> Result<()> {
+        self.authenticate_with_slot(credential, Some(slot))
+    }
+
+    fn authenticate_with_slot(&self, credential: OwnedFd, slot: Option<u32>) -> Result<()> {
         let key = Secret::read(credential)?.fd()?;
         let mut command = Command::new("/usr/sbin/cryptsetup");
-        command
-            .args([
-                "open",
-                "--test-passphrase",
-                "--type",
-                "luks2",
-                // open otherwise tries available tokens before the key file.
-                // Exclude external plugins and every built-in token type so
-                // success proves the supplied credential itself was accepted.
-                "--disable-external-tokens",
-                "--token-type=none",
-                "--key-file",
-                "/proc/self/fd/3",
-            ])
-            .arg(&self.path);
+        command.args([
+            "open",
+            "--test-passphrase",
+            "--type",
+            "luks2",
+            // open otherwise tries available tokens before the key file.
+            // Exclude external plugins and every built-in token type so
+            // success proves the supplied credential itself was accepted.
+            "--disable-external-tokens",
+            "--token-type=none",
+            "--key-file",
+            "/proc/self/fd/3",
+        ]);
+        if let Some(slot) = slot {
+            command.arg("--key-slot").arg(slot.to_string());
+        }
+        command.arg(&self.path);
         key_command(&mut command, &key);
         run(&mut command)?;
         Ok(())
     }
+
+    pub fn ensure_recovery_slot_available(&self) -> Result<()> {
+        ensure_free_slot(&self.header()?)
+    }
+}
+
+fn ensure_free_slot(header: &Value) -> Result<()> {
+    // LUKS2 exposes slot IDs 0 through 31. Allocation may still fail if a
+    // header with a smaller keyslot area runs out of storage first.
+    let slots = header["keyslots"]
+        .as_object()
+        .context("missing LUKS2 keyslots")?;
+    ensure!(
+        slots.len() < 32,
+        "LUKS2 has no free keyslot for a recovery key. Existing recovery acknowledgement is unchanged."
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +232,7 @@ pub fn recovery(device: &Device, unlock: OwnedFd, key_out: OwnedFd) -> Result<En
     let key = Secret::read(unlock)?.fd()?;
     device.authenticate(key.try_clone()?)?;
     let before = device.header()?;
+    ensure_free_slot(&before)?;
     // A retry must inspect/acknowledge an existing key, or explicitly reissue it
     // in an authenticated UI. This primitive never deletes existing recovery.
     let mut command = Command::new("/usr/bin/systemd-cryptenroll");

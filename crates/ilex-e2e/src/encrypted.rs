@@ -1518,7 +1518,7 @@ fn check_fallback(
                 && before["tpm"].is_null()
                 && tokens_before["slots"]
                     .as_array()
-                    .is_some_and(|slots| slots.len() == 3)
+                    .is_some_and(|slots| slots.len() == 32)
                 && tokens_before["tokens"]
                     .as_array()
                     .is_some_and(|tokens| tokens.len() == 2
@@ -2227,6 +2227,16 @@ fn run_layout(
                     && proof["legacy_uuid_bound"] == true
                     && proof["display_interrupted_before_acknowledgement"] == true,
                 "unsupported-layout retry proof incomplete"
+            );
+            let full: Value =
+                serde_json::from_slice(&extract(&seed_path, &artifacts, "full-slot.json")?)?;
+            ensure!(
+                full["occupied_slots"] == 32
+                    && full["reissue_refused_before_prompt"] == true
+                    && full["ordinary_completion_passed"] == true
+                    && full["acknowledged_recovery_unchanged"] == true
+                    && full["luks_header_unchanged"] == true,
+                "full-slot recovery retry proof incomplete"
             );
         }
         let mut export_fingerprints = vec![
