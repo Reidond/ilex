@@ -585,7 +585,11 @@ def layout_retry_probe():
     completion = ['/usr/bin/ilex-enroll', 'complete', '--root', str(root), '--tty', '/dev/tty8']
     status = ['/usr/bin/ilex-enroll', 'status', '--json', '--device', str(device)]
     before = json.loads(subprocess.check_output(status))
-    setup_before = setup_path.read_bytes()
+    # This test post runs before the generated setup post. Record absence too.
+    def setup_record():
+        return setup_path.read_bytes() if setup_path.exists() else None
+
+    setup_before = setup_record()
     assert not state_path.exists() and not before['tokens']
     DRIVE_STEP = 'inject-missing-uuid-link'
     masked = PRIVATE / 'missing-uuids'
@@ -595,12 +599,12 @@ def layout_retry_probe():
          'mount --bind "$1" /dev/disk/by-uuid; shift; exec "$@"', 'ilex-probe',
          str(masked), *completion], capture_output=True, timeout=25)
     assert refused.returncode != 0 and b'storage discovery incomplete' in refused.stderr
-    assert not state_path.exists() and setup_path.read_bytes() == setup_before
+    assert not state_path.exists() and setup_record() == setup_before
     assert json.loads(subprocess.check_output(status)) == before
     masked.rmdir()
 
     DRIVE_STEP = 'retry-legacy-unbound-state'
-    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     state_path.write_text(json.dumps({'schema': 1, 'uuid': None, 'state': 'unavailable',
                                     'reason': 'unsupported-storage-layout',
                                     'recovery': None, 'tpm': None}))
@@ -626,7 +630,7 @@ def layout_retry_probe():
         token = observed['tokens'][0]
         assert token['id'] == str(state['recovery']['token'])
         assert token['keyslots'] == [str(state['recovery']['slot'])]
-        assert setup_path.read_bytes() == setup_before
+        assert setup_record() == setup_before
         save_recovery_envelope(first_key, 'layout-interrupted.oaep')
         (PRIVATE / 'layout-interrupted-fingerprint.json').write_text(
             json.dumps(privacy_module()['fingerprint'](first_key)))
