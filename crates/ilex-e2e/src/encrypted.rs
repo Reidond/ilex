@@ -1025,7 +1025,17 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
     ensure!(output.status.success() && output.stdout.len() <= 4096);
     let snapshot: FailureSnapshot = serde_json::from_slice(&output.stdout)?;
     ensure!(snapshot.schema == 1);
-    ensure!(["prepare", "drive", "finish", "finalise"].contains(&snapshot.phase.as_str()));
+    ensure!(
+        [
+            "prepare",
+            "drive",
+            "finish",
+            "finalise",
+            "layout-retry-probe",
+            "tpm-slot-budget-probe",
+        ]
+        .contains(&snapshot.phase.as_str())
+    );
     ensure!(
         [
             "not-started",
@@ -1045,9 +1055,21 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
             "verify-interrupted-target-binds",
             "order-interrupted-target-binds",
             "acknowledge-recovery",
+            "finish-tpm-with-reserved-slot",
             "wait-ready",
             "capture-confirmation",
             "wait-final-scan",
+            "inject-missing-uuid-link",
+            "leave-one-lvm-slot",
+            "retry-legacy-unbound-state",
+            "interrupt-lvm-key-display",
+            "mistype-lvm-confirmation-with-full-header",
+            "prepare-acknowledged-btrfs-recovery",
+            "leave-one-btrfs-slot-for-tpm",
+            "refuse-btrfs-reissue-with-one-free-slot",
+            "fill-luks2-keyslots",
+            "refuse-full-slot-reissue",
+            "retry-with-acknowledged-key",
         ]
         .contains(&snapshot.drive_step.as_str())
     );
@@ -1064,7 +1086,7 @@ fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
     ensure!(snapshot.errno.is_none_or(|value| value <= 4095));
     ensure!(snapshot.helper_errno.is_none_or(|value| value <= 4095));
     ensure!(snapshot.tty8_mode.is_none_or(|value| value <= 3));
-    ensure!(snapshot.helper_errors.len() <= 13);
+    ensure!(snapshot.helper_errors.len() <= 14);
     ensure!(snapshot.helper_errors.iter().all(|code| {
         [
             "var-unencrypted",

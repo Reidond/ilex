@@ -29,6 +29,7 @@ FINAL_SCAN_UNIT = 'ilex-private-final-scan.service'
 FINAL_SCAN_TARGETS = PRIVATE / 'final-scan-targets'
 INSTALL_TARGETS = ('/mnt/sysroot', '/mnt/sysimage')
 DRIVE_STEP = 'not-started'
+HELPER_ERRORS = set()
 KEY_CODES = dict(zip(b'abcdefghijklmnopqrstuvwxyz',
                      [30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
                       49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44]))
@@ -233,9 +234,13 @@ def screen():
         return b''
 
 
-def wait_for(text, deadline=1800):
+def wait_for(text, deadline=1800, process=None):
     start = time.monotonic()
     while text not in screen():
+        if process is not None and process.poll() is not None:
+            _, errors = process.communicate()
+            HELPER_ERRORS.update(code for code, message in ERRORS.items() if message in errors)
+            raise RuntimeError('completion exited before the expected local prompt')
         if time.monotonic() - start > deadline:
             raise RuntimeError('local completion stage timed out')
         time.sleep(0.2)
@@ -243,7 +248,7 @@ def wait_for(text, deadline=1800):
 
 def failure_snapshot(error):
     """Export only fixed codes/booleans; never an exception, log or screen."""
-    observed = set()
+    observed = HELPER_ERRORS.copy()
     helper_errno = None
     for path in pathlib.Path('/tmp').glob('ks-script-*.log'):
         if path.is_symlink() or not path.is_file():
@@ -554,8 +559,11 @@ def completion_pids():
     return found
 
 
-def recovery_on_screen():
-    wait_for(b'Press Enter when it is saved offline.')
+def recovery_on_screen(process=None):
+    if process is None:
+        wait_for(b'Press Enter when it is saved offline.')
+    else:
+        wait_for(b'Press Enter when it is saved offline.', deadline=240, process=process)
     match = re.search(rb'[cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}', screen())
     assert match is not None, 'recovery key was not shown locally'
     return match.group(0)
@@ -614,11 +622,11 @@ def layout_retry_probe():
     subprocess.run(['chvt', '8'], check=True)
     keyboard = open_keyboard()
     attempt = subprocess.Popen([*completion, '--reissue-recovery'],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
-        wait_for(b'Re-enter the disk passphrase', deadline=120)
+        wait_for(b'Re-enter the disk passphrase', deadline=120, process=attempt)
         type_private(keyboard, (SEED / 'passphrase').read_bytes())
-        first_key = recovery_on_screen()
+        first_key = recovery_on_screen(attempt)
         DRIVE_STEP = 'interrupt-lvm-key-display'
         attempt.kill()
         assert attempt.wait(timeout=30) == -signal.SIGKILL
@@ -645,11 +653,11 @@ def layout_retry_probe():
         DRIVE_STEP = 'mistype-lvm-confirmation-with-full-header'
         attempt = subprocess.Popen([*completion, '--reissue-recovery'],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        wait_for(b'Re-enter the disk passphrase', deadline=120)
+        wait_for(b'Re-enter the disk passphrase', deadline=120, process=attempt)
         type_private(keyboard, (SEED / 'passphrase').read_bytes())
-        assert recovery_on_screen() == first_key, 'pending LVM key changed on retry'
+        assert recovery_on_screen(attempt) == first_key, 'pending LVM key changed on retry'
         type_private(keyboard, b'')
-        wait_for(b'Enter the saved recovery key to confirm')
+        wait_for(b'Enter the saved recovery key to confirm', deadline=120, process=attempt)
         type_private(keyboard, b'wrong-confirmation')
         _, errors = attempt.communicate(timeout=60)
         assert attempt.returncode and b'recovery verification failed' in errors
@@ -699,15 +707,15 @@ def tpm_slot_budget_probe():
         ['unshare', '--mount', '--propagation', 'private', '/bin/sh', '-ec',
          'mount --bind "$1" "$2"; shift 2; exec "$@"', 'ilex-probe',
          str(mask), str(unlock_stack), *complete],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
-        wait_for(b'Re-enter the disk passphrase', deadline=120)
+        wait_for(b'Re-enter the disk passphrase', deadline=120, process=attempt)
         type_private(keyboard, passphrase)
-        recovery = recovery_on_screen()
+        recovery = recovery_on_screen(attempt)
         type_private(keyboard, b'')
-        wait_for(b'Enter the saved recovery key to confirm')
+        wait_for(b'Enter the saved recovery key to confirm', deadline=120, process=attempt)
         type_private(keyboard, recovery)
-        wait_for(b'Recovery key saved and privately verified.')
+        wait_for(b'Recovery key saved and privately verified.', deadline=240, process=attempt)
         type_private(keyboard, b'')
         assert attempt.wait(timeout=60) == 0
     finally:
