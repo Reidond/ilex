@@ -7,8 +7,8 @@ import tempfile
 
 from diagnostics import LOG_BYTES, emit, extract, redacted_tail, tail
 from log_stream import CANCEL, CSI, ESC, OSC, ST, STRINGS, Normalizer
-from privacy import (ENCRYPTED_TIERS, PATTERNS, check_seal, fingerprint, seal_export,
-                     stream_matches, verify_export)
+from privacy import (ENCRYPTED_TIERS, PATTERNS, check_seal, fingerprint,
+                     private_fingerprint, seal_export, stream_matches, verify_export)
 
 
 def terminal_sequences():
@@ -40,6 +40,8 @@ def check_artifact_seal(root):
     security = root / 'security'
     security.mkdir()
     marker = root / 'seal'
+    private = root / 'private'
+    private.mkdir()
     secret = b'z' * 48
     recovery = b'-'.join([b'u' * 8] * 8)
     reissued = b'-'.join([b'v' * 8] * 8)
@@ -50,6 +52,8 @@ def check_artifact_seal(root):
         values = [secret, recovery, reissued] if tier == 'encrypted-interrupted' else [secret, recovery]
         (path / 'installer-credentials.json').write_text(
             json.dumps([fingerprint(value) for value in values]))
+        (private / (tier + '.json')).write_text(
+            json.dumps([private_fingerprint(value) for value in values]))
     log = security / 'fixture-serial.redacted.log'
 
     def refuses_upload():
@@ -61,13 +65,21 @@ def check_artifact_seal(root):
 
     log.write_bytes(b'boot complete')
     refuses_upload()
-    log.write_bytes(secret[:-1] + b'\x9b3\0;1m\r\n' + secret[-1:])
-    assert seal_export(root, marker, encrypted=True)['secret_found']
+    log.write_bytes(secret[:4] + b'\x9b3\0;1m\r\n' + secret[4:8])
+    assert seal_export(root, marker, encrypted=True, private_directory=private)['secret_found']
     refuses_upload()
     log.write_bytes(b'boot complete')
-    assert not seal_export(root, marker, encrypted=True)['secret_found']
+    assert not seal_export(root, marker, encrypted=True, private_directory=private)['secret_found']
     check_seal(root, marker, encrypted=True)
     log.write_bytes(b'changed after successful scan')
+    refuses_upload()
+    (private / (ENCRYPTED_TIERS[0] + '.json')).unlink()
+    try:
+        seal_export(root, marker, encrypted=True, private_directory=private)
+    except OSError:
+        pass
+    else:
+        raise AssertionError('missing private fingerprint receipt did not fail the scan')
     refuses_upload()
 
 
@@ -110,6 +122,23 @@ def check():
                     for boundary in range(len(terminal) + 1):
                         zero(b'<>' + secret[:split] + terminal[:boundary], ('end', split, terminal, boundary))
                         zero(terminal[boundary:] + secret[split:] + b'<>', ('start', split, terminal, boundary))
+
+        endpoints = {digest: {length} for digest in private_fingerprint(secret)['edges']}
+        # Start after the opener in a clipped DCS/OSC. A UTF-8 continuation
+        # that resembles raw ST, a DCS BEL, and line breaks within the string
+        # all precede the actual resynchronization point.
+        for fake_end in (b'clip:\xe2\x80\x9c', b'clip:\x07', b'clip:\xe2\x80\x9c\r\n\x07',
+                         b'\x9c', b'\x80\x9c'):
+            for real_end in (b'\x1b\\', b'\x1b\0\\', b'\x9c', b'\xc2\x9c', b'\x18', b'\x07'):
+                before = fake_end + b'\r\nmore:' + real_end
+                for count in range(8, length):
+                    for fragment in (secret[-count:], secret[:count]):
+                        clipped = before + fragment + b'<>'
+                        zero(clipped, ('clipped-control-string', fake_end, real_end, count))
+                        for size in (1, 23):
+                            assert list(stream_matches(io.BytesIO(clipped), expected, size, edges=endpoints))
+        assert not list(stream_matches(io.BytesIO(b'<>' + secret[:7] + b'<>'),
+                                       expected, 1, edges=endpoints))
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

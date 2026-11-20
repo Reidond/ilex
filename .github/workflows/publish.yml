@@ -310,7 +310,13 @@ jobs:
         env:
           HAS_ENCRYPTED_EVIDENCE: ${{ inputs.encrypted_install || false }}
         run: |
-          python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" "$HAS_ENCRYPTED_EVIDENCE"
+          if [[ "$HAS_ENCRYPTED_EVIDENCE" == true ]]; then
+            case "$ILEX_PRIVATE_FINGERPRINTS" in "$RUNNER_TEMP"/ilex-fingerprints.*) ;; *) exit 1 ;; esac
+            trap 'for tier in encrypted-install encrypted-existing-space encrypted-interrupted; do rm -f -- "$ILEX_PRIVATE_FINGERPRINTS/$tier.json"; done; rmdir -- "$ILEX_PRIVATE_FINGERPRINTS"' EXIT
+            python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" true "$ILEX_PRIVATE_FINGERPRINTS"
+          else
+            python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" false
+          fi
 
       - name: Keep security qualification evidence
         if: steps.qualification-scan.outcome == 'success'

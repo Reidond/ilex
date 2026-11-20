@@ -19,7 +19,7 @@ SPECIAL = re.compile(rb'[\x00-\x1f\x7f-\x9f\xc2-\xf4]')
 UTF8 = re.compile(rb'[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}')
 CSI_SUFFIX = re.compile(rb'\[?[0-?]*[ -/]*[@-~]')
 ESC_SUFFIX = re.compile(rb'[ -/]*[0-~]')
-STRING_SUFFIX = re.compile(rb'[\x07\x18\x1a]|\x1b[\x00-\x06\x08-\x17\x19\x1c-\x1f]*\\|\xc2?\x9c')
+RESYNC = re.compile(UTF8.pattern + rb'|\x1b[\x00-\x17\x19\x1c-\x1f]*\\|[\x07\x18\x1a\x9c]')
 
 
 class Normalizer:
@@ -32,7 +32,6 @@ class Normalizer:
         self.escape = None
         self.bell_ends_string = False
         self.pending = b''
-        self.sequences = []
 
     def feed(self, data, escapes=None, final=False):
         data = self.pending + data
@@ -73,8 +72,6 @@ class Normalizer:
 
         def end(stop):
             if self.escape is not None:
-                if escapes is not None:
-                    self.sequences.append((self.escape, stop))
                 cut(self.escape, stop)
             self.escape = None
             self.mode = 'text'
@@ -168,11 +165,36 @@ def edge_length(data, left):
     for alphabet in CREDENTIALS:
         for length in range(min(limit, len(alphabet) - 1), longest, -1):
             fragment = edge[:length] if left else edge[-length:]
-            allowed = alphabet[-length:] if left else alphabet[:length]
-            if all(byte in choices for byte, choices in zip(fragment, allowed)):
+            if any(all(byte in choices for byte, choices in zip(fragment, allowed))
+                   for allowed in (alphabet[:length], alphabet[-length:])):
                 longest = length
                 break
     return longest
+
+
+def leading_end(data):
+    """Protect the entire leading region if it may be a clipped string."""
+    start = 0
+    for match in RESYNC.finditer(data):
+        control = match.group()
+        bell = control == b'\x07'
+        universal = (control in (b'\x18', b'\x1a', b'\x9c', b'\xc2\x9c')
+                     or control.startswith(b'\x1b'))
+        if not bell and not universal:
+            continue  # A complete UTF-8 graphic can contain a C1 byte.
+        start = match.end()
+        # BEL can end OSC, but the same byte inside DCS is payload. Keep
+        # looking before choosing how much of the unknown leading region to
+        # suppress. ST and CAN/SUB resynchronize all control-string states.
+        clipped_utf8 = (control == b'\x9c' and match.start() < 3
+                        and all(0x80 <= part <= 0xBF for part in data[:match.start()]))
+        if universal and not clipped_utf8:
+            break
+    if start:
+        normalized, mapping = Normalizer(start).feed(data[start:], final=True)
+        if count := edge_length(normalized, left=True):
+            return original_offset(mapping, count - 1) + 1
+    return start
 
 
 def redact(data):
@@ -185,15 +207,7 @@ def redact(data):
     spans.extend(m.span(1) for m in RECOVERY_FULL.finditer(normalized))
     if count := edge_length(normalized, left=True):
         spans.append((0, count))
-    # A snapshot can start in the middle of an escape. Try a leading CSI
-    # suffix as well as the first orphaned control-string terminator.
-    string = None
-    for match in STRING_SUFFIX.finditer(data):
-        sequences = normalizer.sequences
-        previous = bisect_right(sequences, (match.start() - 1, len(data))) - 1
-        if previous < 0 or sequences[previous][1] <= match.start():
-            string = match
-            break
+    # A snapshot can start inside an escape or inside a control string.
     for suffix in (CSI_SUFFIX, ESC_SUFFIX):
         fragment = suffix.match(normalized)
         if not fragment:
@@ -203,14 +217,8 @@ def redact(data):
         if count := edge_length(edge, left=True):
             start = len(normalized) - len(edge)
             spans.append((start, start + count))
-    if string:
-        remainder = Normalizer(string.end()).feed(data[string.end():], final=True)
-        if count := edge_length(remainder[0], left=True):
-            # Use the second mapping because the split starts in the middle
-            # of the original capture and may be followed by wrap indentation.
-            end = original_offset(remainder[1], count - 1) + 1
-            escapes.append((0, end))
-            escapes.sort()
+    if end := leading_end(data):
+        escapes.append((0, end))
     if count := edge_length(normalized, left=False):
         spans.append((len(normalized) - count, len(normalized)))
     # Mask before slicing any output. Preserve line breaks in the original

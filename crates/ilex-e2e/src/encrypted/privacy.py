@@ -38,6 +38,8 @@ PATTERNS = {
     48: re.compile(rb'(?=([a-z]{48}))'),
     71: re.compile(rb'(?=([cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}))'),
 }
+EDGE_BYTES = 8
+EDGE_PATTERN = re.compile(rb'(?=([a-z]{8}))')
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.ppm'}
 SECRET_KINDS = {48: 'disk-passphrase', 71: 'recovery-key'}
 
@@ -45,6 +47,11 @@ SECRET_KINDS = {48: 'disk-passphrase', 71: 'recovery-key'}
 def fingerprint(value):
     assert len(value) in PATTERNS
     return {'length': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
+
+def private_fingerprint(value):
+    return dict(fingerprint(value), edges=[
+        hashlib.sha256(part).hexdigest() for part in (value[:EDGE_BYTES], value[-EDGE_BYTES:])
+    ])
 
 
 def matches(data, expected, found):
@@ -57,17 +64,31 @@ def matches(data, expected, found):
                 break
 
 
-def stream_matches(source, expected, read_size=1024 * 1024):
+def stream_matches(source, expected, read_size=1024 * 1024, edges=None):
     normalizer = Normalizer()
     raw_tail = b''
     normalized_tail = b''
     prior_offsets = []
     found = set()
     offset = 0
+
+    def hits(data):
+        yield from matches(data, expected, found)
+        if edges and len(found) < len(PATTERNS):
+            # Every exposed prefix/suffix of length >= 8 includes its exact
+            # eight-byte endpoint. Scan overlapping candidates throughout the
+            # stream so a clipped capture or embedded terminal transition
+            # cannot disguise where a segment begins or ends.
+            for match in EDGE_PATTERN.finditer(data):
+                digest = hashlib.sha256(match.group(1)).hexdigest()
+                for length in edges.get(digest, ()):
+                    if length not in found:
+                        yield length, match.start(1)
+
     while chunk := source.read(read_size):
         raw = raw_tail + chunk
         # Preserve literal matching for binary evidence and ANSI payloads.
-        for length, start in matches(raw, expected, found):
+        for length, start in hits(raw):
             found.add(length)
             yield length, offset - len(raw_tail) + start
         normalized, mapping = normalizer.feed(chunk)
@@ -78,7 +99,7 @@ def stream_matches(source, expected, read_size=1024 * 1024):
                 return prior_offsets[index]
             return original_offset(mapping, index - len(normalized_tail))
 
-        for length, start in matches(data, expected, found):
+        for length, start in hits(data):
             found.add(length)
             yield length, absolute(start)
         prior_offsets = [absolute(index) for index in range(max(0, len(data) - CONTEXT), len(data))]
@@ -100,7 +121,7 @@ def public_path(path, labels=None):
 
 
 def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=None,
-         require_credentials=True):
+         require_credentials=True, private_edges=None):
     assert (fingerprints or not require_credentials) and all(f['length'] in PATTERNS and
                                re.fullmatch('[0-9a-f]{64}', f['sha256'])
                                for f in fingerprints)
@@ -127,7 +148,7 @@ def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=Non
         finding('scan-read-error', path, region, **details)
 
     def check_stream(source, path, region):
-        for length, start in stream_matches(source, expected):
+        for length, start in stream_matches(source, expected, edges=private_edges):
             result['secret_found'] = True
             finding('credential-fingerprint-match', path, region,
                     secret_kind=SECRET_KINDS[length], offset=start)
@@ -254,12 +275,13 @@ def artifact_snapshot(root, paths):
     return contents
 
 
-def seal_export(root, marker, encrypted):
+def seal_export(root, marker, encrypted, private_directory=None):
     marker.unlink(missing_ok=True)
     paths = artifact_roots(root, encrypted)
     initial = artifact_snapshot(root, paths)
     credentials = [entry for directory in paths for path in directory.rglob('*credentials.json')
                    for entry in json.loads(path.read_text())]
+    edges = {}
     if encrypted:
         for tier in ENCRYPTED_TIERS:
             definition = root / tier / 'result.json'
@@ -267,9 +289,19 @@ def seal_export(root, marker, encrypted):
                 raise ValueError('encrypted qualification incomplete')
             fingerprints = definition.with_name('installer-credentials.json')
             required = [48, 71, 71] if tier == 'encrypted-interrupted' else [48, 71]
-            if sorted(entry['length'] for entry in json.loads(fingerprints.read_text())) != required:
+            public = json.loads(fingerprints.read_text())
+            if sorted(entry['length'] for entry in public) != required:
                 raise ValueError('encrypted qualification fingerprints incomplete')
-    report = scan(paths, credentials, require_credentials=encrypted)
+            private = json.loads((private_directory / (tier + '.json')).read_text())
+            if [{k: item[k] for k in ('length', 'sha256')} for item in private] != public:
+                raise ValueError('private fingerprint receipt does not cover the public set')
+            for entry in private:
+                if (len(entry['edges']) != 2
+                        or not all(re.fullmatch('[0-9a-f]{64}', item) for item in entry['edges'])):
+                    raise ValueError('invalid private endpoint fingerprints')
+                for digest in entry['edges']:
+                    edges.setdefault(digest, set()).add(entry['length'])
+    report = scan(paths, credentials, require_credentials=encrypted, private_edges=edges)
     if report['secret_found'] or report['read_errors']:
         return report
     if artifact_snapshot(root, artifact_roots(root, encrypted)) != initial:
@@ -318,7 +350,8 @@ if __name__ == '__main__':
             print('VERIFIED_QUALIFICATION_PATHS')
             raise SystemExit(0)
         if sys.argv[2:3] == ['--seal-export']:
-            result = seal_export(root, pathlib.Path(sys.argv[3]), sys.argv[4] == 'true')
+            result = seal_export(root, pathlib.Path(sys.argv[3]), sys.argv[4] == 'true',
+                                 pathlib.Path(sys.argv[5]) if len(sys.argv) > 5 else None)
         else:
             fingerprints = []
             for path in root.rglob('*credentials.json'):
