@@ -56,9 +56,11 @@ confirmed recovery key, ordinary completion uses the remaining space for TPM.
 
 `crates/ilex-enroll` is the reusable library and CLI. `recovery` accepts owned
 unlock/output descriptors, captures cryptenroll output privately and returns
-only token/slot ids. Use local completion for recovery reissue. `tpm` accepts
-an owned unlock descriptor, authenticates it, checks eligibility and the
-target tool versions, and reads the token back.
+only token/slot ids. It can add another key to an independent LUKS2 data
+volume. For the managed root with pending enrollment, use local completion
+to protect its reserved space. `tpm` accepts an owned unlock descriptor,
+authenticates it, checks eligibility and the target tool versions, and reads
+the token back.
 The native installer can link the same library used by `ilexctl`.
 
 Credential authentication excludes external token handlers and filters out
