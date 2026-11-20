@@ -21,9 +21,11 @@ expected digest. The harness verifies the ISO byte-for-byte and boots it
 against a blank 32 GiB VHDX. One trial reaches the ilex chooser. A separate
 trial installs the selected image and checks that the vTPM survives the
 disk boot. The part-4 tier covers encrypted installation and enrollment.
-The writable OEMDRV trial uses native `openssl.exe`, `mke2fs.exe` and
-`debugfs.exe` on `PATH` for offline fixture media. The guest runs directly
-on Hyper-V.
+The writable OEMDRV trial uses native `openssl.exe` on `PATH`. The Fedora
+builder creates the ext4 fixture and returns it as a checked job artifact.
+The guest runs directly on Hyper-V. After detachment, the builder reads the
+guest-written ext4 image in memory over pinned SSH. Windows keeps the
+private key and decrypts the witness locally.
 
 Hyper-V's local vTPM protector uses the machine's signing and encryption
 certificates in the **Shielded VM Local Certificates** store. First use

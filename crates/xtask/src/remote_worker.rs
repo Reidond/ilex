@@ -68,6 +68,10 @@ pub fn run(args: Args) -> Result<()> {
         Command::ImportKache { .. } => {
             anyhow::bail!("cache import is handled by the builder runner")
         }
+        #[cfg(target_os = "windows")]
+        Command::Oemdrv { .. } => {
+            anyhow::bail!("OEMDRV creation is handled by the builder runner")
+        }
         Command::Export { image, output } => {
             ensure!(output.is_none(), "export destination must stay on Windows");
             let image = ws.resolve_image(image.as_deref());

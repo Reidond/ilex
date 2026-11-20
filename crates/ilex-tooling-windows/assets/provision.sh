@@ -11,7 +11,7 @@ dnf --setopt=gpgcheck=1 --setopt=max_parallel_downloads=10 install -y \
   libvirt-client virtiofsd passt edk2-ovmf swtpm swtpm-tools tpm2-tools \
   python3-pyyaml hyperv-daemons openssl-devel pkgconf-pkg-config systemd-devel \
   gnu-efi-devel efibootmgr sbsigntools image-builder btrfs-progs xfsprogs \
-  erofs-utils squashfs-tools policycoreutils-devel cpio zstd dracut util-linux
+  erofs-utils squashfs-tools policycoreutils-devel cpio zstd dracut util-linux e2fsprogs
 # Prefer stable; use the approved testing channel only below the ISO minimum.
 image_builder_ready() { python3 - <<'PY'
 import subprocess

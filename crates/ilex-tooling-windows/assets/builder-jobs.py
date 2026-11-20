@@ -32,6 +32,7 @@ JOBS = BASE / 'jobs'
 KACHE_IMPORT_LAYOUT = 'kache-imports/read-only-v1'
 MAX_FRAME = 32 * 1024 * 1024
 CHUNK = 4 * 1024 * 1024
+OEMDRV_BYTES = 32 * 1024 * 1024
 ENV = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin',
        'HOME': '/root', 'LANG': 'C.UTF-8', 'XDG_RUNTIME_DIR': '/run/ilex-builder',
        'CARGO_HOME': str(BASE / 'cargo/home'), 'KACHE_CACHE_DIR': str(BASE / 'kache')}
@@ -367,7 +368,7 @@ def terminal(owner, job):
 
 
 def submit(spec):
-    assert spec['schema'] == 1 and spec['command']['operation'] in {'build', 'rechunk', 'disk', 'iso', 'tool', 'test', 'vm', 'import_kache', 'export', 'self_check'}, 'unsupported job schema/operation'
+    assert spec['schema'] == 1 and spec['command']['operation'] in {'build', 'rechunk', 'disk', 'iso', 'tool', 'test', 'vm', 'import_kache', 'export', 'self_check', 'oemdrv'}, 'unsupported job schema/operation'
     assert set(spec['environment']) <= ALLOWED_ENV, 'environment not allowlisted'
     assert all(isinstance(v, str) and len(v) < 16384 and '\x00' not in v for v in spec['environment'].values()), 'invalid environment value'
     snapshot = spec['snapshot']
@@ -395,7 +396,7 @@ def submit(spec):
 def capacity(spec):
     # One full build/test at a time on 16 GiB; smaller tool jobs may share.
     kind = spec['command']['operation']
-    weight = {'tool': 4, 'self_check': 4, 'export': 4, 'disk': 10, 'rechunk': 8, 'import_kache': 4}.get(kind, 12) * 1024**3
+    weight = {'tool': 4, 'self_check': 4, 'export': 4, 'disk': 10, 'rechunk': 8, 'import_kache': 4, 'oemdrv': 4}.get(kind, 12) * 1024**3
     cpus = min(4, os.cpu_count())
     if kind == 'vm':
         args = spec['command']['args']
@@ -436,6 +437,8 @@ def artifact_inventory(path, state, include_state=True):
              (state / 'disks', 'disks'), (state / 'tools/images', 'tools/images'),
              (state / 'tools/keys', 'tools/keys'), (state / 'jobs', 'jobs'), (state / 'exports', 'exports')]
     operation = read_json(path / 'request.json')['command']['operation']
+    if operation == 'oemdrv':
+        roots = [(path, 'job'), (path / 'fixture', 'artifacts')]
     outputs = {'build': {'jobs'}, 'rechunk': {'jobs'}, 'disk': {'disks'},
                'iso': {'iso'}, 'tool': {'tools/images', 'tools/keys'},
                'export': {'exports'}, 'self_check': set(), 'vm': set(), 'import_kache': set()}
@@ -641,6 +644,51 @@ def import_kache(root, spec):
     return receipt
 
 
+def create_oemdrv(path, spec):
+    args = spec['command']['args']
+    assert set(args) == {'kickstart', 'public_key'} and not spec['inputs'], 'unexpected OEMDRV input'
+    output = path / 'fixture'
+    output.mkdir()
+    raw = output / 'answers.raw.partial'
+    with tempfile.TemporaryDirectory(dir=path) as source:
+        for arg, name in [('kickstart', 'ks.cfg'), ('public_key', 'recovery.pub')]:
+            data = args[arg].encode()
+            assert 0 < len(data) <= 65536, 'invalid OEMDRV source size'
+            (Path(source) / name).write_bytes(data)
+        with raw.open('xb') as file:
+            file.truncate(OEMDRV_BYTES)
+        checked(['mke2fs', '-q', '-t', 'ext4', '-F', '-L', 'OEMDRV', '-d', source, str(raw)], timeout=30)
+    raw.rename(output / 'answers.raw')
+
+
+def read_oemdrv(frame, payload):
+    assert len(payload) == OEMDRV_BYTES and digest(payload) == frame['sha256'], 'invalid OEMDRV readback image'
+
+    # The guest-written disk and encrypted envelope stay out of persistent job
+    # files, chunk caches and logs. The e2e harness decrypts only on Windows.
+    with os.fdopen(os.memfd_create('ilex-oemdrv'), 'wb') as file:
+        file.write(payload)
+        file.flush()
+        fd = file.fileno()
+
+        def extract(entry, size):
+            with subprocess.Popen(
+                ['timeout', '10s', 'debugfs', '-R', 'cat ' + entry, f'/proc/self/fd/{fd}'],
+                pass_fds=(fd,), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=ENV,
+            ) as cmd:
+                data = cmd.stdout.read(size + 1)
+                if len(data) > size:
+                    cmd.kill()
+                assert cmd.wait() == 0 and len(data) == size, 'invalid OEMDRV witness'
+                return data
+
+        boot = extract('/public/installer-boot', 37).decode().strip()
+        fingerprint = extract('/public/recovery-sha256', 65).decode().strip()
+        envelope = extract('/recovery.oaep', 256)
+    return {'boot': ident(boot), 'fingerprint': sha('sha256:' + fingerprint),
+            'sha256': digest(envelope)}, envelope
+
+
 def execute(owner, job):
     path, spec = load_job({'owner': owner, 'job': job})
     state = owner_dir(spec['snapshot']) / 'state' / spec['snapshot']['identity']['slug']
@@ -690,6 +738,12 @@ def execute(owner, job):
                     env['ILEX_ISO'] = str(target)
             Path(env['XDG_RUNTIME_DIR']).mkdir(mode=0o700, exist_ok=True)
             atomic(path / 'state.json', encode({'state': 'running', 'exit_code': None}))
+            if operation == 'oemdrv':
+                operation_started = time.monotonic()
+                create_oemdrv(path, spec)
+                operation_seconds = time.monotonic() - operation_started
+                code = 0
+                return
             if operation == 'import_kache':
                 operation_started = time.monotonic()
                 atomic(path / 'stdout.log', encode(import_kache(root, spec)) + b'\n')
@@ -767,6 +821,8 @@ def execute(owner, job):
 def request(frame, payload):
     assert frame['schema'] == 1, 'unsupported job protocol version'
     op = frame['operation']
+    if op == 'read_oemdrv':
+        return read_oemdrv(frame, payload)
     if op == 'missing':
         chunks = frame['chunks']
         assert len(chunks) <= 100000
@@ -866,7 +922,8 @@ def main():
     frame = json.loads(line)
     assert frame['schema'] == 1, 'unsupported job protocol version'
     count = frame.get('payload_bytes', 0)
-    assert isinstance(count, int) and 0 <= count <= CHUNK
+    limit = OEMDRV_BYTES if frame['operation'] == 'read_oemdrv' else CHUNK
+    assert isinstance(count, int) and 0 <= count <= limit
     payload = sys.stdin.buffer.read(count)
     assert len(payload) == count, 'truncated chunk'
     with lock('/run/lock/ilex-builder-jobs.lock', shared=True):

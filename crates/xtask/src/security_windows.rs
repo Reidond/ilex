@@ -109,7 +109,8 @@ fn native(ws: &Workspace, args: crate::test::Args, memory: &str) -> Result<()> {
         .args(["test", "--package", "ilex-e2e", "--test", "e2e", "--"])
         .args(&args.filters)
         .args(&args.test_args)
-        .env("ILEX_ROOT", &ws.root);
+        .env("ILEX_ROOT", &ws.root)
+        .env("ILEX_XTASK", std::env::current_exe()?);
     if !args.test_args.iter().any(|a| a == "--list") {
         let iso = PathBuf::from(
             std::env::var_os("ILEX_ISO")

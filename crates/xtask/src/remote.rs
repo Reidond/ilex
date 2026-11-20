@@ -85,6 +85,11 @@ pub enum Command {
         version: String,
         sha256: String,
     },
+    #[cfg(target_os = "windows")]
+    Oemdrv {
+        kickstart: String,
+        public_key: String,
+    },
     Export {
         image: Option<String>,
         output: Option<std::path::PathBuf>,
@@ -130,6 +135,12 @@ pub struct Args {
 pub enum Operation {
     /// Inspect exact source chunks without starting the builder
     Snapshot,
+    #[cfg(target_os = "windows")]
+    #[command(hide = true)]
+    Oemdrv {
+        #[arg(long)]
+        source: std::path::PathBuf,
+    },
     /// Explicitly export this checkout's image to an OCI archive (no registry)
     Export {
         #[arg(long)]

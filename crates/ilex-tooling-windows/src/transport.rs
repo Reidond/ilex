@@ -17,6 +17,13 @@ use std::{
 static CANCEL: AtomicBool = AtomicBool::new(false);
 /// Artifact fetches return up to 64 MiB, independently of 4 MiB source chunks.
 pub const MAX_REPLY_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+pub const OEMDRV_BYTES: usize = 32 * 1024 * 1024;
+
+pub struct OemdrvReadback {
+    pub boot: String,
+    pub fingerprint: String,
+    pub envelope: Vec<u8>,
+}
 unsafe extern "system" fn console_event(event: u32) -> i32 {
     if event == 0 || event == 1 {
         CANCEL.store(true, Ordering::SeqCst);
@@ -202,6 +209,54 @@ impl Transport {
             payload.len() <= ilex_tooling_core::CHUNK_BYTES,
             "oversized transfer chunk"
         );
+        self.exchange(&request, payload)
+    }
+
+    pub fn read_oemdrv(&self, raw: &std::path::Path) -> Result<OemdrvReadback> {
+        use crate::received::Directory;
+        use ilex_tooling_core::digest;
+        let parent = Directory::open(raw.parent().context("missing OEMDRV directory")?)?;
+        let raw = parent.read(
+            raw.file_name()
+                .and_then(|name| name.to_str())
+                .context("missing OEMDRV filename")?,
+        )?;
+        ensure!(
+            raw.file.metadata()?.len() == OEMDRV_BYTES as u64,
+            "invalid OEMDRV size"
+        );
+        let mut payload = Vec::with_capacity(OEMDRV_BYTES);
+        raw.file
+            .take(OEMDRV_BYTES as u64 + 1)
+            .read_to_end(&mut payload)?;
+        ensure!(payload.len() == OEMDRV_BYTES, "OEMDRV size changed");
+        let request = serde_json::json!({
+            "schema":1, "payload_bytes":payload.len(),
+            "operation":"read_oemdrv", "sha256":digest(&payload)
+        });
+        let (reply, envelope) = self.exchange(&request, &payload)?;
+        ensure!(
+            envelope.len() == 256 && reply["sha256"] == digest(&envelope),
+            "invalid OEMDRV envelope receipt"
+        );
+        Ok(OemdrvReadback {
+            boot: reply["boot"]
+                .as_str()
+                .context("missing OEMDRV boot ID")?
+                .into(),
+            fingerprint: reply["fingerprint"]
+                .as_str()
+                .context("missing OEMDRV fingerprint")?
+                .into(),
+            envelope,
+        })
+    }
+
+    fn exchange(
+        &self,
+        request: &impl serde::Serialize,
+        payload: &[u8],
+    ) -> Result<(Value, Vec<u8>)> {
         use std::os::windows::process::CommandExt;
         let mut ssh = self.ssh("-T");
         ssh.creation_flags(0x08000000); // CREATE_NO_WINDOW: Ctrl-C belongs to xtask.
@@ -226,7 +281,7 @@ impl Transport {
         {
             let mut input = child.stdin.take().context("SSH stdin")?;
             input.write_all(b"job\n")?;
-            serde_json::to_writer(&mut input, &request)?;
+            serde_json::to_writer(&mut input, request)?;
             input.write_all(b"\n")?;
             input.write_all(payload)?;
         }

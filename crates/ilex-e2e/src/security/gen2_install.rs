@@ -1,7 +1,10 @@
 use super::{BOOT, Media, READY, exec, file_digest, grep_secret, save_frame, wait_screen, write};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use ilex_devkit::{Workspace, core::*};
-use ilex_tooling_windows::gen2::{self, Provider};
+use ilex_tooling_windows::{
+    gen2::{self, Provider},
+    transport::{OEMDRV_BYTES, OemdrvReadback, Transport},
+};
 use serde_json::json;
 use std::{
     fs,
@@ -43,17 +46,7 @@ pub fn transition(
         fs::write(files.join("ks.cfg"), include_bytes!("gen2-install.ks"))?;
         let private_key = recovery_key(&files)?;
         let raw_answers = media.0.join("answers.raw");
-        fs::File::create(&raw_answers)?.set_len(32 << 20)?;
-        ensure!(
-            Command::new("mke2fs.exe")
-                .args(["-q", "-t", "ext4", "-F", "-L", "OEMDRV", "-d"])
-                .arg(&files)
-                .arg(&raw_answers)
-                .output()?
-                .status
-                .success(),
-            "could not build the writable OEMDRV fixture"
-        );
+        create_oemdrv(ws, &files, &raw_answers)?;
         let answers = media.0.join("answers.vhdx");
         gen2::vhdx(&raw_answers, &answers, "raw")?;
         let original = file_digest(&answers)?;
@@ -175,6 +168,28 @@ test ! -e /dev/disk/by-label/OEMDRV
     media.finish(provider, result)
 }
 
+fn create_oemdrv(ws: &Workspace, source: &Path, raw: &Path) -> Result<()> {
+    let xtask = std::env::var_os("ILEX_XTASK").context("launch through cargo xtask test")?;
+    let output = Command::new(xtask)
+        .current_dir(&ws.root)
+        .args(["remote", "oemdrv", "--source"])
+        .arg(source)
+        .output()?;
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    ensure!(
+        output.status.success(),
+        "builder could not create the OEMDRV fixture"
+    );
+    let path = String::from_utf8(output.stdout)?;
+    let artifact = Path::new(path.trim_end());
+    ensure!(artifact.is_absolute(), "invalid OEMDRV artifact path");
+    ensure!(
+        fs::copy(artifact, raw)? == OEMDRV_BYTES as u64,
+        "incorrect OEMDRV artifact size"
+    );
+    Ok(())
+}
+
 fn recovery_key(files: &Path) -> Result<Vec<u8>> {
     let private = Command::new("openssl.exe")
         .args([
@@ -216,26 +231,11 @@ struct OemdrvEvidence {
 }
 
 fn read_evidence(raw: &Path, private_key: &[u8]) -> Result<OemdrvEvidence> {
-    let extract = |entry: &str| -> Result<Vec<u8>> {
-        let output = Command::new("debugfs.exe")
-            .args(["-R", &format!("cat {entry}")])
-            .arg(raw)
-            .output()?;
-        ensure!(
-            output.status.success() && !output.stdout.is_empty(),
-            "missing OEMDRV witness"
-        );
-        Ok(output.stdout)
-    };
-    let guest_boot = String::from_utf8(extract("/public/installer-boot")?)?
-        .trim()
-        .to_owned();
-    let fingerprint = String::from_utf8(extract("/public/recovery-sha256")?)?;
-    let envelope = extract("/recovery.oaep")?;
-    ensure!(
-        envelope.len() == 256,
-        "invalid private recovery envelope size"
-    );
+    let OemdrvReadback {
+        boot: guest_boot,
+        fingerprint,
+        envelope,
+    } = Transport::connect()?.read_oemdrv(raw)?;
     let key_path = raw.with_file_name("recovery.pem");
     let envelope_path = raw.with_file_name("recovery.oaep");
     fs::write(&key_path, private_key)?;
@@ -255,7 +255,7 @@ fn read_evidence(raw: &Path, private_key: &[u8]) -> Result<OemdrvEvidence> {
     ensure!(
         result.status.success()
             && result.stdout.len() == 71
-            && digest(&result.stdout)[7..] == *fingerprint.trim(),
+            && digest(&result.stdout)[7..] == fingerprint,
         "private OEMDRV envelope verification failed"
     );
     Ok(OemdrvEvidence {

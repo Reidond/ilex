@@ -143,6 +143,7 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
     .map(std::path::absolute)
     .transpose()?;
     let artifacts_out = std::env::var_os("ILEX_ARTIFACTS")
+        .filter(|_| !matches!(&command, Command::Oemdrv { .. }))
         .map(std::path::absolute)
         .transpose()?;
     let _outputs = claim_outputs(
@@ -171,7 +172,11 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
     let environment = ENVIRONMENT
         .iter()
         .filter(|&&key| key != "ILEX_KACHE_IMPORT" || matches!(&command, Command::Build(_)))
-        .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_string(), value)))
+        .filter_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| (key.to_string(), value))
+        })
         .collect();
     let job = Job {
         schema: 1,
@@ -278,6 +283,32 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
 
 pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
     match operation {
+        Operation::Oemdrv { source } => {
+            let source = ilex_tooling_windows::received::Directory::open(&source)?;
+            let read = |name| -> Result<String> {
+                let mut text = String::new();
+                source
+                    .read(name)?
+                    .file
+                    .take(65537)
+                    .read_to_string(&mut text)?;
+                ensure!(
+                    !text.is_empty() && text.len() <= 65536,
+                    "invalid OEMDRV source size"
+                );
+                Ok(text)
+            };
+            let artifact = execute(
+                ws,
+                Command::Oemdrv {
+                    kickstart: read("ks.cfg")?,
+                    public_key: read("recovery.pub")?,
+                },
+            )?
+            .context("missing OEMDRV image")?;
+            println!("{}", artifact.display());
+            Ok(())
+        }
         Operation::Snapshot => {
             let root = state(ws)?;
             let _guard = ilex_devkit::ownership::lock(&root.join("client.lock"))?;
@@ -655,6 +686,16 @@ fn wait(
         let disk = delivered_disk(ws, dir, job)?;
         println!("{}", disk.display());
         return Ok(Some(disk));
+    }
+    if matches!(&job.command, Command::Oemdrv { .. }) {
+        let artifact = delivered
+            .get("artifacts/answers.raw")
+            .context("OEMDRV image was not delivered")?;
+        ensure!(
+            artifact.metadata()?.len() == ilex_tooling_windows::transport::OEMDRV_BYTES as u64,
+            "incorrect OEMDRV image size"
+        );
+        return Ok(Some(artifact.clone()));
     }
     if paths && let Some(basename) = primary_name {
         received::relative(&basename)?;
