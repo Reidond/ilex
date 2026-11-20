@@ -4,6 +4,7 @@ Credentials stay on private provisioning media/in memory, never in the input
 kickstart, argv, diagnostics, screenshots or public artifacts. The local
 console driver uses a guest-only virtual keyboard; it prints stage names only.
 """
+import contextlib
 import ctypes
 import fcntl
 import json
@@ -516,12 +517,11 @@ def type_private(keyboard, value):
             time.sleep(0.03)
 
 
-def vt_input(length):
-    # Installed-guest fixture. The host sends bytes through its private
-    # serial-input socket after the helper puts the UART in no-echo raw mode.
-    # The input still reaches ilex-enroll through the real kernel VT keyboard.
-    assert length in (48, 71) and pathlib.Path('/sys/class/tty/tty0/active').read_text().strip() == 'tty8'
-    keyboard = open_keyboard()
+@contextlib.contextmanager
+def private_uart(length):
+    # The host writes to the UART only after raw mode disables echo. The
+    # output-only transcript must never receive credential bytes.
+    assert length in (48, 71)
     data = bytearray()
     try:
         with open('/dev/ttyS0', 'rb', buffering=0) as serial:
@@ -537,13 +537,34 @@ def vt_input(length):
                     data.extend(chunk)
                 assert data[-1] == ord('\n') and all(char in KEY_CODES and char != ord('\n')
                                                      for char in memoryview(data)[:-1])
-                type_private(keyboard, memoryview(data)[:-1])
             finally:
                 termios.tcsetattr(serial, termios.TCSANOW, settings)
+        yield memoryview(data)[:-1]
     finally:
         data[:] = bytes(len(data))
+
+
+def vt_input(length):
+    # Input reaches the installed program through the real kernel VT.
+    assert pathlib.Path('/sys/class/tty/tty0/active').read_text().strip() == 'tty8'
+    keyboard = open_keyboard()
+    try:
+        with private_uart(length) as data:
+            type_private(keyboard, data)
+    finally:
         fcntl.ioctl(keyboard, 0x5502)
         os.close(keyboard)
+
+
+def verify_fallback_key(length, uuid, slot):
+    assert re.fullmatch(r'[a-fA-F0-9-]{36}', uuid) and 0 <= slot < 32
+    with private_uart(length) as data:
+        subprocess.run([
+            '/usr/sbin/cryptsetup', 'open', '--test-passphrase', '--type', 'luks2',
+            '--disable-external-tokens', '--token-type=none', '--key-file', '-',
+            '--key-slot', str(slot), '/dev/disk/by-uuid/' + uuid,
+        ], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+           check=True, timeout=45)
 
 
 def completion_pids():

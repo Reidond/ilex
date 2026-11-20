@@ -235,6 +235,14 @@ verification/repair. `security::encrypted_install` requires T6 qualification
 for its exact 6 GiB/two-vCPU profile and tests a disposable signed local
 candidate. It must not be reported as a passing released-image install.
 
+The installed `ilex-security-verify.service` runs `ilexctl security verify`
+to record pending, verified or error from this boot's root unlock evidence.
+After passphrase or recovery-key fallback, `sudo ilexctl security repair`
+requests a disk credential on local tty8. It defers without a prompt when
+Secure Boot or TPM support is unavailable. A replacement is pending until
+a subsequent boot proves automatic unlock. The encrypted QEMU tier also
+interrupts repair between actual LUKS keyslot and token writes.
+
 PR 17's consumer checks and backend requirements are documented in
 [`docs/security-probes.md`](docs/security-probes.md). Guest probes also require
 kernel lockdown, the selected manifest digest and all three ilex composition

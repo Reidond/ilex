@@ -11,6 +11,7 @@ enable drupe.service
 # Password-encrypted daily homes coexist with the local maintenance account.
 enable systemd-homed.service
 enable ilex-enrollment-report.service
+enable ilex-security-verify.service
 
 # Flathub is the sole source for the image's preinstalled apps.
 disable flatpak-add-fedora-repos.service

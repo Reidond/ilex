@@ -1,8 +1,7 @@
 //! Local console adapter. The library is unaware of Anaconda, terminals and
 //! acknowledgement. Anaconda's %post only starts this adapter on a reserved VT.
-use crate::pending::PendingRecovery;
+use super::*;
 use anyhow::{Context, Result, ensure};
-use ilex_enroll::*;
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
@@ -32,7 +31,8 @@ impl Console {
             .write(true)
             .custom_flags(libc::O_NOCTTY | libc::O_NOFOLLOW)
             .open(path)?;
-        file.lock()?;
+        file.try_lock()
+            .context("local setup console is already in use")?;
         let mut mode: libc::c_int = -1;
         // SAFETY: KDGETMODE writes one int. Refuse a console owned by a GUI;
         // Fedora Anaconda itself runs GNOME Kiosk on VT6.
@@ -122,105 +122,41 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
         }
     };
     let device = Device::open(&layout.device)?;
-    let state_path = root.join("var/lib/ilex/security/enrollment.json");
-    let pending_path = state_path.with_file_name(".pending-recovery.json");
-    let mut state: Value = if state_path.exists() {
-        serde_json::from_slice(&fs::read(&state_path)?)?
-    } else {
-        json!({"schema":1, "uuid":layout.uuid, "state":"pending", "recovery":null, "tpm":null})
-    };
-    let legacy_unbound = state.get("uuid") == Some(&Value::Null)
-        && state["state"] == "unavailable"
-        && state["reason"] == "unsupported-storage-layout"
-        && state.get("recovery") == Some(&Value::Null)
-        && state.get("tpm") == Some(&Value::Null);
-    ensure!(
-        state["schema"] == 1 && (state["uuid"] == layout.uuid || legacy_unbound),
-        "enrollment state UUID/schema mismatch"
-    );
-    let current = status(&device)?;
-    let recovery_exists = current["tokens"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|token| token["type"] == "systemd-recovery");
-    let acknowledged = acknowledged_recovery(&state);
-    if acknowledged {
-        recorded_recovery(&state, &current)?;
-        if refused && !reissue {
-            mark_refusal(root, &state_path, &mut state)?;
-            eprintln!(
-                "Installation can finish. TPM enrollment is unavailable for this storage layout. Use the saved recovery key or disk passphrase at boot."
-            );
-            return Ok(());
-        }
-    }
-    let capability = (!refused).then(probe);
-    let target_tools = if refused {
-        Default::default()
-    } else {
-        tool_versions(root).unwrap_or_default()
-    };
-    let reason = capability.as_ref().map(|capability| {
-        let unlock_stack: Value = fs::read(root.join("usr/lib/ilex/security/unlock.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or(Value::Null);
-        if unlock_stack["schema"] != 1 || unlock_stack["method"] != "cryptsetup-token-only-v1" {
-            "unlock-stack-missing"
-        } else if target_tools != capability.tools {
-            "tool-mismatch"
-        } else {
-            capability.reason
-        }
-    });
-    let tpm_eligible = capability.as_ref().is_some_and(|p| p.verdict == "eligible")
-        && reason == Some("pcr7-sha256");
-    let existing_tpm = current["tokens"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|token| token["type"] == "systemd-tpm2")
-        .collect::<Vec<_>>();
-    if tpm_eligible {
-        ensure!(
-            existing_tpm.is_empty()
-                || existing_tpm.len() == 1 && existing_tpm[0]["pcr7_sha256"] == true,
-            "preexisting TPM enrollment requires authenticated repair"
-        );
-    }
-    let needs_tpm_slot = tpm_eligible && existing_tpm.is_empty();
-    let wants_recovery = !acknowledged || reissue;
-    let mut pending: Option<PendingRecovery> = if wants_recovery && pending_path.try_exists()? {
-        Some(
-            serde_json::from_slice(&fs::read(&pending_path)?)
-                .context("invalid pending recovery receipt")?,
-        )
-    } else {
-        None
-    };
-    // The acknowledgement is committed before deleting the receipt. A crash
-    // between those writes must not turn a later reissue into the same key.
-    if acknowledged
-        && pending.as_ref().is_some_and(|receipt| {
-            state["recovery"]["token"] == receipt.enrollment.token
-                && state["recovery"]["slot"] == receipt.enrollment.slot
-        })
+    let mut state = SecurityState::open(root, &device)?;
+    if refused
+        && !reissue
+        && state.acknowledged()
+        && !state.recovery_pending()?
+        && !state.tpm_pending()?
     {
-        pending = None;
+        recorded_recovery(&state.value, &device.header()?)?;
+        state.value["state"] = json!("unavailable");
+        state.value["reason"] = json!("unsupported-storage-layout");
+        state.save()?;
+        update_setup(
+            root,
+            "unavailable",
+            "unsupported-storage-layout",
+            "passphrase-only",
+        )?;
+        eprintln!(
+            "Installation can finish. TPM enrollment is unavailable for this storage layout. Use the saved recovery key or disk passphrase at boot."
+        );
+        return Ok(());
     }
-    let legacy_confirmation =
-        !acknowledged && !reissue && pending.is_none() && state["recovery"].is_object();
-    let needs_recovery_slot = wants_recovery
-        && !legacy_confirmation
-        && pending.as_ref().is_none_or(|receipt| {
-            !current["slots"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|slot| slot == &receipt.enrollment.slot.to_string())
-        });
-    device.ensure_free_slots(usize::from(needs_recovery_slot) + usize::from(needs_tpm_slot))?;
+    let (capability, tools, reason) = if refused {
+        (None, Default::default(), "unsupported-storage-layout")
+    } else {
+        let (capability, tools, reason) = eligibility(root);
+        (Some(capability), tools, reason)
+    };
+    let eligible = reason == "pcr7-sha256";
+    let wants_recovery = !state.acknowledged() || reissue;
+    let legacy_confirmation = !state.acknowledged()
+        && !reissue
+        && !state.recovery_pending()?
+        && state.value["recovery"].is_object();
+    device.preflight(&state, wants_recovery && !legacy_confirmation, eligible)?;
     let mut console = Console::open(tty)?;
     console.clear()?;
     console.say("ilex encrypted installation — local completion\r\n\r\nThe administrator account is for maintenance and recovery.\r\nThe disk passphrase remains a recovery option.\r\n\r\n")?;
@@ -228,85 +164,39 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
         console.say("TPM enrollment is unavailable for this storage layout.\r\nInstallation will finish with local recovery.\r\n\r\n")?;
     }
     let passphrase = console.read("Re-enter the disk passphrase (input is hidden): ")?;
-    device.authenticate(passphrase.fd()?)?;
-    if legacy_unbound {
-        ensure!(
-            status(&device)? == current,
-            "LUKS keyslots or tokens changed during discovery retry"
-        );
-        state["uuid"] = json!(layout.uuid);
-        state["state"] = json!("pending");
-        write_state(&state_path, &state)?;
-    }
+    let mut session = Reconciled::open(&device, &passphrase, state, eligible)?;
     if !refused {
         configure_crypttab(root, &layout.uuid)?;
     }
     if wants_recovery {
-        let enrolled = if legacy_confirmation {
-            let enrolled = recorded_recovery(&state, &current)?;
+        let entry = if legacy_confirmation {
+            let entry = recorded_recovery(&session.state.value, &device.header()?)?;
             let confirmation =
                 console.read("Enter the previously displayed recovery key (input is hidden): ")?;
-            device.authenticate_slot(confirmation.fd()?, enrolled.slot)
+            device.authenticate_slot(confirmation.fd()?, entry.slot)
                 .context("saved key did not unlock its slot; explicit reissue can create a new key when space is available")?;
-            enrolled
+            entry
         } else {
-            if pending.is_none() {
-                ensure!(
-                    !recovery_exists || acknowledged || reissue || refused,
-                    "recovery slot has no completion record; use explicit reissue"
-                );
-                let receipt =
-                    PendingRecovery::new(&layout.uuid, device.plan_recovery()?, &passphrase)?;
-                write_state(&pending_path, &serde_json::to_value(&receipt)?)?;
-                if !acknowledged {
-                    state["state"] = json!("recovery-incomplete");
-                    write_state(&state_path, &state)?;
-                }
-                pending = Some(receipt);
-            }
-            let receipt = pending.context("pending recovery receipt missing")?;
-            let key = receipt.key(&layout.uuid, &passphrase)?;
-            device.complete_recovery_slot(&receipt.enrollment, &passphrase, &key)?;
-            if !acknowledged {
-                state["recovery"] = recovery_record(&receipt.enrollment, false);
-                write_state(&state_path, &state)?;
-            }
-            display_recovery(&mut console, &device, &key, receipt.enrollment.slot)?;
-            receipt.enrollment
+            let (entry, key) = session.recovery(reissue)?;
+            display_recovery(&mut console, &device, key, entry.slot)?;
+            entry
         };
-        state["recovery"] = recovery_record(&enrolled, true);
-        write_state(&state_path, &state)?;
-        if pending_path.try_exists()? {
-            fs::remove_file(&pending_path)?;
-            File::open(pending_path.parent().unwrap())?.sync_all()?;
-        }
+        session.acknowledge(entry)?;
     }
-    if refused {
-        mark_refusal(root, &state_path, &mut state)?;
-        return finish_console(
-            &mut console,
-            "TPM enrollment unavailable for this storage layout. Use the recovery key or disk passphrase.\r\n",
-        );
-    }
-    let capability = capability.context("missing TPM capability")?;
-    let reason = reason.context("missing TPM capability reason")?;
-    state["probe"] = serde_json::to_value(&capability)?;
-    state["target_tools"] = serde_json::to_value(&target_tools)?;
-    if tpm_eligible {
-        let enrolled = tpm(&device, passphrase.fd()?, &target_tools)?;
-        state["tpm"] = serde_json::to_value(enrolled)?;
-        state["state"] = json!("pending"); // PR19 verifies the next boot's evidence.
+    if eligible {
+        session.enroll_tpm(false)?;
     } else {
-        state["state"] = json!("unavailable");
+        session.state.value["state"] = json!("unavailable");
     }
-    state["reason"] = json!(reason);
-    write_state(&state_path, &state)?;
-    let enrolled = state["state"] == "pending";
+    session.state.value["probe"] = serde_json::to_value(&capability)?;
+    session.state.value["target_tools"] = serde_json::to_value(tools)?;
+    session.state.value["reason"] = json!(reason);
+    session.state.save()?;
     update_setup(
         root,
-        capability.verdict,
+        capability.as_ref().map_or("unavailable", |p| p.verdict),
         reason,
-        if enrolled {
+        if eligible {
             "enrolled-unverified"
         } else {
             "passphrase-only"
@@ -314,38 +204,12 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
     )?;
     finish_console(
         &mut console,
-        if enrolled {
+        if eligible {
             "TPM enrolled to PCR 7 (SHA-256). Unlock verification is pending.\r\n"
         } else {
-            "TPM enrollment unavailable. This disk uses its passphrase.\r\n"
+            "TPM enrollment unavailable. Use the recovery key or disk passphrase.\r\n"
         },
     )
-}
-
-fn recovery_record(enrollment: &Enrollment, acknowledged: bool) -> Value {
-    json!({
-        "token":enrollment.token, "slot":enrollment.slot,
-        "acknowledged":acknowledged, "displayed_and_acknowledged":acknowledged
-    })
-}
-
-fn recorded_recovery(state: &Value, header: &Value) -> Result<Enrollment> {
-    let enrollment: Enrollment = serde_json::from_value(state["recovery"].clone())?;
-    let id = enrollment.token.to_string();
-    let slot = enrollment.slot.to_string();
-    ensure!(
-        header["tokens"].as_array().unwrap().iter().any(|token| {
-            token["id"] == id
-                && token["type"] == "systemd-recovery"
-                && token["keyslots"] == json!([&slot])
-        }) && header["slots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry == &slot),
-        "recorded recovery slot or token is missing"
-    );
-    Ok(enrollment)
 }
 
 fn display_recovery(console: &mut Console, device: &Device, key: &Secret, slot: u32) -> Result<()> {
@@ -363,29 +227,55 @@ fn display_recovery(console: &mut Console, device: &Device, key: &Secret, slot: 
     device.authenticate_slot(confirmation.fd()?, slot)
 }
 
-fn mark_refusal(root: &Path, state_path: &Path, state: &mut Value) -> Result<()> {
+pub fn repair() -> Result<Value> {
+    harden()?;
     ensure!(
-        acknowledged_recovery(state),
-        "recovery display is still incomplete"
+        unsafe { libc::geteuid() } == 0,
+        "security repair requires root"
     );
-    state["state"] = json!("unavailable");
-    state["reason"] = json!("unsupported-storage-layout");
-    write_state(state_path, state)?;
-    update_setup(
-        root,
-        "unavailable",
-        "unsupported-storage-layout",
-        "passphrase-only",
+    let root = Path::new("/");
+    ensure!(
+        Path::new("/run/ostree-booted").exists() && !Path::new("/etc/initrd-release").exists(),
+        "security repair requires the installed system"
+    );
+    let Some(layout) = discover(root).ok().flatten() else {
+        return Ok(
+            json!({"schema":1, "state":"unavailable", "reason":"unsupported-storage-layout"}),
+        );
+    };
+    let device = Device::open(&layout.device)?;
+    let state = SecurityState::open(root, &device)?;
+    let (capability, tools, reason) = eligibility(root);
+    if reason != "pcr7-sha256" {
+        return Ok(json!({"schema":1, "state":"unavailable", "reason":reason}));
+    }
+    ensure!(
+        state.acknowledged(),
+        "confirm the saved recovery key with local completion first"
+    );
+    let boot = super::transaction::current_boot()?;
+    let evidence = super::verify::current_observation(&device, &boot)?;
+    ensure!(
+        evidence["method"] == "fallback"
+            || (evidence["method"] == "tpm2" && state.tpm_pending()?),
+        "repair requires this boot's root fallback evidence or an interrupted TPM transaction"
+    );
+    let tty = Path::new("/dev/tty8");
+    eprintln!("TPM repair requires a disk credential on the local console (Ctrl+Alt+F8).");
+    let mut console = Console::open(tty)?;
+    console.clear()?;
+    let unlock = console.read(
+        "Enter the disk passphrase or saved recovery key for TPM repair (input is hidden): ",
+    )?;
+    let mut session = Reconciled::open(&device, &unlock, state, true)?;
+    let enrolled = session.enroll_tpm(true)?;
+    session.state.value["probe"] = serde_json::to_value(capability)?;
+    session.state.value["target_tools"] = serde_json::to_value(tools)?;
+    session.state.save()?;
+    Ok(
+        json!({"schema":1, "uuid":device.uuid, "state":session.state.value["state"], "tpm":enrolled,
+        "reason":"check-next-cold-boot"}),
     )
-}
-
-fn acknowledged_recovery(state: &Value) -> bool {
-    let recovery = &state["recovery"];
-    // Earlier schema-1 writers set acknowledged only after confirmation.
-    recovery["acknowledged"] == true
-        && recovery
-            .get("displayed_and_acknowledged")
-            .is_none_or(|value| value == true)
 }
 
 fn finish_console(console: &mut Console, message: &str) -> Result<()> {
@@ -611,6 +501,10 @@ pub fn self_check() -> Result<()> {
                     "--batch-mode",
                     "--type",
                     "luks2",
+                    "--luks2-keyslots-size",
+                    "768k",
+                    "--key-size",
+                    "512",
                     "--pbkdf",
                     "pbkdf2",
                     "--pbkdf-force-iterations",
@@ -644,15 +538,35 @@ pub fn self_check() -> Result<()> {
                 .arg("luksUUID")
                 .arg(&loopdev)
                 .output()?;
-            let path = Path::new("/dev/disk/by-uuid").join(String::from_utf8(uuid.stdout)?.trim());
+            let uuid = String::from_utf8(uuid.stdout)?;
+            let path = Path::new("/dev/disk/by-uuid").join(uuid.trim());
+            recovery_guard_self_check(&dir, &path, &pass, uuid.trim())?;
             let device = Device::open(&path)?;
-            let mut output = out_fd()?;
-            let enrolled = recovery(&device, pass.fd()?, output.try_clone()?.into())?;
-            output.seek(SeekFrom::Start(0))?;
-            let recovery_key = Secret::read(output.into())?;
-            device.authenticate(recovery_key.fd()?)?;
+            capacity_self_check(&device)?;
+            let mut keys = Vec::new();
+            for _ in 0..2 {
+                if !keys.is_empty() {
+                    let header = device.header()?;
+                    super::enroll::ensure_capacity(&header, 1, 1)?;
+                    ensure!(
+                        super::enroll::ensure_capacity(&header, 2, 2).is_err(),
+                        "small keyslot area appeared to fit two more keys"
+                    );
+                }
+                let mut output = out_fd()?;
+                let enrolled = recovery(&device, pass.fd()?, output.try_clone()?.into())?;
+                output.seek(SeekFrom::Start(0))?;
+                keys.push((enrolled, Secret::read(output.into())?));
+            }
+            ensure!(
+                keys[0].0.slot != keys[1].0.slot && keys[0].0.token != keys[1].0.token,
+                "second data-volume recovery reused the first enrollment"
+            );
+            for (enrolled, key) in &keys {
+                ensure!(enrolled.slot != 0, "recovery overwrote passphrase");
+                device.authenticate_slot(key.fd()?, enrolled.slot)?;
+            }
             device.authenticate(pass.fd()?)?;
-            ensure!(enrolled.slot != 0, "recovery overwrote passphrase");
             let bad = secret_fd(b"ilex-deliberately-incorrect-passphrase")?;
             ensure!(
                 device.authenticate(bad).is_err(),
@@ -660,7 +574,7 @@ pub fn self_check() -> Result<()> {
             );
             token_auth_self_check(&device, &pass)?;
             println!(
-                "ilex-enroll self-check: LUKS2, private FD handoff, recovery and retained passphrase passed"
+                "ilex-enroll self-check: two data-volume recovery keys, private FD handoff and retained passphrase passed"
             );
             Ok(())
         })();
@@ -674,6 +588,84 @@ pub fn self_check() -> Result<()> {
     })();
     fs::remove_dir_all(&dir)?;
     result
+}
+
+fn recovery_guard_self_check(dir: &Path, device: &Path, pass: &Secret, uuid: &str) -> Result<()> {
+    let mounts = dir.join("mnt");
+    let state_dir = mounts.join("sysimage/var/lib/ilex/security");
+    fs::create_dir_all(&state_dir)?;
+    let state = state_dir.join("enrollment.json");
+    let key = pass.fd()?;
+    let before = header(device)?;
+    let refuse = |reason: &str| -> Result<()> {
+        let mut command = Command::new("unshare");
+        command
+            .args([
+                "--mount",
+                "--propagation",
+                "private",
+                "/bin/sh",
+                "-ec",
+                r#"mount --bind "$1" /mnt
+exec /usr/bin/ilex-enroll recovery --device "$2" --unlock-fd 3 --key-out-fd 4 4>/dev/null"#,
+                "ilex-check",
+            ])
+            .arg(&mounts)
+            .arg(device);
+        inherit(&mut command, &key);
+        let output = command.output()?;
+        ensure!(
+            !output.status.success() && String::from_utf8_lossy(&output.stderr).contains(reason),
+            "recovery guard did not refuse the installer fixture for {reason}"
+        );
+        ensure!(
+            header(device)? == before,
+            "refused recovery allocation changed the header"
+        );
+        Ok(())
+    };
+    write_state(
+        &state,
+        &json!({"schema":1, "uuid":uuid, "state":"pending", "tpm":null}),
+    )?;
+    refuse("reconcile pending root enrollment")?;
+    fs::write(&state, b"{")?;
+    refuse("cannot read root enrollment state under /mnt/sysimage")?;
+    fs::remove_file(state)?;
+    fs::write(state_dir.join(".pending-recovery.json"), b"{}")?;
+    refuse("cannot identify LUKS2 root for enrollment receipt under /mnt/sysimage")
+}
+
+fn capacity_self_check(device: &Device) -> Result<()> {
+    use super::enroll::ensure_capacity;
+    let header = device.header()?;
+    ensure_capacity(&header, 2, 2)?;
+    let token = serde_json::to_vec(&json!({"type":"ilex-self-check", "keyslots":[]}))?;
+    for id in 1..32 {
+        run_with_input(
+            Command::new("/usr/sbin/cryptsetup")
+                .args([
+                    "token",
+                    "import",
+                    "--json-file",
+                    "-",
+                    "--token-id",
+                    &id.to_string(),
+                ])
+                .arg(device.path()),
+            Stdio::from(secret_fd(&token)?),
+        )?;
+    }
+    let header = device.header()?;
+    ensure_capacity(&header, 2, 1)?;
+    ensure!(
+        ensure_capacity(&header, 2, 2).is_err(),
+        "one free token ID appeared to fit two tokens"
+    );
+    for id in 1..32 {
+        device.remove_token(&id.to_string())?;
+    }
+    Ok(())
 }
 
 fn token_auth_self_check(device: &Device, pass: &Secret) -> Result<()> {

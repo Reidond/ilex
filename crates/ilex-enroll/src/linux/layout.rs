@@ -13,6 +13,19 @@ pub struct Layout {
     pub device: std::path::PathBuf,
 }
 
+pub fn installer_root() -> Result<&'static Path> {
+    let sysroot = Path::new("/mnt/sysroot");
+    match fs::metadata(sysroot.join("etc")) {
+        Ok(metadata) if metadata.is_dir() => return Ok(sysroot),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).context("cannot identify installer root at /mnt/sysroot/etc");
+        }
+    }
+    Ok(Path::new("/mnt/sysimage"))
+}
+
 fn mounted_devices(path: &Path) -> Result<(String, Vec<PathBuf>)> {
     // Anaconda stacks bind mounts at the deployment root. findmnt --target
     // on util-linux 2.42 returns every matching mount, including hidden ones.

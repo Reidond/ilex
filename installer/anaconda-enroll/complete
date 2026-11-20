@@ -4,11 +4,7 @@
 # Failure preserves every
 # LUKS slot and the local maintenance account, and prevents an automatic reboot.
 set -eu
-if [ -d /mnt/sysroot/etc ]; then
-    target=/mnt/sysroot
-else
-    target=/mnt/sysimage
-fi
+target=$(/usr/bin/ilex-enroll installer-root)
 # A refusal is handled by completion on the local console. Only a verified
 # plaintext layout may skip the console entirely.
 if layout=$(/usr/bin/ilex-enroll layout --root "$target" 2>/dev/null) && [ "$layout" = null ]; then

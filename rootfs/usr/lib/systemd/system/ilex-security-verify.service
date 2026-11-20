@@ -1,0 +1,14 @@
+[Unit]
+Description=Verify how the encrypted root unlocked
+ConditionPathExists=/run/ostree-booted
+ConditionPathExists=/var/lib/ilex/security/enrollment.json
+RequiresMountsFor=/var/lib/ilex/security
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ilexctl security verify
+TimeoutStartSec=30s
+
+[Install]
+WantedBy=multi-user.target

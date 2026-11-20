@@ -276,6 +276,7 @@ fn checkpoint() -> Result<()> {
             &tokens,
             &expected,
             "pcr-mismatch",
+            None,
         )?;
         stage = "recovery_key_boot";
         fallback(
@@ -290,6 +291,7 @@ fn checkpoint() -> Result<()> {
             &tokens,
             &expected,
             "recovery",
+            Some(&passphrase),
         )?;
         if interrupted {
             stage = "interrupted_completion_repair";
@@ -314,6 +316,7 @@ fn checkpoint() -> Result<()> {
                 &repaired_tokens,
                 &expected,
                 "reissued-recovery",
+                None,
             )?;
             interruption_proven = true;
         } else {
@@ -330,6 +333,7 @@ fn checkpoint() -> Result<()> {
                 &tokens,
                 &expected,
                 "no-tpm",
+                None,
             )?;
         }
         fixture.provider.destroy_owned(&mut fixture.vm)?;
@@ -1174,12 +1178,23 @@ fn guest_json(vm: &qemu::Vm, artifacts: &Path, file: &str, script: &str) -> Resu
 }
 
 fn type_at_vt(vm: &qemu::Vm, console: &mut PrivateConsole, credential: &Secret) -> Result<()> {
-    // Only the helper and the expected byte count cross SSH. The credential
-    // travels on the output-only-logged UART, then through the guest keyboard.
-    let script = format!(
-        "__name__ = 'ilex_fixture_vt_input'\n{GUEST}\nharden()\nvt_input({})",
-        credential.bytes().len()
-    );
+    send_private_input(
+        vm,
+        console,
+        credential,
+        &format!("vt_input({})", credential.bytes().len()),
+    )
+}
+
+fn send_private_input(
+    vm: &qemu::Vm,
+    console: &mut PrivateConsole,
+    credential: &Secret,
+    action: &str,
+) -> Result<()> {
+    // Only the helper and public arguments cross SSH. The credential arrives
+    // on the output-only-logged UART, with no journal or shell interpolation.
+    let script = format!("__name__ = 'ilex_fixture_vt_input'\n{GUEST}\nharden()\n{action}");
     let command = format!(
         "set -eu; systemctl stop serial-getty@ttyS0.service; \
         install -d -m 0700 /run/ilex-encrypted-test; \
@@ -1223,6 +1238,7 @@ fn fallback(
     original_tokens: &Value,
     expected: &Value,
     mode: &str,
+    repair_passphrase: Option<&Secret>,
 ) -> Result<()> {
     let disk = work.join(format!("{mode}.qcow2"));
     cmd::run(
@@ -1317,6 +1333,23 @@ fn fallback(
         let _ = fixture.logs(artifacts, mode);
     }
     result?;
+    if let Some(passphrase) = repair_passphrase
+        && mode == "recovery"
+        && family == "a"
+        && !local_diagnostic
+        && original_tokens["tokens"]
+            .as_array()
+            .is_some_and(|tokens| tokens.iter().any(|t| t["pcr7_sha256"] == true))
+    {
+        repair_fallback(
+            &mut fixture,
+            artifacts,
+            credential,
+            passphrase,
+            credentials,
+            original_tokens,
+        )?;
+    }
     fixture.logs(artifacts, mode)?;
     poweroff(&mut fixture, artifacts, mode)?;
     fixture.provider.destroy_owned(&mut fixture.vm)
@@ -1422,10 +1455,10 @@ fn check_fallback(
             "cat /run/ilex/root-unlock.json",
         )?;
         ensure!(
-            evidence["method"] == "unknown"
+            evidence["method"] == "fallback"
                 && evidence["uuid"] == original_tokens["uuid"]
                 && evidence["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim(),
-            "fallback was incorrectly labeled as TPM unlock"
+            "fallback lacks current root password-agent evidence"
         );
         let layout = guest_json(
             vm,
@@ -1488,6 +1521,18 @@ fn check_fallback(
         tokens_before == *original_tokens,
         "fallback boot changed slots/tokens or resealed automatically"
     );
+    if matches!(mode, "no-tpm" | "pcr-mismatch") {
+        let deferred = guest_json(
+            vm,
+            artifacts,
+            &format!("{mode}-repair-deferred.json"),
+            "timeout 30 ilexctl security repair",
+        )?;
+        ensure!(
+            deferred["state"] == "unavailable" && deferred["reason"] == probe["reason"],
+            "ineligible repair did not defer before asking for a credential"
+        );
+    }
     if mode == "no-tpm" {
         vm.ssh_ok("chvt 8; systemd-run --quiet --remain-after-exit --unit=ilex-enroll-no-tpm-completion /usr/bin/ilex-enroll complete --root / --tty /dev/tty8").context("start no-TPM completion")?;
         vm.ssh_ok("timeout 60 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'").context("wait for no-TPM passphrase prompt")?;
@@ -1588,6 +1633,305 @@ fn save_fallback_output(vm: &qemu::Vm, artifacts: &Path, file: &str, command: &s
     }
 }
 
+fn repair_fallback(
+    fixture: &mut Fixture,
+    artifacts: &Path,
+    recovery: &Secret,
+    passphrase: &Secret,
+    credentials: &Value,
+    original: &Value,
+) -> Result<()> {
+    let vm = fixture.vm.running_mut()?;
+    let boot = vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?;
+    let uuid = original["uuid"].as_str().context("root UUID missing")?;
+    let status = format!("ilex-enroll status --json --device /dev/disk/by-uuid/{uuid}");
+    let verify = guest_json(
+        vm,
+        artifacts,
+        "repair-before-verification.json",
+        "ilexctl security verify",
+    )?;
+    ensure!(
+        verify["state"] == "error" && verify["reason"] == "fallback-unlock-observed",
+        "wrong TPM fallback did not enter verification error"
+    );
+    let before = guest_json(
+        vm,
+        artifacts,
+        "repair-before-state.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    let header_digest = format!(
+        r#"set -eu
+umask 077
+scratch=$(mktemp -d /run/ilex-header-digest.XXXXXXXX)
+trap 'rm -f "$scratch/header"; rmdir "$scratch"' EXIT
+cryptsetup luksHeaderBackup /dev/disk/by-uuid/{uuid} --header-backup-file "$scratch/header"
+sha256sum < "$scratch/header"
+"#
+    );
+    let original_digest = vm.ssh_ok(&header_digest)?;
+    let mut bad_input = Secret::empty()?;
+    let wrong = if passphrase.bytes() == [b'x'; 48] {
+        b'z'
+    } else {
+        b'x'
+    };
+    for _ in 0..48 {
+        bad_input.push(wrong)?;
+    }
+    vm.ssh_ok(r#"set -eu
+chvt 8
+systemd-run --quiet --remain-after-exit --unit=ilex-fixture-wrong-repair -p SuccessExitStatus=1 /usr/bin/ilexctl security repair
+timeout 90 sh -c 'until grep -aFq "for TPM repair (input is hidden)" /dev/vcs8; do sleep 1; done'
+"#)?;
+    let private = fixture
+        .console
+        .as_mut()
+        .context("private console unavailable")?;
+    type_at_vt(vm, private, &bad_input)?;
+    vm.ssh_ok(r#"set -eu
+timeout 90 sh -c 'until test "$(systemctl show -p SubState --value ilex-fixture-wrong-repair)" = exited; do sleep 1; done'
+test "$(systemctl show -p ExecMainStatus --value ilex-fixture-wrong-repair)" = 1
+systemctl stop ilex-fixture-wrong-repair
+test ! -e /var/lib/ilex/security/.pending-tpm.json
+"#)?;
+    ensure!(
+        vm.ssh_ok(&header_digest)? == original_digest,
+        "wrong repair credential changed the LUKS2 header"
+    );
+    let rejected = guest_json(
+        vm,
+        artifacts,
+        "wrong-repair-state.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    ensure!(
+        rejected == before,
+        "wrong repair credential changed the enrollment state"
+    );
+    // Run the shipped binary in an isolated mount namespace. The fixture
+    // wrapper delegates every operation to the real cryptsetup, then cuts
+    // the caller at one successful write. The guest root and host are intact.
+    vm.ssh_ok(
+        r#"set -eu
+dir=/run/ilex-encrypted-test
+install -d -m 0700 "$dir"
+touch "$dir/cryptsetup-original"
+cat > "$dir/cryptsetup-cut" <<'EOF'
+#!/bin/sh
+set -eu
+dir=/run/ilex-encrypted-test
+"$dir/cryptsetup-original" "$@"
+cut=$(cat "$dir/repair-cut")
+if [ "$cut" = "$1:${2-}" ]; then
+    printf '%s\n' "$cut" > "$dir/repair-cut-hit"
+    kill -KILL "$PPID"
+fi
+EOF
+chmod 0700 "$dir/cryptsetup-cut"
+chvt 8
+"#,
+    )?;
+    let ctl = Vmctl::from_info(vm.info.clone());
+    for (cut, evidence) in [
+        ("token:remove", "retirement"),
+        ("luksAddKey:--batch-mode", "allocation"),
+    ] {
+        vm.ssh_ok(&format!(
+            r#"set -eu
+dir=/run/ilex-encrypted-test
+printf '%s\n' '{cut}' > "$dir/repair-cut"
+rm -f "$dir/repair-cut-hit"
+systemd-run --quiet --remain-after-exit --unit=ilex-fixture-repair -p SuccessExitStatus=SIGKILL \
+unshare --mount --propagation private sh -ec '
+    dir=/run/ilex-encrypted-test
+    mount --bind /usr/sbin/cryptsetup "$dir/cryptsetup-original"
+    exec /usr/bin/ilexctl security repair'
+timeout 90 sh -c 'until grep -aFq "for TPM repair (input is hidden)" /dev/vcs8; do sleep 1; done'
+pid=$(systemctl show -p MainPID --value ilex-fixture-repair)
+test "$pid" -gt 1
+nsenter --mount="/proc/$pid/ns/mnt" mount --bind "$dir/cryptsetup-cut" /usr/sbin/cryptsetup
+"#
+        ))?;
+        if evidence == "retirement" {
+            ctl.save_screenshot(&artifacts.join("authenticated-tpm-repair-prompt.png"))?;
+        }
+        type_at_vt(vm, private, recovery)?;
+        vm.ssh_ok(&format!(r#"set -eu
+timeout 180 sh -c 'until test "$(systemctl show -p SubState --value ilex-fixture-repair)" = exited; do sleep 1; done'
+test "$(cat /run/ilex-encrypted-test/repair-cut-hit)" = '{cut}'
+test "$(systemctl show -p ExecMainStatus --value ilex-fixture-repair)" = 9
+systemctl stop ilex-fixture-repair
+stty echo -F /dev/tty8
+printf '\033[2J\033[3J\033[H' > /dev/tty8
+test -f /var/lib/ilex/security/.pending-tpm.json
+"#))?;
+        let header = guest_json(
+            vm,
+            artifacts,
+            &format!("repair-interrupted-{evidence}.json"),
+            &status,
+        )?;
+        ensure!(
+            header["slots"] == original["slots"]
+                && header["tokens"]
+                    .as_array()
+                    .is_some_and(|tokens| tokens.iter().all(|t| t["type"] != "systemd-tpm2")),
+            "interrupted repair did not leave the planned orphan and retained fallback slots"
+        );
+    }
+    vm.ssh_ok(
+        r#"set -eu
+systemd-run --quiet --remain-after-exit --unit=ilex-fixture-repair /usr/bin/ilexctl security repair
+timeout 90 sh -c 'until grep -aFq "for TPM repair (input is hidden)" /dev/vcs8; do sleep 1; done'
+"#,
+    )?;
+    type_at_vt(vm, private, recovery)?;
+    vm.ssh_ok(r#"set -eu
+timeout 180 sh -c 'until test "$(systemctl show -p SubState --value ilex-fixture-repair)" = exited; do sleep 1; done'
+test "$(systemctl show -p Result --value ilex-fixture-repair)" = success
+systemctl stop ilex-fixture-repair
+test ! -e /var/lib/ilex/security/.pending-tpm.json
+test ! -e /var/lib/ilex/security/.pending-recovery.json
+"#)?;
+    let pending = guest_json(
+        vm,
+        artifacts,
+        "repair-pending.json",
+        "ilexctl security verify",
+    )?;
+    let after = guest_json(
+        vm,
+        artifacts,
+        "repair-after-state.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    let new_header = guest_json(vm, artifacts, "repair-after-header.json", &status)?;
+    ensure!(
+        pending["state"] == "pending"
+            && after["recovery"] == before["recovery"]
+            && after["tpm_header"] != before["tpm_header"]
+            && new_header == *original,
+        "repair leaked a slot/token, changed recovery, or verified before a cold boot"
+    );
+    let recovery_slot = before["recovery"]["slot"]
+        .as_u64()
+        .context("missing recovery slot")?;
+    let tpm_slot = before["tpm"]["slot"]
+        .as_u64()
+        .context("missing original TPM slot")?;
+    let mut other_slots = original["slots"]
+        .as_array()
+        .context("missing original slots")?
+        .iter()
+        .filter_map(|id| id.as_str()?.parse::<u64>().ok())
+        .filter(|id| *id != recovery_slot && *id != tpm_slot);
+    let password_slot = other_slots.next().context("missing disk passphrase slot")?;
+    ensure!(
+        other_slots.next().is_none(),
+        "ambiguous disk passphrase slot"
+    );
+    for (credential, slot) in [(passphrase, password_slot), (recovery, recovery_slot)] {
+        send_private_input(
+            vm,
+            private,
+            credential,
+            &format!(
+                "verify_fallback_key({}, '{uuid}', {slot})",
+                credential.bytes().len()
+            ),
+        )?;
+    }
+    fs::write(
+        artifacts.join("repair-fallback-credentials.json"),
+        serde_json::to_vec_pretty(&json!({
+            "passphrase_slot":password_slot, "recovery_slot":recovery_slot, "authenticated":true
+        }))?,
+    )?;
+    guest_privacy(vm, artifacts, "authenticated-tpm-repair", credentials)?;
+    poweroff(fixture, artifacts, "before-repaired-cold")?;
+    fixture.disk_boot()?;
+    let vm = fixture.vm.running_mut()?;
+    vm.wait_ssh(Duration::from_secs(900))?;
+    let verified = guest_json(
+        vm,
+        artifacts,
+        "repaired-cold-verification.json",
+        "ilexctl security verify",
+    )?;
+    let cold_header = guest_json(vm, artifacts, "repaired-cold-header.json", &status)?;
+    ensure!(
+        verified["state"] == "verified"
+            && verified["method"] == "tpm2"
+            && verified["uuid"] == uuid
+            && verified["boot_id"] != boot.trim()
+            && cold_header == new_header,
+        "the repaired TPM did not unlock the same disk automatically on cold boot"
+    );
+    check_stale_unlock(vm, artifacts, boot.trim(), &verified)?;
+    guest_privacy(vm, artifacts, "repaired-cold", credentials)?;
+    Ok(())
+}
+
+fn check_stale_unlock(
+    vm: &qemu::Vm,
+    artifacts: &Path,
+    stale_boot: &str,
+    verified: &Value,
+) -> Result<()> {
+    ensure!(
+        stale_boot.len() == 36
+            && stale_boot
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b'-'),
+        "unexpected fallback boot ID"
+    );
+    let stale = guest_json(
+        vm,
+        artifacts,
+        "repaired-stale-evidence.json",
+        &format!(
+            r#"set -eu
+dir=/run/ilex-encrypted-test
+install -d -m 0700 "$dir"
+sed 's/"boot_id": "[^"]*"/"boot_id": "{stale_boot}"/' /run/ilex/root-unlock.json > "$dir/stale-evidence"
+chmod 0600 "$dir/stale-evidence"
+grep -Fq '{stale_boot}' "$dir/stale-evidence"
+unshare --mount --propagation private sh -ec '
+mount --bind /run/ilex-encrypted-test/stale-evidence /run/ilex/root-unlock.json
+exec /usr/bin/ilexctl security verify'
+"#
+        ),
+    )?;
+    let persisted = guest_json(
+        vm,
+        artifacts,
+        "repaired-stale-state.json",
+        "cat /var/lib/ilex/security/enrollment.json",
+    )?;
+    ensure!(
+        stale["state"] == "pending"
+            && stale["boot_id"] == verified["boot_id"]
+            && stale["method"].is_null()
+            && persisted["state"] == "pending"
+            && persisted["verification"] == stale,
+        "stale unlock evidence left a verified state"
+    );
+    let restored = guest_json(
+        vm,
+        artifacts,
+        "repaired-restored-verification.json",
+        "ilexctl security verify",
+    )?;
+    ensure!(
+        restored == *verified,
+        "real current boot evidence did not restore verification"
+    );
+    vm.ssh_ok("rm -f /run/ilex-encrypted-test/stale-evidence")?;
+    Ok(())
+}
+
 fn interrupted_repair(
     fixture: &mut Fixture,
     artifacts: &Path,
@@ -1654,8 +1998,8 @@ fn interrupted_repair(
         "cat /run/ilex/root-unlock.json",
     )?;
     ensure!(
-        unlock["method"] == "unknown",
-        "interrupted boot falsely claimed TPM unlock"
+        unlock["method"] == "fallback",
+        "interrupted boot lacks password-agent fallback evidence"
     );
     let uuid = state["uuid"].as_str().context("interrupted UUID missing")?;
     ensure!(uuid.len() == 36 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
@@ -1671,6 +2015,7 @@ fn interrupted_repair(
         "interrupted boot left half-enrolled slots or tokens"
     );
     vm.ssh_ok("python3 -I -S -c 'import pathlib; assert sorted(p.name for p in pathlib.Path(\"/var/lib/ilex/security\").iterdir()) == [\".pending-recovery.json\", \"enrollment.json\"]'")?;
+    vm.ssh_ok("install -Dm600 /var/lib/ilex/security/.pending-recovery.json /run/ilex-encrypted-test/acknowledged-receipt")?;
     guest_privacy(vm, artifacts, "interrupted-after-finalisation", credentials)?;
     let console = fixture
         .console
@@ -1720,6 +2065,35 @@ fn interrupted_repair(
                 .filter(|token| token["type"] == "systemd-recovery")
                 .eq(before["tokens"].as_array().unwrap())),
         "ordinary retry changed the recovery token"
+    );
+    // Recreate a stop after acknowledgement was committed and before unlink.
+    // The next ordinary completion must retire the receipt without display.
+    vm.ssh_ok(r#"set -eu
+mv /run/ilex-encrypted-test/acknowledged-receipt /var/lib/ilex/security/.pending-recovery.json
+chvt 8
+systemd-run --quiet --remain-after-exit --unit=ilex-fixture-ack-retry /usr/bin/ilex-enroll complete --root /
+timeout 90 sh -c 'until grep -aFq "Re-enter the disk passphrase" /dev/vcs8; do sleep 1; done'
+"#)?;
+    type_at_vt(vm, console, passphrase)?;
+    vm.ssh_ok(r#"set -eu
+timeout 120 sh -c 'until grep -aFq "Installation completion is ready." /dev/vcs8; do ! grep -aFq "Write this recovery key" /dev/vcs8 || exit 1; sleep 1; done'
+test ! -e /var/lib/ilex/security/.pending-recovery.json
+"#)?;
+    ctl.key("ret")?;
+    vm.ssh_ok(r#"set -eu
+timeout 30 sh -c 'until test "$(systemctl show -p SubState --value ilex-fixture-ack-retry)" = exited; do sleep 1; done'
+test "$(systemctl show -p Result --value ilex-fixture-ack-retry)" = success
+systemctl stop ilex-fixture-ack-retry
+"#)?;
+    let receipt_retry = guest_json(
+        vm,
+        artifacts,
+        "acknowledged-receipt-retry-tokens.json",
+        &token_command,
+    )?;
+    ensure!(
+        receipt_retry == resumed_tokens,
+        "acknowledged receipt cleanup changed LUKS slots or tokens"
     );
     let recovery = confirm_interrupted_key(
         vm,
@@ -1900,7 +2274,7 @@ fn same_tpm_mismatch(
         "cat /run/ilex/root-unlock.json",
     )?;
     ensure!(
-        unlock["method"] == "unknown"
+        unlock["method"] == "fallback"
             && unlock["uuid"] == tokens["uuid"]
             && unlock["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim(),
         "policy rejection lacks matching root fallback evidence"
@@ -1992,6 +2366,7 @@ fn assertions(
             .any(|t| t["pcr7_sha256"] == true),
         "explicit token policy missing"
     );
+    vm.ssh_ok("systemctl is-enabled --quiet ilex-security-verify.service; systemctl is-system-running --wait")?;
     let state = guest_json(
         vm,
         artifacts,
@@ -1999,8 +2374,11 @@ fn assertions(
         "cat /var/lib/ilex/security/enrollment.json",
     )?;
     ensure!(
-        state["state"] == "pending" && state["recovery"]["acknowledged"] == true,
-        "enrollment was not acknowledged and pending verification"
+        state["state"] == "verified"
+            && state["recovery"]["acknowledged"] == true
+            && state["verification"]["boot_id"] == evidence["boot_id"]
+            && state["verification"]["method"] == "tpm2",
+        "the boot verifier did not persist the observed TPM unlock"
     );
     ensure!(
         evidence["token"]
@@ -2397,6 +2775,7 @@ fn run_layout(
                 } else {
                     "no-tpm"
                 },
+                None,
             )?;
             fixture.provider.destroy_owned(&mut fixture.vm)?;
             stage = "diagnostic_complete";
@@ -2416,6 +2795,7 @@ fn run_layout(
                 &original_tokens,
                 &expected,
                 "pcr-mismatch",
+                None,
             )?;
         }
         stage = "recovery_key_boot";
@@ -2431,6 +2811,7 @@ fn run_layout(
             &original_tokens,
             &expected,
             "recovery",
+            Some(&passphrase),
         )?;
         if interrupted {
             stage = "interrupted_completion_repair";
@@ -2456,6 +2837,7 @@ fn run_layout(
                 &repaired_tokens,
                 &expected,
                 "reissued-recovery",
+                None,
             )?;
         } else {
             stage = "first_installed_boot";
@@ -2501,6 +2883,7 @@ fn run_layout(
                 &original_tokens,
                 &expected,
                 "no-tpm",
+                None,
             )?;
         }
         let iso_hash = cmd::output(Command::new("sha256sum").arg(&iso))?;

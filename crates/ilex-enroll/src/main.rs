@@ -1,9 +1,4 @@
 #[cfg(target_os = "linux")]
-mod console;
-#[cfg(target_os = "linux")]
-mod pending;
-
-#[cfg(target_os = "linux")]
 fn main() {
     if let Err(error) = run() {
         eprintln!("ilex-enroll: {error:#}");
@@ -65,6 +60,8 @@ fn run() -> anyhow::Result<()> {
             #[arg(long)]
             root: PathBuf,
         },
+        #[command(hide = true)]
+        InstallerRoot,
         /// Local installer completion. Never use a serial or remote terminal.
         Complete {
             #[arg(long, default_value = "/mnt/sysroot")]
@@ -91,7 +88,7 @@ fn run() -> anyhow::Result<()> {
     let args = Args::parse();
     harden()?;
     if args.self_check {
-        return console::self_check();
+        return local::self_check();
     }
     let value = match args
         .command
@@ -125,25 +122,34 @@ fn run() -> anyhow::Result<()> {
                 layout.device == device,
                 "TPM enrollment device differs from the active encrypted root"
             );
-            let unlock = inherited(unlock_fd)?;
-            serde_json::to_value(tpm(
-                &Device::open(&device)?,
-                unlock,
-                &tool_versions(&target_root)?,
-            )?)?
+            let unlock = Secret::read(inherited(unlock_fd)?)?;
+            let device = Device::open(&device)?;
+            let (_, _, reason) = eligibility(&target_root);
+            anyhow::ensure!(
+                reason == "pcr7-sha256",
+                "TPM enrollment unavailable: {reason}"
+            );
+            let state = SecurityState::open(&target_root, &device)?;
+            serde_json::to_value(
+                Reconciled::open(&device, &unlock, state, true)?.enroll_tpm(false)?,
+            )?
         }
         Cmd::Layout { root } => serde_json::to_value(discover(&root)?)?,
+        Cmd::InstallerRoot => {
+            println!("{}", installer_root()?.display());
+            return Ok(());
+        }
         Cmd::Complete {
             root,
             tty,
             reissue_recovery,
-        } => return console::complete(&root, &tty, reissue_recovery),
+        } => return local::complete(&root, &tty, reissue_recovery),
         Cmd::Initrd { args } => {
             let status = initrd::attach(&args)?;
             std::process::exit(status.code().unwrap_or(1));
         }
         Cmd::RecordRoot { root } => return initrd::record_root(&root),
-        Cmd::ReportBoot => return console::report_boot(),
+        Cmd::ReportBoot => return local::report_boot(),
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
