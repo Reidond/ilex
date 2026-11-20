@@ -1678,6 +1678,18 @@ fn interrupted_repair(
         "interrupted-retry-tokens.json",
         &token_command,
     )?;
+    let resumed_slots = resumed_tokens["slots"]
+        .as_array()
+        .context("missing resumed slots")?;
+    let before_slots = before["slots"]
+        .as_array()
+        .context("missing original slots")?;
+    let tpm_expected = expected["local_diagnostic"] != true;
+    ensure!(
+        before_slots.iter().all(|slot| resumed_slots.contains(slot))
+            && resumed_slots.len() == before_slots.len() + usize::from(tpm_expected),
+        "ordinary retry changed more than the pending TPM slot"
+    );
     ensure!(
         resumed_tokens["tokens"]
             .as_array()

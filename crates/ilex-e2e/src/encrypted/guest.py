@@ -622,6 +622,10 @@ def layout_retry_probe():
         DRIVE_STEP = 'interrupt-lvm-key-display'
         attempt.kill()
         assert attempt.wait(timeout=30) == -signal.SIGKILL
+        # SIGKILL skips Console::drop. Remove the old prompt before polling
+        # for the next invocation, so the driver cannot type into a stale VT.
+        with open('/dev/tty8', 'wb') as console:
+            console.write(b'\x1b[2J\x1b[3J\x1b[H')
         state = json.loads(state_path.read_text())
         assert state['uuid'] == uuid and state['state'] == 'recovery-incomplete' and state['tpm'] is None
         assert state['recovery']['acknowledged'] is False
