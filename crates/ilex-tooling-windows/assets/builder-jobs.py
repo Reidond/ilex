@@ -844,7 +844,7 @@ def request(frame, payload):
 def main():
     os.umask(0o077)
     if len(sys.argv) == 4 and sys.argv[1] == '--terminal':
-        sys.exit(terminal(ident(sys.argv[2]), ident(sys.argv[3])))
+        return terminal(ident(sys.argv[2]), ident(sys.argv[3]))
     if len(sys.argv) == 4 and sys.argv[1] == '--run':
         execute(ident(sys.argv[2]), ident(sys.argv[3]))
         return
@@ -865,10 +865,11 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        status = main()
     except BaseException as error:
         if len(sys.argv) == 1:
             sys.stdout.buffer.write(encode({'schema': 1, 'ok': False, 'error': str(error), 'payload_bytes': 0}) + b'\n')
         else:
             traceback.print_exc(file=sys.stderr)
         sys.exit(1)
+    sys.exit(status)
