@@ -5,6 +5,7 @@ xtask.exe. The client runs in its own hidden console. Its relay refuses every
 PTY request, so a regression in the test cannot start an unintended VM.
 """
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -27,13 +28,26 @@ fn main() -> io::Result<()> {
     }
     let mut data = Vec::new();
     io::stdin().read_to_end(&mut data)?;
-    let submit = String::from_utf8_lossy(&data).contains("\"operation\":\"submit\"");
+    let mut frame = data.strip_prefix(b"job\n").unwrap_or_default().splitn(2, |&b| b == b'\n');
+    let header = String::from_utf8_lossy(frame.next().unwrap_or_default());
+    let submit = header.contains("\"operation\":\"submit\"");
+    let upload = header.contains("\"operation\":\"put_many\"")
+        .then(|| frame.next().unwrap_or_default().len());
+    if header.contains("\"operation\":\"cancel\"")
+        && let Ok(receipt) = fs::read_to_string(state.join("receipt-path"))
+        && PathBuf::from(receipt).is_file()
+    {
+        fs::write(state.join("receipt-before-cancel"), b"present")?;
+    }
     let mut child = Command::new(env::var_os("ILEX_MATRIX_REAL_SSH").unwrap())
         .args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let mut stdin = child.stdin.take().unwrap();
     let input = thread::spawn(move || stdin.write_all(&data));
     let reply = child.wait_with_output()?;
     let _ = input.join();
+    if let Some(bytes) = upload.filter(|_| reply.status.success()) {
+        writeln!(fs::OpenOptions::new().create(true).append(true).open(state.join("uploads"))?, "{bytes}")?;
+    }
     if submit && reply.status.success() {
         let temporary = state.join("registered.partial");
         fs::write(&temporary, &reply.stdout)?;
@@ -107,6 +121,9 @@ def ctrl_c_during_interactive_submit():
             reply = json.loads(registered.read_bytes())
             assert reply["ok"]
             job = reply["value"]["job"]
+            control = remote / "jobs" / job
+            transfer = control / "transfer.json"
+            (root / "receipt-path").write_text(str(transfer), encoding="utf-8")
             sent = subprocess.run([sys.executable, "-B", "-c", CONSOLE_EVENT, str(client.pid)],
                                   capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
             assert sent.returncode == 0, sent.stderr.decode(errors="replace")
@@ -114,7 +131,17 @@ def ctrl_c_during_interactive_submit():
             (root / "release").touch()
             assert client.wait(timeout=90) == 130, f"unexpected client exit ({client.returncode})"
             assert not (root / "attach-attempted").exists(), "the client attempted to open a terminal"
-            receipt = json.loads((remote / "jobs" / job / "collection.json").read_bytes())
+            assert (root / "receipt-before-cancel").is_file(), "transfer receipt was missing at cancel"
+            transfer = json.loads(transfer.read_bytes())
+            source = json.loads((control / "request.json").read_bytes())["snapshot"]["source"]
+            uploads = root / "uploads"
+            uploaded = sum(map(int, uploads.read_text().splitlines())) if uploads.is_file() else 0
+            assert transfer["schema"] == 1 and transfer["snapshot"] == source["digest"]
+            assert transfer["builder_root"] == reply["value"]["root"]
+            assert transfer["uploaded_bytes"] == uploaded
+            for metric in ("snapshot_seconds", "builder_seconds", "upload_seconds", "stage_seconds"):
+                assert math.isfinite(transfer[metric]) and transfer[metric] >= 0, metric
+            receipt = json.loads((control / "collection.json").read_bytes())
             assert receipt["job"] == job and receipt["exit_code"] == 130
             received = Path(receipt["received"])
             result = json.loads((received / "result.json").read_bytes())
@@ -123,7 +150,8 @@ def ctrl_c_during_interactive_submit():
             assert {entry["path"] for entry in result["artifacts"]} == {
                 "job/request.json", "job/context.json", "job/state.json"
             }
-            print(f"Windows submit {job} was cancelled with no PTY request", flush=True)
+            print(f"Windows submit {job} kept its transfer receipt ({uploaded} uploaded bytes) "
+                  "before cancellation, with no PTY request", flush=True)
         finally:
             if client.poll() is None:
                 client.kill()

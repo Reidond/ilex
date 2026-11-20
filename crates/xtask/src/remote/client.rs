@@ -274,24 +274,32 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
     let interactive = matches!(&job.command, Command::Vm(args) if args.command.is_empty());
     let heartbeat =
         interactive.then(|| transport.terminal_heartbeat(&job.snapshot.identity.owner, &job.job));
-    let registered = transport.register(&job);
+    let registered = transport.register(&job).and_then(|reply| {
+        eprintln!("ilex: remote job {} at {}", job.job, reply["root"]);
+        fs::write(
+            job_dir.join("transfer.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": 1,
+                "source_bytes": staged.bytes,
+                "uploaded_bytes": sent,
+                "chunks": staged.chunks.len(),
+                "stage_seconds": started.elapsed().as_secs_f64(),
+                "snapshot_seconds": snapshot_seconds,
+                "builder_seconds": builder_seconds,
+                "upload_seconds": upload_started.elapsed().as_secs_f64(),
+                "snapshot": job.snapshot.source.digest,
+                "builder_root": reply["root"],
+                "started_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+            }))?,
+        )
+        .context("writing remote transfer receipt")
+    });
     if interactive && transport::cancelled() {
         drop(heartbeat);
         // A lost submit reply can still leave a durable registration.
         return wait(ws, &transport, &job, &job_dir, true).context("interactive submit cancelled");
     }
-    let reply = registered?;
-    eprintln!("ilex: remote job {} at {}", job.job, reply["root"]);
-    fs::write(
-        job_dir.join("transfer.json"),
-        serde_json::to_vec_pretty(&json!({
-            "schema":1,"source_bytes":staged.bytes,"uploaded_bytes":sent,"chunks":staged.chunks.len(),
-        "stage_seconds":started.elapsed().as_secs_f64(),"snapshot_seconds":snapshot_seconds,
-        "builder_seconds":builder_seconds,"upload_seconds":upload_started.elapsed().as_secs_f64(),
-        "snapshot":job.snapshot.source.digest,"builder_root":reply["root"],
-            "started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
-        }))?,
-    )?;
+    registered?;
     if interactive {
         let terminal = transport.terminal(&job.snapshot.identity.owner, &job.job);
         drop(heartbeat);
