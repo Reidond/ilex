@@ -30,24 +30,26 @@ directories are disposable after any unique outputs have been recovered.
 ## Import a Linux kache store
 
 Determine the source store from `KACHE_CACHE_DIR`, then `XDG_CACHE_HOME/kache`,
-then `~/.cache/kache`. Confirm x86_64 Linux and the kache version in
-`Containerfile`. At a coordinated quiet time, use an already quiescent store
-or make a consistent export after its writers have stopped. Archive the
-complete store, including the index and its companion files and blobs. Use an
-uncompressed tar with these entries at its root. Keep the archive outside the
-checkout and on a Windows-accessible staging volume. Exclude non-store data,
-runtime sockets and credentials. Keep only regular files and directories.
-
-```sh
-tar --hard-dereference -C /path/to/quiescent/store -cf /path/to/staging/kache.tar .
-```
+then `~/.cache/kache`. For FedoraLinux-45, run the exporter from native
+PowerShell with Windows Python 3.11 or newer. It uses the distro's existing
+Python and an online, read-only SQLite backup while kache is running. The tar
+contains the backed-up index, committed entry metadata and only the immutable
+blobs referenced by those entries. If eviction removes a referenced file
+before it can be opened, the export fails and discards the partial archive.
+Set `--distribution` and `--user` to select another source. Keep the archive
+and its digest receipt in private Windows staging outside the checkout.
 
 ```powershell
+python docs/tooling/export-kache.py --output 'C:\staging\kache.tar'
 cargo xtask migrate kache 'C:\staging\kache.tar' --version 2.0.0
 $env:ILEX_KACHE_IMPORT = '<sha256:… from the import receipt>'
 cargo xtask build -- --no-cache
 Remove-Item Env:ILEX_KACHE_IMPORT
 ```
+
+An external export can also be imported as an uncompressed tar with
+`index.db` and `store/` at its root. Export from a quiescent store or use a
+consistent snapshot. Keep runtime sockets and credentials outside the archive.
 
 Imports use the pinned builder transport and verify the archive digest. The
 builder keeps each complete import by checkout owner and archive hash. Reusing
