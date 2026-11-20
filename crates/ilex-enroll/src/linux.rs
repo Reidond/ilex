@@ -14,7 +14,7 @@ pub use probe::{Probe, probe, tool_manifest, tool_versions};
 mod enroll;
 pub use enroll::{Device, Enrollment, recovery, status, tpm, validate_token};
 mod layout;
-pub use layout::{Layout, discover};
+pub use layout::{Layout, discover, recovery_layout};
 pub mod initrd;
 
 /// Never propagate a subprocess's output in an error: cryptenroll's recovery

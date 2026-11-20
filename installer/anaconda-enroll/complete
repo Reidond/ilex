@@ -9,8 +9,11 @@ if [ -d /mnt/sysroot/etc ]; then
 else
     target=/mnt/sysimage
 fi
-layout=$(/usr/bin/ilex-enroll layout --root "$target")
-[ "$layout" != null ] || exit 0
+# A refusal is handled by completion on the local console. Only a verified
+# plaintext layout may skip the console entirely.
+if layout=$(/usr/bin/ilex-enroll layout --root "$target" 2>/dev/null) && [ "$layout" = null ]; then
+    exit 0
+fi
 chvt 8
 trap 'printf "\033[2J\033[3J\033[H" > /dev/tty8' EXIT HUP INT TERM
 if /usr/bin/ilex-enroll complete --root "$target" --tty /dev/tty8; then

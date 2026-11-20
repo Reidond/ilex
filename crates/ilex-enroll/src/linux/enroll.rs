@@ -255,6 +255,7 @@ pub fn tpm(
     let before = device.header()?;
     // Reuse an exact existing policy only after authenticating the passphrase
     // and proving this token can currently unseal. Never silently reseal.
+    super::layout::verify_header_cipher(&before)?;
     let tokens = before["tokens"].as_object().context("missing tokens")?;
     let existing: Vec<_> = tokens
         .iter()

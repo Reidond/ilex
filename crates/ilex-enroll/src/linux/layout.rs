@@ -148,6 +148,37 @@ fn direct_block_device(node: &Value) -> bool {
                 .is_some_and(|parents| parents.len() == 1 && is_leaf(&parents[0]))
 }
 
+const INSTALLER_CIPHER: &str = "aes-xts-plain64";
+
+pub(super) fn verify_header_cipher(header: &Value) -> Result<u64> {
+    let segments = header["segments"]
+        .as_object()
+        .context("missing LUKS2 segments")?;
+    let segment = segments.get("0").context("missing LUKS2 data segment")?;
+    ensure!(
+        segments.len() == 1
+            && segment["type"] == "crypt"
+            && segment["encryption"] == INSTALLER_CIPHER
+            && segment["size"] == "dynamic",
+        "unsupported LUKS2 payload cipher or segment layout; expected aes-xts-plain64"
+    );
+    let slots = header["keyslots"]
+        .as_object()
+        .context("missing LUKS2 keyslots")?;
+    ensure!(
+        !slots.is_empty()
+            && slots
+                .values()
+                .all(|slot| { slot["key_size"].as_u64().is_some_and(|size| size >= 32) }),
+        "LUKS2 payload key must be at least 256 bits"
+    );
+    segment["offset"]
+        .as_str()
+        .context("missing LUKS2 data offset")?
+        .parse()
+        .context("invalid LUKS2 data offset")
+}
+
 fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
     let children = mapping["children"]
         .as_array()
@@ -190,25 +221,34 @@ fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
         run(Command::new("/usr/sbin/dmsetup").args(["table", "--major", major, "--minor", minor]))?;
     // Query the entire active table without --target or --showkeys. Even
     // suppressed-key output can contain a kernel key reference.
-    let covers_device = std::str::from_utf8(&table.stdout).is_ok_and(|table| {
+    let active = std::str::from_utf8(&table.stdout).ok().and_then(|table| {
         let mut targets = table.lines();
-        let Some(target) = targets.next() else {
-            return false;
-        };
+        let target = targets.next()?;
         let mut fields = target.split_whitespace();
-        let start = fields.next().and_then(|n| n.parse::<u64>().ok());
-        let length = fields.next().and_then(|n| n.parse::<u64>().ok());
-        targets.next().is_none()
-            && start == Some(0)
-            && sectors > 0
-            && length == Some(sectors)
-            && fields.next() == Some("crypt")
-            && fields.nth(3) == backing_tree["maj:min"].as_str()
+        let start = fields.next()?.parse::<u64>().ok()?;
+        let length = fields.next()?.parse::<u64>().ok()?;
+        if targets.next().is_some()
+            || start != 0
+            || sectors == 0
+            || length != sectors
+            || fields.next() != Some("crypt")
+        {
+            return None;
+        }
+        let cipher_allowed = fields.next()? == INSTALLER_CIPHER;
+        // Skip the suppressed key and the IV offset, keeping only the data offset.
+        if fields.nth(2) != backing_tree["maj:min"].as_str() {
+            return None;
+        }
+        let offset = fields.next()?.parse::<u64>().ok()?.checked_mul(512)?;
+        Some((cipher_allowed, offset))
     });
     table.stdout.zeroize();
+    let (cipher_allowed, offset) =
+        active.context("active mapping must have one crypt target covering the entire device")?;
     ensure!(
-        covers_device,
-        "active mapping must have one crypt target covering the entire device"
+        cipher_allowed,
+        "unsupported active payload cipher; expected aes-xts-plain64"
     );
     let sysfs = sysfs.join("dm");
     let dm_uuid = fs::read_to_string(sysfs.join("uuid"))?;
@@ -220,19 +260,82 @@ fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
     let status = run(Command::new("/usr/sbin/cryptsetup")
         .arg("status")
         .arg(name.trim()))?;
+    let status = String::from_utf8_lossy(&status.stdout);
     ensure!(
-        String::from_utf8_lossy(&status.stdout)
-            .lines()
-            .any(|line| line
-                .trim()
-                .strip_prefix("type:")
-                .is_some_and(|kind| kind.trim() == "LUKS2")),
+        status.lines().any(|line| line
+            .trim()
+            .strip_prefix("type:")
+            .is_some_and(|kind| kind.trim() == "LUKS2")),
         "backing device is not an active dm-crypt LUKS2 mapping"
     );
-    run(Command::new("/usr/sbin/cryptsetup")
-        .args(["isLuks", "--type", "luks2"])
-        .arg(backing))?;
+    ensure!(
+        status.lines().any(|line| line
+            .trim()
+            .strip_prefix("keysize:")
+            .and_then(|size| size.trim().strip_suffix(" bits"))
+            .and_then(|bits| bits.parse::<u32>().ok())
+            .is_some_and(|bits| bits >= 256)),
+        "active payload key must be at least 256 bits"
+    );
+    let header = json(
+        Command::new("/usr/sbin/cryptsetup")
+            .args(["luksDump", "--dump-json-metadata"])
+            .arg(backing),
+    )?;
+    ensure!(
+        verify_header_cipher(&header)? == offset,
+        "active crypt data offset differs from the LUKS2 header"
+    );
     Ok(())
+}
+
+fn root_devices(root: &Path) -> Result<(String, Vec<PathBuf>)> {
+    let (fstype, devices) = mounted_devices(root)?;
+    if matches!(fstype.as_str(), "overlay" | "composefs") {
+        let (fstype, devices) = mounted_devices(&root.join("sysroot"))?;
+        ensure!(
+            !devices.is_empty(),
+            "cannot identify the backing root filesystem"
+        );
+        Ok((fstype, devices))
+    } else {
+        Ok((fstype, devices))
+    }
+}
+
+/// Identify a recovery device independently of TPM eligibility. Every path
+/// from every root member must pass through the same verified LUKS2 mapping.
+pub fn recovery_layout(root: &Path) -> Result<Layout> {
+    fn crypt_roots(node: &Value, uuids: &mut BTreeSet<String>) -> Result<()> {
+        if node["type"] == "crypt" {
+            let mapping = block_path(node["maj:min"].as_str().context("missing mapping")?)?;
+            verify_luks_member(&mapping, node)?;
+            let uuid = node["children"][0]["uuid"]
+                .as_str()
+                .context("missing LUKS UUID")?;
+            uuids.insert(uuid.to_owned());
+        } else {
+            let children = node["children"]
+                .as_array()
+                .filter(|nodes| !nodes.is_empty())
+                .context("root has a path without verified LUKS2 encryption")?;
+            for child in children {
+                crypt_roots(child, uuids)?;
+            }
+        }
+        Ok(())
+    }
+    let (_, devices) = root_devices(root)?;
+    let mut uuids = BTreeSet::new();
+    for device in devices {
+        crypt_roots(&block_ancestry(&device)?, &mut uuids)?;
+    }
+    ensure!(uuids.len() == 1, "no unique verified recovery device");
+    let uuid = uuids.into_iter().next().unwrap();
+    Ok(Layout {
+        device: Path::new("/dev/disk/by-uuid").join(&uuid),
+        uuid,
+    })
 }
 
 pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {

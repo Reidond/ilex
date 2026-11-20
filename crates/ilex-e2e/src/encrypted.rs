@@ -53,6 +53,10 @@ pub fn trials() -> Vec<Trial> {
             "security::enrollment_diagnostic_interrupted",
             || run(false, true, true),
         ));
+        trials.push(common::trial(
+            "security::enrollment_diagnostic_layout_refusal",
+            || run_layout(false, false, true, true),
+        ));
     }
     if std::env::var_os("ILEX_ENROLLMENT_CHECKPOINT").is_some() {
         // Explicit local diagnosis, outside CI's security::encrypted_ filter.
@@ -1178,6 +1182,7 @@ fn fallback(
     // Runtime paths include the owner-qualified checkout slug. Keep QMP and
     // swtpm Unix sockets within sockaddr_un even for the interrupted case.
     let family = match template.purpose.as_str() {
+        "ed-l" => "l",
         "encrypted-space" | "ed-s" => "s",
         "encrypted-interrupted" | "ed-i" => "i",
         _ => "a",
@@ -1187,6 +1192,7 @@ fn fallback(
         "recovery" => "recovery",
         "reissued-recovery" => "reissue",
         "no-tpm" => "no-tpm",
+        "layout-recovery" => "layout",
         _ => bail!("unknown fallback case"),
     };
     let local_diagnostic = template.secure_boot == Requirement::Off;
@@ -1352,28 +1358,32 @@ fn check_fallback(
             "recovery boot must retain Secure Boot and a present, different TPM"
         );
     }
-    let evidence = guest_json(
-        vm,
-        artifacts,
-        &format!("{mode}-unlock.json"),
-        "cat /run/ilex/root-unlock.json",
-    )?;
-    ensure!(
-        evidence["method"] == "unknown"
-            && evidence["uuid"] == original_tokens["uuid"]
-            && evidence["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim(),
-        "fallback was incorrectly labeled as TPM unlock"
-    );
-    let layout = guest_json(
-        vm,
-        artifacts,
-        &format!("{mode}-layout.json"),
-        "ilex-enroll layout --root /",
-    )?;
-    ensure!(
-        layout["uuid"] == evidence["uuid"],
-        "fallback evidence does not describe encrypted root"
-    );
+    if mode == "layout-recovery" {
+        vm.ssh_ok("set -eu; test ! -e /run/ilex/root-unlock.json; journalctl -b -u ilex-enrollment-report.service --no-pager | grep -F 'TPM enrollment was skipped for this storage layout'; if layout=$(ilex-enroll layout --root / 2>&1); then exit 1; fi; printf '%s\n' \"$layout\" | grep -F 'unsupported device-mapper layout'")?;
+    } else {
+        let evidence = guest_json(
+            vm,
+            artifacts,
+            &format!("{mode}-unlock.json"),
+            "cat /run/ilex/root-unlock.json",
+        )?;
+        ensure!(
+            evidence["method"] == "unknown"
+                && evidence["uuid"] == original_tokens["uuid"]
+                && evidence["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim(),
+            "fallback was incorrectly labeled as TPM unlock"
+        );
+        let layout = guest_json(
+            vm,
+            artifacts,
+            &format!("{mode}-layout.json"),
+            "ilex-enroll layout --root /",
+        )?;
+        ensure!(
+            layout["uuid"] == evidence["uuid"],
+            "fallback evidence does not describe encrypted root"
+        );
+    }
     let bootc = guest_json(
         vm,
         artifacts,
@@ -1469,7 +1479,46 @@ fn check_fallback(
             "no-TPM completion changed LUKS slots/tokens"
         );
     }
-    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; ilex-enroll layout --root /; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
+    if mode == "layout-recovery" {
+        ensure!(
+            before["state"] == "unavailable"
+                && before["reason"] == "unsupported-storage-layout"
+                && before["recovery"]["acknowledged"] == true
+                && before["tpm"].is_null()
+                && tokens_before["slots"]
+                    .as_array()
+                    .is_some_and(|slots| slots.len() == 2)
+                && tokens_before["tokens"].as_array().is_some_and(
+                    |tokens| tokens.len() == 1 && tokens[0]["type"] == "systemd-recovery"
+                ),
+            "unsupported installation did not defer TPM enrollment and retain recovery"
+        );
+        vm.ssh_ok("set -eu; for attempt in 1 2; do report=$(timeout 30 ilex-enroll complete --root / --tty /dev/tty8 2>&1); printf '%s\n' \"$report\" | grep -F 'Installation can finish'; done; ! grep -Fq tpm2-device= /etc/crypttab")?;
+        let after = guest_json(
+            vm,
+            artifacts,
+            "layout-recovery-enrollment.json",
+            "cat /var/lib/ilex/security/enrollment.json",
+        )?;
+        let setup = guest_json(
+            vm,
+            artifacts,
+            "layout-recovery-setup.json",
+            "cat /etc/ilex/setup.json",
+        )?;
+        let tokens_after =
+            guest_json(vm, artifacts, "layout-recovery-tokens.json", &token_command)?;
+        ensure!(
+            before == after
+                && tokens_before == tokens_after
+                && setup["security"]["tpm"]["status"] == "passphrase-only"
+                && setup["security"]["tpm"]["reason"] == "unsupported-storage-layout",
+            "unsupported-layout retry changed recovery or enrollment state"
+        );
+    } else {
+        vm.ssh_ok("ilex-enroll layout --root /")?;
+    }
+    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
     if preserve_data {
         preserved_data(vm, artifacts)?;
     }
@@ -1978,13 +2027,24 @@ test "$(cat /run/ilex-preserved-check/sentinel)" = ilex-public-sentinel-v1
 }
 
 fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result<()> {
+    run_layout(preserve_data, interrupted, local_diagnostic, false)
+}
+
+fn run_layout(
+    preserve_data: bool,
+    interrupted: bool,
+    local_diagnostic: bool,
+    layout_refusal: bool,
+) -> Result<()> {
     ilex_enroll::harden()?;
     ensure!(
         !local_diagnostic || std::env::var_os("CI").is_none(),
         "local diagnostic is outside the hosted qualification"
     );
     let ws = common::workspace()?;
-    let tier = if local_diagnostic && interrupted {
+    let tier = if layout_refusal {
+        "enrollment-diagnostic-layout-refusal"
+    } else if local_diagnostic && interrupted {
         "enrollment-diagnostic-interrupted"
     } else if local_diagnostic && preserve_data {
         "enrollment-diagnostic-existing-space"
@@ -2029,13 +2089,17 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
                 .arg("40G"),
         )?;
         let mut config = VmConfig::new(
-            match (local_diagnostic, interrupted, preserve_data) {
-                (true, true, _) => "ed-i",
-                (true, false, true) => "ed-s",
-                (true, false, false) => "ed-a",
-                (false, true, _) => "encrypted-interrupted",
-                (false, false, true) => "encrypted-space",
-                (false, false, false) => "encrypted-install",
+            if layout_refusal {
+                "ed-l"
+            } else {
+                match (local_diagnostic, interrupted, preserve_data) {
+                    (true, true, _) => "ed-i",
+                    (true, false, true) => "ed-s",
+                    (true, false, false) => "ed-a",
+                    (false, true, _) => "encrypted-interrupted",
+                    (false, false, true) => "encrypted-space",
+                    (false, false, false) => "encrypted-install",
+                }
             },
             &disk,
         );
@@ -2071,6 +2135,7 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
         expected["preserve_data"] = json!(preserve_data);
         expected["interrupt_completion"] = json!(interrupted);
         expected["local_diagnostic"] = json!(local_diagnostic);
+        expected["layout_refusal"] = json!(layout_refusal);
         fs::write(
             artifacts.join("candidate.json"),
             serde_json::to_vec_pretty(&expected)?,
@@ -2187,12 +2252,20 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
                 &fixture.spec,
                 &work,
                 &artifacts,
-                &passphrase,
+                if layout_refusal {
+                    &recovery
+                } else {
+                    &passphrase
+                },
                 &credentials,
                 &installer_probe,
                 &original_tokens,
                 &expected,
-                "no-tpm",
+                if layout_refusal {
+                    "layout-recovery"
+                } else {
+                    "no-tpm"
+                },
             )?;
             fixture.provider.destroy_owned(&mut fixture.vm)?;
             stage = "diagnostic_complete";

@@ -97,8 +97,39 @@ fn out_fd() -> Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
-    let Some(layout) = discover(root)? else {
-        return Ok(());
+    let (layout, refused) = match discover(root) {
+        Ok(Some(layout)) => (layout, false),
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            eprintln!("TPM enrollment skipped: {error:#}");
+            match recovery_layout(root) {
+                Ok(layout) => (layout, true),
+                Err(_) => {
+                    // No independently verified recovery device. Never select
+                    // a partition or promise a key based on ambiguous ancestry.
+                    let state_path = root.join("var/lib/ilex/security/enrollment.json");
+                    if !state_path.try_exists()? {
+                        write_state(
+                            &state_path,
+                            &json!({
+                                "schema":1, "uuid":null, "state":"unavailable",
+                                "reason":"unsupported-storage-layout", "recovery":null, "tpm":null
+                            }),
+                        )?;
+                    }
+                    update_setup(
+                        root,
+                        "unavailable",
+                        "unsupported-storage-layout",
+                        "unavailable",
+                    )?;
+                    eprintln!(
+                        "Installation can finish. Use any existing storage credentials for recovery. No LUKS recovery key was issued because a unique encrypted root could not be verified. Choose a supported encrypted layout to enable TPM enrollment."
+                    );
+                    return Ok(());
+                }
+            }
+        }
     };
     let device = Device::open(&layout.device)?;
     let state_path = root.join("var/lib/ilex/security/enrollment.json");
@@ -111,18 +142,55 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
         state["schema"] == 1 && state["uuid"] == layout.uuid,
         "enrollment state UUID/schema mismatch"
     );
-    let mut console = Console::open(tty)?;
-    console.clear()?;
-    console.say("ilex encrypted installation — local completion\r\n\r\nThe administrator account is for maintenance and recovery.\r\nThe disk passphrase remains a recovery option.\r\n\r\n")?;
-    let passphrase = console.read("Re-enter the disk passphrase (input is hidden): ")?;
-    device.authenticate(passphrase.fd()?)?;
-    configure_crypttab(root, &layout.uuid)?;
     let current = status(&device)?;
     let recovery_exists = current["tokens"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|t| t["type"] == "systemd-recovery");
+        .any(|token| token["type"] == "systemd-recovery");
+    if state["recovery"]["acknowledged"] == true {
+        let id = state["recovery"]["token"]
+            .as_u64()
+            .context("missing recovery identity")?
+            .to_string();
+        let slot = state["recovery"]["slot"]
+            .as_u64()
+            .context("missing recovery slot")?
+            .to_string();
+        ensure!(
+            current["tokens"].as_array().unwrap().iter().any(|token| {
+                token["id"] == id
+                    && token["type"] == "systemd-recovery"
+                    && token["keyslots"] == json!([slot])
+            }),
+            "acknowledged recovery slot missing"
+        );
+        if refused && !reissue {
+            mark_refusal(root, &state_path, &mut state)?;
+            eprintln!(
+                "Installation can finish. TPM enrollment is unavailable for this storage layout. Use the saved recovery key or disk passphrase at boot."
+            );
+            return Ok(());
+        }
+    }
+    if refused && recovery_exists && state["recovery"]["acknowledged"] != true && !reissue {
+        mark_refusal(root, &state_path, &mut state)?;
+        eprintln!(
+            "Installation can finish. TPM enrollment is unavailable for this storage layout. Use the disk passphrase at boot. To issue and confirm a new recovery key, run local completion with --reissue-recovery."
+        );
+        return Ok(());
+    }
+    let mut console = Console::open(tty)?;
+    console.clear()?;
+    console.say("ilex encrypted installation — local completion\r\n\r\nThe administrator account is for maintenance and recovery.\r\nThe disk passphrase remains a recovery option.\r\n\r\n")?;
+    if refused {
+        console.say("TPM enrollment is unavailable for this storage layout.\r\nInstallation will finish with local recovery.\r\n\r\n")?;
+    }
+    let passphrase = console.read("Re-enter the disk passphrase (input is hidden): ")?;
+    device.authenticate(passphrase.fd()?)?;
+    if !refused {
+        configure_crypttab(root, &layout.uuid)?;
+    }
     if state["recovery"]["acknowledged"] != true || reissue {
         ensure!(
             !recovery_exists || reissue,
@@ -153,24 +221,12 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
         write_state(&state_path, &state)?;
         // key/confirmation are erased on scope exit. Explicit reissue is
         // additive; retiring old recovery slots is an authenticated later task.
-    } else {
-        let id = state["recovery"]["token"]
-            .as_u64()
-            .context("missing recovery identity")?
-            .to_string();
-        let recovery_slot = state["recovery"]["slot"]
-            .as_u64()
-            .context("missing recovery slot")?
-            .to_string();
-        ensure!(
-            current["tokens"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|t| t["id"] == id
-                    && t["type"] == "systemd-recovery"
-                    && t["keyslots"][0] == recovery_slot),
-            "acknowledged recovery slot missing"
+    }
+    if refused {
+        mark_refusal(root, &state_path, &mut state)?;
+        return finish_console(
+            &mut console,
+            "TPM enrollment unavailable for this storage layout. Use the recovery key or disk passphrase.\r\n",
         );
     }
     let capability = probe();
@@ -198,25 +254,76 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
     }
     state["reason"] = json!(reason);
     write_state(&state_path, &state)?;
-    let setup_path = root.join("etc/ilex/setup.json");
-    let setup_permissions = fs::metadata(&setup_path)?.permissions();
-    let mut setup: Value = serde_json::from_slice(&fs::read(&setup_path)?)?;
-    ensure!(setup["schema"] == 1, "unsupported setup schema");
-    setup["security"]["tpm"] = json!({"requested":"auto", "capability":capability.verdict,
-        "reason":reason, "status": if state["state"] == "pending" { "enrolled-unverified" } else { "passphrase-only" }});
-    write_state(&setup_path, &setup)?;
-    // setup.json is the existing public, nonsecret PR16 contract. Enrollment
-    // state stays 0600; updating setup must retain its original permissions.
-    fs::set_permissions(&setup_path, setup_permissions)?;
+    let enrolled = state["state"] == "pending";
+    update_setup(
+        root,
+        capability.verdict,
+        reason,
+        if enrolled {
+            "enrolled-unverified"
+        } else {
+            "passphrase-only"
+        },
+    )?;
+    finish_console(
+        &mut console,
+        if enrolled {
+            "TPM enrolled to PCR 7 (SHA-256). Unlock verification is pending.\r\n"
+        } else {
+            "TPM enrollment unavailable. This disk uses its passphrase.\r\n"
+        },
+    )
+}
+
+fn mark_refusal(root: &Path, state_path: &Path, state: &mut Value) -> Result<()> {
+    state["state"] = json!("unavailable");
+    state["reason"] = json!("unsupported-storage-layout");
+    write_state(state_path, state)?;
+    update_setup(
+        root,
+        "unavailable",
+        "unsupported-storage-layout",
+        "passphrase-only",
+    )
+}
+
+fn finish_console(console: &mut Console, message: &str) -> Result<()> {
     console.clear()?;
     console.say("Recovery key saved and privately verified.\r\n\r\n")?;
-    console.say(if state["state"] == "pending" {
-        "TPM enrolled to PCR 7 (SHA-256). Unlock verification is pending.\r\n"
-    } else {
-        "TPM enrollment unavailable. This disk uses its passphrase.\r\n"
-    })?;
+    console.say(message)?;
     console.say("Installation completion is ready. Press Enter to return to Anaconda.\r\n")?;
     drop(console.read("")?);
+    Ok(())
+}
+
+fn update_setup(root: &Path, capability: &str, reason: &str, status: &str) -> Result<()> {
+    let path = root.join("etc/ilex/setup.json");
+    let permissions = fs::metadata(&path)?.permissions();
+    let mut setup: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    ensure!(setup["schema"] == 1, "unsupported setup schema");
+    setup["security"]["tpm"] = json!({
+        "requested":"auto", "capability":capability, "reason":reason, "status":status
+    });
+    write_state(&path, &setup)?;
+    fs::set_permissions(&path, permissions)?;
+    Ok(())
+}
+
+pub fn report_boot() -> Result<()> {
+    let path = Path::new("/etc/ilex/setup.json");
+    let setup: Value = serde_json::from_slice(&fs::read(path)?)?;
+    let tpm = &setup["security"]["tpm"];
+    if tpm["reason"] == "unsupported-storage-layout" {
+        if tpm["status"] == "passphrase-only" {
+            println!(
+                "ilex: TPM enrollment was skipped for this storage layout. Use the disk passphrase or saved recovery key at boot."
+            );
+        } else {
+            println!(
+                "ilex: TPM enrollment was skipped for this storage layout. Use the existing storage recovery procedure."
+            );
+        }
+    }
     Ok(())
 }
 

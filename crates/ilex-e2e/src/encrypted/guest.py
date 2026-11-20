@@ -189,8 +189,19 @@ def prepare():
     passphrase = (SEED / 'passphrase').read_bytes()
     assert re.fullmatch(b'[a-z]{48}', passphrase)
     storage = PRIVATE / 'storage.ks'
-    storage.write_bytes(b'autopart --type=btrfs --nohome --noswap --encrypted '
-                        b'--luks-version=luks2 --passphrase=' + passphrase + b'\n')
+    if config.get('layout_refusal'):
+        # A normal Anaconda-managed LVM root over a single LUKS2 device. The
+        # volume is bootable but outside ilex's direct Btrfs enrollment policy.
+        storage.write_bytes(
+            b'part /boot/efi --fstype=efi --size=600\n'
+            b'part /boot --fstype=ext4 --size=1024\n'
+            b'part pv.01 --size=8192 --grow --encrypted --luks-version=luks2 --passphrase='
+            + passphrase + b'\n'
+            b'volgroup ilextest pv.01\n'
+            b'logvol / --vgname=ilextest --name=root --fstype=ext4 --size=8192 --grow\n')
+    else:
+        storage.write_bytes(b'autopart --type=btrfs --nohome --noswap --encrypted '
+                            b'--luks-version=luks2 --passphrase=' + passphrase + b'\n')
     storage.chmod(0o600)
     PUBLIC.mkdir(mode=0o700)
     # Anaconda calls poweroff only after its finalisation. This test-only unit
@@ -682,19 +693,31 @@ def drive():
 
 def finish():
     root = pathlib.Path('/mnt/sysroot')
+    config = json.loads((SEED / 'config.json').read_text())
     (PRIVATE / 'storage.ks').unlink(missing_ok=True)
     for name, command in [
         ('probe.json', ['ilex-enroll', 'probe', '--json']),
-        ('layout.json', ['ilex-enroll', 'layout', '--root', str(root)]),
         ('versions.txt', ['cat', '/usr/lib/ilex/security/tools.json']),
     ]:
         output = subprocess.run(command, capture_output=True, check=True)
         (PUBLIC / name).write_bytes(output.stdout)
-    if not json.loads((SEED / 'config.json').read_text()).get('local_diagnostic'):
+    if not config.get('local_diagnostic'):
         (PUBLIC / 'eventlog.bin').write_bytes(pathlib.Path('/sys/kernel/security/tpm0/binary_bios_measurements').read_bytes())
     (PUBLIC / 'enrollment.json').write_bytes((root / 'var/lib/ilex/security/enrollment.json').read_bytes())
     (PUBLIC / 'setup.json').write_bytes((root / 'etc/ilex/setup.json').read_bytes())
     state = json.loads((PUBLIC / 'enrollment.json').read_text())
+    inspected = subprocess.run(['ilex-enroll', 'layout', '--root', str(root)],
+                               capture_output=True, timeout=15)
+    if config.get('layout_refusal'):
+        assert inspected.returncode and b'unsupported device-mapper layout' in inspected.stderr
+        assert state['state'] == 'unavailable' and state['reason'] == 'unsupported-storage-layout'
+        assert state['recovery']['acknowledged'] and state['tpm'] is None
+        setup = json.loads((PUBLIC / 'setup.json').read_text())
+        assert setup['security']['tpm']['status'] == 'passphrase-only'
+        (PUBLIC / 'layout.json').write_text(json.dumps({'uuid': state['uuid'], 'unsupported': True}))
+    else:
+        inspected.check_returncode()
+        (PUBLIC / 'layout.json').write_bytes(inspected.stdout)
     layout = json.loads((PUBLIC / 'layout.json').read_text())
     assert layout['uuid'] == state['uuid'], 'preload/enrollment changed the encrypted root layout'
     apps = root / 'var/lib/ilex/apps'

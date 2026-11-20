@@ -83,6 +83,8 @@ fn run() -> anyhow::Result<()> {
             #[arg(long, default_value = "/sysroot")]
             root: PathBuf,
         },
+        #[command(hide = true)]
+        ReportBoot,
     }
     let args = Args::parse();
     harden()?;
@@ -115,6 +117,12 @@ fn run() -> anyhow::Result<()> {
             target_root,
             ..
         } => {
+            let layout = discover(&target_root)?
+                .ok_or_else(|| anyhow::anyhow!("TPM enrollment requires an encrypted root"))?;
+            anyhow::ensure!(
+                layout.device == device,
+                "TPM enrollment device differs from the active encrypted root"
+            );
             let unlock = inherited(unlock_fd)?;
             serde_json::to_value(tpm(
                 &Device::open(&device)?,
@@ -133,6 +141,7 @@ fn run() -> anyhow::Result<()> {
             std::process::exit(status.code().unwrap_or(1));
         }
         Cmd::RecordRoot { root } => return initrd::record_root(&root),
+        Cmd::ReportBoot => return console::report_boot(),
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())

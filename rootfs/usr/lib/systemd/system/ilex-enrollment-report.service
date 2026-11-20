@@ -1,0 +1,11 @@
+[Unit]
+Description=Report skipped TPM enrollment
+ConditionPathExists=/etc/ilex/setup.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ilex-enroll report-boot
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
