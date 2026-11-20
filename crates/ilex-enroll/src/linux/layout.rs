@@ -125,7 +125,7 @@ fn block_ancestry(device: &Path) -> Result<Value> {
                 "--inverse",
                 "--paths",
                 "--output",
-                "NAME,TYPE,FSTYPE,UUID",
+                "NAME,TYPE,FSTYPE,UUID,MAJ:MIN",
             ])
             .arg(device),
     )?;
@@ -136,6 +136,18 @@ fn block_ancestry(device: &Path) -> Result<Value> {
     Ok(blocks[0].clone())
 }
 
+fn direct_block_device(node: &Value) -> bool {
+    fn is_leaf(node: &Value) -> bool {
+        matches!(node["type"].as_str(), Some("disk" | "loop"))
+            && node["children"].as_array().is_none_or(Vec::is_empty)
+    }
+    is_leaf(node)
+        || node["type"] == "part"
+            && node["children"]
+                .as_array()
+                .is_some_and(|parents| parents.len() == 1 && is_leaf(&parents[0]))
+}
+
 fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
     let children = mapping["children"]
         .as_array()
@@ -143,6 +155,13 @@ fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
     ensure!(
         mapping["type"] == "crypt" && children.len() == 1 && children[0]["fstype"] == "crypto_LUKS",
         "backing device is not a direct dm-crypt LUKS2 mapping"
+    );
+    // Allow only dm-crypt directly over a disk, partition or loop device.
+    // A regular partition's parent must itself be a disk or loop device.
+    let backing_tree = &children[0];
+    ensure!(
+        direct_block_device(backing_tree),
+        "unsupported block stack below the LUKS2 mapping"
     );
     let backing = Path::new(
         children[0]["name"]
@@ -158,8 +177,40 @@ fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
         "LUKS UUID resolves to a different device"
     );
 
-    let number = device.file_name().context("crypt mapping number missing")?;
-    let sysfs = Path::new("/sys/dev/block").join(number).join("dm");
+    let number = device
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("crypt mapping number missing")?;
+    let sysfs = Path::new("/sys/dev/block").join(number);
+    let sectors: u64 = fs::read_to_string(sysfs.join("size"))?.trim().parse()?;
+    let (major, minor) = number
+        .split_once(':')
+        .context("invalid crypt mapping number")?;
+    let mut table =
+        run(Command::new("/usr/sbin/dmsetup").args(["table", "--major", major, "--minor", minor]))?;
+    // Query the entire active table without --target or --showkeys. Even
+    // suppressed-key output can contain a kernel key reference.
+    let covers_device = std::str::from_utf8(&table.stdout).is_ok_and(|table| {
+        let mut targets = table.lines();
+        let Some(target) = targets.next() else {
+            return false;
+        };
+        let mut fields = target.split_whitespace();
+        let start = fields.next().and_then(|n| n.parse::<u64>().ok());
+        let length = fields.next().and_then(|n| n.parse::<u64>().ok());
+        targets.next().is_none()
+            && start == Some(0)
+            && sectors > 0
+            && length == Some(sectors)
+            && fields.next() == Some("crypt")
+            && fields.nth(3) == backing_tree["maj:min"].as_str()
+    });
+    table.stdout.zeroize();
+    ensure!(
+        covers_device,
+        "active mapping must have one crypt target covering the entire device"
+    );
+    let sysfs = sysfs.join("dm");
     let dm_uuid = fs::read_to_string(sysfs.join("uuid"))?;
     ensure!(
         dm_uuid.starts_with(&format!("CRYPT-LUKS2-{}-", uuid.replace('-', ""))),
@@ -186,7 +237,14 @@ fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
 
 pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
     let (fstype, devices) = mounted_devices(path)?;
-    fn collect(node: &Value, out: &mut BTreeSet<String>) -> Result<()> {
+    fn collect(node: &Value, out: &mut BTreeSet<String>, dm: &mut bool) -> Result<()> {
+        let number = node["maj:min"]
+            .as_str()
+            .context("missing block device number")?;
+        *dm |= Path::new("/sys/dev/block")
+            .join(number)
+            .join("dm")
+            .try_exists()?;
         if node["fstype"] == "crypto_LUKS" {
             out.insert(
                 node["uuid"]
@@ -197,23 +255,31 @@ pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {
         }
         if let Some(children) = node["children"].as_array() {
             for child in children {
-                collect(child, out)?;
+                collect(child, out, dm)?;
             }
         }
         Ok(())
     }
     let mut uuids = BTreeSet::new();
+    let mut device_mapper = false;
     let trees = devices
         .iter()
         .map(|device| block_ancestry(device))
         .collect::<Result<Vec<_>>>()?;
     for block in &trees {
-        collect(block, &mut uuids)?;
+        collect(block, &mut uuids, &mut device_mapper)?;
     }
-    if !uuids.is_empty() {
+    if device_mapper || !uuids.is_empty() {
         for (device, tree) in devices.iter().zip(&trees) {
-            verify_luks_member(device, tree)?;
+            verify_luks_member(device, tree).context(
+                "unsupported device-mapper layout. Use the existing disk passphrase or recovery key at the local console if available. Enrollment requires a single fully encrypted LUKS2 mapping directly over a disk or partition",
+            )?;
         }
+    } else {
+        ensure!(
+            trees.iter().all(direct_block_device),
+            "unsupported plaintext layout. Root enrollment only supports a disk or partition with a known backing device"
+        );
     }
     ensure!(
         fstype != "btrfs" || devices.len() == 1,
@@ -230,6 +296,10 @@ pub fn discover(root: &Path) -> Result<Option<Layout>> {
     // filesystem at /sysroot. Configuration and /var belong to the deployment.
     if fstype == "overlay" || fstype == "composefs" {
         (fstype, uuids) = ancestors(&root.join("sysroot"))?;
+        ensure!(
+            !matches!(fstype.as_str(), "overlay" | "composefs"),
+            "cannot identify the backing root filesystem"
+        );
     }
     if uuids.is_empty() {
         return Ok(None);

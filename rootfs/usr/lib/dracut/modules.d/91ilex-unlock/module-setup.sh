@@ -1,8 +1,8 @@
 #!/bin/bash
-check() { require_binaries ilex-enroll cryptsetup lsblk findmnt || return 1; return 0; }
+check() { require_binaries ilex-enroll cryptsetup dmsetup lsblk findmnt || return 1; return 0; }
 depends() { echo "systemd-cryptsetup crypt tpm2-tss"; }
 install() {
-    inst_multiple /usr/bin/ilex-enroll /usr/sbin/cryptsetup /usr/bin/lsblk /usr/bin/findmnt /usr/bin/true
+    inst_multiple /usr/bin/ilex-enroll /usr/sbin/cryptsetup /usr/sbin/dmsetup /usr/bin/lsblk /usr/bin/findmnt /usr/bin/true
     # Keep the original only inside this initramfs; the image's systemd binary
     # and ordinary installed-system cryptsetup services stay untouched.
     # Fedora 45 moved the executable to /usr/bin and kept the old lib/systemd
