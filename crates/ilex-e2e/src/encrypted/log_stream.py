@@ -11,13 +11,15 @@ CREDENTIALS = (
 CONTEXT = max(map(len, CREDENTIALS)) - 1
 FULL = re.compile(rb'[a-z]{48,}')
 RECOVERY_FULL = re.compile(rb'(?i:(?=([cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7})))')
-CONTROL = re.compile(rb'[\r\n\x1b\0]')
-NOT_INDENT = re.compile(rb'[^\r\n \t\0]')
-NOT_PARAMETER = re.compile(rb'[^ -?]')
-NOT_INTERMEDIATE = re.compile(rb'[^ -/]')
-STRING_END = re.compile(rb'[\x07\x1b]')
+ESC = 0x1B
+CSI, ST, OSC = 0x9B, 0x9C, 0x9D
+STRINGS = frozenset((0x90, 0x98, OSC, 0x9E, 0x9F))  # DCS, SOS, OSC, PM, APC
+CANCEL = frozenset((0x18, 0x1A))  # CAN, SUB
+SPECIAL = re.compile(rb'[\x00-\x1f\x7f-\x9f\xc2-\xf4]')
+UTF8 = re.compile(rb'[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}')
 CSI_SUFFIX = re.compile(rb'\[?[0-?]*[ -/]*[@-~]')
-STRING_SUFFIX = re.compile(rb'\x07|\x1b\\')
+ESC_SUFFIX = re.compile(rb'[ -/]*[0-~]')
+STRING_SUFFIX = re.compile(rb'[\x07\x18\x1a]|\x1b[\x00-\x06\x08-\x17\x19\x1c-\x1f]*\\|\xc2?\x9c')
 
 
 class Normalizer:
@@ -25,81 +27,129 @@ class Normalizer:
 
     def __init__(self, offset=0):
         self.offset = offset
-        self.mode = 'wrap'
+        self.mode = 'text'
+        self.indent = True
         self.escape = None
-        self.after_escape = 'text'
+        self.bell_ends_string = False
+        self.pending = b''
+        self.sequences = []
 
-    def feed(self, data, escapes=None):
+    def feed(self, data, escapes=None, final=False):
+        data = self.pending + data
+        self.pending = b''
         parts, offsets, starts = [], [], []
         length = 0
         index = 0
+
+        def keep(first, last):
+            nonlocal length
+            if self.indent:
+                while first < last and data[first] == 32:
+                    first += 1
+                if first == last:
+                    return
+                self.indent = False
+            starts.append(length)
+            offsets.append(self.offset + first)
+            parts.append(data[first:last])
+            length += last - first
+
+        def cut(first, last):
+            if escapes is None:
+                return
+            if escapes and escapes[-1][1] == first:
+                first = escapes.pop()[0]
+            escapes.append((first, last))
+
+        def begin(kind, start):
+            self.escape = start if self.escape is None else self.escape
+            if kind == ESC:
+                self.mode = 'escape'
+            elif kind == CSI:
+                self.mode = 'parameters'
+            else:
+                self.mode = 'string'
+                self.bell_ends_string = kind == OSC
+
+        def end(stop):
+            if self.escape is not None:
+                if escapes is not None:
+                    self.sequences.append((self.escape, stop))
+                cut(self.escape, stop)
+            self.escape = None
+            self.mode = 'text'
+
         while index < len(data):
             if self.mode == 'text':
-                control = CONTROL.search(data, index)
-                end = control.start() if control else len(data)
-                if end > index:
-                    starts.append(length)
-                    offsets.append(self.offset + index)
-                    parts.append(data[index:end])
-                    length += end - index
-                index = end
-                if control:
-                    if data[index] == 27:
-                        self.escape = self.offset + index
-                        self.mode = 'escape'
-                        self.after_escape = 'text'
-                    elif data[index] != 0:
-                        self.mode = 'wrap'
-                    index += 1
-            elif self.mode == 'wrap':
-                ordinary = NOT_INDENT.search(data, index)
-                index = ordinary.start() if ordinary else len(data)
-                if ordinary:
-                    if data[index] == 27:
-                        self.escape = self.offset + index
-                        self.after_escape = 'wrap'
-                        self.mode = 'escape'
-                        index += 1
+                control = SPECIAL.search(data, index)
+                stop = control.start() if control else len(data)
+                if stop > index:
+                    keep(index, stop)
+                index = stop
+                if not control:
+                    break
+            first = index
+            byte = data[index]
+            index += 1
+            if 0xC2 <= byte <= 0xF4:
+                width = 2 if byte <= 0xDF else 3 if byte <= 0xEF else 4
+                glyph = UTF8.match(data, first)
+                if glyph:
+                    index = glyph.end()
+                    if byte == 0xC2 and 0x80 <= data[first + 1] <= 0x9F:
+                        byte = data[first + 1]
                     else:
-                        self.mode = 'text'
-            elif self.mode == 'escape':
-                byte = data[index]
-                if byte == ord('['):
-                    self.mode = 'csi'
-                elif byte in b']P^_X':
-                    self.mode = 'string'
-                elif 32 <= byte <= 47:
-                    self.mode = 'intermediate'
-                else:
-                    self.mode = 'text'
-                if 32 <= byte <= 126:
-                    index += 1
-            elif self.mode in ('csi', 'intermediate'):
-                pattern = NOT_PARAMETER if self.mode == 'csi' else NOT_INTERMEDIATE
-                end = pattern.search(data, index)
-                index = end.start() if end else len(data)
-                if end:
-                    if 48 <= data[index] <= 126:
-                        index += 1
-                    self.mode = 'text'
-            elif self.mode == 'string':
-                end = STRING_END.search(data, index)
-                index = end.start() if end else len(data)
-                if end:
-                    self.mode = 'string-escape' if data[index] == 27 else 'text'
-                    index += 1
-            else:  # ESC in a control string, possibly the string terminator.
-                if data[index] == ord('\\'):
-                    self.mode = 'text'
-                    index += 1
-                else:
-                    self.mode = 'string'
-            if self.escape is not None and self.mode == 'text':
-                if escapes is not None:
-                    escapes.append((self.escape, self.offset + index))
-                self.escape = None
-                self.mode = self.after_escape
-        self.offset += len(data)
+                        byte = 0xFF  # International text is a graphic, not a raw C1 byte.
+                elif len(data) - first < width and all(
+                        0x80 <= part <= 0xBF for part in data[index:]):
+                    if final:
+                        cut(self.escape if self.escape is not None else self.offset + first,
+                            self.offset + len(data))
+                        self.escape = None
+                        index = len(data)
+                    else:
+                        self.pending = data[first:]
+                        index = first
+                    break
+            start, stop = self.offset + first, self.offset + index
+            if self.mode == 'text':
+                if byte == ESC or byte == CSI or byte in STRINGS:
+                    begin(byte, start)
+                elif byte in (10, 13):
+                    self.indent = True
+                elif byte != 9 and (byte < 32 or 0x7F <= byte <= 0x9F):
+                    cut(start, stop)
+                elif byte != 9:
+                    keep(first, index)
+            elif self.mode in ('string', 'string-escape'):
+                if (byte == ST or byte in CANCEL or byte == 7 and self.bell_ends_string
+                        or self.mode == 'string-escape' and byte == ord('\\')):
+                    end(stop)
+                elif byte == ESC:
+                    self.mode = 'string-escape'
+                elif byte >= 32 and not 0x7F <= byte <= 0x9F:
+                    if self.mode == 'string-escape':
+                        self.mode = 'escape'
+                        index = first
+                # Padding (including NUL between ESC and backslash) preserves state.
+            elif byte in CANCEL or byte == ST:
+                end(stop)
+            elif byte == ESC or byte == CSI or byte in STRINGS:
+                begin(byte, start)
+            elif byte < 32 or 0x7F <= byte <= 0x9F:
+                continue  # Execute/ignore standalone controls without ending a sequence.
+            elif self.mode == 'escape' and 0x40 <= byte <= 0x5F and byte + 0x40 in (*STRINGS, CSI):
+                begin(byte + 0x40, start)
+            elif 0x20 <= byte <= 0x2F:
+                self.mode = 'esc-intermediate' if self.mode.startswith('esc') else 'intermediate'
+            elif self.mode == 'parameters' and 0x30 <= byte <= 0x3F:
+                continue
+            elif (0x30 if self.mode.startswith('esc') else 0x40) <= byte <= 0x7E:
+                end(stop)
+            else:
+                end(start)
+                keep(first, index)
+        self.offset += index
         return b''.join(parts), (starts, offsets)
 
 
@@ -128,7 +178,7 @@ def edge_length(data, left):
 def redact(data):
     normalizer = Normalizer()
     escapes = []
-    normalized, mapping = normalizer.feed(data, escapes)
+    normalized, mapping = normalizer.feed(data, escapes, final=True)
     if normalizer.escape is not None:
         escapes.append((normalizer.escape, len(data)))
     spans = [m.span() for m in FULL.finditer(normalized)]
@@ -137,21 +187,24 @@ def redact(data):
         spans.append((0, count))
     # A snapshot can start in the middle of an escape. Try a leading CSI
     # suffix as well as the first orphaned control-string terminator.
-    csi = CSI_SUFFIX.match(normalized)
     string = None
     for match in STRING_SUFFIX.finditer(data):
-        previous = bisect_right(escapes, (match.start() - 1, len(data))) - 1
-        if previous < 0 or escapes[previous][1] <= match.start():
+        sequences = normalizer.sequences
+        previous = bisect_right(sequences, (match.start() - 1, len(data))) - 1
+        if previous < 0 or sequences[previous][1] <= match.start():
             string = match
             break
-    if csi or normalized.startswith(b'\\'):
-        start = csi.end() if csi else 1
+    for suffix in (CSI_SUFFIX, ESC_SUFFIX):
+        fragment = suffix.match(normalized)
+        if not fragment:
+            continue
+        start = fragment.end()
         edge = normalized[start:].lstrip(b' \t')
         if count := edge_length(edge, left=True):
             start = len(normalized) - len(edge)
             spans.append((start, start + count))
     if string:
-        remainder = Normalizer(string.end()).feed(data[string.end():])
+        remainder = Normalizer(string.end()).feed(data[string.end():], final=True)
         if count := edge_length(remainder[0], left=True):
             # Use the second mapping because the split starts in the middle
             # of the original capture and may be followed by wrap indentation.

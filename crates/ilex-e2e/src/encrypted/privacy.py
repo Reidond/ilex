@@ -99,8 +99,9 @@ def public_path(path, labels=None):
     return redact(b'<' + os.fsencode(path) + b'>')[1:-1].decode('utf-8', 'replace')[:160]
 
 
-def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=None):
-    assert fingerprints and all(f['length'] in PATTERNS and
+def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=None,
+         require_credentials=True):
+    assert (fingerprints or not require_credentials) and all(f['length'] in PATTERNS and
                                re.fullmatch('[0-9a-f]{64}', f['sha256'])
                                for f in fingerprints)
     result = {'schema': 2, 'files_scanned': 0, 'images_excluded': 0,
@@ -230,20 +231,103 @@ def verify_export(root, tiers):
                     raise ValueError('raw serial log or unsupported file in artifact tree')
 
 
+ENCRYPTED_TIERS = ('encrypted-install', 'encrypted-existing-space', 'encrypted-interrupted')
+EXPORT_REPORT = 'final-export-privacy.json'
+
+
+def artifact_roots(root, encrypted):
+    tiers = ('security', *ENCRYPTED_TIERS) if encrypted else ('security',)
+    verify_export(root, tiers)
+    paths = [root / tier for tier in tiers]
+    if not all(path.is_dir() for path in paths):
+        raise ValueError('qualification evidence missing')
+    return paths
+
+
+def artifact_snapshot(root, paths):
+    contents = {}
+    for path in sorted(file for directory in paths for file in directory.rglob('*')):
+        if path.is_dir():
+            continue
+        with path.open('rb') as source:
+            contents[path.relative_to(root).as_posix()] = hashlib.file_digest(source, 'sha256').hexdigest()
+    return contents
+
+
+def seal_export(root, marker, encrypted):
+    marker.unlink(missing_ok=True)
+    paths = artifact_roots(root, encrypted)
+    initial = artifact_snapshot(root, paths)
+    credentials = [entry for directory in paths for path in directory.rglob('*credentials.json')
+                   for entry in json.loads(path.read_text())]
+    if encrypted:
+        for tier in ENCRYPTED_TIERS:
+            definition = root / tier / 'result.json'
+            if json.loads(definition.read_text())['qualification'] != 'passed':
+                raise ValueError('encrypted qualification incomplete')
+            fingerprints = definition.with_name('installer-credentials.json')
+            required = [48, 71, 71] if tier == 'encrypted-interrupted' else [48, 71]
+            if sorted(entry['length'] for entry in json.loads(fingerprints.read_text())) != required:
+                raise ValueError('encrypted qualification fingerprints incomplete')
+    report = scan(paths, credentials, require_credentials=encrypted)
+    if report['secret_found'] or report['read_errors']:
+        return report
+    if artifact_snapshot(root, artifact_roots(root, encrypted)) != initial:
+        raise ValueError('qualification evidence changed during scan')
+    receipt = json.dumps(report) + '\n'
+    if encrypted:
+        path = root / EXPORT_REPORT
+        with path.open('x') as output:
+            output.write(receipt)
+        initial[EXPORT_REPORT] = hashlib.sha256(receipt.encode()).hexdigest()
+    with marker.open('x') as output:
+        json.dump(initial, output, sort_keys=True)
+    return report
+
+
+def check_seal(root, marker, encrypted):
+    current = artifact_snapshot(root, artifact_roots(root, encrypted))
+    if encrypted:
+        report = root / EXPORT_REPORT
+        if not stat.S_ISREG(report.lstat().st_mode):
+            raise ValueError('invalid privacy report')
+        current[EXPORT_REPORT] = hashlib.sha256(report.read_bytes()).hexdigest()
+    if json.loads(marker.read_text()) != current:
+        raise ValueError('qualification evidence changed after scan')
+
+
 if __name__ == '__main__':
     try:
         root = pathlib.Path(sys.argv[1])
         if sys.argv[2:3] == ['--verify-export']:
             verify_export(root, sys.argv[3:])
             raise SystemExit(0)
-        fingerprints = []
-        for path in root.rglob('*credentials.json'):
-            fingerprints.extend(json.loads(path.read_text()))
-        result = scan([root], fingerprints)
+        if sys.argv[2:3] == ['--check-seal']:
+            encrypted = sys.argv[4] == 'true'
+            check_seal(root, pathlib.Path(sys.argv[3]), encrypted)
+            name = sys.argv[5]
+            if name == 'security-evidence':
+                paths = ['security']
+            elif name == 'encrypted-installer-evidence' and encrypted:
+                paths = [*ENCRYPTED_TIERS, EXPORT_REPORT]
+            else:
+                raise ValueError('unknown artifact scope')
+            print('paths<<VERIFIED_QUALIFICATION_PATHS')
+            for path in paths:
+                print(root / path)
+            print('VERIFIED_QUALIFICATION_PATHS')
+            raise SystemExit(0)
+        if sys.argv[2:3] == ['--seal-export']:
+            result = seal_export(root, pathlib.Path(sys.argv[3]), sys.argv[4] == 'true')
+        else:
+            fingerprints = []
+            for path in root.rglob('*credentials.json'):
+                fingerprints.extend(json.loads(path.read_text()))
+            result = scan([root], fingerprints)
     except Exception:
         # A malformed archive or filename may contain credential material.
         # CI must fail without rendering exception text, paths or source data.
         result = {'schema': 2, 'secret_found': False, 'read_errors': 1,
                   'verification_failed': True}
-    print(json.dumps(result))
+    print(json.dumps(result), file=sys.stderr if sys.argv[2:3] == ['--check-seal'] else sys.stdout)
     raise SystemExit(1 if result['secret_found'] or result['read_errors'] else 0)

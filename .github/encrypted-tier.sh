@@ -31,6 +31,5 @@ for tier in ('encrypted-install', 'encrypted-existing-space', 'encrypted-interru
     result = pathlib.Path(sys.argv[1]) / tier / 'result.json'
     assert json.loads(result.read_text())['qualification'] == 'passed', tier + ' remains unqualified'
 PY
-python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$ILEX_ARTIFACTS" > "$ILEX_ARTIFACTS/final-export-privacy.json"
 qualified=true
-echo "Exact encrypted gates: **qualified**, automatic storage, existing free space, interrupted completion, PCR mismatch, actual recovery-key boots and final artifact privacy, $ILEX_SECURITY_ACCELERATOR / 6G / 2 vCPUs." >> "$GITHUB_STEP_SUMMARY"
+echo "Exact encrypted install gates: **passed**, automatic storage, existing free space, interrupted completion, PCR mismatch and recovery-key boots, $ILEX_SECURITY_ACCELERATOR / 6G / 2 vCPUs." >> "$GITHUB_STEP_SUMMARY"
