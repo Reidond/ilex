@@ -31,11 +31,17 @@ directories are disposable after any unique outputs have been recovered.
 
 Determine the source store from `KACHE_CACHE_DIR`, then `XDG_CACHE_HOME/kache`,
 then `~/.cache/kache`. For FedoraLinux-45, run the exporter from native
-PowerShell with Windows Python 3.11 or newer. It uses the distro's existing
-Python and an online, read-only SQLite backup while kache is running. The tar
-contains the backed-up index, committed entry metadata and only the immutable
-blobs referenced by those entries. If eviction removes a referenced file
-before it can be opened, the export fails and discards the partial archive.
+PowerShell with Windows Python 3.11 or newer. The distro's `setpriv` uses
+Landlock to deny filesystem writes by the exporter. SQLite reads an active
+WAL through its existing sidecars. A closed index without sidecars uses an
+immutable connection and is checked for concurrent changes.
+
+The exporter verifies each blob with `b3sum`. It reports damaged blobs and
+omits their dependent entries from the archive and its index. If eviction
+removes a referenced file before it can be opened, the export fails and
+discards the partial archive. If `b3sum` is absent in the distro, place the
+[x86_64 Linux release binary](https://github.com/BLAKE3-team/BLAKE3/releases)
+on Windows and pass its path with `--b3sum-linux`.
 Set `--distribution` and `--user` to select another source. Keep the archive
 and its digest receipt in private Windows staging outside the checkout.
 
