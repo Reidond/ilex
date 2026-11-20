@@ -383,7 +383,14 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
         }
         Operation::Resume { job } => {
             let root = state(ws)?;
-            let _guard = ilex_devkit::ownership::lock(&root.join("client.lock"))?;
+            let guard = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(root.join("client.lock"))?;
+            guard
+                .try_lock()
+                .context("job is not resumable while another checkout client is active")?;
             let id = match job {
                 Some(id) => id,
                 None => fs::read_to_string(root.join("last-job"))?,
@@ -424,6 +431,14 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
                 destinations["artifacts"].as_str().map(Path::new),
             )?;
             let transport = Transport::connect()?;
+            if matches!(&job.command, Command::Vm(args) if args.command.is_empty()) {
+                let status = transport.resume_terminal(&job.snapshot.identity.owner, &job.job)?;
+                ensure!(
+                    !status["result"].is_null(),
+                    "interactive job {} is not resumable while its original terminal is active",
+                    job.job
+                );
+            }
             transport::install_cancel_handler()?;
             wait(ws, &transport, &job, &dir, false).map(|_| ())
         }
@@ -666,6 +681,9 @@ fn wait(
         attempt.write_new("disk.windows.json", &serde_json::to_vec_pretty(&artifact)?)?;
     }
     eprintln!("ilex: job {} evidence: {}", job.job, attempt.path.display());
+    if let Some(error) = result["evidence_error"].as_str() {
+        eprintln!("ilex: evidence collection ended early: {error}");
+    }
     let mut receipt = control.create(&format!("collection-{}.partial", job_uuid()?))?;
     receipt.file.write_all(&serde_json::to_vec(&json!({"schema":1,"job":job.job,"owner":owner,"source_digest":job.snapshot.source.digest,"exit_code":code,"received":attempt.path}))?)?;
     receipt.file.sync_all()?;
@@ -675,11 +693,15 @@ fn wait(
     drop(receipt);
     if code != 0 {
         let code = if code < 0 { 128 - code } else { code };
+        let message = if let Some(reason) = result["terminal_error"].as_str() {
+            format!("interactive job {} is not resumable ({reason})", job.job)
+        } else {
+            format!("remote job {} exited {code}", job.job)
+        };
         return Err(super::Failure {
             code: u8::try_from(code).unwrap_or(1),
             message: format!(
-                "remote job {} exited {code}; artifacts retrieved to {}",
-                job.job,
+                "{message}. Artifacts retrieved to {}",
                 attempt.path.display()
             ),
         }

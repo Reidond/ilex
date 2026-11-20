@@ -195,6 +195,16 @@ impl Transport {
         );
         Ok(())
     }
+
+    /// Resolve an unattached terminal once the original checkout client is gone.
+    pub fn resume_terminal(&self, owner: &str, job: &str) -> Result<Value> {
+        let request = serde_json::json!({
+            "schema": 1, "payload_bytes": 0, "operation": "resume_terminal",
+            "owner": owner, "job": job,
+        });
+        self.exchange(&request, &[]).map(|(reply, _)| reply)
+    }
+
     pub fn rpc<Job: serde::Serialize>(
         &self,
         operation: TransferOperation<'_, Job>,
