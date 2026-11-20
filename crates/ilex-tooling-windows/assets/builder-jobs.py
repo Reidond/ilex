@@ -4,6 +4,23 @@
 The maintenance key already has guest-root authority through recipe updates.
 The framing and path checks prevent accidental interpolation and cross-job reuse;
 they do not sandbox executable source supplied by that key holder.
+
+Job lifecycle (state.json, including the immutable terminal result):
+  submit: absent -> registered (PTY) or starting (automatic)
+  client: registered -> registered (heartbeat every 15s, expires after 60s)
+  attach: registered -> starting (consumes the lease, 45s to claim)
+  worker: starting -> running -> collecting -> complete/cancelled
+  controller: registered/starting -> cancelled or interrupted
+  recovery: absent after a partial submit, or running/collecting with an
+    exited unit -> recovering
+  recovery owner: recovering -> interrupted (a successor claims after a crash)
+Cancel intent and successful delivery are fields on the same record. A live
+running unit receives TERM, then KILL after 10s. Only the worker can confirm
+quiescence by entering collecting. Collection takes at most 300s in the
+worker or 120s in recovery, including cleanup. The unit has an 8h runtime
+limit. The controller may retire an expired or abandoned registration.
+Each transition compares the record under a short dispatch lock and makes one
+atomic replacement. A recovery flock fences publication and is released on exit.
 """
 import contextlib
 import fcntl
@@ -34,7 +51,16 @@ MAX_FRAME = 32 * 1024 * 1024
 CHUNK = 4 * 1024 * 1024
 OEMDRV_BYTES = 32 * 1024 * 1024
 TERMINAL_LEASE_SECONDS = 60
+START_SECONDS = 45
+CANCEL_GRACE_SECONDS = 10
+CANCEL_WAIT_SECONDS = 18
+KILL_RETRY_SECONDS = 2
 EVIDENCE_SECONDS = 300
+RECOVERY_SECONDS = 120
+CLEANUP_SECONDS = 25
+JOB_SECONDS = 8 * 60 * 60
+CONSOLE_ROOT = Path('/var/log/libvirt/qemu/ilex-jobs')
+TERMINAL_STATES = {'complete', 'cancelled', 'interrupted'}
 ENV = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin',
        'HOME': '/root', 'LANG': 'C.UTF-8', 'XDG_RUNTIME_DIR': '/run/ilex-builder',
        'CARGO_HOME': str(BASE / 'cargo/home'), 'KACHE_CACHE_DIR': str(BASE / 'kache')}
@@ -77,11 +103,19 @@ def private(path):
 
 
 @contextlib.contextmanager
-def lock(path, shared=False, wait=True):
+def lock(path, shared=False, wait=True, seconds=30):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a+b') as f:
-        fcntl.flock(f, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | (0 if wait else fcntl.LOCK_NB))
+        end = time.monotonic() + seconds
+        while True:
+            try:
+                fcntl.flock(f, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not wait or time.monotonic() >= end:
+                    raise
+                time.sleep(.05)
         yield
 
 
@@ -323,10 +357,16 @@ def service(job):
     return 'ilex-job-' + ident(job) + '.service'
 
 
-def running(unit):
-    state = subprocess.run(['systemctl', 'show', '-p', 'ActiveState', '--value', unit],
-                           env=ENV, capture_output=True, text=True, check=True).stdout.strip()
-    return state in {'active', 'activating', 'deactivating', 'reloading'}
+def unit_live(spec, *, owned=False):
+    unit = service(spec['job'])
+    fields = checked(['systemctl', 'show', '-p', 'ActiveState', '-p', 'Description', unit],
+                     timeout=2).decode().splitlines()
+    info = dict(item.split('=', 1) for item in fields)
+    live = info['ActiveState'] in {'active', 'activating', 'deactivating', 'reloading'}
+    if live and owned:
+        owner = spec['snapshot']['identity']['owner']
+        assert info['Description'] == f"ilex-job schema=1 owner={owner} job={spec['job']}", 'job unit ownership changed'
+    return live
 
 
 def interactive(spec):
@@ -334,8 +374,75 @@ def interactive(spec):
     return command['operation'] == 'vm' and not command['args']['command']
 
 
-def terminal_expired(state):
-    return state.get('terminal_until', 0) <= time.time()
+TRANSITIONS = {
+    'submit': {None: {'registered', 'starting'}},
+    'heartbeat': {'registered': {'registered'}},
+    'attach': {'registered': {'starting'}},
+    'worker': {'starting': {'running'}, 'running': {'collecting'},
+               'collecting': {'complete', 'cancelled'}},
+    'controller': {None: {'cancelled'}, 'registered': {'cancelled', 'interrupted'}, 'starting': {'cancelled', 'interrupted'},
+                   'running': {'running'}, 'collecting': {'collecting'}},
+    'recovery': {None: {'recovering'}, 'running': {'recovering'}, 'collecting': {'recovering'},
+                 'recovering': {'recovering', 'interrupted'}},
+}
+
+
+def record(path, spec):
+    file = path / 'state.json'
+    current = read_json(file) if file.exists() else None
+    if current is None or 'generation' in current:
+        return current
+    # Jobs made before the lifecycle record was introduced are still resumable.
+    legacy = path / 'result.json'
+    if legacy.is_file():
+        return current | {'result': read_json(legacy)}
+    phase = {'queued': 'registered' if interactive(spec) else 'starting',
+             'failed': 'starting', 'cancelled': 'recovering', 'complete': 'recovering'}
+    return current | {'state': phase.get(current['state'], current['state'])}
+
+
+def compare_and_swap(path, spec, previous, actor, phase, **fields):
+    # Callers hold dispatch.lock across the check and atomic replacement.
+    assert record(path, spec) == previous, 'job record changed'
+    old = previous['state'] if previous else None
+    assert phase in TRANSITIONS[actor].get(old, ()), f'invalid {actor} transition {old} -> {phase}'
+    next_record = (previous or {}) | fields | {'state': phase,
+                  'generation': (previous or {}).get('generation', 0) + 1}
+    atomic(path / 'state.json', encode(next_record))
+    return next_record
+
+
+def dispatch(path):
+    return lock(path / 'dispatch.lock', seconds=8)
+
+
+def lease(seconds):
+    return {'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+            'until': time.monotonic() + seconds}
+
+
+def expired(current):
+    deadline = current.get('lease', {})
+    now = lease(0)
+    return deadline.get('boot') != now['boot'] or deadline.get('until', 0) <= now['until']
+
+
+def renew(owner, job):
+    path = job_path(owner, job)
+    if not (path / 'request.json').is_file():
+        return {'lease': 'waiting'}
+    path, spec = load_job({'owner': owner, 'job': job})
+    with dispatch(path):
+        current = record(path, spec)
+        if current is None:
+            return {'lease': 'waiting'}
+        if current['state'] != 'registered':
+            return {'lease': 'consumed'}
+        if expired(current):
+            finish_unclaimed(path, spec, current, 'interrupted', 'terminal registration expired')
+            return {'lease': 'expired'}
+        compare_and_swap(path, spec, current, 'heartbeat', 'registered', lease=lease(TERMINAL_LEASE_SECONDS))
+        return {'lease': 'renewed'}
 
 
 def launch(spec, terminal=False):
@@ -343,39 +450,45 @@ def launch(spec, terminal=False):
     command = ['systemd-run', '--quiet', '--unit=' + service(job),
                '--description=ilex-job schema=1 owner=' + owner + ' job=' + job,
                '--property=Type=exec', '--property=KillMode=control-group',
+               f'--property=RuntimeMaxSec={JOB_SECONDS}',
                f'--property=TimeoutStopSec={EVIDENCE_SECONDS + 45}', '--property=SendSIGKILL=yes']
     if terminal:
         command += ['--pty', '--collect']
     command += ['/usr/bin/python3', '-I', '-S', '/usr/local/libexec/ilex-builder-jobs',
                 '--run', owner, job]
     if terminal:
-        return subprocess.run(command, env=ENV | {'TERM': os.environ.get('TERM', 'xterm')}).returncode
-    checked(command)
+        return subprocess.run(command, env=ENV | {'TERM': os.environ.get('TERM', 'xterm')},
+                              timeout=JOB_SECONDS + EVIDENCE_SECONDS + 60).returncode
+    checked(command, timeout=START_SECONDS)
     return 0
 
 
 def terminal(owner, job):
     path, spec = load_job({'owner': owner, 'job': job})
-    with lock('/run/lock/ilex-builder-jobs.lock', shared=True), lock(path / 'terminal.lock', wait=False):
+    with lock('/run/lock/ilex-builder-jobs.lock', shared=True):
         assert interactive(spec), 'job has no guest terminal'
-        with lock(path / 'dispatch.lock'):
-            state = read_json(path / 'state.json')
-            assert state['state'] == 'queued', 'terminal job is not queued'
-            if terminal_expired(state):
-                finish_interrupted(path, spec, terminal_error='terminal registration expired')
+        with dispatch(path):
+            current = record(path, spec)
+            assert current and current['state'] == 'registered', 'terminal job is not registered'
+            if expired(current):
+                finish_unclaimed(path, spec, current, 'interrupted', 'terminal registration expired')
                 raise ValueError('terminal registration expired')
-            assert not running(service(job)), 'terminal job is already running'
+            compare_and_swap(path, spec, current, 'attach', 'starting', lease=lease(START_SECONDS))
         def disconnect(_signum, _frame):
             raise InterruptedError('guest terminal disconnected')
         signal.signal(signal.SIGHUP, disconnect)
         signal.signal(signal.SIGTERM, disconnect)
+        code = None
         try:
-            return launch(spec, terminal=True)
+            code = launch(spec, terminal=True)
+            return code
         finally:
-            if running(service(job)):
-                description = checked(['systemctl', 'show', '-p', 'Description', '--value', service(job)]).decode().strip()
-                assert description == 'ilex-job schema=1 owner=' + owner + ' job=' + job, 'job unit ownership changed'
-                checked(['systemctl', 'stop', service(job)])
+            if code != 0:
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                reply = cancel_job(path, spec)
+                if reply['cancel'] == 'pending':
+                    print('terminal disconnected; cancel pending', file=sys.stderr)
 
 
 def submit(spec):
@@ -386,25 +499,27 @@ def submit(spec):
     root = materialize(snapshot)
     owner = snapshot['identity']['owner']
     path = job_path(owner, spec['job'])
-    with lock(JOBS / 'register.lock'):
-        if path.exists():
-            assert read_json(path / 'request.json') == spec, 'job UUID reused with another request'
+    with dispatch(path):
+        job_request = path / 'request.json'
+        if job_request.is_file():
+            assert read_json(job_request) == spec, 'job UUID reused with another request'
+        if record(path, spec) is not None:
             return {'job': spec['job'], 'root': str(root)}
         reserve(16 * 1024**3)
-        path.mkdir(parents=True)
-        with lock(path / 'dispatch.lock'):
-            atomic(path / 'request.json', encode(spec))
-            atomic(path / 'context.json', encode({'schema': 1, 'root': str(root), 'identity': snapshot['identity'], 'source': snapshot['source']}))
-            state = {'state': 'queued', 'exit_code': None}
-            if interactive(spec):
-                state['terminal_until'] = time.time() + TERMINAL_LEASE_SECONDS
-            atomic(path / 'state.json', encode(state))
-            try:
-                if not interactive(spec):
-                    launch(spec)
-            except BaseException:
-                atomic(path / 'state.json', encode({'state': 'failed', 'exit_code': 1}))
-                raise
+        atomic(job_request, encode(spec))
+        atomic(path / 'context.json', encode({'schema': 1, 'root': str(root), 'identity': snapshot['identity'], 'source': snapshot['source']}))
+        attached = interactive(spec)
+        initial = compare_and_swap(path, spec, None, 'submit', 'registered' if attached else 'starting',
+                                   lease=lease(TERMINAL_LEASE_SECONDS if attached else START_SECONDS))
+    if not attached:
+        try:
+            launch(spec)
+        except Exception:
+            with dispatch(path):
+                current = record(path, spec)
+                if current == initial:
+                    finish_unclaimed(path, spec, current, 'interrupted', 'worker launch failed')
+            raise
     return {'job': spec['job'], 'root': str(root)}
 
 
@@ -425,25 +540,34 @@ def capacity(spec):
     cap = min(4, max(1, total // (8 * 1024**3)))
     if 'ILEX_VM_SLOTS' in spec['environment']:
         cap = min(cap, max(1, int(spec['environment']['ILEX_VM_SLOTS'])))
-    while True:
-        with lock(JOBS / 'schedule.lock'):
+    until = time.monotonic() + 2 * 60 * 60
+    while time.monotonic() < until:
+        with lock(JOBS / 'schedule.lock', seconds=60):
             active = []
             for lease in JOBS.glob('*/*/lease.json'):
-                record = read_json(lease)
-                if running(service(lease.parent.name)):
-                    active.append(record)
-                else:
-                    # A dead launcher is not proof that libvirt/conmon stopped.
-                    # Reconcile its exact recorded IDs before releasing memory.
-                    previous = read_json(lease.parent / 'request.json')
-                    assert previous['job'] == lease.parent.name and previous['snapshot']['identity']['owner'] == lease.parent.parent.name
-                    cleanup_resources(lease.parent, previous)
-                    lease.unlink(missing_ok=True)
+                if time.monotonic() >= until:
+                    raise TimeoutError('job capacity wait exceeded two hours')
+                try:
+                    reservation = read_json(lease)
+                except FileNotFoundError:
+                    continue
+                previous = read_json(lease.parent / 'request.json')
+                assert previous['job'] == lease.parent.name and previous['snapshot']['identity']['owner'] == lease.parent.parent.name
+                if unit_live(previous, owned=True):
+                    active.append(reservation)
+                    continue
+                try:
+                    with lock(lease.parent / 'publisher.lock', wait=False):
+                        cleanup_bounded(previous, min(until, time.monotonic() + CLEANUP_SECONDS))
+                        lease.unlink(missing_ok=True)
+                except (BlockingIOError, TimeoutError, RuntimeError, subprocess.SubprocessError):
+                    active.append(reservation)
             if len(active) < cap and sum(x['bytes'] for x in active) + weight <= total - 2 * 1024**3 and sum(x['cpus'] for x in active) + cpus <= os.cpu_count():
                 atomic(job_path(spec['snapshot']['identity']['owner'], spec['job']) / 'lease.json',
                        encode({'bytes': weight, 'cpus': cpus, 'unit': service(spec['job'])}))
                 return
         time.sleep(2)
+    raise TimeoutError('job capacity wait exceeded two hours')
 
 
 def artifact_entry(file, name):
@@ -458,11 +582,11 @@ def artifact_inventory(path, state, artifacts):
     outputs = {'build': ('jobs',), 'rechunk': ('jobs',), 'disk': ('disks',),
                'iso': ('iso',), 'tool': ('tools/images', 'tools/keys'),
                'export': ('exports',)}
+    if operation == 'oemdrv':
+        roots.append((path / 'fixture', 'artifacts'))
+    elif operation not in {'import_kache', 'self_check'}:
+        roots.append((path / 'artifacts', 'artifacts'))
     if state is not None:
-        if operation == 'oemdrv':
-            roots.append((path / 'fixture', 'artifacts'))
-        elif operation not in {'import_kache', 'self_check'}:
-            roots.append((path / 'artifacts', 'artifacts'))
         roots.extend((state / prefix, prefix) for prefix in outputs.get(operation, ()))
     for root, prefix in roots:
         if not root.is_dir():
@@ -481,6 +605,8 @@ def artifact_inventory(path, state, artifacts):
                 continue
             assert file.resolve().is_relative_to(root.resolve()), 'artifact parent escapes its owned directory'
             name = prefix + '/' + file.relative_to(root).as_posix()
+            if prefix == 'artifacts' and name.startswith('artifacts/console/'):
+                continue  # guest console evidence is collected separately
             # XFS reflinks retain immutable job outputs cheaply even when the
             # next owner-serialized job rewrites a cache at the same state path.
             if prefix != 'job':
@@ -506,7 +632,7 @@ def remove_libvirt(identity, name):
 
 def prepare_console_logs(owner, job):
     # virtlogd/QEMU must not traverse private source, state or credential trees.
-    base = Path('/var/log/libvirt/qemu/ilex-jobs')
+    base = CONSOLE_ROOT
     directory = base / owner / job
     group = grp.getgrnam('qemu').gr_gid
     for path in (base, base / owner, directory):
@@ -518,16 +644,31 @@ def prepare_console_logs(owner, job):
     return directory
 
 
-def collect_console_logs(directory, artifacts):
-    if directory is None:
-        return
-    target = artifacts / 'console'
-    target.mkdir(parents=True, exist_ok=True)
-    for source in directory.glob('*.log'):
-        assert source.is_file() and not source.is_symlink(), 'console output replaced'
-        partial = target / (source.name + '.' + uuid.uuid4().hex + '.partial')
-        checked(['cp', '--reflink=auto', '--sparse=always', '--', str(source), str(partial)])
-        os.replace(partial, target / source.name)
+def console_names(path, directory):
+    names = {source.name for source in directory.glob('*.log')}
+    names.update(source.name for source in (path / 'artifacts/console').glob('*.log'))
+    for receipt in (path / 'resources').glob('*.json'):
+        entry = read_json(receipt)
+        if entry['provider'] in {'libvirt', 'libvirt_nonce'}:
+            name = relative(entry['name'])
+            assert '/' not in name, 'invalid console allocation name'
+            names.update({name + '-console.log', name + '-platform.log'})
+    return sorted(names)
+
+
+def collect_console_log(path, directory, name):
+    source = directory / name
+    if not source.exists():
+        source = path / 'artifacts/console' / name  # a legacy job may have made the copy
+    assert source.is_file() and not source.is_symlink(), f'missing or invalid console log {name}'
+    assert source.resolve().parent in {directory, path / 'artifacts/console'}, 'console log escaped its job'
+    artifact = f'artifacts/console/{name}'
+    target = path / 'exports' / artifact
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(target.name + '.' + uuid.uuid4().hex + '.partial')
+    checked(['cp', '--reflink=auto', '--sparse=always', '--', str(source), str(partial)])
+    os.replace(partial, target)
+    return artifact_entry(target, artifact)
 
 
 def cleanup_resources(path, spec):
@@ -714,6 +855,7 @@ def execute(owner, job):
     def cancel(_signum, _frame):
         nonlocal cancelled
         cancelled = True
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         raise InterruptedError('job cancelled')
 
     signal.signal(signal.SIGTERM, cancel)
@@ -721,25 +863,21 @@ def execute(owner, job):
     guards = contextlib.ExitStack()
     claimed = False
     admitted = False
-    console_logs = None
     try:
-        # The PTY launcher releases this lock before starting systemd-run.
-        # Claim publication here, before admitting any resources.
-        with lock(path / 'dispatch.lock'):
-            dispatch = read_json(path / 'state.json')
-            if dispatch['state'] == 'cancelled':
+        with dispatch(path):
+            current = record(path, spec)
+            if current['state'] in TERMINAL_STATES:
                 return
-            assert dispatch['state'] == 'queued', 'job is not queued'
-            if interactive(spec) and terminal_expired(dispatch):
-                finish_interrupted(path, spec, terminal_error='terminal registration expired')
+            assert current['state'] == 'starting', 'job is not starting'
+            if expired(current):
                 return
-            atomic(path / 'state.json', encode({'state': 'running', 'exit_code': None}))
+            compare_and_swap(path, spec, current, 'worker', 'running', lease=None)
             claimed = True
         guards.enter_context(lock('/run/lock/ilex-builder-jobs.lock', shared=True))
-        guards.enter_context(lock(owner_dir(spec['snapshot']) / 'job.lock'))
+        guards.enter_context(lock(state.parent.parent / 'job.lock', seconds=2 * 60 * 60))
+        capacity(spec)
         admitted = True
         if admitted:
-            capacity(spec)
             root = snapshot_path(spec['snapshot'])
             verify_source(root, spec['snapshot']['source'])
             console_logs = prepare_console_logs(owner, job)
@@ -804,146 +942,229 @@ def execute(owner, job):
             err.write((str(error) + '\n').encode())
         code = 130 if cancelled else 1
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             if claimed:
-                finish_worker(path, spec, state if admitted else None, console_logs, code, cancelled,
+                finish_worker(path, spec, state if admitted else None, code, cancelled,
                               {'compile_seconds': compile_seconds, 'operation_seconds': operation_seconds,
                                'data_free_before': free_before}, started)
         finally:
             guards.close()
 
 
-def collect_evidence(path, state, console_logs=None, seconds=EVIDENCE_SECONDS):
-    artifacts = []
-    error = None
+@contextlib.contextmanager
+def deadline(until, label):
+    seconds = until - time.monotonic()
+    if seconds <= 0:
+        raise TimeoutError(f'{label} deadline exceeded')
 
-    def deadline(_signum, _frame):
-        raise TimeoutError(f'evidence collection exceeded {seconds} seconds')
+    def timeout(_signum, _frame):
+        raise TimeoutError(f'{label} deadline exceeded')
 
-    previous = signal.signal(signal.SIGALRM, deadline)
-    signal.alarm(seconds)
+    previous = signal.signal(signal.SIGALRM, timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
-        try:
-            collect_console_logs(console_logs, path / 'artifacts')
-        except TimeoutError:
-            raise
-        except Exception as failure:
-            error = 'console collection failed: ' + str(failure)
-        artifact_inventory(path, state, artifacts)
-    except Exception as failure:
-        error = str(failure)
+        yield
     finally:
-        signal.alarm(0)
+        signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
-    return artifacts, error
 
 
-def publish_result(path, outcome, result):
-    # All publishers hold dispatch.lock. A claimed live worker is the only
-    # publisher until its unit exits.
-    assert not (path / 'result.json').exists(), 'job result already published'
-    state = path / 'state.json'
-    atomic(state, encode({'state': outcome, 'exit_code': result['exit_code']}))
-    result['artifacts'].append(artifact_entry(state, 'job/state.json'))
-    atomic(path / 'result.json', encode(result))
-
-
-def finish_worker(path, spec, state, console_logs, code, cancelled, metrics, started):
-    # Cancel may still record intent in this phase. It leaves the workers
-    # copying and hashing evidence alone.
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    with lock(path / 'dispatch.lock'):
-        atomic(path / 'state.json', encode({'state': 'collecting', 'exit_code': None}))
-    cleanup_error = None
-    if state is not None:
+def cleanup_bounded(spec, until):
+    # Keep the publisher out of virsh/Podman. Even a stuck child must not own
+    # the job record or its deadline. The lease survives any cleanup failure.
+    owner = spec['snapshot']['identity']['owner']
+    with tempfile.TemporaryFile() as output:
+        worker = subprocess.Popen([sys.executable, '-I', '-S', __file__, '--cleanup', owner, spec['job'], str(until)],
+                                  env=ENV, stdin=subprocess.DEVNULL, stdout=output,
+                                  stderr=output, start_new_session=True)
         try:
-            cleanup_resources(path, spec)
-        except Exception as error:
-            cleanup_error = str(error)
-            with (path / 'stderr.log').open('ab') as err:
-                err.write(('owned resource cleanup failed: ' + str(error) + '\n').encode())
-    artifacts, evidence_error = collect_evidence(path, state, console_logs)
+            if worker.wait(timeout=max(0, until - time.monotonic())) == 0:
+                return
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(worker.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                worker.wait(timeout=1)
+            raise TimeoutError('resource cleanup deadline exceeded') from None
+        if worker.returncode == -signal.SIGKILL:
+            raise TimeoutError('resource cleanup deadline exceeded')
+        output.seek(0)
+        raise RuntimeError(output.read(4096).decode(errors='replace').strip() or 'resource cleanup failed')
+
+
+def collect_final(path, spec, state, until, cleanup):
+    artifacts, errors = [], []
+    cleanup_error = None
+    if cleanup:
+        try:
+            cleanup_bounded(spec, min(until, time.monotonic() + CLEANUP_SECONDS))
+            (path / 'lease.json').unlink(missing_ok=True)
+        except Exception as failure:
+            cleanup_error = str(failure)
+    owner = spec['snapshot']['identity']['owner']
+    directory = CONSOLE_ROOT / owner / spec['job']
+    try:
+        with deadline(until, 'console inventory'):
+            names = console_names(path, directory)
+    except Exception as failure:
+        names = []
+        errors.append(f'console inventory: {failure}')
+    for name in names:
+        try:
+            with deadline(until, 'console collection'):
+                artifacts.append(collect_console_log(path, directory, name))
+        except Exception as failure:
+            errors.append(f'{name}: {failure}')
+    try:
+        with deadline(until, 'evidence collection'):
+            artifact_inventory(path, state, artifacts)
+    except Exception as failure:
+        errors.append(str(failure))
+    return {'artifacts': artifacts, 'evidence_error': '; '.join(errors) or None,
+            'resource_cleanup_error': cleanup_error,
+            'resource_lease_retained': (path / 'lease.json').exists()}
+
+
+def state_view(current):
+    return {'state': current['state'], 'exit_code': current.get('exit_code')}
+
+
+def publish(path, spec, current, actor, outcome, code, **evidence):
+    assert outcome in TERMINAL_STATES and 'result' not in (current or {}), 'job result already published'
+    state_bytes = encode(state_view({'state': outcome, 'exit_code': code}))
+    artifacts = evidence.pop('artifacts')
+    artifacts.append({'path': 'job/state.json', 'bytes': len(state_bytes), 'sha256': digest(state_bytes)})
+    result = {'schema': 1, 'job': spec['job'], 'owner': spec['snapshot']['identity']['owner'],
+              'source_digest': spec['snapshot']['source']['digest'], 'exit_code': code,
+              'artifacts': artifacts, **evidence}
+    return compare_and_swap(path, spec, current, actor, outcome, exit_code=code, result=result)
+
+
+def finish_unclaimed(path, spec, current, outcome, reason=None):
+    artifacts = [artifact_entry(path / name, 'job/' + name)
+                 for name in ('request.json', 'context.json') if (path / name).is_file()]
+    return publish(path, spec, current, 'controller', outcome, 130, artifacts=artifacts,
+                   interrupted=outcome == 'interrupted', terminal_error=reason)
+
+
+def finish_worker(path, spec, state, code, cancelled, metrics, started):
+    with dispatch(path):
+        current = record(path, spec)
+        compare_and_swap(path, spec, current, 'worker', 'collecting')
+    until = time.monotonic() + EVIDENCE_SECONDS
+    evidence = collect_final(path, spec, state, until, cleanup=(path / 'lease.json').exists())
     versions = {}
     for tool in ('rustc', 'cargo', 'podman', 'bcvk', 'qemu-system-x86_64'):
         try:
-            versions[tool] = checked([tool, '--version'], timeout=5).decode().splitlines()[0]
+            versions[tool] = checked([tool, '--version'], timeout=min(5, max(0, until - time.monotonic()))).decode().splitlines()[0]
         except Exception:
             versions[tool] = 'unavailable'
-    result = {'schema': 1, 'job': spec['job'], 'owner': spec['snapshot']['identity']['owner'],
-              'source_digest': spec['snapshot']['source']['digest'], **metrics,
-              'elapsed_seconds': time.monotonic() - started, 'data_free_after': shutil.disk_usage(BASE).free,
-              'executor_id': 'hyperv-builder:' + read_json('/var/lib/ilex-builder/provision.json')['data_uuid'],
-              'versions': versions, 'artifacts': artifacts, 'evidence_error': evidence_error,
-              'resource_cleanup_error': cleanup_error, 'resource_lease_retained': cleanup_error is not None}
+    details = {**metrics, 'elapsed_seconds': time.monotonic() - started, 'data_free_after': shutil.disk_usage(BASE).free,
+               'executor_id': 'hyperv-builder:' + read_json('/var/lib/ilex-builder/provision.json')['data_uuid'],
+               'versions': versions}
     if (path / 'image.json').is_file():
-        result['image'] = read_json(path / 'image.json')
-    with lock(path / 'dispatch.lock'):
-        cancelled = cancelled or (path / 'cancel.requested').exists()
-        result['exit_code'] = 130 if cancelled else (code or int(bool(cleanup_error or evidence_error)))
-        publish_result(path, 'cancelled' if cancelled else 'complete', result)
-    if cleanup_error is None:
-        (path / 'lease.json').unlink(missing_ok=True)
+        details['image'] = read_json(path / 'image.json')
+    with dispatch(path):
+        current = record(path, spec)
+        cancelled = cancelled or 'cancel_at' in current
+        code = 130 if cancelled else (code or int(bool(evidence['resource_cleanup_error'] or evidence['evidence_error'])))
+        publish(path, spec, current, 'worker', 'cancelled' if cancelled else 'complete',
+                code, **details, **evidence)
 
 
-def finish_interrupted(path, spec, state=None, cleanup_error=None, terminal_error=None):
-    artifacts, evidence_error = collect_evidence(path, state, seconds=120)
-    result = {'schema': 1, 'job': spec['job'], 'owner': spec['snapshot']['identity']['owner'],
-              'source_digest': spec['snapshot']['source']['digest'], 'exit_code': 130,
-              'artifacts': artifacts, 'interrupted': True, 'evidence_error': evidence_error,
-              'resource_cleanup_error': cleanup_error, 'terminal_error': terminal_error}
-    publish_result(path, 'cancelled', result)
-    return result
+def recover(path, spec):
+    # A crashed recovery releases this lock in the kernel. Its successor
+    # reclaims the recovering record without racing a live publisher.
+    try:
+        with lock(path / 'publisher.lock', wait=False):
+            with dispatch(path):
+                current = record(path, spec)
+                if current and current['state'] not in {'running', 'collecting', 'recovering'}:
+                    return current
+                if current and unit_live(spec, owned=True):
+                    return current
+                if current is None:
+                    # The submitter died after writing the request but before committing registration.
+                    # The absence is fenced by dispatch.lock and no launcher can claim it.
+                    current = compare_and_swap(path, spec, None, 'recovery', 'recovering')
+                else:
+                    current = compare_and_swap(path, spec, current, 'recovery', 'recovering')
+            # Only job-owned outputs are safe to recover after losing the checkout execution lock.
+            evidence = collect_final(path, spec, None, time.monotonic() + RECOVERY_SECONDS, cleanup=True)
+            with dispatch(path):
+                return publish(path, spec, current, 'recovery', 'interrupted', 130,
+                               interrupted=True, **evidence)
+    except BlockingIOError:
+        with dispatch(path):
+            return record(path, spec)
+
+
+def cancel_step(path, spec):
+    with dispatch(path):
+        current = record(path, spec)
+        if current is None:
+            finish_unclaimed(path, spec, current, 'cancelled')
+            return 'confirmed', None
+        phase = current['state']
+        if phase in TERMINAL_STATES:
+            return ('finished' if phase == 'complete' else 'confirmed'), None
+        if phase in {'registered', 'starting'}:
+            finish_unclaimed(path, spec, current, 'cancelled')
+            return 'confirmed', None
+        if phase == 'recovering':
+            return 'gone', None
+        if 'cancel_at' not in current:
+            current = compare_and_swap(path, spec, current, 'controller', phase, cancel_at=time.monotonic())
+        if phase == 'collecting':
+            return 'confirmed', None
+        try:
+            if not unit_live(spec, owned=True):
+                return 'gone', None
+            now = time.monotonic()
+            which = 'SIGKILL' if now - current['cancel_at'] >= CANCEL_GRACE_SECONDS else 'SIGTERM'
+            retry_kill = which == 'SIGKILL' and now - current.get('delivered_at', 0) >= KILL_RETRY_SECONDS
+            if current.get('delivered') != which or retry_kill:
+                checked(['systemctl', 'kill', '--signal=' + which, '--kill-whom=all', service(spec['job'])], timeout=2)
+                compare_and_swap(path, spec, current, 'controller', phase,
+                                 delivered=which, delivered_at=time.monotonic())
+        except (OSError, subprocess.SubprocessError, AssertionError) as failure:
+            return 'pending', str(failure)
+        return 'pending', 'waiting for the worker to stop'
 
 
 def cancel_job(path, spec):
-    with lock(path / 'dispatch.lock'):
-        request = path / 'cancel.requested'
-        if (path / 'result.json').exists() or request.exists():
-            return
-        state_name = read_json(path / 'state.json')['state']
-        if state_name == 'queued':
-            finish_interrupted(path, spec)
-            return
-        unit = service(spec['job'])
-        signal_worker = state_name == 'running' and running(unit)
-        if signal_worker:
-            description = checked(['systemctl', 'show', '-p', 'Description', '--value', unit]).decode().strip()
-            owner = spec['snapshot']['identity']['owner']
-            assert description == 'ilex-job schema=1 owner=' + owner + ' job=' + spec['job'], 'job unit ownership changed'
-        atomic(request, b'\n')
-        if signal_worker:
-            checked(['systemctl', 'kill', '--signal=SIGTERM', '--kill-whom=all', unit])
+    until = time.monotonic() + CANCEL_WAIT_SECONDS
+    while True:
+        try:
+            status, detail = cancel_step(path, spec)
+        except BlockingIOError:
+            status, detail = 'pending', 'job transition in progress'
+        if status != 'pending':
+            # A status poll will recover evidence if a unit has exited.
+            return {'cancel': 'confirmed' if status == 'gone' else status}
+        if time.monotonic() >= until:
+            return {'cancel': 'pending', 'detail': detail}
+        time.sleep(.5)
 
 
 def job_status(path, spec, resume_terminal=False):
-    with lock(path / 'dispatch.lock'):
-        result = read_json(path / 'result.json') if (path / 'result.json').exists() else None
-        dispatch = read_json(path / 'state.json')
-        reconciliation_error = None
-        if result and (path / 'lease.json').exists() and not running(service(spec['job'])):
-            try:
-                cleanup_resources(path, spec)
-                (path / 'lease.json').unlink(missing_ok=True)
-            except Exception as error:
-                reconciliation_error = str(error)
-        waiting_terminal = interactive(spec) and dispatch['state'] == 'queued'
-        if not result and waiting_terminal and (resume_terminal or terminal_expired(dispatch)):
-            reason = 'the original client did not open its terminal' if resume_terminal else 'terminal registration expired'
-            result = finish_interrupted(path, spec, terminal_error=reason)
-        if not result and not waiting_terminal and not running(service(spec['job'])):
-            # Recover an interrupted process, or a cancellation interrupted
-            # after recording the state but before publishing the result.
-            state = owner_dir(spec['snapshot']) / 'state' / spec['snapshot']['identity']['slug']
-            cleanup_error = None
-            try:
-                cleanup_resources(path, spec)
-                (path / 'lease.json').unlink(missing_ok=True)
-            except Exception as error:
-                cleanup_error = str(error)
-            result = finish_interrupted(path, spec, state, cleanup_error)
-        sizes = {n: (path / (n + '.log')).stat().st_size if (path / (n + '.log')).exists() else 0 for n in ('stdout', 'stderr')}
-        return {'state': read_json(path / 'state.json'), 'result': result, 'logs': sizes,
-                'resource_reconciliation_error': reconciliation_error}
+    with dispatch(path):
+        current = record(path, spec)
+        if current and current['state'] in {'registered', 'starting'}:
+            if expired(current) or (resume_terminal and current['state'] == 'registered'):
+                reason = ('the original client did not open its terminal' if resume_terminal and current['state'] == 'registered'
+                          else 'terminal registration expired' if current['state'] == 'registered'
+                          else 'worker start expired')
+                current = finish_unclaimed(path, spec, current, 'interrupted', reason)
+    if current and current['state'] == 'running' and 'cancel_at' in current:
+        cancel_step(path, spec)
+    if current is None or current['state'] in {'running', 'collecting', 'recovering'}:
+        # A live worker keeps its publication right. Recovery never runs under the dispatch lock.
+        current = recover(path, spec)
+    sizes = {n: (path / (n + '.log')).stat().st_size if (path / (n + '.log')).exists() else 0 for n in ('stdout', 'stderr')}
+    return {'state': state_view(current or {'state': 'recovering'}),
+            'result': (current or {}).get('result'), 'logs': sizes}
 
 
 def request(frame, payload):
@@ -980,11 +1201,12 @@ def request(frame, payload):
         return submit(frame['request']), b''
     if op == 'stage':
         return {'root': str(materialize(frame['snapshot']))}, b''
+    if op == 'renew_terminal':
+        return renew(frame['owner'], frame['job']), b''
     if op in {'status', 'resume_terminal', 'cancel', 'fetch'}:
         path, spec = load_job(frame)
         if op == 'cancel':
-            cancel_job(path, spec)
-            return {}, b''
+            return cancel_job(path, spec), b''
         if op in {'status', 'resume_terminal'}:
             assert op == 'status' or interactive(spec), 'job has no guest terminal'
             return job_status(path, spec, resume_terminal=op == 'resume_terminal'), b''
@@ -993,9 +1215,19 @@ def request(frame, payload):
         if prefix == 'job':
             assert tail in {'stdout.log', 'stderr.log', 'state.json', 'request.json', 'context.json', 'result.json', 'image.json'}, 'unsupported job artifact'
             target = path / tail
+            if tail in {'state.json', 'result.json'}:
+                current = record(path, spec)
+                if current and 'generation' in current:
+                    value = state_view(current) if tail == 'state.json' else current.get('result')
+                    assert value is not None, 'job result not published'
+                    offset = frame.get('offset', 0)
+                    assert isinstance(offset, int) and offset >= 0
+                    data = encode(value)[offset:offset + 64 * 1024 * 1024]
+                    return {'bytes': len(data), 'sha256': digest(data)}, data
         else:
             assert prefix in {'artifacts', 'iso', 'disks', 'tools', 'jobs', 'exports'} and not private(tail), 'unsupported output artifact'
-            result = read_json(path / 'result.json')
+            result = record(path, spec).get('result')
+            assert result is not None, 'job result not published'
             assert result['job'] == frame['job'] and result['owner'] == frame['owner'], 'artifact result identity mismatch'
             assert any(a['path'] == name for a in result['artifacts']), 'artifact is not in the immutable job result'
             target = path / 'exports' / name
@@ -1015,6 +1247,18 @@ def main():
         return terminal(ident(sys.argv[2]), ident(sys.argv[3]))
     if len(sys.argv) == 4 and sys.argv[1] == '--run':
         execute(ident(sys.argv[2]), ident(sys.argv[3]))
+        return
+    if len(sys.argv) == 5 and sys.argv[1] == '--cleanup':
+        assert os.getpid() == os.getpgrp(), 'cleanup needs its own process group'
+        until = float(sys.argv[4])
+        # The deadline and resource lock still apply if the publisher dies.
+        def stop_cleanup(_signum, _frame):
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+        signal.signal(signal.SIGALRM, stop_cleanup)
+        signal.setitimer(signal.ITIMER_REAL, max(.001, until - time.monotonic()))
+        path, spec = load_job({'owner': ident(sys.argv[2]), 'job': ident(sys.argv[3])})
+        with lock(path / 'resource-cleanup.lock', seconds=max(0, until - time.monotonic())):
+            cleanup_resources(path, spec)
         return
     assert len(sys.argv) == 1, 'arguments are internal only'
     # read(1) in the shell controller does not prefetch this binary stdin frame.

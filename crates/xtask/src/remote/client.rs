@@ -70,6 +70,18 @@ fn state(ws: &Workspace) -> Result<PathBuf> {
     Ok(root)
 }
 
+fn client_lock(root: &Path) -> Result<fs::File> {
+    let guard = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("client.lock"))?;
+    guard
+        .try_lock()
+        .context("another checkout client is active")?;
+    Ok(guard)
+}
+
 fn delivered_disk(ws: &Workspace, directory: &Path, request: &Job) -> Result<PathBuf> {
     use ilex_tooling_windows::received::Directory;
     let control = Directory::open(directory)?;
@@ -118,7 +130,7 @@ fn delivered_disk(ws: &Workspace, directory: &Path, request: &Job) -> Result<Pat
 
 pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> {
     let root = state(ws)?;
-    let _checkout_lock = ilex_devkit::ownership::lock(&root.join("client.lock"))?;
+    let _checkout_lock = client_lock(&root)?;
     validate(ws, &command)?;
     let started = Instant::now();
     let disk_out = if let Command::Disk(a) = &mut command {
@@ -259,6 +271,9 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
         "ilex: snapshot {} ({} source bytes; {sent} bytes uploaded) owner {}",
         job.snapshot.source.digest, staged.bytes, job.snapshot.identity.owner
     );
+    let interactive = matches!(&job.command, Command::Vm(args) if args.command.is_empty());
+    let heartbeat =
+        interactive.then(|| transport.terminal_heartbeat(&job.snapshot.identity.owner, &job.job));
     let reply = transport.register(&job)?;
     eprintln!("ilex: remote job {} at {}", job.job, reply["root"]);
     fs::write(
@@ -271,9 +286,10 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
             "started_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
         }))?,
     )?;
-    if matches!(&job.command, Command::Vm(args) if args.command.is_empty()) {
+    if interactive {
         transport::remove_cancel_handler()?;
         let terminal = transport.terminal(&job.snapshot.identity.owner, &job.job);
+        drop(heartbeat);
         transport::install_cancel_handler()?;
         let result = wait(ws, &transport, &job, &job_dir, terminal.is_err());
         return terminal.and(result);
@@ -311,7 +327,7 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
         }
         Operation::Snapshot => {
             let root = state(ws)?;
-            let _guard = ilex_devkit::ownership::lock(&root.join("client.lock"))?;
+            let _guard = client_lock(&root)?;
             let staged = source::stage(ws)?;
             println!(
                 "{}",
@@ -368,29 +384,33 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
             ensure!(job.job == id, "local job identity mismatch");
             ws.identity()?.authorize(&job.snapshot.identity.owner)?;
             let transport = Transport::existing(control_json(&control, "endpoint.json")?)?;
-            transport.rpc(
+            let (reply, _) = transport.rpc(
                 Rpc::Cancel {
                     owner: &job.snapshot.identity.owner,
                     job: &job.job,
                 },
                 &[],
             )?;
-            eprintln!(
-                "ilex: cancellation requested for {}; the running client collects evidence, or use remote resume",
-                job.job
-            );
+            match reply["cancel"].as_str() {
+                Some("confirmed") => eprintln!(
+                    "ilex: cancellation confirmed for {}. The running client collects evidence, or use remote resume",
+                    job.job
+                ),
+                Some("finished") => eprintln!("ilex: job {} already finished", job.job),
+                Some("pending") => anyhow::bail!(
+                    "cancel pending for {} ({})",
+                    job.job,
+                    reply["detail"]
+                        .as_str()
+                        .unwrap_or("waiting for the worker to stop")
+                ),
+                _ => anyhow::bail!("invalid builder cancellation reply"),
+            }
             Ok(())
         }
         Operation::Resume { job } => {
             let root = state(ws)?;
-            let guard = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(root.join("client.lock"))?;
-            guard
-                .try_lock()
-                .context("job is not resumable while another checkout client is active")?;
+            let _guard = client_lock(&root).context("job is not resumable now")?;
             let id = match job {
                 Some(id) => id,
                 None => fs::read_to_string(root.join("last-job"))?,
@@ -432,12 +452,7 @@ pub fn run(ws: &Workspace, operation: Operation) -> Result<()> {
             )?;
             let transport = Transport::connect()?;
             if matches!(&job.command, Command::Vm(args) if args.command.is_empty()) {
-                let status = transport.resume_terminal(&job.snapshot.identity.owner, &job.job)?;
-                ensure!(
-                    !status["result"].is_null(),
-                    "interactive job {} is not resumable while its original terminal is active",
-                    job.job
-                );
+                transport.resume_terminal(&job.snapshot.identity.owner, &job.job)?;
             }
             transport::install_cancel_handler()?;
             wait(ws, &transport, &job, &dir, false).map(|_| ())
@@ -512,9 +527,16 @@ fn wait(
         job.command,
         Command::Disk(_) | Command::Tool(_) | Command::Export { .. }
     ) || matches!(&job.command, Command::Iso(a) if !a.check_registry && !a.due);
+    let mut until = Instant::now() + transport::JOB_WAIT;
     let result = loop {
+        ensure!(
+            Instant::now() < until,
+            "job {} did not publish within the wait limit. Use cargo xtask remote resume --job {}",
+            job.job,
+            job.job
+        );
         if (cancel || transport::cancelled()) && !cancelled {
-            transport.rpc(
+            let (reply, _) = transport.rpc(
                 Rpc::Cancel {
                     owner,
                     job: &job.job,
@@ -522,10 +544,22 @@ fn wait(
                 &[],
             )?;
             cancelled = true;
-            eprintln!("ilex: cancelled job {}; builder remains running", job.job);
+            let status = match reply["cancel"].as_str() {
+                Some("confirmed") => "cancellation confirmed",
+                Some("finished") => "already finished",
+                Some("pending") => "cancel pending",
+                _ => "cancellation status unknown",
+            };
+            eprintln!("ilex: job {} {status}", job.job);
         }
         let status = transport.rpc(Rpc::Status { owner, job: &job.job }, &[])
             .with_context(|| format!("job {} retained; reconnect with `cargo xtask remote resume --job {}`; logs at {}", job.job, job.job, logs.path.display()))?.0;
+        if matches!(
+            status["state"]["state"].as_str(),
+            Some("collecting" | "recovering")
+        ) {
+            until = until.min(Instant::now() + Duration::from_secs(6 * 60));
+        }
         for (i, name) in ["stdout", "stderr"].iter().enumerate() {
             let end = status["logs"][*name]
                 .as_u64()

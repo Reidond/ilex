@@ -9,7 +9,10 @@ use serde_json::Value;
 use std::{
     io::{Read, Write},
     process::{Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -18,6 +21,21 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 /// Artifact fetches return up to 64 MiB, independently of 4 MiB source chunks.
 pub const MAX_REPLY_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const OEMDRV_BYTES: usize = 32 * 1024 * 1024;
+pub const JOB_WAIT: Duration = Duration::from_secs(8 * 60 * 60 + 10 * 60);
+
+pub struct TerminalHeartbeat {
+    stop: mpsc::Sender<()>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for TerminalHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.thread.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 pub struct OemdrvReadback {
     pub boot: String,
@@ -178,6 +196,40 @@ impl Transport {
         self.rpc(TransferOperation::Submit { request }, &[])
             .map(|r| r.0)
     }
+    /// Start before submit so delayed registration replies cannot starve the lease.
+    pub fn terminal_heartbeat(&self, owner: &str, job: &str) -> TerminalHeartbeat {
+        let transport = Self {
+            endpoint: self.endpoint.clone(),
+        };
+        let request = serde_json::json!({
+            "schema": 1, "payload_bytes": 0, "operation": "renew_terminal",
+            "owner": owner, "job": job,
+        });
+        let (stop, stopped) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut tick = Instant::now();
+            loop {
+                if let Ok((reply, _)) =
+                    transport.exchange_with_timeout(&request, &[], Duration::from_secs(8))
+                    && matches!(reply["lease"].as_str(), Some("consumed" | "expired"))
+                {
+                    return;
+                }
+                tick += Duration::from_secs(15);
+                if !matches!(
+                    stopped.recv_timeout(tick.saturating_duration_since(Instant::now())),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    return;
+                }
+            }
+        });
+        TerminalHeartbeat {
+            stop,
+            thread: Some(worker),
+        }
+    }
+
     pub fn terminal(&self, owner: &str, job: &str) -> Result<()> {
         use std::io::IsTerminal;
 
@@ -188,7 +240,17 @@ impl Transport {
         // OpenSSH handles Windows console modes and window size negotiation.
         let (_lease, mut child) = host::spawn_owned(self.ssh("-t").args(["terminal", owner, job]))
             .context("opening the builder guest terminal")?;
-        let status = child.wait()?;
+        let until = Instant::now() + JOB_WAIT;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= until {
+                child.kill()?;
+                anyhow::bail!("builder guest terminal timed out");
+            }
+            thread::sleep(Duration::from_millis(100));
+        };
         ensure!(
             status.success(),
             "builder guest terminal exited with {status}"
@@ -267,14 +329,29 @@ impl Transport {
         request: &impl serde::Serialize,
         payload: &[u8],
     ) -> Result<(Value, Vec<u8>)> {
+        self.exchange_with_timeout(request, payload, Duration::from_secs(180))
+    }
+
+    fn exchange_with_timeout(
+        &self,
+        request: &impl serde::Serialize,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<(Value, Vec<u8>)> {
         use std::os::windows::process::CommandExt;
+        let mut frame = b"job\n".to_vec();
+        serde_json::to_writer(&mut frame, request)?;
+        frame.push(b'\n');
+        frame.extend_from_slice(payload);
         let mut ssh = self.ssh("-T");
         ssh.creation_flags(0x08000000); // CREATE_NO_WINDOW: Ctrl-C belongs to xtask.
         ssh.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // There is deliberately no SSH remote-command argument.
-        let (_job, mut child) = host::spawn_owned(&mut ssh)?;
+        let (process_job, mut child) = host::spawn_owned(&mut ssh)?;
+        let mut stdin = child.stdin.take().context("SSH stdin")?;
+        let input = thread::spawn(move || stdin.write_all(&frame));
         let stdout = child.stdout.take().context("SSH stdout")?;
         let stderr = child.stderr.take().context("SSH stderr")?;
         let out = thread::spawn(move || {
@@ -288,25 +365,21 @@ impl Transport {
             let mut b = Vec::new();
             stderr.take(1024 * 1024).read_to_end(&mut b).map(|_| b)
         });
-        {
-            let mut input = child.stdin.take().context("SSH stdin")?;
-            input.write_all(b"job\n")?;
-            serde_json::to_writer(&mut input, request)?;
-            input.write_all(b"\n")?;
-            input.write_all(payload)?;
-        }
-        let deadline = Instant::now() + Duration::from_secs(180);
+        let deadline = Instant::now() + timeout;
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break status;
             }
             if Instant::now() > deadline {
                 child.kill()?;
-                let _ = child.wait();
                 anyhow::bail!("builder RPC timed out; job retained for resume");
             }
             thread::sleep(Duration::from_millis(25));
         };
+        drop(process_job);
+        // A refused or disconnected relay may have already closed its input.
+        // Its protocol reply below is more useful than a broken-pipe error.
+        let _ = input.join();
         let bytes = out
             .join()
             .map_err(|_| anyhow::anyhow!("SSH output reader panicked"))??;
