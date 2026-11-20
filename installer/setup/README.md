@@ -13,6 +13,9 @@ the generated kickstart's `%post`. `schema: 1` identifies this contract.
   capability `unknown` and status `not-configured`. Encrypted completion writes
   requested mode `auto`, observed capability/reason, and `enrolled-unverified`
   or `passphrase-only`. Enrollment stays pending until PR19 verifies a boot.
+  Unsupported storage records reason `unsupported-storage-layout`. The status
+  is `passphrase-only` when the encrypted device can be independently verified,
+  and `unavailable` when there is no verified device for a recovery key.
 
 The local encrypted-install completion helper updates this record without
 changing its composition, image or profile. Enrollment details live in the

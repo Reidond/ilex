@@ -272,8 +272,8 @@ fn verify_luks_member(device: &Path, mapping: &Value) -> Result<()> {
         status.lines().any(|line| line
             .trim()
             .strip_prefix("keysize:")
-            .and_then(|size| size.trim().strip_suffix(" bits"))
-            .and_then(|bits| bits.parse::<u32>().ok())
+            .and_then(|size| size.trim().strip_suffix(" [bits]"))
+            .and_then(|bits| bits.trim_end().parse::<u32>().ok())
             .is_some_and(|bits| bits >= 256)),
         "active payload key must be at least 256 bits"
     );
