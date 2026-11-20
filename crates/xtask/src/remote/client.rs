@@ -274,7 +274,13 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
     let interactive = matches!(&job.command, Command::Vm(args) if args.command.is_empty());
     let heartbeat =
         interactive.then(|| transport.terminal_heartbeat(&job.snapshot.identity.owner, &job.job));
-    let reply = transport.register(&job)?;
+    let registered = transport.register(&job);
+    if interactive && transport::cancelled() {
+        drop(heartbeat);
+        // A lost submit reply can still leave a durable registration.
+        return wait(ws, &transport, &job, &job_dir, true).context("interactive submit cancelled");
+    }
+    let reply = registered?;
     eprintln!("ilex: remote job {} at {}", job.job, reply["root"]);
     fs::write(
         job_dir.join("transfer.json"),
@@ -287,11 +293,12 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
         }))?,
     )?;
     if interactive {
-        transport::remove_cancel_handler()?;
         let terminal = transport.terminal(&job.snapshot.identity.owner, &job.job);
         drop(heartbeat);
-        transport::install_cancel_handler()?;
         let result = wait(ws, &transport, &job, &job_dir, terminal.is_err());
+        if transport::cancelled() {
+            return result;
+        }
         return terminal.and(result);
     }
     wait(ws, &transport, &job, &job_dir, false)

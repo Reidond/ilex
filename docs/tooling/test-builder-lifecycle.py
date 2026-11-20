@@ -12,15 +12,17 @@ from pathlib import Path
 import select
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
 import uuid
 
-SOURCE = Path(__file__).resolve().parents[2] / "crates/ilex-tooling-windows/assets/builder-jobs.py"
-loader = importlib.util.spec_from_file_location("builder_jobs", SOURCE)
-jobs = importlib.util.module_from_spec(loader)
-loader.loader.exec_module(jobs)
+if sys.platform != "win32":
+    SOURCE = Path(__file__).resolve().parents[2] / "crates/ilex-tooling-windows/assets/builder-jobs.py"
+    loader = importlib.util.spec_from_file_location("builder_jobs", SOURCE)
+    jobs = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(jobs)
 
 
 @contextmanager
@@ -57,7 +59,8 @@ def prime(path, spec, phase):
     return state
 
 
-def at_replace(path, action, fault, verify_old, verify_new, after=False):
+def at_replace(path, action, fault, verify_old, verify_new, after=False, target_path=None):
+    target_path = target_path or path / "state.json"
     ready, notify = os.pipe()
     server, unblock = os.pipe()
     pid = os.fork()
@@ -67,7 +70,7 @@ def at_replace(path, action, fault, verify_old, verify_new, after=False):
         replace = os.replace
 
         def pause(source, target):
-            if Path(target) != path / "state.json":
+            if Path(target) != target_path:
                 return replace(source, target)
             if after:
                 replace(source, target)
@@ -233,7 +236,7 @@ def cancel_retry_and_collecting_resume():
             jobs.unit_live, jobs.checked = unit_live, checked
 
 
-def hung_cleanup_and_console():
+def hung_cleanup_and_console(*, maintenance=False):
     with fixture() as (path, spec):
         prime(path, spec, "collecting")
         logs = jobs.CONSOLE_ROOT / path.parent.name / path.name
@@ -253,17 +256,92 @@ def hung_cleanup_and_console():
             start = time.monotonic()
             result = jobs.job_status(path, spec, resume_terminal=True)["result"]
             assert time.monotonic() - start < 2
-            assert result["interrupted"] and result["resource_lease_retained"]
+            assert result["interrupted"] and not result["resource_lease_retained"]
+            assert result["resources_pending_cleanup"] == ["fixture"]
+            assert jobs.read_json(path / "reap.json")["names"] == ["fixture"]
+            assert not (path / "lease.json").exists()
             assert "resource cleanup deadline exceeded" in result["resource_cleanup_error"]
             assert "fixture-platform.log" in result["evidence_error"]
             assert "fixture-console.log" not in result["evidence_error"]
             assert "artifacts/console/fixture-console.log" in {entry["path"] for entry in result["artifacts"]}
             assert (path / "exports/artifacts/console/fixture-console.log").read_text() == "serial evidence\n"
+            if maintenance:
+                # The failed service can remain down during the first idle probe.
+                assert jobs.maintenance() == ""
+                assert (path / "reap.json").exists()
+                hung.write_text("pass\n")
+                assert jobs.maintenance() == ""
+                assert not (path / "reap.json").exists()
             assert jobs.job_status(path, spec)["result"] == result
         finally:
             jobs.__file__ = source
             jobs.unit_live = unit_live
             jobs.CLEANUP_SECONDS = cleanup_seconds
+
+
+def cleanup_timeout_maintenance_reaps():
+    hung_cleanup_and_console(maintenance=True)
+
+
+def crash_after_disk_is_frozen():
+    for manifested in (False, True):
+        with fixture() as (path, spec):
+            spec["command"] = {"operation": "disk", "args": {}}
+            jobs.atomic(path / "request.json", jobs.encode(spec))
+            previous = prime(path, spec, "collecting")
+            checkout = path / "checkout-output"
+            (checkout / "disks").mkdir(parents=True)
+            disk = checkout / "disks/probe.qcow2"
+            disk.write_bytes(b"frozen disk bytes")
+            target = path / "exports/disks/probe.qcow2"
+
+            def copy_and_hash():
+                jobs.artifact_inventory(path, spec, checkout, [])
+
+            def visible():
+                assert target.read_bytes() == b"frozen disk bytes"
+                assert jobs.record(path, spec) == previous
+
+            at_replace(path, copy_and_hash, "kill", lambda: None, visible, after=True, target_path=target)
+            (target.parent / "unfinished.qcow2.partial").write_bytes(b"partial")
+            (target.parent / "not-a-disk.txt").write_bytes(b"other")
+            expected = jobs.artifact_entry(target, "disks/probe.qcow2")
+            unit_live, cleanup, hash_file = jobs.unit_live, jobs.cleanup_bounded, jobs.artifact_entry
+            if manifested:
+                jobs.atomic(path / "frozen-manifest.json", jobs.encode({
+                    "job": spec["job"], "owner": path.parent.name,
+                    "source_digest": spec["snapshot"]["source"]["digest"], "artifacts": [expected],
+                }))
+                def hash_unlisted(file, name):
+                    assert file != target, "valid frozen manifest did not supply the disk checksum"
+                    return hash_file(file, name)
+                jobs.artifact_entry = hash_unlisted
+            jobs.unit_live = lambda *_args, **_kwargs: False
+            jobs.cleanup_bounded = lambda *_args: None
+            try:
+                result = jobs.job_status(path, spec)["result"]
+                assert result["interrupted"] and result["evidence_error"] is None
+                assert [entry for entry in result["artifacts"] if entry["path"].startswith("disks/")] == [expected]
+                _, bytes_read = jobs.request({"schema": 1, "operation": "fetch", "owner": path.parent.name,
+                                              "job": path.name, "path": expected["path"]}, b"")
+                assert bytes_read == target.read_bytes()
+            finally:
+                jobs.unit_live, jobs.cleanup_bounded, jobs.artifact_entry = unit_live, cleanup, hash_file
+
+
+def maintenance_while_terminal_renewed():
+    with fixture() as (path, spec):
+        prime(path, spec, "registered")
+        transition(path, spec, "heartbeat", "registered", lease=jobs.lease(.15))
+        time.sleep(.08)
+        assert jobs.renew(path.parent.name, path.name)["lease"] == "renewed"
+        time.sleep(.1)
+        with jobs.lock(path / "maintenance.lock"):
+            assert jobs.maintenance() == f"busy: job {path.name}"
+            transition(path, spec, "attach", "starting", lease=jobs.lease(2))
+            assert jobs.maintenance() == f"busy: job {path.name}"
+        assert jobs.cancel_job(path, spec)["cancel"] == "confirmed"
+        assert jobs.maintenance() == ""
 
 
 def main():
@@ -283,7 +361,8 @@ def main():
                         outcomes.append(f"FAIL {fault}")
                         failed = True
                 print(f"MATRIX {actor} {source or 'absent'} -> {target} | {' | '.join(outcomes)}", flush=True)
-    for check in (heartbeat_and_attach, cancel_retry_and_collecting_resume, hung_cleanup_and_console):
+    for check in (heartbeat_and_attach, cancel_retry_and_collecting_resume, hung_cleanup_and_console,
+                  cleanup_timeout_maintenance_reaps, crash_after_disk_is_frozen, maintenance_while_terminal_renewed):
         try:
             check()
             print(f"SCENARIO {check.__name__} PASS", flush=True)
@@ -295,4 +374,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.platform == "win32":
+        from windows_builder_faults import ctrl_c_during_interactive_submit
+        ctrl_c_during_interactive_submit()
+        print("SCENARIO ctrl_c_during_interactive_submit PASS", flush=True)
+    else:
+        main()

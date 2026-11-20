@@ -289,18 +289,18 @@ function Guest([string]$op,[int]$timeout=1200) {
 function Stop-Owned {
     $vm=Owned-VM
     if($vm.State -eq 'Off') {return}
-    $idle=(Guest 'idle') | ConvertFrom-Json
-    if(!$idle.idle) {throw 'Builder has active jobs; refusing shutdown'}
+    $idle=(Guest 'idle' 45) | ConvertFrom-Json
+    if(!$idle.idle) {throw "Builder refused shutdown ($($idle.reason))"}
     Stop-VM -VM $vm -Confirm:$false -ErrorAction Stop
     if((Owned-VM).State -ne 'Off') {throw 'Graceful builder shutdown did not complete'}
 }
 function Wait-Idle {
     $deadline=[DateTime]::UtcNow.AddMinutes(30)
     do {
-        $idle=(Guest 'idle') | ConvertFrom-Json
+        $idle=(Guest 'idle' 45) | ConvertFrom-Json
         if($idle.idle) {return}
-        if([DateTime]::UtcNow -ge $deadline) {throw 'Timed out waiting for builder jobs to become idle; no update performed'}
-        Say 'Waiting for active builder jobs before update'
+        if([DateTime]::UtcNow -ge $deadline) {throw "Timed out waiting for the builder ($($idle.reason)); no update performed"}
+        Say "Waiting for the builder ($($idle.reason))"
         Start-Sleep -Seconds 10
     } while($true)
 }

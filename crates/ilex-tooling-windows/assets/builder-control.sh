@@ -28,10 +28,10 @@ busy() {
 }
 flock -n 8 || busy lifecycle_busy
 # Failed inventories abort under set -e; they never establish absence.
-units=$(systemctl list-units 'ilex-job-*.service' --state=active,activating,deactivating,reloading --no-legend)
+units=$(timeout 5s systemctl list-units 'ilex-job-*.service' --state=active,activating,deactivating,reloading --no-legend)
 [ -z "$units" ] || busy active_jobs
-leases=$(find /var/lib/ilex-data/jobs -type f -name lease.json -print -quit)
-[ -z "$leases" ] || busy unreconciled_resources
+reason=$(/usr/bin/python3 -I -S /usr/local/libexec/ilex-builder-jobs --maintenance)
+[ -z "$reason" ] || busy "$reason"
 case "$op" in
   idle) printf '{"schema":1,"idle":true}\n';;
   smoke) /usr/local/libexec/ilex-builder-smoke;;

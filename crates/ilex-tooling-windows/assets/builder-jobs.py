@@ -21,6 +21,8 @@ worker or 120s in recovery, including cleanup. The unit has an 8h runtime
 limit. The controller may retire an expired or abandoned registration.
 Each transition compares the record under a short dispatch lock and makes one
 atomic replacement. A recovery flock fences publication and is released on exit.
+Maintenance fences registered/starting leases and retries named resource
+cleanup separately from the immutable result and the active capacity lease.
 """
 import contextlib
 import fcntl
@@ -58,6 +60,7 @@ KILL_RETRY_SECONDS = 2
 EVIDENCE_SECONDS = 300
 RECOVERY_SECONDS = 120
 CLEANUP_SECONDS = 25
+MAINTENANCE_SECONDS = 30
 JOB_SECONDS = 8 * 60 * 60
 CONSOLE_ROOT = Path('/var/log/libvirt/qemu/ilex-jobs')
 TERMINAL_STATES = {'complete', 'cancelled', 'interrupted'}
@@ -544,23 +547,13 @@ def capacity(spec):
     while time.monotonic() < until:
         with lock(JOBS / 'schedule.lock', seconds=60):
             active = []
-            for lease in JOBS.glob('*/*/lease.json'):
+            for path in sorted(resource_jobs()):
                 if time.monotonic() >= until:
                     raise TimeoutError('job capacity wait exceeded two hours')
-                try:
-                    reservation = read_json(lease)
-                except FileNotFoundError:
+                reservation = resource_reservation(path)
+                if reservation is None:
                     continue
-                previous = read_json(lease.parent / 'request.json')
-                assert previous['job'] == lease.parent.name and previous['snapshot']['identity']['owner'] == lease.parent.parent.name
-                if unit_live(previous, owned=True):
-                    active.append(reservation)
-                    continue
-                try:
-                    with lock(lease.parent / 'publisher.lock', wait=False):
-                        cleanup_bounded(previous, min(until, time.monotonic() + CLEANUP_SECONDS))
-                        lease.unlink(missing_ok=True)
-                except (BlockingIOError, TimeoutError, RuntimeError, subprocess.SubprocessError):
+                if not reconcile_resources(path, min(until, time.monotonic() + CLEANUP_SECONDS)):
                     active.append(reservation)
             if len(active) < cap and sum(x['bytes'] for x in active) + weight <= total - 2 * 1024**3 and sum(x['cpus'] for x in active) + cpus <= os.cpu_count():
                 atomic(job_path(spec['snapshot']['identity']['owner'], spec['job']) / 'lease.json',
@@ -576,36 +569,86 @@ def artifact_entry(file, name):
     return {'path': name, 'sha256': 'sha256:' + checksum, 'bytes': file.stat().st_size}
 
 
-def artifact_inventory(path, state, artifacts):
-    roots = [(path, 'job')]
-    operation = read_json(path / 'request.json')['command']['operation']
+def output_prefixes(operation):
     outputs = {'build': ('jobs',), 'rechunk': ('jobs',), 'disk': ('disks',),
                'iso': ('iso',), 'tool': ('tools/images', 'tools/keys'),
                'export': ('exports',)}
+    return outputs.get(operation, ())
+
+
+def artifact_files(root, prefix):
+    if not root.is_dir():
+        return
+    # Enforce the same filters when a replacement publisher opens frozen files.
+    assert root.resolve() == root, 'artifact root escaped its owned directory'
+    files = root.iterdir() if prefix == 'job' else root.rglob('*')
+    for file in sorted(files):
+        tail = file.relative_to(root)
+        if not file.is_file() or file.is_symlink() or private(tail):
+            continue
+        parts = [part.lower() for part in tail.parts]
+        if any(part.startswith('.ilex') or part.endswith(('.ilex-owner', '.partial', '.lock')) for part in parts):
+            continue
+        if prefix == 'job' and file.name not in {'stdout.log', 'stderr.log', 'request.json', 'context.json', 'image.json'}:
+            continue
+        if prefix == 'iso' and file.suffix not in {'.iso', '.sha256', '.json', '.md'}:
+            continue
+        if prefix == 'disks' and (len(parts) != 1 or not file.name.endswith(('.qcow2', '.raw', '.disk.json'))):
+            continue
+        if prefix == 'tools/keys' and (len(parts) != 1 or file.suffix != '.crt'):
+            continue
+        if prefix == 'tools/images' and (len(parts) != 1 or file.suffix not in {'.raw', '.crt'}):
+            continue
+        if prefix == 'exports' and (len(parts) != 1 or not file.name.endswith(('.oci.tar', '.sha256'))):
+            continue
+        if prefix == 'jobs' and (len(parts) != 2 or not re.fullmatch('[0-9a-f]{64}', parts[0]) or file.name not in {'request.json', 'result.json'}):
+            continue
+        if prefix == 'artifacts/console' and (len(parts) != 1 or file.suffix != '.log'):
+            continue
+        name = relative(prefix + '/' + tail.as_posix())
+        assert file.resolve().is_relative_to(root), 'artifact parent escapes its owned directory'
+        yield file, name
+
+
+def frozen_inventory(path, spec, artifacts):
+    receipt = path / 'frozen-manifest.json'
+    known = {}
+    if receipt.exists():
+        value = read_json(receipt)
+        assert value['job'] == spec['job'] and value['owner'] == spec['snapshot']['identity']['owner'], 'foreign frozen manifest'
+        assert value['source_digest'] == spec['snapshot']['source']['digest'], 'frozen manifest source changed'
+        known = {entry['path']: entry for entry in value['artifacts']}
+    seen = {entry['path'] for entry in artifacts}
+    operation = spec['command']['operation']
+    for prefix in (*output_prefixes(operation), 'artifacts'):
+        for file, name in artifact_files(path / 'exports' / prefix, prefix):
+            if name in seen:
+                continue
+            if operation == 'oemdrv' and name != 'artifacts/answers.raw':
+                continue
+            if operation in {'import_kache', 'self_check'}:
+                continue
+            entry = known.get(name)
+            if not entry or entry['bytes'] != file.stat().st_size:
+                entry = artifact_entry(file, name)
+            else:
+                entry = {'path': name, 'bytes': entry['bytes'], 'sha256': 'sha256:' + sha(entry['sha256'])}
+            artifacts.append(entry)
+
+
+def artifact_inventory(path, spec, state, artifacts):
+    roots = [(path, 'job')]
+    operation = spec['command']['operation']
     if operation == 'oemdrv':
         roots.append((path / 'fixture', 'artifacts'))
     elif operation not in {'import_kache', 'self_check'}:
         roots.append((path / 'artifacts', 'artifacts'))
     if state is not None:
-        roots.extend((state / prefix, prefix) for prefix in outputs.get(operation, ()))
+        roots.extend((state / prefix, prefix) for prefix in output_prefixes(operation))
+    seen = {entry['path'] for entry in artifacts}
     for root, prefix in roots:
-        if not root.is_dir():
-            continue
-        files = root.iterdir() if prefix == 'job' else root.rglob('*')
-        for file in sorted(files):
-            if not file.is_file() or file.is_symlink() or private(file.relative_to(root)) or file.name.endswith(('.partial', '.lock')):
-                continue
-            if any(part.lower().startswith('.ilex') or part.lower().endswith('.ilex-owner') for part in file.relative_to(root).parts):
-                continue  # allocation receipts are control data, never exports
-            if prefix == 'job' and file.name not in {'stdout.log', 'stderr.log', 'request.json', 'context.json', 'image.json'}:
-                continue
-            if prefix == 'iso' and file.suffix not in {'.iso', '.sha256', '.json', '.md'}:
-                continue
-            if prefix == 'tools/keys' and file.suffix != '.crt':
-                continue
-            assert file.resolve().is_relative_to(root.resolve()), 'artifact parent escapes its owned directory'
-            name = prefix + '/' + file.relative_to(root).as_posix()
-            if prefix == 'artifacts' and name.startswith('artifacts/console/'):
+        for file, name in artifact_files(root, prefix):
+            if name in seen or name.startswith('artifacts/console/'):
                 continue  # guest console evidence is collected separately
             # XFS reflinks retain immutable job outputs cheaply even when the
             # next owner-serialized job rewrites a cache at the same state path.
@@ -972,7 +1015,7 @@ def deadline(until, label):
 
 def cleanup_bounded(spec, until):
     # Keep the publisher out of virsh/Podman. Even a stuck child must not own
-    # the job record or its deadline. The lease survives any cleanup failure.
+    # the job record or its deadline.
     owner = spec['snapshot']['identity']['owner']
     with tempfile.TemporaryFile() as output:
         worker = subprocess.Popen([sys.executable, '-I', '-S', __file__, '--cleanup', owner, spec['job'], str(until)],
@@ -993,17 +1036,99 @@ def cleanup_bounded(spec, until):
         raise RuntimeError(output.read(4096).decode(errors='replace').strip() or 'resource cleanup failed')
 
 
+def resource_jobs():
+    return {file.parent for name in ('lease.json', 'reap.json') for file in JOBS.glob(f'*/*/{name}')}
+
+
+def resource_reservation(path):
+    for name in ('lease.json', 'reap.json'):
+        try:
+            value = read_json(path / name)
+            return value if name == 'lease.json' else value['reservation']
+        except FileNotFoundError:
+            continue
+    return None
+
+
+def resource_names(path):
+    names = set()
+    for file in (path / 'resources').glob('*.json'):
+        entry = read_json(file)
+        names.add(entry['name'])
+    for file in (path / 'resources').glob('*.cid'):
+        names.add(file.read_text().strip())
+    return sorted(names)
+
+
+def release_resources(path):
+    (path / 'lease.json').unlink(missing_ok=True)
+    (path / 'reap.json').unlink(missing_ok=True)
+
+
+def defer_cleanup(path):
+    # Commit the reaping receipt before releasing the active lease. A crash
+    # between these operations leaves a retryable receipt and a stale lease.
+    names = resource_names(path)
+    atomic(path / 'reap.json', encode({'names': names, 'reservation': resource_reservation(path)}))
+    (path / 'lease.json').unlink(missing_ok=True)
+    return names
+
+
+def reconcile_resources(path, until):
+    try:
+        with lock(path / 'publisher.lock', wait=False):
+            _, spec = load_job({'owner': path.parent.name, 'job': path.name})
+            if unit_live(spec, owned=True):
+                return False
+            try:
+                cleanup_bounded(spec, until)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                defer_cleanup(path)
+                return False
+            release_resources(path)
+            return True
+    except BlockingIOError:
+        return False
+
+
+def maintenance():
+    # The shell holds the exclusive lifecycle lock. A live lease cannot be
+    # renewed or consumed between this inventory and the idle decision.
+    until = time.monotonic() + MAINTENANCE_SECONDS
+    with deadline(until, 'maintenance job inventory'):
+        for file in sorted(JOBS.glob('*/*/state.json')):
+            path, spec = load_job({'owner': file.parent.parent.name, 'job': file.parent.name})
+            current = record(path, spec)
+            if current and current['state'] in {'registered', 'starting'} and not expired(current):
+                return f"busy: job {spec['job']}"
+        resources = sorted(resource_jobs())
+    for path in resources:
+        if time.monotonic() >= until:
+            break
+        if not reconcile_resources(path, min(until, time.monotonic() + CLEANUP_SECONDS)):
+            print(f"job {path.name} cleanup still pending: {', '.join(resource_names(path))}", file=sys.stderr)
+    return ''
+
+
 def collect_final(path, spec, state, until, cleanup):
     artifacts, errors = [], []
     cleanup_error = None
+    pending_resources = []
     if cleanup:
         try:
             cleanup_bounded(spec, min(until, time.monotonic() + CLEANUP_SECONDS))
-            (path / 'lease.json').unlink(missing_ok=True)
+            release_resources(path)
         except Exception as failure:
             cleanup_error = str(failure)
+            pending_resources = defer_cleanup(path)
     owner = spec['snapshot']['identity']['owner']
     directory = CONSOLE_ROOT / owner / spec['job']
+    try:
+        with deadline(until, 'frozen evidence recovery'):
+            frozen_inventory(path, spec, artifacts)
+    except Exception as failure:
+        errors.append(str(failure))
+    frozen_names = {entry['path'] for entry in artifacts}
     try:
         with deadline(until, 'console inventory'):
             names = console_names(path, directory)
@@ -1011,6 +1136,8 @@ def collect_final(path, spec, state, until, cleanup):
         names = []
         errors.append(f'console inventory: {failure}')
     for name in names:
+        if f'artifacts/console/{name}' in frozen_names:
+            continue
         try:
             with deadline(until, 'console collection'):
                 artifacts.append(collect_console_log(path, directory, name))
@@ -1018,11 +1145,17 @@ def collect_final(path, spec, state, until, cleanup):
             errors.append(f'{name}: {failure}')
     try:
         with deadline(until, 'evidence collection'):
-            artifact_inventory(path, state, artifacts)
+            artifact_inventory(path, spec, state, artifacts)
+            atomic(path / 'frozen-manifest.json', encode({
+                'job': spec['job'], 'owner': owner,
+                'source_digest': spec['snapshot']['source']['digest'],
+                'artifacts': [entry for entry in artifacts if not entry['path'].startswith('job/')],
+            }))
     except Exception as failure:
         errors.append(str(failure))
     return {'artifacts': artifacts, 'evidence_error': '; '.join(errors) or None,
             'resource_cleanup_error': cleanup_error,
+            'resources_pending_cleanup': pending_resources,
             'resource_lease_retained': (path / 'lease.json').exists()}
 
 
@@ -1243,6 +1376,9 @@ def request(frame, payload):
 
 def main():
     os.umask(0o077)
+    if sys.argv[1:] == ['--maintenance']:
+        print(maintenance())
+        return
     if len(sys.argv) == 4 and sys.argv[1] == '--terminal':
         return terminal(ident(sys.argv[2]), ident(sys.argv[3]))
     if len(sys.argv) == 4 and sys.argv[1] == '--run':

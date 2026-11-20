@@ -64,16 +64,6 @@ pub fn install_cancel_handler() -> Result<()> {
 pub fn cancelled() -> bool {
     CANCEL.load(Ordering::SeqCst)
 }
-pub fn remove_cancel_handler() -> Result<()> {
-    ensure!(
-        unsafe {
-            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_event), 0)
-        } != 0,
-        "removing job cancellation handler: {}",
-        std::io::Error::last_os_error()
-    );
-    Ok(())
-}
 pub fn available_space(path: &std::path::Path) -> Result<u64> {
     let ancestor = path
         .ancestors()
@@ -237,6 +227,7 @@ impl Transport {
             std::io::stdin().is_terminal(),
             "ephemeral VM shell needs a terminal"
         );
+        ensure!(!cancelled(), "cancelled before opening the terminal");
         // OpenSSH handles Windows console modes and window size negotiation.
         let (_lease, mut child) = host::spawn_owned(self.ssh("-t").args(["terminal", owner, job]))
             .context("opening the builder guest terminal")?;
@@ -244,6 +235,10 @@ impl Transport {
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break status;
+            }
+            if cancelled() {
+                let _ = child.kill();
+                anyhow::bail!("guest terminal cancelled");
             }
             if Instant::now() >= until {
                 child.kill()?;
