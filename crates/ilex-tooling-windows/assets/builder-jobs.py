@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -28,6 +29,7 @@ import xml.etree.ElementTree as ET
 BASE = Path('/var/lib/ilex-data')
 CHUNKS = BASE / 'chunks'
 JOBS = BASE / 'jobs'
+KACHE_IMPORT_LAYOUT = 'kache-imports/read-only-v1'
 MAX_FRAME = 32 * 1024 * 1024
 CHUNK = 4 * 1024 * 1024
 ENV = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin',
@@ -583,8 +585,8 @@ def import_kache(root, spec):
     chunks = spec['inputs']['kache']
     assert set(spec['inputs']) == {'kache'} and chunks, 'missing kache archive'
     owner = owner_dir(spec['snapshot'])
-    parent = owner / 'kache-imports'
-    parent.mkdir(exist_ok=True)
+    parent = owner / KACHE_IMPORT_LAYOUT
+    parent.mkdir(parents=True, exist_ok=True)
     destination = parent / key
     receipt = {'schema': 1, 'sha256': args['sha256'], 'version': args['version'],
                'target': 'x86_64-linux', 'owner': spec['snapshot']['identity']['owner']}
@@ -620,6 +622,15 @@ def import_kache(root, spec):
                         os.fsync(out.fileno())
         index = store / 'index.db'
         assert index.is_file() and index.stat().st_size, 'archive is missing the cache index'
+        # A cleanly stopped daemon can leave a WAL-mode index without its
+        # sidecars. SQLite cannot create those files on the read-only mount.
+        with contextlib.closing(sqlite3.connect(index)) as database:
+            busy, _, _ = database.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+            assert busy == 0, 'could not checkpoint the copied cache index'
+            mode, = database.execute('PRAGMA journal_mode=DELETE').fetchone()
+            assert mode == 'delete', 'could not prepare the copied index for a read-only mount'
+            assert database.execute('PRAGMA quick_check(1)').fetchall() == [('ok',)], 'cache index is corrupt'
+            database.execute('SELECT 1 FROM entries LIMIT 1').fetchone()
         atomic(candidate / 'receipt.json', encode(receipt))
         candidate.rename(destination)
         fd = os.open(parent, os.O_DIRECTORY)
@@ -686,7 +697,7 @@ def execute(owner, job):
                 code = 0
                 return
             if operation == 'build' and 'ILEX_KACHE_IMPORT' in env:
-                cache = owner_dir(spec['snapshot']) / 'kache-imports' / sha(env['ILEX_KACHE_IMPORT'])
+                cache = owner_dir(spec['snapshot']) / KACHE_IMPORT_LAYOUT / sha(env['ILEX_KACHE_IMPORT'])
                 receipt = read_json(cache / 'receipt.json')
                 assert receipt['sha256'] == env['ILEX_KACHE_IMPORT'] and receipt['owner'] == owner, 'cache import identity mismatch'
                 assert receipt['version'] == kache_version(root) and receipt['target'] == 'x86_64-linux', 'cache import profile mismatch'
