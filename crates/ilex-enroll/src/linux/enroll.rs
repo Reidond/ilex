@@ -17,24 +17,19 @@ pub struct Device {
     pub uuid: String,
     _lock: File,
 }
+
+pub(super) struct PlannedWrite<'a> {
+    pub entry: Enrollment,
+    pub key: &'a Secret,
+    pub token: &'a Value,
+}
+
 impl Device {
     pub fn open(path: &Path) -> Result<Self> {
         let uuid = path
             .file_name()
             .and_then(|s| s.to_str())
             .context("missing LUKS UUID")?;
-        ensure!(
-            uuid.len() == 36
-                && uuid
-                    .bytes()
-                    .enumerate()
-                    .all(|(i, b)| if [8, 13, 18, 23].contains(&i) {
-                        b == b'-'
-                    } else {
-                        b.is_ascii_hexdigit()
-                    }),
-            "invalid LUKS UUID"
-        );
         ensure!(
             path == Path::new("/dev/disk/by-uuid").join(uuid),
             "use /dev/disk/by-uuid/<LUKS UUID>"
@@ -43,23 +38,7 @@ impl Device {
             fs::metadata(path)?.file_type().is_block_device(),
             "LUKS target is not a block device"
         );
-        // Serialize ilex operations across processes. cryptsetup retains its own
-        // header lock. UUID comes from the block device, not user-supplied state.
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create("/run/ilex-enroll")?;
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(format!("/run/ilex-enroll/{uuid}.lock"))?;
-        lock.try_lock()
-            .context("another enrollment operation is running")?;
+        let lock = Self::lock_uuid(uuid)?;
         let output = run(Command::new("/usr/sbin/cryptsetup")
             .arg("luksUUID")
             .arg(path))?;
@@ -74,8 +53,43 @@ impl Device {
             uuid: uuid.to_ascii_lowercase(),
             _lock: lock,
         };
-        device.header()?; // --dump-json-metadata requires LUKS2.
+        device.header()?;
         Ok(device)
+    }
+
+    /// Serialize ilex operations for a UUID, including invalidation when the
+    /// verified device cannot be opened. Cryptsetup retains its header lock.
+    pub(super) fn lock_uuid(uuid: &str) -> Result<File> {
+        ensure!(
+            uuid.len() == 36
+                && uuid.bytes().enumerate().all(|(i, b)| {
+                    if [8, 13, 18, 23].contains(&i) {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_hexdigit()
+                    }
+                }),
+            "invalid LUKS UUID"
+        );
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create("/run/ilex-enroll")?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(format!(
+                "/run/ilex-enroll/{}.lock",
+                uuid.to_ascii_lowercase()
+            ))?;
+        lock.try_lock()
+            .context("another enrollment operation is running")?;
+        Ok(lock)
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -145,11 +159,68 @@ impl Device {
     }
 
     pub(super) fn plan_slot(&self) -> Result<Enrollment> {
+        self.plan_slot_avoiding(None)
+    }
+
+    pub(super) fn plan_slot_avoiding(&self, hint: Option<Enrollment>) -> Result<Enrollment> {
         let header = self.header()?;
         Ok(Enrollment {
-            token: free_id(&header, "tokens")?,
-            slot: free_id(&header, "keyslots")?,
+            token: free_id_avoiding(&header, "tokens", hint.map(|entry| entry.token))?,
+            slot: free_id_avoiding(&header, "keyslots", hint.map(|entry| entry.slot))?,
         })
+    }
+
+    /// Exercise the qualified allocator on a protected copy. JSON capacity
+    /// is measured by libcryptsetup using both actual token payloads and the
+    /// same keyslot parameters and IDs as the installed-header writes.
+    pub(super) fn prove_capacity(
+        &self,
+        before: &Value,
+        unlock: &Secret,
+        writes: &[PlannedWrite<'_>],
+    ) -> Result<()> {
+        let backup = Scratch(Path::new("/run/ilex-enroll").join(format!("{}.budget", self.uuid)));
+        if backup.0.try_exists()? {
+            fs::remove_file(&backup.0)?;
+        }
+        let mut command = Command::new("/usr/sbin/cryptsetup");
+        command
+            .arg("luksHeaderBackup")
+            .arg(self.path())
+            .arg("--header-backup-file")
+            .arg(&backup.0);
+        self.keep_lock(&mut command);
+        run(&mut command)?;
+        let payload = before["segments"]["0"]["offset"]
+            .as_str()
+            .context("missing LUKS2 data offset")?
+            .parse::<u64>()?;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        fs::set_permissions(&backup.0, fs::Permissions::from_mode(0o600))?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&backup.0)?;
+        file.set_len(
+            file.metadata()?.len().max(
+                payload
+                    .checked_add(4 << 20)
+                    .context("invalid LUKS2 data offset")?,
+            ),
+        )?;
+        let copy = Self {
+            path: backup.0.clone(),
+            uuid: self.uuid.clone(),
+            _lock: self._lock.try_clone()?,
+        };
+        ensure!(
+            copy.header()? == *before,
+            "LUKS2 header changed before capacity check"
+        );
+        for write in writes {
+            copy.complete_slot(&write.entry, unlock, write.key, write.token)?;
+        }
+        Ok(())
     }
 
     /// Install or resume the exact preplanned recovery slot. The caller
@@ -206,11 +277,9 @@ impl Device {
                 .arg(&slot_id)
                 .arg(self.path())
                 .arg("-");
-            if token["type"] == "systemd-tpm2" {
-                // TPM credentials have full entropy. Keep the same minimal
-                // PBKDF as systemd-cryptenroll for fast initramfs unlock.
-                command.args(["--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000"]);
-            }
+            // Both enrolled keys have full entropy. Use fixed parameters as
+            // systemd does, including when proving JSON capacity on a copy.
+            command.args(["--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000"]);
             self.keep_lock(&mut command);
             key_command(&mut command, &unlock_fd);
             run_with_input(&mut command, Stdio::from(key.fd()?))?;
@@ -260,8 +329,13 @@ impl Device {
 }
 
 pub(super) fn free_id(header: &Value, field: &str) -> Result<u32> {
+    free_id_avoiding(header, field, None)
+}
+
+fn free_id_avoiding(header: &Value, field: &str, hint: Option<u32>) -> Result<u32> {
     (0..32)
-        .find(|id| header[field].get(id.to_string()).is_none())
+        .filter(|id| header[field].get(id.to_string()).is_none())
+        .min_by_key(|id| Some(*id) == hint)
         .with_context(|| format!("no free LUKS2 identifier in {field}"))
 }
 
@@ -462,6 +536,7 @@ pub fn recovery(device: &Device, unlock: OwnedFd, key_out: OwnedFd) -> Result<En
     let key = Secret::read(unlock)?.fd()?;
     device.authenticate(key.try_clone()?)?;
     let before = device.header()?;
+    device.refuse_unjournaled_reissue(&before)?;
     ensure_capacity(&before, 1, 1)?;
     // A retry must inspect/acknowledge an existing key, or explicitly reissue it
     // in an authenticated UI. This primitive never deletes existing recovery.
@@ -469,6 +544,7 @@ pub fn recovery(device: &Device, unlock: OwnedFd, key_out: OwnedFd) -> Result<En
     command
         .args(["--recovery-key", "--unlock-key-file=/proc/self/fd/3"])
         .arg(device.path());
+    device.keep_lock(&mut command);
     key_command(&mut command, &key);
     let mut output = run(&mut command)?;
     let result = (|| {

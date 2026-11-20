@@ -39,9 +39,12 @@ only after you re-enter it and the helper verifies that it unlocks the disk.
 After an interruption or a mistyped confirmation, switch to VT8 and run
 `ilex-enroll complete --root /mnt/sysroot --tty /dev/tty8`. Use `--root /` on the
 installed system. Enter the disk passphrase to see the same pending key again.
-The helper keeps a passphrase-protected receipt on the encrypted volume until
-you confirm the key. If you already have a confirmed key, ordinary completion
-can still use it.
+The helper keeps a protected receipt on the encrypted volume until you confirm
+the key. A credential that opens the volume can resume a current receipt.
+Legacy receipts used the initiating passphrase. If an authenticated operator
+cannot decrypt one, ilex keeps the encrypted receipt and all existing slots,
+and marks them for manual cleanup. Ordinary TPM completion and repair can
+proceed using the acknowledged recovery key.
 
 Add `--reissue-recovery` to request a new key or resume an interrupted explicit
 reissue. Reissue keeps the previously confirmed key and its acknowledgement
@@ -53,8 +56,9 @@ confirmed recovery key, ordinary completion uses the remaining space for TPM.
 
 `crates/ilex-enroll` is the reusable library and CLI. `recovery` accepts owned
 unlock/output descriptors, captures cryptenroll output privately and returns
-only token/slot ids. `tpm` accepts an owned unlock descriptor, authenticates
-it, checks eligibility and the target tool versions, and reads the token back.
+only token/slot ids. Use local completion for recovery reissue. `tpm` accepts
+an owned unlock descriptor, authenticates it, checks eligibility and the
+target tool versions, and reads the token back.
 The native installer can link the same library used by `ilexctl`.
 
 Credential authentication excludes external token handlers and filters out
@@ -133,6 +137,9 @@ keyslot. The initramfs records `tpm2` from a successful token-only activation.
 On the qualified Anaconda mapping it can also record `fallback` after the
 stock Plymouth or console password agent opens the volume. Unrecognized
 options, other token types or missing evidence leave verification pending.
+Consumers of the persisted verdict must compare its boot ID with the running
+system. Discovery or evidence errors clear an older verified result when the
+bound state can be safely updated.
 
 After a fallback boot, run `sudo ilexctl security repair` and switch to
 tty8 with Ctrl+Alt+F8. Enter the disk passphrase or saved recovery key at
@@ -143,9 +150,14 @@ repair returns pending. Power off and start the machine, then check that
 `ilexctl security verify` reports `verified`.
 
 Completion, explicit recovery reissue and repair pass through the same
-authenticated receipt reconciliation. Fresh reissue budgets numeric LUKS2
-keyslots, contiguous keyslot-area byte ranges and token IDs for both
-enrollments. The TPM helper seals on a disposable LUKS2 header. Before a
+authenticated receipt reconciliation. A resumed receipt proves ownership of
+its slot by unlocking that slot. An occupied reservation can be replanned
+without deleting the occupant or changing the pending key. The allocator
+proves space for both enrollments on a protected header copy, including the
+actual keyslot areas, token IDs and serialized JSON metadata. When reissue
+starts with an acknowledged key and TPM still needs an allocation, ilex
+commits the proved TPM enrollment before allocating the optional key.
+The TPM helper seals on a disposable LUKS2 header. Before a
 write to the real header, ilex commits the planned identifiers and a
 protected credential, or the fingerprints of the TPM slot and token it
 will retire. The authenticated fallback then identifies an interrupted
@@ -214,7 +226,9 @@ booted guest creates one disposable loopback LUKS2 volume and exercises real
 inherited-FD authentication, recovery, retained passphrase and wrong-password
 rejection. It checks a real undersized keyslot area and a nearly full token
 table. The wrong-vTPM trial cuts repair after actual header writes, resumes
-with the saved recovery key, and requires unattended verified cold boot.
+with the saved recovery key, and requires unattended verified cold boot. It
+rejects a wrong repair input with an unchanged header, authenticates both
+retained fallback slots, and checks that stale evidence clears verification.
 
 The guest starts its private virtual keyboard when the shipped completion
 process appears. The overall install deadline covers the earlier Flatpak

@@ -1,7 +1,7 @@
 //! The single authenticated reconciliation point for installed-header writes.
 //! A receipt is durable before any write that cannot be recognized on retry.
 use super::{
-    enroll::{ensure_capacity, free_id, slot, stage_tpm, trial_token},
+    enroll::{PlannedWrite, ensure_capacity, free_id, slot, stage_tpm, trial_token},
     pending::PendingRecovery,
     *,
 };
@@ -39,6 +39,23 @@ impl SecurityState {
 
     pub fn acknowledged(&self) -> bool {
         acknowledged_recovery(&self.value)
+    }
+
+    pub(super) fn read_bound(root: &Path) -> Result<Option<Self>> {
+        use std::os::unix::fs::MetadataExt;
+        let path = root.join("var/lib/ilex/security/enrollment.json");
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => ensure!(
+                meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0,
+                "untrusted enrollment state file"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let Some(value): Option<Value> = read(&path)? else {
+            return Ok(None);
+        };
+        Ok((value["schema"] == 1 && value["uuid"].is_string()).then_some(Self { path, value }))
     }
 
     pub fn recovery_pending(&self) -> Result<bool> {
@@ -140,6 +157,27 @@ impl Device {
         }
         Ok(())
     }
+
+    pub(super) fn refuse_unjournaled_reissue(&self, header: &Value) -> Result<()> {
+        ensure!(
+            !header["tokens"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|token| token["type"] == "systemd-recovery"),
+            "use local completion to reissue a recovery key"
+        );
+        for root in [Path::new("/"), Path::new("/mnt/sysroot")] {
+            let state = SecurityState::open(root, self);
+            if let Ok(state) = state {
+                ensure!(
+                    !state.recovery_pending()? && !state.tpm_pending()?,
+                    "use local completion to reconcile pending enrollment before allocation"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct Reconciled<'a> {
@@ -147,6 +185,8 @@ pub struct Reconciled<'a> {
     unlock: &'a Secret,
     pub state: SecurityState,
     recovery: Option<(Enrollment, Secret)>,
+    pending: Option<(Enrollment, Secret)>,
+    staged_tpm: Option<(Enrollment, Value, Secret)>,
     recovery_path: PathBuf,
     tpm_path: PathBuf,
     tpm_eligible: bool,
@@ -167,6 +207,8 @@ impl<'a> Reconciled<'a> {
             unlock,
             state,
             recovery: None,
+            pending: None,
+            staged_tpm: None,
             recovery_path,
             tpm_path,
             tpm_eligible,
@@ -180,64 +222,134 @@ impl<'a> Reconciled<'a> {
         if session.state.acknowledged() {
             recorded_recovery(&session.state.value, &header)?;
         }
-        if let Some(mut receipt) = read::<PendingRecovery>(&session.recovery_path)? {
-            if session.state.acknowledged()
-                && recorded_recovery(&session.state.value, &header)? == receipt.enrollment
-            {
-                unlink(&session.recovery_path)?;
-            } else {
-                let key = receipt.key(&device.uuid, unlock).context(
-                    "resume the pending recovery issue with the credential used to start it",
-                )?;
-                let entry = receipt.enrollment;
-                if header["tokens"]
-                    .get(entry.token.to_string())
-                    .is_some_and(|t| t != &recovery_token(entry))
-                {
-                    // PR18 could allocate this receipt's token ID to TPM. The
-                    // authenticated key still identifies the planned slot.
-                    if header["keyslots"].get(entry.slot.to_string()).is_some() {
-                        device.authenticate_slot(key.fd()?, entry.slot)?;
-                    }
-                    let new_token = free_id(&header, "tokens")?;
-                    receipt.retarget(&device.uuid, unlock, new_token)?;
-                    write_state(&session.recovery_path, &serde_json::to_value(&receipt)?)?;
-                }
-                let entry = receipt.enrollment;
-                device.complete_slot(&entry, unlock, &key, &recovery_token(entry))?;
-                session.recovery = Some((entry, key));
-            }
-        }
         if tpm_eligible && let Some(receipt) = read::<TpmReceipt>(&session.tpm_path)? {
             session.resume_tpm(&receipt)?;
         }
+        session.reconcile_recovery()?;
         Ok(session)
     }
 
-    pub fn recovery(&mut self, allow_existing_unrecorded: bool) -> Result<(Enrollment, &Secret)> {
+    fn reconcile_recovery(&mut self) -> Result<()> {
+        let header = self.device.header()?;
+        let acknowledged = if self.state.acknowledged() {
+            Some(recorded_recovery(&self.state.value, &header)?)
+        } else {
+            None
+        };
+        let planned = serde_json::from_value::<Option<Enrollment>>(
+            self.state.value["recovery_attempt"].clone(),
+        )?;
+        let bytes = match fs::read(&self.recovery_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(entry) = planned {
+                    self.manual_recovery(&header, Some(entry), None)?;
+                }
+                return Ok(());
+            }
+            Err(_) => {
+                self.manual_recovery(&header, planned, None)?;
+                return Ok(());
+            }
+        };
+        let receipt = serde_json::from_slice::<PendingRecovery>(&bytes).ok();
+        if let Some(receipt) = receipt.as_ref() {
+            let (_, protector) = super::crypt::receipt_key(self.device, self.unlock)?;
+            if let Ok(key) = receipt.key(&self.device.uuid, self.unlock, &protector) {
+                if acknowledged == Some(receipt.enrollment)
+                    && self
+                        .device
+                        .authenticate_slot(key.fd()?, receipt.enrollment.slot)
+                        .is_ok()
+                {
+                    self.state.value["recovery_attempt"] = Value::Null;
+                    self.state.save()?;
+                    unlink(&self.recovery_path)?;
+                } else {
+                    self.pending = Some((receipt.enrollment, key));
+                }
+                return Ok(());
+            }
+        }
+        // The presented credential already authenticated the volume. Neither
+        // a legacy receipt nor an unreadable receipt grants deletion rights
+        // over a slot. Retain its ciphertext and leave every candidate intact.
+        self.manual_recovery(
+            &header,
+            receipt.map(|r| r.enrollment).or(planned),
+            Some(&bytes),
+        )
+    }
+
+    fn manual_recovery(
+        &mut self,
+        header: &Value,
+        hint: Option<Enrollment>,
+        bytes: Option<&[u8]>,
+    ) -> Result<()> {
+        let archive =
+            bytes.map(|bytes| format!(".recovery-manual-{:x}.json", Sha256::digest(bytes)));
+        let slot = hint
+            .and_then(|entry| header["keyslots"].get(entry.slot.to_string()))
+            .map(fingerprint)
+            .transpose()?;
+        let token = hint
+            .and_then(|entry| header["tokens"].get(entry.token.to_string()))
+            .map(fingerprint)
+            .transpose()?;
+        self.state.value["recovery_cleanup"] = json!({"state":"manual", "hint":hint,
+            "slot_sha256":slot, "token_sha256":token, "receipt":archive});
+        self.state.value["recovery_attempt"] = Value::Null;
+        self.state.save()?;
+        if let Some(archive) = archive {
+            fs::rename(
+                &self.recovery_path,
+                self.recovery_path.with_file_name(archive),
+            )?;
+            fs::File::open(
+                self.recovery_path
+                    .parent()
+                    .context("receipt has no parent")?,
+            )?
+            .sync_all()?;
+        }
+        Ok(())
+    }
+
+    pub fn recovery(&mut self, explicit: bool) -> Result<(Enrollment, &Secret)> {
         if self.recovery.is_none() {
             let header = self.device.header()?;
-            ensure!(
-                allow_existing_unrecorded
-                    || !header["tokens"]
-                        .as_object()
-                        .unwrap()
-                        .values()
-                        .any(|t| t["type"] == "systemd-recovery"),
-                "recovery slot has no completion record; use explicit reissue"
-            );
-            let count = 1 + usize::from(self.tpm_eligible && tpm_entries(&header).next().is_none());
-            ensure_capacity(&header, count, count)?;
-            let entry = self.device.plan_slot()?;
-            let receipt = PendingRecovery::new(&self.device.uuid, entry, self.unlock)?;
+            let (entry, key) = if let Some((hint, key)) = self.pending.take() {
+                (self.recovery_plan(&header, hint, &key)?, key)
+            } else {
+                ensure!(
+                    !self.recovery_path.try_exists()?,
+                    "unreadable recovery receipt requires manual cleanup"
+                );
+                ensure!(
+                    explicit
+                        || (self.state.value["recovery_cleanup"].is_null()
+                            && !header["tokens"]
+                                .as_object()
+                                .unwrap()
+                                .values()
+                                .any(|t| t["type"] == "systemd-recovery")),
+                    "recovery enrollment needs explicit reissue or confirmation of a saved key"
+                );
+                (self.device.plan_slot()?, PendingRecovery::generate()?)
+            };
+            let token = recovery_token(entry);
+            self.reserve_recovery(&header, entry, &key, &token)?;
+            let (_, protector) = super::crypt::receipt_key(self.device, self.unlock)?;
+            let receipt = PendingRecovery::seal(&self.device.uuid, entry, &protector, &key)?;
             write_state(&self.recovery_path, &serde_json::to_value(&receipt)?)?;
+            self.state.value["recovery_attempt"] = serde_json::to_value(entry)?;
             if !self.state.acknowledged() {
                 self.state.value["state"] = json!("recovery-incomplete");
-                self.state.save()?;
             }
-            let key = receipt.key(&self.device.uuid, self.unlock)?;
+            self.state.save()?;
             self.device
-                .complete_slot(&entry, self.unlock, &key, &recovery_token(entry))?;
+                .complete_slot(&entry, self.unlock, &key, &token)?;
             self.recovery = Some((entry, key));
         }
         let (entry, key) = self
@@ -251,9 +363,106 @@ impl<'a> Reconciled<'a> {
         Ok((*entry, key))
     }
 
+    /// Reservations are hints. A present slot belongs to the receipt only if
+    /// the authenticated recovery key actually unlocks that slot.
+    fn recovery_plan(&self, header: &Value, hint: Enrollment, key: &Secret) -> Result<Enrollment> {
+        let slot_id = hint.slot.to_string();
+        let tokens = header["tokens"].as_object().unwrap();
+        let mut references = tokens.iter().filter(|(_, token)| {
+            token["keyslots"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id == &slot_id))
+        });
+        let first = references.next();
+        let ours = header["keyslots"].get(&slot_id).is_some()
+            && self.device.authenticate_slot(key.fd()?, hint.slot).is_ok();
+        if ours
+            && let Some((id, token)) = first
+            && references.next().is_none()
+            && token == &recovery_token(hint)
+        {
+            return Ok(Enrollment {
+                slot: hint.slot,
+                token: id.parse()?,
+            });
+        }
+        let slot = if first.is_none() && (ours || header["keyslots"].get(&slot_id).is_none()) {
+            hint.slot
+        } else {
+            free_id(header, "keyslots")?
+        };
+        let token = if header["tokens"].get(hint.token.to_string()).is_none() {
+            hint.token
+        } else {
+            free_id(header, "tokens")?
+        };
+        Ok(Enrollment { slot, token })
+    }
+
+    fn reserve_recovery(
+        &mut self,
+        header: &Value,
+        entry: Enrollment,
+        key: &Secret,
+        token: &Value,
+    ) -> Result<()> {
+        let needs_slot = header["keyslots"].get(entry.slot.to_string()).is_none();
+        let needs_token = header["tokens"].get(entry.token.to_string()).is_none();
+        if !needs_slot && !needs_token {
+            return Ok(());
+        }
+        let needs_tpm = self.tpm_eligible && tpm_entries(header).next().is_none();
+        ensure_capacity(
+            header,
+            usize::from(needs_slot) + usize::from(needs_tpm),
+            usize::from(needs_token) + usize::from(needs_tpm),
+        )?;
+        if !self.tpm_eligible {
+            return Ok(());
+        }
+        let recovery = PlannedWrite { entry, key, token };
+        if needs_tpm {
+            let tpm_entry = self.device.plan_slot_avoiding(Some(entry))?;
+            let (mut tpm_token, tpm_key) = stage_tpm(self.device)?;
+            tpm_token["keyslots"] = json!([tpm_entry.slot.to_string()]);
+            let tpm = PlannedWrite {
+                entry: tpm_entry,
+                key: &tpm_key,
+                token: &tpm_token,
+            };
+            // A reissue already has an acknowledged key, so commit the
+            // proved TPM allocation first. Even power loss before recovery
+            // acknowledgement cannot consume the space reserved for TPM.
+            if self.state.acknowledged() {
+                self.device
+                    .prove_capacity(header, self.unlock, &[tpm, recovery])
+                    .context(
+                        "LUKS2 capacity cannot fit both TPM enrollment and recovery reissue",
+                    )?;
+                self.install_tpm(tpm_entry, tpm_token, &tpm_key)?;
+            } else {
+                self.device
+                    .prove_capacity(header, self.unlock, &[recovery, tpm])
+                    .context("LUKS2 capacity cannot fit recovery and TPM enrollment")?;
+                self.staged_tpm = Some((tpm_entry, tpm_token, tpm_key));
+            }
+        } else {
+            if self.state.acknowledged() {
+                // Confirm that the allocation already present is usable
+                // before issuing an optional key. Stale TPM needs repair.
+                self.enroll_tpm(false)?;
+            }
+            self.device
+                .prove_capacity(header, self.unlock, &[recovery])
+                .context("LUKS2 capacity cannot fit the recovery enrollment")?;
+        }
+        Ok(())
+    }
+
     pub fn acknowledge(&mut self, entry: Enrollment) -> Result<()> {
         recorded_recovery(&json!({"recovery":entry}), &self.device.header()?)?;
         self.state.value["recovery"] = recovery_record(entry, true);
+        self.state.value["recovery_attempt"] = Value::Null;
         self.state.save()?;
         if self.recovery.take().is_some() {
             unlink(&self.recovery_path)?;
@@ -319,12 +528,22 @@ impl<'a> Reconciled<'a> {
             ensure_capacity(&header, 1, 1)?;
             None
         };
+        if let Some((entry, token, key)) = self.staged_tpm.take() {
+            ensure!(old.is_none(), "TPM header changed after capacity proof");
+            return self.install_tpm(entry, token, &key);
+        }
         let (mut token, key) = stage_tpm(self.device)?;
         if let Some(old) = old {
             self.commit_tpm(TpmChange::Remove(old))?;
         }
-        let entry = self.device.plan_slot()?;
+        let entry = self
+            .device
+            .plan_slot_avoiding(self.pending.as_ref().map(|(entry, _)| *entry))?;
         token["keyslots"] = json!([entry.slot.to_string()]);
+        self.install_tpm(entry, token, &key)
+    }
+
+    fn install_tpm(&mut self, entry: Enrollment, token: Value, key: &Secret) -> Result<Enrollment> {
         let (_, protector) = super::crypt::receipt_key(self.device, self.unlock)?;
         let mut nonce = [0; 12];
         fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;

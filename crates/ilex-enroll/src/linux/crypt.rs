@@ -111,7 +111,7 @@ pub(super) fn receipt_key(device: &Device, unlock: &Secret) -> Result<(u32, Secr
             )
         };
         ensure!(
-            slot >= 0 && (32..=64).contains(&size),
+            slot >= 0 && (16..=64).contains(&size),
             "fallback credential did not unlock the LUKS2 payload"
         );
         (slot as u32, size)
