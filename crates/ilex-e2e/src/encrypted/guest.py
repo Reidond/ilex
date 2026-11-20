@@ -554,6 +554,98 @@ def completion_pids():
     return found
 
 
+def recovery_on_screen():
+    wait_for(b'Press Enter when it is saved offline.')
+    match = re.search(rb'[cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}', screen())
+    assert match is not None, 'recovery key was not shown locally'
+    return match.group(0)
+
+
+def save_recovery_envelope(recovery, name):
+    # The throwaway private key stays in the host's private fixture.
+    encrypted = subprocess.run(
+        ['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(SEED / 'recovery.pub'),
+         '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
+        input=recovery, capture_output=True, check=True).stdout
+    (SEED / name).write_bytes(encrypted)
+
+
+def layout_retry_probe():
+    if not json.loads((SEED / 'config.json').read_text()).get('layout_refusal'):
+        return
+    global DRIVE_STEP
+    root = pathlib.Path('/mnt/sysroot')
+    state_path = root / 'var/lib/ilex/security/enrollment.json'
+    setup_path = root / 'etc/ilex/setup.json'
+    crypttab = (root / 'etc/crypttab').read_text()
+    uuids = re.findall(r'(?m)^[^\s#]+\s+UUID=([0-9a-f-]+)\s', crypttab)
+    assert len(uuids) == 1
+    uuid, = uuids
+    device = pathlib.Path('/dev/disk/by-uuid') / uuid
+    completion = ['/usr/bin/ilex-enroll', 'complete', '--root', str(root), '--tty', '/dev/tty8']
+    status = ['/usr/bin/ilex-enroll', 'status', '--json', '--device', str(device)]
+    before = json.loads(subprocess.check_output(status))
+    setup_before = setup_path.read_bytes()
+    assert not state_path.exists() and not before['tokens']
+    DRIVE_STEP = 'inject-missing-uuid-link'
+    masked = PRIVATE / 'missing-uuids'
+    masked.mkdir()
+    refused = subprocess.run(
+        ['unshare', '--mount', '--propagation', 'private', '/bin/sh', '-ec',
+         'mount --bind "$1" /dev/disk/by-uuid; shift; exec "$@"', 'ilex-probe',
+         str(masked), *completion], capture_output=True, timeout=25)
+    assert refused.returncode != 0 and b'storage discovery incomplete' in refused.stderr
+    assert not state_path.exists() and setup_path.read_bytes() == setup_before
+    assert json.loads(subprocess.check_output(status)) == before
+    masked.rmdir()
+
+    DRIVE_STEP = 'retry-legacy-unbound-state'
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({'schema': 1, 'uuid': None, 'state': 'unavailable',
+                                    'reason': 'unsupported-storage-layout',
+                                    'recovery': None, 'tpm': None}))
+    state_path.chmod(0o600)
+    subprocess.run(['chvt', '8'], check=True)
+    keyboard = open_keyboard()
+    attempt = subprocess.Popen([*completion, '--reissue-recovery'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_for(b'Re-enter the disk passphrase', deadline=120)
+        type_private(keyboard, (SEED / 'passphrase').read_bytes())
+        first_key = recovery_on_screen()
+        DRIVE_STEP = 'interrupt-lvm-key-display'
+        attempt.kill()
+        assert attempt.wait(timeout=30) == -signal.SIGKILL
+        state = json.loads(state_path.read_text())
+        assert state['uuid'] == uuid and state['state'] == 'recovery-incomplete' and state['tpm'] is None
+        assert state['recovery']['acknowledged'] is False
+        assert state['recovery']['displayed_and_acknowledged'] is False
+        observed = json.loads(subprocess.check_output(status))
+        assert set(before['slots']) < set(observed['slots']) and len(observed['slots']) == 2
+        assert len(observed['tokens']) == 1 and observed['tokens'][0]['type'] == 'systemd-recovery'
+        token = observed['tokens'][0]
+        assert token['id'] == str(state['recovery']['token'])
+        assert token['keyslots'] == [str(state['recovery']['slot'])]
+        assert setup_path.read_bytes() == setup_before
+        save_recovery_envelope(first_key, 'layout-interrupted.oaep')
+        (PRIVATE / 'layout-interrupted-fingerprint.json').write_text(
+            json.dumps(privacy_module()['fingerprint'](first_key)))
+        (PUBLIC / 'layout-retry.json').write_text(json.dumps({
+            'discovery_failure_retryable': True, 'legacy_uuid_bound': True,
+            'display_interrupted_before_acknowledgement': True, 'original_token': token,
+        }))
+    finally:
+        if attempt.poll() is None:
+            attempt.kill()
+            attempt.wait(timeout=30)
+        fcntl.ioctl(keyboard, 0x5502)
+        os.close(keyboard)
+        with open('/dev/tty8', 'wb') as console:
+            console.write(b'\x1b[2J\x1b[3J\x1b[H')
+        subprocess.run(['stty', 'echo', '-F', '/dev/tty8'], check=True)
+        subprocess.run(['chvt', '6'], check=True)
+
+
 def drive():
     global DRIVE_STEP
     # This %post starts before Flatpak preload. Its independent download
@@ -593,20 +685,13 @@ def drive():
         DRIVE_STEP = 'enter-passphrase'
         type_private(keyboard, passphrase)
         DRIVE_STEP = 'wait-recovery'
-        wait_for(b'Press Enter when it is saved offline.')
         # Read character cells privately. Never take a screenshot while the
         # key is visible and never send the key to the host or serial console.
-        match = re.search(rb'[cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}', screen())
-        assert match is not None, 'recovery key was not shown locally'
-        recovery = match.group(0)
+        recovery = recovery_on_screen()
         DRIVE_STEP = 'export-recovery'
         # Only an OAEP envelope leaves this guest. Its throwaway private key
         # stays in the host's 0700 fixture; decrypted bytes go to locked memory.
-        envelope = subprocess.run(
-            ['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(SEED / 'recovery.pub'),
-             '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
-            input=recovery, capture_output=True, check=True).stdout
-        (SEED / 'recovery.oaep').write_bytes(envelope)
+        save_recovery_envelope(recovery, 'recovery.oaep')
         matcher = privacy_module()
         # Both matchers must catch overlapping candidates across a read boundary
         # inside this VM. The intentional private probe is never a log/export.
@@ -635,8 +720,11 @@ def drive():
         finally:
             check.unlink(missing_ok=True)
             check_dir.rmdir()
-        (PUBLIC / 'credentials.json').write_text(json.dumps(
-            [matcher['fingerprint'](value) for value in [passphrase, recovery]]))
+        fingerprints = [matcher['fingerprint'](value) for value in [passphrase, recovery]]
+        previous = PRIVATE / 'layout-interrupted-fingerprint.json'
+        if previous.exists():
+            fingerprints.append(json.loads(previous.read_text()))
+        (PUBLIC / 'credentials.json').write_text(json.dumps(fingerprints))
         config = json.loads((SEED / 'config.json').read_text())
         if config.get('interrupt_completion', False):
             DRIVE_STEP = 'interrupt-completion'
@@ -711,7 +799,8 @@ def finish():
     if config.get('layout_refusal'):
         assert inspected.returncode and b'unsupported device-mapper layout' in inspected.stderr
         assert state['state'] == 'unavailable' and state['reason'] == 'unsupported-storage-layout'
-        assert state['recovery']['acknowledged'] and state['tpm'] is None
+        assert state['recovery']['acknowledged'] and state['recovery']['displayed_and_acknowledged']
+        assert state['tpm'] is None
         setup = json.loads((PUBLIC / 'setup.json').read_text())
         assert setup['security']['tpm']['status'] == 'passphrase-only'
         (PUBLIC / 'layout.json').write_text(json.dumps({'uuid': state['uuid'], 'unsupported': True}))
@@ -732,6 +821,11 @@ def finish():
     }))
     tokens = subprocess.run(['ilex-enroll', 'status', '--json', '--device',
                              '/dev/disk/by-uuid/' + state['uuid']], capture_output=True, check=True)
+    if config.get('layout_refusal'):
+        observed = json.loads(tokens.stdout)
+        original = json.loads((PUBLIC / 'layout-retry.json').read_text())['original_token']
+        assert len(observed['slots']) == 3 and len(observed['tokens']) == 2
+        assert original in observed['tokens'] and state['recovery']['token'] != int(original['id'])
     (PUBLIC / 'tokens.json').write_bytes(tokens.stdout)
     start = time.monotonic()
     while not (PRIVATE / 'driver-done').exists():
@@ -750,6 +844,7 @@ if __name__ == '__main__':
     harden()
     try:
         {'prepare': prepare, 'drive': drive, 'finish': finish, 'finalise': finalise,
+         'layout-retry-probe': layout_retry_probe,
          'diagnostics': diagnostic_loop}[sys.argv[1]]()
     except Exception as error:
         # Do not include exception repr: an input or tool failure may contain a

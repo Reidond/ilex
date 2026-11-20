@@ -102,21 +102,10 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
         Ok(None) => return Ok(()),
         Err(error) => {
             eprintln!("TPM enrollment skipped: {error:#}");
-            match recovery_layout(root) {
-                Ok(layout) => (layout, true),
-                Err(_) => {
-                    // No independently verified recovery device. Never select
-                    // a partition or promise a key based on ambiguous ancestry.
-                    let state_path = root.join("var/lib/ilex/security/enrollment.json");
-                    if !state_path.try_exists()? {
-                        write_state(
-                            &state_path,
-                            &json!({
-                                "schema":1, "uuid":null, "state":"unavailable",
-                                "reason":"unsupported-storage-layout", "recovery":null, "tpm":null
-                            }),
-                        )?;
-                    }
+            match recovery_layout(root).context("storage discovery incomplete; retry local completion once the devices are available")? {
+                Some(layout) => (layout, true),
+                None => {
+                    // A verified plaintext stack has no LUKS device to bind.
                     update_setup(
                         root,
                         "unavailable",
@@ -138,8 +127,13 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
     } else {
         json!({"schema":1, "uuid":layout.uuid, "state":"pending", "recovery":null, "tpm":null})
     };
+    let legacy_unbound = state.get("uuid") == Some(&Value::Null)
+        && state["state"] == "unavailable"
+        && state["reason"] == "unsupported-storage-layout"
+        && state.get("recovery") == Some(&Value::Null)
+        && state.get("tpm") == Some(&Value::Null);
     ensure!(
-        state["schema"] == 1 && state["uuid"] == layout.uuid,
+        state["schema"] == 1 && (state["uuid"] == layout.uuid || legacy_unbound),
         "enrollment state UUID/schema mismatch"
     );
     let current = status(&device)?;
@@ -148,7 +142,8 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
         .unwrap()
         .iter()
         .any(|token| token["type"] == "systemd-recovery");
-    if state["recovery"]["acknowledged"] == true {
+    let acknowledged = acknowledged_recovery(&state);
+    if acknowledged {
         let id = state["recovery"]["token"]
             .as_u64()
             .context("missing recovery identity")?
@@ -173,35 +168,43 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
             return Ok(());
         }
     }
-    if refused && recovery_exists && state["recovery"]["acknowledged"] != true && !reissue {
-        mark_refusal(root, &state_path, &mut state)?;
-        eprintln!(
-            "Installation can finish. TPM enrollment is unavailable for this storage layout. Use the disk passphrase at boot. To issue and confirm a new recovery key, run local completion with --reissue-recovery."
-        );
-        return Ok(());
-    }
     let mut console = Console::open(tty)?;
     console.clear()?;
     console.say("ilex encrypted installation — local completion\r\n\r\nThe administrator account is for maintenance and recovery.\r\nThe disk passphrase remains a recovery option.\r\n\r\n")?;
     if refused {
         console.say("TPM enrollment is unavailable for this storage layout.\r\nInstallation will finish with local recovery.\r\n\r\n")?;
+        if recovery_exists && !acknowledged {
+            console.say("The previous recovery key was not confirmed. A replacement will be displayed for confirmation.\r\n\r\n")?;
+        }
     }
     let passphrase = console.read("Re-enter the disk passphrase (input is hidden): ")?;
     device.authenticate(passphrase.fd()?)?;
+    if legacy_unbound {
+        ensure!(
+            status(&device)? == current,
+            "LUKS keyslots or tokens changed during discovery retry"
+        );
+        state["uuid"] = json!(layout.uuid);
+        state["state"] = json!("pending");
+        write_state(&state_path, &state)?;
+    }
     if !refused {
         configure_crypttab(root, &layout.uuid)?;
     }
-    if state["recovery"]["acknowledged"] != true || reissue {
+    if !acknowledged || reissue {
         ensure!(
-            !recovery_exists || reissue,
+            !recovery_exists || reissue || refused,
             "recovery was interrupted; rerun local completion with --reissue-recovery; existing slots and passphrase preserved"
         );
         state["state"] = json!("recovery-incomplete");
+        if state["recovery"].is_object() {
+            state["recovery"]["acknowledged"] = json!(false);
+            state["recovery"]["displayed_and_acknowledged"] = json!(false);
+        }
         write_state(&state_path, &state)?;
         let mut output = out_fd()?;
         let enrolled = recovery(&device, passphrase.fd()?, output.try_clone()?.into())?;
-        state["recovery"] =
-            json!({"token":enrolled.token, "slot":enrolled.slot, "acknowledged":false});
+        state["recovery"] = json!({"token":enrolled.token, "slot":enrolled.slot, "acknowledged":false, "displayed_and_acknowledged":false});
         write_state(&state_path, &state)?;
         output.seek(SeekFrom::Start(0))?;
         let key = Secret::read(output.into())?;
@@ -218,6 +221,7 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
         );
         device.authenticate(confirmation.fd()?)?;
         state["recovery"]["acknowledged"] = json!(true);
+        state["recovery"]["displayed_and_acknowledged"] = json!(true);
         write_state(&state_path, &state)?;
         // key/confirmation are erased on scope exit. Explicit reissue is
         // additive; retiring old recovery slots is an authenticated later task.
@@ -276,6 +280,10 @@ pub fn complete(root: &Path, tty: &Path, reissue: bool) -> Result<()> {
 }
 
 fn mark_refusal(root: &Path, state_path: &Path, state: &mut Value) -> Result<()> {
+    ensure!(
+        acknowledged_recovery(state),
+        "recovery display is still incomplete"
+    );
     state["state"] = json!("unavailable");
     state["reason"] = json!("unsupported-storage-layout");
     write_state(state_path, state)?;
@@ -285,6 +293,15 @@ fn mark_refusal(root: &Path, state_path: &Path, state: &mut Value) -> Result<()>
         "unsupported-storage-layout",
         "passphrase-only",
     )
+}
+
+fn acknowledged_recovery(state: &Value) -> bool {
+    let recovery = &state["recovery"];
+    // Earlier schema-1 writers set acknowledged only after confirmation.
+    recovery["acknowledged"] == true
+        && recovery
+            .get("displayed_and_acknowledged")
+            .is_none_or(|value| value == true)
 }
 
 fn finish_console(console: &mut Console, message: &str) -> Result<()> {
@@ -315,9 +332,21 @@ pub fn report_boot() -> Result<()> {
     let tpm = &setup["security"]["tpm"];
     if tpm["reason"] == "unsupported-storage-layout" {
         if tpm["status"] == "passphrase-only" {
-            println!(
-                "ilex: TPM enrollment was skipped for this storage layout. Use the disk passphrase or saved recovery key at boot."
-            );
+            let state: Option<Value> = fs::read("/var/lib/ilex/security/enrollment.json")
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            if state
+                .as_ref()
+                .is_some_and(|state| state["uuid"].is_string() && acknowledged_recovery(state))
+            {
+                println!(
+                    "ilex: TPM enrollment was skipped for this storage layout. Use the disk passphrase or saved recovery key at boot."
+                );
+            } else {
+                println!(
+                    "ilex: TPM enrollment was skipped for this storage layout. Use the disk passphrase and confirm a new recovery key with local completion."
+                );
+            }
         } else {
             println!(
                 "ilex: TPM enrollment was skipped for this storage layout. Use the existing storage recovery procedure."

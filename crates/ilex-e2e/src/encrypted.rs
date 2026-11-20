@@ -18,7 +18,10 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     net::{Shutdown, TcpListener},
-    os::unix::{fs::PermissionsExt, net::UnixStream},
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        net::UnixStream,
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -652,6 +655,7 @@ fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Secret)> {
     // The source override changes only the test registry and keeps target and
     // signature enforcement. No passphrase bytes occur in ks.cfg or scripts.
     let ks = r#"%post --nochroot --erroronfail
+python3 -I -S /run/ilex-encrypted-test/seed/guest.py layout-retry-probe
 python3 -I -S /run/ilex-encrypted-test/seed/guest.py drive > /run/ilex-encrypted-test/driver.log 2>&1 &
 %end
 %include /usr/share/anaconda/interactive-defaults.ks
@@ -700,15 +704,20 @@ python3 -I -S /run/ilex-encrypted-test/seed/guest.py finish
 }
 
 fn recovery_secret(seed: &Path, work: &Path) -> Result<Secret> {
+    recovery_secret_named(seed, work, "recovery.oaep")
+}
+
+fn recovery_secret_named(seed: &Path, work: &Path, name: &str) -> Result<Secret> {
     let output = Command::new("debugfs")
-        .args(["-R", "cat /recovery.oaep"])
+        .arg("-R")
+        .arg(format!("cat /{name}"))
         .arg(seed)
         .output()?;
     ensure!(
         output.status.success() && output.stdout.len() == 256,
         "private recovery envelope missing"
     );
-    let envelope = work.join("recovery.oaep");
+    let envelope = work.join(name);
     fs::write(&envelope, output.stdout)?;
     let mut child = Command::new("openssl")
         .args(["pkeyutl", "-decrypt", "-inkey"])
@@ -757,6 +766,28 @@ fn fingerprints(secrets: &[&Secret]) -> Value {
             .map(|s| json!({"length":s.bytes().len(), "sha256":security::hash(s.bytes())}))
             .collect::<Vec<_>>()
     )
+}
+
+fn private_fingerprint(secret: &Secret) -> Value {
+    let bytes = secret.bytes();
+    json!({
+        "length":bytes.len(), "sha256":security::hash(bytes),
+        "edges":[security::hash(&bytes[..8]), security::hash(&bytes[bytes.len() - 8..])]
+    })
+}
+
+fn save_private_fingerprints(tier: &str, fingerprints: &[Value]) -> Result<()> {
+    if let Some(directory) = std::env::var_os("ILEX_PRIVATE_FINGERPRINTS") {
+        let path = PathBuf::from(directory).join(format!("{tier}.json"));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        serde_json::to_writer(&mut file, fingerprints)?;
+        file.sync_all()?;
+    }
+    Ok(())
 }
 
 fn failure_code(error: &anyhow::Error) -> Value {
@@ -1487,10 +1518,13 @@ fn check_fallback(
                 && before["tpm"].is_null()
                 && tokens_before["slots"]
                     .as_array()
-                    .is_some_and(|slots| slots.len() == 2)
-                && tokens_before["tokens"].as_array().is_some_and(
-                    |tokens| tokens.len() == 1 && tokens[0]["type"] == "systemd-recovery"
-                ),
+                    .is_some_and(|slots| slots.len() == 3)
+                && tokens_before["tokens"]
+                    .as_array()
+                    .is_some_and(|tokens| tokens.len() == 2
+                        && tokens
+                            .iter()
+                            .all(|token| token["type"] == "systemd-recovery")),
             "unsupported installation did not defer TPM enrollment and retain recovery"
         );
         vm.ssh_ok("set -eu; for attempt in 1 2; do report=$(timeout 30 ilex-enroll complete --root / --tty /dev/tty8 2>&1); printf '%s\n' \"$report\" | grep -F 'Installation can finish'; done; ! grep -Fq tpm2-device= /etc/crypttab")?;
@@ -2179,6 +2213,26 @@ fn run_layout(
         let recovery =
             recovery_secret(&seed_path, &work).context("read installer recovery envelope")?;
         credentials = fingerprints(&[&passphrase, &recovery]);
+        if layout_refusal {
+            let interrupted = recovery_secret_named(&seed_path, &work, "layout-interrupted.oaep")?;
+            ensure!(
+                interrupted.bytes() != recovery.bytes(),
+                "LVM retry did not issue a replacement"
+            );
+            credentials = fingerprints(&[&passphrase, &recovery, &interrupted]);
+            let proof: Value =
+                serde_json::from_slice(&extract(&seed_path, &artifacts, "layout-retry.json")?)?;
+            ensure!(
+                proof["discovery_failure_retryable"] == true
+                    && proof["legacy_uuid_bound"] == true
+                    && proof["display_interrupted_before_acknowledgement"] == true,
+                "unsupported-layout retry proof incomplete"
+            );
+        }
+        let mut export_fingerprints = vec![
+            private_fingerprint(&passphrase),
+            private_fingerprint(&recovery),
+        ];
         let recorded: Value =
             serde_json::from_slice(&extract(&seed_path, &artifacts, "credentials.json")?)?;
         ensure!(
@@ -2238,7 +2292,7 @@ fn run_layout(
                 scan["secret_found"] == false
                     && scan["journal_scanned"] == true
                     && scan["read_errors"] == 0
-                    && scan["credentials_checked"] == 2,
+                    && scan["credentials_checked"] == if layout_refusal { 3 } else { 2 },
                 "private guest secret scan failed"
             );
         }
@@ -2311,6 +2365,7 @@ fn run_layout(
                 &original_tokens,
                 &expected,
             )?;
+            export_fingerprints.push(private_fingerprint(&reissued));
             stage = "reissued_recovery_key_boot";
             fallback(
                 &ws,
@@ -2384,6 +2439,9 @@ fn run_layout(
             artifacts.join("final-artifact-privacy.json"),
             serde_json::to_vec_pretty(&scan)?,
         )?;
+        if !local_diagnostic {
+            save_private_fingerprints(tier, &export_fingerprints)?;
+        }
         stage = "complete";
         Ok(())
     })();

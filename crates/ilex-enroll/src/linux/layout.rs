@@ -303,10 +303,11 @@ fn root_devices(root: &Path) -> Result<(String, Vec<PathBuf>)> {
     }
 }
 
-/// Identify a recovery device independently of TPM eligibility. Every path
-/// from every root member must pass through the same verified LUKS2 mapping.
-pub fn recovery_layout(root: &Path) -> Result<Layout> {
-    fn crypt_roots(node: &Value, uuids: &mut BTreeSet<String>) -> Result<()> {
+/// Identify a recovery device independently of TPM eligibility. None means
+/// every path was positively identified as plaintext. Incomplete evidence,
+/// including a disappearing UUID link, remains a discovery error.
+pub fn recovery_layout(root: &Path) -> Result<Option<Layout>> {
+    fn crypt_roots(node: &Value, uuids: &mut BTreeSet<String>) -> Result<bool> {
         if node["type"] == "crypt" {
             let mapping = block_path(node["maj:min"].as_str().context("missing mapping")?)?;
             verify_luks_member(&mapping, node)?;
@@ -314,28 +315,39 @@ pub fn recovery_layout(root: &Path) -> Result<Layout> {
                 .as_str()
                 .context("missing LUKS UUID")?;
             uuids.insert(uuid.to_owned());
+            Ok(true)
+        } else if direct_block_device(node) && node["fstype"] != "crypto_LUKS" {
+            Ok(false)
         } else {
             let children = node["children"]
                 .as_array()
                 .filter(|nodes| !nodes.is_empty())
                 .context("root has a path without verified LUKS2 encryption")?;
+            let mut encrypted = true;
             for child in children {
-                crypt_roots(child, uuids)?;
+                encrypted &= crypt_roots(child, uuids)?;
             }
+            Ok(encrypted)
         }
-        Ok(())
     }
     let (_, devices) = root_devices(root)?;
     let mut uuids = BTreeSet::new();
+    let mut encrypted = true;
     for device in devices {
-        crypt_roots(&block_ancestry(&device)?, &mut uuids)?;
+        encrypted &= crypt_roots(&block_ancestry(&device)?, &mut uuids)?;
     }
-    ensure!(uuids.len() == 1, "no unique verified recovery device");
+    if !encrypted && uuids.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        encrypted && uuids.len() == 1,
+        "no unique verified recovery device"
+    );
     let uuid = uuids.into_iter().next().unwrap();
-    Ok(Layout {
+    Ok(Some(Layout {
         device: Path::new("/dev/disk/by-uuid").join(&uuid),
         uuid,
-    })
+    }))
 }
 
 pub(super) fn ancestors(path: &Path) -> Result<(String, BTreeSet<String>)> {

@@ -3,9 +3,11 @@
 Anaconda still owns partitioning and deployment. Select LUKS2 encryption in
 its storage page and keep a separate maintenance administrator. The chooser
 handles public composition data only. ESP and `/boot` remain outside LUKS;
-root must use single-device Btrfs, and root and `/var` must share one encrypted
-ancestor, with no disk swap or crypttab keyfile. Unsupported or ambiguous encrypted layouts stop
-completion instead of guessing a partition.
+TPM enrollment requires single-device Btrfs. Root and `/var` must share one
+encrypted ancestor, with no disk swap or crypttab keyfile. A stacked layout,
+such as LVM over one verified LUKS2 device, can finish with recovery and no TPM
+enrollment. If device discovery fails or the root cannot be verified, retry
+after the storage is visible. The helper does not guess a partition.
 
 Btrfs mount major/minor numbers identify anonymous superblocks. Discovery uses
 the mounted filesystem's kernel FSID to enumerate every member in sysfs and
@@ -32,12 +34,15 @@ the key screen. `inst.nosave=all_ks` prevents copying input/output kickstarts
 to the target. Runtime log/diagnostic serialization remains an exact-ISO
 qualification gate, including when supplied private unattended answers are used.
 
-The completion hook retains every existing slot. An interrupted recovery
-display is recorded as incomplete; normal retries refuse to generate another
-key. An administrator can explicitly rerun `ilex-enroll complete --root
-/mnt/sysroot --tty /dev/tty8 --reissue-recovery` after switching to VT8.
-This adds a replacement before any possible later retirement of old slots;
-PR 18 never removes slots. The original passphrase always remains usable.
+The completion hook retains every existing slot. A key becomes acknowledged
+only after you re-enter it and the helper verifies that it unlocks the disk.
+On an unsupported encrypted layout, an ordinary retry after an interrupted
+display asks for the disk passphrase, shows a replacement key, and waits for
+confirmation. For a TPM-eligible layout, switch to VT8 and run
+`ilex-enroll complete --root /mnt/sysroot --tty /dev/tty8 --reissue-recovery`.
+Use `--root /` on the installed system. Explicit reissue is also available for
+an unsupported encrypted layout. It adds a slot and retains the disk passphrase
+and earlier slots.
 
 `crates/ilex-enroll` is the reusable library and CLI. `recovery` accepts owned
 unlock/output descriptors, captures cryptenroll output privately and returns
@@ -70,12 +75,22 @@ a PIN, signed policies and pcrlock. No `--wipe-slot=all` or production
 authentication and a successful token-only trial. Other TPM policies require
 authenticated repair, not implicit replacement.
 
-No TPM, Secure Boot off, unmeasured PCR or version/stack mismatch leaves
-passphrase-only encryption and a nonsecret reason. `/etc/ilex/setup.json`
-retains schema 1 and reports `enrolled-unverified` or `passphrase-only`.
-Runtime state under encrypted `/var/lib/ilex/security/enrollment.json` stores
-UUID, slot identities, acknowledgement, tool versions and probe results.
-`pending` is not proof that a boot used TPM.
+The public `/etc/ilex/setup.json` retains schema 1.
+
+- `enrolled-unverified` means a TPM token was enrolled. Boot verification is
+  still pending.
+- `passphrase-only` means TPM enrollment was skipped, for example because
+  Secure Boot is off, the TPM is unavailable, or the encrypted layout is
+  unsupported. Use the disk passphrase or a confirmed recovery key. If a
+  display was interrupted, use the passphrase and complete reissue before
+  relying on the new key.
+- `unavailable` means the inspected plaintext mapper layout has no verified
+  LUKS recovery device. First boot refers you to the existing storage recovery
+  procedure. No recovery key is generated in this case.
+
+The encrypted target's `/var/lib/ilex/security/enrollment.json` binds slot
+identities and acknowledgement to the verified LUKS UUID. A transient
+discovery error leaves this record unchanged. Retry after the device reappears.
 
 Every image carries a generic dracut unlock stack and
 `rd.luks.options=tpm2-device=auto`. The initramfs wrapper first tries one
@@ -185,8 +200,11 @@ and recovery reissue use the same private UART to feed a test-only virtual
 keyboard on VT8. The screenshot handshake still protects the recovery screen.
 Both credentials pass the final recursive log/export scan.
 Evidence is staged privately until the installer privacy gate and recursive
-artifact scan both pass. A failed run publishes its unqualified result and,
-when available, validated error codes and redacted diagnostic excerpts. The
+artifact scan both pass. The hosted upload rechecks the scan seal. A failed
+run keeps its unqualified result and available redacted diagnostics on the
+runner. The final scan detects exposed credential prefixes and suffixes of
+eight bytes or more. Short fingerprint receipts stay in runner-private
+temporary storage. The
 fixture mirrors bounded tails of Anaconda's program, storage, packaging and
 kickstart logs over serial. It also captures the preload and enrollment
 output, LUKS header metadata and the no-TPM completion unit's journal. The
@@ -203,6 +221,9 @@ To diagnose installation and fallback locally, point `ILEX_ISO` and
 These trials use a firmware profile with Secure Boot off and no TPM. They
 retain an unqualified result and run outside the hosted filter. Use explicit
 TCG qualification for a local Secure Boot run with the hosted memory profile.
+The encrypted LVM diagnostic also hides the LUKS UUID link in a private mount
+namespace, checks that discovery failure is retryable, then exercises legacy
+state repair and interruption before recovery confirmation.
 
 The install deadline defaults to three hours for explicit TCG and can be set
 with positive `ILEX_ENCRYPTED_INSTALL_TIMEOUT` seconds. Missing qualification,

@@ -75,9 +75,8 @@ for attempt in first retry; do
     python3 - "$mountpoint" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
-state = json.loads((root / 'var/lib/ilex/security/enrollment.json').read_text())
 setup = json.loads((root / 'etc/ilex/setup.json').read_text())['security']['tpm']
-assert state['state'] == 'unavailable' and state['recovery'] is None and state['tpm'] is None
+assert not (root / 'var/lib/ilex/security/enrollment.json').exists()
 assert setup['status'] == 'unavailable' and setup['reason'] == 'unsupported-storage-layout'
 PY
 done
