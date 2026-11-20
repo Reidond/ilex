@@ -1662,7 +1662,13 @@ fn repair_fallback(
         "cat /var/lib/ilex/security/enrollment.json",
     )?;
     let header_digest = format!(
-        "set -o pipefail; cryptsetup luksDump --dump-json-metadata /dev/disk/by-uuid/{uuid} | sha256sum"
+        r#"set -eu
+umask 077
+scratch=$(mktemp -d /run/ilex-header-digest.XXXXXXXX)
+trap 'rm -f "$scratch/header"; rmdir "$scratch"' EXIT
+cryptsetup luksHeaderBackup /dev/disk/by-uuid/{uuid} --header-backup-file "$scratch/header"
+sha256sum < "$scratch/header"
+"#
     );
     let original_digest = vm.ssh_ok(&header_digest)?;
     let mut bad_input = Secret::empty()?;

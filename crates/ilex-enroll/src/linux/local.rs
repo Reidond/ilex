@@ -502,7 +502,7 @@ pub fn self_check() -> Result<()> {
                     "--type",
                     "luks2",
                     "--luks2-keyslots-size",
-                    "512k",
+                    "768k",
                     "--key-size",
                     "512",
                     "--pbkdf",
@@ -541,13 +541,30 @@ pub fn self_check() -> Result<()> {
             let path = Path::new("/dev/disk/by-uuid").join(String::from_utf8(uuid.stdout)?.trim());
             let device = Device::open(&path)?;
             capacity_self_check(&device)?;
-            let mut output = out_fd()?;
-            let enrolled = recovery(&device, pass.fd()?, output.try_clone()?.into())?;
-            output.seek(SeekFrom::Start(0))?;
-            let recovery_key = Secret::read(output.into())?;
-            device.authenticate(recovery_key.fd()?)?;
+            let mut keys = Vec::new();
+            for _ in 0..2 {
+                if !keys.is_empty() {
+                    let header = device.header()?;
+                    super::enroll::ensure_capacity(&header, 1, 1)?;
+                    ensure!(
+                        super::enroll::ensure_capacity(&header, 2, 2).is_err(),
+                        "small keyslot area appeared to fit two more keys"
+                    );
+                }
+                let mut output = out_fd()?;
+                let enrolled = recovery(&device, pass.fd()?, output.try_clone()?.into())?;
+                output.seek(SeekFrom::Start(0))?;
+                keys.push((enrolled, Secret::read(output.into())?));
+            }
+            ensure!(
+                keys[0].0.slot != keys[1].0.slot && keys[0].0.token != keys[1].0.token,
+                "second data-volume recovery reused the first enrollment"
+            );
+            for (enrolled, key) in &keys {
+                ensure!(enrolled.slot != 0, "recovery overwrote passphrase");
+                device.authenticate_slot(key.fd()?, enrolled.slot)?;
+            }
             device.authenticate(pass.fd()?)?;
-            ensure!(enrolled.slot != 0, "recovery overwrote passphrase");
             let bad = secret_fd(b"ilex-deliberately-incorrect-passphrase")?;
             ensure!(
                 device.authenticate(bad).is_err(),
@@ -555,7 +572,7 @@ pub fn self_check() -> Result<()> {
             );
             token_auth_self_check(&device, &pass)?;
             println!(
-                "ilex-enroll self-check: LUKS2, private FD handoff, recovery and retained passphrase passed"
+                "ilex-enroll self-check: two data-volume recovery keys, private FD handoff and retained passphrase passed"
             );
             Ok(())
         })();
@@ -574,11 +591,7 @@ pub fn self_check() -> Result<()> {
 fn capacity_self_check(device: &Device) -> Result<()> {
     use super::enroll::ensure_capacity;
     let header = device.header()?;
-    ensure_capacity(&header, 1, 1)?;
-    ensure!(
-        ensure_capacity(&header, 2, 2).is_err(),
-        "small keyslot area appeared to fit two more keys"
-    );
+    ensure_capacity(&header, 2, 2)?;
     let token = serde_json::to_vec(&json!({"type":"ilex-self-check", "keyslots":[]}))?;
     for id in 1..32 {
         run_with_input(
@@ -596,9 +609,9 @@ fn capacity_self_check(device: &Device) -> Result<()> {
         )?;
     }
     let header = device.header()?;
-    ensure_capacity(&header, 1, 1)?;
+    ensure_capacity(&header, 2, 1)?;
     ensure!(
-        ensure_capacity(&header, 1, 2).is_err(),
+        ensure_capacity(&header, 2, 2).is_err(),
         "one free token ID appeared to fit two tokens"
     );
     for id in 1..32 {

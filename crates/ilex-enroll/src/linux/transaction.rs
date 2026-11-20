@@ -158,23 +158,35 @@ impl Device {
         Ok(())
     }
 
-    pub(super) fn refuse_unjournaled_reissue(&self, header: &Value) -> Result<()> {
-        ensure!(
-            !header["tokens"]
-                .as_object()
-                .unwrap()
-                .values()
-                .any(|token| token["type"] == "systemd-recovery"),
-            "use local completion to reissue a recovery key"
-        );
+    pub(super) fn guard_recovery_allocation(&self) -> Result<()> {
         for root in [Path::new("/"), Path::new("/mnt/sysroot")] {
-            let state = SecurityState::open(root, self);
-            if let Ok(state) = state {
-                ensure!(
-                    !state.recovery_pending()? && !state.tpm_pending()?,
-                    "use local completion to reconcile pending enrollment before allocation"
-                );
-            }
+            let state = SecurityState::read_bound(root).ok().flatten();
+            let blocked = match state {
+                Some(state) if state.value["uuid"] == self.uuid => {
+                    let needs_tpm = state.value["tpm"].is_null()
+                        && matches!(
+                            state.value["state"].as_str(),
+                            Some("pending" | "error" | "recovery-incomplete")
+                        );
+                    needs_tpm || state.recovery_pending()? || state.tpm_pending()?
+                }
+                Some(_) => false,
+                None => {
+                    // The initial recovery receipt can be durable before the
+                    // first state write. In that window resolve the root UUID.
+                    let dir = root.join("var/lib/ilex/security");
+                    (dir.join(".pending-recovery.json").exists()
+                        || dir.join(".pending-tpm.json").exists())
+                        && recovery_layout(root)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|layout| layout.uuid == self.uuid)
+                }
+            };
+            ensure!(
+                !blocked,
+                "use local completion to reconcile pending root enrollment before allocation"
+            );
         }
         Ok(())
     }

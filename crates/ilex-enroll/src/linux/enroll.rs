@@ -536,10 +536,10 @@ pub fn recovery(device: &Device, unlock: OwnedFd, key_out: OwnedFd) -> Result<En
     let key = Secret::read(unlock)?.fd()?;
     device.authenticate(key.try_clone()?)?;
     let before = device.header()?;
-    device.refuse_unjournaled_reissue(&before)?;
+    device.guard_recovery_allocation()?;
     ensure_capacity(&before, 1, 1)?;
-    // A retry must inspect/acknowledge an existing key, or explicitly reissue it
-    // in an authenticated UI. This primitive never deletes existing recovery.
+    // A managed root with a pending allocation needs local completion. On
+    // other volumes this primitive adds a key and keeps all existing recovery.
     let mut command = Command::new("/usr/bin/systemd-cryptenroll");
     command
         .args(["--recovery-key", "--unlock-key-file=/proc/self/fd/3"])
