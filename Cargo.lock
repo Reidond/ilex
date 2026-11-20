@@ -1033,9 +1033,13 @@ dependencies = [
 name = "ilexctl"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
  "clap_complete",
  "ilex-agent",
+ "ilex-devkit",
+ "ilex-vmctl",
+ "xtask",
 ]
 
 [[package]]

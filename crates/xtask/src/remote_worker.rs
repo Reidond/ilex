@@ -1,7 +1,7 @@
 //! Linux endpoint for one typed, versioned builder job.
 use crate::remote::{Command, Job};
 use anyhow::{Result, ensure};
-use ilex_devkit::{Workspace, core::SnapshotContext};
+use ilex_devkit::core::SnapshotContext;
 use std::path::PathBuf;
 
 #[derive(clap::Args)]
@@ -14,7 +14,7 @@ pub fn run(args: Args) -> Result<()> {
     ilex_devkit::provider::require_arch(ilex_devkit::core::Architecture::X86_64)?;
     let job: Job = serde_json::from_slice(&std::fs::read(&args.request)?)?;
     ilex_devkit::core::check_version(job.schema)?;
-    let ws = Workspace::discover()?;
+    let ws = crate::checkout::workspace()?;
     let context = ilex_devkit::source::remote_context(&ws.root)?
         .ok_or_else(|| anyhow::anyhow!("remote worker requires an installed snapshot context"))?;
     let expected = SnapshotContext {

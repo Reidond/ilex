@@ -6,7 +6,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ilex_tooling_core::{CheckoutIdentity, digest};
 
 use crate::git;
@@ -25,23 +25,47 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Find the checkout from `ILEX_ROOT` or by walking up from the current
-    /// directory. Works from `cargo xtask` and from `cargo test`, whose
-    /// working directory is the crate's own directory.
-    pub fn discover() -> Result<Self> {
-        if let Some(root) = env::var_os("ILEX_ROOT") {
-            return Ok(Self::from_root(PathBuf::from(root)));
+    /// Resolve checkout selection before allocating or looking up any resources.
+    /// ILEX_ROOT can supply a checkout from elsewhere, or confirm the checkout
+    /// containing the caller. Compare canonical paths to allow aliases.
+    pub fn checkout_root() -> Result<Option<PathBuf>> {
+        let cwd = env::current_dir().context("reading current directory")?;
+        let checkout = cwd
+            .ancestors()
+            .find(|dir| dir.join("Containerfile").is_file() && dir.join("Cargo.toml").is_file())
+            .map(Path::canonicalize)
+            .transpose()
+            .context("resolving the current ilex checkout")?;
+        let Some(root) = env::var_os("ILEX_ROOT").map(PathBuf::from) else {
+            return Ok(checkout);
+        };
+        let requested = root
+            .canonicalize()
+            .with_context(|| format!("resolving ILEX_ROOT {}", root.display()))?;
+        if let Some(checkout) = checkout {
+            ensure!(
+                requested == checkout,
+                "checkout mismatch: ILEX_ROOT points to {}, but the working directory is in {}",
+                requested.display(),
+                checkout.display()
+            );
+        }
+        Ok(Some(requested))
+    }
+
+    pub fn require_checkout_root() -> Result<PathBuf> {
+        if let Some(root) = Self::checkout_root()? {
+            return Ok(root);
         }
         let cwd = env::current_dir().context("reading current directory")?;
-        for dir in cwd.ancestors() {
-            if dir.join("Containerfile").is_file() && dir.join("Cargo.toml").is_file() {
-                return Ok(Self::from_root(dir.to_path_buf()));
-            }
-        }
         bail!(
             "no ilex checkout above {} (looked for Containerfile + Cargo.toml; set ILEX_ROOT to override)",
             cwd.display()
         )
+    }
+
+    pub fn discover() -> Result<Self> {
+        Self::require_checkout_root().map(Self::from_root)
     }
 
     pub fn from_root(root: PathBuf) -> Self {

@@ -405,11 +405,37 @@ and 2 for invalid usage. Errors use stderr. Drupe's exit-code behaviour is uncha
 the image installs bash, zsh and fish scripts under their usual `/usr/share`
 completion directories. `ilexctl --version` identifies the machine build.
 
-The default `dev` feature is an empty extension point until K2. Checkout tools
-still run through `cargo xtask` and `ilex-vmctl`; the cargo alias, installed
-launcher and MCP migration arrive with K2. On non-Linux hosts machine commands
-explain that they require an ilex machine; help/completions still work. A dev
-build on an ilex host hands machine commands to `/usr/bin/ilexctl`.
+Install the default dev build with `cargo install --locked --path crates/ilexctl`.
+Use it from native PowerShell on Windows. For checkout commands, the installed
+`ilexctl` selects the checkout's Cargo manifest and keeps the caller's working
+directory, including for relative paths. `ILEX_ROOT` can supply a checkout when
+called from outside one. Inside a checkout it must match that checkout.
+`cargo ilexctl` and `cargo xtask` use the code and resources of the same checkout.
+`builder`, `runtime` and `identity` also work outside a checkout. In a
+checkout, `ilexctl --version` prints the dev flavour and the checkout slug.
+
+VM controls and `mcp` run from the executable you start and can attach by
+`--slug` and `--name` (also `--vm`). For `vm run`, `--slug` must match
+the current checkout and `--name` selects the VM purpose. Use the installed
+copy for a long-running MCP server, so Windows can relink
+`target/debug/ilexctl.exe` during builds.
+The MCP tool names and schemas are shared by both entry points. The old dev
+spellings work until K3.
+
+| Previous dev command | Dev command |
+| --- | --- |
+| `cargo xtask build\|rechunk\|changed\|prepare-publish\|publish\|disk\|iso\|test …` | `ilexctl <same verb> …` |
+| `cargo xtask vm …` | `ilexctl vm run …` |
+| `cargo xtask security …` | `ilexctl doctor security …` |
+| `cargo xtask tool NAME [PACKAGES…]` | `ilexctl drupe build NAME [PACKAGES…]` |
+| `cargo xtask apps --check` | `ilexctl doctor apps` |
+| `cargo xtask info\|identity\|doctor\|builder\|runtime\|remote\|migrate …` | `ilexctl <same verb> …` |
+| `ilex-vmctl list\|display\|self-check\|capabilities\|screenshot\|click\|move\|scroll\|type\|key\|wait-screen …` | `ilexctl vm <same verb> …` |
+| `ilex-vmctl mcp` | `ilexctl mcp` |
+
+On non-Linux hosts machine commands explain that they require an ilex machine.
+Help and completions work on both builds. A dev build on an ilex host hands
+machine commands to `/usr/bin/ilexctl`.
 
 ## Configurations: shells, machines and users
 

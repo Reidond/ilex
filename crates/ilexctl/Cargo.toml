@@ -1,6 +1,6 @@
 [package]
 name = "ilexctl"
-description = "The ilex machine command line"
+description = "The ilex machine and development command line"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,10 +8,14 @@ publish.workspace = true
 
 [features]
 default = ["dev"]
-# K2 adds the checkout tooling here; the image always disables this feature.
-dev = []
+# The image always disables checkout tooling.
+dev = ["clap/string", "dep:anyhow", "dep:ilex-devkit", "dep:ilex-vmctl", "dep:xtask"]
 
 [dependencies]
 clap.workspace = true
 clap_complete = "4"
 ilex-agent = { path = "../ilex-agent" }
+anyhow = { workspace = true, optional = true }
+ilex-devkit = { workspace = true, optional = true }
+ilex-vmctl = { path = "../ilex-vmctl", optional = true }
+xtask = { path = "../xtask", optional = true }
