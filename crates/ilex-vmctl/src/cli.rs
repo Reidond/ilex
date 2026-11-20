@@ -10,12 +10,12 @@ use ilex_devkit::Workspace;
 
 #[derive(Args)]
 pub struct Target {
-    /// Worktree slug (defaults to the current checkout)
+    /// Worktree slug (must match the current checkout for vm run)
     #[arg(long, global = true, env = "ILEX_VM_SLUG")]
-    slug: Option<String>,
-    /// VM name when several run for the slug (e.g. vm, gui, graphical)
+    pub slug: Option<String>,
+    /// VM to attach to or purpose to boot (e.g. vm, gui, graphical)
     #[arg(long, visible_alias = "vm", global = true, env = "ILEX_VM")]
-    name: Option<String>,
+    pub name: Option<String>,
 }
 
 impl Target {

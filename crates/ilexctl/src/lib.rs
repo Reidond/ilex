@@ -45,6 +45,9 @@ pub fn run() -> ExitCode {
         let mut args = args;
         if args.get(1).is_some_and(|arg| arg == dev::IN_CHECKOUT) {
             args.remove(1);
+            if let Err(error) = xtask::check_checkout() {
+                return dev::finish(Err(error));
+            }
         } else if let Some(result) = dev::launch(&args[1..]) {
             return dev::finish(result);
         }

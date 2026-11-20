@@ -1,6 +1,6 @@
 //! Inspect automatic main ownership and explicitly release a missing checkout.
 use anyhow::Result;
-use ilex_devkit::{Workspace, main_claim::MainClaims};
+use ilex_devkit::main_claim::MainClaims;
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
@@ -27,7 +27,7 @@ pub enum Action {
 pub fn run(args: &Args) -> Result<()> {
     match &args.command {
         Action::Status => {
-            let ws = Workspace::discover()?;
+            let ws = crate::checkout::workspace()?;
             let registry = MainClaims::system()?;
             println!(
                 "{}",
@@ -44,7 +44,7 @@ pub fn run(args: &Args) -> Result<()> {
             );
         }
         Action::RebuildLegacyImage { expected_id, build } => {
-            let ws = Workspace::discover()?;
+            let ws = crate::checkout::workspace()?;
             println!("{}", crate::build::rebuild_legacy(&ws, build, expected_id)?);
         }
     }

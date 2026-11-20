@@ -5,12 +5,12 @@
 
 use anyhow::Result;
 use clap::Subcommand;
-use ilex_devkit::Workspace;
 
 mod apps;
 mod build;
 mod builder;
 mod changed;
+mod checkout;
 mod dev_image;
 mod disk;
 mod doctor;
@@ -70,6 +70,7 @@ pub enum CheckoutCmd {
 }
 
 pub use apps::Args as AppsArgs;
+pub use checkout::check_checkout;
 pub use doctor::Args as DoctorArgs;
 pub use security::Args as SecurityArgs;
 pub use tool::Args as ToolArgs;
@@ -84,12 +85,18 @@ pub enum Cmd {
     Security(SecurityArgs),
 }
 
+#[derive(Clone, Copy)]
+pub enum EntryPoint {
+    Xtask,
+    Ilexctl,
+}
+
 pub fn exit_code(err: &anyhow::Error) -> u8 {
     err.downcast_ref::<remote::Failure>()
         .map_or(1, |failure| failure.code)
 }
 
-pub fn run(cmd: Cmd) -> Result<()> {
+pub fn run(cmd: Cmd, entry: EntryPoint) -> Result<()> {
     // Infrastructure commands work outside a checkout.
     let cmd = match cmd {
         Cmd::Checkout(CheckoutCmd::Identity(args)) => return identity::run(&args),
@@ -98,7 +105,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
         Cmd::Checkout(CheckoutCmd::Runtime(args)) => return runtime::run(args),
         other => other,
     };
-    let ws = Workspace::discover()?;
+    let ws = checkout::workspace()?;
     let Some(cmd) = remote::route(&ws, cmd)? else {
         return Ok(());
     };
@@ -135,7 +142,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
         Cmd::Checkout(CheckoutCmd::Iso(args)) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
         Cmd::Checkout(CheckoutCmd::Info(args)) => info::run(&ws, args),
-        Cmd::Doctor(args) => doctor::run(&ws, args),
+        Cmd::Doctor(args) => doctor::run(&ws, args, entry),
         Cmd::Security(args) => security::run(&ws, args),
         Cmd::Checkout(
             CheckoutCmd::Builder(_)

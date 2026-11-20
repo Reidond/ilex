@@ -407,15 +407,18 @@ completion directories. `ilexctl --version` identifies the machine build.
 
 Install the default dev build with `cargo install --locked --path crates/ilexctl`.
 Use it from native PowerShell on Windows. For checkout commands, the installed
-`ilexctl` finds the checkout from the working directory or `ILEX_ROOT` and
-uses Cargo to run that checkout's code, including command help. `cargo ilexctl`
-uses the same code directly. `builder`, `runtime` and `identity` also work
-outside a checkout. In a checkout, `ilexctl --version` prints the dev flavour
-and the checkout slug.
+`ilexctl` selects the checkout's Cargo manifest and keeps the caller's working
+directory, including for relative paths. `ILEX_ROOT` can supply a checkout when
+called from outside one. Inside a checkout it must match that checkout.
+`cargo ilexctl` and `cargo xtask` use the code and resources of the same checkout.
+`builder`, `runtime` and `identity` also work outside a checkout. In a
+checkout, `ilexctl --version` prints the dev flavour and the checkout slug.
 
 VM controls and `mcp` run from the executable you start and can attach by
-`--slug` and `--name` (also `--vm`). Use the installed copy for a long-running
-MCP server, so Windows can relink `target/debug/ilexctl.exe` during builds.
+`--slug` and `--name` (also `--vm`). For `vm run`, `--slug` must match
+the current checkout and `--name` selects the VM purpose. Use the installed
+copy for a long-running MCP server, so Windows can relink
+`target/debug/ilexctl.exe` during builds.
 The MCP tool names and schemas are shared by both entry points. The old dev
 spellings work until K3.
 

@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use xtask::{CheckoutCmd, Cmd};
+use xtask::{CheckoutCmd, Cmd, EntryPoint};
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +33,10 @@ enum LegacyCmd {
 }
 
 fn main() -> ExitCode {
+    if let Err(err) = xtask::check_checkout() {
+        eprintln!("xtask: error: {err:#}");
+        return ExitCode::FAILURE;
+    }
     let cmd = match Cli::parse().cmd {
         LegacyCmd::Checkout(cmd) => Cmd::Checkout(cmd),
         LegacyCmd::Apps(args) => Cmd::Apps(args),
@@ -44,7 +48,7 @@ fn main() -> ExitCode {
     if io::stderr().is_terminal() && !matches!(cmd, Cmd::Checkout(CheckoutCmd::RemoteWorker(_))) {
         eprintln!("xtask: use cargo ilexctl for checkout commands");
     }
-    match xtask::run(cmd) {
+    match xtask::run(cmd, EntryPoint::Xtask) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("xtask: error: {err:#}");

@@ -2,13 +2,15 @@
 use anyhow::{Result, bail};
 use ilex_devkit::Workspace;
 
+use crate::EntryPoint;
+
 #[cfg(not(target_os = "linux"))]
-pub(super) fn run(_: &Workspace) -> Result<serde_json::Value> {
+pub(super) fn run(_: &Workspace, _: EntryPoint) -> Result<serde_json::Value> {
     bail!("build self-check requires the Linux Podman backend")
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
+pub(super) fn run(ws: &Workspace, entry: EntryPoint) -> Result<serde_json::Value> {
     use anyhow::{Context, ensure};
     use ilex_devkit::{bcvk, cmd, git, ownership};
     use std::{
@@ -36,27 +38,51 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
             }
         }
     }
-    fn command(exe: &Path, ws: &Workspace, root: &Path, sub: &str) -> Command {
-        let mut c = Command::new(exe);
+    fn command(entry: EntryPoint, ws: &Workspace, root: &Path, sub: &str) -> Command {
+        // Each fixture runs the sources in its own checkout.
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let mut c = Command::new(cargo);
         c.current_dir(&ws.root)
+            .env("CARGO_TARGET_DIR", root.join("target").join(&ws.slug))
             .env("ILEX_ROOT", &ws.root)
             .env("ILEX_STATE_DIR", root.join("state"))
             .env("XDG_RUNTIME_DIR", root.join("run"))
             .env_remove("ILEX_IMAGE")
             .env_remove("ILEX_MACHINE")
             .env_remove("ILEX_SHELLS")
+            .arg(match entry {
+                EntryPoint::Xtask => "xtask",
+                EntryPoint::Ilexctl => "ilexctl",
+            })
             .arg(sub);
+        if sub == "vm" && matches!(entry, EntryPoint::Ilexctl) {
+            c.arg("run");
+        }
         c
     }
+    fn expect_rejection(c: &mut Command, sub: &str, reason: &str) -> Result<()> {
+        let out = c.output()?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        ensure!(
+            out.status.code() != Some(2),
+            "self-check {sub} probe has invalid CLI usage: {stderr}"
+        );
+        ensure!(
+            out.status.code() == Some(1) && stderr.contains(reason),
+            "self-check {sub} probe expected rejection ({reason}), got {}: {stderr}",
+            out.status
+        );
+        Ok(())
+    }
     fn build(
-        exe: &Path,
+        entry: EntryPoint,
         ws: &Workspace,
         root: &Path,
         recipe: &Path,
         gate: &Path,
         log: &Path,
     ) -> Result<Child> {
-        let mut c = command(exe, ws, root, "build");
+        let mut c = command(entry, ws, root, "build");
         c.args(["--no-pull", "--no-host-kache", "--", "--no-cache", "--file"])
             .arg(recipe)
             .arg("--volume")
@@ -91,7 +117,6 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
     ));
     fs::create_dir(&root)?;
     let _fixture = super::Fixture(root.clone());
-    let exe = std::env::current_exe()?;
     let common = cmd::output(git::git(&ws.root).args([
         "rev-parse",
         "--path-format=absolute",
@@ -141,7 +166,7 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
     for fixture in [a, b] {
         let log = root.join(format!("{}.log", fixture.slug));
         ensure!(
-            build(&exe, fixture, &root, &recipe, &gate, &log)?
+            build(entry, fixture, &root, &recipe, &gate, &log)?
                 .wait()?
                 .success(),
             "baseline build failed: {}",
@@ -171,7 +196,7 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
         } else {
             "source-edit.log"
         });
-        let mut child = build(&exe, a, &root, &recipe, &gate, &log)?;
+        let mut child = build(entry, a, &root, &recipe, &gate, &log)?;
         gated(&mut child, &gate, || {
             if inventory_error {
                 fs::write(
@@ -215,19 +240,14 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
     cmd::run(Command::new("podman").args(["tag", &a.image_ref(), &b.image_ref()]))?;
     let mut rejected = Vec::new();
     for sub in ["test", "disk", "vm", "build"] {
-        let mut c = command(&exe, b, &root, sub);
+        let mut c = command(entry, b, &root, sub);
         if sub == "test" {
             c.arg("ephemeral::");
         }
         if sub == "build" {
             c.arg("--no-pull");
         }
-        let out = c.output()?;
-        let text = String::from_utf8_lossy(&out.stderr);
-        ensure!(
-            !out.status.success() && text.contains("another checkout"),
-            "{sub} adopted foreign image: {text}"
-        );
+        expect_rejection(&mut c, sub, "another checkout")?;
         ensure!(
             bcvk::image_id(&b.image_ref())? == accepted,
             "{sub} replaced foreign image"
@@ -247,14 +267,13 @@ pub(super) fn run(ws: &Workspace) -> Result<serde_json::Value> {
             .stdout(Stdio::from(std::io::stderr())),
     )?;
     images.ids.push(bcvk::image_id(&b.image_ref())?);
-    let out = command(&exe, b, &root, "build").arg("--no-pull").output()?;
-    ensure!(
-        !out.status.success()
-            && String::from_utf8_lossy(&out.stderr).contains("unlabelled legacy image"),
-        "unlabelled image silently adopted"
-    );
+    expect_rejection(
+        command(entry, b, &root, "build").arg("--no-pull"),
+        "build",
+        "unlabelled legacy image",
+    )?;
     let legacy_id = bcvk::image_id(&b.image_ref())?;
-    let rebuilt = command(&exe, b, &root, "identity")
+    let rebuilt = command(entry, b, &root, "identity")
         .args([
             "rebuild-legacy-image",
             "--expected-id",

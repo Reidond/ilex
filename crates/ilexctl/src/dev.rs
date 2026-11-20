@@ -2,13 +2,14 @@
 
 use std::ffi::OsString;
 use std::fmt::Write;
+use std::path::Path;
 use std::process::{Command as Process, ExitCode};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use ilex_devkit::Workspace;
 use ilex_vmctl::cli::{Cmd as Control, Target};
-use xtask::{CheckoutCmd, Cmd};
+use xtask::{CheckoutCmd, Cmd, EntryPoint};
 
 pub const IN_CHECKOUT: &str = "--ilexctl-in-checkout";
 
@@ -73,7 +74,24 @@ impl Command {
         let command = match self {
             Self::Checkout(cmd) => Cmd::Checkout(cmd),
             Self::Vm(vm) => match vm.command {
-                Vm::Run(args) => Cmd::Vm(args),
+                Vm::Run(mut args) => {
+                    if let Some(slug) = vm.target.slug {
+                        let ws = Workspace::discover()?;
+                        ensure!(
+                            slug == ws.slug,
+                            "vm run: --slug {slug} does not match this checkout ({})",
+                            ws.slug
+                        );
+                    }
+                    if let Some(name) = vm.target.name {
+                        ensure!(
+                            args.purpose.as_ref().is_none_or(|purpose| purpose == &name),
+                            "vm run: --name and --purpose name different VMs"
+                        );
+                        args.purpose = Some(name);
+                    }
+                    Cmd::Vm(args)
+                }
                 Vm::Control(cmd) => return vm.target.run(cmd),
             },
             Self::Doctor(doctor) => match doctor.command {
@@ -86,7 +104,7 @@ impl Command {
             } => Cmd::Tool(args),
             Self::Mcp(target) => return target.serve(),
         };
-        xtask::run(command)
+        xtask::run(command, EntryPoint::Ilexctl)
     }
 }
 
@@ -147,18 +165,19 @@ pub fn launch(args: &[OsString]) -> Option<Result<ExitCode>> {
         _ => {}
     }
 
-    let ws = match Workspace::discover() {
-        Ok(ws) => ws,
+    let root = match Workspace::checkout_root() {
+        Ok(Some(root)) => Ok(root),
         // These commands have standalone entry points, as in xtask.
-        Err(_)
+        Ok(None)
             if !dev_command
                 || matches!(name, "builder" | "runtime" | "identity" | "remote-worker") =>
         {
             return None;
         }
-        Err(err) => return Some(Err(err)),
+        Ok(None) => Workspace::require_checkout_root(),
+        Err(err) => Err(err),
     };
-    Some(run_checkout(&ws, args))
+    Some(root.and_then(|root| run_checkout(&root, args)))
 }
 
 fn vm_run_requested(mut args: &[OsString]) -> bool {
@@ -180,17 +199,15 @@ fn vm_run_requested(mut args: &[OsString]) -> bool {
     false
 }
 
-fn run_checkout(ws: &Workspace, args: &[OsString]) -> Result<ExitCode> {
+fn run_checkout(root: &Path, args: &[OsString]) -> Result<ExitCode> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Process::new(cargo);
     command
-        .current_dir(&ws.root)
-        .args(["run", "-q", "-p", "ilexctl", "--", IN_CHECKOUT])
+        .args(["run", "-q", "--manifest-path"])
+        .arg(root.join("Cargo.toml"))
+        .args(["-p", "ilexctl", "--", IN_CHECKOUT])
         .args(args);
-    if std::env::var_os("ILEX_ROOT").is_some() {
-        command.env("ILEX_ROOT", &ws.root);
-    }
-    let context = || format!("starting Cargo in {}", ws.root.display());
+    let context = || format!("starting Cargo for {}", root.display());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
