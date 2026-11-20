@@ -302,8 +302,14 @@ jobs:
         if: steps.changed.outputs.changed != 'true' && !inputs.test && !inputs.encrypted_install
         run: echo 'security::firmware **UNQUALIFIED** (unchanged image; tier not run). Use test=true to qualify this runner.' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep security qualification evidence
+      - name: Verify qualification artifact paths
         if: always()
+        id: qualification-artifacts
+        run: |
+          python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --verify-export security encrypted-install encrypted-existing-space encrypted-interrupted
+
+      - name: Keep security qualification evidence
+        if: always() && steps.qualification-artifacts.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: security-evidence
@@ -327,7 +333,7 @@ jobs:
           echo "Installed-system Flatpak qualification (apps input): $APPS_RESULT" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep encrypted installer public evidence
-        if: always() && inputs.encrypted_install
+        if: always() && inputs.encrypted_install && steps.qualification-artifacts.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: encrypted-installer-evidence

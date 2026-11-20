@@ -18,6 +18,7 @@ finish() {
 trap finish EXIT
 [[ -n "${ILEX_IMAGE:-}" && -f "${ILEX_ISO:-}" ]] || { echo '::error::encrypted qualification requires a local candidate and exact ISO'; exit 1; }
 command -v openssl >/dev/null
+python3 -B crates/ilex-e2e/src/encrypted/log_stream_check.py
 export ILEX_SECURITY_ACCELERATOR
 ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
 case "$ILEX_SECURITY_ACCELERATOR" in kvm|tcg) ;; *) exit 1 ;; esac
@@ -30,6 +31,6 @@ for tier in ('encrypted-install', 'encrypted-existing-space', 'encrypted-interru
     result = pathlib.Path(sys.argv[1]) / tier / 'result.json'
     assert json.loads(result.read_text())['qualification'] == 'passed', tier + ' remains unqualified'
 PY
-python3 crates/ilex-e2e/src/encrypted/privacy.py "$ILEX_ARTIFACTS" > "$ILEX_ARTIFACTS/final-export-privacy.json"
+python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$ILEX_ARTIFACTS" > "$ILEX_ARTIFACTS/final-export-privacy.json"
 qualified=true
 echo "Exact encrypted gates: **qualified**, automatic storage, existing free space, interrupted completion, PCR mismatch, actual recovery-key boots and final artifact privacy, $ILEX_SECURITY_ACCELERATOR / 6G / 2 vCPUs." >> "$GITHUB_STEP_SUMMARY"

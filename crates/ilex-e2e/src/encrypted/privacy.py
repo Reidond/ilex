@@ -20,6 +20,9 @@ import stat
 import subprocess
 import sys
 import zipfile
+if 'Normalizer' not in globals():
+    from log_stream import CONTEXT, Normalizer, original_offset, redact
+
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE
 try:
@@ -37,8 +40,6 @@ PATTERNS = {
 }
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.ppm'}
 SECRET_KINDS = {48: 'disk-passphrase', 71: 'recovery-key'}
-PRIVATE_NAME = re.compile(
-    rb'[a-z]{48,}|(?i:[cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7})')
 
 
 def fingerprint(value):
@@ -56,6 +57,36 @@ def matches(data, expected, found):
                 break
 
 
+def stream_matches(source, expected, read_size=1024 * 1024):
+    normalizer = Normalizer()
+    raw_tail = b''
+    normalized_tail = b''
+    prior_offsets = []
+    found = set()
+    offset = 0
+    while chunk := source.read(read_size):
+        raw = raw_tail + chunk
+        # Preserve literal matching for binary evidence and ANSI payloads.
+        for length, start in matches(raw, expected, found):
+            found.add(length)
+            yield length, offset - len(raw_tail) + start
+        normalized, mapping = normalizer.feed(chunk)
+        data = normalized_tail + normalized
+
+        def absolute(index):
+            if index < len(normalized_tail):
+                return prior_offsets[index]
+            return original_offset(mapping, index - len(normalized_tail))
+
+        for length, start in matches(data, expected, found):
+            found.add(length)
+            yield length, absolute(start)
+        prior_offsets = [absolute(index) for index in range(max(0, len(data) - CONTEXT), len(data))]
+        normalized_tail = data[-CONTEXT:]
+        raw_tail = raw[-CONTEXT:]
+        offset += len(chunk)
+
+
 def public_path(path, labels=None):
     # A path itself can contain the secret. Redact before truncating it. JSON
     # escapes control characters so a name cannot inject a serial log record.
@@ -64,8 +95,8 @@ def public_path(path, labels=None):
         if path == alias or path.startswith(alias + '/'):
             path = original + path[len(alias):]
             break
-    return PRIVATE_NAME.sub(b'[redacted]', os.fsencode(path)).decode(
-        'utf-8', 'replace')[:160]
+    # Delimit a complete path so edge-fragment masking preserves its labels.
+    return redact(b'<' + os.fsencode(path) + b'>')[1:-1].decode('utf-8', 'replace')[:160]
 
 
 def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=None):
@@ -95,18 +126,10 @@ def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=Non
         finding('scan-read-error', path, region, **details)
 
     def check_stream(source, path, region):
-        previous = b''
-        offset = 0
-        found = set()
-        while chunk := source.read(1024 * 1024):
-            data = previous + chunk
-            for length, start in matches(data, expected, found):
-                found.add(length)
-                result['secret_found'] = True
-                finding('credential-fingerprint-match', path, region,
-                        secret_kind=SECRET_KINDS[length], offset=offset - len(previous) + start)
-            offset += len(chunk)
-            previous = data[-70:]
+        for length, start in stream_matches(source, expected):
+            result['secret_found'] = True
+            finding('credential-fingerprint-match', path, region,
+                    secret_kind=SECRET_KINDS[length], offset=start)
 
     def walk_error(error):
         unreadable(error.filename or 'scan-root', 'directory-walk', error)
@@ -185,9 +208,34 @@ def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=Non
     return result
 
 
+def verify_export(root, tiers):
+    def walk_error(error):
+        raise error
+
+    for tier in tiers:
+        directory = root / tier
+        if not directory.exists() and not directory.is_symlink():
+            continue
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise ValueError('invalid artifact root')
+        for parent, subdirs, files in os.walk(directory, onerror=walk_error):
+            for name in subdirs:
+                if name == 'raw-logs' or not stat.S_ISDIR((pathlib.Path(parent) / name).lstat().st_mode):
+                    raise ValueError('raw log directory in artifact tree')
+            for name in files:
+                kind = (pathlib.Path(parent) / name).lstat().st_mode
+                name = name.lower()
+                if (not stat.S_ISREG(kind)
+                        or ('serial' in name and not name.endswith('-serial.redacted.log'))):
+                    raise ValueError('raw serial log or unsupported file in artifact tree')
+
+
 if __name__ == '__main__':
     try:
         root = pathlib.Path(sys.argv[1])
+        if sys.argv[2:3] == ['--verify-export']:
+            verify_export(root, sys.argv[3:])
+            raise SystemExit(0)
         fingerprints = []
         for path in root.rglob('*credentials.json'):
             fingerprints.extend(json.loads(path.read_text()))

@@ -194,7 +194,15 @@ impl Fixture {
             let source = dir.join(file);
             if source.try_exists()? {
                 ilex_devkit::provider::require_owned_path(&dir, &source)?;
-                fs::copy(source, artifacts.join(format!("{label}-{file}")))?;
+                if file == "serial.log" {
+                    crate::encrypted::format_log(
+                        &source,
+                        &artifacts.join(format!("{label}-serial.redacted.log")),
+                    )?;
+                } else {
+                    // These are tool stdout/stderr; QEMU writes serial to a separate file.
+                    fs::copy(source, artifacts.join(format!("{label}-{file}")))?;
+                }
             }
         }
         Ok(())

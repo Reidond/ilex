@@ -28,6 +28,7 @@ use std::{
 const GUEST: &str = include_str!("encrypted/guest.py");
 const PRIVACY: &str = include_str!("encrypted/privacy.py");
 const DIAGNOSTICS: &str = include_str!("encrypted/diagnostics.py");
+const LOG_STREAM: &str = include_str!("encrypted/log_stream.py");
 
 pub fn trials() -> Vec<Trial> {
     let mut trials = vec![
@@ -332,7 +333,7 @@ fn checkpoint() -> Result<()> {
     // failure logs/screens remain private, as for the full installer gate.
     if credentials.is_array() {
         let export = (|| -> Result<()> {
-            artifact_privacy(&[&artifacts], &credentials)?;
+            artifact_privacy(&[&artifacts, &raw_logs(&artifacts)?], &credentials)?;
             for file in evidence_files(&artifacts)? {
                 if !matches!(
                     file.extension().and_then(|s| s.to_str()),
@@ -572,12 +573,11 @@ impl Fixture {
             console.finish()?;
         }
         let info = &self.vm.running_mut()?.info;
+        let private = raw_logs(artifacts)?;
+        fs::create_dir_all(&private)?;
         for file in ["serial.log", "qemu.log", "swtpm.log"] {
             if info.dir.join(file).is_file() {
-                fs::copy(
-                    info.dir.join(file),
-                    artifacts.join(format!("{label}-{file}")),
-                )?;
+                fs::copy(info.dir.join(file), private.join(format!("{label}-{file}")))?;
             }
         }
         Ok(())
@@ -613,6 +613,7 @@ fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Secret)> {
     fs::write(dir.join("guest.py"), GUEST)?;
     fs::write(dir.join("privacy.py"), PRIVACY)?;
     fs::write(dir.join("diagnostics.py"), DIAGNOSTICS)?;
+    fs::write(dir.join("log_stream.py"), LOG_STREAM)?;
     // Test-only transport: no recovery plaintext is written to host media.
     let private_key = work.join("recovery.pem");
     ensure!(
@@ -864,21 +865,45 @@ fn private_scan(script: &str) -> Result<Value> {
 
 fn artifact_privacy(roots: &[&Path], credentials: &Value) -> Result<Value> {
     private_scan(&format!(
-        "{PRIVACY}\nprint(json.dumps(scan(json.loads({:?}), json.loads({:?}))))",
+        "{LOG_STREAM}\n{PRIVACY}\nprint(json.dumps(scan(json.loads({:?}), json.loads({:?}))))",
         serde_json::to_string(roots)?,
         credentials.to_string()
     ))
 }
 
+fn raw_logs(artifacts: &Path) -> Result<PathBuf> {
+    Ok(artifacts
+        .parent()
+        .context("evidence work directory missing")?
+        .join("raw-logs"))
+}
+
+pub(crate) fn format_log(source: &Path, destination: &Path) -> Result<()> {
+    let script = format!(
+        "__name__ = 'ilex_fixture_diagnostics'\n{LOG_STREAM}\n{DIAGNOSTICS}\npathlib.Path(sys.argv[2]).write_bytes(tail(pathlib.Path(sys.argv[1])))"
+    );
+    ensure!(
+        Command::new("python3")
+            .args(["-I", "-S", "-c", &script])
+            .arg(source)
+            .arg(destination)
+            .output()?
+            .status
+            .success(),
+        "could not format private log"
+    );
+    Ok(())
+}
+
 fn diagnostics(artifacts: &Path, output: &Path, credentials: &Value) -> Result<()> {
     let mut command = Command::new("python3");
-    command.args(["-I", "-S", "-c", DIAGNOSTICS]).arg(output);
+    let script = format!("{LOG_STREAM}\n{DIAGNOSTICS}");
+    command.args(["-I", "-S", "-c", &script]).arg(output);
+    let private = raw_logs(artifacts)?;
+    if private.try_exists()? {
+        command.args(evidence_files(&private)?);
+    }
     for file in [
-        "installer-serial.log",
-        "installer-qemu.log",
-        "installer-swtpm.log",
-        "no-tpm-serial.log",
-        "no-tpm-qemu.log",
         "no-tpm-unit-journal.txt",
         "no-tpm-luksDump.txt",
         "no-tpm-failed-units.txt",
@@ -899,7 +924,7 @@ fn diagnostics(artifacts: &Path, output: &Path, credentials: &Value) -> Result<(
 
 fn guest_privacy(vm: &qemu::Vm, artifacts: &Path, label: &str, credentials: &Value) -> Result<()> {
     let script = format!(
-        "__name__ = 'ilex_private_matcher'\n{PRIVACY}\nprint(json.dumps(scan(['/etc', '/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/var/lib/ilex', '/var/roothome', '/root', '/var/lib/systemd/coredump', '/var/spool/abrt', '/run/anaconda', '/run/ilex', '/run/ilex-enroll'], json.loads({:?}), journal=True)))",
+        "__name__ = 'ilex_private_matcher'\n{LOG_STREAM}\n{PRIVACY}\nprint(json.dumps(scan(['/etc', '/tmp', '/var/tmp', '/var/log', '/var/lib/anaconda', '/var/lib/ilex', '/var/roothome', '/root', '/var/lib/systemd/coredump', '/var/spool/abrt', '/run/anaconda', '/run/ilex', '/run/ilex-enroll'], json.loads({:?}), journal=True)))",
         credentials.to_string()
     );
     let command = format!("python3 -I -S -c '{}'", script.replace('\'', "'\\''"));
@@ -1900,7 +1925,19 @@ fn evidence_files(directory: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn copy_evidence(source: &Path, destination: &Path) -> Result<()> {
-    for path in evidence_files(source)? {
+    let files = evidence_files(source)?;
+    ensure!(
+        files.iter().all(|path| {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_ascii_lowercase();
+            !name.contains("serial") || name.ends_with("-serial.redacted.log")
+        }),
+        "raw serial log refused at evidence export"
+    );
+    for path in files {
         let target = destination.join(path.strip_prefix(source)?);
         fs::create_dir_all(target.parent().context("evidence has no parent")?)?;
         fs::copy(path, target)?;
@@ -2267,7 +2304,9 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
         // Drop remains the failure-path backstop. On success, propagating
         // destruction errors prevents a retained private TPM bundle going green.
         fixture.provider.destroy_owned(&mut fixture.vm)?;
-        let scan = artifact_privacy(&[&artifacts], &credentials)?;
+        stage = "privacy_export";
+        let scan = artifact_privacy(&[&artifacts, &raw_logs(&artifacts)?], &credentials)?;
+        diagnostics(&artifacts, &artifacts.join("diagnostics"), &credentials)?;
         fs::write(
             artifacts.join("final-artifact-privacy.json"),
             serde_json::to_vec_pretty(&scan)?,
@@ -2285,12 +2324,12 @@ fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result
             format!("{error:#}\n"),
         );
     }
-    if credentials.is_array() {
+    if credentials.is_array() && result.is_err() {
         let diagnostic_text = artifacts.join("diagnostics");
         let target = published.join("diagnostics");
         let capture = (|| {
             diagnostics(&artifacts, &diagnostic_text, &credentials)?;
-            if result.is_err() && !evidence_files(&diagnostic_text)?.is_empty() {
+            if !evidence_files(&diagnostic_text)?.is_empty() {
                 copy_evidence(&diagnostic_text, &target)?;
                 artifact_privacy(&[&target], &credentials)?;
             }

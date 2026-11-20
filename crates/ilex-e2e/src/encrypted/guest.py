@@ -36,11 +36,16 @@ KEY_CODES[ord('-')] = 12
 KEY_CODES[ord('\n')] = 28
 
 
-def privacy_module():
+def fixture_module(filename):
     # -I -S deliberately excludes provisioning media from Python's search path.
-    scope = {'__name__': 'ilex_private_matcher'}
-    exec((SEED / 'privacy.py').read_text(), scope)
+    scope = {'__name__': 'ilex_fixture_module'}
+    exec((SEED / 'log_stream.py').read_text(), scope)
+    exec((SEED / filename).read_text(), scope)
     return scope
+
+
+def privacy_module():
+    return fixture_module('privacy.py')
 
 
 def scan_roots():
@@ -83,8 +88,7 @@ def marker(text):
 
 
 def emit_diagnostics(records):
-    scope = {'__name__': 'ilex_fixture_diagnostics'}
-    exec((SEED / 'diagnostics.py').read_text(), scope)
+    scope = fixture_module('diagnostics.py')
     with (PRIVATE / 'diagnostic-uart.lock').open('wb') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with open('/dev/ttyS0', 'wb') as serial:
@@ -95,8 +99,7 @@ def emit_diagnostics(records):
 def mirror_diagnostics():
     # Mirror bounded, redacted text on the installer UART. Enrollment still
     # reads credentials only from its reserved local virtual console.
-    scope = {'__name__': 'ilex_fixture_diagnostics'}
-    exec((SEED / 'diagnostics.py').read_text(), scope)
+    scope = fixture_module('diagnostics.py')
     sources = {name: pathlib.Path('/tmp') / name for name in
                ('anaconda.log', 'program.log', 'storage.log', 'packaging.log')}
     sources['driver.log'] = PRIVATE / 'driver.log'
@@ -104,7 +107,12 @@ def mirror_diagnostics():
     if not (root / 'etc').is_dir():
         root = pathlib.Path('/mnt/sysimage')
     sources['preload.log'] = root / 'var/log/anaconda/ilex-apps.log'
-    records = {name: scope['tail'](path) for name, path in sources.items()}
+    records = {}
+    for name, path in sources.items():
+        try:
+            records[name] = scope['tail'](path)
+        except (OSError, ValueError):
+            continue
     post_logs = sorted(pathlib.Path('/tmp').glob('ks-script-*.log'))
     records['post.log'] = b'\n'.join(scope['tail'](path) for path in post_logs[-12:])
     if (root / 'etc').is_dir():
