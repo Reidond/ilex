@@ -1842,7 +1842,7 @@ fn interrupted_repair(
     )?;
     ensure!(
         unlock["method"] == "fallback",
-        "interrupted boot falsely claimed TPM unlock"
+        "interrupted boot lacks password-agent fallback evidence"
     );
     let uuid = state["uuid"].as_str().context("interrupted UUID missing")?;
     ensure!(uuid.len() == 36 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
@@ -1858,6 +1858,7 @@ fn interrupted_repair(
         "interrupted boot left half-enrolled slots or tokens"
     );
     vm.ssh_ok("python3 -I -S -c 'import pathlib; assert sorted(p.name for p in pathlib.Path(\"/var/lib/ilex/security\").iterdir()) == [\".pending-recovery.json\", \"enrollment.json\"]'")?;
+    vm.ssh_ok("install -Dm600 /var/lib/ilex/security/.pending-recovery.json /run/ilex-encrypted-test/acknowledged-receipt")?;
     guest_privacy(vm, artifacts, "interrupted-after-finalisation", credentials)?;
     let console = fixture
         .console
@@ -1907,6 +1908,35 @@ fn interrupted_repair(
                 .filter(|token| token["type"] == "systemd-recovery")
                 .eq(before["tokens"].as_array().unwrap())),
         "ordinary retry changed the recovery token"
+    );
+    // Recreate a stop after acknowledgement was committed and before unlink.
+    // The next ordinary completion must retire the receipt without display.
+    vm.ssh_ok(r#"set -eu
+mv /run/ilex-encrypted-test/acknowledged-receipt /var/lib/ilex/security/.pending-recovery.json
+chvt 8
+systemd-run --quiet --remain-after-exit --unit=ilex-fixture-ack-retry /usr/bin/ilex-enroll complete --root /
+timeout 90 sh -c 'until grep -aFq "Re-enter the disk passphrase" /dev/vcs8; do sleep 1; done'
+"#)?;
+    type_at_vt(vm, console, passphrase)?;
+    vm.ssh_ok(r#"set -eu
+timeout 120 sh -c 'until grep -aFq "Installation completion is ready." /dev/vcs8; do ! grep -aFq "Write this recovery key" /dev/vcs8 || exit 1; sleep 1; done'
+test ! -e /var/lib/ilex/security/.pending-recovery.json
+"#)?;
+    ctl.key("ret")?;
+    vm.ssh_ok(r#"set -eu
+timeout 30 sh -c 'until test "$(systemctl show -p SubState --value ilex-fixture-ack-retry)" = exited; do sleep 1; done'
+test "$(systemctl show -p Result --value ilex-fixture-ack-retry)" = success
+systemctl stop ilex-fixture-ack-retry
+"#)?;
+    let receipt_retry = guest_json(
+        vm,
+        artifacts,
+        "acknowledged-receipt-retry-tokens.json",
+        &token_command,
+    )?;
+    ensure!(
+        receipt_retry == resumed_tokens,
+        "acknowledged receipt cleanup changed LUKS slots or tokens"
     );
     let recovery = confirm_interrupted_key(
         vm,
