@@ -60,6 +60,8 @@ fn run() -> anyhow::Result<()> {
             #[arg(long)]
             root: PathBuf,
         },
+        #[command(hide = true)]
+        InstallerRoot,
         /// Local installer completion. Never use a serial or remote terminal.
         Complete {
             #[arg(long, default_value = "/mnt/sysroot")]
@@ -133,6 +135,10 @@ fn run() -> anyhow::Result<()> {
             )?
         }
         Cmd::Layout { root } => serde_json::to_value(discover(&root)?)?,
+        Cmd::InstallerRoot => {
+            println!("{}", installer_root()?.display());
+            return Ok(());
+        }
         Cmd::Complete {
             root,
             tty,

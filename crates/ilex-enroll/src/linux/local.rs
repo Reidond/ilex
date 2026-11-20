@@ -538,7 +538,9 @@ pub fn self_check() -> Result<()> {
                 .arg("luksUUID")
                 .arg(&loopdev)
                 .output()?;
-            let path = Path::new("/dev/disk/by-uuid").join(String::from_utf8(uuid.stdout)?.trim());
+            let uuid = String::from_utf8(uuid.stdout)?;
+            let path = Path::new("/dev/disk/by-uuid").join(uuid.trim());
+            recovery_guard_self_check(&dir, &path, &pass, uuid.trim())?;
             let device = Device::open(&path)?;
             capacity_self_check(&device)?;
             let mut keys = Vec::new();
@@ -586,6 +588,52 @@ pub fn self_check() -> Result<()> {
     })();
     fs::remove_dir_all(&dir)?;
     result
+}
+
+fn recovery_guard_self_check(dir: &Path, device: &Path, pass: &Secret, uuid: &str) -> Result<()> {
+    let mounts = dir.join("mnt");
+    let state_dir = mounts.join("sysimage/var/lib/ilex/security");
+    fs::create_dir_all(&state_dir)?;
+    let state = state_dir.join("enrollment.json");
+    let key = pass.fd()?;
+    let before = header(device)?;
+    let refuse = |reason: &str| -> Result<()> {
+        let mut command = Command::new("unshare");
+        command
+            .args([
+                "--mount",
+                "--propagation",
+                "private",
+                "/bin/sh",
+                "-ec",
+                r#"mount --bind "$1" /mnt
+exec /usr/bin/ilex-enroll recovery --device "$2" --unlock-fd 3 --key-out-fd 4 4>/dev/null"#,
+                "ilex-check",
+            ])
+            .arg(&mounts)
+            .arg(device);
+        inherit(&mut command, &key);
+        let output = command.output()?;
+        ensure!(
+            !output.status.success() && String::from_utf8_lossy(&output.stderr).contains(reason),
+            "recovery guard did not refuse the installer fixture for {reason}"
+        );
+        ensure!(
+            header(device)? == before,
+            "refused recovery allocation changed the header"
+        );
+        Ok(())
+    };
+    write_state(
+        &state,
+        &json!({"schema":1, "uuid":uuid, "state":"pending", "tpm":null}),
+    )?;
+    refuse("reconcile pending root enrollment")?;
+    fs::write(&state, b"{")?;
+    refuse("cannot read root enrollment state under /mnt/sysimage")?;
+    fs::remove_file(state)?;
+    fs::write(state_dir.join(".pending-recovery.json"), b"{}")?;
+    refuse("cannot identify LUKS2 root for enrollment receipt under /mnt/sysimage")
 }
 
 fn capacity_self_check(device: &Device) -> Result<()> {

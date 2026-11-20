@@ -14,7 +14,7 @@ pub use probe::{Probe, probe, tool_manifest, tool_versions};
 mod enroll;
 pub use enroll::{Device, Enrollment, recovery, status, validate_token};
 mod layout;
-pub use layout::{Layout, discover, recovery_layout};
+pub use layout::{Layout, discover, installer_root, recovery_layout};
 pub mod initrd;
 mod pending;
 mod transaction;
