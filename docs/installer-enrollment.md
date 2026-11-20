@@ -47,15 +47,15 @@ Add `--reissue-recovery` to request a new key or resume an interrupted explicit
 reissue. Reissue keeps the previously confirmed key and its acknowledgement
 until you confirm the replacement. It retains the disk passphrase and earlier
 slots. Completion checks for the slots it still needs before allocating any.
-If eligible TPM enrollment is pending, a new recovery key needs two free slots.
-With only one free slot and a confirmed key, use ordinary completion to reserve
-the remaining slot for TPM enrollment.
+If eligible TPM enrollment is pending, a new recovery key needs two free
+keyslot allocations and token IDs. With room for only one enrollment and a
+confirmed recovery key, ordinary completion uses the remaining space for TPM.
 
 `crates/ilex-enroll` is the reusable library and CLI. `recovery` accepts owned
 unlock/output descriptors, captures cryptenroll output privately and returns
 only token/slot ids. `tpm` accepts an owned unlock descriptor, authenticates
 it, checks eligibility and the target tool versions, and reads the token back.
-The future native installer can link the library; PR 19 can use this CLI.
+The native installer can link the same library used by `ilexctl`.
 
 Credential authentication excludes external token handlers and filters out
 built-in tokens before testing the supplied descriptor. An already available
@@ -106,8 +106,7 @@ mapping through that operation records `method=tpm2`. Stock systemd handles
 fallback prompts; a successful path without direct method evidence records
 `unknown`. Before pivot, the matching root UUID record becomes
 `/run/ilex/root-unlock.json` (schema 1, UUID, boot ID, method, token/slot).
-PR 19 owns later verification and fallback repair. No boot service in PR 18
-automatically reseals or generates recovery material.
+The installed verifier consumes this record. Repair requires a local operator.
 
 The rebased shell-free build with Flatpak and enrollment measured
 2,334,252,793 bytes in Podman's uncompressed `.Size` against 2,014,310,965
@@ -207,13 +206,15 @@ Secure Boot omits; the negative does not weaken that qualification contract.
 A further negative
 changes only the stopped positive fixture's SecureBootEnable variable while
 keeping its original TPM and LUKS header. Both require a prompt, passphrase
-boot, unknown unlock method and no automatic reseal. A separate no-TPM
+boot, fallback evidence and unchanged TPM enrollment. A separate no-TPM
 passphrase fallback also retries local
 completion, records passphrase-only mode and proves that recovery acknowledgement
 and all slots/tokens are retained. `ilex-enroll --self-check` in the
 booted guest creates one disposable loopback LUKS2 volume and exercises real
 inherited-FD authentication, recovery, retained passphrase and wrong-password
-rejection. There are no unit tests.
+rejection. It checks a real undersized keyslot area and a nearly full token
+table. The wrong-vTPM trial cuts repair after actual header writes, resumes
+with the saved recovery key, and requires unattended verified cold boot.
 
 The guest starts its private virtual keyboard when the shipped completion
 process appears. The overall install deadline covers the earlier Flatpak
