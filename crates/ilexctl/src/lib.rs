@@ -7,13 +7,15 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 #[cfg(feature = "dev")]
 mod dev;
 
+mod security;
+
 #[cfg(feature = "dev")]
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (dev)");
 #[cfg(not(feature = "dev"))]
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (machine)");
 
 #[derive(Parser)]
-#[command(name = "ilexctl", version = VERSION, about = "Manage an ilex machine", help_template = "{about}\n\n{usage-heading} {usage}\n\nOn an ilex machine:\n  system   Inspect the image and enforce its signature policy\n  home     Create password-encrypted homes\n  profile  Apply public user profiles\n  apps     Reconcile system Flatpaks\n  updates  List OS and Flatpak updates\n\nBoth builds:\n  completion  Generate a shell completion script\n\n{options}")]
+#[command(name = "ilexctl", version = VERSION, about = "Manage an ilex machine", help_template = "{about}\n\n{usage-heading} {usage}\n\nOn an ilex machine:\n  system   Inspect the image and enforce its signature policy\n  home     Create password-encrypted homes\n  profile  Apply public user profiles\n  apps     Reconcile system Flatpaks\n  updates  List OS and Flatpak updates\n  security  Verify root unlock and repair TPM enrollment\n\nBoth builds:\n  completion  Generate a shell completion script\n\n{options}")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -31,6 +33,8 @@ enum Command {
     Apps(ilex_agent::AppsArgs),
     /// List OS and system Flatpak updates (on an ilex machine)
     Updates(ilex_agent::UpdatesArgs),
+    /// Verify root unlock and authenticate TPM repair (on an ilex machine)
+    Security(security::Args),
     #[cfg(feature = "dev")]
     #[command(flatten)]
     Dev(dev::Command),
@@ -125,6 +129,7 @@ pub fn run() -> ExitCode {
         Command::Profile(args) => ilex_agent::profile(args),
         Command::Apps(args) => ilex_agent::apps(args),
         Command::Updates(args) => ilex_agent::updates(args),
+        Command::Security(args) => security::run(args),
         #[cfg(feature = "dev")]
         Command::Dev(_) => unreachable!(),
         Command::Completion { .. } => unreachable!(),

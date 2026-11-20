@@ -1,12 +1,12 @@
 //! A temporary, authenticated recovery receipt. Persist it before allocating
 //! anything so retry can redisplay the same key even after an abrupt stop.
+use super::{Enrollment, Secret};
 use aes_gcm::{
     Aes256Gcm, KeyInit,
     aead::{Aead, Payload},
 };
 use anyhow::{Result, ensure};
 use argon2::{Algorithm, Argon2, Params, Version};
-use ilex_enroll::{Enrollment, Secret};
 use serde::{Deserialize, Serialize};
 use std::{fs::File, io::Read};
 use zeroize::Zeroizing;
@@ -46,21 +46,7 @@ impl PendingRecovery {
     }
 
     pub fn key(&self, uuid: &str, passphrase: &Secret) -> Result<Secret> {
-        ensure!(
-            self.ciphertext.len() == 48,
-            "invalid pending recovery receipt"
-        );
-        let bytes = Zeroizing::new(
-            self.cipher(passphrase)?
-                .decrypt(
-                    (&self.nonce).into(),
-                    Payload {
-                        msg: &self.ciphertext,
-                        aad: self.binding(uuid).as_bytes(),
-                    },
-                )
-                .map_err(|_| anyhow::anyhow!("cannot authenticate pending recovery receipt"))?,
-        );
+        let bytes = self.decrypt(uuid, passphrase)?;
         let alphabet = b"cbdefghijklnrtuv";
         let mut key = Secret::empty()?;
         for (index, byte) in bytes.iter().enumerate() {
@@ -71,6 +57,41 @@ impl PendingRecovery {
             key.push(alphabet[usize::from(byte & 15)])?;
         }
         Ok(key)
+    }
+
+    pub fn retarget(&mut self, uuid: &str, passphrase: &Secret, token: u32) -> Result<()> {
+        let entropy = self.decrypt(uuid, passphrase)?;
+        self.enrollment.token = token;
+        File::open("/dev/urandom")?.read_exact(&mut self.nonce)?;
+        self.ciphertext = self
+            .cipher(passphrase)?
+            .encrypt(
+                (&self.nonce).into(),
+                Payload {
+                    msg: &entropy,
+                    aad: self.binding(uuid).as_bytes(),
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("cannot protect pending recovery key"))?;
+        Ok(())
+    }
+
+    fn decrypt(&self, uuid: &str, passphrase: &Secret) -> Result<Zeroizing<Vec<u8>>> {
+        ensure!(
+            self.ciphertext.len() == 48,
+            "invalid pending recovery receipt"
+        );
+        Ok(Zeroizing::new(
+            self.cipher(passphrase)?
+                .decrypt(
+                    (&self.nonce).into(),
+                    Payload {
+                        msg: &self.ciphertext,
+                        aad: self.binding(uuid).as_bytes(),
+                    },
+                )
+                .map_err(|_| anyhow::anyhow!("cannot authenticate pending recovery receipt"))?,
+        ))
     }
 
     fn binding(&self, uuid: &str) -> String {

@@ -40,6 +40,16 @@ impl Secret {
     pub fn bytes(&self) -> &[u8] {
         &self.0
     }
+    pub(super) fn buffer(&mut self, size: usize) -> Result<&mut [u8]> {
+        ensure!(size < self.0.capacity(), "invalid secret buffer size");
+        self.0.resize(size, 0);
+        Ok(&mut self.0)
+    }
+    pub(super) fn copy(bytes: &[u8]) -> Result<Self> {
+        let mut secret = Self::empty()?;
+        secret.buffer(bytes.len())?.copy_from_slice(bytes);
+        Ok(secret)
+    }
     pub fn push(&mut self, byte: u8) -> Result<()> {
         ensure!(self.0.len() < 65536, "secret too long");
         self.0.push(byte);

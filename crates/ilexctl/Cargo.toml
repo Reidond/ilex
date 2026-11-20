@@ -19,3 +19,6 @@ anyhow = { workspace = true, optional = true }
 ilex-devkit = { workspace = true, optional = true }
 ilex-vmctl = { path = "../ilex-vmctl", optional = true }
 xtask = { path = "../xtask", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ilex-enroll = { path = "../ilex-enroll" }
