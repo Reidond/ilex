@@ -13,6 +13,7 @@
 
 pub mod attached;
 pub mod backend;
+pub mod cli;
 pub mod image;
 pub mod keys;
 pub mod mcp;

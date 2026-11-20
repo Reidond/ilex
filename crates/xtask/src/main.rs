@@ -1,41 +1,10 @@
-//! `cargo xtask <cmd>`: build, boot, test and release the ilex image.
-//!
-//! Each subcommand lives in its own module with its own `Args`, so commands
-//! can grow independently.
+//! Compatibility entry point for cargo xtask and the Linux remote worker.
 
+use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ilex_devkit::Workspace;
-
-mod apps;
-mod build;
-mod builder;
-mod changed;
-mod dev_image;
-mod disk;
-mod doctor;
-mod identity;
-mod info;
-mod iso;
-mod migrate;
-mod prepare_publish;
-mod publish;
-mod rechunk;
-mod registry;
-mod remote;
-mod remote_worker;
-mod runtime;
-mod security;
-#[cfg(target_os = "windows")]
-mod security_windows;
-mod select;
-mod test;
-mod tool;
-mod vm;
-#[cfg(target_os = "windows")]
-mod vm_windows;
+use xtask::{CheckoutCmd, Cmd};
 
 #[derive(Parser)]
 #[command(
@@ -44,118 +13,42 @@ mod vm_windows;
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: LegacyCmd,
 }
 
 #[derive(Subcommand)]
-enum Cmd {
-    /// Resume, cancel or qualify this checkout's remote builder jobs
-    Remote(remote::Args),
-    #[command(hide = true)]
-    RemoteWorker(remote_worker::Args),
-    /// Provision and maintain the native Windows Hyper-V Fedora builder
-    Builder(builder::Args),
-    /// Import an explicitly exported development cache into the Windows builder
-    Migrate(migrate::Args),
-    /// Fetch or inspect the pinned per-user portable Windows QEMU runtime
-    Runtime(runtime::Args),
+enum LegacyCmd {
+    #[command(flatten)]
+    Checkout(CheckoutCmd),
     /// Check configured Flatpaks against Flathub without downloading apps
-    Apps(apps::Args),
-    /// podman build, tagged with this checkout's slug, labels included
-    Build(build::Args),
-    /// Split the image into reproducible chunks and add the `ilex.fingerprint` label
-    Rechunk(rechunk::Args),
+    Apps(xtask::AppsArgs),
     /// Boot the current image as an interactive ephemeral VM
-    Vm(vm::Args),
-    /// Write a qcow2 or raw disk with `bcvk to-disk`
-    Disk(disk::Args),
-    /// Build if needed, then run the e2e harness (`cargo xtask test ephemeral::`)
-    Test(test::Args),
-    /// Compare the candidate's fingerprint with a published image
-    Changed(changed::Args),
-    /// Push by digest, tag and sign (CI only)
-    Publish(publish::Args),
-    /// Record a machine fingerprint before testing its immutable image ID
-    PreparePublish(prepare_publish::Args),
-    /// Build the network installer ISO (releases are CI-only)
-    Iso(iso::Args),
+    Vm(xtask::VmArgs),
     /// Build a drupe tool image from Fedora packages (`cargo xtask tool strace`)
-    Tool(tool::Args),
-    /// Show this checkout's slug, image, VM names and state directories
-    Info(info::Args),
+    Tool(xtask::ToolArgs),
     /// Probe the backend; --self-check exercises owned checkout fixtures
-    Doctor(doctor::Args),
-    /// Inspect automatic primary ownership, release stale claims, or rebuild legacy images
-    Identity(identity::Args),
+    Doctor(xtask::DoctorArgs),
     /// Probe secure firmware/KVM/SMM; --self-check boots the firmware tier
-    Security(security::Args),
+    Security(xtask::SecurityArgs),
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli.cmd) {
+    let cmd = match Cli::parse().cmd {
+        LegacyCmd::Checkout(cmd) => Cmd::Checkout(cmd),
+        LegacyCmd::Apps(args) => Cmd::Apps(args),
+        LegacyCmd::Vm(args) => Cmd::Vm(args),
+        LegacyCmd::Tool(args) => Cmd::Tool(args),
+        LegacyCmd::Doctor(args) => Cmd::Doctor(args),
+        LegacyCmd::Security(args) => Cmd::Security(args),
+    };
+    if io::stderr().is_terminal() && !matches!(cmd, Cmd::Checkout(CheckoutCmd::RemoteWorker(_))) {
+        eprintln!("xtask: use cargo ilexctl for checkout commands");
+    }
+    match xtask::run(cmd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("xtask: error: {err:#}");
-            err.downcast_ref::<remote::Failure>()
-                .map(|failure| ExitCode::from(failure.code))
-                .unwrap_or(ExitCode::FAILURE)
+            ExitCode::from(xtask::exit_code(&err))
         }
-    }
-}
-
-fn run(cmd: Cmd) -> Result<()> {
-    if let Cmd::Identity(args) = &cmd {
-        return identity::run(args);
-    }
-    // Infrastructure commands work outside a checkout.
-    let cmd = match cmd {
-        Cmd::RemoteWorker(args) => return remote_worker::run(args),
-        Cmd::Builder(args) => return builder::run(args),
-        Cmd::Runtime(args) => return runtime::run(args),
-        other => other,
-    };
-    let ws = Workspace::discover()?;
-    let Some(cmd) = remote::route(&ws, cmd)? else {
-        return Ok(());
-    };
-    match cmd {
-        Cmd::Remote(args) => remote::run(&ws, args),
-        Cmd::Migrate(args) => migrate::run(&ws, args),
-        Cmd::RemoteWorker(_) => unreachable!("handled before workspace discovery"),
-        Cmd::Apps(args) => apps::run(&ws, args),
-        Cmd::Build(args) => build::run(&ws, args),
-        Cmd::Rechunk(args) => rechunk::run(&ws, args),
-        Cmd::Vm(args) => {
-            let resolved = args.resolve(&ws)?;
-            if args.secure {
-                #[cfg(target_os = "windows")]
-                return security_windows::vm(&ws, args, resolved);
-                #[cfg(not(target_os = "windows"))]
-                anyhow::bail!(
-                    "vm --secure selects the Windows Hyper-V provider; use xtask security on Linux"
-                );
-            }
-            #[cfg(target_os = "windows")]
-            if args.gui || args.disk {
-                return vm_windows::run(&ws, args, resolved);
-            }
-            if !cfg!(any(target_os = "linux", target_os = "windows")) {
-                anyhow::bail!("no VM backend implemented for this host");
-            }
-            vm::run(&ws, args, resolved)
-        }
-        Cmd::Disk(args) => disk::run(&ws, args),
-        Cmd::Test(args) => test::run(&ws, args),
-        Cmd::Changed(args) => changed::run(&ws, args),
-        Cmd::Publish(args) => publish::run(&ws, args),
-        Cmd::PreparePublish(args) => prepare_publish::run(&ws, args),
-        Cmd::Iso(args) => iso::run(&ws, args),
-        Cmd::Tool(args) => tool::run(&ws, args),
-        Cmd::Info(args) => info::run(&ws, args),
-        Cmd::Doctor(args) => doctor::run(&ws, args),
-        Cmd::Identity(args) => identity::run(&args),
-        Cmd::Security(args) => security::run(&ws, args),
-        Cmd::Builder(_) | Cmd::Runtime(_) => unreachable!("handled before workspace discovery"),
     }
 }

@@ -176,14 +176,18 @@ pub enum Operation {
 pub fn route(ws: &Workspace, cmd: crate::Cmd) -> Result<Option<crate::Cmd>> {
     #[cfg(target_os = "windows")]
     {
+        use crate::{CheckoutCmd, Cmd};
+
         let remote = match cmd {
-            crate::Cmd::Build(a) => Command::Build(a),
-            crate::Cmd::Rechunk(a) => Command::Rechunk(a),
-            crate::Cmd::Disk(a) => Command::Disk(a),
-            crate::Cmd::Iso(a) if !a.due => Command::Iso(a),
-            crate::Cmd::Tool(a) => Command::Tool(a),
-            crate::Cmd::Vm(a) if !a.disk && !a.gui && !a.secure && !a.print_image => Command::Vm(a),
-            crate::Cmd::Test(a) if a.filters.iter().any(|f| f.contains("security")) => {
+            Cmd::Checkout(CheckoutCmd::Build(a)) => Command::Build(a),
+            Cmd::Checkout(CheckoutCmd::Rechunk(a)) => Command::Rechunk(a),
+            Cmd::Checkout(CheckoutCmd::Disk(a)) => Command::Disk(a),
+            Cmd::Checkout(CheckoutCmd::Iso(a)) if !a.due => Command::Iso(a),
+            Cmd::Tool(a) => Command::Tool(a),
+            Cmd::Vm(a) if !a.disk && !a.gui && !a.secure && !a.print_image => Command::Vm(a),
+            Cmd::Checkout(CheckoutCmd::Test(a))
+                if a.filters.iter().any(|f| f.contains("security")) =>
+            {
                 let (legacy, native) = crate::security_windows::partition(a)?;
                 // Both groups run once, even if the first reports a failure.
                 let linux = legacy.map_or(Ok(()), |a| {
@@ -194,7 +198,7 @@ pub fn route(ws: &Workspace, cmd: crate::Cmd) -> Result<Option<crate::Cmd>> {
                 windows?;
                 return Ok(None);
             }
-            crate::Cmd::Test(a) => Command::Test(a),
+            Cmd::Checkout(CheckoutCmd::Test(a)) => Command::Test(a),
             other => return Ok(Some(other)),
         };
         let _ = client::execute(ws, remote)?;
