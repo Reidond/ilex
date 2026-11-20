@@ -352,8 +352,9 @@ def terminal(owner, job):
     path, spec = load_job({'owner': owner, 'job': job})
     with lock('/run/lock/ilex-builder-jobs.lock', shared=True), lock(path / 'terminal.lock', wait=False):
         assert interactive(spec), 'job has no guest terminal'
-        assert read_json(path / 'state.json')['state'] == 'queued', 'terminal job was already started'
-        assert not running(service(job)), 'terminal job is already running'
+        with lock(path / 'dispatch.lock'):
+            assert read_json(path / 'state.json')['state'] == 'queued', 'terminal job is not queued'
+            assert not running(service(job)), 'terminal job is already running'
         def disconnect(_signum, _frame):
             raise InterruptedError('guest terminal disconnected')
         signal.signal(signal.SIGHUP, disconnect)
@@ -381,15 +382,16 @@ def submit(spec):
             return {'job': spec['job'], 'root': str(root)}
         reserve(16 * 1024**3)
         path.mkdir(parents=True)
-        atomic(path / 'request.json', encode(spec))
-        atomic(path / 'context.json', encode({'schema': 1, 'root': str(root), 'identity': snapshot['identity'], 'source': snapshot['source']}))
-        atomic(path / 'state.json', encode({'state': 'queued', 'exit_code': None}))
-        try:
-            if not interactive(spec):
-                launch(spec)
-        except BaseException:
-            atomic(path / 'state.json', encode({'state': 'failed', 'exit_code': 1}))
-            raise
+        with lock(path / 'dispatch.lock'):
+            atomic(path / 'request.json', encode(spec))
+            atomic(path / 'context.json', encode({'schema': 1, 'root': str(root), 'identity': snapshot['identity'], 'source': snapshot['source']}))
+            atomic(path / 'state.json', encode({'state': 'queued', 'exit_code': None}))
+            try:
+                if not interactive(spec):
+                    launch(spec)
+            except BaseException:
+                atomic(path / 'state.json', encode({'state': 'failed', 'exit_code': 1}))
+                raise
     return {'job': spec['job'], 'root': str(root)}
 
 
@@ -431,30 +433,29 @@ def capacity(spec):
         time.sleep(2)
 
 
-def artifact_inventory(path, state, include_state=True):
+def artifact_inventory(path, state=None):
     artifacts = []
-    roots = [(path, 'job'), (state / 'artifacts', 'artifacts'), (state / 'iso', 'iso'),
-             (state / 'disks', 'disks'), (state / 'tools/images', 'tools/images'),
-             (state / 'tools/keys', 'tools/keys'), (state / 'jobs', 'jobs'), (state / 'exports', 'exports')]
+    roots = [(path, 'job')]
     operation = read_json(path / 'request.json')['command']['operation']
-    if operation == 'oemdrv':
-        roots = [(path, 'job'), (path / 'fixture', 'artifacts')]
-    outputs = {'build': {'jobs'}, 'rechunk': {'jobs'}, 'disk': {'disks'},
-               'iso': {'iso'}, 'tool': {'tools/images', 'tools/keys'},
-               'export': {'exports'}, 'self_check': set(), 'vm': set(), 'import_kache': set()}
+    outputs = {'build': ('jobs',), 'rechunk': ('jobs',), 'disk': ('disks',),
+               'iso': ('iso',), 'tool': ('tools/images', 'tools/keys'),
+               'export': ('exports',)}
+    if state is not None:
+        if operation == 'oemdrv':
+            roots.append((path / 'fixture', 'artifacts'))
+        elif operation not in {'import_kache', 'self_check'}:
+            roots.append((path / 'artifacts', 'artifacts'))
+        roots.extend((state / prefix, prefix) for prefix in outputs.get(operation, ()))
     for root, prefix in roots:
-        if not include_state and prefix != 'job':
-            continue
-        if operation in outputs and prefix != 'job' and prefix not in outputs[operation] and not (prefix == 'artifacts' and operation != 'self_check'):
-            continue
         if not root.is_dir():
             continue
-        for file in sorted(root.rglob('*')):
+        files = root.iterdir() if prefix == 'job' else root.rglob('*')
+        for file in sorted(files):
             if not file.is_file() or file.is_symlink() or private(file.relative_to(root)) or file.name.endswith(('.partial', '.lock')):
                 continue
             if any(part.lower().startswith('.ilex') or part.lower().endswith('.ilex-owner') for part in file.relative_to(root).parts):
                 continue  # allocation receipts are control data, never exports
-            if prefix == 'job' and (file.parent != path or file.name not in {'stdout.log', 'stderr.log', 'state.json', 'request.json', 'context.json', 'image.json'}):
+            if prefix == 'job' and file.name not in {'stdout.log', 'stderr.log', 'state.json', 'request.json', 'context.json', 'image.json'}:
                 continue
             if prefix == 'iso' and file.suffix not in {'.iso', '.sha256', '.json', '.md'}:
                 continue
@@ -505,10 +506,10 @@ def prepare_console_logs(owner, job):
     return directory
 
 
-def collect_console_logs(directory, state):
+def collect_console_logs(directory, artifacts):
     if directory is None:
         return
-    target = state / 'artifacts/console'
+    target = artifacts / 'console'
     target.mkdir(parents=True, exist_ok=True)
     for source in directory.glob('*.log'):
         assert source.is_file() and not source.is_symlink(), 'console output replaced'
@@ -704,6 +705,14 @@ def execute(owner, job):
         raise InterruptedError('job cancelled')
 
     signal.signal(signal.SIGTERM, cancel)
+    # The terminal path releases this lock before starting systemd-run so it
+    # can relay the PTY. Recheck in the worker before admitting any resources.
+    with lock(path / 'dispatch.lock'):
+        state_name = read_json(path / 'state.json')['state']
+        if state_name == 'cancelled':
+            return
+        assert state_name == 'queued', 'job is not queued'
+        atomic(path / 'state.json', encode({'state': 'running', 'exit_code': None}))
     code = 1
     guards = contextlib.ExitStack()
     admitted = False
@@ -720,7 +729,7 @@ def execute(owner, job):
             env = ENV | spec['environment'] | {
                 'ILEX_ROOT': str(root), 'ILEX_STATE_DIR': str(state.parent),
                 'ILEX_REMOTE_CONTEXT': str(path / 'context.json'),
-                'ILEX_ARTIFACTS': str(state / 'artifacts'),
+                'ILEX_ARTIFACTS': str(path / 'artifacts'),
                 'ILEX_VM_LOG_DIR': str(console_logs),
                 'ILEX_JOB_RESOURCE_DIR': str(path / 'resources'),
                 # Cargo freshness uses mtimes and shared binary paths. Returning
@@ -737,7 +746,6 @@ def execute(owner, job):
                 if name == 'iso':
                     env['ILEX_ISO'] = str(target)
             Path(env['XDG_RUNTIME_DIR']).mkdir(mode=0o700, exist_ok=True)
-            atomic(path / 'state.json', encode({'state': 'running', 'exit_code': None}))
             if operation == 'oemdrv':
                 operation_started = time.monotonic()
                 create_oemdrv(path, spec)
@@ -789,13 +797,13 @@ def execute(owner, job):
                     err.write(('owned resource cleanup failed: ' + str(error) + '\n').encode())
                 code = code or 1
         try:
-            collect_console_logs(console_logs, state)
+            collect_console_logs(console_logs, path / 'artifacts')
         except Exception as error:
             with (path / 'stderr.log').open('ab') as err:
                 err.write(('console collection failed: ' + str(error) + '\n').encode())
             code = code or 1
         atomic(path / 'state.json', encode({'state': 'cancelled' if cancelled else 'complete', 'exit_code': code}))
-        artifacts = artifact_inventory(path, state, include_state=admitted)
+        artifacts = artifact_inventory(path, state if admitted else None)
         versions = {}
         for tool in ('rustc', 'cargo', 'podman', 'bcvk', 'qemu-system-x86_64'):
             try:
@@ -816,6 +824,59 @@ def execute(owner, job):
         if cleanup_error is None:
             (path / 'lease.json').unlink(missing_ok=True)
         guards.close()
+
+
+def finish_interrupted(path, spec, state=None, cleanup_error=None):
+    atomic(path / 'state.json', encode({'state': 'cancelled', 'exit_code': 130}))
+    result = {'schema': 1, 'job': spec['job'], 'owner': spec['snapshot']['identity']['owner'],
+              'source_digest': spec['snapshot']['source']['digest'], 'exit_code': 130,
+              'artifacts': artifact_inventory(path, state), 'interrupted': True,
+              'resource_cleanup_error': cleanup_error}
+    atomic(path / 'result.json', encode(result))
+    return result
+
+
+def cancel_job(path, spec):
+    with lock(path / 'dispatch.lock'):
+        if (path / 'result.json').exists():
+            return
+        if read_json(path / 'state.json')['state'] in {'queued', 'cancelled'}:
+            finish_interrupted(path, spec)
+        elif running(service(spec['job'])):
+            unit = service(spec['job'])
+            description = checked(['systemctl', 'show', '-p', 'Description', '--value', unit]).decode().strip()
+            owner = spec['snapshot']['identity']['owner']
+            assert description == 'ilex-job schema=1 owner=' + owner + ' job=' + spec['job'], 'job unit ownership changed'
+            # Signal only this unit. The worker freezes its own outputs.
+            checked(['systemctl', 'kill', '--signal=SIGTERM', '--kill-whom=all', unit])
+
+
+def job_status(path, spec):
+    with lock(path / 'dispatch.lock'):
+        result = read_json(path / 'result.json') if (path / 'result.json').exists() else None
+        state_name = read_json(path / 'state.json')['state']
+        reconciliation_error = None
+        if result and (path / 'lease.json').exists() and not running(service(spec['job'])):
+            try:
+                cleanup_resources(path, spec)
+                (path / 'lease.json').unlink(missing_ok=True)
+            except Exception as error:
+                reconciliation_error = str(error)
+        waiting_terminal = interactive(spec) and state_name == 'queued'
+        if not result and not waiting_terminal and not running(service(spec['job'])):
+            # Recover an interrupted process, or a cancellation interrupted
+            # after recording the state but before publishing the result.
+            state = owner_dir(spec['snapshot']) / 'state' / spec['snapshot']['identity']['slug']
+            cleanup_error = None
+            try:
+                cleanup_resources(path, spec)
+                (path / 'lease.json').unlink(missing_ok=True)
+            except Exception as error:
+                cleanup_error = str(error)
+            result = finish_interrupted(path, spec, state, cleanup_error)
+        sizes = {n: (path / (n + '.log')).stat().st_size if (path / (n + '.log')).exists() else 0 for n in ('stdout', 'stderr')}
+        return {'state': read_json(path / 'state.json'), 'result': result, 'logs': sizes,
+                'resource_reconciliation_error': reconciliation_error}
 
 
 def request(frame, payload):
@@ -855,39 +916,10 @@ def request(frame, payload):
     if op in {'status', 'cancel', 'fetch'}:
         path, spec = load_job(frame)
         if op == 'cancel':
-            if not (path / 'result.json').exists() and running(service(frame['job'])):
-                description = checked(['systemctl', 'show', '-p', 'Description', '--value', service(frame['job'])]).decode().strip()
-                assert description == 'ilex-job schema=1 owner=' + frame['owner'] + ' job=' + frame['job'], 'job unit ownership changed'
-                # Signal only this unit. The wrapper freezes outputs and writes
-                # its result before exiting; no maintenance/VM-stop operation.
-                checked(['systemctl', 'kill', '--signal=SIGTERM', '--kill-whom=all', service(frame['job'])])
+            cancel_job(path, spec)
             return {}, b''
         if op == 'status':
-            result = read_json(path / 'result.json') if (path / 'result.json').exists() else None
-            reconciliation_error = None
-            if result and (path / 'lease.json').exists() and not running(service(frame['job'])):
-                try:
-                    cleanup_resources(path, spec)
-                    (path / 'lease.json').unlink(missing_ok=True)
-                except Exception as error:
-                    reconciliation_error = str(error)
-            if not result and not running(service(frame['job'])):
-                # A power loss/cgroup kill remains observable and still exposes logs.
-                state = owner_dir(spec['snapshot']) / 'state' / spec['snapshot']['identity']['slug']
-                cleanup_error = None
-                try:
-                    cleanup_resources(path, spec)
-                    (path / 'lease.json').unlink(missing_ok=True)
-                except Exception as error:
-                    cleanup_error = str(error)
-                result = {'schema': 1, 'job': frame['job'], 'owner': frame['owner'],
-                          'source_digest': spec['snapshot']['source']['digest'], 'exit_code': 130,
-                          'artifacts': artifact_inventory(path, state), 'interrupted': True,
-                          'resource_cleanup_error': cleanup_error}
-                atomic(path / 'result.json', encode(result))
-            sizes = {n: (path / (n + '.log')).stat().st_size if (path / (n + '.log')).exists() else 0 for n in ('stdout', 'stderr')}
-            return {'state': read_json(path / 'state.json'), 'result': result, 'logs': sizes,
-                    'resource_reconciliation_error': reconciliation_error}, b''
+            return job_status(path, spec), b''
         name = relative(frame['path'])
         prefix, _, tail = name.partition('/')
         if prefix == 'job':
@@ -896,6 +928,7 @@ def request(frame, payload):
         else:
             assert prefix in {'artifacts', 'iso', 'disks', 'tools', 'jobs', 'exports'} and not private(tail), 'unsupported output artifact'
             result = read_json(path / 'result.json')
+            assert result['job'] == frame['job'] and result['owner'] == frame['owner'], 'artifact result identity mismatch'
             assert any(a['path'] == name for a in result['artifacts']), 'artifact is not in the immutable job result'
             target = path / 'exports' / name
         assert target.resolve().is_relative_to(path.resolve()) and not target.is_symlink(), 'artifact escape'

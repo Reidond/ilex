@@ -164,6 +164,22 @@ pub fn manifest(value: &Value) -> Result<Vec<Artifact>> {
     Ok(artifacts)
 }
 
+pub fn validate_oemdrv(artifacts: &[Artifact], success: bool) -> Result<()> {
+    let mut fixture = false;
+    for artifact in artifacts {
+        if !artifact.path.starts_with("job/") {
+            ensure!(
+                artifact.path == "artifacts/answers.raw"
+                    && artifact.bytes == transport::OEMDRV_BYTES as u64,
+                "unexpected OEMDRV artifact name or declared size"
+            );
+            fixture = true;
+        }
+    }
+    ensure!(fixture || !success, "missing OEMDRV fixture in result");
+    Ok(())
+}
+
 pub fn collect(
     directory: &Directory,
     value: &Value,
@@ -251,6 +267,29 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
     let directory = Directory::open(&root.join("received"))?;
     let bytes = b"verified artifact\n";
     let good = json!({"path":"artifacts/valid.log","sha256":ilex_devkit::core::digest(bytes),"bytes":bytes.len()});
+    let oemdrv = json!({
+        "path": "artifacts/answers.raw",
+        "sha256": ilex_devkit::core::digest(bytes),
+        "bytes": transport::OEMDRV_BYTES,
+    });
+    validate_oemdrv(&manifest(&json!([oemdrv]))?, true)?;
+    for (name, size) in [
+        ("artifacts/answers.raw", transport::OEMDRV_BYTES - 1),
+        ("artifacts/answers.raw", transport::OEMDRV_BYTES + 1),
+        ("artifacts/old.raw", transport::OEMDRV_BYTES),
+    ] {
+        let mut malformed = oemdrv.clone();
+        malformed["path"] = json!(name);
+        malformed["bytes"] = json!(size);
+        ensure!(
+            validate_oemdrv(&manifest(&json!([malformed]))?, true).is_err(),
+            "accepted invalid OEMDRV manifest before transfer"
+        );
+    }
+    ensure!(
+        validate_oemdrv(&manifest(&json!([]))?, true).is_err(),
+        "accepted a successful result with no OEMDRV"
+    );
     let mut refused = 0;
     for path in [
         "job/destinations.json",
@@ -479,7 +518,7 @@ pub fn self_check(ws: &ilex_devkit::Workspace) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"invalid_manifests_refused":refused,"complete_manifest_validation":true,"positive_receive":true,"native_append_stream":true,"growing_log_prefix_only":true,"growing_log_suffix_recovered":true,"log_bad_checksum_and_limit_refused":true,"atomic_existing_replacement":true,"chunk_limit":true,"fetch_payload_limit_bytes":transport::MAX_REPLY_PAYLOAD_BYTES,"large_artifact_bytes":large_bytes.len(),"large_artifact_blocks":large_blocks,"oversized_fetch_refused":true,"count_and_aggregate_limits":true,"log_and_metadata_limits":true,"duplicate_case_and_directory_aliases":true,"receiver_junction_refused":true,"in_place_reparse_race":reparse_race,"hardlink_refused":true,"held_directory_cannot_be_replaced":true,"control_sentinel_unchanged":true,"handle_rename":true,"explicit_state_output_refused":true,"root":root})
+            &json!({"invalid_manifests_refused":refused,"complete_manifest_validation":true,"oemdrv_declaration_checked":true,"positive_receive":true,"native_append_stream":true,"growing_log_prefix_only":true,"growing_log_suffix_recovered":true,"log_bad_checksum_and_limit_refused":true,"atomic_existing_replacement":true,"chunk_limit":true,"fetch_payload_limit_bytes":transport::MAX_REPLY_PAYLOAD_BYTES,"large_artifact_bytes":large_bytes.len(),"large_artifact_blocks":large_blocks,"oversized_fetch_refused":true,"count_and_aggregate_limits":true,"log_and_metadata_limits":true,"duplicate_case_and_directory_aliases":true,"receiver_junction_refused":true,"in_place_reparse_race":reparse_race,"hardlink_refused":true,"held_directory_cannot_be_replaced":true,"control_sentinel_unchanged":true,"handle_rename":true,"explicit_state_output_refused":true,"root":root})
         )?
     );
     drop(original);

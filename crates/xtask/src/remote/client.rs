@@ -562,7 +562,10 @@ fn wait(
         .context("missing remote exit code")?;
     ensure!((-127..=255).contains(&code), "invalid remote exit code");
     // Validate the complete untrusted manifest before writing any artifact.
-    receive::manifest(&result["artifacts"])?;
+    let manifest = receive::manifest(&result["artifacts"])?;
+    if matches!(job.command, Command::Oemdrv { .. }) {
+        receive::validate_oemdrv(&manifest, code == 0)?;
+    }
     let result_bytes = serde_json::to_vec_pretty(&result)?;
     ensure!(
         result_bytes.len() <= 32 * 1024 * 1024,
