@@ -23,3 +23,7 @@ libtest-mimic = "0.8"
 [profile.release]
 lto = "thin"
 strip = true
+
+# Native disk transfers hash multi-GiB images in the dev profile.
+[profile.dev.package."*"]
+opt-level = 3

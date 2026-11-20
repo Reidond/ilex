@@ -1,8 +1,8 @@
 # Portable Windows runtime and Fedora builder
 
-T2 adds infrastructure commands. Existing image build/test commands keep their
-current routing until T3 supplies snapshot transfer and the remote executor.
-Use native PowerShell; neither command calls WSL. Linux hosts keep local tooling.
+Run the infrastructure commands in native PowerShell. Windows sends Linux image
+builds, tests, disk and ISO jobs and ordinary ephemeral VMs to the managed Fedora
+builder. Native Linux runs its tooling locally.
 
 ```powershell
 cargo xtask runtime fetch

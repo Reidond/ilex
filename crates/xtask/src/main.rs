@@ -140,6 +140,9 @@ fn run(cmd: Cmd) -> Result<()> {
             if args.gui || args.disk {
                 return vm_windows::run(&ws, args, resolved);
             }
+            if !cfg!(any(target_os = "linux", target_os = "windows")) {
+                anyhow::bail!("no VM backend implemented for this host");
+            }
             vm::run(&ws, args, resolved)
         }
         Cmd::Disk(args) => disk::run(&ws, args),
