@@ -53,6 +53,7 @@ Imports use the pinned builder transport and verify the archive digest. The
 builder keeps each complete import by checkout owner and archive hash. Reusing
 the same archive returns the same receipt. The importer checkpoints and checks
 the builder's copy of the index so kache can open it on a read-only mount.
+Podman labels the builder's copy for SELinux when mounting it.
 A build with `ILEX_KACHE_IMPORT`
 mounts that import read-only as `/kache-host`. The ordinary `ilex-kache` layer
 cache still receives new results. Inspect the build's `kache stats --last-build`

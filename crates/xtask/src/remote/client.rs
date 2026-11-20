@@ -168,15 +168,17 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
             staged.file(&iso.with_file_name("compositions.json"))?,
         );
     }
+    let environment = ENVIRONMENT
+        .iter()
+        .filter(|&&key| key != "ILEX_KACHE_IMPORT" || matches!(&command, Command::Build(_)))
+        .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_string(), value)))
+        .collect();
     let job = Job {
         schema: 1,
         job: job_uuid()?,
         snapshot: staged.snapshot.clone(),
         command,
-        environment: ENVIRONMENT
-            .iter()
-            .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
-            .collect(),
+        environment,
         inputs,
     };
     let snapshot_seconds = started.elapsed().as_secs_f64();

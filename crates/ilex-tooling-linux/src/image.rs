@@ -96,9 +96,18 @@ pub fn build(
         }
     }
     if let Some(store) = host_kache_store().filter(|_| !options.no_host_kache) {
+        // The Windows builder validates this selection before it supplies
+        // the checkout-owned copy. Let Podman label that copy for SELinux.
+        let mount_options = if std::env::var_os("ILEX_KACHE_IMPORT").is_some()
+            && crate::source::remote_context(&ws.root)?.is_some()
+        {
+            "ro,z"
+        } else {
+            "ro"
+        };
         build.args([
             "--volume",
-            &format!("{}:{KACHE_HOST_MOUNT}:ro", store.display()),
+            &format!("{}:{KACHE_HOST_MOUNT}:{mount_options}", store.display()),
         ]);
     }
     crate::ownership::validate_build_args(&options.podman_args)?;
