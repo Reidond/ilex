@@ -2041,7 +2041,7 @@ test ! -e /var/lib/ilex/security/.pending-recovery.json
         )?;
     }
     fs::write(
-        artifacts.join("repair-fallback-credentials.json"),
+        artifacts.join("repair-fallback-authentication.json"),
         serde_json::to_vec_pretty(&json!({
             "passphrase_slot":password_slot, "recovery_slot":recovery_slot, "authenticated":true
         }))?,

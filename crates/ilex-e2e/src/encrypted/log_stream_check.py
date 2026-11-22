@@ -3,11 +3,13 @@ import io
 import json
 import pathlib
 import re
+import subprocess
+import sys
 import tempfile
 
 from diagnostics import LOG_BYTES, emit, extract, redacted_tail, tail
 from log_stream import CANCEL, CSI, ESC, OSC, ST, STRINGS, Normalizer
-from privacy import (ENCRYPTED_TIERS, PATTERNS, check_seal, fingerprint,
+from privacy import (ENCRYPTED_TIERS, PATTERNS, EvidenceError, check_seal, fingerprint,
                      private_fingerprint, seal_export, stream_matches, verify_export)
 
 
@@ -65,6 +67,23 @@ def check_artifact_seal(root):
 
     log.write_bytes(b'boot complete')
     refuses_upload()
+    fallback = root / 'encrypted-existing-space' / 'repair-fallback-credentials.json'
+    fallback.write_text('{"passphrase_slot":0,"recovery_slot":1,"authenticated":true}')
+
+    def rejected_export(path, region):
+        process = subprocess.run([
+            sys.executable, '-B', str(pathlib.Path(__file__).with_name('privacy.py')),
+            str(root), '--seal-export', str(marker), 'true', str(private),
+        ], capture_output=True, text=True)
+        assert process.returncode == 1 and not process.stderr
+        report = json.loads(process.stdout)
+        assert report['verification_failed'] and report['read_errors'] == 1
+        assert report['findings'][0]['path'].endswith('/' + path.name)
+        assert report['findings'][0]['region'] == region
+        refuses_upload()
+
+    rejected_export(fallback, 'public-fingerprints')
+    fallback.rename(fallback.with_name('repair-fallback-authentication.json'))
     log.write_bytes(secret[:4] + b'\x9b3\0;1m\r\n' + secret[4:8])
     assert seal_export(root, marker, encrypted=True, private_directory=private)['secret_found']
     refuses_upload()
@@ -73,14 +92,17 @@ def check_artifact_seal(root):
     check_seal(root, marker, encrypted=True)
     log.write_bytes(b'changed after successful scan')
     refuses_upload()
-    (private / (ENCRYPTED_TIERS[0] + '.json')).unlink()
+    receipt = private / (ENCRYPTED_TIERS[0] + '.json')
+    receipt.unlink()
+    rejected_export(receipt, 'private-fingerprints')
+    secret_path = security / (secret.decode() + '.json')
+    secret_path.symlink_to(receipt)
     try:
-        seal_export(root, marker, encrypted=True, private_directory=private)
-    except OSError:
-        pass
+        verify_export(root, ['security'])
+    except EvidenceError as error:
+        assert error.finding['path'].endswith('/security/' + '*' * len(secret) + '.json')
     else:
-        raise AssertionError('missing private fingerprint receipt did not fail the scan')
-    refuses_upload()
+        raise AssertionError('artifact symlink accepted for export')
 
 
 def check():

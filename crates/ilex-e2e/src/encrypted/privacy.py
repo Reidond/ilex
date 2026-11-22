@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import zipfile
+from contextlib import contextmanager
 if 'Normalizer' not in globals():
     from log_stream import CONTEXT, Normalizer, original_offset, redact
 
@@ -230,26 +231,73 @@ def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=Non
     return result
 
 
-def verify_export(root, tiers):
+class EvidenceError(ValueError):
+    def __init__(self, path, region, error=None):
+        super().__init__(region)
+        self.finding = {'rule': 'scan-read-error', 'path': public_path(path), 'region': region}
+        if error is not None:
+            self.finding.update(error=type(error).__name__, errno=getattr(error, 'errno', None))
+
+
+@contextmanager
+def evidence_io(path, region):
+    try:
+        yield
+    except (*READ_ERRORS, UnicodeError, json.JSONDecodeError) as error:
+        raise EvidenceError(path, region, error) from None
+
+
+def evidence_json(path, region):
+    with evidence_io(path, region):
+        return json.loads(path.read_text())
+
+
+def fingerprint_records(path, private=False):
+    region = 'private-fingerprints' if private else 'public-fingerprints'
+    records = evidence_json(path, region)
+    if not isinstance(records, list) or not all(
+            isinstance(record, dict) and type(record.get('length')) is int
+            and record['length'] in PATTERNS and isinstance(record.get('sha256'), str)
+            and re.fullmatch('[0-9a-f]{64}', record['sha256']) for record in records):
+        raise EvidenceError(path, region)
+    return records
+
+
+def export_files(directory):
     def walk_error(error):
-        raise error
+        raise EvidenceError(error.filename or directory, 'artifact-directory-walk', error) from None
+
+    for parent, subdirs, files in os.walk(directory, onerror=walk_error):
+        for name in subdirs:
+            path = pathlib.Path(parent) / name
+            with evidence_io(path, 'artifact-directory'):
+                if name == 'raw-logs' or not stat.S_ISDIR(path.lstat().st_mode):
+                    raise EvidenceError(path, 'artifact-directory')
+        for name in files:
+            path = pathlib.Path(parent) / name
+            with evidence_io(path, 'artifact-file'):
+                lower = name.lower()
+                if (not stat.S_ISREG(path.lstat().st_mode)
+                        or ('serial' in lower and not lower.endswith('-serial.redacted.log'))):
+                    raise EvidenceError(path, 'artifact-file')
+            yield path
+
+
+def verify_export(root, tiers, required=False):
 
     for tier in tiers:
         directory = root / tier
-        if not directory.exists() and not directory.is_symlink():
-            continue
-        if not stat.S_ISDIR(directory.lstat().st_mode):
-            raise ValueError('invalid artifact root')
-        for parent, subdirs, files in os.walk(directory, onerror=walk_error):
-            for name in subdirs:
-                if name == 'raw-logs' or not stat.S_ISDIR((pathlib.Path(parent) / name).lstat().st_mode):
-                    raise ValueError('raw log directory in artifact tree')
-            for name in files:
-                kind = (pathlib.Path(parent) / name).lstat().st_mode
-                name = name.lower()
-                if (not stat.S_ISREG(kind)
-                        or ('serial' in name and not name.endswith('-serial.redacted.log'))):
-                    raise ValueError('raw serial log or unsupported file in artifact tree')
+        with evidence_io(directory, 'artifact-root'):
+            try:
+                mode = directory.lstat().st_mode
+            except FileNotFoundError:
+                if required:
+                    raise
+                continue
+            if not stat.S_ISDIR(mode):
+                raise EvidenceError(directory, 'artifact-root')
+        for _ in export_files(directory):
+            pass
 
 
 ENCRYPTED_TIERS = ('encrypted-install', 'encrypted-existing-space', 'encrypted-interrupted')
@@ -258,74 +306,86 @@ EXPORT_REPORT = 'final-export-privacy.json'
 
 def artifact_roots(root, encrypted):
     tiers = ('security', *ENCRYPTED_TIERS) if encrypted else ('security',)
-    verify_export(root, tiers)
-    paths = [root / tier for tier in tiers]
-    if not all(path.is_dir() for path in paths):
-        raise ValueError('qualification evidence missing')
-    return paths
+    verify_export(root, tiers, required=True)
+    return [root / tier for tier in tiers]
 
 
 def artifact_snapshot(root, paths):
     contents = {}
-    for path in sorted(file for directory in paths for file in directory.rglob('*')):
-        if path.is_dir():
-            continue
-        with path.open('rb') as source:
-            contents[path.relative_to(root).as_posix()] = hashlib.file_digest(source, 'sha256').hexdigest()
+    for path in sorted(file for directory in paths for file in export_files(directory)):
+        with evidence_io(path, 'artifact-digest'):
+            with path.open('rb') as source:
+                contents[path.relative_to(root).as_posix()] = hashlib.file_digest(source, 'sha256').hexdigest()
     return contents
 
 
 def seal_export(root, marker, encrypted, private_directory=None):
-    marker.unlink(missing_ok=True)
+    with evidence_io(marker, 'seal-reset'):
+        marker.unlink(missing_ok=True)
     paths = artifact_roots(root, encrypted)
     initial = artifact_snapshot(root, paths)
-    credentials = [entry for directory in paths for path in directory.rglob('*credentials.json')
-                   for entry in json.loads(path.read_text())]
+    credentials = [entry for name in initial if name.endswith('credentials.json')
+                   for entry in fingerprint_records(root / name)]
     edges = {}
     if encrypted:
         for tier in ENCRYPTED_TIERS:
             definition = root / tier / 'result.json'
-            if json.loads(definition.read_text())['qualification'] != 'passed':
-                raise ValueError('encrypted qualification incomplete')
+            outcome = evidence_json(definition, 'qualification-result')
+            if not isinstance(outcome, dict) or outcome.get('qualification') != 'passed':
+                raise EvidenceError(definition, 'qualification-result')
             fingerprints = definition.with_name('installer-credentials.json')
             required = [48, 71, 71] if tier == 'encrypted-interrupted' else [48, 71]
-            public = json.loads(fingerprints.read_text())
+            public = fingerprint_records(fingerprints)
             if sorted(entry['length'] for entry in public) != required:
-                raise ValueError('encrypted qualification fingerprints incomplete')
-            private = json.loads((private_directory / (tier + '.json')).read_text())
+                raise EvidenceError(fingerprints, 'public-fingerprints')
+            private_path = private_directory / (tier + '.json')
+            private = fingerprint_records(private_path, private=True)
             if [{k: item[k] for k in ('length', 'sha256')} for item in private] != public:
-                raise ValueError('private fingerprint receipt does not cover the public set')
+                raise EvidenceError(private_path, 'private-fingerprints')
             for entry in private:
-                if (len(entry['edges']) != 2
-                        or not all(re.fullmatch('[0-9a-f]{64}', item) for item in entry['edges'])):
-                    raise ValueError('invalid private endpoint fingerprints')
+                if (not isinstance(entry.get('edges'), list) or len(entry['edges']) != 2
+                        or not all(isinstance(item, str) and re.fullmatch('[0-9a-f]{64}', item)
+                                   for item in entry['edges'])):
+                    raise EvidenceError(private_path, 'private-fingerprints')
                 for digest in entry['edges']:
                     edges.setdefault(digest, set()).add(entry['length'])
     report = scan(paths, credentials, require_credentials=encrypted, private_edges=edges)
     if report['secret_found'] or report['read_errors']:
         return report
-    if artifact_snapshot(root, artifact_roots(root, encrypted)) != initial:
-        raise ValueError('qualification evidence changed during scan')
+    require_same_snapshot(root, initial, artifact_snapshot(root, artifact_roots(root, encrypted)))
     receipt = json.dumps(report) + '\n'
     if encrypted:
         path = root / EXPORT_REPORT
-        with path.open('x') as output:
-            output.write(receipt)
+        with evidence_io(path, 'privacy-report-write'):
+            with path.open('x') as output:
+                output.write(receipt)
         initial[EXPORT_REPORT] = hashlib.sha256(receipt.encode()).hexdigest()
-    with marker.open('x') as output:
-        json.dump(initial, output, sort_keys=True)
+    with evidence_io(marker, 'seal-write'):
+        with marker.open('x') as output:
+            json.dump(initial, output, sort_keys=True)
     return report
+
+
+def require_same_snapshot(root, expected, current):
+    for name in sorted(expected.keys() | current.keys()):
+        if expected.get(name) != current.get(name):
+            raise EvidenceError(root / name, 'artifact-changed')
 
 
 def check_seal(root, marker, encrypted):
     current = artifact_snapshot(root, artifact_roots(root, encrypted))
     if encrypted:
         report = root / EXPORT_REPORT
-        if not stat.S_ISREG(report.lstat().st_mode):
-            raise ValueError('invalid privacy report')
-        current[EXPORT_REPORT] = hashlib.sha256(report.read_bytes()).hexdigest()
-    if json.loads(marker.read_text()) != current:
-        raise ValueError('qualification evidence changed after scan')
+        with evidence_io(report, 'privacy-report-read'):
+            if not stat.S_ISREG(report.lstat().st_mode):
+                raise EvidenceError(report, 'privacy-report-read')
+            current[EXPORT_REPORT] = hashlib.sha256(report.read_bytes()).hexdigest()
+    expected = evidence_json(marker, 'seal-read')
+    if not isinstance(expected, dict) or not all(
+            isinstance(digest, str) and re.fullmatch('[0-9a-f]{64}', digest)
+            for digest in expected.values()):
+        raise EvidenceError(marker, 'seal-read')
+    require_same_snapshot(root, expected, current)
 
 
 if __name__ == '__main__':
@@ -355,8 +415,11 @@ if __name__ == '__main__':
         else:
             fingerprints = []
             for path in root.rglob('*credentials.json'):
-                fingerprints.extend(json.loads(path.read_text()))
+                fingerprints.extend(fingerprint_records(path))
             result = scan([root], fingerprints)
+    except EvidenceError as error:
+        result = {'schema': 2, 'secret_found': False, 'read_errors': 1,
+                  'verification_failed': True, 'findings': [error.finding]}
     except Exception:
         # A malformed archive or filename may contain credential material.
         # CI must fail without rendering exception text, paths or source data.
