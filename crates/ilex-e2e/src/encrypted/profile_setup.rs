@@ -70,15 +70,25 @@ pub(super) fn run(
 test "$(getenforce)" = Enforcing
 test ! -e /dev/tpmrm0
 test -n "$(ilex-enroll layout --root / | python3 -c 'import json,sys; print(json.load(sys.stdin)["uuid"])')"
+"#)?;
+    daily_home(vm, artifacts, daily, maintenance)?;
+    guest_privacy(vm, artifacts, "profile-setup", credentials)?;
+    poweroff(fixture, artifacts, "profile")
+}
+
+fn daily_home(vm: &qemu::Vm, artifacts: &Path, daily: &Secret, maintenance: &Secret) -> Result<()> {
+    let ctl = Vmctl::from_info(vm.info.clone());
+    vm.ssh_ok(
+        r#"set -eu
 test -r /etc/issue.d/90-ilex-home-setup.issue
 test "$(getent -s files passwd ilexmaint | cut -d: -f1)" = ilexmaint
 id -nG ilexmaint | grep -w wheel
 test ! -e /var/home/andriishafar.home
-! getent passwd andriishafar
+if getent passwd andriishafar; then exit 1; fi
 # Keep the management forward on the connected subnet; remove Internet paths.
 ip -4 route flush default
 ip -6 route flush default
-! ip route get 1.1.1.1
+if ip route get 1.1.1.1; then exit 1; fi
 systemctl stop systemd-homed
 if result=$(ilexctl home setup 2>&1); then exit 1; fi
 printf '%s\n' "$result" | grep -F 'systemd-homed is unavailable'
@@ -90,7 +100,8 @@ printf '%s\n' "$result" | grep -F 'already a local account'
 test ! -e /var/lib/ilex/home-setup/state.json
 test ! -e /var/home/andriishafar.home
 userdel andriishafar
-"#)?;
+"#,
+    )?;
     let daily = std::str::from_utf8(daily.bytes())?;
     let maintenance = std::str::from_utf8(maintenance.bytes())?;
     crate::homed::guest(
@@ -102,8 +113,8 @@ test ! -e /etc/issue.d/90-ilex-home-setup.issue
 test ! -e /var/lib/ilex/home-setup/identity.json
 test -f /var/home/andriishafar.home
 id -nG andriishafar | grep -w ilex-homed
-! id -nG andriishafar | grep -w wheel
-! mountpoint -q /home/andriishafar
+if id -nG andriishafar | grep -w wheel; then exit 1; fi
+if mountpoint -q /home/andriishafar; then exit 1; fi
 # Lose the completion write and prove that setup reconciles the original UUID.
 state=/var/lib/ilex/home-setup/state.json
 cp "$state" /run/ilex-complete-state.json
@@ -133,6 +144,5 @@ test "$vt" -gt 0 && chvt "$vt"
         artifacts.join("profile-proof.json"),
         serde_json::to_vec_pretty(&proof)?,
     )?;
-    guest_privacy(vm, artifacts, "profile-setup", credentials)?;
-    poweroff(fixture, artifacts, "profile")
+    Ok(())
 }

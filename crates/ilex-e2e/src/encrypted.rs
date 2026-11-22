@@ -800,6 +800,17 @@ cat > /run/ilex-installer/choice <<'PROFILE_SELECTION'
 {choice}
 PROFILE_SELECTION
 %end
+%post --nochroot --erroronfail
+# The image is installed by now. Exercise the shipped preload's offline
+# failure path without changing how Anaconda obtains the signed payload.
+set -eu
+ip -4 route flush default
+ip -6 route flush default
+if ip route get 1.1.1.1 >/dev/null 2>&1; then exit 1; fi
+# Locale configuration is complete. Let localed remove its private tmp
+# directory before the strict credential scan traverses the live /tmp.
+systemctl stop systemd-localed.service
+%end
 user --name=ilexmaint --groups=wheel --lock
 {ks}
 "#
@@ -3042,10 +3053,18 @@ fn run_fixture(
             serde_json::from_slice(&fs::read(artifacts.join("installer-tokens.json"))?)?;
         if profile_setup {
             stage = "profile_setup_no_tpm";
+            let preload: Value =
+                serde_json::from_slice(&fs::read(artifacts.join("installer-preload-check.json"))?)?;
+            ensure!(
+                preload["apps_result"]
+                    .as_i64()
+                    .is_some_and(|status| status != 0),
+                "offline app preload did not exercise the failure path"
+            );
             let daily = profile_setup::secret()?;
             let maintenance = profile_setup::secret()?;
             credentials = fingerprints(&[&passphrase, &recovery, &daily, &maintenance]);
-            profile_setup::run(
+            let profile_result = profile_setup::run(
                 fixture,
                 &artifacts,
                 &passphrase,
@@ -3053,7 +3072,11 @@ fn run_fixture(
                 &maintenance,
                 &credentials,
                 &expected,
-            )?;
+            );
+            if profile_result.is_err() {
+                let _ = fixture.logs(&artifacts, "profile");
+            }
+            profile_result?;
             export_fingerprints.push(private_fingerprint(&daily));
             export_fingerprints.push(private_fingerprint(&maintenance));
             return finish(

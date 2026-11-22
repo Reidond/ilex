@@ -176,8 +176,36 @@ def main():
                 [(r"ILEX-SUDO:", secrets[0]),
                  (r"new password for user andriishafar:", secrets[1]),
                  (r"new password for user andriishafar \(repeat\):", secrets[1])])
-        except RuntimeError:
-            raise RuntimeError("maintenance login or homectl setup failed; terminal output suppressed") from None
+        except RuntimeError as error:
+            # A failed password prompt can include a suggested password.
+            # Report only whitelisted stage names and messages.
+            heading, _, output = str(error).partition("\n")
+            stages = {
+                r"password[^\r\n]*:": "maintenance login",
+                r"[$#] ": "maintenance shell",
+                r"ILEX-SUDO:": "maintenance sudo",
+                r"new password for user andriishafar:": "new daily home password",
+                r"new password for user andriishafar \(repeat\):": "daily home password confirmation",
+                r"ILEX-TTY-DONE:0\r?\n": "verified daily home",
+            }
+            stage = stages.get(heading.partition(": ")[2], "setup command")
+            indicators = (
+                "Creating the encrypted daily home",
+                "Daily home creation did not complete",
+                "unavailable in this image",
+                "already a local account",
+                "occupied by another account or an unfinished home",
+                "Could not obtain named home",
+                "Failed to create home",
+                "Failed to read identity",
+                "Failed to parse",
+                "not in the sudoers",
+                "Authentication failure",
+                "insufficient space",
+                "Unknown option",
+            )
+            found = ", ".join(message for message in indicators if message in output)
+            raise RuntimeError(f"installer profile failed at {stage}" + (f" ({found})" if found else "")) from None
         return "maintenance PAM and sudo login created the separate daily account"
     if action == "installer-profile-login":
         tty(name, secrets[0], r"""test "$(findmnt -nro FSTYPE --target "$HOME")" = btrfs &&

@@ -192,21 +192,18 @@ fn home_uid(intent: &Intent) -> Result<Option<u64>> {
     let machine = fs::read_to_string("/etc/machine-id").map_err(|e| e.to_string())?;
     let binding = &record["binding"][machine.trim()];
     let state = record["status"][machine.trim()]["state"].as_str();
-    let uid = binding["uid"].as_u64().or_else(|| record["uid"].as_u64());
+    let uid = binding["uid"].as_u64();
     // The binding is written when homework has created the LUKS filesystem.
     // The top-level requested UUID alone is insufficient evidence of success.
     let actual_uuid = binding["luksUuid"].as_str().map(|s| s.replace('-', ""));
     if record["userName"] != *name
-        || record["storage"] != "luks"
-        || record["fileSystemType"] != "btrfs"
+        || binding["storage"] != "luks"
+        || binding["fileSystemType"] != "btrfs"
         || !matches!(
             state,
             Some("inactive" | "active" | "lingering" | "locked" | "dirty")
         )
-        || binding["imagePath"]
-            .as_str()
-            .or_else(|| record["imagePath"].as_str())
-            != Some(&image_path)
+        || binding["imagePath"].as_str() != Some(&image_path)
         || actual_uuid.as_deref() != Some(intent.luks_uuid.as_str())
         || !image.is_some_and(|m| m.is_file() && m.len() > 0)
         || uid.is_none()
