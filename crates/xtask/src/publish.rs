@@ -2,7 +2,7 @@
 //!
 //! 1. Push a tested composition once as `:<tag>_sha-<short>` and read back the
 //!    digest the registry stored. In CI the image is already there: the build
-//!    job pushed it as `:candidate.<tag>` (`--stage`) so the upgrade tier could pull
+//!    job pushed it under a staging tag (`--stage`) so the upgrade tier could pull
 //!    it on its own runner, and the publish job hands that digest over
 //!    (`--digest`), so what is signed is exactly what was tested.
 //! 2. Sign that digest with the cosign key pair (`COSIGN_PRIVATE_KEY` +
@@ -41,10 +41,13 @@ pub struct Args {
     /// (`--repository localhost:5000/ilex`). Never reaches ghcr.
     #[arg(long)]
     pub allow_local_registry: bool,
-    /// Push unsigned as `:candidate.<tag>` for tests and print its `digest=`.
+    /// Push unsigned for tests and print the staged `digest=`.
     /// Published composition tags do not move.
     #[arg(long, conflicts_with = "digest")]
     pub stage: bool,
+    /// Staging tag for this root. Main defaults to `candidate.<tag>`.
+    #[arg(long, requires = "stage")]
+    pub stage_tag: Option<String>,
     /// Publish the image already in the repository at this digest (what
     /// `--stage` pushed) instead of pushing a local one
     #[arg(long, value_name = "sha256:…")]
@@ -234,7 +237,23 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
         &image_id,
         inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
     )?;
-    let stage_tag = format!("candidate.{}", args.as_tag);
+    let main_tag = format!("candidate.{}", args.as_tag);
+    let stage_tag = args.stage_tag.as_deref().unwrap_or(&main_tag);
+    if let Some(ci_ref) = std::env::var_os("GITHUB_REF")
+        && (ci_ref == "refs/heads/main") != (stage_tag == main_tag)
+    {
+        bail!("staging tag {stage_tag:?} does not match GitHub ref {ci_ref:?}");
+    }
+    if stage_tag != main_tag
+        && !stage_tag.strip_prefix("candidate-").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    {
+        bail!("invalid branch staging tag {stage_tag:?}");
+    }
     check_tag_length(&format!("{repository}:{stage_tag}"))?;
     let fingerprint = local_fingerprint(&image_id)?;
     {
@@ -256,7 +275,10 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
     )?;
     let pinned = format!("{repository}@{digest}");
     check_pushed_image(&pinned, &image_id, insecure, &auth)?;
-    eprintln!("staged {pinned} as :{stage_tag} (fingerprint {fingerprint}; unsigned)");
+    eprintln!(
+        "staged {pinned} as :{stage_tag} for :{} (fingerprint {fingerprint}; unsigned)",
+        args.as_tag
+    );
 
     // Reproducible layers only help machines if the registry gets the same
     // compressed blobs for them as last time.

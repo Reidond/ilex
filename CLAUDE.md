@@ -507,7 +507,7 @@ must name a published `generic` composition with at least one shell.
 Published tags describe their contents: `base` for generic without shells,
 `<machine>` for another machine without shells, otherwise
 `<machine>.<shell>[.<shell>...]`. Every tag `X` has `X_YYYYMMDD` and
-`X_sha-<7 hex>` companions; roots stage unsigned as `candidate.X`. All derived
+`X_sha-<7 hex>` companions; main stages roots unsigned as `candidate.X`. All derived
 tags, including the longest suffix, must fit 128 bytes. The default shell must
 be first for an image to have a published tag. The three selection labels are
 the authority for the image's name. Publications add no image label or file.
@@ -1630,7 +1630,7 @@ Three paths start together on separate runners:
 - `build`: snapshot each root tag's own digest (explicit `-` for absence),
   check selected inputs → build its shell selection → `changed` against that
   immutable snapshot → rechunk → unsigned
-  `candidate.generic.gnome` through `publish --stage --as` → `ephemeral::`.
+  staging through `publish --stage --as` → `ephemeral::`.
   From its first minute, `vm-prep.sh ephemeral` prepares the VM stack and pulls
   each root's current digest for compressed-blob reuse, installer first. Only while its tag is
   absent does the reuse pull fall back to legacy `latest`. Staging freezes the
@@ -1650,8 +1650,8 @@ Three paths start together on separate runners:
   `v1-disk-boot-mask-<bcvk>-<v1 digest>`, with plain image install options.
   The earlier kernel-argument profile is not restored. It installs
   v1 itself on a cache miss, in the background with the VM stack. It waits for
-  build's "Stage the candidate", pulls `candidate.<installer>` by digest, and
-  runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`
+  build's "Stage the candidate", resolves this ref's staging tag, pulls by
+  digest, and runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`
   and no upgrade tier is the explicit first-publish case.
 - `installer-due` → `iso`: described below. Automatic due builds run on main;
   a branch requests an ISO explicitly with `iso=true`.
@@ -1673,8 +1673,14 @@ Every composition `X` has `X_sha-<7 hex>`, `X` and `X_YYYYMMDD` companions.
 The SHA reference is populated before signing; only after signature verification
 are the moving composition/date tags updated. A failed/cancelled sign can leave
 an unsigned SHA reference, but never moves the composition/date tags to it.
-Unsigned `candidate.X` is the sole staging namespace. Runs use one serialized
-`publish` concurrency group; v1-disk has its own group and writes no image tag.
+Main stages as `candidate.X` in the serialized `publish` group. Other refs use
+`publish-<full ref>`: different refs can run together, and a new run replaces
+the pending run in its group. GitHub compares group names case-insensitively.
+Branch staging tags are `candidate-<ref slug>-<hash>` per ref and root,
+with the full case-sensitive ref and root in the hash. Runs on the same ref
+reuse those tags. Tags from deleted refs remain until a follow-up adds safe
+tag-only cleanup. GHCR's package deletion API removes a whole version, which
+can be shared by multiple tags. The v1-disk group writes no image tag.
 
 Immediately before each publisher, `.github/publish-head.sh image` reads that
 **tag's own** revision and main's head and requires published → run → main
@@ -1898,9 +1904,11 @@ cargo xtask publish <machine-image> --as ms-7c35.gnome --tested-image-id <tested
 ```
 
 Publishing and releases only happen in CI. A branch dispatch with `test=true`
-builds, stages every `candidate.<root>` including `candidate.base`, runs their
-ephemeral tests, upgrades the installer (including legacy fallback) and
-tests machine layers; it signs nothing and moves no published tag. Add `iso=true`
+builds, stages each root under its branch tag, runs their ephemeral tests,
+upgrades the installer (including legacy fallback) and tests machine layers.
+Upgrade and machine tests use registry digests. Encrypted qualification uses
+the immutable local image ID and a disposable signed loopback fixture.
+Branch runs sign nothing in GHCR and move no published tag. Add `iso=true`
 to build the ISO as an artifact on a branch; the installation/release job is
 main-only because its network install exercises the published target, not the
 branch candidate. PR/fork events cannot reach signing.
@@ -2140,10 +2148,9 @@ Anaconda, installs onto a sparse blank 40 GiB disk, boots it, and asserts the
 booted and tracked `generic.gnome` registry reference, the exact verified
 digest, system `running`, no failed units and GDM up. It requires KVM and 6 GiB
 for the installer VM, on the same runner selection as other tiers; it adds
-about 15 minutes only when an ISO was built. Workflow runs are serialized
-(v1-disk has a separate group but never moves tags), so this workflow cannot
-move the tag between verification and installation. Before release it also
-re-reads that tag, requires the same digest, verifies its signature again and
+about 15 minutes only when an ISO was built. Main runs serialize publication,
+so the target tag stays stable between verification and installation. Before
+release it also re-reads that tag, requires the same digest, verifies its signature again and
 rechecks the ISO checksum. A changed/deleted tag cannot release the artifact.
 
 Only a successful `iso::` step can create `installer-YYYYMMDD` (`-N` suffix if

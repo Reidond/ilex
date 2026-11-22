@@ -9,9 +9,8 @@
 #
 # Three jobs start together, so the slow parts overlap on separate machines:
 #
-# * build: build → changed → rechunk → stage the candidate in ghcr as
-#   `:candidate.<tag>` (unsigned; machines only accept signed images) → the
-#   ephemeral tier;
+# * build: build → changed → rechunk → stage the unsigned candidate in ghcr
+#   → the ephemeral tier;
 # * upgrade: restores the upgrade tier's v1 (the published :generic.gnome), already
 #   installed to a disk, from the Actions cache (or installs it, ~14 minutes),
 #   waits for the build job to stage the candidate, pulls it by digest and
@@ -19,8 +18,9 @@
 # * installer-due → iso: see below.
 #
 # Then publish signs the staged digest, the one both tiers tested, and moves
-# :generic.gnome to it; nothing is pushed twice. Runs of this workflow never overlap
-# (the concurrency group), so `:candidate.<tag>` is always this run's.
+# :generic.gnome to it; nothing is pushed twice. Main stages as
+# `:candidate.<tag>` in the `publish` group. Other refs have their own groups
+# and staging tags.
 # Then machines builds/tests opted-in layers on that digest (or current
 # :generic.gnome by digest when unchanged); only main signs/publishes machine tags.
 #
@@ -75,11 +75,14 @@ on:
         type: boolean
         default: false
 
-# A v1-disk run has a group of its own (per branch: each has its cache scope):
-# publish runs never wait for it, and a newer :generic.gnome supersedes the disk it
-# is making.
+# Ordinary runs replace only the pending run in their group. A v1-disk run
+# has a separate group per ref for its cache scope; a newer one cancels the
+# in-flight disk build too.
 concurrency:
-  group: ${{ inputs.v1_disk && format('v1-disk-{0}', github.ref) || 'publish' }}
+  group: >-
+    ${{ inputs.v1_disk && format('v1-disk-{0}', github.ref) ||
+        (github.ref == 'refs/heads/main' && 'publish') ||
+        format('publish-{0}', github.ref) }}
   cancel-in-progress: ${{ inputs.v1_disk == true }}
 
 permissions:
@@ -114,8 +117,9 @@ jobs:
       installer_changed: ${{ steps.changed.outputs.changed || 'false' }}
       other_changed: ${{ steps.roots.outputs.other_changed }}
       roots: ${{ steps.roots.outputs.roots }}
-      # What `xtask publish --stage --as` pushed as candidate.<tag>.
+      # What `xtask publish --stage --as` pushed for the installer root.
       digest: ${{ steps.stage.outputs.digest }}
+      main: ${{ steps.composition.outputs.main }}
       tag: ${{ steps.composition.outputs.tag }}
       snapshot: ${{ steps.composition.outputs.snapshot }}
       fingerprint: ${{ steps.stage.outputs.fingerprint }}
@@ -146,6 +150,11 @@ jobs:
           bash .github/publication-tag.sh "$tag"
           echo "INSTALLER_TAG=$tag" >> "$GITHUB_ENV"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # Actions expression comparisons ignore case. Gate publication on
+          # the exact ref even when Actions groups differently cased refs.
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            echo 'main=true' >> "$GITHUB_OUTPUT"
+          fi
           cargo xtask info --publications > "$RUNNER_TEMP/publications"
           awk -F '\t' -v tag="$tag" '$1 == tag' "$RUNNER_TEMP/publications" > "$RUNNER_TEMP/ordered-publications"
           awk -F '\t' -v tag="$tag" '$1 != tag' "$RUNNER_TEMP/publications" >> "$RUNNER_TEMP/ordered-publications"
@@ -240,7 +249,8 @@ jobs:
           image_id=$(podman image inspect --format '{{.Id}}' localhost/ilex:rechunked)
           image_id="sha256:${image_id#sha256:}"
           if [[ "$ENCRYPTED_INSTALL" != true ]]; then
-            cargo xtask publish "$image_id" --stage --as "$INSTALLER_TAG"
+            stage_tag=$(bash .github/candidate-tag.sh "$INSTALLER_TAG")
+            cargo xtask publish "$image_id" --stage --as "$INSTALLER_TAG" --stage-tag "$stage_tag"
           fi
           echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
         env:
@@ -381,7 +391,7 @@ jobs:
       v1: ${{ steps.from.outputs.digest }}
       own: ${{ steps.from.outputs.own }}
     env:
-      # The candidate, pulled from candidate.<tag> below and tagged like on the
+      # The candidate, pulled by digest below and tagged like on the
       # build runner; set before it exists so `xtask test` never builds one.
       ILEX_IMAGE: localhost/ilex:rechunked
     steps:
@@ -467,8 +477,9 @@ jobs:
             esac
             sleep 10
           done
-          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:candidate.$INSTALLER_TAG")
-          echo "candidate: $IMAGE_REPO@$digest"
+          stage_tag=$(bash .github/candidate-tag.sh "$INSTALLER_TAG")
+          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:$stage_tag")
+          echo "candidate: $IMAGE_REPO:$stage_tag -> $IMAGE_REPO@$digest"
           podman pull --quiet "$IMAGE_REPO@$digest"
           podman tag "$IMAGE_REPO@$digest" "$ILEX_IMAGE"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -514,6 +525,7 @@ jobs:
       needs.build.result == 'success' && needs.upgrade.result == 'success' &&
       needs.build.outputs.installer_changed == 'true' &&
       github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
+      needs.build.outputs.main == 'true' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 30
@@ -586,6 +598,7 @@ jobs:
       needs.build.result == 'success' && needs.upgrade.result == 'success' &&
       needs.build.outputs.other_changed == 'true' &&
       github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
+      needs.build.outputs.main == 'true' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 30
@@ -704,7 +717,8 @@ jobs:
 
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         if: >-
-          success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true'
+          success() && github.ref == 'refs/heads/main' && needs.build.outputs.main == 'true' &&
+          steps.tested.outputs.changed == 'true'
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
@@ -712,7 +726,8 @@ jobs:
       # is the job's packages:write token; action inputs are not a sandbox.
       - name: Publish and sign tested machines (main only)
         if: >-
-          success() && github.ref == 'refs/heads/main' && steps.tested.outputs.changed == 'true'
+          success() && github.ref == 'refs/heads/main' && needs.build.outputs.main == 'true' &&
+          steps.tested.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -945,6 +960,7 @@ jobs:
     needs: [iso, build, upgrade, publish]
     if: >-
       !cancelled() && github.repository == 'Reidond/ilex' && github.ref == 'refs/heads/main' &&
+      needs.build.outputs.main == 'true' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
       needs.iso.result == 'success' && needs.build.result == 'success' && needs.upgrade.result == 'success' &&
       ((needs.publish.result == 'success' && needs.publish.outputs.published == 'true') ||
