@@ -1504,8 +1504,14 @@ Agents get the same tools (`screenshot`, `click`, `scroll`, `type_text`, `key`,
 `wait_screen`, `vm_list`) as an MCP server; screenshots come back downscaled
 and `click` takes coordinates in that downscaled image:
 
+If `ilex-vm` is already registered, remove it in the scope where it was added
+before adding the replacement. Run these commands from the intended checkout.
+The example uses the default `local` scope. For a `user` or `project`
+registration, use that scope in both commands. Skip removal on a fresh setup.
+
 ```sh
-claude mcp add --transport stdio ilex-vm -- ilexctl mcp
+claude mcp remove -s local ilex-vm
+claude mcp add -s local --transport stdio ilex-vm -- ilexctl mcp
 ```
 
 - QMP serves one client at a time; `ilexctl vm` connects per command, so an agent

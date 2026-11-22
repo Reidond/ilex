@@ -5,7 +5,10 @@ VMs. The shared Fedora builder runs Linux jobs. Native QEMU/WHPX runs the
 virgl desktop, and native Hyper-V Gen2 runs the security tier. Install the dev
 build with `cargo install --locked --path crates/ilexctl` and configure the
 MCP server to launch `ilexctl mcp` with the intended checkout as its working
-directory.
+directory. Replace any existing `ilex-vm` registration, including one that
+launches through WSL, using the scoped remove and add commands in
+[Driving VMs](../../CLAUDE.md#driving-vms-ilexctl-vm). Run them from native
+PowerShell in the checkout.
 
 ## Inventory the old environment
 
