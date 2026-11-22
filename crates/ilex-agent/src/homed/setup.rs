@@ -238,7 +238,6 @@ fn verify_existing_home(name: &str) -> Result<()> {
             "with",
             name,
             "/usr/bin/mountpoint",
-            "--quiet",
             ".",
         ])
         .env_remove("PASSWORD")

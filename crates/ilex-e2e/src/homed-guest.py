@@ -216,6 +216,7 @@ def main():
         if action == "installer-profile-damaged":
             status, output = terminal(argv, password, optional=True, allow_failure=True)
             assert status != 0 and "Could not verify the daily home" in output and ready not in output
+            assert "unrecognized option" not in output.lower()
             return "homed refused to verify the damaged daily home"
         output = terminal(argv, password + [(re.escape(ready), None)])
         completion = next(line for line in output.splitlines() if line == ready)

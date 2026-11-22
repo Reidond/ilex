@@ -171,9 +171,6 @@ pub fn trials() -> Vec<Trial> {
     trials.push(Trial::test("iso::install", || {
         run().map_err(|e| Failed::from(format!("{e:#}")))
     }));
-    trials.push(Trial::test("iso::install_no_profile", || {
-        install_no_profile().map_err(|e| Failed::from(format!("{e:#}")))
-    }));
     trials
 }
 
@@ -278,7 +275,7 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     );
     let mut config = VmConfig::new(purpose, &disk);
     config.memory = INSTALLER_MEMORY.into();
-    config.vcpus = if name == "profile_chooser" { 2 } else { 4 };
+    config.vcpus = if matches!(name, "chooser" | "profile_chooser") { 2 } else { 4 };
     config.usb_keyboard = kernel;
     config.cdrom = Some(iso.clone());
     config.smbios = smbios(&table, machine, board_only)?;
@@ -679,7 +676,7 @@ fn run() -> Result<()> {
     report.finish()
 }
 
-fn install_no_profile() -> Result<()> {
+pub(crate) fn install_no_profile() -> Result<()> {
     let ws = common::workspace()?;
     let iso = iso_path()?;
     let table = table(&iso)?;
@@ -985,7 +982,8 @@ fn kickstart_disk(work: &Path, chosen: &str, local: Option<&serde_json::Value>) 
         fs::write(dir.join("config.json"), serde_json::to_vec(candidate)?)?;
         fs::copy(work.join("cosign.pub"), dir.join("test.pub"))?;
         let choice = serde_json::json!({"schema":1,"composition":chosen});
-        answers = format!(r#"%pre --erroronfail
+        answers = format!(r#"ignoredisk --only-use=vda
+%pre --erroronfail
 mkdir -p /run/ilex-installer
 printf '%s\n' '{choice}' > /run/ilex-installer/choice
 %end
@@ -1227,7 +1225,7 @@ fn bootc_status(vm: &Vm, artifacts: &Path, wanted: &str, expected_digest: &str) 
     if origin["signature"] != "containerPolicy" {
         bail!("installed origin is not enforcing: {origin}");
     }
-    println!("     {wanted} is the verified published digest {expected_digest}");
+    println!("     {wanted} matches the verified digest {expected_digest}");
     Ok(())
 }
 

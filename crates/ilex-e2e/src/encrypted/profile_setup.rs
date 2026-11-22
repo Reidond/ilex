@@ -124,6 +124,7 @@ printf '%s\n' 'Run sudo ilexctl home setup.' > /etc/issue.d/90-ilex-home-setup.i
 # Keep the homed record and a nonempty image at the original pathname.
 image=/var/home/andriishafar.home
 mv "$image" /var/home/.ilex-test-intact
+cp --attributes-only --preserve=mode,ownership,xattr /var/home/.ilex-test-intact "$image"
 head -c 4096 /var/home/.ilex-test-intact > "$image"
 test "$(stat -c %s "$image")" = 4096
 homectl inspect andriishafar --json=short | python3 -c 'import json,sys; assert json.load(sys.stdin)["userName"] == "andriishafar"'

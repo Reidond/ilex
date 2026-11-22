@@ -2326,7 +2326,7 @@ as the daily user on the first authenticated login. Profile apps remain opt-in.
 See [the handoff contract](installer/setup/README.md).
 
 The local acceptance trials are `iso::chooser`, `iso::profile_chooser`,
-`iso::install_no_profile` and `security::installer_profile_setup`.
+`security::installer_no_profile` and `security::installer_profile_setup`.
 The latter uses an exact ISO and an
 isolated, signed candidate selected with the installed machine and GNOME.
 It exercises passphrase-only boot, a blocked setup retry, a local

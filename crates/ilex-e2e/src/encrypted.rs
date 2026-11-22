@@ -136,6 +136,7 @@ pub fn trials() -> Vec<Trial> {
         common::trial("security::installer_profile_setup", || {
             run_fixture(false, false, true, false, true)
         }),
+        common::trial("security::installer_no_profile", crate::iso::install_no_profile),
     ];
     if std::env::var_os("ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS").is_some() {
         trials.push(common::trial(
