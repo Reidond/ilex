@@ -34,6 +34,7 @@ const GUEST: &str = include_str!("encrypted/guest.py");
 const PRIVACY: &str = include_str!("encrypted/privacy.py");
 const DIAGNOSTICS: &str = include_str!("encrypted/diagnostics.py");
 const LOG_STREAM: &str = include_str!("encrypted/log_stream.py");
+mod profile_setup;
 
 #[derive(Clone, Debug, Serialize)]
 struct GuestFailure {
@@ -130,6 +131,9 @@ pub fn trials() -> Vec<Trial> {
         }),
         common::trial("security::encrypted_interrupted", || {
             run(false, true, false)
+        }),
+        common::trial("security::installer_profile_setup", || {
+            run_fixture(false, false, true, false, true)
         }),
     ];
     if std::env::var_os("ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS").is_some() {
@@ -782,6 +786,26 @@ python3 -I -S /run/ilex-encrypted-test/seed/guest.py finish
         )
     } else {
         ks.to_owned()
+    };
+    let ks = if config["profile_setup"] == true {
+        let composition = config["composition"]
+            .as_str()
+            .context("fixture composition missing")?;
+        ilex_devkit::installer::validate_tag(composition)?;
+        let choice = json!({"schema":1, "composition":composition, "profile":"andriishafar"});
+        format!(
+            r#"%pre --erroronfail
+install -d -m 0755 /run/ilex-installer
+cat > /run/ilex-installer/choice <<'PROFILE_SELECTION'
+{choice}
+PROFILE_SELECTION
+%end
+user --name=ilexmaint --groups=wheel --lock
+{ks}
+"#
+        )
+    } else {
+        ks
     };
     fs::write(dir.join("ks.cfg"), ks)?;
     let seed = work.join("oemdrv.img");
@@ -2697,13 +2721,31 @@ fn run_layout(
     local_diagnostic: bool,
     layout_refusal: bool,
 ) -> Result<()> {
+    run_fixture(
+        preserve_data,
+        interrupted,
+        local_diagnostic,
+        layout_refusal,
+        false,
+    )
+}
+
+fn run_fixture(
+    preserve_data: bool,
+    interrupted: bool,
+    local_diagnostic: bool,
+    layout_refusal: bool,
+    profile_setup: bool,
+) -> Result<()> {
     ilex_enroll::harden()?;
     ensure!(
         !local_diagnostic || std::env::var_os("CI").is_none(),
         "local diagnostic is outside the hosted qualification"
     );
     let ws = common::workspace()?;
-    let tier = if layout_refusal {
+    let tier = if profile_setup {
+        "installer-profile-setup"
+    } else if layout_refusal {
         "enrollment-diagnostic-layout-refusal"
     } else if local_diagnostic && interrupted {
         "enrollment-diagnostic-interrupted"
@@ -2752,7 +2794,9 @@ fn run_layout(
                 .arg("40G"),
         )?;
         let mut config = VmConfig::new(
-            if layout_refusal {
+            if profile_setup {
+                "profile-setup"
+            } else if layout_refusal {
                 "ed-l"
             } else {
                 match (local_diagnostic, interrupted, preserve_data) {
@@ -2799,6 +2843,25 @@ fn run_layout(
         expected["interrupt_completion"] = json!(interrupted);
         expected["local_diagnostic"] = json!(local_diagnostic);
         expected["layout_refusal"] = json!(layout_refusal);
+        if profile_setup {
+            let labels = ilex_devkit::machine::image_machine_label(&image)?;
+            let machine = labels
+                .as_deref()
+                .context("candidate machine label missing")?;
+            let catalogue: ilex_devkit::installer::Table =
+                serde_json::from_slice(&fs::read(iso.with_file_name("compositions.json"))?)?;
+            let composition = format!("{machine}.gnome");
+            ensure!(
+                catalogue
+                    .compositions
+                    .iter()
+                    .any(|row| row.tag == composition)
+                    && catalogue.profiles.contains_key("andriishafar"),
+                "the installed composition and profile must be offered by the exact ISO"
+            );
+            expected["composition"] = json!(composition);
+            expected["profile_setup"] = json!(true);
+        }
         let tpm_slot_budget = !local_diagnostic && !interrupted && !preserve_data;
         expected["tpm_slot_budget"] = json!(tpm_slot_budget);
         fs::write(
@@ -2952,7 +3015,20 @@ fn run_layout(
         }
         let original_tokens: Value =
             serde_json::from_slice(&fs::read(artifacts.join("installer-tokens.json"))?)?;
-        if local_diagnostic && !interrupted {
+        if profile_setup {
+            stage = "profile_setup_no_tpm";
+            let daily = profile_setup::secret()?;
+            credentials = fingerprints(&[&passphrase, &recovery, &daily]);
+            profile_setup::run(
+                fixture,
+                &artifacts,
+                &passphrase,
+                &daily,
+                &credentials,
+                &expected,
+            )?;
+            export_fingerprints.push(private_fingerprint(&daily));
+        } else if local_diagnostic && !interrupted {
             stage = "diagnostic_fallback";
             fallback(
                 &ws,
@@ -2980,7 +3056,7 @@ fn run_layout(
             stage = "diagnostic_complete";
             return Ok(());
         }
-        if !local_diagnostic {
+        if !local_diagnostic && !profile_setup {
             stage = "pcr_mismatch_first_boot";
             fallback(
                 &ws,
@@ -2997,93 +3073,95 @@ fn run_layout(
                 None,
             )?;
         }
-        stage = "recovery_key_boot";
-        fallback(
-            &ws,
-            &disk,
-            &fixture.spec,
-            &work,
-            &artifacts,
-            &recovery,
-            &credentials,
-            &installer_probe,
-            &original_tokens,
-            &expected,
-            "recovery",
-            Some(&passphrase),
-        )?;
-        if interrupted {
-            stage = "interrupted_completion_repair";
-            let (reissued, repaired_tokens) = interrupted_repair(
-                fixture,
-                &artifacts,
-                &passphrase,
-                &mut credentials,
-                &original_tokens,
-                &expected,
-            )?;
-            export_fingerprints.push(private_fingerprint(&reissued));
-            stage = "reissued_recovery_key_boot";
+        if !profile_setup {
+            stage = "recovery_key_boot";
             fallback(
                 &ws,
                 &disk,
                 &fixture.spec,
                 &work,
                 &artifacts,
-                &reissued,
-                &credentials,
-                &installer_probe,
-                &repaired_tokens,
-                &expected,
-                "reissued-recovery",
-                None,
-            )?;
-        } else {
-            stage = "first_installed_boot";
-            fixture.disk_boot()?;
-            let booted = assertions(fixture, &artifacts, &expected, &installer_probe);
-            fixture.logs(&artifacts, "installed")?;
-            booted?;
-            guest_privacy(
-                fixture.vm.running_mut()?,
-                &artifacts,
-                "installed-after-finalisation",
-                &credentials,
-            )?;
-            stage = "cold_restart";
-            poweroff(fixture, &artifacts, "installed")?;
-            fixture.disk_boot()?;
-            let cold = artifacts.join("cold");
-            fs::create_dir_all(&cold)?;
-            assertions(fixture, &cold, &expected, &installer_probe)?;
-            guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
-            fixture.logs(&artifacts, "cold")?;
-            poweroff(fixture, &artifacts, "cold")?;
-            stage = "same_tpm_policy_mismatch";
-            same_tpm_mismatch(
-                &ws,
-                fixture,
-                &artifacts,
-                &passphrase,
-                &credentials,
-                &installer_probe,
-                &original_tokens,
-            )?;
-            stage = "no_tpm_fallback";
-            fallback(
-                &ws,
-                &disk,
-                &fixture.spec,
-                &work,
-                &artifacts,
-                &passphrase,
+                &recovery,
                 &credentials,
                 &installer_probe,
                 &original_tokens,
                 &expected,
-                "no-tpm",
-                None,
+                "recovery",
+                Some(&passphrase),
             )?;
+            if interrupted {
+                stage = "interrupted_completion_repair";
+                let (reissued, repaired_tokens) = interrupted_repair(
+                    fixture,
+                    &artifacts,
+                    &passphrase,
+                    &mut credentials,
+                    &original_tokens,
+                    &expected,
+                )?;
+                export_fingerprints.push(private_fingerprint(&reissued));
+                stage = "reissued_recovery_key_boot";
+                fallback(
+                    &ws,
+                    &disk,
+                    &fixture.spec,
+                    &work,
+                    &artifacts,
+                    &reissued,
+                    &credentials,
+                    &installer_probe,
+                    &repaired_tokens,
+                    &expected,
+                    "reissued-recovery",
+                    None,
+                )?;
+            } else {
+                stage = "first_installed_boot";
+                fixture.disk_boot()?;
+                let booted = assertions(fixture, &artifacts, &expected, &installer_probe);
+                fixture.logs(&artifacts, "installed")?;
+                booted?;
+                guest_privacy(
+                    fixture.vm.running_mut()?,
+                    &artifacts,
+                    "installed-after-finalisation",
+                    &credentials,
+                )?;
+                stage = "cold_restart";
+                poweroff(fixture, &artifacts, "installed")?;
+                fixture.disk_boot()?;
+                let cold = artifacts.join("cold");
+                fs::create_dir_all(&cold)?;
+                assertions(fixture, &cold, &expected, &installer_probe)?;
+                guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
+                fixture.logs(&artifacts, "cold")?;
+                poweroff(fixture, &artifacts, "cold")?;
+                stage = "same_tpm_policy_mismatch";
+                same_tpm_mismatch(
+                    &ws,
+                    fixture,
+                    &artifacts,
+                    &passphrase,
+                    &credentials,
+                    &installer_probe,
+                    &original_tokens,
+                )?;
+                stage = "no_tpm_fallback";
+                fallback(
+                    &ws,
+                    &disk,
+                    &fixture.spec,
+                    &work,
+                    &artifacts,
+                    &passphrase,
+                    &credentials,
+                    &installer_probe,
+                    &original_tokens,
+                    &expected,
+                    "no-tpm",
+                    None,
+                )?;
+            }
         }
         let iso_hash = cmd::output(Command::new("sha256sum").arg(&iso))?;
         fs::write(artifacts.join("iso-sha256.txt"), iso_hash)?;
@@ -3098,7 +3176,7 @@ fn run_layout(
             artifacts.join("final-artifact-privacy.json"),
             serde_json::to_vec_pretty(&scan)?,
         )?;
-        if !local_diagnostic {
+        if !local_diagnostic || profile_setup {
             save_private_fingerprints(tier, &export_fingerprints)?;
         }
         stage = "complete";

@@ -8,6 +8,37 @@ use std::process::{Command, ExitCode};
 
 use serde_json::Value;
 
+#[cfg(target_os = "linux")]
+mod setup;
+
+/// Resume the nonsecret selection left by the installer.
+#[derive(clap::Args)]
+pub struct SetupArgs {
+    /// Daily username for the custom profile. Omit it to resume an interrupted setup
+    #[arg(long, value_parser = parse_name)]
+    name: Option<String>,
+    /// Capacity for a new custom home (default 20 GiB)
+    #[arg(long, value_name = "GiB", value_parser = clap::value_parser!(u64).range(2..=1_048_576))]
+    disk_size: Option<u64>,
+}
+
+pub fn setup(args: SetupArgs) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    let result = setup::run(args);
+    #[cfg(not(target_os = "linux"))]
+    let result = {
+        let _ = (args.name, args.disk_size);
+        Err::<(), String>("home setup requires Linux".into())
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("ilexctl: error: home setup: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// user@ starts only after pam_systemd_home has acquired the home. Initialize
 /// its filesystem labels here, before the user manager or login shell can
 /// create files. Classic accounts do not depend on homed for recovery.
@@ -113,7 +144,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 pub fn create(args: CreateArgs) -> ExitCode {
-    match create_inner(args) {
+    match create_inner(args, None) {
         Ok(0) => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
         Err(error) => {
@@ -123,7 +154,13 @@ pub fn create(args: CreateArgs) -> ExitCode {
     }
 }
 
-fn create_inner(args: CreateArgs) -> Result<u8, String> {
+struct SetupIdentity<'a> {
+    path: &'a Path,
+    locale: Option<&'a str>,
+    gamemode: bool,
+}
+
+fn create_inner(args: CreateArgs, setup: Option<SetupIdentity<'_>>) -> Result<u8, String> {
     let CreateArgs {
         name,
         disk_size: size,
@@ -148,7 +185,13 @@ fn create_inner(args: CreateArgs) -> Result<u8, String> {
     }
     // No UID, record import, alternate path or arbitrary homectl arguments.
     // homed atomically rejects local/NSS username and UID collisions itself.
-    let mut command = Command::new("/usr/bin/homectl");
+    let mut command = if setup.is_some() {
+        let mut timeout = Command::new("/usr/bin/timeout");
+        timeout.args(["--foreground", "--kill-after=5s", "30m", "/usr/bin/homectl"]);
+        timeout
+    } else {
+        Command::new("/usr/bin/homectl")
+    };
     command.args([
         "create",
         &name,
@@ -171,11 +214,19 @@ fn create_inner(args: CreateArgs) -> Result<u8, String> {
         .arg(format!("--home-dir=/home/{name}"))
         .arg(if admin {
             "--member-of=ilex-homed,wheel"
+        } else if setup.as_ref().is_some_and(|setup| setup.gamemode) {
+            "--member-of=ilex-homed,gamemode"
         } else {
             "--member-of=ilex-homed"
         });
     if let Some(real_name) = real_name {
         command.arg(format!("--real-name={real_name}"));
+    }
+    if let Some(setup) = setup {
+        command.arg("--identity").arg(setup.path);
+        if let Some(locale) = setup.locale {
+            command.arg(format!("--language={locale}"));
+        }
     }
     // Ignore homectl's test/automation password shortcuts: credentials come
     // from its private local prompt, not inherited environment or argv.

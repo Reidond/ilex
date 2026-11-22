@@ -153,6 +153,7 @@ pub fn trials() -> Vec<Trial> {
     for (name, machine, board_only, kernel) in [
         ("welcome", None, false, false),
         ("chooser", Some("ms-7c35"), false, false),
+        ("profile_chooser", Some("ms-7c35"), false, false),
         ("detect_board", Some("ms-7c35"), true, false),
         ("kernel_argument", Some("ms-7c35"), false, true),
         ("chooser_browser_closed", Some("ms-7c35"), false, false),
@@ -274,7 +275,7 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     );
     let mut config = VmConfig::new(purpose, &disk);
     config.memory = INSTALLER_MEMORY.into();
-    config.vcpus = 4;
+    config.vcpus = if name == "profile_chooser" { 2 } else { 4 };
     config.usb_keyboard = kernel;
     config.cdrom = Some(iso.clone());
     config.smbios = smbios(&table, machine, board_only)?;
@@ -350,11 +351,28 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
             wait_serial(&mut vm, &serial, "ILEX-CHOOSER-CHECK OK")?;
         }
         if name == "chooser" {
-            for key in ["shift+tab", "shift+tab", "up", "tab", "tab"] {
+            for key in [
+                "shift+tab",
+                "shift+tab",
+                "shift+tab",
+                "up",
+                "tab",
+                "tab",
+                "tab",
+            ] {
                 ctl.key(key)?;
             }
             std::thread::sleep(Duration::from_secs(1));
             ctl.save_screenshot(&artifacts.join("04-chooser-generic.png"))?;
+        }
+        if name == "profile_chooser" {
+            if !table.profiles.contains_key("andriishafar") {
+                bail!("the exact ISO does not offer the owner's profile");
+            }
+            for key in ["shift+tab", "down", "tab"] {
+                ctl.key(key)?;
+            }
+            ctl.save_screenshot(&artifacts.join("profile-chooser.png"))?;
         }
         match name {
             "chooser_browser_closed" => {
@@ -377,6 +395,9 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
     };
     let wanted = format!("ILEX-COMPOSITION {expected} ({reason})");
     wait_serial(&mut vm, &serial, &wanted)?;
+    if name == "profile_chooser" {
+        wait_serial(&mut vm, &serial, "ILEX-PROFILE andriishafar")?;
+    }
     let console = fs::read_to_string(&serial)?;
     if kernel && console.contains("ILEX-CHOOSER") {
         bail!("kernel override did not skip the chooser: {console}");
@@ -1014,8 +1035,7 @@ fn save_installer_serial(artifacts: &Path, console: &str) -> Result<bool> {
     qemu::write_artifact(artifacts, "installer-serial.txt", console)?;
     let mut received = [false; 3];
     for record in console.lines().filter_map(|line| {
-        serde_json::from_str::<serde_json::Value>(line.strip_prefix("ILEX-INSTALLER-LOG ")?)
-            .ok()
+        serde_json::from_str::<serde_json::Value>(line.strip_prefix("ILEX-INSTALLER-LOG ")?).ok()
     }) {
         if let (Some(name), Some(text)) = (record["name"].as_str(), record["text"].as_str())
             && INSTALLER_LOGS.iter().any(|(allowed, _)| *allowed == name)

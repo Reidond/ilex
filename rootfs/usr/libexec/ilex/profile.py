@@ -27,6 +27,7 @@ import uuid
 ROOT = "/usr/share/ilex"
 STATE = ".local/state/ilex/profile.json"
 STATE_SCHEMA = 2
+SETUP = "/var/lib/ilex/home-setup/state.json"
 BACKUPS = ".local/state/ilex/profile-backups"
 BACKUP_NOTICE_BYTES = 50 * 1024 * 1024
 BACKUP_APPLY = r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{8}"
@@ -507,7 +508,7 @@ def profile(name):
     return entry, data
 
 
-def active_home():
+def active_home(setup=None):
     uid = os.getuid()
     if uid == 0 or os.geteuid() != uid:
         raise ValueError("run profile apply as the authenticated home user, without sudo")
@@ -521,6 +522,8 @@ def active_home():
         or record.get("status", {}).get(machine, {}).get("state") != "active"
         or not os.path.ismount(account.pw_dir)):
         raise ValueError("profile application requires the caller's active LUKS homed home")
+    if setup and binding.get("luksUuid", "").replace("-", "") != setup["luks_uuid"]:
+        raise ValueError("installer profile belongs to a different encrypted home")
     # /home is the image's intentional /var/home alias, not profile data.
     path = os.path.realpath(account.pw_dir)
     if path != f"/var/home/{account.pw_name}":
@@ -614,8 +617,8 @@ def settings(home, data, previous, shell, conflicts):
         return dict(previous)
 
 
-def apply(args):
-    home = active_home()
+def apply(args, setup=None):
+    home = active_home(setup)
     lock = None
     try:
         # Lock the directory inode, leaving no lock pathname to replace.
@@ -628,8 +631,11 @@ def apply(args):
             raise ValueError("unsupported profile state; declining changes")
         if args.selected:
             if old is None:
-                return 0
-            name = old["profile"]
+                if setup is None:
+                    return 0
+                name = setup["profile"]["id"]
+            else:
+                name = old["profile"]
         else:
             name = args.name
         if not name:
@@ -711,6 +717,18 @@ def apply(args):
         os.close(home.fd)
 
 
+def installer_profile():
+    try:
+        setup = json.loads(read_image(SETUP))
+    except FileNotFoundError:
+        return None
+    account = pwd.getpwuid(os.getuid())
+    if setup.get("schema") != 1 or setup.get("name") != account.pw_name or setup.get("uid") != account.pw_uid:
+        return None
+    selection = setup["profile"]
+    return setup if selection.get("schema") == 1 and selection.get("id") == account.pw_name else None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -739,7 +757,8 @@ def main():
     if args.selected and not os.path.lexists(os.path.join(pwd.getpwuid(os.getuid()).pw_dir, STATE)):
         if os.getuid() == 0:
             raise ValueError("profile apply must not run as root")
-        return 0
+        setup = installer_profile()
+        return apply(args, setup) if setup else 0
     return apply(args)
 
 

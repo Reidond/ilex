@@ -26,6 +26,14 @@ pub struct Composition {
     pub shells: Vec<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub schema: u32,
+    #[serde(rename = "display-name")]
+    pub display_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Table {
     pub schema: u32,
     pub repository: String,
@@ -35,8 +43,7 @@ pub struct Table {
     pub machines: BTreeMap<String, Machine>,
     pub shells: BTreeMap<String, Shell>,
     pub compositions: Vec<Composition>,
-    // Reserved catalogues, populated by the later profiles/security work.
-    pub profiles: BTreeMap<String, serde_json::Value>,
+    pub profiles: BTreeMap<String, Profile>,
     #[serde(rename = "security-capabilities")]
     pub security_capabilities: BTreeMap<String, serde_json::Value>,
 }
@@ -108,7 +115,7 @@ pub fn table(root: &Path, testing_tag: Option<&str>) -> Result<Table> {
         machines: BTreeMap::new(),
         shells: BTreeMap::new(),
         compositions: vec![],
-        profiles: BTreeMap::new(),
+        profiles: public_profiles(root, &manifest)?,
         security_capabilities: BTreeMap::new(),
     };
     for row in compositions {
@@ -138,4 +145,43 @@ pub fn table(root: &Path, testing_tag: Option<&str>) -> Result<Table> {
         });
     }
     Ok(table)
+}
+
+fn public_profiles(root: &Path, manifest: &toml::Table) -> Result<BTreeMap<String, Profile>> {
+    let mut profiles = BTreeMap::new();
+    if !manifest.contains_key("users") {
+        return Ok(profiles);
+    }
+    for id in config::string_list(manifest, "users")? {
+        if id.len() > 31
+            || !id.starts_with(|ch: char| ch.is_ascii_lowercase())
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            || profiles.contains_key(&id)
+        {
+            bail!("invalid or duplicate installer profile ID");
+        }
+        let definition = config::manifest(&root.join("users").join(&id).join("user.toml"))?;
+        if definition.get("schema").and_then(toml::Value::as_integer) != Some(1)
+            || definition.get("username").and_then(toml::Value::as_str) != Some(id.as_str())
+        {
+            bail!("installer profile {id} has an unsupported schema or username");
+        }
+        let display_name = definition
+            .get("display-name")
+            .and_then(toml::Value::as_str)
+            .filter(|s| {
+                !s.trim().is_empty() && s.chars().count() <= 256 && !s.chars().any(char::is_control)
+            })
+            .context("invalid installer profile display name")?;
+        profiles.insert(
+            id,
+            Profile {
+                schema: 1,
+                display_name: display_name.into(),
+            },
+        );
+    }
+    Ok(profiles)
 }

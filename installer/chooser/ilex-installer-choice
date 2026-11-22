@@ -62,6 +62,14 @@ def load(path):
         raise ValueError("default must name an offered generic composition")
     if data.get("testing-tag") is not None:
         tag(data["testing-tag"])
+    for name, profile in data["profiles"].items():
+        if (not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", name)
+                or set(profile) != {"schema", "display-name"}
+                or type(profile["schema"]) is not int or profile["schema"] != 1
+                or not isinstance(profile["display-name"], str)
+                or not 0 < len(profile["display-name"]) <= 256
+                or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in profile["display-name"])):
+            raise ValueError("invalid public profile catalogue")
     for name, machine in data["machines"].items():
         for rule in machine["match"]:
             keys = set(rule)
@@ -117,6 +125,7 @@ def apply(data, result, args):
                          capture_output=True, timeout=5).stdout.strip() == b"activating":
         time.sleep(0.2)
     chosen = None
+    profile = {"id": None, "schema": None}
     for argument in args.cmdline.read_text(encoding="utf-8").split():
         if argument.startswith("ilex.composition="):
             chosen, result["reason"] = argument.split("=", 1)[1], "chosen at boot"
@@ -124,9 +133,18 @@ def apply(data, result, args):
         chosen = args.choice.read_text(encoding="utf-8").strip()
         if chosen.startswith("{"):
             record = json.loads(chosen)
-            if set(record) != {"schema", "composition"} or record["schema"] != 1:
+            fields = set(record)
+            if fields not in ({"schema", "composition"}, {"schema", "composition", "profile"}) or record["schema"] != 1:
                 raise ValueError("unsupported chooser choice record")
             chosen = record["composition"]
+            if "profile" in record:
+                name = record["profile"]
+                if name is None:
+                    profile["mode"] = "custom"
+                elif isinstance(name, str) and name in data["profiles"]:
+                    profile = {"id": name, "schema": data["profiles"][name]["schema"]}
+                else:
+                    raise ValueError("chosen profile is not in the installer catalogue")
         result["reason"] = "chosen in the installer"
     chosen = result["tag"] if chosen is None else chosen
     entry = next((e for e in data["compositions"] if e["tag"] == chosen), None)
@@ -135,7 +153,7 @@ def apply(data, result, args):
     target = REPOSITORY + ":" + tag(data.get("testing-tag") or chosen)
     # Versioned, nonsecret reservation only. No probes or enrollment run here.
     setup = {"schema": 1, "composition": chosen, "image": target,
-             "profile": {"id": None, "schema": None},
+             "profile": profile,
              "security": {"capabilities": {}, "tpm": {"requested": "unspecified",
                           "capability": "unknown", "status": "not-configured"}}}
     record = json.dumps(setup, indent=2, sort_keys=True) + "\n"
@@ -143,6 +161,13 @@ def apply(data, result, args):
                  "\n%post --erroronfail\ninstall -d -m 0755 /etc/ilex\n"
                  "cat > /etc/ilex/setup.json <<'ILEX_SETUP_JSON'\n" + record
                  + "ILEX_SETUP_JSON\nchmod 0644 /etc/ilex/setup.json\n%end\n")
+    if profile.get("id") or profile.get("mode") == "custom":
+        kickstart += (
+            "\n%post --erroronfail\ninstall -d -m 0755 /etc/issue.d\n"
+            "cat > /etc/issue.d/90-ilex-home-setup.issue <<'ILEX_HOME_SETUP'\n"
+            "Sign in as the maintenance administrator and run sudo ilexctl home setup.\n"
+            "ILEX_HOME_SETUP\n%end\n"
+        )
     atomic_write(args.output, kickstart)
     atomic_write(args.choice.parent / "setup.json", record)
     description = data["machines"][entry["machine"]]["description"].split(":", 1)[0]
@@ -155,6 +180,9 @@ def apply(data, result, args):
     atomic_write(args.os_release, "\n".join(lines + ['NAME="ilex"', "PRETTY_NAME=" + quote(pretty)]) + "\n")
     message = f"ILEX-COMPOSITION {chosen} ({result['reason']}) installs {target}"
     diagnostic(message, consoles=("/dev/ttyS0", "/dev/tty0"), journal=sys.stdout)
+    if profile.get("id") or profile.get("mode") == "custom":
+        diagnostic("ILEX-PROFILE " + (profile.get("id") or "custom"),
+                   consoles=("/dev/ttyS0", "/dev/tty0"), journal=sys.stdout)
 
 
 PAGE = """<!DOCTYPE html>
@@ -188,7 +216,13 @@ PAGE = """<!DOCTYPE html>
   <legend>Desktop</legend>
   {shells}
  </fieldset>
- <p class="note">Only signed ilex images are offered. The review screen shows this choice again before anything is written to disk.</p>
+ <fieldset>
+  <legend>Daily user profile</legend>
+  {profiles}
+ </fieldset>
+ <p class="note">In Anaconda, enable disk encryption and create a separate maintenance administrator such as <strong>ilexmaint</strong>. Use a different name from the daily account.</p>
+ <p>Disk unlock uses the install passphrase when automatic TPM unlock is unavailable. After reboot, sign in as the maintenance administrator and run <code>sudo ilexctl home setup</code> to set the daily home password.</p>
+ <p>This installer downloads the signed system image. If the download fails, check the network and restart the installer.</p>
 </main>
 <footer>
  <input type="hidden" name="token" value="{token}">
@@ -261,7 +295,12 @@ def render(table, result, token, nonce):
               + (" <em>(default at sign-in: " + html.escape(table["shells"][sl[0]]["label"]) + ")</em>" if len(sl) > 1 else ""),
         description=html.escape("; ".join(table["shells"][s]["description"] for s in sl))) for sl in lists)
     offered = json.dumps([c["machine"] + "|" + ",".join(c["shells"]) for c in table["compositions"]])
-    return PAGE.format(identity=identity, verdict=verdict, machines=machines, shells=shells,
+    profiles = RADIO.format(id="p-custom", name="profile", value="", checked=" checked",
+                            label="Custom daily user", description="Choose the username after installation")
+    for name, profile in table["profiles"].items():
+        profiles += RADIO.format(id=f"p-profile-{name}", name="profile", value=name, checked="",
+                                 label=html.escape(profile["display-name"]), description=name)
+    return PAGE.format(identity=identity, verdict=verdict, machines=machines, shells=shells, profiles=profiles,
                        offered=offered, token=token, nonce=nonce)
 
 
@@ -344,21 +383,22 @@ def serve(data, result, args):
                 if len(body) != int(lengths[0]) or re.search(rb"%(?![0-9a-fA-F]{2})", body):
                     return self.send(400)
                 form = parse_qs(body.decode("ascii"), keep_blank_values=True,
-                                strict_parsing=True, errors="strict", max_num_fields=3)
+                                strict_parsing=True, errors="strict", max_num_fields=4)
             except (ValueError, UnicodeError, TimeoutError):
                 return self.send(400)
-            if set(form) != {"token", "machine", "shells"} or any(len(v) != 1 for v in form.values()):
+            if set(form) != {"token", "machine", "shells", "profile"} or any(len(v) != 1 for v in form.values()):
                 return self.send(400)
             if not secrets.compare_digest(form["token"][0].encode(), token.encode()):
                 return self.send(403)
             entry = next((e for e in data["compositions"]
                           if e["machine"] == form["machine"][0]
                           and e["shells"] == form["shells"][0].split(",")), None)
-            if entry is None:
+            profile = form["profile"][0] or None
+            if entry is None or (profile is not None and profile not in data["profiles"]):
                 return self.send(400, b"not offered")
-            # Explicit schema, public composition only. Future profile/security
-            # choices can extend this record; secrets must never enter it.
-            atomic_write(args.choice, json.dumps({"schema": 1, "composition": entry["tag"]}) + "\n")
+            atomic_write(args.choice, json.dumps({
+                "schema": 1, "composition": entry["tag"], "profile": profile,
+            }) + "\n")
             done = True
             self.send(200, DONE.format(tag=html.escape(entry["tag"])).encode())
 
@@ -388,7 +428,7 @@ def self_check(data, address=None):
     assert url.hostname == "127.0.0.1" and url.scheme == "http"
     entry = data["compositions"][0]
     form = {"token": url.path.strip("/"), "machine": entry["machine"],
-            "shells": ",".join(entry["shells"])}
+            "shells": ",".join(entry["shells"]), "profile": ""}
 
     def request(method, path, expected, body=None, headers=None):
         with closing(http.client.HTTPConnection(url.hostname, url.port, timeout=5)) as client:
@@ -401,7 +441,7 @@ def self_check(data, address=None):
             return result
 
     page = request("GET", url.path, 200)
-    assert b"Machine configuration" in page and b"Desktop" in page
+    assert b"Machine configuration" in page and b"Desktop" in page and b"Custom daily user" in page
     request("GET", url.path + "index.css", 200)
     for path in ("/", "/wrong/", url.path + "../etc/shadow",
                  url.path + "%2e%2e/etc/shadow", url.path + "?x=1"):
@@ -413,7 +453,7 @@ def self_check(data, address=None):
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     for changes in ({"token": "wrong"}, {"machine": "../generic"},
                     {"machine": "generic;touch /run/ilex-injected"},
-                    {"shells": "gnome;id"}, {"shells": "gnome,unknown"}):
+                    {"shells": "gnome;id"}, {"shells": "gnome,unknown"}, {"profile": "../andriishafar"}):
         request("POST", url.path + "choose", 403 if "token" in changes else 400,
                 urlencode(form | changes), headers)
     body = urlencode(form)

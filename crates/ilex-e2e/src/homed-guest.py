@@ -166,6 +166,14 @@ def checksum(name):
 def main():
     action = request["action"]
     name = request.get("name", "homedtest")
+    if action == "installer-profile-login":
+        tty(name, secrets[0], r"""test "$(findmnt -nro FSTYPE --target "$HOME")" = btrfs &&
+systemctl --user is-active dbus.socket &&
+test "$(systemctl --user show ilex-profile.service -p Result --value)" = success &&
+timeout 60 bash -c 'until test -s ~/.local/state/ilex/profile.json; do sleep 1; done' &&
+python3 -c 'import json,pathlib; assert json.loads((pathlib.Path.home()/".local/state/ilex/profile.json").read_text())["profile"] == "andriishafar"' &&
+test -s ~/.config/ilex/welcome.txt""".replace("\n", " "))
+        return "authenticated PAM login with encrypted btrfs and installer profile applied"
     if action == "profiles":
         tty(name, secrets[0], "python3 -I -S /run/ilex-profiles-user.py")
         return "password-authenticated profile application and safety regressions passed"

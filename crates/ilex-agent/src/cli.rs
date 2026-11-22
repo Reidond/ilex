@@ -49,6 +49,8 @@ pub struct HomeArgs {
 enum HomeCommand {
     /// Create a daily home, keeping the local maintenance account separate
     Create(homed::CreateArgs),
+    /// Create or resume the daily home selected in the installer
+    Setup(homed::SetupArgs),
     /// Initialize a new homed filesystem before user@ starts
     #[command(hide = true)]
     Label { uid: u32 },
@@ -57,6 +59,7 @@ enum HomeCommand {
 pub fn home(args: HomeArgs) -> ExitCode {
     match args.command {
         HomeCommand::Create(args) => homed::create(args),
+        HomeCommand::Setup(args) => homed::setup(args),
         HomeCommand::Label { uid } => homed::label(uid),
     }
 }

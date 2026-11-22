@@ -34,6 +34,8 @@ COPY chooser/anaconda-chooser.conf /usr/lib/systemd/system/anaconda.service.d/10
 COPY chooser/anaconda-chooser.conf /usr/lib/systemd/system/anaconda-direct.service.d/10-ilex-chooser.conf
 COPY interactive-defaults.ks /usr/share/anaconda/interactive-defaults.ks
 COPY --chmod=0755 anaconda-enroll/complete /usr/libexec/ilex-installer/complete-enrollment
+COPY setup/anaconda-policy.py /usr/libexec/ilex-installer/anaconda-policy.py
+COPY setup/configure-anaconda.py /usr/libexec/ilex-installer/configure-anaconda.py
 
 FROM quay.io/fedora/fedora-bootc:45
 LABEL org.opencontainers.image.source="https://github.com/Reidond/ilex"
@@ -133,6 +135,7 @@ EOT
 # Kickstart defaults: install the newest ilex image and keep tracking ghcr.
 # Anaconda still asks for the disk, the user and everything else.
 COPY --from=installer-config / /
+RUN python3 -I -S /usr/libexec/ilex-installer/configure-anaconda.py
 RUN mkdir -p /usr/lib/ilex/security && \
     ilex-enroll tool-manifest > /usr/lib/ilex/security/tools.json && \
     mkdir -p /usr/lib/systemd/system/anaconda.target.wants && \
