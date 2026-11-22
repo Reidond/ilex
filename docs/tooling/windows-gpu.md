@@ -3,9 +3,9 @@
 Run these commands in the checkout, in PowerShell:
 
 ```powershell
-ilexctl build
-ilexctl vm run --gui
-ilexctl vm run --gui --persist
+cargo ilexctl build
+cargo ilexctl vm run --gui
+cargo ilexctl vm run --gui --persist
 cargo install --locked --path crates/ilexctl
 ilexctl vm list
 ilexctl vm capabilities --json
@@ -18,9 +18,10 @@ ilexctl mcp
 
 `vm run --gui` asks the T3 builder for an installed development qcow2, verifies
 the delivered disk manifest and SHA256, and runs the pinned T2 QEMU locally.
-Image builds run on the builder; QEMU and vmctl run directly on Windows. `vm run --disk` also uses
-native WHPX, with a software headless display. Native Linux uses GTK/KVM.
-Plain Windows `vm` opens an ephemeral guest terminal on the builder.
+Image builds run on the builder. QEMU and the `ilexctl vm` controls run directly
+on Windows. `vm run --disk` also uses native WHPX, with a software headless
+display. Native Linux uses GTK/KVM.
+On Windows, `ilexctl vm run` opens an ephemeral guest terminal on the builder.
 
 The native profile uses q35, `-cpu max`, four vCPUs, 8 GiB fixed guest RAM,
 nonsecure EDK2, virtio disk/network/keyboard and a USB absolute tablet. The
@@ -53,7 +54,7 @@ under the checkout's state directory.
 
 `--purpose research` selects a separate owned overlay and control endpoint.
 An explicit `ILEX_DISK` accepts a validated development disk from Linux:
-run `ilexctl disk --development`, then copy the qcow2, `.disk.json` manifest
+run `cargo ilexctl disk --development`, then copy the qcow2, `.disk.json` manifest
 and `.ilex-owner` receipt together. Import requires this checkout's owner and
 the exact SHA256 and preserves the original executor in image provenance.
 The normal builder delivery path remains the default.

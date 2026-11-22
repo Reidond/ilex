@@ -2,9 +2,10 @@
 
 Native PowerShell is the entry point for Windows builds, tests and development
 VMs. The shared Fedora builder runs Linux jobs. Native QEMU/WHPX runs the
-virgl desktop, and native Hyper-V Gen2 runs the security tier. Install the
-Windows dev build of `ilexctl` and configure the MCP server to launch `ilexctl mcp`
-with the intended checkout as its working directory.
+virgl desktop, and native Hyper-V Gen2 runs the security tier. Install the dev
+build with `cargo install --locked --path crates/ilexctl` and configure the
+MCP server to launch `ilexctl mcp` with the intended checkout as its working
+directory.
 
 ## Inventory the old environment
 

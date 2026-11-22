@@ -7,20 +7,20 @@ installer integration and recovery are later work.
 
 ## Running and interpreting the probes
 
-Run `ilexctl info` first. Only use this checkout's image, disk and VM
+Run `cargo ilexctl info` first. Only use this checkout's image, disk and VM
 namespace. On a native Linux executor:
 
 ```sh
-ilexctl build --shell none
-ILEX_SHELLS=none ilexctl doctor security --self-check --memory 2G
-ilexctl doctor security --require-qualified --memory 2G
+cargo ilexctl build --shell none
+ILEX_SHELLS=none cargo ilexctl doctor security --self-check --memory 2G
+cargo ilexctl doctor security --require-qualified --memory 2G
 # A different resource profile must have its own passing T6 record:
-ilexctl doctor security --require-qualified --memory 2049M
+cargo ilexctl doctor security --require-qualified --memory 2049M
 # Explicit emulation, with independent qualification:
-ILEX_SHELLS=none ilexctl doctor security --self-check --accelerator tcg --memory 4G
+ILEX_SHELLS=none cargo ilexctl doctor security --self-check --accelerator tcg --memory 4G
 ```
 
-`security` alone is an inventory and explicitly says no guest was qualified.
+`doctor security` alone is an inventory and explicitly says no guest was qualified.
 `--require-qualified` prints the provider's existing capability/qualification
 record and exits nonzero unless both firmware enforcement and persistent TPM
 are effective for that exact accelerator/RAM/two-vCPU profile. It launches

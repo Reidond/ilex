@@ -186,12 +186,12 @@ deadline is retained in `amdgpu-deadline.json`; assertions and boot deadlines
 remain mandatory, and timeouts stay unqualified.
 
 ```sh
-ilexctl build --shell none
-ILEX_SHELLS=none ilexctl doctor security --self-check --accelerator tcg --memory 6G
-ILEX_SHELLS=none ilexctl test disk::install
-ILEX_SECURITY_ACCELERATOR=tcg ilexctl test security::encrypted_install
-ILEX_SECURITY_ACCELERATOR=tcg ilexctl test security::encrypted_existing_space
-ILEX_SECURITY_ACCELERATOR=tcg ilexctl test security::encrypted_interrupted
+cargo ilexctl build --shell none
+ILEX_SHELLS=none cargo ilexctl doctor security --self-check --accelerator tcg --memory 6G
+ILEX_SHELLS=none cargo ilexctl test disk::install
+ILEX_SECURITY_ACCELERATOR=tcg cargo ilexctl test security::encrypted_install
+ILEX_SECURITY_ACCELERATOR=tcg cargo ilexctl test security::encrypted_existing_space
+ILEX_SECURITY_ACCELERATOR=tcg cargo ilexctl test security::encrypted_interrupted
 ```
 
 `security::encrypted_install` builds/reuses `ILEX_ISO`, installs this candidate
@@ -282,7 +282,7 @@ Disks, firmware/TPM state, private answers and signing keys are removed.
 
 To diagnose installation and fallback locally, point `ILEX_ISO` and
 `ILEX_IMAGE` at this checkout's installer and candidate and run
-`ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS=1 ilexctl test security::enrollment_diagnostic_ -- --test-threads 1`.
+`ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS=1 cargo ilexctl test security::enrollment_diagnostic_ -- --test-threads 1`.
 These trials use a firmware profile with Secure Boot off and no TPM. They
 retain an unqualified result and run outside the hosted filter. Use explicit
 TCG qualification for a local Secure Boot run with the hosted memory profile.
@@ -333,7 +333,7 @@ remain later qualification, never inferred from this fixture.
 For a failed test-only finalisation scanner, an owned checkpoint taken after
 the installer QEMU exited successfully can diagnose the installed boot without
 repeating the import. `ILEX_ENROLLMENT_CHECKPOINT=<owned-state-checkpoint>` with
-`ilexctl test security::enrollment_checkpoint` restores the original disk,
+`cargo ilexctl test security::enrollment_checkpoint` restores the original disk,
 TPM and firmware bundle only after the original controller has exited. It
 requires the exact qualified 6 GiB/two-vCPU backend, authenticates the private
 credential fingerprints, then runs first/cold boot and fallback gates. It

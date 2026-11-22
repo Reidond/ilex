@@ -5,18 +5,18 @@ builds, tests, disk and ISO jobs and ordinary ephemeral VMs to the managed Fedor
 builder. Native Linux runs its tooling locally.
 
 ```powershell
-ilexctl runtime fetch
-ilexctl runtime status
-ilexctl runtime self-check
-ilexctl runtime activation-self-check
-ilexctl runtime update
-ilexctl builder up
-ilexctl builder status --json
-ilexctl builder self-check
-ilexctl builder recovery-self-check --wait-for-memory-seconds 10800
-ilexctl builder maintenance-self-check --wait-for-memory-seconds 10800
-ilexctl builder down
-ilexctl builder update
+cargo ilexctl runtime fetch
+cargo ilexctl runtime status
+cargo ilexctl runtime self-check
+cargo ilexctl runtime activation-self-check
+cargo ilexctl runtime update
+cargo ilexctl builder up
+cargo ilexctl builder status --json
+cargo ilexctl builder self-check
+cargo ilexctl builder recovery-self-check --wait-for-memory-seconds 10800
+cargo ilexctl builder maintenance-self-check --wait-for-memory-seconds 10800
+cargo ilexctl builder down
+cargo ilexctl builder update
 ```
 
 The host needs enabled Hyper-V/WHPX, the Hyper-V PowerShell module, an authorized
@@ -96,7 +96,7 @@ another host allocation. T3 adds shared weighted guest/job scheduling.
 For a constrained validation run:
 
 ```powershell
-ilexctl builder up --memory-gib 4 --cpus 4 --wait-for-memory-seconds 10800
+cargo ilexctl builder up --memory-gib 4 --cpus 4 --wait-for-memory-seconds 10800
 ```
 
 The wait polls live available memory every two minutes without touching other

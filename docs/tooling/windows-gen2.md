@@ -11,9 +11,9 @@ uses the same `VmSpec`, `VmProvider`, `VmControl` and exact-profile
 $env:ILEX_ISO = 'C:\fixtures\ilex-installer.iso'
 $env:ILEX_ISO_SHA256 = '<SHA-256 from the matching release>'
 $env:ILEX_VM_SLOTS = '1'
-ilexctl doctor security --self-check --memory 6G
-ilexctl doctor security --require-qualified --memory 6G
-ilexctl test security::firmware ephemeral:: -- --test-threads 1
+cargo ilexctl doctor security --self-check --memory 6G
+cargo ilexctl doctor security --require-qualified --memory 6G
+cargo ilexctl test security::firmware ephemeral:: -- --test-threads 1
 ```
 
 A matching `ilex-installer.iso.sha256` next to the ISO also supplies the
@@ -39,7 +39,7 @@ Switch. It accepts 2–6 GiB and up to four vCPUs; use
 `ILEX_SECURITY_MEMORY` and `ILEX_SECURITY_VCPUS` to qualify another exact
 profile. Gen2 and WHPX share the native slots and the 14 GiB host memory
 reserve. An interrupted Gen2 launcher leaves its creation intent and slot
-receipt for reconciliation. Use `ilexctl doctor security --cleanup-run <run UUID>`
+receipt for reconciliation. Use `cargo ilexctl doctor security --cleanup-run <run UUID>`
 from the owning checkout after the launcher exits. If registration finished
 before the UUID receipt was written, cleanup checks the private VM path,
 name, generation, and target disk. An ambiguous or mismatched allocation
@@ -98,10 +98,10 @@ absolute axes and a click. Firmware pointer, clipboard, and suspend remain
 unavailable. From the owning checkout:
 
 ```powershell
-ilexctl vm run --secure --memory 6G
-ilexctl vm --vm secure capabilities --json
-ilexctl vm --vm secure type ilex-gen2-recovery-410625 --enter
-ilexctl vm --vm secure screenshot -o secure.png
+cargo ilexctl vm run --secure --memory 6G
+cargo ilexctl vm --vm secure capabilities --json
+cargo ilexctl vm --vm secure type ilex-gen2-recovery-410625 --enter
+cargo ilexctl vm --vm secure screenshot -o secure.png
 ```
 
 `vm run --secure` requires an already qualified profile. The example above

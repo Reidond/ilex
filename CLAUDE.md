@@ -43,7 +43,7 @@ ilexctl info               # resource identity, selection and available configur
   State/runtime paths stay owner-qualified even for `main` (`main--<owner hash>`),
   so registering main never adopts old unreceipted directories or keys.
   Never use another checkout's image or VMs.
-- `build`, `test`, `vm` and `disk` accept repeatable `--shell <name>`: the
+- `build`, `test`, `vm run` and `disk` accept repeatable `--shell <name>`: the
   first shell is the default. Flags override `ILEX_SHELLS` (comma-separated),
   which overrides `image.toml`; an empty environment variable uses the manifest.
   `none` alone selects the small base (`multi-user.target`), without desktop
@@ -73,7 +73,7 @@ ilexctl info               # resource identity, selection and available configur
   `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
 - Reusing an implicit image first requires `ilex.checkout-owner` to match the
   canonical checkout owner, then compares all three selection labels with the current
-  manifests and flags. `test` rebuilds a stale selection; `vm` and `disk` refuse
+  manifests and flags. `test` rebuilds a stale selection; `vm run` and `disk` refuse
   it and print the selection it was built for and the build command to run.
   Explicit image references are compared only when `--shell`, `--machine`,
   `ILEX_SHELLS` or `ILEX_MACHINE`
@@ -633,7 +633,7 @@ bootc's `kargs = ["..."]` format; bootc applies the difference at install,
 upgrade and switch. Other machine defaults (udev, sysctl, unit drop-ins) go in
 `rootfs/usr/` too. No replacement list exists.
 
-`build`, `test`, `vm` and `disk` accept `--machine <name>`, overriding
+`build`, `test`, `vm run` and `disk` accept `--machine <name>`, overriding
 `ILEX_MACHINE`, then `generic`. Native Windows `vm run --gui` installs the
 selected composition with a disposable development overlay. `--print-image`
 reports the selected reference without building or booting.
