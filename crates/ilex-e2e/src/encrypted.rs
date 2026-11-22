@@ -15,6 +15,8 @@ use libtest_mimic::Trial;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
+    fmt,
     fs::{self, File},
     io::{Read, Write},
     net::{Shutdown, TcpListener},
@@ -32,6 +34,93 @@ const GUEST: &str = include_str!("encrypted/guest.py");
 const PRIVACY: &str = include_str!("encrypted/privacy.py");
 const DIAGNOSTICS: &str = include_str!("encrypted/diagnostics.py");
 const LOG_STREAM: &str = include_str!("encrypted/log_stream.py");
+
+#[derive(Clone, Debug, Serialize)]
+struct GuestFailure {
+    check: &'static str,
+    observed_unix_seconds: u64,
+    unlock_method: &'static str,
+    unit_states: BTreeMap<&'static str, &'static str>,
+}
+
+impl fmt::Display for GuestFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.check)
+    }
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+impl GuestFailure {
+    fn capture(fixture: Option<&mut Fixture>, check: &'static str) -> Self {
+        const UNITS: &[&str] = &[
+            "multi-user.target",
+            "ilex-security-verify.service",
+            "ilex-fixture-wrong-repair.service",
+            "ilex-fixture-full-repair.service",
+            "ilex-fixture-repair.service",
+            "ilex-encrypted-vt-input.service",
+            "ilex-enroll-no-tpm-completion.service",
+        ];
+        const STATES: &[&str] = &[
+            "active",
+            "reloading",
+            "inactive",
+            "failed",
+            "activating",
+            "deactivating",
+            "maintenance",
+            "refreshing",
+        ];
+        let mut snapshot = Self {
+            check,
+            observed_unix_seconds: unix_seconds(),
+            unlock_method: "unavailable",
+            unit_states: UNITS.iter().map(|&unit| (unit, "unavailable")).collect(),
+        };
+        let Some(vm) = fixture.and_then(|fixture| fixture.vm.running_mut().ok()) else {
+            return snapshot;
+        };
+        let query = format!(
+            r#"timeout 10s sh -s -- {} <<'ILEX_STATE'
+for unit do
+    state=$(systemctl show -p ActiveState --value "$unit" 2>/dev/null) || state=
+    printf '%s\n' "$state"
+done
+python3 -I -S -c 'import json; method = json.loads(open("/run/ilex/root-unlock.json", "rb").read(4096))["method"]; print(method if method in ("fallback", "tpm2") else "unavailable")' 2>/dev/null || printf '\n'
+ILEX_STATE"#,
+            UNITS.join(" "),
+        );
+        let Ok(output) = vm.ssh(&query) else {
+            return snapshot;
+        };
+        if output.status.success()
+            && output.stdout.len() <= 1024
+            && let Ok(output) = std::str::from_utf8(&output.stdout)
+            && output.lines().count() == UNITS.len() + 1
+        {
+            // Emit only fixed unit names and allowlisted values. Failure
+            // paths can report this even when the artifact scan cannot run.
+            let mut values = output.lines();
+            for (&unit, value) in UNITS.iter().zip(&mut values) {
+                if let Some(&state) = STATES.iter().find(|&&state| state == value) {
+                    snapshot.unit_states.insert(unit, state);
+                }
+            }
+            snapshot.unlock_method = match values.next() {
+                Some("tpm2") => "tpm2",
+                Some("fallback") => "fallback",
+                _ => "unavailable",
+            };
+        }
+        snapshot
+    }
+}
 
 pub fn trials() -> Vec<Trial> {
     let mut trials = vec![
@@ -857,6 +946,14 @@ fn failure_code(error: &anyhow::Error) -> Value {
         (b"QMP response ID", "qmp-response-id"),
         (b"installed system health", "installed-system-health"),
         (b"installed enrollment self-check", "enrollment-self-check"),
+        (
+            b"repair did not refuse for lack of a free LUKS2 slot",
+            "full-header-refusal",
+        ),
+        (
+            b"full-header repair changed credential data or enrollment state",
+            "full-header-changed",
+        ),
         (b"PCR7 lacks meaningful", "positive-authority-log"),
         (
             b"present TPM / changed Secure Boot PCR",
@@ -1332,23 +1429,46 @@ fn fallback(
     if result.is_err() {
         let _ = fixture.logs(artifacts, mode);
     }
-    result?;
+    result.map_err(|error| {
+        error.context(GuestFailure::capture(Some(&mut fixture), "fallback_boot"))
+    })?;
     if let Some(passphrase) = repair_passphrase
         && mode == "recovery"
-        && family == "a"
         && !local_diagnostic
         && original_tokens["tokens"]
             .as_array()
             .is_some_and(|tokens| tokens.iter().any(|t| t["pcr7_sha256"] == true))
     {
-        repair_fallback(
-            &mut fixture,
-            artifacts,
-            credential,
-            passphrase,
-            credentials,
-            original_tokens,
-        )?;
+        if expected["tpm_slot_budget"] == true {
+            full_header_repair(
+                &mut fixture,
+                artifacts,
+                credential,
+                credentials,
+                original_tokens,
+            )
+            .map_err(|error| {
+                error.context(GuestFailure::capture(
+                    Some(&mut fixture),
+                    "full_header_repair",
+                ))
+            })?;
+        } else {
+            repair_fallback(
+                &mut fixture,
+                artifacts,
+                credential,
+                passphrase,
+                credentials,
+                original_tokens,
+            )
+            .map_err(|error| {
+                error.context(GuestFailure::capture(
+                    Some(&mut fixture),
+                    "authenticated_repair",
+                ))
+            })?;
+        }
     }
     fixture.logs(artifacts, mode)?;
     poweroff(&mut fixture, artifacts, mode)?;
@@ -1633,6 +1753,92 @@ fn save_fallback_output(vm: &qemu::Vm, artifacts: &Path, file: &str, command: &s
     }
 }
 
+fn header_digest(vm: &qemu::Vm, uuid: &str) -> Result<String> {
+    vm.ssh_ok(&format!(
+        r#"set -eu
+umask 077
+scratch=$(mktemp -d /run/ilex-header-digest.XXXXXXXX)
+trap 'rm -f "$scratch/header"; rmdir "$scratch"' EXIT
+cryptsetup luksHeaderBackup /dev/disk/by-uuid/{uuid} --header-backup-file "$scratch/header"
+sha256sum < "$scratch/header"
+"#
+    ))
+}
+
+fn full_header_repair(
+    fixture: &mut Fixture,
+    artifacts: &Path,
+    recovery: &Secret,
+    credentials: &Value,
+    original: &Value,
+) -> Result<()> {
+    let vm = fixture.vm.running_mut()?;
+    let uuid = original["uuid"].as_str().context("root UUID missing")?;
+    vm.ssh_ok("systemctl start ilex-security-verify.service")?;
+    ensure!(
+        original["slots"]
+            .as_array()
+            .is_some_and(|slots| slots.len() == 32),
+        "expected every LUKS2 slot to be occupied"
+    );
+    let tokens = original["tokens"]
+        .as_array()
+        .context("root tokens missing")?;
+    let tpm_token: u32 = tokens
+        .iter()
+        .find(|token| token["type"] == "systemd-tpm2")
+        .and_then(|token| token["id"].as_str())
+        .context("TPM token missing")?
+        .parse()?;
+
+    // A full header can still replace a provably owned TPM slot. Orphan that
+    // slot on this disposable overlay so repair must find genuinely free space.
+    let device = format!("/dev/disk/by-uuid/{uuid}");
+    vm.ssh_ok(&format!(
+        "cryptsetup token remove --token-id {tpm_token} {device}"
+    ))?;
+    let status = format!("ilex-enroll status --json --device {device}");
+    let full: Value = serde_json::from_str(&vm.ssh_ok(&status)?)?;
+    let remaining: Vec<_> = tokens
+        .iter()
+        .filter(|token| token["type"] != "systemd-tpm2")
+        .collect();
+    ensure!(
+        full["slots"] == original["slots"] && full["tokens"] == json!(remaining),
+        "fixture did not retain all slots and recovery metadata"
+    );
+    let header_before = header_digest(vm, uuid)?;
+    let state_digest = "sha256sum /var/lib/ilex/security/enrollment.json /etc/ilex/setup.json";
+    let state_before = vm.ssh_ok(state_digest)?;
+    vm.ssh_ok(r#"set -eu
+chvt 8
+systemd-run --quiet --remain-after-exit --unit=ilex-fixture-full-repair -p SuccessExitStatus=1 /usr/bin/ilexctl security repair
+timeout 90 sh -c 'until grep -aFq "for TPM repair (input is hidden)" /dev/vcs8; do sleep 1; done'
+"#)?;
+    let private = fixture
+        .console
+        .as_mut()
+        .context("private console unavailable")?;
+    type_at_vt(vm, private, recovery)?;
+    vm.ssh_ok(r#"set -eu
+timeout 180 sh -c 'until test "$(systemctl show -p SubState --value ilex-fixture-full-repair)" = exited; do sleep 1; done'
+test "$(systemctl show -p ExecMainStatus --value ilex-fixture-full-repair)" = 1
+journalctl -b -u ilex-fixture-full-repair --no-pager -o cat | grep -Fq 'LUKS2 has no free keyslot or keyslot area'
+systemctl stop ilex-fixture-full-repair
+test ! -e /var/lib/ilex/security/.pending-tpm.json
+test ! -e /var/lib/ilex/security/.pending-recovery.json
+"#).context("repair did not refuse for lack of a free LUKS2 slot")?;
+    ensure!(
+        header_digest(vm, uuid)? == header_before && vm.ssh_ok(state_digest)? == state_before,
+        "full-header repair changed credential data or enrollment state"
+    );
+    fs::write(
+        artifacts.join("full-header-repair.json"),
+        b"{\"occupied_slots\":32,\"authenticated_refusal\":true,\"header_unchanged\":true,\"enrollment_unchanged\":true}\n",
+    )?;
+    guest_privacy(vm, artifacts, "full-header-repair", credentials)
+}
+
 fn repair_fallback(
     fixture: &mut Fixture,
     artifacts: &Path,
@@ -1661,16 +1867,7 @@ fn repair_fallback(
         "repair-before-state.json",
         "cat /var/lib/ilex/security/enrollment.json",
     )?;
-    let header_digest = format!(
-        r#"set -eu
-umask 077
-scratch=$(mktemp -d /run/ilex-header-digest.XXXXXXXX)
-trap 'rm -f "$scratch/header"; rmdir "$scratch"' EXIT
-cryptsetup luksHeaderBackup /dev/disk/by-uuid/{uuid} --header-backup-file "$scratch/header"
-sha256sum < "$scratch/header"
-"#
-    );
-    let original_digest = vm.ssh_ok(&header_digest)?;
+    let original_digest = header_digest(vm, uuid)?;
     let mut bad_input = Secret::empty()?;
     let wrong = if passphrase.bytes() == [b'x'; 48] {
         b'z'
@@ -1697,7 +1894,7 @@ systemctl stop ilex-fixture-wrong-repair
 test ! -e /var/lib/ilex/security/.pending-tpm.json
 "#)?;
     ensure!(
-        vm.ssh_ok(&header_digest)? == original_digest,
+        header_digest(vm, uuid)? == original_digest,
         "wrong repair credential changed the LUKS2 header"
     );
     let rejected = guest_json(
@@ -2540,9 +2737,11 @@ fn run_layout(
     let artifacts = work.join("evidence");
     fs::create_dir(&artifacts)?;
     let start = Instant::now();
+    let started_unix_seconds = unix_seconds();
     let mut stage = "platform";
     let mut credentials = Value::Null;
-    let mut result = (|| {
+    let mut active_fixture = None;
+    let mut result = (|| -> Result<()> {
         let iso = PathBuf::from(std::env::var_os("ILEX_ISO").context("ILEX_ISO required")?);
         ensure!(iso.is_file(), "exact installer ISO missing");
         let disk = work.join("root.qcow2");
@@ -2615,19 +2814,19 @@ fn run_layout(
             read_only: false,
         });
         let vm = provider.create(spec.clone())?;
-        let mut fixture = Fixture {
+        let fixture = active_fixture.insert(Fixture {
             provider,
             vm,
             spec,
             console: None,
-        };
+        });
         stage = "installation";
         let deadline = Duration::from_secs(
             std::env::var("ILEX_ENCRYPTED_INSTALL_TIMEOUT")
                 .unwrap_or_else(|_| "10800".into())
                 .parse()?,
         );
-        let installed = install(&mut fixture, &artifacts, deadline, interrupted);
+        let installed = install(fixture, &artifacts, deadline, interrupted);
         let installer_logs = fixture.logs(&artifacts, "installer");
         if installed.is_err() {
             fixture.provider.stop(&mut fixture.vm)?;
@@ -2816,7 +3015,7 @@ fn run_layout(
         if interrupted {
             stage = "interrupted_completion_repair";
             let (reissued, repaired_tokens) = interrupted_repair(
-                &mut fixture,
+                fixture,
                 &artifacts,
                 &passphrase,
                 &mut credentials,
@@ -2842,7 +3041,7 @@ fn run_layout(
         } else {
             stage = "first_installed_boot";
             fixture.disk_boot()?;
-            let booted = assertions(&mut fixture, &artifacts, &expected, &installer_probe);
+            let booted = assertions(fixture, &artifacts, &expected, &installer_probe);
             fixture.logs(&artifacts, "installed")?;
             booted?;
             guest_privacy(
@@ -2852,18 +3051,18 @@ fn run_layout(
                 &credentials,
             )?;
             stage = "cold_restart";
-            poweroff(&mut fixture, &artifacts, "installed")?;
+            poweroff(fixture, &artifacts, "installed")?;
             fixture.disk_boot()?;
             let cold = artifacts.join("cold");
             fs::create_dir_all(&cold)?;
-            assertions(&mut fixture, &cold, &expected, &installer_probe)?;
+            assertions(fixture, &cold, &expected, &installer_probe)?;
             guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
             fixture.logs(&artifacts, "cold")?;
-            poweroff(&mut fixture, &artifacts, "cold")?;
+            poweroff(fixture, &artifacts, "cold")?;
             stage = "same_tpm_policy_mismatch";
             same_tpm_mismatch(
                 &ws,
-                &mut fixture,
+                fixture,
                 &artifacts,
                 &passphrase,
                 &credentials,
@@ -2905,6 +3104,13 @@ fn run_layout(
         stage = "complete";
         Ok(())
     })();
+    let guest_failure = result.as_ref().err().map(|error| {
+        error
+            .downcast_ref::<GuestFailure>()
+            .cloned()
+            .unwrap_or_else(|| GuestFailure::capture(active_fixture.as_mut(), stage))
+    });
+    drop(active_fixture);
     if let Err(error) = &result {
         let _ = fs::write(
             published.join("failure-code.json"),
@@ -2961,13 +3167,23 @@ fn run_layout(
         stage = "cleanup";
         result = Err(error.into());
     }
+    let failure_summary = result.as_ref().err().map(|error| {
+        let guest = guest_failure.unwrap_or_else(|| GuestFailure::capture(None, stage));
+        json!({
+            "case": tier, "stage": stage, "started_unix_seconds": started_unix_seconds,
+            "guest": guest, "diagnostic": failure_code(error),
+        })
+    });
     fs::write(
         published.join("result.json"),
         serde_json::to_vec_pretty(
-            &json!({"qualification": if result.is_ok() && !local_diagnostic {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|_|"private failure details suppressed"), "storage":if preserve_data {"existing-free-space"} else if interrupted {"interrupted-completion"} else {"automatic-empty-disk"}, "scope":if local_diagnostic {"local nonsecure guest with no TPM"} else {"exact ISO, signed local candidate, installed boot; physical hardware remains unqualified"}}),
+            &json!({"qualification": if result.is_ok() && !local_diagnostic {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|_|"private failure details suppressed"), "failure_summary":failure_summary, "storage":if preserve_data {"existing-free-space"} else if interrupted {"interrupted-completion"} else {"automatic-empty-disk"}, "scope":if local_diagnostic {"local nonsecure guest with no TPM"} else {"exact ISO, signed local candidate, installed boot; physical hardware remains unqualified"}}),
         )?,
     )?;
     result.map_err(|_| {
-        anyhow::anyhow!("encrypted qualification failed at {stage}; private diagnostics suppressed")
+        let summary = failure_summary.unwrap_or(Value::Null);
+        anyhow::anyhow!(
+            "encrypted qualification failed at {stage}; private diagnostics suppressed\n{summary}"
+        )
     })
 }

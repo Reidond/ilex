@@ -227,10 +227,14 @@ and all slots/tokens are retained. `ilex-enroll --self-check` in the
 booted guest creates one disposable loopback LUKS2 volume and exercises real
 inherited-FD authentication, recovery, retained passphrase and wrong-password
 rejection. It checks a real undersized keyslot area and a nearly full token
-table. The wrong-vTPM trial cuts repair after actual header writes, resumes
-with the saved recovery key, and requires unattended verified cold boot. It
-rejects a wrong repair input with an unchanged header, authenticates both
-retained fallback slots, and checks that stale evidence clears verification.
+table. In the existing-space trial, the wrong-vTPM guest cuts repair after
+actual header writes, resumes with the saved recovery key, and requires
+unattended verified cold boot. It rejects a wrong repair input with an
+unchanged header, authenticates both retained fallback slots, and checks
+that stale evidence clears verification. The empty-disk trial removes the
+TPM token on the disposable recovery overlay while leaving all 32 keyslots
+occupied. Authenticated repair must refuse for lack of a free slot, preserve
+the entire resulting header and enrollment state, and leave no pending receipt.
 
 The guest starts its private virtual keyboard when the shipped completion
 process appears. The overall install deadline covers the earlier Flatpak
