@@ -3,7 +3,7 @@
 from pathlib import Path
 import sysconfig
 
-PACKAGE = Path(sysconfig.get_path("purelib", vars={"base": "/usr"})) / "pyanaconda"
+PACKAGE = Path(sysconfig.get_path("platlib", vars={"platbase": "/usr"})) / "pyanaconda"
 
 
 def patch(module, anchor, replacement):
