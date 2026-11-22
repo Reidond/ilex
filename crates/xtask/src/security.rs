@@ -81,7 +81,7 @@ fn linux(ws: &Workspace, args: Args) -> Result<()> {
         cmd::run(
             Command::new(cargo)
                 .current_dir(&ws.root)
-                .args(["xtask", "test", "security::firmware"])
+                .args(["ilexctl", "test", "security::firmware"])
                 .env("ILEX_SECURITY_ACCELERATOR", accelerator)
                 .env("ILEX_SECURITY_MEMORY", memory),
         )?;

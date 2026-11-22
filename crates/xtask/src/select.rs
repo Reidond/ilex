@@ -49,7 +49,7 @@ impl Args {
         // use the named image, without comparing it with this checkout.
         let check_base_selection = image.is_none() || requested.is_some();
         let check_selection = check_base_selection || requested_machine.is_some();
-        let mut build_command = "cargo xtask build".to_string();
+        let mut build_command = "cargo ilexctl build".to_string();
         if let Some(shells) = &requested {
             if shells.is_empty() {
                 build_command.push_str(" --shell none");
@@ -199,7 +199,7 @@ impl Resolved {
             )));
         }
         let requested = self.selection.as_ref().context(
-            "cannot read the requested selection from image.toml; run `cargo xtask build` for manifest diagnostics",
+            "cannot read the requested selection from image.toml; run `cargo ilexctl build` for manifest diagnostics",
         )?;
         let actual = (|| -> Result<Selection> {
             let text = cmd::output(Command::new("podman").args([

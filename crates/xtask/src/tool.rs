@@ -1,8 +1,8 @@
-//! `cargo xtask tool <name> [packages...]`: build a drupe tool image from
+//! `cargo ilexctl drupe build <name> [packages...]`: build a drupe tool image from
 //! Fedora packages (see `ilex_devkit::tool`).
 //!
-//! `cargo xtask tool strace` builds `<state dir>/tools/images/strace.raw`
-//! from the package of the same name; `cargo xtask tool net nmap tcpdump`
+//! `cargo ilexctl drupe build strace` builds `<state dir>/tools/images/strace.raw`
+//! from the package of the same name; `cargo ilexctl drupe build net nmap tcpdump`
 //! puts the commands of two packages into one tool called `net`.
 
 use anyhow::Result;

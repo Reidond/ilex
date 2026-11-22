@@ -159,6 +159,7 @@ pub enum Operation {
         job: Option<String>,
     },
     /// Verify staged source and real nested KVM userspace; optionally hold for Ctrl-C
+    #[command(name = "self-check", long_flag = "self-check")]
     SelfCheck {
         #[arg(long, default_value_t = 0)]
         hold_seconds: u64,

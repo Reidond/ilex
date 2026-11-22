@@ -1,4 +1,4 @@
-//! `cargo xtask disk`: write a qcow2 or raw disk with `bcvk to-disk`.
+//! `cargo ilexctl disk`: write a qcow2 or raw disk with `bcvk to-disk`.
 //!
 //! The disk lands in the checkout's state directory
 //! (`<state dir>/disks/<image>.qcow2`) unless `--out` says otherwise. bcvk
@@ -77,7 +77,7 @@ pub struct Gen2 {
     pub no_pull: bool,
 }
 
-/// The command line's defaults, for `xtask vm --disk`, which writes its disk
+/// The command line's defaults, for `cargo ilexctl vm run --disk`, which writes its disk
 /// without parsing one. (A derived `Default` left `size` empty, and bcvk
 /// rejects `--disk-size ''`.)
 impl Default for Args {
@@ -106,7 +106,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 }
 
 /// Write the disk for `args` (or reuse one) and return its path and image.
-/// The image must already be built (`cargo xtask build`).
+/// The image must already be built (`cargo ilexctl build`).
 pub fn ensure(ws: &Workspace, args: &Args) -> Result<(PathBuf, String)> {
     let image = if let Some(gen2) = &args.gen2 {
         let base = crate::test::image_under_test_with_reference(
@@ -137,7 +137,7 @@ pub fn ensure(ws: &Workspace, args: &Args) -> Result<(PathBuf, String)> {
 /// that reference or for the viewer layer derived from it.
 pub fn ensure_image(ws: &Workspace, args: &Args, image: &str) -> Result<PathBuf> {
     if !build::image_exists(image) {
-        bail!("image {image} not found in local container storage; run `cargo xtask build` first");
+        bail!("image {image} not found in local container storage; run `cargo ilexctl build` first");
     }
     let mut spec = DiskSpec::new(image);
     spec.format = args.format.into();

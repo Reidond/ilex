@@ -1,4 +1,4 @@
-//! `cargo xtask rechunk`: split the image into reproducible chunks and add
+//! `cargo ilexctl rechunk`: split the image into reproducible chunks and add
 //! the `ilex.fingerprint` label.
 //!
 //! A plain `podman build` writes a new tar stream with new timestamps every
@@ -11,10 +11,10 @@
 //! storage. The result replaces the input tag in place, or goes to its own
 //! tag with `--output` (CI rechunks while it tests the input).
 //!
-//! The fingerprint label is the hash that `xtask changed` compares with the
+//! The fingerprint label is the hash that `cargo ilexctl changed` compares with the
 //! published image: the sorted `rpm -qa` of the image plus the git tree
 //! hashes of everything in the repo that ends up in the image. It is the
-//! same before and after the rechunk, so `xtask changed` can decide on the
+//! same before and after the rechunk, so `cargo ilexctl changed` can decide on the
 //! image as built.
 
 use std::process::{Command, Stdio};
@@ -36,7 +36,7 @@ pub struct Args {
     #[arg(long)]
     pub output: Option<String>,
     /// Write this fingerprint into the label instead of computing it (the
-    /// `fingerprint=` that `xtask changed` printed)
+    /// `fingerprint=` that `cargo ilexctl changed` printed)
     #[arg(long)]
     pub fingerprint: Option<String>,
     /// Maximum number of layers in the result
@@ -50,7 +50,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     ws.ensure_state()?;
     ws.verify_implicit_image(&input)?;
     if !image_exists(&input) {
-        bail!("{input} is not in local container storage; run `cargo xtask build` first");
+        bail!("{input} is not in local container storage; run `cargo ilexctl build` first");
     }
     image_selection(&input)?;
     // Where the result goes: a tag of its own, or over the input.
@@ -61,7 +61,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let in_place = image == input;
     let transaction = ilex_devkit::ownership::ImageTransaction::new(ws, &image)?;
 
-    // The same value `xtask changed` computes on the un-rechunked image
+    // The same value `cargo ilexctl changed` computes on the un-rechunked image
     // (rechunking keeps the RPM database, and the repo trees are the same);
     // CI hands it over so the label is exactly what `changed` compared.
     let fingerprint = match args.fingerprint {
@@ -158,7 +158,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
 
 /// The fingerprint of a candidate image: its `ilex.fingerprint` label when it
 /// has one (a rechunked image), otherwise computed from the image as built.
-/// Both are the same value, so `xtask changed` can decide right after the
+/// Both are the same value, so `cargo ilexctl changed` can decide right after the
 /// build and a run that changed nothing never pays for the rechunk.
 pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     image_selection(image)?;

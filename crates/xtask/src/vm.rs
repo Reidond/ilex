@@ -1,12 +1,12 @@
-//! `cargo xtask vm`: boot this checkout's image as an interactive VM under
+//! `cargo ilexctl vm run`: boot this checkout's image as an interactive VM under
 //! the machine-wide VM slot cap.
 //!
 //! Three modes:
 //! - default: an ephemeral VM straight from the container image
 //!   (`bcvk ephemeral run-ssh`, no disk); exiting the shell tears it down.
-//! - `--disk`: the installed qcow2 from `cargo xtask disk`, booted headless
+//! - `--disk`: the installed qcow2 from `cargo ilexctl disk`, booted headless
 //!   with a 4K `virtio-vga` display exactly like the graphical test tier.
-//!   Attach to it with `ilex-vmctl` (QMP) or a VNC viewer.
+//!   Attach to it with `cargo ilexctl vm` (QMP) or a VNC viewer.
 //! - `--gui`: the same plus a window to watch and use. When the host has a
 //!   GPU the guest gets one too (virgl: `virtio-vga-gl`).
 //!   - On Linux, GTK opens a window on the desktop.
@@ -202,7 +202,7 @@ fn run_disk(ws: &Workspace, args: Args, resolved: crate::select::Resolved) -> Re
         ),
         _ => {
             eprintln!(
-                "  vmctl:  ilex-vmctl screenshot   (QMP {})",
+                "  ilexctl vm screenshot   (QMP {})",
                 info.qmp_sock.display()
             );
             eprintln!("  vnc:    unix socket {}", info.vnc_sock.display());

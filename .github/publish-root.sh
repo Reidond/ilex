@@ -32,7 +32,7 @@ config=$(without_key skopeo inspect --raw "docker://$IMAGE_REPO@$STAGED" |
 }
 if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$TAG" "$SNAPSHOT" &&
    without_key bash .github/publish-head.sh swap "$IMAGE_REPO:$TAG" "$SNAPSHOT"; then
-    "$XTASK_PUBLISHER" publish --digest "$STAGED" --as "$TAG" --tested-fingerprint "$FINGERPRINT"
+    "$XTASK_PUBLISHER" --ilexctl-in-checkout publish --digest "$STAGED" --as "$TAG" --tested-fingerprint "$FINGERPRINT"
     echo 'published=true' >> "$GITHUB_OUTPUT"
     echo "root publication result: $TAG published=true"
 else

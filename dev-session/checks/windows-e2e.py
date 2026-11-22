@@ -106,7 +106,7 @@ def caption():
 
 
 def ctl(*command):
-    return subprocess.check_output([str(args.vmctl), '--vm', info['purpose'], *command], cwd=Path(__file__).resolve().parents[2])
+    return subprocess.check_output([str(args.vmctl), 'vm', '--vm', info['purpose'], *command], cwd=Path(__file__).resolve().parents[2])
 
 
 def check_relogin():

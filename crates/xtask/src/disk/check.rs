@@ -107,6 +107,7 @@ qemu-img create -q -f qcow2 "${!#}" 1M
     let command = |mode: &str, out: &str, runtime: &str| {
         let mut c = Command::new(&exe);
         c.current_dir(&ws.root)
+            .arg("--ilexctl-in-checkout")
             .args(["disk", "--image", &source, "--size", "1M", "--out"])
             .arg(root.join(out))
             .env("ILEX_ROOT", &ws.root)

@@ -649,7 +649,7 @@ fn run() -> Result<()> {
 
 fn iso_path() -> Result<PathBuf> {
     let Some(path) = std::env::var_os("ILEX_ISO").filter(|p| !p.is_empty()) else {
-        bail!("ILEX_ISO is not set: run `cargo xtask test iso::`, which builds the ISO first");
+        bail!("ILEX_ISO is not set: run `cargo ilexctl test iso::`, which builds the ISO first");
     };
     let path = PathBuf::from(path);
     if !path.is_file() {

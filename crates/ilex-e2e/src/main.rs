@@ -2,8 +2,8 @@
 //! image in QEMU and asserts over SSH.
 //!
 //! Tiers are selected with the standard libtest filter, e.g.
-//! `cargo xtask test ephemeral::`; several filters select their union
-//! (`cargo xtask test ephemeral:: upgrade::`). The image under test comes in
+//! `cargo ilexctl test ephemeral::`; several filters select their union
+//! (`cargo ilexctl test ephemeral:: upgrade::`). The image under test comes in
 //! through `ILEX_IMAGE` (default: this checkout's `localhost/ilex:<tag>`).
 
 #[cfg(target_os = "linux")]
@@ -88,7 +88,7 @@ fn main() {
         trials.extend(config::trials());
     }
     // Opt-in: builds an installer ISO and runs an install (tens of minutes),
-    // so it only exists when a filter asks for it (`cargo xtask test iso::`).
+    // so it only exists when a filter asks for it (`cargo ilexctl test iso::`).
     if filters.iter().any(|f| f.contains("iso")) {
         trials.extend(iso::trials());
     }

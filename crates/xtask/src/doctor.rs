@@ -34,14 +34,14 @@ pub struct Args {
     pub arch: Option<String>,
 }
 
-pub fn run(ws: &Workspace, args: Args, entry: crate::EntryPoint) -> Result<()> {
+pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let fingerprints = args
         .self_check_fingerprint
         .as_deref()
         .map(|image| fingerprint_report(ws, image))
         .transpose()?;
     let builds = if args.self_check_build {
-        Some(build::run(ws, entry)?)
+        Some(build::run(ws)?)
     } else {
         None
     };

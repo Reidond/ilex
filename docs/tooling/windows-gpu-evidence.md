@@ -132,7 +132,7 @@ its sampling rate is separate from the application's callback rate.
 
 ## Builder delivery and repeat launches
 
-The normal `cargo xtask vm --gui --persist` path submitted job
+The normal `ilexctl vm run --gui --persist` path submitted job
 `7e28a556-cbe5-4efb-be20-e2457f0bcbe3` from signed source head
 `885f2eafa1a128db9dad7f72daa89335ef4464e3`, snapshot
 `sha256:b4dec9e92122576613cf1c723b9e30601a8bd9eee566e03e5f5f9f8f991c9c41`.

@@ -84,7 +84,7 @@ pub fn image_owner(image: &str) -> Result<Option<String>> {
 }
 
 pub fn require_image(ws: &Workspace, image: &str) -> Result<()> {
-    let owner = image_owner(image)?.with_context(|| format!("unlabelled legacy image {image}; refusing implicit adoption; run cargo xtask build from the registered primary to rebuild :main, or inspect this checkout's image ID and use cargo xtask identity rebuild-legacy-image --expected-id <id>; a fresh owned tag is also supported"))?;
+    let owner = image_owner(image)?.with_context(|| format!("unlabelled legacy image {image}; refusing implicit adoption; run cargo ilexctl build from the registered primary to rebuild :main, or inspect this checkout's image ID and use cargo ilexctl identity rebuild-legacy-image --expected-id <id>; a fresh owned tag is also supported"))?;
     ws.identity()?
         .authorize(&owner)
         .with_context(|| format!("image {image} belongs to another checkout"))

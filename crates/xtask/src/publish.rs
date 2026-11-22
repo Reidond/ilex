@@ -1,4 +1,4 @@
-//! `cargo xtask publish`: push by digest, tag and sign (CI only).
+//! `cargo ilexctl publish`: push by digest, tag and sign (CI only).
 //!
 //! 1. Push a tested composition once as `:<tag>_sha-<short>` and read back the
 //!    digest the registry stored. In CI the image is already there: the build
@@ -74,7 +74,7 @@ pub struct Args {
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     let repository = registry::repository(args.repository.as_deref(), "ilex")?;
-    registry::require_ci("xtask publish", &repository, args.allow_local_registry)?;
+    registry::require_ci("cargo ilexctl publish", &repository, args.allow_local_registry)?;
     if args.allow_local_registry && !registry::is_local_registry(&repository) {
         bail!(
             "--allow-local-registry only works with a registry on this machine, not {repository}"
@@ -486,7 +486,7 @@ fn require_layer_parent(
 
 fn local_fingerprint(image: &str) -> Result<String> {
     rechunk::local_label(image, FINGERPRINT_LABEL)?.with_context(|| {
-        format!("{image} has no {FINGERPRINT_LABEL} label; run `cargo xtask rechunk` for a generic image or `cargo xtask prepare-publish` for a machine, then test it first")
+        format!("{image} has no {FINGERPRINT_LABEL} label; run `cargo ilexctl rechunk` for a generic image or `cargo ilexctl prepare-publish` for a machine, then test it first")
     })
 }
 

@@ -4,7 +4,7 @@
 //!
 //! One [`Vm`] is one `qemu-system-x86_64` process holding a machine-wide VM
 //! slot ([`crate::slots`]) for as long as it lives. Everything a client needs
-//! to attach (`ilex-vmctl`, a human with a VNC viewer) is published in
+//! to attach (`ilexctl vm`, a human with a VNC viewer) is published in
 //! `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<purpose>/`:
 //!
 //! ```text
@@ -335,13 +335,13 @@ pub fn find_vm(ws: &Workspace, purpose: Option<&str>) -> Result<VmInfo> {
     match purpose {
         Some(p) => vms.into_iter().find(|v| v.purpose == p).with_context(|| {
             format!(
-                "no running `{p}` VM for `{}` (boot one with `cargo xtask vm --gui`)",
+                "no running `{p}` VM for `{}` (boot one with `cargo ilexctl vm run --gui`)",
                 ws.slug
             )
         }),
         None => match vms.len() {
             0 => bail!(
-                "no VM running for `{}` (boot one with `cargo xtask vm --gui`)",
+                "no VM running for `{}` (boot one with `cargo ilexctl vm run --gui`)",
                 ws.slug
             ),
             1 => Ok(vms.into_iter().next().unwrap()),
@@ -559,7 +559,7 @@ impl Vm {
             .with_context(|| format!("resolving {}", config.disk.display()))?;
         if !base_disk.is_file() {
             bail!(
-                "disk image {} not found (write it with `cargo xtask disk`)",
+                "disk image {} not found (write it with `cargo ilexctl disk`)",
                 base_disk.display()
             );
         }

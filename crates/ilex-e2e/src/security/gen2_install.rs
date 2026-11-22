@@ -169,10 +169,10 @@ test ! -e /dev/disk/by-label/OEMDRV
 }
 
 fn create_oemdrv(ws: &Workspace, source: &Path, raw: &Path) -> Result<()> {
-    let xtask = std::env::var_os("ILEX_XTASK").context("launch through cargo xtask test")?;
+    let xtask = std::env::var_os("ILEX_XTASK").context("launch through cargo ilexctl test")?;
     let output = Command::new(xtask)
         .current_dir(&ws.root)
-        .args(["remote", "oemdrv", "--source"])
+        .args(["--ilexctl-in-checkout", "remote", "oemdrv", "--source"])
         .arg(source)
         .output()?;
     eprint!("{}", String::from_utf8_lossy(&output.stderr));

@@ -10,7 +10,7 @@
 #   vm-prep.sh upgrade     the upgrade job and the v1-disk run: the VM stack
 #                          and, meanwhile, a pull of v1 ($ILEX_UPGRADE_FROM,
 #                          `v1-pull`); then v1 installed to a disk and booted
-#                          once (`ILEX_UPGRADE_PREPARE=1 cargo xtask test
+#                          once (`ILEX_UPGRADE_PREPARE=1 cargo ilexctl test
 #                          upgrade::`, `upgrade-prepare`). bcvk keeps the
 #                          installed disk, so the real test boots v1 in
 #                          seconds. When $ILEX_V1_DISK holds v1's disk from the
@@ -168,7 +168,7 @@ restore_disk() {
 
 prepare() {
     restore_disk
-    ILEX_UPGRADE_PREPARE=1 sg libvirt -c "cargo xtask test upgrade::"
+    ILEX_UPGRADE_PREPARE=1 sg libvirt -c "cargo ilexctl test upgrade::"
 }
 
 root_pulls() {

@@ -3,7 +3,7 @@
 //! Hand-rolled JSON-RPC 2.0 (newline-delimited, per the MCP stdio
 //! transport) instead of an SDK, since the surface is five tools and the
 //! rest of the crate is synchronous. Register it with
-//! `claude mcp add --transport stdio ilex-vm -- ilex-vmctl mcp`.
+//! `claude mcp add --transport stdio ilex-vm -- ilexctl mcp`.
 //!
 //! Screenshots come back downscaled (longer edge 1568 px by default, what
 //! image-reading models resample to anyway). `click`/`scroll` take
@@ -23,7 +23,7 @@ use crate::{Button, WaitCond, attached::Attached};
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const DEFAULT_MAX_EDGE: u32 = 1568;
 
-const INSTRUCTIONS: &str = "Drives the QEMU VM that `cargo xtask vm --disk` (or --gui) or the e2e tests booted for this \
+const INSTRUCTIONS: &str = "Drives the QEMU VM that `cargo ilexctl vm run --disk` (or --gui) or the e2e tests booted for this \
 checkout, over QMP. Take a `screenshot` first; `click`/`scroll` coordinates are in the pixels of the \
 latest screenshot. It works before login (firmware, GRUB, GDM). Use SSH, not pixels, for assertions.";
 
@@ -173,7 +173,7 @@ impl Server {
                 let vms = Attached::list(&ws)?;
                 if vms.is_empty() {
                     return Ok(vec![text(&format!(
-                        "No VM running for `{}`. Boot one with `cargo xtask vm --disk` (headless) or `--gui`.",
+                        "No VM running for `{}`. Boot one with `cargo ilexctl vm run --disk` (headless) or `--gui`.",
                         ws.slug
                     ))]);
                 }

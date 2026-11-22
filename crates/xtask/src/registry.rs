@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use ilex_devkit::cmd;
 
-/// Image label holding the content fingerprint written by `xtask rechunk`.
+/// Image label holding the content fingerprint written by `cargo ilexctl rechunk`.
 pub const FINGERPRINT_LABEL: &str = "ilex.fingerprint";
 
 /// Where machines get their updates from. ghcr needs lowercase names.
@@ -71,7 +71,7 @@ pub fn require_ci(what: &str, repository: &str, allow_local_registry: bool) -> R
     if allow_local_registry {
         if is_local_registry(repository) {
             eprintln!(
-                "xtask: not in CI; {what} to the local registry {repository} (--allow-local-registry)"
+                "ilexctl: not in CI; {what} to the local registry {repository} (--allow-local-registry)"
             );
             return Ok(());
         }

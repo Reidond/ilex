@@ -10,10 +10,6 @@ publish.workspace = true
 name = "ilex_vmctl"
 path = "src/lib.rs"
 
-[[bin]]
-name = "ilex-vmctl"
-path = "src/main.rs"
-
 [dependencies]
 ilex-tooling-core.workspace = true
 ilex-tooling-qmp.workspace = true

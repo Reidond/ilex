@@ -115,7 +115,7 @@ fn workspace(slug: Option<&str>) -> Result<Workspace> {
             worktree: None,
         }),
         None => Workspace::discover()
-            .context("pass --slug (see `cargo xtask info`) or run inside the checkout"),
+            .context("pass --slug (see `cargo ilexctl info`) or run inside the checkout"),
     }
 }
 

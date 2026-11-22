@@ -1,3 +1,2 @@
 [alias]
-xtask = "run -q -p xtask --"
 ilexctl = "run -q -p ilexctl -- --ilexctl-in-checkout"

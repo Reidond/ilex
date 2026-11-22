@@ -21,6 +21,6 @@ sudo -n podman run --rm --privileged --security-opt label=disable \
     quay.io/fedora/fedora:45 bash -euc '
         dnf -y install git cargo gcc podman skopeo image-builder
         git config --global --add safe.directory /src
-        cargo xtask iso --output-dir /mnt/ilex-state/iso
+        cargo ilexctl iso --output-dir /mnt/ilex-state/iso
     '
 echo "ILEX_ISO=$root/state/iso/ilex-installer.iso" >> "$GITHUB_ENV"

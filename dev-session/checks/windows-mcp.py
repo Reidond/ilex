@@ -25,7 +25,7 @@ assert info['schema'] == 1 and info['display'] == 'sdl-gl'
 a.artifacts.mkdir(parents=True, exist_ok=True)
 messages = queue.Queue()
 with (a.artifacts / 'mcp.stderr.log').open('w', encoding='utf-8') as log:
-    server = subprocess.Popen([str(a.vmctl), '--vm', info['purpose'], 'mcp'],
+    server = subprocess.Popen([str(a.vmctl), 'mcp', '--vm', info['purpose']],
                               cwd=Path(__file__).resolve().parents[2], stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=log, text=True, encoding='utf-8')
     def read():

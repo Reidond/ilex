@@ -2,7 +2,7 @@
 # carries no ilex image: its kickstart installs the newest installer composition from the
 # registry (so one ISO stays current, and fits GitHub's 2 GiB release asset
 # limit). `image-builder` turns this container into the ISO
-# (`cargo xtask iso`). Follows osbuild's example for an Anaconda installer
+# (`cargo ilexctl iso`). Follows osbuild's example for an Anaconda installer
 # container:
 # https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/
 # Assemble the small installer configuration on scratch: each COPY here avoids

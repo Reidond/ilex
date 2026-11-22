@@ -1,7 +1,7 @@
 # Public profile data shipped in every composition, without a user OCI tag.
 users = ["andriishafar"]
 
-# The default composition: what `cargo xtask build`, `test`, `vm` and `disk`
+# The default composition: what `cargo ilexctl build`, `test`, `vm` and `disk`
 # use with no flags. It is the base + these shells + machine `generic`.
 shells = ["gnome"]
 default-shell = "gnome"

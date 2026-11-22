@@ -46,7 +46,7 @@ chmod 700 "$fixture/bin/qemu-system-x86_64"
 if env -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER \
     PATH="$fixture/bin:$PATH" ILEX_ARTIFACTS="$output" \
     timeout --signal=TERM --kill-after=20s 45m \
-    cargo xtask security --self-check --accelerator "$accel" \
+    cargo ilexctl doctor security --self-check --accelerator "$accel" \
     > "$output/command.log" 2>&1; then
     echo 'injected unsigned-control startup failure unexpectedly qualified' >&2
     exit 1

@@ -1,7 +1,6 @@
-//! `ilex-vmctl`: drive an ilex VM that `cargo xtask vm` or the e2e harness
-//! booted. It never starts or stops VMs (xtask owns that, under the machine
-//! wide VM slot cap); it attaches by worktree slug to the QMP socket under
-//! `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<purpose>/` and offers:
+//! VM controls for `ilexctl vm` and the e2e harness. They attach by worktree
+//! slug to the QMP socket of a VM booted by `ilexctl vm run` or the harness.
+//! Under `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<purpose>/`, the socket supports:
 //!
 //! - [`Vmctl::screenshot_png`]: the guest framebuffer, via QMP `screendump`
 //! - [`Vmctl::click`], [`Vmctl::type_text`], [`Vmctl::key`], ...: input at the
@@ -267,7 +266,7 @@ impl Vmctl {
         if self.info.display == "gtk-gl" {
             bail!(
                 "{} renders with virgl in a GTK window, and QEMU can't take screenshots of GL output \
-                 (QMP screendump: \"no surface\"); input still works. Use `cargo xtask vm --disk`, or \
+                 (QMP screendump: \"no surface\"); input still works. Use `cargo ilexctl vm run --disk`, or \
                  `--gui --no-gl`, for screenshots",
                 self.info.name
             );

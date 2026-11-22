@@ -41,7 +41,7 @@ while IFS=$'\t' read -r tag parent base image image_id expected changed; do
         echo "::error::${tag} tested parent $base differs from current :$parent $IMAGE_REPO@$current" >&2
         exit 2
     fi
-    "$XTASK_PUBLISHER" publish "$image" --as "$tag" --tested-image-id "$image_id" \
+    "$XTASK_PUBLISHER" --ilexctl-in-checkout publish "$image" --as "$tag" --tested-image-id "$image_id" \
         --tested-parent-digest "${base##*@}"
     record published 'ancestry, registry snapshot and base match'
     published_count=$((published_count + 1))

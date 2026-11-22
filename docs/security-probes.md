@@ -7,17 +7,17 @@ installer integration and recovery are later work.
 
 ## Running and interpreting the probes
 
-Run `cargo xtask info` first. Only use this checkout's image, disk and VM
+Run `ilexctl info` first. Only use this checkout's image, disk and VM
 namespace. On a native Linux executor:
 
 ```sh
-cargo xtask build --shell none
-ILEX_SHELLS=none cargo xtask security --self-check --memory 2G
-cargo xtask security --require-qualified --memory 2G
+ilexctl build --shell none
+ILEX_SHELLS=none ilexctl doctor security --self-check --memory 2G
+ilexctl doctor security --require-qualified --memory 2G
 # A different resource profile must have its own passing T6 record:
-cargo xtask security --require-qualified --memory 2049M
+ilexctl doctor security --require-qualified --memory 2049M
 # Explicit emulation, with independent qualification:
-ILEX_SHELLS=none cargo xtask security --self-check --accelerator tcg --memory 4G
+ILEX_SHELLS=none ilexctl doctor security --self-check --accelerator tcg --memory 4G
 ```
 
 `security` alone is an inventory and explicitly says no guest was qualified.

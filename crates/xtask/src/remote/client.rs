@@ -546,7 +546,7 @@ fn wait(
     let result = loop {
         ensure!(
             Instant::now() < until,
-            "job {} did not publish within the wait limit. Use cargo xtask remote resume --job {}",
+            "job {} did not publish within the wait limit. Use cargo ilexctl remote resume --job {}",
             job.job,
             job.job
         );
@@ -568,7 +568,7 @@ fn wait(
             eprintln!("ilex: job {} {status}", job.job);
         }
         let status = transport.rpc(Rpc::Status { owner, job: &job.job }, &[])
-            .with_context(|| format!("job {} retained; reconnect with `cargo xtask remote resume --job {}`; logs at {}", job.job, job.job, logs.path.display()))?.0;
+            .with_context(|| format!("job {} retained; reconnect with `cargo ilexctl remote resume --job {}`; logs at {}", job.job, job.job, logs.path.display()))?.0;
         if matches!(
             status["state"]["state"].as_str(),
             Some("collecting" | "recovering")

@@ -1,4 +1,4 @@
-//! `cargo xtask changed <ref>`: has the image's content changed since the
+//! `cargo ilexctl changed <ref>`: has the image's content changed since the
 //! published `<ref>` (usually `ghcr.io/<owner>/ilex:generic.gnome`)?
 //!
 //! Compares the candidate's fingerprint with the `ilex.fingerprint` label on
@@ -63,7 +63,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     };
     let candidate_ref = ws.resolve_image(args.image.as_deref());
     // The image as built has no label yet; its fingerprint is computed from it
-    // (the same value `xtask rechunk` will write).
+    // (the same value `cargo ilexctl rechunk` will write).
     let candidate = if let Some(tag) = &args.root {
         let publication = config::publications(&ws.root)?
             .into_iter()
@@ -136,7 +136,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         &changed.to_string(),
     )?;
     registry::github_output("exists", &exists.to_string())?;
-    // `xtask rechunk --fingerprint` writes exactly this value into the label,
+    // `cargo ilexctl rechunk --fingerprint` writes exactly this value into the label,
     // however the working tree looks by then.
     registry::github_output("fingerprint", &candidate)?;
     Ok(())
@@ -185,7 +185,7 @@ fn published_fingerprint(
         let missing = error.contains("manifest unknown") || error.contains("name unknown");
         if missing {
             eprintln!(
-                "xtask: {reference} not found ({}); treating as unpublished",
+                "ilexctl: {reference} not found ({}); treating as unpublished",
                 first_line(&out.stderr)
             );
             return Ok(Published::Missing);

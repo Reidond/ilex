@@ -166,7 +166,7 @@ impl Transport {
         ilex_tooling_core::check_version(endpoint.schema)?;
         ensure!(
             endpoint.provisioning_revision == builder::revision(),
-            "builder runner revision mismatch; run cargo xtask builder update"
+            "builder runner revision mismatch; run cargo ilexctl builder update"
         );
         Ok(Self { endpoint })
     }

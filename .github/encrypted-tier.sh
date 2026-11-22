@@ -27,12 +27,12 @@ python3 -B crates/ilex-e2e/src/encrypted/log_stream_check.py
 export ILEX_SECURITY_ACCELERATOR
 ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
 case "$ILEX_SECURITY_ACCELERATOR" in kvm|tcg) ;; *) exit 1 ;; esac
-cargo xtask security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
+cargo ilexctl doctor security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
 # Endpoint hashes stay in a private runner directory, outside the evidence.
 private_fingerprints=$(mktemp -d "$RUNNER_TEMP/ilex-fingerprints.XXXXXXXX")
 export ILEX_PRIVATE_FINGERPRINTS="$private_fingerprints"
 # Each case uses the exact qualified 6 GiB profile and its own private fixture.
-timeout --signal=TERM --kill-after=30s 175m cargo xtask test security::encrypted_ -- --test-threads 1
+timeout --signal=TERM --kill-after=30s 175m cargo ilexctl test security::encrypted_ -- --test-threads 1
 python3 - "$ILEX_ARTIFACTS" <<'PY'
 import json, pathlib, sys
 for tier in ('encrypted-install', 'encrypted-existing-space', 'encrypted-interrupted'):

@@ -3,22 +3,22 @@
 Run these commands in the checkout, in PowerShell:
 
 ```powershell
-cargo xtask build
-cargo xtask vm --gui
-cargo xtask vm --gui --persist
-cargo install --path crates/ilex-vmctl
-ilex-vmctl list
-ilex-vmctl capabilities --json
-ilex-vmctl self-check
-ilex-vmctl display
-ilex-vmctl screenshot -o shot.png
-ilex-vmctl key super
-ilex-vmctl mcp
+ilexctl build
+ilexctl vm run --gui
+ilexctl vm run --gui --persist
+cargo install --locked --path crates/ilexctl
+ilexctl vm list
+ilexctl vm capabilities --json
+ilexctl vm self-check
+ilexctl vm display
+ilexctl vm screenshot -o shot.png
+ilexctl vm key super
+ilexctl mcp
 ```
 
-`vm --gui` asks the T3 builder for an installed development qcow2, verifies
+`vm run --gui` asks the T3 builder for an installed development qcow2, verifies
 the delivered disk manifest and SHA256, and runs the pinned T2 QEMU locally.
-Image builds run on the builder; QEMU and vmctl run directly on Windows. `vm --disk` also uses
+Image builds run on the builder; QEMU and vmctl run directly on Windows. `vm run --disk` also uses
 native WHPX, with a software headless display. Native Linux uses GTK/KVM.
 Plain Windows `vm` opens an ephemeral guest terminal on the builder.
 
@@ -53,7 +53,7 @@ under the checkout's state directory.
 
 `--purpose research` selects a separate owned overlay and control endpoint.
 An explicit `ILEX_DISK` accepts a validated development disk from Linux:
-run `cargo xtask disk --development`, then copy the qcow2, `.disk.json` manifest
+run `ilexctl disk --development`, then copy the qcow2, `.disk.json` manifest
 and `.ilex-owner` receipt together. Import requires this checkout's owner and
 the exact SHA256 and preserves the original executor in image provenance.
 The normal builder delivery path remains the default.
@@ -94,7 +94,7 @@ If its mode list is stale, the adapter can use the exact preferred timing
 from the matching DRM connector's checked EDID; it does not synthesize modes.
 Current Hyprland uses Lua runtime commands, with the older keyword fallback;
 it never writes monitor configuration. An unsupported mode stays unacknowledged.
-`ilex-vmctl display` reports the actual guest mode independently of screenshot
+`ilexctl vm display` reports the actual guest mode independently of screenshot
 size. Screenshot/input coordinates on Windows are cropped **client pixels**;
 QMP absolute coordinates are normalized against that viewport. Capture
 generation changes with the viewport and stale MCP mappings are rejected.

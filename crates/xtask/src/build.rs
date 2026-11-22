@@ -1,4 +1,4 @@
-//! `cargo xtask build`: podman build tagged with the checkout's slug.
+//! `cargo ilexctl build`: podman build tagged with the checkout's slug.
 //!
 //! The base tag floats (`fedora-bootc:45`), so the nightly build picks up
 //! base updates. The digest it resolved to is recorded as the

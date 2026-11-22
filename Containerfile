@@ -1,4 +1,4 @@
-# ilex: a personal Fedora bootc image. Build with `cargo xtask build`.
+# ilex: a personal Fedora bootc image. Build with `cargo ilexctl build`.
 
 # First, so a bad manifest fails in seconds, before anything compiles.
 FROM quay.io/fedora/fedora-bootc:45 AS compose
@@ -68,7 +68,7 @@ RUN curl -fsSL -o /tmp/kache.tar.gz \
 
 WORKDIR /src
 # Fedora's cargo is used directly; rust-toolchain.toml configures rustup on
-# the host, and .cargo/config.toml contains only the xtask alias. All embedded
+# the host, and .cargo/config.toml contains only the ilexctl alias. All embedded
 # source files (including tool-build.sh) live below crates/; there are no Cargo
 # build scripts.
 COPY Cargo.toml Cargo.lock ./
@@ -76,7 +76,7 @@ COPY crates/ crates/
 # Every compile goes through kache, whose store is a podman cache mount shared
 # by all worktrees. There is no shared target directory any more: each build
 # compiles into a fresh /src/target and kache restores what an earlier build
-# (or the host) already compiled, by content rather than by mtime. `xtask
+# (or the host) already compiled, by content rather than by mtime. `ilexctl
 # build` also mounts the host's own kache store at /kache-host, read-only; it
 # is used when present, so a plain `podman build` and CI work without it. The
 # daemon is stopped before the step ends so it flushes what it queued.

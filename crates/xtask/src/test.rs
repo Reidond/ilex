@@ -1,4 +1,4 @@
-//! `cargo xtask test [--shell NAME] [--build] [filters...]`: build if needed, then
+//! `cargo ilexctl test [--shell NAME] [--build] [filters...]`: build if needed, then
 //! run the e2e harness against it.
 //!
 //! The image under test is this checkout's (`localhost/ilex:main` or

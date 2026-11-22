@@ -5,18 +5,18 @@ builds, tests, disk and ISO jobs and ordinary ephemeral VMs to the managed Fedor
 builder. Native Linux runs its tooling locally.
 
 ```powershell
-cargo xtask runtime fetch
-cargo xtask runtime status
-cargo xtask runtime self-check
-cargo xtask runtime activation-self-check
-cargo xtask runtime update
-cargo xtask builder up
-cargo xtask builder status --json
-cargo xtask builder self-check
-cargo xtask builder recovery-self-check --wait-for-memory-seconds 10800
-cargo xtask builder maintenance-self-check --wait-for-memory-seconds 10800
-cargo xtask builder down
-cargo xtask builder update
+ilexctl runtime fetch
+ilexctl runtime status
+ilexctl runtime self-check
+ilexctl runtime activation-self-check
+ilexctl runtime update
+ilexctl builder up
+ilexctl builder status --json
+ilexctl builder self-check
+ilexctl builder recovery-self-check --wait-for-memory-seconds 10800
+ilexctl builder maintenance-self-check --wait-for-memory-seconds 10800
+ilexctl builder down
+ilexctl builder update
 ```
 
 The host needs enabled Hyper-V/WHPX, the Hyper-V PowerShell module, an authorized
@@ -50,7 +50,7 @@ uses a private DLL/PATH search; the parent environment is untouched.
 `fetch` acquires a ready runtime without writing activation pointers. Only
 `update` activates it, after successful GPU smoke, including the first install.
 Helper processes belong to an unnamed Windows Job Object with kill-on-close;
-an interrupted xtask cannot leave downloads or provisioning PowerShell running.
+an interrupted ilexctl cannot leave downloads or provisioning PowerShell running.
 The persistent Hyper-V VM belongs to the journal rather than the helper job.
 
 `runtime update` uses only the lock shipped in this checkout. It boots a small
@@ -96,7 +96,7 @@ another host allocation. T3 adds shared weighted guest/job scheduling.
 For a constrained validation run:
 
 ```powershell
-cargo xtask builder up --memory-gib 4 --cpus 4 --wait-for-memory-seconds 10800
+ilexctl builder up --memory-gib 4 --cpus 4 --wait-for-memory-seconds 10800
 ```
 
 The wait polls live available memory every two minutes without touching other

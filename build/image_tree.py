@@ -273,7 +273,7 @@ def prepare(root, replay):
         if machine.get("schema") != 1 or machine.get("name") != "generic":
             error("machine base", machine_path, f"base machine is {machine.get('name')!r}; machine layers require generic; machines do not stack")
         if PROVENANCE not in registered:
-            error("inherited overlays", PROVENANCE, "missing registered overlay provenance; rebuild the base with cargo xtask build")
+            error("inherited overlays", PROVENANCE, "missing registered overlay provenance; rebuild the base with cargo ilexctl build")
         overlays = json.loads(image.read(PROVENANCE))
         seen = set()
         for overlay in overlays:

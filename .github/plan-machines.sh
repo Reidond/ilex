@@ -33,7 +33,7 @@ while IFS=$'\t' read -r tag kind parent machine shells; do
     previous=$(jq -er --arg tag "$tag" '.[$tag]' <<<"$SNAPSHOTS")
     reference=-
     if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
-    cargo xtask changed "$reference" --machine "$machine" --inputs-only --base-id "$base_id" > "$RUNNER_TEMP/machine-inputs"
+    cargo ilexctl changed "$reference" --machine "$machine" --inputs-only --base-id "$base_id" > "$RUNNER_TEMP/machine-inputs"
     cat "$RUNNER_TEMP/machine-inputs"
     if [ "$BASE_CHANGED" != true ] && [ "$FORCE_TEST" != true ] &&
        grep -qx 'inputs_changed=false' "$RUNNER_TEMP/machine-inputs" &&

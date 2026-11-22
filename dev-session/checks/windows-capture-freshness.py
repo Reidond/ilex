@@ -43,7 +43,7 @@ def screenshot(name, backend):
         env['ILEX_CAPTURE_BACKEND'] = backend
     path = a.out / (name + '.png')
     assert not path.exists(), 'Use a new artifact directory'
-    result, row = execute([a.vmctl, '--vm', i['purpose'], 'screenshot', '-o', path], name, env)
+    result, row = execute([a.vmctl, 'vm', '--vm', i['purpose'], 'screenshot', '-o', path], name, env)
     row['output_exists'] = path.exists()
     if result.returncode == 0:
         row['frame'] = json.loads(path.with_suffix('.frame.json').read_text())

@@ -27,7 +27,7 @@ pub fn disk(ws: &Workspace) -> Result<PathBuf> {
     if cmd::probe(std::process::Command::new("podman").args(["image", "exists", &image])).is_none()
     {
         bail!(
-            "image {image} not found in local container storage (run `cargo xtask build`, or set ILEX_IMAGE)"
+            "image {image} not found in local container storage (run `cargo ilexctl build`, or set ILEX_IMAGE)"
         );
     }
     let mut spec = DiskSpec::new(&image);

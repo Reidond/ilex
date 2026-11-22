@@ -966,14 +966,14 @@ def execute(owner, job):
             with (path / 'stdout.log').open('ab', buffering=0) as out, (path / 'stderr.log').open('ab', buffering=0) as err:
                 attached = interactive(spec)
                 compile_started = time.monotonic()
-                compile_result = subprocess.run(['cargo', 'build', '--locked', '-p', 'xtask'], cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=None if attached else err, stderr=None if attached else err)
+                compile_result = subprocess.run(['cargo', 'build', '--locked', '-p', 'ilexctl'], cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=None if attached else err, stderr=None if attached else err)
                 compile_seconds = time.monotonic() - compile_started
                 if compile_result.returncode:
                     code = compile_result.returncode
                 else:
-                    binary = Path(env['CARGO_TARGET_DIR']) / 'debug/xtask'
+                    binary = Path(env['CARGO_TARGET_DIR']) / 'debug/ilexctl'
                     operation_started = time.monotonic()
-                    code = subprocess.run([str(binary), 'remote-worker', '--request', str(path / 'request.json')],
+                    code = subprocess.run([str(binary), '--ilexctl-in-checkout', 'remote-worker', '--request', str(path / 'request.json')],
                                           cwd=root, env=env | ({'TERM': os.environ.get('TERM', 'xterm')} if attached else {}),
                                           stdin=None if attached else subprocess.DEVNULL,
                                           stdout=None if attached else out, stderr=None if attached else err).returncode

@@ -3,7 +3,7 @@
 #
 # Runs on every merge to main, nightly at 03:00 UTC (the base image floats, so
 # the nightly picks up its updates) and on demand. It publishes only when the
-# image content changed (`cargo xtask changed`) and the e2e tests pass. A run
+# image content changed (`cargo ilexctl changed`) and the e2e tests pass. A run
 # with an unchanged generic image skips its rechunk and base tests; machines
 # still check their inputs and published base identity below.
 #
@@ -31,8 +31,8 @@
 #
 # The installer ISO is a network installer: it carries no ilex image and installs
 # the newest :generic.gnome from ghcr, so it needn't follow every publish. It is built
-# (and, on main, released as a GitHub Release) when `cargo xtask iso --due` says
-# so: no installer release yet, `installer/` (or the ISO code in xtask) changed
+# (and, on main, released as a GitHub Release) when `cargo ilexctl iso --due` says
+# so: no installer release yet, `installer/` (or the ISO code for ilexctl) changed
 # since the latest one, or the latest one is a week old (Fedora and Anaconda
 # fixes). A manual run with `iso` checked builds it regardless.
 #
@@ -120,8 +120,8 @@ jobs:
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
           podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
-          installer=$(cargo xtask info --installer)
-          cargo xtask info --publications > "$RUNNER_TEMP/publications"
+          installer=$(cargo ilexctl info --installer)
+          cargo ilexctl info --publications > "$RUNNER_TEMP/publications"
           compositions='{}'
           legacy=-
           while IFS=$'\t' read -r tag kind _; do
@@ -148,14 +148,14 @@ jobs:
       installer_changed: ${{ steps.changed.outputs.changed || 'false' }}
       other_changed: ${{ steps.roots.outputs.other_changed }}
       roots: ${{ steps.roots.outputs.roots }}
-      # What `xtask publish --stage --as` pushed for the installer root.
+      # What `cargo ilexctl publish --stage --as` pushed for the installer root.
       digest: ${{ steps.stage.outputs.digest }}
       tag: ${{ steps.composition.outputs.tag }}
       snapshot: ${{ steps.composition.outputs.snapshot }}
       fingerprint: ${{ steps.stage.outputs.fingerprint }}
     env:
-      # `xtask build --tag candidate` tags the image localhost/ilex:candidate.
-      # The image as built; `xtask rechunk --output rechunked` makes the image
+      # `cargo ilexctl build --tag candidate` tags the image localhost/ilex:candidate.
+      # The image as built; `cargo ilexctl rechunk --output rechunked` makes the image
       # that is tested and published when it changed.
       ILEX_IMAGE: localhost/ilex:candidate
     steps:
@@ -167,7 +167,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Check configured Flathub apps (metadata only)
-        run: cargo xtask apps --check
+        run: cargo ilexctl doctor apps
 
       - name: Registry names and installer composition
         id: composition
@@ -183,7 +183,7 @@ jobs:
           bash .github/publication-tag.sh "$tag"
           echo "INSTALLER_TAG=$tag" >> "$GITHUB_ENV"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          cargo xtask info --publications > "$RUNNER_TEMP/publications"
+          cargo ilexctl info --publications > "$RUNNER_TEMP/publications"
           awk -F '\t' -v tag="$tag" '$1 == tag' "$RUNNER_TEMP/publications" > "$RUNNER_TEMP/ordered-publications"
           awk -F '\t' -v tag="$tag" '$1 != tag' "$RUNNER_TEMP/publications" >> "$RUNNER_TEMP/ordered-publications"
           mv "$RUNNER_TEMP/ordered-publications" "$RUNNER_TEMP/publications"
@@ -208,7 +208,7 @@ jobs:
           podman pull --quiet quay.io/fedora/fedora:45
           reference=-
           if [ "$snapshot" != - ]; then reference="$IMAGE_REPO@$snapshot"; fi
-          cargo xtask changed "$reference" --root "$tag" --inputs-only
+          cargo ilexctl changed "$reference" --root "$tag" --inputs-only
 
 
       # The runner's root disk is 145 GB with about 110 GB free: container
@@ -240,7 +240,7 @@ jobs:
 
       - name: Build the candidate image
         if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install
-        run: cargo xtask build --tag candidate --no-pull
+        run: cargo ilexctl build --tag candidate --no-pull
 
       # Fingerprints the image as built (the rechunk keeps it): when it is the
       # published one, everything below is skipped.
@@ -250,7 +250,7 @@ jobs:
         run: |
           reference=-
           if [ "$SNAPSHOT" != - ]; then reference="$IMAGE_REPO@$SNAPSHOT"; fi
-          cargo xtask changed "$reference" --image candidate
+          cargo ilexctl changed "$reference" --image candidate
         env:
           SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -263,7 +263,7 @@ jobs:
       # image is rechunked too, for the same reason.
       - name: Rechunk (reproducible layers)
         if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install
-        run: cargo xtask rechunk candidate --output rechunked --fingerprint "$FINGERPRINT"
+        run: cargo ilexctl rechunk candidate --output rechunked --fingerprint "$FINGERPRINT"
         env:
           FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
 
@@ -284,7 +284,7 @@ jobs:
           image_id="sha256:${image_id#sha256:}"
           if [[ "$ENCRYPTED_INSTALL" != true ]]; then
             stage_tag=$(bash .github/candidate-tag.sh "$INSTALLER_TAG")
-            cargo xtask publish "$image_id" --stage --as "$INSTALLER_TAG" \
+            cargo ilexctl publish "$image_id" --stage --as "$INSTALLER_TAG" \
               --stage-tag "$stage_tag" --stage-snapshot "$SNAPSHOT"
           fi
           echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
@@ -317,7 +317,7 @@ jobs:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
         run: |
           podman run --rm -i --network=none --entrypoint python3 "$ILEX_IMAGE" -I -S - < .github/check-filecaps.py
-          sg libvirt -c 'cargo xtask test ephemeral::'
+          sg libvirt -c 'cargo ilexctl test ephemeral::'
 
       - name: Qualify candidate secure firmware and persistent TPM
         id: security-qualification
@@ -384,7 +384,7 @@ jobs:
         timeout-minutes: 60
         env:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
-        run: sg libvirt -c 'cargo xtask test apps::install -- --test-threads 1'
+        run: sg libvirt -c 'cargo ilexctl test apps::install -- --test-threads 1'
 
       - name: Apps qualification summary
         if: always()
@@ -430,7 +430,7 @@ jobs:
       own: ${{ steps.from.outputs.own }}
     env:
       # The candidate, pulled by digest below and tagged like on the
-      # build runner; set before it exists so `xtask test` never builds one.
+      # build runner; set before it exists so `cargo ilexctl test` never builds one.
       ILEX_IMAGE: localhost/ilex:rechunked
     steps:
       - uses: actions/checkout@v7
@@ -548,7 +548,7 @@ jobs:
                   sudo cp /var/log/libvirt/qemu/*.log "$ILEX_VM_LOG_DIR/" 2>/dev/null || true
                   sudo chmod -R a+r "$ILEX_VM_LOG_DIR" || true
                 fi' EXIT
-          sg libvirt -c "cargo xtask test upgrade::"
+          sg libvirt -c "cargo ilexctl test upgrade::"
 
       - name: Keep VM logs
         if: failure() && steps.e2e.outcome == 'failure'
@@ -715,7 +715,7 @@ jobs:
           github-cache: "true"
 
       - name: Publications (validated compositions, parents and selections)
-        run: cargo xtask info --publications > "$RUNNER_TEMP/publications"
+        run: cargo ilexctl info --publications > "$RUNNER_TEMP/publications"
 
       - name: Plan changed machine compositions (registry metadata only)
         id: plan
@@ -790,7 +790,7 @@ jobs:
       # Deletes the superseded disks from the cache.
       actions: write
     env:
-      # Set, so `xtask test` builds nothing: preparing v1 needs no candidate.
+      # Set, so `cargo ilexctl test` builds nothing: preparing v1 needs no candidate.
       ILEX_IMAGE: localhost/ilex:rechunked
     steps:
       - uses: actions/checkout@v7
@@ -800,7 +800,7 @@ jobs:
         run: |
           repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
-          tag=$(cargo xtask info --installer)
+          tag=$(cargo ilexctl info --installer)
           bash .github/publication-tag.sh "$tag"
           digest=$(bash .github/publish-head.sh digest "$repo:$tag")
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -885,11 +885,11 @@ jobs:
       - uses: actions/checkout@v7
       - name: Is a new installer ISO due?
         id: isodue
-        run: cargo xtask iso --due
+        run: cargo ilexctl iso --due
         env:
           GH_TOKEN: ${{ github.token }}
 
-  # The network installer ISO, built when `cargo xtask iso --due` says so (see
+  # The network installer ISO, built when `cargo ilexctl iso --due` says so (see
   # the top of this file) or on a manual run with `iso` checked. It carries no
   # ilex image, so it doesn't depend on what the publish job published. On main
   # it becomes an artifact first. installer-release waits for publication,
@@ -915,7 +915,7 @@ jobs:
         run: |
           # The container builds as root with /src bind-mounted. Keep host
           # Cargo artifacts separate and never run host Cargo after that build.
-          tag=$(CARGO_TARGET_DIR="$RUNNER_TEMP/installer-info-target" cargo xtask info --installer)
+          tag=$(CARGO_TARGET_DIR="$RUNNER_TEMP/installer-info-target" cargo ilexctl info --installer)
           bash .github/publication-tag.sh "$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -964,7 +964,7 @@ jobs:
                 dnf -y install image-builder
                 image-builder version
                 git config --global --add safe.directory /src
-                cargo xtask iso --output-dir /mnt/ilex-state/iso
+                cargo ilexctl iso --output-dir /mnt/ilex-state/iso
               '
           ls -l /mnt/ilex/state/iso/
 
@@ -1076,12 +1076,12 @@ jobs:
           ILEX_ISO_TARGET: ${{ steps.target.outputs.target }}
           ILEX_ISO_DIGEST: ${{ steps.target.outputs.digest }}
           # iso:: needs no locally built ilex container. This explicit reference
-          # stops xtask from building its default image before the ISO tier.
+          # stops ilexctl from building its default image before the ISO tier.
           ILEX_IMAGE: ${{ steps.target.outputs.target }}
         run: |
           (cd "$ISO_DIR" && sha256sum --check ilex-installer.iso.sha256)
           bash .github/vm-prep.sh wait vm-stack
-          sg libvirt -c 'cargo xtask test iso::'
+          sg libvirt -c 'cargo ilexctl test iso::'
 
       - name: Keep installer test evidence
         if: ${{ !cancelled() && steps.install.outcome != 'skipped' && steps.install.outcome != '' }}

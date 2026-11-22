@@ -290,7 +290,7 @@ pub fn idle_capabilities() -> VmCapabilities {
         GpuRendering,
         Clipboard,
     ] {
-        features.insert(feature, NotYetQualified("no owned native VM running; launch cargo xtask vm --gui, then inspect its capabilities".into()));
+        features.insert(feature, NotYetQualified("no owned native VM running; launch cargo ilexctl vm run --gui, then inspect its capabilities".into()));
     }
     features.insert(
         PrebootPointer,

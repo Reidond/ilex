@@ -63,7 +63,7 @@ fn run() -> Result<()> {
     transport::install_cancel_handler()?;
     let ws = Workspace::discover()?;
     let resources: Resources = serde_json::from_str(
-        &std::env::var("ILEX_GEN2_RESOURCES").context("use cargo xtask security --self-check")?,
+        &std::env::var("ILEX_GEN2_RESOURCES").context("use cargo ilexctl doctor security --self-check")?,
     )?;
     let selection: Selection = serde_json::from_str(&std::env::var("ILEX_GEN2_SELECTION")?)?;
     let provider = Provider::new(ws.identity()?, &ws.ensure_state()?)?;

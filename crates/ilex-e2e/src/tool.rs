@@ -1,7 +1,7 @@
 //! `tool::` tier: drupe, developer tools from signed disk images.
 //!
 //! One ephemeral VM. Booting it builds the test tool (`strace`, from the
-//! Fedora package, as `cargo xtask tool strace` does; reused once built,
+//! Fedora package, as `cargo ilexctl drupe build strace` does; reused once built,
 //! `ILEX_TOOL_REBUILD=1` builds it again), shares the image with the guest,
 //! tries to install it before its certificate is trusted, then trusts the
 //! certificate (`/run/verity.d`) and installs it. The tests then run the

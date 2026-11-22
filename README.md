@@ -6,8 +6,8 @@ A personal Fedora bootc image with a GNOME desktop, built from one
 The name is Latin for holly, an evergreen that stays green through winter.
 
 ```sh
-cargo xtask build
-cargo xtask test ephemeral::
+cargo ilexctl build
+cargo ilexctl test ephemeral::
 ```
 
 See [CLAUDE.md](CLAUDE.md) for the development workflow.

@@ -88,7 +88,7 @@ try:
         value = json.loads(teardown.read_text())
         if value.get('run') == i['run']:
             result['launcher_teardown'] = value
-    stale = subprocess.run([str(a.vmctl), '--vm', i['purpose'], 'self-check'], capture_output=True, timeout=10)
+    stale = subprocess.run([str(a.vmctl), 'vm', '--vm', i['purpose'], 'self-check'], capture_output=True, timeout=10)
     result['stale_attach_exit'] = stale.returncode
     result['stale_attach_error'] = stale.stderr.decode(errors='replace')
     assert stale.returncode != 0, 'vmctl accepted a dead VM'

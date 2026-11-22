@@ -11,15 +11,15 @@ layer on that root. Rust tooling, e2e-only tests on QEMU via bcvk.
 ## Build and test
 
 ```sh
-cargo xtask build              # podman build → localhost/ilex:<slug>, runs bootc container lint
-cargo xtask build --shell none # small base → localhost/ilex:<tag>.s-none (322 MiB growth budget)
-cargo xtask build --machine ms-7c35 # build the base, then its machine layer
-cargo xtask build --machine ms-7c35 --on <image> # only a machine layer on an existing image
-cargo xtask test ephemeral::   # build if needed, boot in QEMU, assert over SSH
-cargo xtask vm                 # interactive ephemeral VM of this checkout's image (--gui: a window)
+ilexctl build              # podman build → localhost/ilex:<slug>, runs bootc container lint
+ilexctl build --shell none # small base → localhost/ilex:<tag>.s-none (322 MiB growth budget)
+ilexctl build --machine ms-7c35 # build the base, then its machine layer
+ilexctl build --machine ms-7c35 --on <image> # only a machine layer on an existing image
+ilexctl test ephemeral::   # build if needed, boot in QEMU, assert over SSH
+ilexctl vm run                 # interactive ephemeral VM of this checkout's image (--gui: a window)
                                # on Windows: ephemeral VM on the builder, native window with --gui
-cargo xtask vm --gui --print-image # show the selected image without building
-cargo xtask info               # resource identity, selection and available configurations
+ilexctl vm run --gui --print-image # show the selected image without building
+ilexctl info               # resource identity, selection and available configurations
 ```
 
 - Every ordinary checkout uses a bounded readable name plus `--` and 32 hex
@@ -60,7 +60,7 @@ cargo xtask info               # resource identity, selection and available conf
   directories keep the slug alone; installed disks are separate per image.
 - VM boots take one of N machine-wide slots (`ILEX_VM_SLOTS`, default one per
   8 GiB RAM, max 4) and wait when none is free.
-- `xtask test` builds an implicit image when missing or its selection is stale;
+- `ilexctl test` builds an implicit image when missing or its selection is stale;
   after changing other content that ships in the image, pass `--build`.
   Without `--on`, `build --machine <name>` and `test --build --machine <name>`
   always build the generic base first, then build or reuse the machine layer.
@@ -69,7 +69,7 @@ cargo xtask info               # resource identity, selection and available conf
   A missing or mismatched explicit reference must be built or pulled at that
   reference; building this checkout's implicit tag does not repair it.
   Filters are substrings and
-  several run their union (`xtask test ephemeral:: upgrade::`); arguments after
+  several run their union (`ilexctl test ephemeral:: upgrade::`); arguments after
   `--` go to the test binary. `ILEX_IMAGE=<tag or ref>` tests another image.
 - Reusing an implicit image first requires `ilex.checkout-owner` to match the
   canonical checkout owner, then compares all three selection labels with the current
@@ -157,7 +157,7 @@ cargo xtask info               # resource identity, selection and available conf
   Logs retain command line and mount state, plus prior finalization journal
   on failure. The defect predates the stack: fix it with the common shipped
   image, rather than a phase-0-only fixture workaround.
-- `iso::` is opt-in and slow: `cargo xtask test iso::` builds the network
+- `iso::` is opt-in and slow: `ilexctl test iso::` builds the network
   installer (`ILEX_ISO=<path>` reuses one with `compositions.json` beside it).
   `welcome` accepts the unknown machine's chooser default with Enter;
   `chooser` boots the MSI identity, checks rejected HTTP requests inside the
@@ -197,7 +197,7 @@ cargo xtask info               # resource identity, selection and available conf
   and GDM. These assertions test the published image, not the branch image.
   `ILEX_ISO_MACHINE=ms-7c35` supplies that machine's SMBIOS identity;
   `ILEX_ISO_EXPECT=generic.gnome` pre-answers via the kickstart choice file.
-  Build locally with `cargo xtask iso --testing-tag latest` before composition
+  Build locally with `ilexctl iso --testing-tag latest` before composition
   tags exist: the selected composition stays visible, while every entry
   installs signed legacy `:latest`. This flag is forbidden whenever `CI` or
   `GITHUB_ACTIONS` is set. CI supplies `ILEX_ISO_DIGEST`; registry resolution
@@ -221,7 +221,7 @@ cargo xtask info               # resource identity, selection and available conf
   that assertion; testing the fixed published composition awaits the stack's
   first publication. A passing candidate-image CI run does not turn that
   legacy-payload installation into a passing update check.
-- Publishing (`xtask publish`) and the installer release only happen in CI.
+- Publishing (`ilexctl publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
 
 ## Linux security qualification
@@ -252,7 +252,7 @@ alias coverage); this does not qualify physical GPU rendering. These checks
 use the existing `VmControl` interface and T6 qualification records. Native
 Windows uses the [Hyper-V Gen2 security provider](docs/tooling/windows-gen2.md)
 with the same profile and capability types.
-`cargo xtask security --require-qualified --memory 2G` asserts an existing
+`ilexctl doctor security --require-qualified --memory 2G` asserts an existing
 exact-profile record without starting a VM; `--self-check --memory 2G` measures
 that profile. Failures retain an unqualified result with the failing stage,
 distinguishing platform provisioning from guest failure. No installer,
@@ -264,9 +264,9 @@ restart checks, then injects an EFI-control-only QEMU startup failure and
 requires platform/unqualified reporting. Normal qualification runs afterward
 to restore a passing profile; `on` selects the second control for local checks.
 
-`cargo xtask security` reports this Linux host's KVM SMM capability and
+`ilexctl doctor security` reports this Linux host's KVM SMM capability and
 security prerequisites. Its result is explicitly `not_yet_qualified` until
-the booted-guest tier passes. `cargo xtask security --self-check` runs
+the booted-guest tier passes. `ilexctl doctor security --self-check` runs
 `security::firmware` against this checkout's image (`ILEX_IMAGE` can select
 the CI candidate). `--accelerator tcg` explicitly selects emulation; a failed
 KVM/SMM probe never silently changes accelerators. On Windows the security
@@ -385,7 +385,7 @@ caches and the GPT automount workaround retain their behavior.
 
 The image ships the machine build of `ilexctl` from `crates/ilexctl`
 (`cargo build --release -p ilexctl --no-default-features`). It composes the
-`ilex-agent` library; there is no `/usr/bin/ilex-agent` or compatibility alias.
+machine command library and supersedes the previous machine commands below.
 Units keep their names and switch together with the binary on upgrade/rollback.
 Drupe remains its own command, with its service, setuid helper and state unchanged.
 
@@ -397,6 +397,10 @@ Drupe remains its own command, with its service, setuid helper and state unchang
 | `ilex-agent home-create NAME ...` | `ilexctl home create NAME ...` |
 | `ilex-agent home-label UID` (internal) | `ilexctl home label UID` (hidden) |
 | `ilex-agent profile ...` | `ilexctl profile ...` |
+| `drupe install strace.raw` | `drupe install strace.raw` (as root, then just `strace …`) |
+| `drupe list` | `drupe list` |
+| `drupe remove strace` | `drupe remove strace` |
+| `drupe run strace -V` | `drupe run strace -V` |
 
 Homed creation/labeling stay in Rust. Public profile operations, including
 `prune-backups`, retain the internal Python implementation; clap validates the
@@ -418,7 +422,7 @@ Use it from native PowerShell on Windows. For checkout commands, the installed
 `ilexctl` selects the checkout's Cargo manifest and keeps the caller's working
 directory, including for relative paths. `ILEX_ROOT` can supply a checkout when
 called from outside one. Inside a checkout it must match that checkout.
-`cargo ilexctl` and `cargo xtask` use the code and resources of the same checkout.
+`cargo ilexctl` runs checkout commands without installing the dev build.
 `builder`, `runtime` and `identity` also work outside a checkout. In a
 checkout, `ilexctl --version` prints the dev flavour and the checkout slug.
 
@@ -427,8 +431,7 @@ VM controls and `mcp` run from the executable you start and can attach by
 the current checkout and `--name` selects the VM purpose. Use the installed
 copy for a long-running MCP server, so Windows can relink
 `target/debug/ilexctl.exe` during builds.
-The MCP tool names and schemas are shared by both entry points. The old dev
-spellings work until K3.
+The MCP tool names and schemas stay the same.
 
 | Previous dev command | Dev command |
 | --- | --- |
@@ -459,7 +462,7 @@ with a shell. These and all selected shells' packages share a second transaction
 and image layer, with their combined excludes. A shell's excludes cannot prevent
 installation of a base package. The machine remains the last, squashed layer.
 
-`cargo xtask build` checks every root built without shells against the local
+`ilexctl build` checks every root built without shells against the local
 fedora-bootc image using Podman's uncompressed `.Size`. The shell-free build
 with headless Flatpak, regenerated SELinux policy and the crypt/TPM initramfs
 measured 2,334,252,793 bytes against Fedora bootc's 2,014,310,965 bytes, an
@@ -520,14 +523,14 @@ the authority for the image's name. Publications add no image label or file.
 | Base + ms-7c35 | `T.s-none.m-ms-7c35` | `ms-7c35`, only if listed with `shells = []` | layer on `base` | no |
 | Base + GNOME + ilex (future) | `T.s-gnome.s-ilex` | `generic.gnome.ilex`, once listed | root | yes |
 
-`cargo xtask info --publications` validates the complete list before printing
+`ilexctl info --publications` validates the complete list before printing
 TSV without a header: tag, kind (`root` or `layer`), parent tag (`-` for roots),
 machine name, comma-separated shells (`-` for none). All roots precede layers.
 `ilex_devkit::config::publications` exposes these five fields for CI, plus
 machine descriptions/match rules and shell descriptions for the installer
 catalogue. Its `selection`
 field resolves all three expected labels from the same manifest snapshot.
-`cargo xtask info --installer` prints the validated installer tag.
+`ilexctl info --installer` prints the validated installer tag.
 
 CI builds and publishes every root, including `base`, and its listed machine
 layers. Removing a publication
@@ -617,7 +620,7 @@ complete `sys_vendor`/`product_name` pair or `board_vendor`/`board_name` pair
 (all four are allowed), compared exactly and case-sensitively after stripping
 firmware whitespace. Values have 1–128 characters, no control characters or
 surrounding whitespace; firmware placeholders are refused. `generic` and `vm`
-cannot have match rules. `xtask info` and `iso` reject identical/subset rules
+cannot have match rules. `ilexctl info` and `iso` reject identical/subset rules
 across different machines. Runtime conflicts fall back to the default with
 the conflicting names reported. Match metadata stays out of `machine.json`.
 These are the only machine manifest keys; `publish` and other unknown keys
@@ -631,7 +634,7 @@ upgrade and switch. Other machine defaults (udev, sysctl, unit drop-ins) go in
 `rootfs/usr/` too. No replacement list exists.
 
 `build`, `test`, `vm` and `disk` accept `--machine <name>`, overriding
-`ILEX_MACHINE`, then `generic`. Native Windows `vm --gui` installs the
+`ILEX_MACHINE`, then `generic`. Native Windows `vm run --gui` installs the
 selected composition with a disposable development overlay. `--print-image`
 reports the selected reference without building or booting.
 The implicit tag is `<checkout tag>[.s-<shell>...].m-<machine>`. A layer built
@@ -641,13 +644,13 @@ of base reference>.m-<machine>`. This prevents overwriting another checkout's
 layer and lets distinct bases coexist. A base already in this checkout's own
 shell-variant namespace keeps that prefix. Only an explicit build `--tag`
 chooses another output name. Both suffixes count towards the 128-byte tag limit.
-`xtask build --machine <name> --on <image>` builds only the layer and prints its
+`ilexctl build --machine <name> --on <image>` builds only the layer and prints its
 resulting full reference on stdout; scripts must use that result rather than
 append a suffix to their input. Build subprocesses (including base builds and
 pulls) send stdout to stderr, so command substitution captures only the reference:
 
 ```sh
-image=$(cargo xtask build --machine "$machine" --on "$base")
+image=$(ilexctl build --machine "$machine" --on "$base")
 ```
 
 No image is pushed by building.
@@ -694,9 +697,9 @@ not register this tier.
 `build/compose.py` is the schema authority (Python standard library only).
 Unknown keys and invalid defaults fail in the first `compose` stage, before
 compilation. Plain `podman build .` composes the default image too, but does not
-set the configuration labels: build with `cargo xtask build` to test or rechunk
+set the configuration labels: build with `ilexctl build` to test or rechunk
 the result.
-`cargo xtask info` honours `ILEX_SHELLS`, listing the resolved image, selection
+`ilexctl info` honours `ILEX_SHELLS`, listing the resolved image, selection
 and available configurations; builds
 record them in the three `ilex.shells`, `ilex.default-shell` and `ilex.machine`
 labels.
@@ -878,7 +881,7 @@ when administering these accounts with homectl. No SSH password/bootstrap
 flow for daily homes is supported. Local maintenance login remains available
 when a daily home cannot be unlocked. Profiles and firstboot UI are later work.
 
-`cargo xtask test homed::` is opt-in and uses the installed-disk QEMU/bcvk
+`ilexctl test homed::` is opt-in and uses the installed-disk QEMU/bcvk
 backend, never the SELinux-disabled ephemeral guest. `homed::lifecycle`
 checks enforcing SELinux, authselect/NSS, inactive discovery in AccountsService
 and GDM, password login/logout, TTY, password change, sudo, maintenance recovery
@@ -960,7 +963,7 @@ app metadata and explicitly installs missing runtime refs from Flathub with
 `--no-auto-pin`. Related extensions remain Flatpak's responsibility. This
 keeps the remote hidden throughout and does not permanently pin old runtimes.
 
-`cargo xtask apps --check` checks configured IDs against Flathub's API without
+`ilexctl doctor apps` checks configured IDs against Flathub's API without
 installing apps, warns about EOL, trust-file changes and imminent key expiry,
 and explicitly reports unreachable checks as unverified. GPG inspection uses
 a temporary home inside the checkout, never the host root's GPG state.
@@ -969,11 +972,11 @@ before that date. Do not assume remote metadata refresh alone renews the key.
 
 Disk VMs default to a systemd SMBIOS credential adding an unmet condition to
 the apps timer, keeping downloads out of ordinary tests. Upgrade masks both
-apps units before the first timer deadline. `xtask vm --disk --apps` enables
-downloads; `vm --gui` enables them by default (`--no-apps` opts out).
+apps units before the first timer deadline. `ilexctl vm run --disk --apps` enables
+downloads; `vm run --gui` enables them by default (`--no-apps` opts out).
 Ephemeral assertions parse the lists and trust file without Flathub traffic.
 
-`cargo xtask test apps::` opts into an enforcing installed disk and real
+`ilexctl test apps::` opts into an enforcing installed disk and real
 Flathub downloads: offline timer/backoff with the internet NIC down and a
 restricted SSH management NIC, automatic recovery without a manual start,
 an interrupted real pull that resumes below 8 GiB free, real installation,
@@ -1036,7 +1039,7 @@ Machines accept the same optional `[apps] flatpak` and `rpm` lists as shells
 (generic has no machine additions). Machine app RPMs join its transaction;
 Flatpak is included when the machine declares Flatpaks, even on a shell-free
 base. A generated `machine-<name>.preinstall` joins the shell lists and enables
-the root timer. `ms-7c35` declares Steam through this path. `xtask apps --check`
+the root timer. `ms-7c35` declares Steam through this path. `ilexctl doctor apps`
 checks machine IDs too; configuration/self-check assertions include them.
 
 The apps stack must merge together in one main push: the GNOME RPM removal
@@ -1188,7 +1191,7 @@ left in place. The per-user `ilex-profile.service` reapplies only an already
 selected profile on login, without app installation; no selection is a no-op.
 There are no root-run profile hooks. Installer choice/provisioning UX is PR 22.
 
-`cargo xtask test ephemeral::user_profiles homed::profiles -- --test-threads 1`
+`ilexctl test ephemeral::user_profiles homed::profiles -- --test-threads 1`
 checks catalogue/schema/path/registry rejection in a booted image and profile
 application through PR 20's real creation/TTY path in an enforcing installed
 guest. It creates `andriishafar` from the catalogue metadata alongside the local
@@ -1225,7 +1228,7 @@ build, so nothing trusts mtimes and one worktree's binaries can't leak into
 another's image. The step ends with `kache stats --last-build`: crates
 restored vs compiled.
 
-- `xtask build` also mounts the host's own store (`$KACHE_CACHE_DIR`, else
+- `ilexctl build` also mounts the host's own store (`$KACHE_CACHE_DIR`, else
   `~/.cache/kache`, once it holds an `index.db`) read-only at `/kache-host`,
   and the builder reads it only when present, so a plain `podman build` and CI
   work without it (`--no-host-kache` skips it). After a host `cargo build
@@ -1246,17 +1249,17 @@ backend qualifies native x86_64 only; unsupported requests fail before launch.
 The `ilex-devkit` facade re-exports the portable contracts and Linux tooling.
 
 ```sh
-cargo xtask info --json                 # identity, source manifest, paths, capabilities
-cargo xtask info --capabilities
-cargo xtask identity status             # automatic primary claim; no hand-written config
-cargo xtask identity release-main --owner <UUID> # only when that checkout no longer exists
-cargo xtask identity rebuild-legacy-image --expected-id <ID> # explicit rebuild, preserving old image
-cargo xtask doctor --self-check --json  # disposable real Git checkouts; no images/VMs
-cargo xtask doctor --self-check-build --json # Linux: actual gated Podman builds and ownership rejection
-cargo xtask disk --self-check           # Linux: disposable CLI alias faults; no real store or VM
-cargo xtask doctor --arch aarch64        # explicit rejection on the current Linux backend
-cargo xtask doctor --require firmware_enforcement # fails: ordinary defaults are nonsecure
-ilex-vmctl capabilities --json          # attach to a running VM; MCP: capabilities
+ilexctl info --json                 # identity, source manifest, paths, capabilities
+ilexctl info --capabilities
+ilexctl identity status             # automatic primary claim; no hand-written config
+ilexctl identity release-main --owner <UUID> # only when that checkout no longer exists
+ilexctl identity rebuild-legacy-image --expected-id <ID> # explicit rebuild, preserving old image
+ilexctl doctor --self-check --json  # disposable real Git checkouts; no images/VMs
+ilexctl doctor --self-check-build --json # Linux: actual gated Podman builds and ownership rejection
+ilexctl disk --self-check           # Linux: disposable CLI alias faults; no real store or VM
+ilexctl doctor --arch aarch64        # explicit rejection on the current Linux backend
+ilexctl doctor --require firmware_enforcement # fails: ordinary defaults are nonsecure
+ilexctl vm capabilities --json          # attach to a running VM; MCP: capabilities
 ```
 
 Only the automatically registered canonical primary checkout gets `main` (see
@@ -1313,7 +1316,7 @@ unlabelled outputs there. Foreign labelled images are always refused.
 Nonempty unlabelled state/disk caches fail visibly with `unlabelled legacy ...;
 refusing adoption`. Old resources are never automatically deleted or imported.
 Build output flags (`--tag`, `--manifest`, `--output`, `--iidfile`) are reserved
-for the executor; use xtask `--tag` to choose the final output.
+for the executor; use `ilexctl build --tag` to choose the final output.
 
 ### One-time tooling migration
 
@@ -1363,12 +1366,12 @@ weakened.
 
 ## Windows development tooling
 
-The infrastructure commands run natively: run `cargo xtask
-runtime fetch|status|update|self-check` and `cargo xtask builder
+The infrastructure commands run natively: run `ilexctl
+runtime fetch|status|update|self-check` and `ilexctl builder
 up|status|down|update|self-check` in PowerShell. The persistent per-user Gen2
 builder, pinned acquisition, SSH identity, owned cleanup and update recovery are
 documented in [Windows builder tooling](docs/tooling/windows-builder.md).
-T3 also routes native Windows `build`, `test`, `disk`, `iso`, `tool` and `rechunk`
+T3 also routes native Windows `build`, `test`, `disk`, `iso`, `drupe build` and `rechunk`
 to that builder automatically, calling idempotent `builder up` as needed.
 Run all Windows commands from native PowerShell in the checkout.
 Install a changed controller with `builder update`; a recipe mismatch fails
@@ -1379,18 +1382,18 @@ builder. The Windows homed tier remains unavailable. Never remove the shared bui
 checkout cleanup.
 
 ```powershell
-cargo xtask builder up --memory-gib 16 --cpus 8 --wait-for-memory-seconds 10800
-cargo xtask builder update --wait-for-memory-seconds 10800
-cargo xtask build
-cargo xtask vm
-cargo xtask vm -- uname -r
-cargo xtask test ephemeral:: disk:: upgrade:: graphical:: tool:: -- --test-threads 1
-cargo xtask remote snapshot
-cargo xtask remote self-check
-cargo xtask remote resume --job <UUID>
-cargo xtask remote cancel --job <UUID>
-cargo xtask remote export --image <owned-image> --out 'C:\outputs\ilex.oci.tar'
-cargo xtask remote self-check-receiver
+ilexctl builder up --memory-gib 16 --cpus 8 --wait-for-memory-seconds 10800
+ilexctl builder update --wait-for-memory-seconds 10800
+ilexctl build
+ilexctl vm run
+ilexctl vm run -- uname -r
+ilexctl test ephemeral:: disk:: upgrade:: graphical:: tool:: -- --test-threads 1
+ilexctl remote snapshot
+ilexctl remote --self-check
+ilexctl remote resume --job <UUID>
+ilexctl remote cancel --job <UUID>
+ilexctl remote export --image <owned-image> --out 'C:\outputs\ilex.oci.tar'
+ilexctl remote self-check-receiver
 ```
 
 Snapshots inventory HEAD/index names, dirty working bytes and nonignored
@@ -1447,16 +1450,16 @@ revalidates claims. Output copies are published atomically by file handle;
 commands print the delivered path. `iso --due` stays a native read-only command;
 registry checks retain their exit codes. The installer remains a network ISO.
 
-For fault checks, `remote self-check --allocation-image <owned-image>` pauses a
+For fault checks, `remote --self-check --allocation-image <owned-image>` pauses a
 real ephemeral launch after container creation and before its CID receipt, for a
-second terminal to cancel. `remote self-check --fingerprint-image <owned-image>`
+second terminal to cancel. `remote --self-check --fingerprint-image <owned-image>`
 and Linux `doctor --self-check-fingerprint <owned-image> --json` report actual
 root/rechunk fingerprints for same-tree comparisons. Acceptance logs and
 measurements belong in the PR body.
 
-Windows `cargo xtask vm --gui` and `vm --disk` now run native QEMU/WHPX;
+Windows `ilexctl vm run --gui` and `vm run --disk` now run native QEMU/WHPX;
 `--gui` uses the pinned portable SDL/virgl runtime, an immutable disk delivered
-by the T3 builder and a writable overlay. Native Windows `ilex-vmctl` and MCP
+by the T3 builder and a writable overlay. Native Windows `ilexctl vm` controls and MCP
 attach directly, including exact-HWND virgl screenshots. Clipboard is an
 unpublished development overlay, supervised over pinned SSH only during an
 unlocked user session. Right-Ctrl+G escapes SDL grab. See
@@ -1465,36 +1468,36 @@ resolution, capture limitations and acceptance commands.
 
 | Windows command | Backend |
 | --- | --- |
-| `build`, `rechunk`, `disk`, `iso`, `tool` | Managed Fedora builder with rootful Podman |
+| `build`, `rechunk`, `disk`, `iso`, `drupe build` | Managed Fedora builder with rootful Podman |
 | `test ephemeral::` and the ordinary Linux tiers | Managed Fedora builder with nested KVM |
-| `vm`, `vm -- <command>` | Ephemeral bcvk guest on the builder, with SSH terminal or streamed command output |
-| `vm --gui`, `vm --disk` | Native WHPX, with SDL and virgl for `--gui` |
-| `security`, `test security::firmware`, `vm --secure` | Native [Hyper-V Gen2](docs/tooling/windows-gen2.md) |
+| `vm run`, `vm run -- <command>` | Ephemeral bcvk guest on the builder, with SSH terminal or streamed command output |
+| `vm run --gui`, `vm run --disk` | Native WHPX, with SDL and virgl for `--gui` |
+| `doctor security`, `test security::firmware`, `vm run --secure` | Native [Hyper-V Gen2](docs/tooling/windows-gen2.md) |
 
 See [Windows migration](docs/tooling/windows-migration.md) for inventory,
 optional cache import and the owner's retirement checklist.
 
-## Driving VMs with ilex-vmctl
+## Driving VMs: `ilexctl vm`
 
-`cargo xtask disk` writes the installed qcow2 (`bcvk to-disk`). On Windows,
-`vm --disk` boots a native headless WHPX VM and `--gui` selects SDL/virgl.
-Linux `vm --disk` uses the graphical test machine (UEFI, 4K `virtio-vga`);
+`ilexctl disk` writes the installed qcow2 (`bcvk to-disk`). On Windows,
+`vm run --disk` boots a native headless WHPX VM and `--gui` selects SDL/virgl.
+Linux `vm run --disk` uses the graphical test machine (UEFI, 4K `virtio-vga`);
 `--gui` opens GTK on a Linux desktop.
 Linux disk-booted VMs (also the `disk::` and `graphical::` tests) publish `qmp.sock`, `vnc.sock` and
 `vm.toml` in
 `$XDG_RUNTIME_DIR/ilex-vm/<slug>/<vm>/`; native Windows publishes private
 `vm.json` with independent current-user/SYSTEM-only Windows AF_UNIX QMP
 endpoints and PID/HWND identity in the
-runtime directory printed by `xtask info`. `ilex-vmctl` attaches by slug
-(from the checkout you are in, or `--slug`) and never starts or stops VMs.
+runtime directory printed by `ilexctl info`. `ilexctl vm` controls attach by slug
+(from the checkout you are in, or `--slug`). Only `vm run` starts a VM.
 
 ```sh
-cargo install --path crates/ilex-vmctl   # native Windows or Linux
-ilex-vmctl list
-ilex-vmctl screenshot -o shot.png        # read the PNG to see the screen
-ilex-vmctl wait-screen --stable 3        # not blank, then unchanged for 3s
-ilex-vmctl click 640 400                 # screenshot pixels; cropped client pixels on Windows
-ilex-vmctl type 'hunter2' --enter        # US layout; ilex-vmctl key ctrl+alt+t
+cargo install --locked --path crates/ilexctl   # native Windows or Linux
+ilexctl vm list
+ilexctl vm screenshot -o shot.png        # read the PNG to see the screen
+ilexctl vm wait-screen --stable 3        # not blank, then unchanged for 3s
+ilexctl vm click 640 400                 # screenshot pixels; cropped client pixels on Windows
+ilexctl vm type 'hunter2' --enter        # US layout; ilexctl vm key ctrl+alt+t
 ```
 
 Agents get the same tools (`screenshot`, `click`, `scroll`, `type_text`, `key`,
@@ -1502,12 +1505,12 @@ Agents get the same tools (`screenshot`, `click`, `scroll`, `type_text`, `key`,
 and `click` takes coordinates in that downscaled image:
 
 ```sh
-claude mcp add --transport stdio ilex-vm -- ilex-vmctl mcp
+claude mcp add --transport stdio ilex-vm -- ilexctl mcp
 ```
 
-- QMP serves one client at a time; vmctl connects per command, so an agent
+- QMP serves one client at a time; `ilexctl vm` connects per command, so an agent
   and a running test can share a VM. One VM per purpose and checkout: `vm`
-  (`xtask vm --disk`), `gui` (`--gui`), `disk` and `graphical` (tests); pick
+  (`ilexctl vm run --disk`), `gui` (`--gui`), `disk` and `graphical` (tests); pick
   with `--vm` when more than one runs.
 - Tests assert over SSH, not pixels. Screenshots are evidence: the
   `graphical::` tier saves them to `<state dir>/artifacts/graphical/` (or
@@ -1516,7 +1519,7 @@ claude mcp add --transport stdio ilex-vm -- ilex-vmctl mcp
   login and scaling, and fails immediately before installing or booting a VM
   when the image's default shell is not `gnome`, including `--shell none`.
 - The SSH test key and the throwaway disk overlays live in the state dir;
-  `cargo xtask vm --disk` prints the exact `ssh` command line.
+  `ilexctl vm run --disk` prints the exact `ssh` command line.
 - On Linux, `--gui` selects virgl when a DRM render node is available.
   QMP input works with GTK virgl. For QMP screenshots, use `--disk` or
   `--gui --no-gl`. Windows SDL screenshots use the exact client area of
@@ -1533,11 +1536,12 @@ commands and every library they load; running a command mounts that image at
 the rest of the machine untouched (`crates/drupe`).
 
 ```sh
-cargo xtask tool strace                  # dev machine: <state dir>/tools/images/strace.raw + drupe.crt
-cargo xtask tool net nmap tcpdump        # one tool `net` with the commands of two packages
-drupe install strace.raw                 # on the machine, as root; then just `strace …`
-drupe list; drupe remove strace; drupe run strace -V
+ilexctl drupe build strace                  # dev machine: <state dir>/tools/images/strace.raw + drupe.crt
+ilexctl drupe build net nmap tcpdump        # one tool `net` with the commands of two packages
 ```
+
+Install, list, remove and run tools on the machine using the Drupe commands
+in the [machine command table](#ilexctl).
 
 - The image is a discoverable disk image (erofs root + dm-verity hash +
   signature partitions, `systemd-repart`), built in a Fedora container from
@@ -1550,7 +1554,7 @@ drupe list; drupe remove strace; drupe run strace -V
 - Trust: `drupe` only mounts through `systemd-dissect --image-policy
   root=signed:=absent+unused`, so the root hash must be signed by a
   certificate in `/etc/verity.d/` (or `/run/verity.d`, `/usr/lib/verity.d`,
-  the kernel keyring). The image ships none: `cargo xtask tool` signs with a
+  the kernel keyring). The image ships none: `ilexctl drupe build` signs with a
   per-checkout development key (`<state dir>/tools/keys/`, created on first
   use) and prints the certificate to copy to `/etc/verity.d/`. A real key and
   where tools are published are open. `install` also reads every file once, so
@@ -1569,7 +1573,7 @@ drupe list; drupe remove strace; drupe run strace -V
   `/run/drupe/{cmd,bin,tools}`.
   `/etc/profile.d/drupe.sh` puts `/run/drupe/bin` first in `PATH` (symlinks
   to `drupe`, which runs the command it was called as). `sudo` resets `PATH`:
-  `sudo drupe run strace …`.
+  use `sudo` with Drupe’s `run` verb to invoke `strace`.
 - A user can't trace a drupe command (`strace rg …` with both from drupe, or
   `gdb` on one): the kernel ignores the setuid bit of a traced program, so
   `drupe-enter` can't make its namespace and says so. Root can. The image
@@ -1582,7 +1586,7 @@ drupe list; drupe remove strace; drupe run strace -V
   host's or nothing; such tools need a build with `--prefix=/app`, which is
   what the fixed mount point is for. Libraries a tool `dlopen`s (NSS modules)
   are not collected. No tool depends on another tool.
-- `tool::` tier (`cargo xtask test tool::`, not run in CI): builds the strace
+- `tool::` tier (`ilexctl test tool::`, not run in CI): builds the strace
   tool once (`ILEX_TOOL_REBUILD=1` rebuilds), refuses it while its certificate
   is untrusted, then runs it as `nobody`: ids and capabilities, tracing a host
   program that loads the host's libc, attaching to a running process, the
@@ -1895,19 +1899,19 @@ an unrelated shell changes an existing root's inputs. Fedora images are pulled
 once before these checks, so nightly upstream changes invalidate both keys.
 
 ```sh
-cargo xtask info --publications
-cargo xtask info --installer
-cargo xtask changed ghcr.io/reidond/ilex:base --root base --inputs-only
-cargo xtask build --shell none
-cargo xtask changed ghcr.io/reidond/ilex:base --image <base-image>
-cargo xtask changed ghcr.io/reidond/ilex:generic.gnome --image <image>
-cargo xtask rechunk <image> --output <rechunked>
-cargo xtask publish <rechunked> --stage --as generic.gnome
-cargo xtask publish --digest <staged-digest> --as generic.gnome --tested-fingerprint <fingerprint>
-cargo xtask changed <ref> --machine ms-7c35 --inputs-only --base-id <config-digest>
-cargo xtask prepare-publish <machine-image> --machine ms-7c35
-ILEX_IMAGE=sha256:<tested-id> cargo xtask test ephemeral::
-cargo xtask publish <machine-image> --as ms-7c35.gnome --tested-image-id <tested-id>
+ilexctl info --publications
+ilexctl info --installer
+ilexctl changed ghcr.io/reidond/ilex:base --root base --inputs-only
+ilexctl build --shell none
+ilexctl changed ghcr.io/reidond/ilex:base --image <base-image>
+ilexctl changed ghcr.io/reidond/ilex:generic.gnome --image <image>
+ilexctl rechunk <image> --output <rechunked>
+ilexctl publish <rechunked> --stage --as generic.gnome
+ilexctl publish --digest <staged-digest> --as generic.gnome --tested-fingerprint <fingerprint>
+ilexctl changed <ref> --machine ms-7c35 --inputs-only --base-id <config-digest>
+ilexctl prepare-publish <machine-image> --machine ms-7c35
+ILEX_IMAGE=sha256:<tested-id> ilexctl test ephemeral::
+ilexctl publish <machine-image> --as ms-7c35.gnome --tested-image-id <tested-id>
 ```
 
 Publishing and releases only happen in CI. A branch dispatch with `test=true`
@@ -2003,7 +2007,7 @@ https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso.sha2
 ```
 
 Because it always installs the newest image it doesn't follow every publish.
-On every run, `cargo xtask iso --due` decides, in the `installer-due` job (the `iso`
+On every run, `ilexctl iso --due` decides, in the `installer-due` job (the `iso`
 job reads its `iso_due=`): a new ISO is due when there is no `installer-*`
 release yet, when installer inputs differ from the latest one (its notes carry
 an `installer-fingerprint:` line), or when the
@@ -2124,7 +2128,7 @@ in both the catalogue and release notes. It is forbidden in CI.
 The release job has `packages: read`, logs in using the job token and a private
 auth file shared by skopeo and cosign, and installs cosign v2 through the same
 pinned cosign-installer action as publication. Before default-target cosign
-verification, `cargo xtask iso --check-registry` checks every offered tag and
+verification, `ilexctl iso --check-registry` checks every offered tag and
 its digest's legacy cosign signature tag. Explicit manifest/name absence for
 any tag or signature tag, including the default's signature tag, exits 3;
 `installer-target.sh` then sets `available=false` and exits successfully,
@@ -2146,7 +2150,7 @@ is an error rather than a deferral.
 The job prepares KVM/QEMU/libvirt with `vm-prep.sh`, restores its apt package
 cache (v2 also includes `xorriso`, `e2fsprogs`, `openssh-client` and `ovmf`),
 checks disk space and the ISO checksum, then runs
-`ILEX_ISO=<downloaded artifact> cargo xtask test iso::` with the verified tag and
+`ILEX_ISO=<downloaded artifact> ilexctl test iso::` with the verified tag and
 `ILEX_ISO_DIGEST`. No ilex container is built by that invocation. Before any
 selected ISO trial runs, the harness checks all host commands (`xorriso`,
 `qemu-system-x86_64`, `qemu-img`, `mkfs.ext4`, `skopeo`, `ssh`, `ssh-keygen`)
@@ -2182,8 +2186,8 @@ image signing/tag movement and installer release creation, not the builds or
 unsigned candidate staging that happen before them.
 
 ```sh
-cargo xtask iso                # build; the ISO, its .sha256 and release-notes.md land in <state dir>/iso/
-cargo xtask iso --due          # is a new ISO due? (reads the latest installer release; needs gh)
+ilexctl iso                # build; the ISO, its .sha256 and release-notes.md land in <state dir>/iso/
+ilexctl iso --due          # is a new ISO due? (reads the latest installer release; needs gh)
 ```
 
 - `installer/Containerfile` is `fedora-bootc:45` plus `anaconda-core`,
@@ -2198,7 +2202,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   `ghcr.io/reidond/ilex:<selected tag>` (`--target-imgref`). The installer drops GPU
   firmware and Vulkan drivers before it builds its initramfs. The local web ISO
   measured 1,953,595,392 bytes (1.82 GiB) and 694 seconds to build on 2026-11-16
-  (`--testing-tag latest`); `firefox-langpacks` remains installed. `xtask iso`
+  (`--testing-tag latest`); `firefox-langpacks` remains installed. `ilexctl iso`
   fails if the ISO reaches 2 GiB.
 - The installer base is not cached between runs (an `ilex-installer-base`
   package was tried, and saved ~11 of 22 minutes per build): the weekly rebuild
@@ -2213,7 +2217,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
   `/usr/bin/bwrap` by path, even inside an unconfined container, and its
   `unpriv_bwrap` child denies the setuid/chown/sys_admin osbuild's sandbox
   needs ("mount: … permission denied"). `/var/lib/containers`, `/var/cache/image-builder` and
-  `TMPDIR` live on volumes under `/mnt`. `xtask iso` does the same locally: when
+  `TMPDIR` live on volumes under `/mnt`. `ilexctl iso` does the same locally: when
   the `image-builder` on `PATH` is older than 89 (or missing) it builds
   `installer/image-builder/Containerfile` and runs image-builder from that
   container against this host's container storage. The installer and fallback
@@ -2287,7 +2291,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
    permissions should allow the `packages: write` the workflow requests, and
    a package created by the first run must list this repository under
    "Manage Actions access" (it does when the image carries the
-   `org.opencontainers.image.source` label, which `xtask build` sets).
+   `org.opencontainers.image.source` label, which `ilexctl build` sets).
 4. Nothing to set up for the installer: its releases use `GITHUB_TOKEN` (the
    `installer-release` job asks for `contents: write` and `packages: read`; if Settings → Actions → General →
    Workflow permissions is read-only by default, a job-level `permissions:`
@@ -2302,7 +2306,7 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 - **No unit tests.** Every test boots the image (`crates/ilex-e2e`, one
   libtest-mimic binary, tiers `ephemeral::`, `disk::`, `upgrade::`,
   `graphical::`, `tool::`, local opt-in `config::`). Anything worth testing in a shipped binary must be
-  observable from inside the VM: give it a `--self-check` mode.
+  observable from inside the VM: give its command group a `--self-check` mode.
 - **bootc rules for `rootfs/`** (copied to `/`): defaults go in `/usr`; keep
   `/etc` to files that must live there (it is 3-way merged on upgrade); never
   ship content in `/var` (use tmpfiles.d); create users with sysusers.d.
@@ -2324,7 +2328,10 @@ cargo xtask iso --due          # is a new ISO due? (reads the latest installer r
 - Portable contracts and selection live in `crates/ilex-tooling-core`; QMP
   framing and keyboard mapping in `crates/ilex-tooling-qmp`; Linux execution,
   paths and slots in `crates/ilex-tooling-linux`. `ilex-devkit` is the
-  compatibility facade. Each `xtask` subcommand has its own module and Args.
+  compatibility facade. Each `ilexctl` group has its own module in the
+  crate that owns it. Add a command to the machine build only if a machine
+  needs it.
+- `drupe-enter` is the only setuid binary we ship and takes no new dependency.
 - Shell out to the packaged `bcvk` CLI, not the `bcvk-qemu` library.
 - Text files use LF (`.gitattributes`), except token exports, whose bytes are
   preserved exactly; scripts shipped in `rootfs/`

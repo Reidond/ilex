@@ -233,7 +233,7 @@ pub fn vm(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resolv
             vm.name()
         );
         eprintln!(
-            "Console control from this checkout uses ilex-vmctl --vm {}.",
+            "Console control from this checkout uses cargo ilexctl vm --vm {}.",
             vm.purpose()
         );
         let viewer = if args.gui {

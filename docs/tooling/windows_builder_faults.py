@@ -1,7 +1,7 @@
 """Windows row of the lifecycle matrix, run against the managed builder.
 
 The real submit reply is delayed in a temporary SSH relay beside a copy of
-xtask.exe. The client runs in its own hidden console. Its relay refuses every
+ilexctl.exe. The client runs in its own hidden console. Its relay refuses every
 PTY request, so a regression in the test cannot start an unintended VM.
 """
 import json
@@ -88,14 +88,14 @@ finally:
 
 def ctrl_c_during_interactive_submit():
     workspace = Path(__file__).resolve().parents[2]
-    executable = workspace / "target/debug/xtask.exe"
-    assert executable.is_file(), "build the current native xtask before running the Windows matrix"
-    description = json.loads(subprocess.check_output([str(executable), "info", "--json"], cwd=workspace, timeout=45))
+    executable = workspace / "target/debug/ilexctl.exe"
+    assert executable.is_file(), "build the current native ilexctl before running the Windows matrix"
+    description = json.loads(subprocess.check_output([str(executable), "--ilexctl-in-checkout", "info", "--json"], cwd=workspace, timeout=45))
     remote = Path(description["state_dir"]) / "remote"
     # Keep the test's binary and relay out of PATH and out of the checkout.
     with tempfile.TemporaryDirectory(prefix="ilex-builder-matrix-") as root:
         root = Path(root)
-        test_client = root / "xtask.exe"
+        test_client = root / "ilexctl.exe"
         shutil.copy2(executable, test_client)
         code = root / "relay.rs"
         code.write_text(RELAY, encoding="utf-8")
@@ -108,7 +108,7 @@ def ctrl_c_during_interactive_submit():
         console = subprocess.STARTUPINFO()
         console.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         console.wShowWindow = 0
-        client = subprocess.Popen([str(test_client), "vm"], cwd=workspace, env=env,
+        client = subprocess.Popen([str(test_client), "--ilexctl-in-checkout", "vm", "run"], cwd=workspace, env=env,
                                   startupinfo=console, creationflags=subprocess.CREATE_NEW_CONSOLE)
         job = None
         try:
@@ -157,5 +157,5 @@ def ctrl_c_during_interactive_submit():
                 client.kill()
                 client.wait(timeout=10)
             if job is not None and not (remote / "jobs" / job / "collection.json").exists():
-                subprocess.run([str(executable), "remote", "cancel", "--job", job],
+                subprocess.run([str(executable), "--ilexctl-in-checkout", "remote", "cancel", "--job", job],
                                cwd=workspace, env=env, timeout=60, check=False)

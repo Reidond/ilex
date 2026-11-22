@@ -81,7 +81,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             #[cfg(not(target_os = "windows"))]
             println!("vm slots:    {}", ilex_devkit::slots::max_slots());
             let selection = resolved.selection.context(
-                "reading image.toml for info; run `cargo xtask build` for manifest diagnostics",
+                "reading image.toml for info; run `cargo ilexctl build` for manifest diagnostics",
             )?;
             let summary = format!("selection:   {}", selection.summary());
             println!("{}", terminal_text(&summary));
@@ -150,7 +150,7 @@ pub(crate) fn capabilities(ws: &Workspace) -> Result<ilex_devkit::core::VmCapabi
             [vm] => Ok(vm.capabilities()),
             [] => Ok(ilex_tooling_windows::qemu::idle_capabilities()),
             _ => anyhow::bail!(
-                "several native VMs are running; use ilex-vmctl --vm <purpose> capabilities"
+                "several native VMs are running; use cargo ilexctl vm --vm <purpose> capabilities"
             ),
         }
     }

@@ -53,7 +53,7 @@ pub enum CheckoutCmd {
     Rechunk(rechunk::Args),
     /// Write a qcow2 or raw disk with `bcvk to-disk`
     Disk(disk::Args),
-    /// Build if needed, then run the e2e harness (`cargo xtask test ephemeral::`)
+    /// Build if needed, then run the e2e harness (`cargo ilexctl test ephemeral::`)
     Test(test::Args),
     /// Compare the candidate's fingerprint with a published image
     Changed(changed::Args),
@@ -85,18 +85,12 @@ pub enum Cmd {
     Security(SecurityArgs),
 }
 
-#[derive(Clone, Copy)]
-pub enum EntryPoint {
-    Xtask,
-    Ilexctl,
-}
-
 pub fn exit_code(err: &anyhow::Error) -> u8 {
     err.downcast_ref::<remote::Failure>()
         .map_or(1, |failure| failure.code)
 }
 
-pub fn run(cmd: Cmd, entry: EntryPoint) -> Result<()> {
+pub fn run(cmd: Cmd) -> Result<()> {
     // Infrastructure commands work outside a checkout.
     let cmd = match cmd {
         Cmd::Checkout(CheckoutCmd::Identity(args)) => return identity::run(&args),
@@ -122,7 +116,7 @@ pub fn run(cmd: Cmd, entry: EntryPoint) -> Result<()> {
                 return security_windows::vm(&ws, args, resolved);
                 #[cfg(not(target_os = "windows"))]
                 anyhow::bail!(
-                    "vm --secure selects the Windows Hyper-V provider; use xtask security on Linux"
+                    "vm --secure selects the Windows Hyper-V provider; use cargo ilexctl doctor security on Linux"
                 );
             }
             #[cfg(target_os = "windows")]
@@ -142,7 +136,7 @@ pub fn run(cmd: Cmd, entry: EntryPoint) -> Result<()> {
         Cmd::Checkout(CheckoutCmd::Iso(args)) => iso::run(&ws, args),
         Cmd::Tool(args) => tool::run(&ws, args),
         Cmd::Checkout(CheckoutCmd::Info(args)) => info::run(&ws, args),
-        Cmd::Doctor(args) => doctor::run(&ws, args, entry),
+        Cmd::Doctor(args) => doctor::run(&ws, args),
         Cmd::Security(args) => security::run(&ws, args),
         Cmd::Checkout(
             CheckoutCmd::Builder(_)

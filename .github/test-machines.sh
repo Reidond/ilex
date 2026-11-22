@@ -12,21 +12,21 @@ while IFS=$'\t' read -r tag parent machine shells base base_id previous; do
     # the pinned parent's full selection; the publisher checks it independently.
     selection_shells=$shells
     if [ "$selection_shells" = - ]; then selection_shells=none; fi
-    image=$(ILEX_SHELLS="$selection_shells" cargo xtask build --machine "$machine" --on "$base")
+    image=$(ILEX_SHELLS="$selection_shells" cargo ilexctl build --machine "$machine" --on "$base")
     reference=-
     if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
-    cargo xtask changed "$reference" --machine "$machine" --image "$image" > "$RUNNER_TEMP/machine-change"
+    cargo ilexctl changed "$reference" --machine "$machine" --image "$image" > "$RUNNER_TEMP/machine-change"
     cat "$RUNNER_TEMP/machine-change"
     if grep -qx 'changed=false' "$RUNNER_TEMP/machine-change" && [ "$FORCE_TEST" != true ]; then
         printf -- '- %s: skipped publication, full fingerprint unchanged at %s\n' "$tag" "$previous" >> "$GITHUB_STEP_SUMMARY"
         continue
     fi
-    cargo xtask prepare-publish "$image" --machine "$machine"
+    cargo ilexctl prepare-publish "$image" --machine "$machine"
     image_id=$(podman image inspect --format '{{.Id}}' "$image")
     podman run --rm -i --network=none --entrypoint python3 "$image_id" -I -S - < .github/check-filecaps.py
     bash .github/vm-prep.sh wait vm-stack
     export ILEX_IMAGE="sha256:${image_id#sha256:}"
-    sg libvirt -c 'cargo xtask test ephemeral::'
+    sg libvirt -c 'cargo ilexctl test ephemeral::'
     publish=false
     if grep -qx 'changed=true' "$RUNNER_TEMP/machine-change"; then publish=true; fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \

@@ -1,6 +1,6 @@
 [package]
 name = "ilex-devkit"
-description = "Shared host-side plumbing for xtask, the e2e harness and ilex-vmctl"
+description = "Shared host-side plumbing for ilexctl and the e2e harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

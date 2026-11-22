@@ -8,7 +8,7 @@ recheck=${1:-}
 expected=${recheck:-${INSTALLER_SNAPSHOT:?installer snapshot required}}
 # Every offered tag must exist with a signature before this ISO can release.
 # Preserve the exact-default-digest verification and install gate below.
-if cargo xtask iso --check-registry; then :; else
+if cargo ilexctl iso --check-registry; then :; else
     rc=$?
     if [ "$rc" = 3 ]; then
         if [ -n "$recheck" ]; then echo '::error::an offered composition disappeared after testing'; exit 2; fi

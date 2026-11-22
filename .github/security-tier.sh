@@ -38,8 +38,8 @@ if [[ "${GITHUB_ACTIONS:-}" == true && -f /etc/apparmor.d/usr.bin.swtpm ]]; then
         exit 1
     fi
 fi
-timeout --signal=TERM --kill-after=10s 5m cargo xtask disk --self-check > "$ILEX_ARTIFACTS/security/disk-alias-self-check.json"
-cargo xtask security > "$ILEX_ARTIFACTS/security/runner-probe.json"
+timeout --signal=TERM --kill-after=10s 5m cargo ilexctl disk --self-check > "$ILEX_ARTIFACTS/security/disk-alias-self-check.json"
+cargo ilexctl doctor security > "$ILEX_ARTIFACTS/security/runner-probe.json"
 timeout --signal=TERM --kill-after=10s 12m bash .github/security-startup-self-check.sh
 # KVM_CHECK_EXTENSION(KVM_CAP_X86_SMM), not a virtualized-host heuristic.
 requested=${ILEX_SECURITY_ACCELERATOR:-probe}
@@ -61,7 +61,7 @@ echo "security accelerator: **$accel** (runner probe retained); ${ILEX_SECURITY_
 # Real guest boots precede an injected EFI-control startup failure. Run this
 # before normal qualification: the expected failure invalidates its profile.
 ILEX_SECURITY_ACCELERATOR="$accel" bash .github/security-control-startup-self-check.sh
-timeout --signal=TERM --kill-after=20s 45m cargo xtask security --self-check --accelerator "$accel" --memory "${ILEX_SECURITY_MEMORY:-4G}"
+timeout --signal=TERM --kill-after=20s 45m cargo ilexctl doctor security --self-check --accelerator "$accel" --memory "${ILEX_SECURITY_MEMORY:-4G}"
 python3 - "$ILEX_ARTIFACTS/security/result.json" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))['qualification'] == 'passed', 'missing guest qualification'

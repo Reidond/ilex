@@ -3,7 +3,7 @@
 Native PowerShell is the entry point for Windows builds, tests and development
 VMs. The shared Fedora builder runs Linux jobs. Native QEMU/WHPX runs the
 virgl desktop, and native Hyper-V Gen2 runs the security tier. Install the
-Windows `ilex-vmctl` and configure the MCP server to launch `ilex-vmctl mcp`
+Windows dev build of `ilexctl` and configure the MCP server to launch `ilexctl mcp`
 with the intended checkout as its working directory.
 
 ## Inventory the old environment
@@ -47,9 +47,9 @@ and its digest receipt in private Windows staging outside the checkout.
 
 ```powershell
 python docs/tooling/export-kache.py --output 'C:\staging\kache.tar'
-cargo xtask migrate kache 'C:\staging\kache.tar' --version 2.0.0
+ilexctl migrate kache 'C:\staging\kache.tar' --version 2.0.0
 $env:ILEX_KACHE_IMPORT = '<sha256:… from the import receipt>'
-cargo xtask build -- --no-cache
+ilexctl build -- --no-cache
 Remove-Item Env:ILEX_KACHE_IMPORT
 ```
 

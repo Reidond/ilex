@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use ilex_devkit::Workspace;
 use ilex_vmctl::cli::{Cmd as Control, Target};
-use xtask::{CheckoutCmd, Cmd, EntryPoint};
+use xtask::{CheckoutCmd, Cmd};
 
 pub const IN_CHECKOUT: &str = "--ilexctl-in-checkout";
 
@@ -104,7 +104,7 @@ impl Command {
             } => Cmd::Tool(args),
             Self::Mcp(target) => return target.serve(),
         };
-        xtask::run(command, EntryPoint::Ilexctl)
+        xtask::run(command)
     }
 }
 
@@ -167,7 +167,7 @@ pub fn launch(args: &[OsString]) -> Option<Result<ExitCode>> {
 
     let root = match Workspace::checkout_root() {
         Ok(Some(root)) => Ok(root),
-        // These commands have standalone entry points, as in xtask.
+        // These commands can run without a checkout.
         Ok(None)
             if !dev_command
                 || matches!(name, "builder" | "runtime" | "identity" | "remote-worker") =>

@@ -1,4 +1,4 @@
-//! Building drupe tool images (`cargo xtask tool`, and the `tool::` tier's
+//! Building drupe tool images (`cargo ilexctl drupe build`, and the `tool::` tier's
 //! test image).
 //!
 //! The work happens in a Fedora container running `tool-build.sh`: install

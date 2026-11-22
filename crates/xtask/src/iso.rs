@@ -1,4 +1,4 @@
-//! `cargo xtask iso`: build the ilex installer ISO.
+//! `cargo ilexctl iso`: build the ilex installer ISO.
 //!
 //! A network installer: `image-builder` turns `installer/Containerfile` (a
 //! fedora-bootc image with Anaconda in it) into the ISO, and the kickstart
@@ -485,7 +485,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
         );
     }
     eprintln!(
-        "xtask: image-builder {} on PATH; running version {MIN_IMAGE_BUILDER}+ in a container",
+        "ilexctl: image-builder {} on PATH; running version {MIN_IMAGE_BUILDER}+ in a container",
         host_image_builder().map_or("is not".to_string(), |v| format!("{v} is too old:")),
     );
 

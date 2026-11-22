@@ -11,9 +11,9 @@ uses the same `VmSpec`, `VmProvider`, `VmControl` and exact-profile
 $env:ILEX_ISO = 'C:\fixtures\ilex-installer.iso'
 $env:ILEX_ISO_SHA256 = '<SHA-256 from the matching release>'
 $env:ILEX_VM_SLOTS = '1'
-cargo xtask security --self-check --memory 6G
-cargo xtask security --require-qualified --memory 6G
-cargo xtask test security::firmware ephemeral:: -- --test-threads 1
+ilexctl doctor security --self-check --memory 6G
+ilexctl doctor security --require-qualified --memory 6G
+ilexctl test security::firmware ephemeral:: -- --test-threads 1
 ```
 
 A matching `ilex-installer.iso.sha256` next to the ISO also supplies the
@@ -39,7 +39,7 @@ Switch. It accepts 2–6 GiB and up to four vCPUs; use
 `ILEX_SECURITY_MEMORY` and `ILEX_SECURITY_VCPUS` to qualify another exact
 profile. Gen2 and WHPX share the native slots and the 14 GiB host memory
 reserve. An interrupted Gen2 launcher leaves its creation intent and slot
-receipt for reconciliation. Use `cargo xtask security --cleanup-run <run UUID>`
+receipt for reconciliation. Use `ilexctl doctor security --cleanup-run <run UUID>`
 from the owning checkout after the launcher exits. If registration finished
 before the UUID receipt was written, cleanup checks the private VM path,
 name, generation, and target disk. An ambiguous or mismatched allocation
@@ -79,7 +79,7 @@ send fails. Keep the generation returned by `Vm::send_sensitive_text` or
 `Vm::conceal_console`, for example before a guest displays a newly generated
 recovery key. Pass that generation and its authenticated, public guest marker
 to `Vm::acknowledge_sensitive_input`. A superseded generation leaves capture
-withheld. Live capability reports reflect that state. `ilex-vmctl type --stdin`
+withheld. Live capability reports reflect that state. `ilexctl vm type --stdin`
 sends private text and starts its own redaction generation. The normal text
 command accepts public input in argv.
 
@@ -98,18 +98,18 @@ absolute axes and a click. Firmware pointer, clipboard, and suspend remain
 unavailable. From the owning checkout:
 
 ```powershell
-cargo xtask vm --secure --memory 6G
-ilex-vmctl --vm secure capabilities --json
-ilex-vmctl --vm secure type ilex-gen2-recovery-410625 --enter
-ilex-vmctl --vm secure screenshot -o secure.png
+ilexctl vm run --secure --memory 6G
+ilexctl vm --vm secure capabilities --json
+ilexctl vm --vm secure type ilex-gen2-recovery-410625 --enter
+ilexctl vm --vm secure screenshot -o secure.png
 ```
 
-`vm --secure` requires an already qualified profile. The example above
+`vm run --secure` requires an already qualified profile. The example above
 sends the public fixture response before the pinned SSH session starts. Wait
 for the session before taking a screenshot.
 Add `--gui` to open VMConnect.
-`ilex-vmctl` and its MCP server attach to a journaled Gen2 guest. Hyper-V's
-CIM console supplies capture and keyboard input. xtask owns the lifecycle.
+`ilexctl vm` and the MCP server attach to a journaled Gen2 guest. Hyper-V's
+CIM console supplies capture and keyboard input. `ilexctl vm run` owns the lifecycle.
 
 Evidence lands in `<state dir>/artifacts/gen2-security/<run UUID>` or the
 corresponding tier under `ILEX_ARTIFACTS`. A profile qualifies only after

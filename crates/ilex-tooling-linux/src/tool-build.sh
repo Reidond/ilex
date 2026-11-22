@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build a drupe tool image from Fedora packages. Runs inside a fedora
-# container started by `cargo xtask tool` (tool.rs sends this script on
+# container started by `cargo ilexctl drupe build` (tool.rs sends this script on
 # stdin), which sets:
 #
 #   NAME      tool name, also the image's file name (/out/$NAME.raw)

@@ -19,11 +19,11 @@ registry publication or release creation were used.
 - A terminated acquisition left unpublished staging. The subsequent fetch
   discarded staging and reused the already verified archives. The final runtime
   lock SHA256 is `0b77976331754a55f27e9c6b9da99374810a692be6cbc35c710d345f60309e1f`.
-- `cargo xtask runtime self-check` loaded real qemu-img, rejected corrupted
+- `ilexctl runtime self-check` loaded real qemu-img, rejected corrupted
   SHA256, traversal/device names and an escaping archive link, and removed its
   owned fixture. A separate PowerShell corrupt-cache fixture command was rejected
   by automatic approval review with only “blocked by policy”; it did not execute.
-- `cargo xtask runtime update` booted the disposable q35/WHPX/SDL GL/virgl firmware
+- `ilexctl runtime update` booted the disposable q35/WHPX/SDL GL/virgl firmware
   fixture, queried running status with correlated loopback QMP, quit it and
   activated the runtime. This proves host runtime initialization; it is not the
   T4 actual-ilex rendering/input qualification.
@@ -146,20 +146,20 @@ Reproducible active commands (the rollback probe intentionally returns failure
 only after recovery passes):
 
 ```powershell
-cargo xtask runtime fetch
-cargo xtask runtime self-check
-cargo xtask runtime update
-cargo xtask builder up --wait-for-memory-seconds 10800
-cargo xtask builder --self-check
-cargo xtask builder down
-cargo xtask builder up --memory-gib 4 --cpus 4 --wait-for-memory-seconds 10800
-cargo xtask builder --self-check
-cargo xtask builder update --rollback-probe --wait-for-memory-seconds 10800
-cargo xtask builder status --json
-cargo xtask builder accept-update
-cargo xtask builder update --wait-for-memory-seconds 10800
-cargo xtask builder rollback --wait-for-memory-seconds 10800
-cargo xtask builder accept-update
+ilexctl runtime fetch
+ilexctl runtime self-check
+ilexctl runtime update
+ilexctl builder up --wait-for-memory-seconds 10800
+ilexctl builder --self-check
+ilexctl builder down
+ilexctl builder up --memory-gib 4 --cpus 4 --wait-for-memory-seconds 10800
+ilexctl builder --self-check
+ilexctl builder update --rollback-probe --wait-for-memory-seconds 10800
+ilexctl builder status --json
+ilexctl builder accept-update
+ilexctl builder update --wait-for-memory-seconds 10800
+ilexctl builder rollback --wait-for-memory-seconds 10800
+ilexctl builder accept-update
 ```
 
 Build/test command execution and actual ilex desktop qualification remain T3/T4.
@@ -233,8 +233,8 @@ Reproduction on native Windows, with the retained ready builder off:
 ```powershell
 cargo check -p xtask --locked
 cargo clippy -p xtask --locked -- -D warnings
-cargo xtask builder recovery-self-check --wait-for-memory-seconds 10800
-cargo xtask runtime activation-self-check
+ilexctl builder recovery-self-check --wait-for-memory-seconds 10800
+ilexctl runtime activation-self-check
 ```
 
 The recovery command uses instrumented copies of the embedded production helper:
@@ -309,7 +309,7 @@ check and whether a fresh branch run was dispatched.
 The two additional P2s were tested with the new isolated command:
 
 ```powershell
-cargo xtask builder maintenance-self-check --wait-for-memory-seconds 10800
+ilexctl builder maintenance-self-check --wait-for-memory-seconds 10800
 cargo clippy -p xtask --locked -- -D warnings
 ```
 
