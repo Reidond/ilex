@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_devkit::{Workspace, cmd, installer};
 use ilex_vmctl::{Frame, Vmctl, WaitCond};
@@ -170,6 +170,9 @@ pub fn trials() -> Vec<Trial> {
     }
     trials.push(Trial::test("iso::install", || {
         run().map_err(|e| Failed::from(format!("{e:#}")))
+    }));
+    trials.push(Trial::test("iso::install_no_profile", || {
+        install_no_profile().map_err(|e| Failed::from(format!("{e:#}")))
     }));
     trials
 }
@@ -369,7 +372,7 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
             if !table.profiles.contains_key("andriishafar") {
                 bail!("the exact ISO does not offer the owner's profile");
             }
-            for key in ["shift+tab", "down", "tab"] {
+            for key in ["shift+tab", "down", "down", "tab"] {
                 ctl.key(key)?;
             }
             ctl.save_screenshot(&artifacts.join("profile-chooser.png"))?;
@@ -399,6 +402,9 @@ fn boot_selection(name: &str, machine: Option<&str>, board_only: bool, kernel: b
         wait_serial(&mut vm, &serial, "ILEX-PROFILE andriishafar")?;
     }
     let console = fs::read_to_string(&serial)?;
+    if name == "chooser" && console.contains("ILEX-PROFILE ") {
+        bail!("the default no-profile chooser option requested daily setup");
+    }
     if kernel && console.contains("ILEX-CHOOSER") {
         bail!("kernel override did not skip the chooser: {console}");
     }
@@ -651,7 +657,12 @@ fn run() -> Result<()> {
         (&disk, &vars),
         &work,
         &artifacts,
-        (&table, machine.as_deref(), &chosen),
+        InstallerChoice {
+            table: &table,
+            machine: machine.as_deref(),
+            composition: &chosen,
+            local_candidate: None,
+        },
         &mut report,
     );
     if installed {
@@ -666,6 +677,65 @@ fn run() -> Result<()> {
     }
     println!("artifacts: {}", artifacts.display());
     report.finish()
+}
+
+fn install_no_profile() -> Result<()> {
+    let ws = common::workspace()?;
+    let iso = iso_path()?;
+    let table = table(&iso)?;
+    let image = common::image()?;
+    let machine = ilex_devkit::machine::image_machine_label(&image)?
+        .context("local candidate lacks its machine label")?;
+    let chosen = selection(&table, Some(&machine), None)?;
+    ensure!(
+        chosen.starts_with(&format!("{machine}.")),
+        "local candidate composition is unavailable in the exact ISO"
+    );
+    let target = format!(
+        "{}:{}",
+        installer::REPOSITORY,
+        table.testing_tag.as_deref().unwrap_or(&chosen)
+    );
+    let artifacts = qemu::artifact_dir(&ws, "iso-no-profile")?;
+    let work = ws.ensure_state()?.join(format!("iso-no-profile-{}", std::process::id()));
+    fs::create_dir(&work)?;
+    let result = (|| {
+        let (_registry, local) = crate::encrypted::registry(&ws, &image, &work)?;
+        let disk = work.join("ilex.qcow2");
+        let vars = work.join("OVMF_VARS.fd");
+        let mut report = Report::default();
+        if unattended_install(
+            &ws, &iso, (&disk, &vars), &work, &artifacts,
+            InstallerChoice {
+                table: &table,
+                machine: None,
+                composition: &chosen,
+                local_candidate: Some(&local),
+            },
+            &mut report,
+        ) {
+            let mut config = VmConfig::new("iso-no-profile", &disk);
+            config.efi_vars = Some(vars);
+            config.memory = INSTALLER_MEMORY.into();
+            config.vcpus = 2;
+            let vm = vmtest::boot(&ws, config)?;
+            let digest = local["digest"].as_str().context("candidate digest missing")?;
+            report.check("bootc tracks the signed local candidate", bootc_status(&vm, &artifacts, &target, digest));
+            report.check("normal Anaconda account and unencrypted storage options remain usable", (|| {
+                let record = vm.ssh_ok("cat /etc/ilex/setup.json")?;
+                let data: serde_json::Value = serde_json::from_str(&record)?;
+                ensure!(data["composition"] == chosen && data["image"] == target
+                    && data["profile"] == serde_json::json!({"id":null,"schema":null})
+                    && data["security"]["tpm"]["status"] == "not-configured",
+                    "no-profile install changed the legacy handoff");
+                vm.ssh_ok("set -eu; test ! -e /etc/issue.d/90-ilex-home-setup.issue; test ! -e /var/lib/ilex/home-setup/state.json; if lsblk -nr -o TYPE | grep -qx crypt; then exit 1; fi")?;
+                qemu::write_artifact(&artifacts, "setup.json", &record)
+            })());
+        }
+        report.finish()
+    })();
+    fs::remove_dir_all(&work)?;
+    result
 }
 
 fn iso_path() -> Result<PathBuf> {
@@ -754,6 +824,13 @@ fn is_light(frame: &Frame) -> bool {
 // 2. Unattended install
 // ---------------------------------------------------------------------------
 
+struct InstallerChoice<'a> {
+    table: &'a installer::Table,
+    machine: Option<&'a str>,
+    composition: &'a str,
+    local_candidate: Option<&'a serde_json::Value>,
+}
+
 /// Run the installer to completion. Returns whether the disk is installed.
 fn unattended_install(
     ws: &Workspace,
@@ -761,11 +838,11 @@ fn unattended_install(
     storage: (&Path, &Path),
     work: &Path,
     artifacts: &Path,
-    choice: (&installer::Table, Option<&str>, &str),
+    choice: InstallerChoice<'_>,
     report: &mut Report,
 ) -> bool {
     let (disk, vars) = storage;
-    let (table, machine, chosen) = choice;
+    let InstallerChoice { table, machine, composition: chosen, local_candidate } = choice;
     let install = || -> Result<()> {
         let timeout = std::env::var("ILEX_ISO_INSTALL_TIMEOUT")
             .ok()
@@ -778,11 +855,11 @@ fn unattended_install(
         }
         println!("     installer time limit: {timeout:?}");
         blank_disk(disk)?;
-        let oemdrv = kickstart_disk(work)?;
+        let oemdrv = kickstart_disk(work, chosen, local_candidate)?;
         let mut config = VmConfig::new("iso-install", disk);
         config.snapshot = false;
         config.memory = INSTALLER_MEMORY.into();
-        config.vcpus = 4;
+        config.vcpus = if local_candidate.is_some() { 2 } else { 4 };
         config.cdrom = Some(iso.to_path_buf());
         config.extra_disks = vec![oemdrv];
         config.efi_vars = Some(vars.to_path_buf());
@@ -833,7 +910,7 @@ fn unattended_install(
         if control.clone().any(|line| line.contains("ILEX-CHOOSER")) {
             bail!("OEMDRV kickstart did not skip the chooser: {console}");
         }
-        let reason = if std::env::var_os("ILEX_ISO_EXPECT").is_some() {
+        let reason = if local_candidate.is_some() || std::env::var_os("ILEX_ISO_EXPECT").is_some() {
             "chosen in the installer"
         } else if machine.is_some() {
             "detected"
@@ -897,18 +974,49 @@ fn blank_disk(path: &Path) -> Result<()> {
 }
 
 /// A small disk labelled `OEMDRV` holding `ks.cfg`.
-fn kickstart_disk(work: &Path) -> Result<PathBuf> {
+fn kickstart_disk(work: &Path, chosen: &str, local: Option<&serde_json::Value>) -> Result<PathBuf> {
     let dir = work.join("oemdrv");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
     let mut answers = String::new();
-    if let Ok(tag) = std::env::var("ILEX_ISO_EXPECT") {
+    if let Some(candidate) = local {
+        installer::validate_tag(chosen)?;
+        fs::write(dir.join("source.py"), crate::encrypted::LOCAL_SOURCE)?;
+        fs::write(dir.join("config.json"), serde_json::to_vec(candidate)?)?;
+        fs::copy(work.join("cosign.pub"), dir.join("test.pub"))?;
+        let choice = serde_json::json!({"schema":1,"composition":chosen});
+        answers = format!(r#"%pre --erroronfail
+mkdir -p /run/ilex-installer
+printf '%s\n' '{choice}' > /run/ilex-installer/choice
+%end
+%post --nochroot --erroronfail
+# The signed local payload is already installed. Keep the test independent
+# of Flatpak downloads during its no-profile boot proof.
+ip -4 route flush default
+ip -6 route flush default
+%end
+"#);
+        let local_source = r#"%pre --erroronfail
+mkdir -p /run/ilex-local-candidate
+mount -o ro /dev/disk/by-label/OEMDRV /run/ilex-local-candidate
+python3 -I -S /run/ilex-local-candidate/source.py /run/ilex-local-candidate
+%end
+"#;
+        answers.push_str(&KICKSTART.replacen(
+            "%include /usr/share/anaconda/interactive-defaults.ks\n",
+            &format!("%include /usr/share/anaconda/interactive-defaults.ks\n{local_source}"),
+            1,
+        ));
+    } else if let Ok(tag) = std::env::var("ILEX_ISO_EXPECT") {
         installer::validate_tag(&tag)?;
         answers = format!(
             "%pre --erroronfail\nmkdir -p /run/ilex-installer\nprintf '%s\\n' '{tag}' > /run/ilex-installer/choice\n%end\n"
         );
     }
-    fs::write(dir.join("ks.cfg"), answers + KICKSTART)?;
+    if local.is_none() {
+        answers.push_str(KICKSTART);
+    }
+    fs::write(dir.join("ks.cfg"), answers)?;
     let image = work.join("oemdrv.img");
     let _ = fs::remove_file(&image);
     fs::File::create(&image)?.set_len(16 << 20)?;

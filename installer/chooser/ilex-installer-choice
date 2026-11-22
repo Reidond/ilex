@@ -220,8 +220,10 @@ PAGE = """<!DOCTYPE html>
   <legend>Daily user profile</legend>
   {profiles}
  </fieldset>
- <p class="note">In Anaconda, enable disk encryption and create a separate maintenance administrator such as <strong>ilexmaint</strong>. Use a different name from the daily account.</p>
- <p>Disk unlock uses the install passphrase when automatic TPM unlock is unavailable. After reboot, sign in as the maintenance administrator and run <code>sudo ilexctl home setup</code> to set the daily home password.</p>
+ <div id="profile-help" hidden>
+  <p class="note">In Anaconda, enable disk encryption and create a separate maintenance administrator such as <strong>ilexmaint</strong>. Use a different name from the daily account.</p>
+  <p>Disk unlock uses the install passphrase when automatic TPM unlock is unavailable. After reboot, sign in as the maintenance administrator and run <code>sudo ilexctl home setup</code> to set the daily home password.</p>
+ </div>
  <p>This installer downloads the signed system image. If the download fails, check the network and restart the installer.</p>
 </main>
 <footer>
@@ -242,8 +244,11 @@ function update() {{
     const first = document.querySelector('input[name=shells]:not([disabled])');
     if (first) first.checked = true;
   }}
+  document.getElementById('profile-help').hidden =
+    document.querySelector('input[name=profile]:checked').value === '-';
 }}
 for (const r of document.querySelectorAll('input[name=machine]')) r.addEventListener('change', update);
+for (const r of document.querySelectorAll('input[name=profile]')) r.addEventListener('change', update);
 update();
 </script>
 </body></html>
@@ -295,8 +300,10 @@ def render(table, result, token, nonce):
               + (" <em>(default at sign-in: " + html.escape(table["shells"][sl[0]]["label"]) + ")</em>" if len(sl) > 1 else ""),
         description=html.escape("; ".join(table["shells"][s]["description"] for s in sl))) for sl in lists)
     offered = json.dumps([c["machine"] + "|" + ",".join(c["shells"]) for c in table["compositions"]])
-    profiles = RADIO.format(id="p-custom", name="profile", value="", checked=" checked",
-                            label="Custom daily user", description="Choose the username after installation")
+    profiles = RADIO.format(id="p-none", name="profile", value="-", checked=" checked",
+                            label="No daily profile", description="Use the standard Anaconda account and storage options")
+    profiles += RADIO.format(id="p-custom", name="profile", value="", checked="",
+                             label="Custom daily user", description="Choose the username after installation")
     for name, profile in table["profiles"].items():
         profiles += RADIO.format(id=f"p-profile-{name}", name="profile", value=name, checked="",
                                  label=html.escape(profile["display-name"]), description=name)
@@ -393,12 +400,13 @@ def serve(data, result, args):
             entry = next((e for e in data["compositions"]
                           if e["machine"] == form["machine"][0]
                           and e["shells"] == form["shells"][0].split(",")), None)
-            profile = form["profile"][0] or None
-            if entry is None or (profile is not None and profile not in data["profiles"]):
+            profile = form["profile"][0]
+            if entry is None or (profile not in ("-", "") and profile not in data["profiles"]):
                 return self.send(400, b"not offered")
-            atomic_write(args.choice, json.dumps({
-                "schema": 1, "composition": entry["tag"], "profile": profile,
-            }) + "\n")
+            choice = {"schema": 1, "composition": entry["tag"]}
+            if profile != "-":
+                choice["profile"] = profile or None
+            atomic_write(args.choice, json.dumps(choice) + "\n")
             done = True
             self.send(200, DONE.format(tag=html.escape(entry["tag"])).encode())
 
@@ -428,7 +436,7 @@ def self_check(data, address=None):
     assert url.hostname == "127.0.0.1" and url.scheme == "http"
     entry = data["compositions"][0]
     form = {"token": url.path.strip("/"), "machine": entry["machine"],
-            "shells": ",".join(entry["shells"]), "profile": ""}
+            "shells": ",".join(entry["shells"]), "profile": "-"}
 
     def request(method, path, expected, body=None, headers=None):
         with closing(http.client.HTTPConnection(url.hostname, url.port, timeout=5)) as client:

@@ -33,6 +33,7 @@ const ISO_NAME: &str = "ilex-installer";
 const INSTALLER_INPUTS: &[&str] = &[
     "users",
     "build/compose.py",
+    "build/image_tree.py",
     "installer",
     "crates/xtask/src/iso.rs",
     "crates/ilex-tooling-core/src/installer.rs",
@@ -73,14 +74,15 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
-    let table = installer::table(&ws.root, args.testing_tag.as_deref())?;
     if args.check_registry {
+        let table = installer::table(&ws.root, args.testing_tag.as_deref())?;
         if !check_registry(&table)? {
             std::process::exit(3);
         }
         return Ok(());
     }
     if args.due {
+        let table = validated_table(&ws.root, args.testing_tag.as_deref())?;
         return due(ws, &args, &table);
     }
     cmd::require("podman")?;
@@ -102,11 +104,31 @@ pub struct Build<'a> {
     pub output_dir: Option<&'a Path>,
 }
 
+fn validated_table(root: &Path, testing_tag: Option<&str>) -> Result<installer::Table> {
+    let mut table = installer::table(root, testing_tag)?;
+    let output = cmd::output(
+        Command::new("python3")
+            .args([
+                "-I",
+                "-B",
+                "-c",
+                "import runpy,sys; sys.path.insert(0, 'build'); runpy.run_path('build/compose.py', run_name='__main__')",
+                "installer-profiles",
+                "--context",
+                ".",
+            ])
+            .current_dir(root),
+    )
+    .context("validating installer profiles with the image catalogue")?;
+    table.profiles = serde_json::from_str(&output).context("reading validated installer profiles")?;
+    Ok(table)
+}
+
 /// Build the installer container and the ISO and return the path of the ISO;
 /// its checksum and the release notes are written next to it.
 pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
     ws.ensure_state()?;
-    let table = installer::table(&ws.root, spec.testing_tag)?;
+    let table = validated_table(&ws.root, spec.testing_tag)?;
     let out_dir = spec
         .output_dir
         .map_or_else(|| ws.state_dir().join("iso"), Path::to_path_buf);

@@ -31,6 +31,7 @@ use std::{
 };
 
 const GUEST: &str = include_str!("encrypted/guest.py");
+pub(crate) const LOCAL_SOURCE: &str = include_str!("encrypted/source.py");
 const PRIVACY: &str = include_str!("encrypted/privacy.py");
 const DIAGNOSTICS: &str = include_str!("encrypted/diagnostics.py");
 const LOG_STREAM: &str = include_str!("encrypted/log_stream.py");
@@ -486,7 +487,7 @@ fn checkpoint() -> Result<()> {
     )
 }
 
-struct Registry {
+pub(crate) struct Registry {
     id: String,
     owner: String,
 }
@@ -507,7 +508,7 @@ impl Drop for Registry {
         }
     }
 }
-fn registry(ws: &Workspace, image: &str, work: &Path) -> Result<(Registry, Value)> {
+pub(crate) fn registry(ws: &Workspace, image: &str, work: &Path) -> Result<(Registry, Value)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     drop(listener);
@@ -704,7 +705,7 @@ impl Drop for Fixture {
     }
 }
 
-fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Secret)> {
+fn seed(work: &Path, config: &Value, maintenance: Option<&Secret>) -> Result<(PathBuf, Secret)> {
     let dir = work.join("seed");
     fs::create_dir(&dir)?;
     let mut passphrase = vec![0u8; 48];
@@ -713,8 +714,12 @@ fn seed(work: &Path, config: &Value) -> Result<(PathBuf, Secret)> {
         *byte = b'a' + *byte % 26;
     }
     fs::write(dir.join("passphrase"), &passphrase)?;
+    if let Some(maintenance) = maintenance {
+        fs::write(dir.join("maintenance-password"), maintenance.bytes())?;
+    }
     fs::write(dir.join("config.json"), serde_json::to_vec(config)?)?;
     fs::write(dir.join("guest.py"), GUEST)?;
+    fs::write(dir.join("source.py"), LOCAL_SOURCE)?;
     fs::write(dir.join("privacy.py"), PRIVACY)?;
     fs::write(dir.join("diagnostics.py"), DIAGNOSTICS)?;
     fs::write(dir.join("log_stream.py"), LOG_STREAM)?;
@@ -811,7 +816,7 @@ if ip route get 1.1.1.1 >/dev/null 2>&1; then exit 1; fi
 # directory before the strict credential scan traverses the live /tmp.
 systemctl stop systemd-localed.service
 %end
-user --name=ilexmaint --groups=wheel --lock
+%include /run/ilex-encrypted-test/maintenance.ks
 {ks}
 "#
         )
@@ -2908,8 +2913,13 @@ fn run_fixture(
             artifacts.join("candidate.json"),
             serde_json::to_vec_pretty(&expected)?,
         )?;
-        let (seed_path, passphrase) = seed(&work, &expected)?;
-        credentials = fingerprints(&[&passphrase]);
+        let maintenance = profile_setup.then(profile_setup::secret).transpose()?;
+        let (seed_path, passphrase) = seed(&work, &expected, maintenance.as_ref())?;
+        credentials = if let Some(maintenance) = &maintenance {
+            fingerprints(&[&passphrase, maintenance])
+        } else {
+            fingerprints(&[&passphrase])
+        };
         spec.additional_disks.push(ilex_devkit::core::AttachedDisk {
             path: seed_path.clone(),
             format: ilex_devkit::core::DiskFormat::Raw,
@@ -2946,7 +2956,9 @@ fn run_fixture(
         stage = "installer_evidence";
         let recovery =
             recovery_secret(&seed_path, &work).context("read installer recovery envelope")?;
-        credentials = fingerprints(&[&passphrase, &recovery]);
+        let mut installed_secrets = vec![&passphrase, &recovery];
+        installed_secrets.extend(maintenance.as_ref());
+        credentials = fingerprints(&installed_secrets);
         if layout_refusal {
             let interrupted = recovery_secret_named(&seed_path, &work, "layout-interrupted.oaep")?;
             ensure!(
@@ -2986,10 +2998,10 @@ fn run_fixture(
                 "one-free-slot TPM completion proof incomplete"
             );
         }
-        let mut export_fingerprints = vec![
-            private_fingerprint(&passphrase),
-            private_fingerprint(&recovery),
-        ];
+        let mut export_fingerprints: Vec<_> = installed_secrets
+            .into_iter()
+            .map(private_fingerprint)
+            .collect();
         let recorded: Value =
             serde_json::from_slice(&extract(&seed_path, &artifacts, "credentials.json")?)?;
         ensure!(
@@ -3049,7 +3061,7 @@ fn run_fixture(
                 scan["secret_found"] == false
                     && scan["journal_scanned"] == true
                     && scan["read_errors"] == 0
-                    && scan["credentials_checked"] == 2,
+                    && scan["credentials_checked"] == if profile_setup { 3 } else { 2 },
                 "private guest secret scan failed"
             );
         }
@@ -3066,14 +3078,14 @@ fn run_fixture(
                 "offline app preload did not exercise the failure path"
             );
             let daily = profile_setup::secret()?;
-            let maintenance = profile_setup::secret()?;
-            credentials = fingerprints(&[&passphrase, &recovery, &daily, &maintenance]);
+            let maintenance = maintenance.as_ref().context("installer maintenance credential missing")?;
+            credentials = fingerprints(&[&passphrase, &recovery, maintenance, &daily]);
             let profile_result = profile_setup::run(
                 fixture,
                 &artifacts,
                 &passphrase,
                 &daily,
-                &maintenance,
+                maintenance,
                 &credentials,
                 &expected,
             );
@@ -3082,7 +3094,6 @@ fn run_fixture(
             }
             profile_result?;
             export_fingerprints.push(private_fingerprint(&daily));
-            export_fingerprints.push(private_fingerprint(&maintenance));
             return finish(
                 fixture,
                 &iso,

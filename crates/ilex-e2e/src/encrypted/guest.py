@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import resource
+import runpy
 import select
 import shlex
 import signal
@@ -168,28 +169,20 @@ def prepare():
             subprocess.run(['umount', str(mount)], check=True)
     # Only the isolated test registry gains another signing authority. The
     # shipped default reject and production repository requirements remain.
-    policy_path = pathlib.Path('/etc/containers/policy.json')
-    policy = json.loads(policy_path.read_text())
-    assert policy['default'] == [{'type': 'reject'}]
-    policy['transports'].setdefault('docker', {})[config['repository']] = [{
-        'type': 'sigstoreSigned', 'keyPath': str(SEED / 'test.pub'),
-        'signedIdentity': {'type': 'matchRepository'},
-    }]
-    policy_path.write_text(json.dumps(policy))
-    pathlib.Path('/etc/containers/registries.conf.d/99-encrypted-test.conf').write_text(
-        '[[registry]]\nlocation = ' + json.dumps(config['repository']) + '\ninsecure = true\n')
-    pathlib.Path('/etc/containers/registries.d/encrypted-test.yaml').write_text(
-        'docker:\n  ' + json.dumps(config['repository']) + ':\n    use-sigstore-attachments: true\n')
-    bootc = pathlib.Path('/tmp/ilex-bootc.ks')
-    text = bootc.read_text()
-    text, count = re.subn(r'--source-imgref\s+registry:\S+',
-                         '--source-imgref registry:' + config['source'], text)
-    assert count == 1
-    bootc.write_text(text)
+    runpy.run_path(str(SEED / 'source.py'))['override_source'](SEED, config)
     # The root credential is generated at runtime, and the only key-bearing
     # include is in the live RAM filesystem. Input ks.cfg contains no secret.
     passphrase = (SEED / 'passphrase').read_bytes()
     assert re.fullmatch(b'[a-z]{48}', passphrase)
+    if config.get('profile_setup'):
+        maintenance = (SEED / 'maintenance-password').read_bytes()
+        assert re.fullmatch(b'[a-z]{48}', maintenance)
+        crypted = subprocess.run(['openssl', 'passwd', '-6', '-stdin'],
+                                 input=maintenance + b'\n', capture_output=True, check=True).stdout.strip()
+        assert re.fullmatch(rb'\$6\$[./a-zA-Z0-9]+\$[./a-zA-Z0-9]+', crypted)
+        answer = PRIVATE / 'maintenance.ks'
+        with open(answer, 'xb', opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
+            file.write(b'user --name=ilexmaint --groups=wheel --iscrypted --password=' + crypted + b'\n')
     storage = PRIVATE / 'storage.ks'
     if config.get('layout_refusal'):
         # A normal Anaconda-managed LVM root over a single LUKS2 device. The
@@ -799,7 +792,10 @@ def check_and_record_credentials(passphrase, recovery):
     finally:
         check.unlink(missing_ok=True)
         check_dir.rmdir()
-    fingerprints = [matcher['fingerprint'](value) for value in [passphrase, recovery]]
+    credentials = [passphrase, recovery]
+    if (SEED / 'maintenance-password').exists():
+        credentials.append((SEED / 'maintenance-password').read_bytes())
+    fingerprints = [matcher['fingerprint'](value) for value in credentials]
     (PUBLIC / 'credentials.json').write_text(json.dumps(fingerprints))
 
 
@@ -966,6 +962,7 @@ def finish():
     root = pathlib.Path('/mnt/sysroot')
     config = json.loads((SEED / 'config.json').read_text())
     (PRIVATE / 'storage.ks').unlink(missing_ok=True)
+    (PRIVATE / 'maintenance.ks').unlink(missing_ok=True)
     for name, command in [
         ('probe.json', ['ilex-enroll', 'probe', '--json']),
         ('versions.txt', ['cat', '/usr/lib/ilex/security/tools.json']),

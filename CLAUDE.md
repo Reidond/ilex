@@ -2306,9 +2306,10 @@ ilexctl iso --due          # is a new ISO due? (reads the latest installer relea
 
 ### Installer profile setup
 
-The pre-Anaconda chooser offers an installed public profile or a custom
-daily user. Custom is the default. The choice does not change the image tag.
-Enable LUKS2 in Anaconda and create a distinct local maintenance administrator
+The pre-Anaconda chooser offers an installed public profile, a custom
+daily user, or No daily profile. No daily profile is the default and uses
+Anaconda's standard account and storage options. For daily setup, enable
+LUKS2 in Anaconda and create a distinct local maintenance administrator
 such as `ilexmaint`. The installer reserves a selected profile's username for
 the daily home. On a machine without eligible TPM enrollment, unlock the
 installed disk with the install passphrase or saved recovery key.
@@ -2316,18 +2317,23 @@ installed disk with the install passphrase or saved recovery key.
 On first boot, sign in to the maintenance account and run
 `sudo ilexctl home setup` in a terminal. For a custom daily user, supply
 `--name NAME` and optionally `--disk-size GiB` (default 20). Supply a
-distinct password at homectl's prompts. If setup is interrupted, run the same
-command without options to resume. Setup runs offline and leaves the
+distinct password at homectl's prompts. If setup is interrupted, rerun the
+command. Correct the custom username or capacity while no home exists.
+After creation, enter the daily password to verify the home and resume.
+Setup runs offline and leaves the
 maintenance login available on error. The selected public profile is applied
 as the daily user on the first authenticated login. Profile apps remain opt-in.
 See [the handoff contract](installer/setup/README.md).
 
-The local acceptance trials are `iso::profile_chooser` and
-`security::installer_profile_setup`. The second uses an exact ISO and an
+The local acceptance trials are `iso::chooser`, `iso::profile_chooser`,
+`iso::install_no_profile` and `security::installer_profile_setup`.
+The latter uses an exact ISO and an
 isolated, signed candidate selected with the installed machine and GNOME.
 It exercises passphrase-only boot, a blocked setup retry, a local
-username collision, transaction reconciliation and authenticated profile
-application without network access. It does not establish Secure Boot or
+username collision, password login as the installer-created maintenance
+account, custom capacity correction, damaged-home refusal, transaction
+reconciliation and authenticated profile application without network
+access. It does not establish Secure Boot or
 TPM hardware qualification.
 For the profile trial, set `ILEX_PRIVATE_FINGERPRINTS` to a fresh private
 directory outside the artifacts. Seal the successful export with

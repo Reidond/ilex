@@ -251,7 +251,7 @@ def publications(path, data):
         fail(path, "installer", "must name a published generic composition with at least one shell")
 
 
-def user_profiles(ctx, names, generated):
+def user_profiles(ctx, names, generated=None):
     """Public templates, never homed records or executable build inputs.
 
     Deliberately small v1 dotfile/settings allowlists. Extend them by review,
@@ -259,6 +259,7 @@ def user_profiles(ctx, names, generated):
     Every read (including manifests and ancestors) is descriptor/no-follow.
     """
     catalogue = []
+    public = {}
     with Tree(ctx, "profile inputs") as source:
         for profile in names:
             prefix = f"users/{profile}"
@@ -362,12 +363,25 @@ def user_profiles(ctx, names, generated):
                 ):
                     fail(path, relative, "contains forbidden control or credential material")
                 files[target] = hashlib.sha256(raw).hexdigest()
-                generated.write(f"usr/share/ilex/{prefix}/home/{target}", raw)
-            payload = json_bytes({**data, "files": files, "settings": settings, "apps": apps})
-            generated.write(f"usr/share/ilex/{prefix}/user.json", payload)
-            catalogue.append({"id": profile, "schema": 1, "revision": data["revision"],
-                              "sha256": hashlib.sha256(payload).hexdigest()})
-    generated.write("usr/share/ilex/users.json", json_bytes({"schema": 1, "profiles": catalogue}))
+                if generated is not None:
+                    generated.write(f"usr/share/ilex/{prefix}/home/{target}", raw)
+            if generated is not None:
+                payload = json_bytes({**data, "files": files, "settings": settings, "apps": apps})
+                generated.write(f"usr/share/ilex/{prefix}/user.json", payload)
+                catalogue.append({"id": profile, "schema": 1, "revision": data["revision"],
+                                  "sha256": hashlib.sha256(payload).hexdigest()})
+            public[profile] = {"schema": data["schema"], "display-name": display}
+    if generated is not None:
+        generated.write("usr/share/ilex/users.json", json_bytes({"schema": 1, "profiles": catalogue}))
+    return public
+
+
+def installer_profiles(args):
+    with Tree(args.context, "profile inputs") as source:
+        raw = source.read("image.toml", max_bytes=PROFILE_INPUT_LIMIT)
+    data = tomllib.loads(raw.decode("utf-8"))
+    names = selected("image.toml", "users", data.get("users", []))
+    sys.stdout.buffer.write(json_bytes(user_profiles(args.context, names)))
 
 
 def image(args):
@@ -448,9 +462,11 @@ def main():
     layer = commands.add_parser("machine")
     layer.add_argument("--dir", type=Path, required=True)
     layer.add_argument("--out", type=Path, required=True)
+    installer = commands.add_parser("installer-profiles")
+    installer.add_argument("--context", type=Path, required=True)
     args = parser.parse_args()
     try:
-        (image if args.command == "image" else machine)(args)
+        {"image": image, "machine": machine, "installer-profiles": installer_profiles}[args.command](args)
     except (ValueError, OSError) as error:
         sys.exit(f"compose: {error}")
 

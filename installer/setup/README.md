@@ -36,7 +36,8 @@ shared from another source directory, add that directory to
 
 The chooser's separate `/run/ilex-installer/choice` record is schema 1 with
 `composition` and an optional `profile` field. An explicit null profile
-requests custom setup. The chooser writes it atomically and `apply` validates
+requests custom setup. No daily profile omits the field and keeps Anaconda's
+standard account and storage options. The chooser writes it atomically and `apply` validates
 it against the generated catalogue again. Kickstarts may still write a plain
 composition tag or an old two-field record. The chooser handles no passwords,
 passphrases or recovery material.
@@ -44,8 +45,10 @@ passphrases or recovery material.
 `ilexctl home setup` checks named profile metadata against the installed
 image's catalogue and payload hash. It records a nonsecret intent in
 `/var/lib/ilex/home-setup/state.json` before invoking the existing homectl
-creation path. A local or unrelated homed account with the requested name
-is refused. A retry accepts a committed home only when homed reports the
-allocated LUKS UUID in its machine binding and the expected backing file
-exists. The profile service matches the recorded UID and UUID on
+creation path. Capacity is checked before saving the intent. A custom intent
+can be edited while it has no account, backing image or home directory.
+A local or unrelated homed account with the requested name is refused. To
+resume a created home, setup checks the allocated LUKS UUID and asks homed
+to unlock and verify it with its native password prompt. The profile service
+matches the recorded UID and UUID on
 authenticated activation and applies the profile as the daily user.

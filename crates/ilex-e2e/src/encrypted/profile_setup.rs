@@ -119,17 +119,41 @@ if mountpoint -q /home/andriishafar; then exit 1; fi
 state=/var/lib/ilex/home-setup/state.json
 cp "$state" /run/ilex-complete-state.json
 python3 -c 'import json,sys; p=sys.argv[1]; s=json.load(open(p)); s["uid"]=None; open(p,"w").write(json.dumps(s))' "$state"
-ilexctl home setup </dev/null | grep -F 'is ready'
-cmp "$state" /run/ilex-complete-state.json
+cp "$state" /run/ilex-pending-state.json
+printf '%s\n' 'Run sudo ilexctl home setup.' > /etc/issue.d/90-ilex-home-setup.issue
+# Keep the homed record and a nonempty image at the original pathname.
+image=/var/home/andriishafar.home
+mv "$image" /var/home/.ilex-test-intact
+head -c 4096 /var/home/.ilex-test-intact > "$image"
+test "$(stat -c %s "$image")" = 4096
+homectl inspect andriishafar --json=short | python3 -c 'import json,sys; assert json.load(sys.stdin)["userName"] == "andriishafar"'
+"#)?;
+    let damaged = crate::homed::guest(
+        vm,
+        json!({"action":"installer-profile-damaged", "secrets":[daily]}),
+    );
+    vm.ssh_ok("mv -f /var/home/.ilex-test-intact /var/home/andriishafar.home")?;
+    damaged?;
+    vm.ssh_ok(
+        r#"set -eu
+cmp /var/lib/ilex/home-setup/state.json /run/ilex-pending-state.json
+test -e /etc/issue.d/90-ilex-home-setup.issue
 chvt 8
 TERM=linux setterm --blank poke < /dev/tty8 > /dev/tty8
 printf '\033[2J\033[3J\033[H\033[?25l' > /dev/tty8
-(
-    set -x
-    ilexctl home setup </dev/null
-) > /dev/tty8 2>&1
+"#,
+    )?;
+    crate::homed::guest(
+        vm,
+        json!({"action":"installer-profile-resume", "secrets":[daily]}),
+    )?;
+    vm.ssh_ok(
+        r#"set -eu
+cmp /var/lib/ilex/home-setup/state.json /run/ilex-complete-state.json
+test ! -e /etc/issue.d/90-ilex-home-setup.issue
 grep -aFq 'Daily home andriishafar is ready' /dev/vcs8
-"#)?;
+"#,
+    )?;
     let (setup_screen, _) = ctl
         .wait_screen(&ilex_vmctl::WaitCond::nonblank(), Duration::from_secs(30))
         .context("waiting for the daily home setup console to render")?;
@@ -153,11 +177,58 @@ done
     .context("switching to the GDM greeter")?;
     thread::sleep(Duration::from_secs(3));
     ctl.save_screenshot(&artifacts.join("gdm.png"))?;
+    custom_capacity_retry(vm, maintenance, daily)?;
     let proof = json!({"offline":true, "homed_unavailable_retry":true, "local_username_refused":true,
-        "reconciled_original_home":true, "authenticated_profile_application":true});
+        "installer_maintenance_password":true, "reconciled_original_home":true,
+        "authenticated_profile_application":true, "damaged_home_refused":true,
+        "custom_capacity_retry":true});
     fs::write(
         artifacts.join("profile-proof.json"),
         serde_json::to_vec_pretty(&proof)?,
+    )?;
+    Ok(())
+}
+
+fn custom_capacity_retry(vm: &qemu::Vm, maintenance: &str, daily: &str) -> Result<()> {
+    vm.ssh_ok(r#"set -eu
+# The disposable guest has already proven and captured the named profile.
+mv /var/lib/ilex/home-setup/state.json /run/ilex-named-state.json
+python3 - <<'PY'
+import json,pathlib
+path=pathlib.Path('/etc/ilex/setup.json')
+data=json.loads(path.read_bytes())
+data['profile']={'id':None,'schema':None,'mode':'custom'}
+path.write_text(json.dumps(data))
+PY
+if result=$(ilexctl home setup --name ilexcustom --disk-size 1048576 </dev/null 2>&1); then exit 1; fi
+printf '%s\n' "$result" | grep -F 'insufficient space'
+test ! -e /var/lib/ilex/home-setup/state.json
+test ! -e /var/home/ilexcustom.home
+# Model a saved intent from before creation began, including older intents
+# that recorded an oversized request.
+python3 - <<'PY'
+import json,pathlib,uuid
+state={'schema':1,'profile':{'id':None,'schema':None,'mode':'custom'},
+       'name':'ilexcustom','size':1048576,'luks_uuid':uuid.uuid4().hex,'uid':None}
+pathlib.Path('/var/lib/ilex/home-setup/state.json').write_text(json.dumps(state))
+PY
+"#)?;
+    crate::homed::guest(
+        vm,
+        json!({"action":"installer-custom-retry", "secrets":[maintenance, daily]}),
+    )?;
+    vm.ssh_ok(
+        r#"set -eu
+python3 - <<'PY'
+import json
+s=json.load(open('/var/lib/ilex/home-setup/state.json'))
+assert s['name']=='ilexcustom2' and s['size']==2 and s['uid'] is not None
+PY
+test -f /var/home/ilexcustom2.home
+test ! -e /var/home/ilexcustom.home
+if result=$(ilexctl home setup --name ilexcustom2 --disk-size 3 </dev/null 2>&1); then exit 1; fi
+printf '%s\n' "$result" | grep -F 'already recorded'
+"#,
     )?;
     Ok(())
 }

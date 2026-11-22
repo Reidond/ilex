@@ -1,7 +1,9 @@
 //! First boot creates one local homed identity. A preallocated LUKS UUID
 //! binds a resumed transaction to its own home, even across a lost reply.
 
-use super::{CreateArgs, SetupArgs, SetupIdentity, create_inner, parse_real_name, valid_name};
+use super::{
+    CreateArgs, SetupArgs, SetupIdentity, check_capacity, create_inner, parse_real_name, valid_name,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -214,6 +216,44 @@ fn home_uid(intent: &Intent) -> Result<Option<u64>> {
     Ok(uid)
 }
 
+fn new_uuid() -> Result<String> {
+    fs::read_to_string("/proc/sys/kernel/random/uuid")
+        .map(|uuid| uuid.trim().replace('-', ""))
+        .map_err(|e| e.to_string())
+}
+
+fn verify_existing_home(name: &str) -> Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err("Run setup in a terminal to unlock and verify the existing daily home.".into());
+    }
+    println!("Unlock the daily home {name} to verify it.");
+    // Hold a homed reference while testing the mounted home. Homed releases
+    // it when verification exits and retains any other sessions' references.
+    let status = Command::new("/usr/bin/timeout")
+        .args([
+            "--foreground",
+            "--kill-after=5s",
+            "5m",
+            "/usr/bin/homectl",
+            "with",
+            name,
+            "/usr/bin/mountpoint",
+            "--quiet",
+            ".",
+        ])
+        .env_remove("PASSWORD")
+        .env_remove("NEWPASSWORD")
+        .env_remove("SYSTEMD_PLEASE_SUSPEND_HOME")
+        .status()
+        .map_err(|e| format!("Starting daily home verification: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Could not verify the daily home {name}. Check its password or restore its backing image, then retry setup."
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn run(args: SetupArgs) -> Result<()> {
     if command("/usr/bin/id", &["-u"])?.stdout != b"0\n" {
         return Err("Run sudo ilexctl home setup from the maintenance account.".into());
@@ -268,34 +308,36 @@ pub(super) fn run(args: SetupArgs) -> Result<()> {
         {
             return Err("Existing setup state does not match the installer selection.".into());
         }
-        if args.name.as_ref().is_some_and(|name| *name != intent.name)
-            || args.disk_size.is_some_and(|size| size != intent.size)
-        {
-            return Err(format!(
-                "Setup is already recorded for {} ({} GiB). Omit the options to resume.",
-                intent.name, intent.size
-            ));
-        }
         intent
     } else {
         let (name, size) = if let Some(profile) = &profile {
             (profile.username.clone(), profile.disk_size_gib)
         } else {
-            (args.name.ok_or("Choose a daily username with sudo ilexctl home setup --name NAME. Use --disk-size to set its capacity.")?,
+            (args.name.clone().ok_or("Choose a daily username with sudo ilexctl home setup --name NAME. Use --disk-size to set its capacity.")?,
              args.disk_size.unwrap_or(20))
         };
-        let uuid = fs::read_to_string("/proc/sys/kernel/random/uuid").map_err(|e| e.to_string())?;
         Intent {
             schema: 1,
             profile: selected,
             name,
             size,
-            luks_uuid: uuid.trim().replace('-', ""),
+            luks_uuid: new_uuid()?,
             uid: None,
         }
     };
     let uid = match home_uid(&intent)? {
-        Some(uid) => uid,
+        Some(uid) => {
+            if args.name.as_ref().is_some_and(|name| *name != intent.name)
+                || args.disk_size.is_some_and(|size| size != intent.size)
+            {
+                return Err(format!(
+                    "Setup is already recorded for {} ({} GiB). Omit the options to resume.",
+                    intent.name, intent.size
+                ));
+            }
+            verify_existing_home(&intent.name)?;
+            uid
+        }
         None if intent.uid.is_some() => {
             return Err(
                 "The previously configured home is missing. Restore it before retrying setup."
@@ -303,6 +345,17 @@ pub(super) fn run(args: SetupArgs) -> Result<()> {
             );
         }
         None => {
+            // An intent without a registered account, backing file or home
+            // directory can be corrected. Recheck the new name before saving.
+            if let Some(name) = args.name.filter(|name| *name != intent.name) {
+                intent.name = name;
+                intent.luks_uuid = new_uuid()?;
+                if home_uid(&intent)?.is_some() {
+                    return Err("The requested daily home already exists.".into());
+                }
+            }
+            intent.size = args.disk_size.unwrap_or(intent.size);
+            check_capacity(intent.size)?;
             if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
                 return Err(
                     "Open a terminal as the maintenance administrator and rerun setup.".into(),
@@ -339,8 +392,14 @@ pub(super) fn run(args: SetupArgs) -> Result<()> {
                 }),
             );
             remove(&dir.join("identity.json")).map_err(|e| e.to_string())?;
-            if let Err(error) = result {
-                return Err(format!("{error}. Run setup again to retry."));
+            match result {
+                Ok(0) => (),
+                Ok(_) => {
+                    return Err(
+                        "Daily home creation did not complete. Run setup again to retry.".into(),
+                    );
+                }
+                Err(error) => return Err(format!("{error}. Run setup again to retry.")),
             }
             home_uid(&intent)?
                 .ok_or("Daily home creation did not complete. Run setup again to retry.")?

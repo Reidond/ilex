@@ -144,7 +144,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 pub fn create(args: CreateArgs) -> ExitCode {
-    match create_inner(args, None) {
+    match check_capacity(args.disk_size).and_then(|()| create_inner(args, None)) {
         Ok(0) => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
         Err(error) => {
@@ -160,13 +160,7 @@ struct SetupIdentity<'a> {
     gamemode: bool,
 }
 
-fn create_inner(args: CreateArgs, setup: Option<SetupIdentity<'_>>) -> Result<u8, String> {
-    let CreateArgs {
-        name,
-        disk_size: size,
-        real_name,
-        admin,
-    } = args;
+fn check_capacity(size: u64) -> Result<(), String> {
     // Admission check, not a quota/reservation: keep at least 2 GiB on the
     // backing filesystem after the requested allocation. Homed still handles
     // races/ENOSPC atomically; administrators must budget simultaneous homes.
@@ -183,6 +177,16 @@ fn create_inner(args: CreateArgs, setup: Option<SetupIdentity<'_>>) -> Result<u8
     if available < (size + 2) * 1024 * 1024 * 1024 {
         return Err("insufficient space for the home and a 2 GiB system reserve".into());
     }
+    Ok(())
+}
+
+fn create_inner(args: CreateArgs, setup: Option<SetupIdentity<'_>>) -> Result<u8, String> {
+    let CreateArgs {
+        name,
+        disk_size: size,
+        real_name,
+        admin,
+    } = args;
     // No UID, record import, alternate path or arbitrary homectl arguments.
     // homed atomically rejects local/NSS username and UID collisions itself.
     let mut command = if setup.is_some() {

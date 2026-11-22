@@ -28,6 +28,14 @@ patch("modules/users/users_interface.py",
       "        accounts = UserData.from_structure_list(users)\n"
       "        validate_maintenance(accounts)\n"
       "        self.implementation.set_users(accounts)\n")
+patch("modules/users/users.py", "        return [\n            self.configure_groups_with_task(),\n",
+      "        from pyanaconda.ilex_setup import validate_maintenance\n"
+      "        validate_maintenance(self.users)\n"
+      "        return [\n            self.configure_groups_with_task(),\n")
+patch("modules/users/installation.py", "        self._create_users()\n",
+      "        self._create_users()\n"
+      "        from pyanaconda.ilex_setup import validate_installed_maintenance\n"
+      "        validate_installed_maintenance(self._sysroot, self._user_data_list)\n")
 patch("modules/storage/checker/utils.py", "    check_empty = bool(root and",
       "    from pyanaconda.ilex_setup import validate_storage\n"
       "    validate_storage(storage, root, report_error)\n\n"

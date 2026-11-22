@@ -166,16 +166,17 @@ def checksum(name):
 def main():
     action = request["action"]
     name = request.get("name", "homedtest")
-    if action == "installer-profile-create":
-        # The fixture installed this distinct, locked maintenance account.
-        # Give it a throwaway password over stdin before the real PAM login.
-        run("chpasswd", input="ilexmaint:" + secrets[0] + "\n")
+    if action in {"installer-profile-create", "installer-custom-retry"}:
+        daily = "andriishafar" if action == "installer-profile-create" else "ilexcustom2"
+        options = "" if action == "installer-profile-create" else " --name ilexcustom2 --disk-size 2"
+        first = f"new password for user {daily}:"
+        repeat = rf"new password for user {daily} \(repeat\):"
         try:
             tty("ilexmaint", secrets[0],
-                "sudo -k; sudo -p ILEX-'SUDO:' /usr/bin/ilexctl home setup",
+                "sudo -k; sudo -p ILEX-'SUDO:' /usr/bin/ilexctl home setup" + options,
                 [(r"ILEX-SUDO:", secrets[0]),
-                 (r"new password for user andriishafar:", secrets[1]),
-                 (r"new password for user andriishafar \(repeat\):", secrets[1])])
+                 (first, secrets[1]),
+                 (repeat, secrets[1])])
         except RuntimeError as error:
             # A failed password prompt can include a suggested password.
             # Report only whitelisted stage names and messages.
@@ -184,8 +185,8 @@ def main():
                 r"password[^\r\n]*:": "maintenance login",
                 r"[$#] ": "maintenance shell",
                 r"ILEX-SUDO:": "maintenance sudo",
-                r"new password for user andriishafar:": "new daily home password",
-                r"new password for user andriishafar \(repeat\):": "daily home password confirmation",
+                first: "new daily home password",
+                repeat: "daily home password confirmation",
                 r"ILEX-TTY-DONE:0\r?\n": "verified daily home",
             }
             stage = stages.get(heading.partition(": ")[2], "setup command")
@@ -207,6 +208,21 @@ def main():
             found = ", ".join(message for message in indicators if message in output)
             raise RuntimeError(f"installer profile failed at {stage}" + (f" ({found})" if found else "")) from None
         return "maintenance PAM and sudo login created the separate daily account"
+    if action in {"installer-profile-damaged", "installer-profile-resume"}:
+        argv = ["/usr/bin/ilexctl", "home", "setup"]
+        password = [(r"password[^\r\n]*:", secrets[0])]
+        ready = ("Daily home andriishafar is ready. Sign out of the maintenance account "
+                 "and sign in as andriishafar.")
+        if action == "installer-profile-damaged":
+            status, output = terminal(argv, password, optional=True, allow_failure=True)
+            assert status != 0 and "Could not verify the daily home" in output and ready not in output
+            return "homed refused to verify the damaged daily home"
+        output = terminal(argv, password + [(re.escape(ready), None)])
+        completion = next(line for line in output.splitlines() if line == ready)
+        # Only the checked completion line enters the public screenshot.
+        with open("/dev/tty8", "w") as console:
+            console.write("+ ilexctl home setup\n" + completion + "\n")
+        return "native password prompt verified the restored home and resumed setup"
     if action == "installer-profile-login":
         tty(name, secrets[0], r"""test "$(findmnt -nro FSTYPE --target "$HOME")" = btrfs &&
 systemctl --user is-active dbus.socket &&
