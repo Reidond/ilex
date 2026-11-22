@@ -2329,6 +2329,9 @@ It exercises passphrase-only boot, a blocked setup retry, a local
 username collision, transaction reconciliation and authenticated profile
 application without network access. It does not establish Secure Boot or
 TPM hardware qualification.
+For the profile trial, set `ILEX_PRIVATE_FINGERPRINTS` to a fresh private
+directory outside the artifacts. Seal the successful export with
+`encrypted/privacy.py --seal-profile-export` before attaching screenshots.
 
 ## Conventions
 

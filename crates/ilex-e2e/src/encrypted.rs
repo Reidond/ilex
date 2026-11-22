@@ -2753,6 +2753,10 @@ fn run_fixture(
         !local_diagnostic || std::env::var_os("CI").is_none(),
         "local diagnostic is outside the hosted qualification"
     );
+    ensure!(
+        !profile_setup || std::env::var_os("ILEX_PRIVATE_FINGERPRINTS").is_some(),
+        "set ILEX_PRIVATE_FINGERPRINTS to a private directory for the profile evidence seal"
+    );
     let ws = common::workspace()?;
     let tier = if profile_setup {
         "installer-profile-setup"

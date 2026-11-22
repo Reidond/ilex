@@ -122,20 +122,35 @@ python3 -c 'import json,sys; p=sys.argv[1]; s=json.load(open(p)); s["uid"]=None;
 ilexctl home setup </dev/null | grep -F 'is ready'
 cmp "$state" /run/ilex-complete-state.json
 chvt 8
-printf '\033[2J\033[3J\033[H' > /dev/tty8
-ilexctl home setup </dev/null > /dev/tty8
+TERM=linux setterm --blank poke < /dev/tty8 > /dev/tty8
+printf '\033[2J\033[3J\033[H\033[?25l' > /dev/tty8
+(
+    set -x
+    ilexctl home setup </dev/null
+) > /dev/tty8 2>&1
 grep -aFq 'Daily home andriishafar is ready' /dev/vcs8
 "#)?;
-    ctl.save_screenshot(&artifacts.join("daily-home-setup.png"))?;
+    let (setup_screen, _) = ctl
+        .wait_screen(&ilex_vmctl::WaitCond::nonblank(), Duration::from_secs(30))
+        .context("waiting for the daily home setup console to render")?;
+    fs::write(artifacts.join("daily-home-setup.png"), setup_screen)?;
     crate::homed::guest(
         vm,
         json!({"action":"installer-profile-login", "name":"andriishafar", "secrets":[daily]}),
     )?;
-    vm.ssh_ok(r#"timeout 180 bash -c '
-until loginctl list-sessions --no-legend | grep -q gdm; do sleep 1; done
-vt=$(loginctl show-session "$(loginctl list-sessions --no-legend | awk "/gdm/{print \$1;exit}")" -p VTNr --value)
-test "$vt" -gt 0 && chvt "$vt"
-'"#)?;
+    vm.ssh_ok(
+        r#"timeout 180 bash -c '
+while :; do
+    for session in $(loginctl list-sessions --no-legend | awk "{print \$1}"); do
+        test "$(loginctl show-session "$session" -p Class --value)" = greeter || continue
+        vt=$(loginctl show-session "$session" -p VTNr --value)
+        if [[ "$vt" =~ ^[1-9][0-9]*$ ]] && chvt "$vt"; then exit 0; fi
+    done
+    sleep 1
+done
+'"#,
+    )
+    .context("switching to the GDM greeter")?;
     thread::sleep(Duration::from_secs(3));
     ctl.save_screenshot(&artifacts.join("gdm.png"))?;
     let proof = json!({"offline":true, "homed_unavailable_retry":true, "local_username_refused":true,
