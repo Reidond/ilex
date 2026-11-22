@@ -13,7 +13,7 @@ while IFS=$'\t' read -r tag parent machine shells base base_id previous; do
     selection_shells=$shells
     if [ "$selection_shells" = - ]; then selection_shells=none; fi
     image=$(ILEX_SHELLS="$selection_shells" cargo xtask build --machine "$machine" --on "$base")
-    reference="$IMAGE_REPO:$tag"
+    reference=-
     if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
     cargo xtask changed "$reference" --machine "$machine" --image "$image" > "$RUNNER_TEMP/machine-change"
     cat "$RUNNER_TEMP/machine-change"

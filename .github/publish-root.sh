@@ -30,7 +30,7 @@ config=$(without_key skopeo inspect --raw "docker://$IMAGE_REPO@$STAGED" |
 [ "$config" = "$IMAGE_ID" ] || {
     echo "::error::$TAG staged config $config differs from tested image ID $IMAGE_ID"; exit 2;
 }
-if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$TAG" &&
+if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$TAG" "$SNAPSHOT" &&
    without_key bash .github/publish-head.sh swap "$IMAGE_REPO:$TAG" "$SNAPSHOT"; then
     "$XTASK_PUBLISHER" publish --digest "$STAGED" --as "$TAG" --tested-fingerprint "$FINGERPRINT"
     echo 'published=true' >> "$GITHUB_OUTPUT"

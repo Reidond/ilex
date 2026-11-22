@@ -1,5 +1,5 @@
 #!/bin/bash
-# image RUN REPO TAG, or revision RUN REPO PUBLISHED_SHA_OR_DASH (installer).
+# image RUN REPO TAG [SNAPSHOT], or revision RUN REPO PUBLISHED_SHA_OR_DASH (installer).
 # 0: forward publication; 3: green skip; 2: unreadable state or rewritten history.
 # PATH-injected gh/skopeo provide local controls without registry/API writes.
 set -euo pipefail
@@ -48,26 +48,34 @@ published=-
 case "$mode" in
     image)
         [ -n "$target" ] || fail 'image tag required'
-        inspect=(skopeo inspect --config)
-        case "$target" in localhost:*|127.0.0.1:*|\[::1\]:*) inspect+=(--tls-verify=false) ;; esac
-        error=$(mktemp)
-        if config=$("${inspect[@]}" "docker://$target" 2>"$error"); then
-            rm -f "$error"
-            jq -e 'type == "object" and (.config | type == "object") and
-                (.config.Labels == null or (.config.Labels | type == "object"))' <<<"$config" >/dev/null ||
-                fail "unreadable config/labels on $target"
-            if jq -e '(.config.Labels // {}) | has("org.opencontainers.image.revision")' <<<"$config" >/dev/null; then
-                published=$(jq -er '.config.Labels["org.opencontainers.image.revision"] | select(type == "string")' <<<"$config") ||
-                    fail "unreadable revision label on $target"
-                [[ "$published" =~ ^[0-9a-f]{40}$ ]] || fail "invalid published revision on $target: $published"
+        snapshot=${5:-}
+        inspect_target=$target
+        if [ -n "$snapshot" ] && [ "$snapshot" != - ]; then
+            [[ "$snapshot" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid snapshot for $target: $snapshot"
+            inspect_target="${target%:*}@$snapshot"
+        fi
+        if [ "$snapshot" != - ]; then
+            inspect=(skopeo inspect --config)
+            case "$target" in localhost:*|127.0.0.1:*|\[::1\]:*) inspect+=(--tls-verify=false) ;; esac
+            error=$(mktemp)
+            if config=$("${inspect[@]}" "docker://$inspect_target" 2>"$error"); then
+                rm -f "$error"
+                jq -e 'type == "object" and (.config | type == "object") and
+                    (.config.Labels == null or (.config.Labels | type == "object"))' <<<"$config" >/dev/null ||
+                    fail "unreadable config/labels on $target"
+                if jq -e '(.config.Labels // {}) | has("org.opencontainers.image.revision")' <<<"$config" >/dev/null; then
+                    published=$(jq -er '.config.Labels["org.opencontainers.image.revision"] | select(type == "string")' <<<"$config") ||
+                        fail "unreadable revision label on $target"
+                    [[ "$published" =~ ^[0-9a-f]{40}$ ]] || fail "invalid published revision on $target: $published"
+                fi
+            else
+                # Only explicit registry absence permits a first publish.
+                if [ -n "$snapshot" ] || ! grep -qiE 'manifest unknown|name unknown' "$error"; then
+                    cat "$error" >&2; rm -f "$error"
+                    fail "cannot read published revision from $target"
+                fi
+                rm -f "$error"
             fi
-        else
-            # Only explicit registry absence permits a first publish.
-            if ! grep -qiE 'manifest unknown|name unknown' "$error"; then
-                cat "$error" >&2; rm -f "$error"
-                fail "cannot read published revision from $target"
-            fi
-            rm -f "$error"
         fi
         ;;
     revision) published=$target; target=installer ;;

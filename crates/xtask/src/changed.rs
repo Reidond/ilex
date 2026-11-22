@@ -20,7 +20,7 @@ use crate::registry::{self, Auth, FINGERPRINT_LABEL};
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
-    /// Published image to compare against, e.g. `ghcr.io/reidond/ilex:generic.gnome`
+    /// Published image to compare against. A snapshot of explicit absence is `-`.
     pub reference: String,
     /// Candidate image: tag or reference (defaults to this checkout's image)
     #[arg(long)]
@@ -88,7 +88,11 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     };
 
     let repository = repo_of(&args.reference);
-    let auth = Auth::login(repository)?;
+    let auth = if args.reference == "-" {
+        None
+    } else {
+        Auth::login(repository)?
+    };
     let published = published_fingerprint(&args.reference, repository, &auth, label)?;
     let base_id = if let Some(base) = &args.base {
         if machine::image_machine(base)? != "generic" {
@@ -162,6 +166,9 @@ fn published_fingerprint(
     auth: &Option<Auth>,
     label: &str,
 ) -> Result<Published> {
+    if reference == "-" {
+        return Ok(Published::Missing);
+    }
     let mut skopeo = Command::new("skopeo");
     skopeo.args(["inspect", "--config"]);
     if registry::is_local_registry(repository) {

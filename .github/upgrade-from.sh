@@ -4,13 +4,17 @@
 set -euo pipefail
 repo=${1:?repository required}; tag=${2:?installer composition required}
 bash .github/publication-tag.sh "$tag"
-own=$(bash .github/publish-head.sh digest "$repo:$tag")
+own=${3:?installer snapshot required}
+legacy=${4:?legacy snapshot required}
+for snapshot in "$own" "$legacy"; do
+    [[ "$snapshot" = - || "$snapshot" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
+done
 digest=$own
 # The enforcing VM must check a real signed image, including before the
 # installer's composition has ever been published. Never skip a missing tag.
 echo "ILEX_SIGPOLICY_LEGACY=0" >> "$GITHUB_ENV"
 if [ "$digest" = - ]; then
-    digest=$(bash .github/publish-head.sh digest "$repo:latest")
+    digest=$legacy
     if [ "$digest" != - ]; then
         echo "::notice::no $repo:$tag yet; using legacy :latest as upgrade v1 ($digest)"
         echo "ILEX_SIGPOLICY_LEGACY=1" >> "$GITHUB_ENV"

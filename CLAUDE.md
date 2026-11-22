@@ -1618,17 +1618,22 @@ size: 27" 4K → 150%, 32" 4K → 125%, 24" 1080p and 27" 1440p → 100%, 13.3"
 ## CI publishing
 
 `.github/workflows/publish.yml` runs on merges to `main`, nightly at 03:00 UTC
-and on demand. `image.toml` supplies the installer composition (currently
+and on demand. A small routing job compares the full ref in Bash and acquires
+its concurrency group before calling `publish-pipeline.yml`.
+`image.toml` supplies the installer composition (currently
 `generic.gnome`) and `info --publications` supplies the validated tag, kind,
 parent, machine and ordered shells of every publication. This workflow builds
 the installer root first, then every other root, including `base`.
 The existing legacy tags (`latest`, `candidate`, bare date and `sha-` tags)
 stay in the registry: CI neither moves nor deletes them.
 
-Three paths start together on separate runners:
+A registry job snapshots each published composition by digest before build or
+upgrade starts. A missing tag is recorded as `-`. The same job records legacy
+`latest` once if needed. These values select the build comparisons, upgrade v1,
+layer-reuse pulls and machine inputs. Three paths run on separate runners:
 
-- `build`: snapshot each root tag's own digest (explicit `-` for absence),
-  check selected inputs → build its shell selection → `changed` against that
+- `build`: take the recorded snapshots, check selected inputs → build its
+  shell selection → `changed` against that
   immutable snapshot → rechunk → unsigned
   staging through `publish --stage --as` → `ephemeral::`.
   From its first minute, `vm-prep.sh ephemeral` prepares the VM stack and pulls
@@ -1643,7 +1648,7 @@ Three paths start together on separate runners:
   Every root runs `ephemeral::` and capability checks; only the installer runs
   `upgrade::`. The base shares its update implementation, has no installed v1
   yet, and gets no legacy-desktop upgrade. `tool::` remains a local tier.
-- `upgrade`: `.github/upgrade-from.sh` resolves the installer's tag as v1;
+- `upgrade`: `.github/upgrade-from.sh` selects the installer's snapshot as v1;
   only explicit absence permits legacy `latest` as the first-run fallback.
   Registry/authentication errors are fatal. It records `own` (the installer
   tag's digest or `-`), v1's digest and `exists`. Its cached disk key is
@@ -1674,8 +1679,9 @@ The SHA reference is populated before signing; only after signature verification
 are the moving composition/date tags updated. A failed/cancelled sign can leave
 an unsigned SHA reference, but never moves the composition/date tags to it.
 Main stages as `candidate.X` in the serialized `publish` group. Other refs use
-`publish-<full ref>`: different refs can run together, and a new run replaces
-the pending run in its group. GitHub compares group names case-insensitively.
+`publish-<SHA-256 of the exact ref>`: different refs can run together,
+including names that differ only by case. A new run replaces the pending
+pipeline in its group.
 Branch staging tags are `candidate-<ref slug>-<hash>` per ref and root,
 with the full case-sensitive ref and root in the hash. Runs on the same ref
 reuse those tags. Tags from deleted refs remain until a follow-up adds safe
@@ -1683,7 +1689,7 @@ tag-only cleanup. GHCR's package deletion API removes a whole version, which
 can be shared by multiple tags. The v1-disk group writes no image tag.
 
 Immediately before each publisher, `.github/publish-head.sh image` reads that
-**tag's own** revision and main's head and requires published → run → main
+**tag's snapshotted** revision and main's head and requires published → run → main
 ancestry using the API's `ahead`/`identical` statuses. A tested forward run may
 publish behind main's head when a newer run never started or was cancelled.
 A missing tag/revision permits a first publish, still within main's history.
@@ -1717,14 +1723,15 @@ per-parent result and parent-current guards forbid that.
 the tested-root inventory. Each row
 retains its composition tag, parent tag, machine and shell list. The parent is
 the exact staged/tested digest when changed in this run; main requires it to
-have published. An unchanged main root resolves its current signed tag once,
-even if `test=true` staged an unsigned equivalent. Branches test the staged
-parent. `machine-base.sh` requires root configuration labels, verifies the
+have published. An unchanged main root uses its initial signed digest,
+even if `test=true` staged an unsigned equivalent. Branches use the staged
+digest when available and the initial snapshot otherwise. `machine-base.sh`
+requires root configuration labels, verifies the
 pulled image ID equals the registry config digest and checks generated-file
 and overlay metadata. There is no unlabelled legacy-parent skip: these new
 parent tags can only have been created by the composition publisher.
 
-Planning snapshots each layer's own tag and compares inputs and parent ID using
+Planning uses each layer's initial snapshot and compares inputs and parent ID using
 that immutable reference, without pulling the large root when unchanged. A
 missed machine publication catches up through the parent ID in the machine
 key. Neither unchanged inputs nor a full unchanged fingerprint republish;

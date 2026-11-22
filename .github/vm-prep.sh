@@ -171,21 +171,14 @@ prepare() {
     ILEX_UPGRADE_PREPARE=1 sg libvirt -c "cargo xtask test upgrade::"
 }
 
-pull_root() {
-    local reuse
-    reuse=$(bash .github/publish-head.sh digest "$IMAGE_REPO:$1") || return
-    if [ "$reuse" = - ]; then
-        reuse=$(bash .github/publish-head.sh digest "$IMAGE_REPO:latest") || return
-    fi
-    if [ "$reuse" != - ]; then podman pull --quiet "$IMAGE_REPO@$reuse"; fi
-}
-
 root_pulls() {
-    local tag kind
-    while IFS=$'\t' read -r tag kind _ _ _; do
-        bash .github/publication-tag.sh "$tag" || return
-        [ "$kind" = root ] || continue
-        run "root-pull.$tag" pull_root "$tag"
+    local tag digest
+    while IFS=$'\t' read -r tag digest; do
+        if [ "$digest" = - ]; then
+            skip "root-pull.$tag" "no published root or legacy image at snapshot"
+        else
+            run "root-pull.$tag" podman pull --quiet "$IMAGE_REPO@$digest"
+        fi
     done < "$ILEX_ROOT_PULLS"
 }
 

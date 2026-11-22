@@ -18,8 +18,8 @@ while IFS=$'\t' read -r tag kind _ _ shells; do
     bash .github/publication-tag.sh "$tag"
     [ "$kind" = root ] && [ "$tag" != "$INSTALLER_TAG" ] || continue
     started=$SECONDS
-    snapshot=$(bash .github/publish-head.sh digest "$IMAGE_REPO:$tag")
-    reference="$IMAGE_REPO:$tag"
+    snapshot=$(jq -er --arg tag "$tag" '.[$tag]' <<<"$SNAPSHOTS")
+    reference=-
     if [ "$snapshot" != - ]; then reference="$IMAGE_REPO@$snapshot"; fi
     : > "$RUNNER_TEMP/root-inputs"
     GITHUB_OUTPUT="$RUNNER_TEMP/root-inputs" cargo xtask changed "$reference" --root "$tag" --inputs-only
@@ -47,7 +47,8 @@ while IFS=$'\t' read -r tag kind _ _ shells; do
         image_id="sha256:${image_id#sha256:}"
         stage_tag=$(bash .github/candidate-tag.sh "$tag")
         : > "$RUNNER_TEMP/root-stage"
-        GITHUB_OUTPUT="$RUNNER_TEMP/root-stage" cargo xtask publish "$image_id" --stage --as "$tag" --stage-tag "$stage_tag"
+        GITHUB_OUTPUT="$RUNNER_TEMP/root-stage" cargo xtask publish "$image_id" --stage --as "$tag" \
+            --stage-tag "$stage_tag" --stage-snapshot "$snapshot"
         digest=$(sed -n 's/^digest=//p' "$RUNNER_TEMP/root-stage")
         fingerprint=$(sed -n 's/^fingerprint=//p' "$RUNNER_TEMP/root-stage")
         podman run --rm -i --network=none --entrypoint python3 "$image_id" -I -S - < .github/check-filecaps.py

@@ -48,6 +48,9 @@ pub struct Args {
     /// Staging tag for this root. Main defaults to `candidate.<tag>`.
     #[arg(long, requires = "stage")]
     pub stage_tag: Option<String>,
+    /// Manifest digest used for staging's layer-reuse comparison, or `-` if absent
+    #[arg(long, requires = "stage")]
+    pub stage_snapshot: Option<String>,
     /// Publish the image already in the repository at this digest (what
     /// `--stage` pushed) instead of pushing a local one
     #[arg(long, value_name = "sha256:…")]
@@ -58,6 +61,9 @@ pub struct Args {
     /// Immutable ID recorded before this machine's capability and VM tests
     #[arg(long, conflicts_with_all = ["stage", "digest"])]
     pub tested_image_id: Option<String>,
+    /// Published parent digest recorded by the machine's tests
+    #[arg(long, requires = "tested_image_id")]
+    pub tested_parent_digest: Option<String>,
     /// Root fingerprint recorded by --stage before testing this digest
     #[arg(long, requires = "digest", value_name = "sha256:…")]
     pub tested_fingerprint: Option<String>,
@@ -153,8 +159,15 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
                 &pinned,
                 inspect["Config"]["Labels"][REVISION_LABEL].as_str(),
             )?;
-            let parent =
-                require_layer_parent(ws, &pinned, &inspect, &publication, &repository, &auth)?;
+            let parent = require_layer_parent(
+                ws,
+                &pinned,
+                &inspect,
+                &publication,
+                &repository,
+                &auth,
+                args.tested_parent_digest.as_deref(),
+            )?;
             verify(ws, &parent, &auth, args.verification_key.as_deref())
                 .context("verifying the declared published parent before signing its layer")?;
             let computed = rechunk::fingerprint(ws, &pinned)?;
@@ -255,6 +268,13 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
         bail!("invalid branch staging tag {stage_tag:?}");
     }
     check_tag_length(&format!("{repository}:{stage_tag}"))?;
+    let comparison = &args.as_tag;
+    let previous = match args.stage_snapshot.as_deref() {
+        None => Some(format!("{repository}:{comparison}")),
+        Some("-") => None,
+        Some(digest) if registry::is_digest(digest) => Some(format!("{repository}@{digest}")),
+        Some(value) => bail!("invalid --stage-snapshot {value:?}"),
+    };
     let fingerprint = local_fingerprint(&image_id)?;
     {
         require_fingerprint(&image_id, &fingerprint)?;
@@ -295,8 +315,7 @@ fn stage(ws: &Workspace, args: &Args, repository: &str) -> Result<()> {
         )
     };
     let staged = layers(&pinned)?.unwrap_or_default();
-    let comparison = &args.as_tag;
-    match layers(&format!("{repository}:{comparison}"))? {
+    match previous.as_deref().map(layers).transpose()?.flatten() {
         Some(latest) => {
             let new: Vec<_> = staged
                 .iter()
@@ -399,6 +418,7 @@ fn require_layer_parent(
     row: &config::Publication,
     repository: &str,
     auth: &Option<Auth>,
+    tested_parent_digest: Option<&str>,
 ) -> Result<String> {
     let insecure = registry::is_local_registry(repository);
     let parent = row
@@ -406,10 +426,15 @@ fn require_layer_parent(
         .as_ref()
         .context("layer publication has no parent")?;
     let tag = format!("{repository}:{parent}");
-    let metadata = skopeo_json(&["inspect"], &tag, insecure, auth)?
-        .with_context(|| format!("declared parent {tag} is not published"))?;
-    let digest = metadata["Digest"]
-        .as_str()
+    let metadata;
+    let digest = if let Some(digest) = tested_parent_digest {
+        Some(digest)
+    } else {
+        metadata = skopeo_json(&["inspect"], &tag, insecure, auth)?
+            .with_context(|| format!("declared parent {tag} is not published"))?;
+        metadata["Digest"].as_str()
+    };
+    let digest = digest
         .filter(|digest| registry::is_digest(digest))
         .with_context(|| format!("{tag} has no valid manifest digest"))?;
     let pinned = format!("{repository}@{digest}");

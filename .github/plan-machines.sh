@@ -9,7 +9,7 @@ while IFS=$'\t' read -r tag kind parent machine shells; do
     bash .github/publication-tag.sh "$parent"
     row=$(awk -F '\t' -v parent="$parent" '$1 == parent' "$RUNNER_TEMP/root-rows")
     [ -n "$row" ] || { echo "::error::no tested root row for $parent"; exit 2; }
-    IFS=$'\t' read -r _ _ BASE_CHANGED STAGED _ _ <<<"$row"
+    IFS=$'\t' read -r _ snapshot BASE_CHANGED STAGED _ _ <<<"$row"
     if [ "$GITHUB_REF" = refs/heads/main ] && [ "$BASE_CHANGED" = true ]; then
         published=$(jq -er --arg tag "$parent" \
             '[.[] | select(.tag == $tag) | .published] | if length == 0 then "false" elif length == 1 then .[0] | tostring else error("duplicate publication") end' <<<"$PUBLISHED_ROOTS")
@@ -23,15 +23,15 @@ while IFS=$'\t' read -r tag kind parent machine shells; do
         digest=$STAGED
     else
         # A forced unchanged main run must use its signed parent, not staging.
-        digest=$(bash .github/publish-head.sh digest "$IMAGE_REPO:$parent")
+        digest=$snapshot
     fi
     [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
     base="$IMAGE_REPO@$digest"
     echo "$tag parent: $parent at $base"
     bash .github/machine-base.sh registry "$base" > "$RUNNER_TEMP/base-info"
     base_id=$(sed -n 's/^base_id=//p' "$RUNNER_TEMP/base-info")
-    previous=$(bash .github/publish-head.sh digest "$IMAGE_REPO:$tag")
-    reference="$IMAGE_REPO:$tag"
+    previous=$(jq -er --arg tag "$tag" '.[$tag]' <<<"$SNAPSHOTS")
+    reference=-
     if [ "$previous" != - ]; then reference="$IMAGE_REPO@$previous"; fi
     cargo xtask changed "$reference" --machine "$machine" --inputs-only --base-id "$base_id" > "$RUNNER_TEMP/machine-inputs"
     cat "$RUNNER_TEMP/machine-inputs"

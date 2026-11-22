@@ -20,7 +20,7 @@ while IFS=$'\t' read -r tag parent base image image_id expected changed; do
         record skipped 'fingerprint unchanged'; skipped_count=$((skipped_count + 1)); continue
     fi
     [ "$changed" = true ] || { echo "::error::invalid tested row for ${tag}" >&2; exit 2; }
-    if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$tag"; then :; else
+    if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$tag" "$expected"; then :; else
         rc=$?
         if [ "$rc" = 3 ]; then
             record skipped ancestry; skipped_count=$((skipped_count + 1)); continue
@@ -28,7 +28,7 @@ while IFS=$'\t' read -r tag parent base image image_id expected changed; do
         exit "$rc"
     fi
     # A newer same-commit machine digest must not be replaced by an old tested
-    # list. A whole-job rerun re-plans from current tags and rebuilds/tests.
+    # list. A fresh run takes new snapshots and rebuilds/tests.
     if without_key bash .github/publish-head.sh swap "$IMAGE_REPO:$tag" "$expected"; then :; else
         rc=$?
         if [ "$rc" = 3 ]; then
@@ -41,7 +41,8 @@ while IFS=$'\t' read -r tag parent base image image_id expected changed; do
         echo "::error::${tag} tested parent $base differs from current :$parent $IMAGE_REPO@$current" >&2
         exit 2
     fi
-    "$XTASK_PUBLISHER" publish "$image" --as "$tag" --tested-image-id "$image_id"
+    "$XTASK_PUBLISHER" publish "$image" --as "$tag" --tested-image-id "$image_id" \
+        --tested-parent-digest "${base##*@}"
     record published 'ancestry, registry snapshot and base match'
     published_count=$((published_count + 1))
 done < "$RUNNER_TEMP/tested-machines"
