@@ -3,23 +3,34 @@
 from pathlib import Path
 import sysconfig
 
+PACKAGE = Path(sysconfig.get_path("purelib", vars={"base": "/usr"})) / "pyanaconda"
 
-def insert(module, anchor, lines):
-    path = Path(sysconfig.get_path("purelib")) / "pyanaconda" / module
+
+def patch(module, anchor, replacement):
+    path = PACKAGE / module
     text = path.read_text()
     if text.count(anchor) != 1:
         raise SystemExit(f"Review the ilex validation hook for {module} after the Anaconda update")
-    path.write_text(text.replace(anchor, lines + anchor))
+    updated = text.replace(anchor, replacement)
+    compile(updated, str(path), "exec")
+    path.write_text(updated)
 
 
 # Keep the standard WebUI and account creation. This callback also covers
 # kickstart accounts, including a conflicting username in a pre-answer.
-insert("modules/users/users.py", "        self._users = users\n", """+        from pyanaconda.ilex_setup import validate_users
-        validate_users(users)
-""")
-insert("modules/storage/checker/utils.py", "    check_empty = bool(root and", """+    from pyanaconda.ilex_setup import validate_storage
-    validate_storage(storage, root, report_error)
-
-""")
-target = Path(sysconfig.get_path("purelib")) / "pyanaconda/ilex_setup.py"
+patch("modules/users/users.py", "        self._users = users\n",
+      "        from pyanaconda.ilex_setup import validate_users\n"
+      "        validate_users(users)\n"
+      "        self._users = users\n")
+patch("modules/users/users_interface.py",
+      "        self.implementation.set_users(UserData.from_structure_list(users))\n",
+      "        from pyanaconda.ilex_setup import validate_maintenance\n"
+      "        accounts = UserData.from_structure_list(users)\n"
+      "        validate_maintenance(accounts)\n"
+      "        self.implementation.set_users(accounts)\n")
+patch("modules/storage/checker/utils.py", "    check_empty = bool(root and",
+      "    from pyanaconda.ilex_setup import validate_storage\n"
+      "    validate_storage(storage, root, report_error)\n\n"
+      "    check_empty = bool(root and")
+target = PACKAGE / "ilex_setup.py"
 target.write_bytes(Path("/usr/libexec/ilex-installer/anaconda-policy.py").read_bytes())

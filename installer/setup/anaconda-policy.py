@@ -1,4 +1,4 @@
-"""Installer-only checks. Neither callback reads any credential field."""
+"""Installer-only checks with nonsecret diagnostics."""
 
 import json
 from pathlib import Path
@@ -18,9 +18,20 @@ def validate_users(users):
                          "Choose a different maintenance username, such as ilexmaint.")
 
 
+def requested(profile):
+    return bool(profile.get("id")) or profile.get("mode") == "custom"
+
+
+def validate_maintenance(users):
+    # Anaconda already holds the submitted account properties. Inspect only
+    # whether a password was provided; never copy or format the value.
+    if requested(selection()) and not any(
+            "wheel" in user.groups and not user.lock and user.password for user in users):
+        raise ValueError("Create a local maintenance administrator with a password.")
+
+
 def validate_storage(storage, root, report_error):
-    profile = selection()
-    if root is None or (not profile.get("id") and profile.get("mode") != "custom"):
+    if root is None or not requested(selection()):
         return
 
     def encrypted(device):

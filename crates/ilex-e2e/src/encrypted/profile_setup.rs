@@ -16,6 +16,7 @@ pub(super) fn run(
     artifacts: &Path,
     disk: &Secret,
     daily: &Secret,
+    maintenance: &Secret,
     credentials: &Value,
     expected: &Value,
 ) -> Result<()> {
@@ -85,37 +86,18 @@ test ! -e /var/lib/ilex/home-setup/state.json
 systemctl start systemd-homed
 useradd --no-create-home andriishafar
 if result=$(ilexctl home setup 2>&1); then exit 1; fi
-printf '%s\n' "$result" | grep -F 'distinct names'
+printf '%s\n' "$result" | grep -F 'already a local account'
 test ! -e /var/lib/ilex/home-setup/state.json
 test ! -e /var/home/andriishafar.home
 userdel andriishafar
-chvt 8
-systemd-run --quiet --remain-after-exit --unit=ilex-profile-setup-test \
-    -p StandardInput=tty -p StandardOutput=tty -p StandardError=tty -p TTYPath=/dev/tty8 \
-    --setenv=TERM=linux --setenv=LC_ALL=C /usr/bin/ilexctl home setup
 "#)?;
-    vm.ssh_ok("timeout 90 sh -c 'until grep -aiq password /dev/vcs8; do sleep .2; done'")?;
-    ctl.save_screenshot(&artifacts.join("daily-home-setup.png"))?;
-    type_at_vt(
+    let daily = std::str::from_utf8(daily.bytes())?;
+    let maintenance = std::str::from_utf8(maintenance.bytes())?;
+    crate::homed::guest(
         vm,
-        fixture
-            .console
-            .as_mut()
-            .context("private console missing")?,
-        daily,
-    )?;
-    vm.ssh_ok(r#"timeout 90 sh -c 'until grep -aiEq "repeat|again|reenter" /dev/vcs8; do sleep .2; done'"#)?;
-    type_at_vt(
-        vm,
-        fixture
-            .console
-            .as_mut()
-            .context("private console missing")?,
-        daily,
+        json!({"action":"installer-profile-create", "secrets":[maintenance, daily]}),
     )?;
     vm.ssh_ok(r#"set -eu
-timeout 600 sh -c 'until test "$(systemctl show -p SubState --value ilex-profile-setup-test)" = exited; do test "$(systemctl show -p ActiveState --value ilex-profile-setup-test)" != failed || exit 1; sleep 1; done'
-grep -aFq 'Daily home andriishafar is ready' /dev/vcs8
 test ! -e /etc/issue.d/90-ilex-home-setup.issue
 test ! -e /var/lib/ilex/home-setup/identity.json
 test -f /var/home/andriishafar.home
@@ -128,8 +110,12 @@ cp "$state" /run/ilex-complete-state.json
 python3 -c 'import json,sys; p=sys.argv[1]; s=json.load(open(p)); s["uid"]=None; open(p,"w").write(json.dumps(s))' "$state"
 ilexctl home setup </dev/null | grep -F 'is ready'
 cmp "$state" /run/ilex-complete-state.json
+chvt 8
+printf '\033[2J\033[3J\033[H' > /dev/tty8
+ilexctl home setup </dev/null > /dev/tty8
+grep -aFq 'Daily home andriishafar is ready' /dev/vcs8
 "#)?;
-    let daily = std::str::from_utf8(daily.bytes())?;
+    ctl.save_screenshot(&artifacts.join("daily-home-setup.png"))?;
     crate::homed::guest(
         vm,
         json!({"action":"installer-profile-login", "name":"andriishafar", "secrets":[daily]}),

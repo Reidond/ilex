@@ -2782,6 +2782,31 @@ fn run_fixture(
     let started_unix_seconds = unix_seconds();
     let mut stage = "platform";
     let mut credentials = Value::Null;
+    let finish = |fixture: &mut Fixture,
+                  iso: &Path,
+                  credentials: &Value,
+                  export_fingerprints: &[Value],
+                  stage: &mut &str|
+     -> Result<()> {
+        let iso_hash = cmd::output(Command::new("sha256sum").arg(iso))?;
+        fs::write(artifacts.join("iso-sha256.txt"), iso_hash)?;
+        *stage = "cleanup";
+        // Drop remains the failure-path backstop. On success, propagating
+        // destruction errors prevents a retained private TPM bundle going green.
+        fixture.provider.destroy_owned(&mut fixture.vm)?;
+        *stage = "privacy_export";
+        let scan = artifact_privacy(&[&artifacts, &raw_logs(&artifacts)?], credentials)?;
+        diagnostics(&artifacts, &artifacts.join("diagnostics"), credentials)?;
+        fs::write(
+            artifacts.join("final-artifact-privacy.json"),
+            serde_json::to_vec_pretty(&scan)?,
+        )?;
+        if !local_diagnostic || profile_setup {
+            save_private_fingerprints(tier, export_fingerprints)?;
+        }
+        *stage = "complete";
+        Ok(())
+    };
     let mut active_fixture = None;
     let mut result = (|| -> Result<()> {
         let iso = PathBuf::from(std::env::var_os("ILEX_ISO").context("ILEX_ISO required")?);
@@ -3018,17 +3043,28 @@ fn run_fixture(
         if profile_setup {
             stage = "profile_setup_no_tpm";
             let daily = profile_setup::secret()?;
-            credentials = fingerprints(&[&passphrase, &recovery, &daily]);
+            let maintenance = profile_setup::secret()?;
+            credentials = fingerprints(&[&passphrase, &recovery, &daily, &maintenance]);
             profile_setup::run(
                 fixture,
                 &artifacts,
                 &passphrase,
                 &daily,
+                &maintenance,
                 &credentials,
                 &expected,
             )?;
             export_fingerprints.push(private_fingerprint(&daily));
-        } else if local_diagnostic && !interrupted {
+            export_fingerprints.push(private_fingerprint(&maintenance));
+            return finish(
+                fixture,
+                &iso,
+                &credentials,
+                &export_fingerprints,
+                &mut stage,
+            );
+        }
+        if local_diagnostic && !interrupted {
             stage = "diagnostic_fallback";
             fallback(
                 &ws,
@@ -3056,7 +3092,7 @@ fn run_fixture(
             stage = "diagnostic_complete";
             return Ok(());
         }
-        if !local_diagnostic && !profile_setup {
+        if !local_diagnostic {
             stage = "pcr_mismatch_first_boot";
             fallback(
                 &ws,
@@ -3073,114 +3109,101 @@ fn run_fixture(
                 None,
             )?;
         }
-        if !profile_setup {
-            stage = "recovery_key_boot";
+        stage = "recovery_key_boot";
+        fallback(
+            &ws,
+            &disk,
+            &fixture.spec,
+            &work,
+            &artifacts,
+            &recovery,
+            &credentials,
+            &installer_probe,
+            &original_tokens,
+            &expected,
+            "recovery",
+            Some(&passphrase),
+        )?;
+        if interrupted {
+            stage = "interrupted_completion_repair";
+            let (reissued, repaired_tokens) = interrupted_repair(
+                fixture,
+                &artifacts,
+                &passphrase,
+                &mut credentials,
+                &original_tokens,
+                &expected,
+            )?;
+            export_fingerprints.push(private_fingerprint(&reissued));
+            stage = "reissued_recovery_key_boot";
             fallback(
                 &ws,
                 &disk,
                 &fixture.spec,
                 &work,
                 &artifacts,
-                &recovery,
+                &reissued,
+                &credentials,
+                &installer_probe,
+                &repaired_tokens,
+                &expected,
+                "reissued-recovery",
+                None,
+            )?;
+        } else {
+            stage = "first_installed_boot";
+            fixture.disk_boot()?;
+            let booted = assertions(fixture, &artifacts, &expected, &installer_probe);
+            fixture.logs(&artifacts, "installed")?;
+            booted?;
+            guest_privacy(
+                fixture.vm.running_mut()?,
+                &artifacts,
+                "installed-after-finalisation",
+                &credentials,
+            )?;
+            stage = "cold_restart";
+            poweroff(fixture, &artifacts, "installed")?;
+            fixture.disk_boot()?;
+            let cold = artifacts.join("cold");
+            fs::create_dir_all(&cold)?;
+            assertions(fixture, &cold, &expected, &installer_probe)?;
+            guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
+            fixture.logs(&artifacts, "cold")?;
+            poweroff(fixture, &artifacts, "cold")?;
+            stage = "same_tpm_policy_mismatch";
+            same_tpm_mismatch(
+                &ws,
+                fixture,
+                &artifacts,
+                &passphrase,
+                &credentials,
+                &installer_probe,
+                &original_tokens,
+            )?;
+            stage = "no_tpm_fallback";
+            fallback(
+                &ws,
+                &disk,
+                &fixture.spec,
+                &work,
+                &artifacts,
+                &passphrase,
                 &credentials,
                 &installer_probe,
                 &original_tokens,
                 &expected,
-                "recovery",
-                Some(&passphrase),
+                "no-tpm",
+                None,
             )?;
-            if interrupted {
-                stage = "interrupted_completion_repair";
-                let (reissued, repaired_tokens) = interrupted_repair(
-                    fixture,
-                    &artifacts,
-                    &passphrase,
-                    &mut credentials,
-                    &original_tokens,
-                    &expected,
-                )?;
-                export_fingerprints.push(private_fingerprint(&reissued));
-                stage = "reissued_recovery_key_boot";
-                fallback(
-                    &ws,
-                    &disk,
-                    &fixture.spec,
-                    &work,
-                    &artifacts,
-                    &reissued,
-                    &credentials,
-                    &installer_probe,
-                    &repaired_tokens,
-                    &expected,
-                    "reissued-recovery",
-                    None,
-                )?;
-            } else {
-                stage = "first_installed_boot";
-                fixture.disk_boot()?;
-                let booted = assertions(fixture, &artifacts, &expected, &installer_probe);
-                fixture.logs(&artifacts, "installed")?;
-                booted?;
-                guest_privacy(
-                    fixture.vm.running_mut()?,
-                    &artifacts,
-                    "installed-after-finalisation",
-                    &credentials,
-                )?;
-                stage = "cold_restart";
-                poweroff(fixture, &artifacts, "installed")?;
-                fixture.disk_boot()?;
-                let cold = artifacts.join("cold");
-                fs::create_dir_all(&cold)?;
-                assertions(fixture, &cold, &expected, &installer_probe)?;
-                guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
-                fixture.logs(&artifacts, "cold")?;
-                poweroff(fixture, &artifacts, "cold")?;
-                stage = "same_tpm_policy_mismatch";
-                same_tpm_mismatch(
-                    &ws,
-                    fixture,
-                    &artifacts,
-                    &passphrase,
-                    &credentials,
-                    &installer_probe,
-                    &original_tokens,
-                )?;
-                stage = "no_tpm_fallback";
-                fallback(
-                    &ws,
-                    &disk,
-                    &fixture.spec,
-                    &work,
-                    &artifacts,
-                    &passphrase,
-                    &credentials,
-                    &installer_probe,
-                    &original_tokens,
-                    &expected,
-                    "no-tpm",
-                    None,
-                )?;
-            }
         }
-        let iso_hash = cmd::output(Command::new("sha256sum").arg(&iso))?;
-        fs::write(artifacts.join("iso-sha256.txt"), iso_hash)?;
-        stage = "cleanup";
-        // Drop remains the failure-path backstop. On success, propagating
-        // destruction errors prevents a retained private TPM bundle going green.
-        fixture.provider.destroy_owned(&mut fixture.vm)?;
-        stage = "privacy_export";
-        let scan = artifact_privacy(&[&artifacts, &raw_logs(&artifacts)?], &credentials)?;
-        diagnostics(&artifacts, &artifacts.join("diagnostics"), &credentials)?;
-        fs::write(
-            artifacts.join("final-artifact-privacy.json"),
-            serde_json::to_vec_pretty(&scan)?,
-        )?;
-        if !local_diagnostic || profile_setup {
-            save_private_fingerprints(tier, &export_fingerprints)?;
-        }
-        stage = "complete";
-        Ok(())
+        finish(
+            fixture,
+            &iso,
+            &credentials,
+            &export_fingerprints,
+            &mut stage,
+        )
     })();
     let guest_failure = result.as_ref().err().map(|error| {
         error

@@ -166,6 +166,19 @@ def checksum(name):
 def main():
     action = request["action"]
     name = request.get("name", "homedtest")
+    if action == "installer-profile-create":
+        # The fixture installed this distinct, locked maintenance account.
+        # Give it a throwaway password over stdin before the real PAM login.
+        run("chpasswd", input="ilexmaint:" + secrets[0] + "\n")
+        try:
+            tty("ilexmaint", secrets[0],
+                "sudo -k; sudo -p ILEX-'SUDO:' /usr/bin/ilexctl home setup",
+                [(r"ILEX-SUDO:", secrets[0]),
+                 (r"new password for user andriishafar:", secrets[1]),
+                 (r"new password for user andriishafar \(repeat\):", secrets[1])])
+        except RuntimeError:
+            raise RuntimeError("maintenance login or homectl setup failed; terminal output suppressed") from None
+        return "maintenance PAM and sudo login created the separate daily account"
     if action == "installer-profile-login":
         tty(name, secrets[0], r"""test "$(findmnt -nro FSTYPE --target "$HOME")" = btrfs &&
 systemctl --user is-active dbus.socket &&

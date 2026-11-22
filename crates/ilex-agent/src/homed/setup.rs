@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{ErrorKind, IsTerminal, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
     process::{Command, Output, Stdio},
 };
@@ -70,6 +70,7 @@ fn save(name: &str, data: &impl Serialize) -> Result<()> {
             .create_new(true)
             .mode(0o644)
             .open(&temp)?;
+        file.set_permissions(fs::Permissions::from_mode(0o644))?;
         serde_json::to_writer(&mut file, data)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
@@ -170,7 +171,13 @@ fn home_uid(intent: &Intent) -> Result<Option<u64>> {
         Err(e) => return Err(format!("Checking the daily home: {e}")),
     };
     if !account_exists(name, false)? && image.is_none() {
-        return Ok(None);
+        return match fs::symlink_metadata(format!("/var/home/{name}")) {
+            Ok(_) => Err(format!(
+                "The path /var/home/{name} is already occupied. No data was changed."
+            )),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Checking for an existing home directory: {e}")),
+        };
     }
     // Never print, serialize or store homectl's raw record. It can include
     // privileged metadata when the caller is root.
@@ -236,6 +243,7 @@ pub(super) fn run(args: SetupArgs) -> Result<()> {
     if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
         return Err("Invalid setup state directory.".into());
     }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     let lock = File::open(dir).map_err(|e| e.to_string())?;
     lock.try_lock()
         .map_err(|_| "Home setup is already running. Retry after it finishes.")?;
@@ -279,15 +287,6 @@ pub(super) fn run(args: SetupArgs) -> Result<()> {
             (args.name.ok_or("Choose a daily username with sudo ilexctl home setup --name NAME. Use --disk-size to set its capacity.")?,
              args.disk_size.unwrap_or(20))
         };
-        if account_exists(&name, false)?
-            || Path::new(&format!("/var/home/{name}.home"))
-                .symlink_metadata()
-                .is_ok()
-        {
-            return Err(format!(
-                "{name} is already in use. The maintenance account and daily home must have distinct names."
-            ));
-        }
         let uuid = fs::read_to_string("/proc/sys/kernel/random/uuid").map_err(|e| e.to_string())?;
         Intent {
             schema: 1,

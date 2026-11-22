@@ -388,9 +388,48 @@ def check_seal(root, marker, encrypted):
     require_same_snapshot(root, expected, current)
 
 
+def seal_profile_export(root, marker, private_directory):
+    tier = 'installer-profile-setup'
+    verify_export(root, (tier,))
+    paths = [root / tier]
+    initial = artifact_snapshot(root, paths)
+    result = json.loads((paths[0] / 'result.json').read_text())
+    if result['stage'] != 'complete':
+        raise ValueError('profile setup qualification incomplete')
+    public = [entry for path in paths[0].rglob('*credentials.json')
+              for entry in json.loads(path.read_text())]
+    private = json.loads((private_directory / (tier + '.json')).read_text())
+    if sorted(entry['length'] for entry in private) != [48, 48, 48, 71] or not all(p in private_projection(private) for p in public):
+        raise ValueError('profile setup fingerprints incomplete')
+    edges = {}
+    for entry in private:
+        if len(entry['edges']) != 2 or not all(re.fullmatch('[0-9a-f]{64}', digest) for digest in entry['edges']):
+            raise ValueError('invalid private endpoint fingerprints')
+        for digest in entry['edges']:
+            edges.setdefault(digest, set()).add(entry['length'])
+    report = scan(paths, private_projection(private), require_credentials=True, private_edges=edges)
+    if report['secret_found'] or report['read_errors']:
+        return report
+    if artifact_snapshot(root, paths) != initial:
+        raise ValueError('profile setup evidence changed during scan')
+    with marker.open('x') as output:
+        json.dump(initial, output, sort_keys=True)
+    return report
+
+
+def private_projection(private):
+    return [{k: item[k] for k in ('length', 'sha256')} for item in private]
+
+
 if __name__ == '__main__':
     try:
         root = pathlib.Path(sys.argv[1])
+        if sys.argv[2:3] == ['--check-profile-seal']:
+            paths = [root / 'installer-profile-setup']
+            verify_export(root, ('installer-profile-setup',))
+            if json.loads(pathlib.Path(sys.argv[3]).read_text()) != artifact_snapshot(root, paths):
+                raise ValueError('profile setup evidence changed after scan')
+            raise SystemExit(0)
         if sys.argv[2:3] == ['--verify-export']:
             verify_export(root, sys.argv[3:])
             raise SystemExit(0)
@@ -409,7 +448,9 @@ if __name__ == '__main__':
                 print(root / path)
             print('VERIFIED_QUALIFICATION_PATHS')
             raise SystemExit(0)
-        if sys.argv[2:3] == ['--seal-export']:
+        if sys.argv[2:3] == ['--seal-profile-export']:
+            result = seal_profile_export(root, pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]))
+        elif sys.argv[2:3] == ['--seal-export']:
             result = seal_export(root, pathlib.Path(sys.argv[3]), sys.argv[4] == 'true',
                                  pathlib.Path(sys.argv[5]) if len(sys.argv) > 5 else None)
         else:

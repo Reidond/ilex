@@ -2304,8 +2304,6 @@ ilexctl iso --due          # is a new ISO due? (reads the latest installer relea
    still raises it). The old `ilex-iso` package, if it exists, is unused and can
    be deleted, and so can `ilex-installer-base`.
 
-## Conventions
-
 ### Installer profile setup
 
 The pre-Anaconda chooser offers an installed public profile or a custom
@@ -2331,6 +2329,8 @@ It exercises passphrase-only boot, a blocked setup retry, a local
 username collision, transaction reconciliation and authenticated profile
 application without network access. It does not establish Secure Boot or
 TPM hardware qualification.
+
+## Conventions
 
 - `packages.toml` belongs to the base and stays within its 322 MiB growth
   budget; desktop-wide dependencies belong in `shells/packages.toml`. Both
