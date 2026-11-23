@@ -328,6 +328,7 @@ fn home(expected: &mut Option<Value>, vm: &qemu::Vm, path: &Path, password: &Sec
             "homed_create" => "homed_create",
             "homed_installer_profile" => "homed_installer_profile",
             "homed_authenticated_login" => "homed_authenticated_login",
+            "homed_profile_reapplication" => "homed_profile_reapplication",
             "homed_data_checksum" => "homed_data_checksum",
             "homed_machine_binding" => "homed_machine_binding",
             "homed_deactivation" => "homed_deactivation",

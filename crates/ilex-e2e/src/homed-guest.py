@@ -168,8 +168,17 @@ def encrypted_home(name, password, first_boot, profile=None):
                 profile_checks = f"{apply} && {state} && {edit} && "
             else:
                 # Validate the selected profile and user edit after normal login,
-                # then also verify a reapplication leaves the edited file intact.
-                profile_checks = f"{state} && {marker} && {apply} && "
+                # then require the reapplication to report the preserved edit.
+                check = "homed_profile_reapplication"
+                preserve = (
+                    "python3 -c 'import json,subprocess; "
+                    'result=subprocess.run(["/usr/bin/ilexctl","profile","apply","--selected"], '
+                    'capture_output=True,text=True,timeout=45); '
+                    'assert result.returncode == 1; report=json.loads(result.stdout); '
+                    'assert report["profile"] == "andriishafar" and '
+                    '".config/ilex/welcome.txt" in report["conflicts"]' "'"
+                )
+                profile_checks = f"{state} && {marker} && {preserve} && "
             profile_checks += (f"{state} && {marker} && "
                 "printf 'ILEX-PROFILE-EDIT-%s\\n' \"$(sha256sum ~/.config/ilex/welcome.txt | cut -d ' ' -f 1)\" && ")
         text = tty(name, password, profile_checks + write +
