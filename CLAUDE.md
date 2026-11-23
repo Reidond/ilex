@@ -2327,11 +2327,13 @@ See [the handoff contract](installer/setup/README.md).
 
 The local acceptance trials are `iso::chooser`, `iso::profile_chooser`,
 `security::installer_no_profile` and `security::installer_profile_setup`.
-The latter uses an exact ISO and an
-isolated, signed candidate selected with the installed machine and GNOME.
+Run them with `cargo ilexctl test FILTER -- --test-threads 1`.
+The profile setup trial uses an exact ISO and an isolated, signed candidate
+selected with the installed machine and GNOME.
 It exercises passphrase-only boot, a blocked setup retry, a local
 username collision, password login as the installer-created maintenance
-account, custom capacity correction, damaged-home refusal, transaction
+account, refusal of malformed maintenance hashes, custom capacity
+correction, damaged-home refusal, transaction
 reconciliation and authenticated profile application without network
 access. It does not establish Secure Boot or
 TPM hardware qualification.

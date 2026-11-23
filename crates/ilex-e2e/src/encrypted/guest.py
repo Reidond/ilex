@@ -22,6 +22,7 @@ import sys
 import time
 import termios
 import tty
+from types import SimpleNamespace
 
 PRIVATE = pathlib.Path('/run/ilex-encrypted-test')
 SEED = PRIVATE / 'seed'
@@ -142,6 +143,18 @@ def diagnostic_loop():
         time.sleep(120)
 
 
+def check_maintenance_policy(crypted):
+    policy = runpy.run_path('/usr/libexec/ilex-installer/anaconda-policy.py')
+    account = SimpleNamespace(name='ilexmaint', groups=['wheel'], lock=False, get_uid=lambda: None,
+                              password=crypted, is_crypted=True, shell='/bin/bash')
+    assert policy['maintenance_users']([account]), 'installer rejected the valid maintenance hash'
+    assert policy['matches_password'](account, crypted), 'installed hash verification rejected the valid hash'
+    for invalid in ('$6$salt$x', '$y$j9T$abcdefghijklmnopqrstuvwx$x', '', '!' + crypted):
+        account.password = invalid
+        assert not policy['maintenance_users']([account]), 'installer accepted an unusable maintenance hash'
+        assert not policy['matches_password'](account, invalid), 'installed hash verification accepted an unusable hash'
+
+
 def prepare():
     PRIVATE.mkdir(mode=0o700)
     SEED.mkdir()
@@ -179,7 +192,7 @@ def prepare():
         assert re.fullmatch(b'[a-z]{48}', maintenance)
         crypted = subprocess.run(['openssl', 'passwd', '-6', '-stdin'],
                                  input=maintenance + b'\n', capture_output=True, check=True).stdout.strip()
-        assert re.fullmatch(rb'\$6\$[./a-zA-Z0-9]+\$[./a-zA-Z0-9]+', crypted)
+        check_maintenance_policy(crypted.decode('ascii'))
         answer = PRIVATE / 'maintenance.ks'
         with open(answer, 'xb', opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
             file.write(b'user --name=ilexmaint --groups=wheel --iscrypted --password=' + crypted + b'\n')

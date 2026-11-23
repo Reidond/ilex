@@ -42,6 +42,10 @@ it against the generated catalogue again. Kickstarts may still write a plain
 composition tag or an old two-field record. The chooser handles no passwords,
 passphrases or recovery material.
 
+A profile install requires an unlocked local maintenance administrator with
+a usable password. Prehashed kickstart passwords use canonical SHA-512 crypt
+or yescrypt with standard libxcrypt cost settings.
+
 `ilexctl home setup` checks named profile metadata against the installed
 image's catalogue and payload hash. It records a nonsecret intent in
 `/var/lib/ilex/home-setup/state.json` before invoking the existing homectl

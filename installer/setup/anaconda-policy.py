@@ -7,6 +7,13 @@ from pathlib import Path
 import re
 
 
+CRYPT_ALPHABET = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+# The final encoded digit carries two bits for SHA-512 or four for yescrypt.
+SHA512_CRYPT = re.compile(r"\$6\$(?:rounds=[1-9][0-9]{3,8}\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{85}[./01]")
+# Standard libxcrypt costs 1–11 include Anaconda's j9T setting.
+YESCRYPT = re.compile(r"\$y\$j(?:[78]5|[7-9A-F]T)\$([./A-Za-z0-9]{2,86})\$[./A-Za-z0-9]{42}[./0-9A-D]")
+
+
 def selection():
     try:
         return json.loads(Path("/run/ilex-installer/setup.json").read_bytes())["profile"]
@@ -26,8 +33,15 @@ def requested(profile):
 
 
 def password_hash(value):
-    # Modular crypt encodings and the legacy DES encoding supported by libxcrypt.
-    return re.fullmatch(r"\$[^:$\s]+\$(?:[^:$\s]+\$)*[./A-Za-z0-9]+|[./A-Za-z0-9]{13}", value)
+    if SHA512_CRYPT.fullmatch(value):
+        return True
+    match = YESCRYPT.fullmatch(value)
+    if match is None:
+        return False
+    salt = match[1]
+    # Final groups of 0, 1, 2 or 3 characters allow 6, 0, 2 or 4
+    # bits in the last digit. A lone character cannot encode a byte.
+    return CRYPT_ALPHABET.index(salt[-1]) < (64, 0, 4, 16)[len(salt) % 4]
 
 
 def maintenance_users(users):
