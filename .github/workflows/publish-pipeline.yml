@@ -335,7 +335,7 @@ jobs:
           key: ${{ steps.stack.outputs.debs }}
 
       - name: e2e tests (ephemeral)
-        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install
+        if: ${{ !inputs.encrypted_lifecycle_only && (steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install) }}
         env:
           # Always the rechunked image: the one staged above.
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}

@@ -62,8 +62,8 @@ images. The release scope is the default installer composition.
 
 For a focused retry, dispatch with both `encrypted_install=true` and
 `encrypted_lifecycle_only=true`. It still installs the exact ISO and seals
-the firmware and lifecycle evidence. The other encrypted installer cases
-retain their separate verdict in the full suite.
+the firmware and lifecycle evidence. The ephemeral suite and other encrypted
+installer cases retain their separate verdicts in the full workflow.
 
 The hosted runner must pass the firmware and 6 GiB lifecycle budget with KVM
 plus SMM or TCG. If it cannot, set `ILEX_RUNNER` to a dedicated Linux runner
