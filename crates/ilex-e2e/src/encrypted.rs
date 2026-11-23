@@ -62,6 +62,11 @@ fn unix_seconds() -> u64 {
 
 impl GuestFailure {
     fn capture(fixture: Option<&mut Fixture>, check: &'static str) -> Self {
+        let vm = fixture.and_then(|fixture| fixture.vm.running_mut().ok());
+        Self::capture_vm(vm.as_deref(), check)
+    }
+
+    fn capture_vm(vm: Option<&qemu::Vm>, check: &'static str) -> Self {
         const UNITS: &[&str] = &[
             "multi-user.target",
             "ilex-security-verify.service",
@@ -87,7 +92,7 @@ impl GuestFailure {
             unlock_method: "unavailable",
             unit_states: UNITS.iter().map(|&unit| (unit, "unavailable")).collect(),
         };
-        let Some(vm) = fixture.and_then(|fixture| fixture.vm.running_mut().ok()) else {
+        let Some(vm) = vm else {
             return snapshot;
         };
         let query = format!(

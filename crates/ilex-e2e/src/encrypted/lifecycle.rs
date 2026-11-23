@@ -321,6 +321,19 @@ fn home(expected: &mut Option<Value>, vm: &qemu::Vm, path: &Path, password: &Sec
             "secrets":[std::str::from_utf8(password.bytes())?],
         }),
     )?;
+    if let Some(failed) = observed["failed_check"].as_str() {
+        let check = match failed {
+            "homed_initial_state" => "homed_initial_state",
+            "homed_create" => "homed_create",
+            "homed_authenticated_login" => "homed_authenticated_login",
+            "homed_data_checksum" => "homed_data_checksum",
+            "homed_machine_binding" => "homed_machine_binding",
+            "homed_deactivation" => "homed_deactivation",
+            _ => "homed_unknown_check",
+        };
+        return Err(anyhow::anyhow!("encrypted home check failed")
+            .context(GuestFailure::capture_vm(Some(vm), check)));
+    }
     ensure!(observed["data_sha256"].is_string(), "home checksum missing");
     if let Some(expected) = expected {
         ensure!(
