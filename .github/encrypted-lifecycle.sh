@@ -45,8 +45,8 @@ fi
 export ILEX_SECURITY_ACCELERATOR
 ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
 case "$ILEX_SECURITY_ACCELERATOR" in kvm|tcg) ;; *) exit 1 ;; esac
-cargo xtask security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
-timeout --signal=TERM --kill-after=30s 105m cargo xtask test security::upgrade_rollback -- --test-threads 1
+cargo ilexctl doctor security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
+timeout --signal=TERM --kill-after=30s 105m cargo ilexctl test security::upgrade_rollback -- --test-threads 1
 python3 - "$ILEX_ARTIFACTS/$tier/result.json" <<'PY'
 import json, sys
 with open(sys.argv[1]) as source:

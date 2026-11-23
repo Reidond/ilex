@@ -25,13 +25,13 @@ export ILEX_ISO=/absolute/path/to/ilex-installer.iso
 export ILEX_IMAGE=localhost/ilex:checkout-candidate
 export ILEX_ENCRYPTED_UPGRADE_FROM='ghcr.io/reidond/ilex@sha256:<v1-digest>'
 podman pull "$ILEX_ENCRYPTED_UPGRADE_FROM"
-cargo xtask security
+cargo ilexctl doctor security
 # Use kvm with a positive SMM probe and successful guest qualification.
 # Use tcg for the same profile if KVM with SMM is unavailable.
 export ILEX_SECURITY_ACCELERATOR=kvm
-cargo xtask security --self-check --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
-cargo xtask security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
-cargo xtask test security::upgrade_rollback -- --test-threads 1
+cargo ilexctl doctor security --self-check --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
+cargo ilexctl doctor security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
+cargo ilexctl test security::upgrade_rollback -- --test-threads 1
 ```
 
 `encrypted-upgrade-rollback/result.json` must say `passed`. Inspect
@@ -80,13 +80,13 @@ wsl -d FedoraLinux-45 -u root -e free -h
 $env:ILEX_VM_SLOTS = '1'
 $env:ILEX_ISO = 'C:\fixtures\ilex-installer.iso'
 $env:ILEX_ISO_SHA256 = '<SHA-256 from the matching asset>'
-cargo xtask security --self-check --memory 6G
-cargo xtask security --require-qualified --memory 6G
-cargo xtask security --encrypted-console --memory 6G
+cargo ilexctl doctor security --self-check --memory 6G
+cargo ilexctl doctor security --require-qualified --memory 6G
+cargo ilexctl doctor security --encrypted-console --memory 6G
 ```
 
 Open the printed VM in VMConnect. For automation, use the owning checkout's
-ilex-vmctl and the configured TryCua session. After Anaconda reports successful
+`cargo ilexctl vm` commands and the configured TryCua session. After Anaconda reports successful
 completion, power off. If the interface only offers reboot, use
 `sudo systemctl poweroff` from the installer console. The launcher ejects the ISO and starts the installed disk
 with the original disk, VM ID and vTPM. Use guest reboots for the remaining
