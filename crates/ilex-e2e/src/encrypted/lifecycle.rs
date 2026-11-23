@@ -318,6 +318,7 @@ fn home(expected: &mut Option<Value>, vm: &qemu::Vm, path: &Path, password: &Sec
         vm,
         json!({
             "action":"encrypted-lifecycle", "create":expected.is_none(),
+            "name":"andriishafar", "profile":"andriishafar",
             "secrets":[std::str::from_utf8(password.bytes())?],
         }),
     )?;
@@ -325,6 +326,7 @@ fn home(expected: &mut Option<Value>, vm: &qemu::Vm, path: &Path, password: &Sec
         let check = match failed {
             "homed_initial_state" => "homed_initial_state",
             "homed_create" => "homed_create",
+            "homed_installer_profile" => "homed_installer_profile",
             "homed_authenticated_login" => "homed_authenticated_login",
             "homed_data_checksum" => "homed_data_checksum",
             "homed_machine_binding" => "homed_machine_binding",
@@ -334,11 +336,16 @@ fn home(expected: &mut Option<Value>, vm: &qemu::Vm, path: &Path, password: &Sec
         return Err(anyhow::anyhow!("encrypted home check failed")
             .context(GuestFailure::capture_vm(Some(vm), check)));
     }
-    ensure!(observed["data_sha256"].is_string(), "home checksum missing");
+    ensure!(
+        observed["data_sha256"].is_string()
+            && observed["profile"] == "andriishafar"
+            && observed["profile_edit_sha256"].is_string(),
+        "encrypted home or edited profile checksum missing"
+    );
     if let Some(expected) = expected {
         ensure!(
             *expected == observed,
-            "encrypted home data or identity changed"
+            "encrypted home data, profile edit or identity changed"
         );
     } else {
         *expected = Some(observed.clone());

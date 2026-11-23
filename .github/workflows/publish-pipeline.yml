@@ -1148,14 +1148,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: Qualify the release ISO on encrypted storage through rollback
+      - name: Qualify fresh encrypted release installs and rollback
         id: encrypted-release
         if: success() && steps.install.outcome == 'success'
-        timeout-minutes: 175
+        timeout-minutes: 220
         env:
           ILEX_ISO: ${{ env.ISO_DIR }}/ilex-installer.iso
           ILEX_IMAGE: ${{ env.IMAGE_REPO }}@${{ steps.target.outputs.digest }}
-          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ vars.ILEX_ENCRYPTED_UPGRADE_FROM }}
+          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ inputs.encrypted_upgrade_from || vars.ILEX_ENCRYPTED_UPGRADE_FROM }}
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
           ILEX_SECURITY_MEMORY: 6G
         run: |
@@ -1164,24 +1164,34 @@ jobs:
           podman pull --quiet "$ILEX_IMAGE"
           export ILEX_PRIVATE_FINGERPRINTS
           ILEX_PRIVATE_FINGERPRINTS=$(mktemp -d "$RUNNER_TEMP/ilex-fingerprints.XXXXXXXX")
-          trap 'rm -f -- "$ILEX_PRIVATE_FINGERPRINTS/encrypted-upgrade-rollback.json"; rmdir -- "$ILEX_PRIVATE_FINGERPRINTS"' EXIT
+          trap 'rm -f -- "$ILEX_PRIVATE_FINGERPRINTS/encrypted-install.json" "$ILEX_PRIVATE_FINGERPRINTS/encrypted-upgrade-rollback.json"; rmdir -- "$ILEX_PRIVATE_FINGERPRINTS"' EXIT
           bash .github/security-tier.sh
+          export ILEX_SECURITY_ACCELERATOR
+          ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
+          ILEX_ENCRYPTED_PUBLISHED_INSTALL=1 timeout --signal=TERM --kill-after=30s 85m \
+            cargo ilexctl test security::encrypted_install -- --exact --test-threads 1
           bash .github/encrypted-lifecycle.sh
-          python3 - "$ILEX_ARTIFACTS/encrypted-upgrade-rollback" "${ILEX_IMAGE##*@}" "$ISO_DIR/ilex-installer.iso.sha256" <<'PY'
+          python3 - "$ILEX_ARTIFACTS" "${ILEX_IMAGE##*@}" "$ISO_DIR/ilex-installer.iso.sha256" <<'PY'
           import json, pathlib, sys
           evidence = pathlib.Path(sys.argv[1])
-          inputs = json.loads((evidence / 'input-images.json').read_text())
-          assert inputs['update']['manifest_digest'] == sys.argv[2], 'published digest differs from tested input'
-          assert (evidence / 'iso-sha256.txt').read_text().split()[0] == pathlib.Path(sys.argv[3]).read_text().split()[0], 'installer hash differs from tested ISO'
+          fresh = evidence / 'encrypted-install'
+          lifecycle = evidence / 'encrypted-upgrade-rollback'
+          install = json.loads((fresh / 'candidate.json').read_text())
+          inputs = json.loads((lifecycle / 'input-images.json').read_text())
+          assert install['published_source'] and install['digest'] == sys.argv[2], 'fresh encrypted install did not use the published digest'
+          assert inputs['update']['manifest_digest'] == sys.argv[2], 'published digest differs from tested update'
+          expected = pathlib.Path(sys.argv[3]).read_text().split()[0]
+          for tier in (fresh, lifecycle):
+              assert (tier / 'iso-sha256.txt').read_text().split()[0] == expected, 'installer hash differs from tested ISO'
           PY
-          python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$ILEX_ARTIFACTS" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" lifecycle "$ILEX_PRIVATE_FINGERPRINTS"
+          python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$ILEX_ARTIFACTS" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" release "$ILEX_PRIVATE_FINGERPRINTS"
 
       - name: Keep sealed release lifecycle evidence
         if: steps.encrypted-release.outcome == 'success'
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: encrypted-release-lifecycle-evidence
-          encrypted: lifecycle
+          encrypted: release
 
       - name: Publish the release
         if: success() && steps.target.outputs.available == 'true' && steps.install.outcome == 'success' && steps.encrypted-release.outcome == 'success'

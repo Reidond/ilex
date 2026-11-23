@@ -238,8 +238,10 @@ candidate. It must not be reported as a passing released-image install.
 `security::upgrade_rollback` uses the same exact-ISO encrypted fixture with
 an explicit rollback baseline (`ILEX_ENCRYPTED_UPGRADE_FROM`) and a distinct
 kernel/initramfs in the candidate. It checks unattended and recovery-key
-boots, the LUKS header and authenticated homed data on each deployment. The
-workflow requires it for encrypted CI qualification and installer release.
+boots, the LUKS header, authenticated homed data and an edited file from
+the selected home profile on each deployment. Installer release requires
+both the lifecycle and an independent fresh encrypted install of the exact
+published digest, with both results sealed before upload.
 See the [encrypted lifecycle runbook](docs/encrypted-lifecycle.md) for the
 CI baseline, native Gen2 console fixture, and owner-run MS-7C35 qualification.
 

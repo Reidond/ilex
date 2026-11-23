@@ -42,7 +42,8 @@ and stages the same manifest after applying a disposable test signature. It
 preserves the production branch of the installed verification policy.
 A separate recovery boot at each deployment changes Secure Boot on the
 disposable VM, enters the original recovery key and checks the boot ID, root
-UUID, unlock method, header metadata and home checksum. It restores firmware
+UUID, unlock method, header metadata, home checksum, selected profile and
+an authenticated user edit to a profile-managed file. It restores firmware
 policy and requires another unattended unlock before advancing.
 
 The `publish` workflow's `encrypted_install=true` input includes the lifecycle
@@ -52,11 +53,11 @@ the `ILEX_ENCRYPTED_UPGRADE_FROM` repository variable with a signed
 kernel, a CI dispatch can name a distinct Fedora RPM release via
 `encrypted_update_kernel` and exercise the candidate userspace with that
 kernel and a regenerated initramfs. Evidence labels this disposable update
-fixture. The exact-ISO release job tests the unmodified published payload and uses the
-variable and the verified published target digest. It requires the encrypted
-lifecycle and a sealed artifact before releasing the ISO. This supplements the
-ordinary network install test, which checks the production registry and
-composition. The lifecycle imports v1 and v2 into an isolated registry with a
+fixture. The exact-ISO release job requires both a fresh encrypted install
+from the verified production digest under the shipped signature policy and the
+encrypted lifecycle through that unmodified published target. It seals both
+results before releasing the ISO. The ordinary network install test also checks
+the production registry and composition. The lifecycle imports v1 and v2 into an isolated registry with a
 throwaway verification key. Its manifest digests identify those delivered test
 images. The release scope is the default installer composition.
 
@@ -179,6 +180,11 @@ sudo cryptsetup luksDump --dump-json-metadata "/dev/disk/by-uuid/$uuid" |
 if test -c /dev/tpmrm0; then
   sudo cat /sys/kernel/security/tpm0/binary_bios_measurements > "$out/eventlog.bin"
   cat /sys/class/tpm/tpm0/pcr-sha256/7 > "$out/pcr7.txt"
+  if jq -e '.secure_boot == true' "$out/probe.json" >/dev/null; then
+    jq -e --arg measured "$(tr '[:upper:]' '[:lower:]' < "$out/pcr7.txt")" \
+      '.verdict == "eligible" and .pcr7 == $measured and .replay.sha256 == $measured' \
+      "$out/probe.json"
+  fi
 fi
 rpm -q shim-x64 grub2-efi-x64 systemd cryptsetup > "$out/versions.txt"
 getenforce > "$out/selinux.txt"

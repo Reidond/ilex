@@ -135,7 +135,7 @@ def login_argv(name):
             "--noreset", "--noclear", "--noissue", "-", "dumb"]
 
 
-def encrypted_home(name, password, first_boot):
+def encrypted_home(name, password, first_boot, profile=None):
     # Return fixed check labels on failure. The PTY transcript and raw home
     # record can contain private data and stay inside the disposable guest.
     check = "homed_initial_state"
@@ -144,6 +144,12 @@ def encrypted_home(name, password, first_boot):
         home = "/var/home/" + name
         mount = ["findmnt", "--noheadings", "--mountpoint", home]
         assert sp.run(mount, stdout=sp.DEVNULL).returncode == 1
+        if profile is not None:
+            check = "homed_installer_profile"
+            assert profile == name == "andriishafar"
+            with open("/etc/ilex/setup.json") as setup:
+                selected = json.load(setup)["profile"]
+            assert selected["id"] == profile and selected["schema"] == 1
         if first_boot:
             check = "homed_create"
             create(name, password)
@@ -152,7 +158,21 @@ def encrypted_home(name, password, first_boot):
         write = ""
         if first_boot:
             write = "umask 077 && dd if=/dev/urandom of=~/e2e-data bs=1M count=4 status=none && sync -f ~/e2e-data && "
-        text = tty(name, password, write +
+        profile_checks = ""
+        if profile is not None:
+            state = (r"""python3 -c 'import json,pathlib; assert json.loads((pathlib.Path.home()/".local/state/ilex/profile.json").read_text())["profile"] == "andriishafar"'""")
+            apply = "/usr/bin/ilexctl profile apply andriishafar"
+            edit = "test -s ~/.config/ilex/welcome.txt && printf '\\nilex-lifecycle-customized\\n' >> ~/.config/ilex/welcome.txt"
+            marker = "grep -Fxq ilex-lifecycle-customized ~/.config/ilex/welcome.txt"
+            if first_boot:
+                profile_checks = f"{apply} && {state} && {edit} && "
+            else:
+                # Validate the selected profile and user edit after normal login,
+                # then also verify a reapplication leaves the edited file intact.
+                profile_checks = f"{state} && {marker} && {apply} && "
+            profile_checks += (f"{state} && {marker} && "
+                "printf 'ILEX-PROFILE-EDIT-%s\\n' \"$(sha256sum ~/.config/ilex/welcome.txt | cut -d ' ' -f 1)\" && ")
+        text = tty(name, password, profile_checks + write +
                    "test \"$SYSTEMD_HOME\" = 1 && "
                    "findmnt -nro SOURCE --mountpoint \"$(realpath ~)\" | grep -q '^/dev/mapper/' && "
                    "test \"$(findmnt -nro FSTYPE --mountpoint \"$(realpath ~)\")\" = btrfs && "
@@ -181,8 +201,13 @@ def encrypted_home(name, password, first_boot):
                 break
             assert status == 0 and time.monotonic() < deadline
             time.sleep(1)
-        return {"data_sha256": checksum, "uid": uid, "luks_uuid": luks_uuid,
-                "storage": binding["storage"], "filesystem": binding["fileSystemType"]}
+        evidence = {"data_sha256": checksum, "uid": uid, "luks_uuid": luks_uuid,
+                    "storage": binding["storage"], "filesystem": binding["fileSystemType"]}
+        if profile is not None:
+            check = "homed_installer_profile"
+            profile_edit, = re.findall(r"(?:^|\n)ILEX-PROFILE-EDIT-([0-9a-f]{64})\r?\n", text)
+            evidence.update(profile=profile, profile_edit_sha256=profile_edit)
+        return evidence
     except Exception:
         return {"failed_check": check}
 
@@ -285,7 +310,7 @@ python3 -c 'import json,pathlib; assert json.loads((pathlib.Path.home()/".local/
 test -s ~/.config/ilex/welcome.txt""".replace("\n", " "))
         return "authenticated PAM login with encrypted btrfs and installer profile applied"
     if action == "encrypted-lifecycle":
-        return encrypted_home(name, secrets[0], request["create"])
+        return encrypted_home(name, secrets[0], request["create"], request.get("profile"))
     if action == "profiles":
         tty(name, secrets[0], "python3 -I -S /run/ilex-profiles-user.py")
         return "password-authenticated profile application and safety regressions passed"

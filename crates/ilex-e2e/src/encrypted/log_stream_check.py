@@ -48,11 +48,14 @@ def check_artifact_seal(root):
     recovery = b'-'.join([b'u' * 8] * 8)
     reissued = b'-'.join([b'v' * 8] * 8)
     home = b'Ix9-' + b'0a' * 24
+    maintenance = b'y' * 48
     for tier in (*ENCRYPTED_TIERS, LIFECYCLE_TIER):
         path = root / tier
         path.mkdir()
         (path / 'result.json').write_text('{"qualification":"passed"}')
         values = [secret, recovery, reissued] if tier == 'encrypted-interrupted' else [secret, recovery]
+        if tier == LIFECYCLE_TIER:
+            values.append(maintenance)
         (path / 'installer-credentials.json').write_text(
             json.dumps([fingerprint(value) for value in values]))
         if tier == LIFECYCLE_TIER:
@@ -74,7 +77,7 @@ def check_artifact_seal(root):
     fallback = root / 'encrypted-existing-space' / 'repair-fallback-credentials.json'
     fallback.write_text('{"passphrase_slot":0,"recovery_slot":1,"authenticated":true}')
 
-    def rejected_export(path, region):
+    def rejected_export(path, region, reported_name=None):
         process = subprocess.run([
             sys.executable, '-B', str(pathlib.Path(__file__).with_name('privacy.py')),
             str(root), '--seal-export', str(marker), 'true', str(private),
@@ -82,7 +85,9 @@ def check_artifact_seal(root):
         assert process.returncode == 1 and not process.stderr
         report = json.loads(process.stdout)
         assert report['verification_failed'] and report['read_errors'] == 1
-        assert report['findings'][0]['path'].endswith('/' + path.name)
+        assert report['findings'][0]['path'].endswith('/' + (reported_name or path.name))
+        if reported_name:
+            assert path.name not in process.stdout
         assert report['findings'][0]['region'] == region
         refuses_upload()
 
@@ -95,6 +100,18 @@ def check_artifact_seal(root):
     assert seal_export(root, marker, 'true', private)['secret_found']
     refuses_upload()
     log.write_bytes(b'boot complete')
+    secret_name = home.decode() + '.json'
+    home_path = security / secret_name
+    home_path.write_text('{}')
+    report = seal_export(root, marker, 'true', private)
+    assert report['secret_found'] and report['read_errors'] == 0
+    assert report['findings'][0]['region'] == 'file-name'
+    assert secret_name not in json.dumps(report)
+    refuses_upload()
+    home_path.unlink()
+    home_path.symlink_to(log)
+    rejected_export(home_path, 'artifact-file', '*' * len(home) + '.json')
+    home_path.unlink()
     assert not seal_export(root, marker, 'true', private)['secret_found']
     check_seal(root, marker, 'true')
     log.write_bytes(b'changed after successful scan')

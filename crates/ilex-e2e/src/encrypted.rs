@@ -784,7 +784,9 @@ fn seed(work: &Path, config: &Value, maintenance: Option<&Secret>) -> Result<(Pa
             .success(),
         "fixture public key generation failed"
     );
-    fs::copy(work.join("cosign.pub"), dir.join("test.pub"))?;
+    if config["published_source"] != true {
+        fs::copy(work.join("cosign.pub"), dir.join("test.pub"))?;
+    }
     // Start the private console driver before the shipped completion %post.
     // The source override changes only the test registry and keeps target and
     // signature enforcement. No passphrase bytes occur in ks.cfg or scripts.
@@ -830,14 +832,8 @@ python3 -I -S /run/ilex-encrypted-test/seed/guest.py finish
             .context("fixture composition missing")?;
         ilex_devkit::installer::validate_tag(composition)?;
         let choice = json!({"schema":1, "composition":composition, "profile":"andriishafar"});
-        format!(
-            r#"%pre --erroronfail
-install -d -m 0755 /run/ilex-installer
-cat > /run/ilex-installer/choice <<'PROFILE_SELECTION'
-{choice}
-PROFILE_SELECTION
-%end
-%post --nochroot --erroronfail
+        let offline = if config["profile_offline"] == true {
+            r#"%post --nochroot --erroronfail
 # The image is installed by now. Exercise the shipped preload's offline
 # failure path without changing how Anaconda obtains the signed payload.
 set -eu
@@ -848,7 +844,18 @@ if ip route get 1.1.1.1 >/dev/null 2>&1; then exit 1; fi
 # directory before the strict credential scan traverses the live /tmp.
 systemctl stop systemd-localed.service
 %end
-%include /run/ilex-encrypted-test/maintenance.ks
+"#
+        } else {
+            ""
+        };
+        format!(
+            r#"%pre --erroronfail
+install -d -m 0755 /run/ilex-installer
+cat > /run/ilex-installer/choice <<'PROFILE_SELECTION'
+{choice}
+PROFILE_SELECTION
+%end
+{offline}%include /run/ilex-encrypted-test/maintenance.ks
 {ks}
 "#
         )
@@ -2820,6 +2827,17 @@ fn run_fixture(
     ilex_enroll::harden()?;
     let profile_setup = matches!(case, FixtureCase::ProfileSetup);
     let lifecycle = matches!(case, FixtureCase::UpgradeRollback);
+    let selected_profile = profile_setup || lifecycle;
+    let published_install = std::env::var_os("ILEX_ENCRYPTED_PUBLISHED_INSTALL").is_some();
+    ensure!(
+        !published_install
+            || (matches!(case, FixtureCase::Standard)
+                && !preserve_data
+                && !interrupted
+                && !local_diagnostic
+                && !layout_refusal),
+        "published encrypted qualification requires the ordinary clean-disk case"
+    );
     ensure!(
         !local_diagnostic || std::env::var_os("CI").is_none(),
         "local diagnostic is outside the hosted qualification"
@@ -2958,9 +2976,28 @@ fn run_fixture(
         } else {
             image.clone()
         };
-        let (registry, mut expected) = registry(&ws, &v1, &work)?;
+        let (registry, mut expected) = if published_install {
+            let digest = image
+                .strip_prefix("ghcr.io/reidond/ilex@")
+                .filter(|digest| lifecycle::valid_digest(digest))
+                .context("published encrypted qualification needs the verified digest")?;
+            (
+                None,
+                json!({
+                    "source":image, "digest":digest, "published_source":true
+                }),
+            )
+        } else {
+            let (registry, expected) = registry(&ws, &v1, &work)?;
+            (Some(registry), expected)
+        };
         let update = lifecycle
-            .then(|| registry.push(&image, "update"))
+            .then(|| {
+                registry
+                    .as_ref()
+                    .context("lifecycle registry missing")?
+                    .push(&image, "update")
+            })
             .transpose()?;
         if lifecycle {
             lifecycle::record_inputs(&artifacts, &v1, &image)?;
@@ -2969,8 +3006,8 @@ fn run_fixture(
         expected["interrupt_completion"] = json!(interrupted);
         expected["local_diagnostic"] = json!(local_diagnostic);
         expected["layout_refusal"] = json!(layout_refusal);
-        if profile_setup {
-            let labels = ilex_devkit::machine::image_machine_label(&image)?;
+        if selected_profile {
+            let labels = ilex_devkit::machine::image_machine_label(&v1)?;
             let machine = labels
                 .as_deref()
                 .context("candidate machine label missing")?;
@@ -2987,6 +3024,7 @@ fn run_fixture(
             );
             expected["composition"] = json!(composition);
             expected["profile_setup"] = json!(true);
+            expected["profile_offline"] = json!(profile_setup);
         }
         let tpm_slot_budget = !lifecycle && !local_diagnostic && !interrupted && !preserve_data;
         expected["tpm_slot_budget"] = json!(tpm_slot_budget);
@@ -2994,7 +3032,7 @@ fn run_fixture(
             artifacts.join("candidate.json"),
             serde_json::to_vec_pretty(&expected)?,
         )?;
-        let maintenance = profile_setup.then(profile_setup::secret).transpose()?;
+        let maintenance = selected_profile.then(profile_setup::secret).transpose()?;
         let (seed_path, passphrase) = seed(&work, &expected, maintenance.as_ref())?;
         credentials = if let Some(maintenance) = &maintenance {
             fingerprints(&[&passphrase, maintenance])
@@ -3142,7 +3180,7 @@ fn run_fixture(
                 scan["secret_found"] == false
                     && scan["journal_scanned"] == true
                     && scan["read_errors"] == 0
-                    && scan["credentials_checked"] == if profile_setup { 3 } else { 2 },
+                    && scan["credentials_checked"] == if selected_profile { 3 } else { 2 },
                 "private guest secret scan failed"
             );
         }
@@ -3188,7 +3226,10 @@ fn run_fixture(
         if let Some(update) = update {
             stage = "encrypted_lifecycle";
             let home_password = lifecycle::home_password()?;
-            credentials = fingerprints(&[&passphrase, &recovery, &home_password]);
+            let maintenance = maintenance
+                .as_ref()
+                .context("installer maintenance credential missing")?;
+            credentials = fingerprints(&[&passphrase, &recovery, maintenance, &home_password]);
             export_fingerprints.push(private_fingerprint(&home_password));
             fs::write(
                 artifacts.join("home-credentials.json"),
@@ -3198,7 +3239,7 @@ fn run_fixture(
                 &ws,
                 fixture,
                 &artifacts,
-                &registry,
+                registry.as_ref().context("lifecycle registry missing")?,
                 &expected,
                 &update,
                 &installer_probe,

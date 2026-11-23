@@ -182,9 +182,15 @@ def scan(roots, fingerprints, journal=False, sync_journal=False, path_labels=Non
         except OSError as error:
             unreadable(root, 'scan-root', error)
             continue
-        for directory, _, files in os.walk(root, followlinks=False, onerror=walk_error):
+        root = pathlib.Path(root)
+        check_stream(io.BytesIO(os.fsencode(root.name)), root, 'directory-name')
+        for directory, subdirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+            directory = pathlib.Path(directory)
+            for name in subdirs:
+                check_stream(io.BytesIO(os.fsencode(name)), directory / name, 'directory-name')
             for name in files:
-                path = pathlib.Path(directory) / name
+                path = directory / name
+                check_stream(io.BytesIO(os.fsencode(name)), path, 'file-name')
                 region = 'file-metadata'
                 try:
                     info = path.lstat()
@@ -307,14 +313,14 @@ FINGERPRINT_LENGTHS = {
     'encrypted-install': [48, 71],
     'encrypted-existing-space': [48, 71],
     'encrypted-interrupted': [48, 71, 71],
-    LIFECYCLE_TIER: [48, 52, 71],
+    LIFECYCLE_TIER: [48, 48, 52, 71],
 }
 EXPORT_REPORT = 'final-export-privacy.json'
 
 
 def encrypted_tiers(mode):
     return {'false': (), 'true': (*ENCRYPTED_TIERS, LIFECYCLE_TIER),
-            'lifecycle': (LIFECYCLE_TIER,)}[mode]
+            'lifecycle': (LIFECYCLE_TIER,), 'release': (ENCRYPTED_TIERS[0], LIFECYCLE_TIER)}[mode]
 
 
 def artifact_roots(root, mode):
@@ -456,8 +462,9 @@ if __name__ == '__main__':
                 paths = ['security']
             elif name == 'encrypted-installer-evidence' and mode == 'true':
                 paths = [*encrypted_tiers(mode), EXPORT_REPORT]
-            elif name in ('encrypted-lifecycle-evidence', 'encrypted-release-lifecycle-evidence') and mode == 'lifecycle':
-                paths = ['security', LIFECYCLE_TIER, EXPORT_REPORT]
+            elif (name, mode) in (('encrypted-lifecycle-evidence', 'lifecycle'),
+                                  ('encrypted-release-lifecycle-evidence', 'release')):
+                paths = ['security', *encrypted_tiers(mode), EXPORT_REPORT]
             else:
                 raise ValueError('unknown artifact scope')
             print('paths<<VERIFIED_QUALIFICATION_PATHS')

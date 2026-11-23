@@ -10,6 +10,7 @@ CREDENTIALS = (
 )
 CONTEXT = max(map(len, CREDENTIALS)) - 1
 FULL = re.compile(rb'[a-z]{48,}')
+HOMED_FULL = re.compile(rb'Ix9-[0-9a-f]{48}')
 RECOVERY_FULL = re.compile(rb'(?i:(?=([cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7})))')
 ESC = 0x1B
 CSI, ST, OSC = 0x9B, 0x9C, 0x9D
@@ -205,6 +206,7 @@ def redact(data):
         escapes.append((normalizer.escape, len(data)))
     spans = [m.span() for m in FULL.finditer(normalized)]
     spans.extend(m.span(1) for m in RECOVERY_FULL.finditer(normalized))
+    spans.extend(m.span() for m in HOMED_FULL.finditer(normalized))
     if count := edge_length(normalized, left=True):
         spans.append((0, count))
     # A snapshot can start inside an escape or inside a control string.
