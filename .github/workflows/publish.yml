@@ -36,6 +36,9 @@ on:
       encrypted_upgrade_from:
         description: Signed rollback image pinned by digest (defaults to the ILEX_ENCRYPTED_UPGRADE_FROM repository variable)
         type: string
+      encrypted_update_kernel:
+        description: Optional exact Fedora kernel for the disposable encrypted CI update image
+        type: string
 
 permissions: {}
 
@@ -86,6 +89,7 @@ jobs:
       security_accelerator: ${{ inputs.security_accelerator || 'probe' }}
       encrypted_install: ${{ inputs.encrypted_install || false }}
       encrypted_upgrade_from: ${{ inputs.encrypted_upgrade_from || '' }}
+      encrypted_update_kernel: ${{ inputs.encrypted_update_kernel || '' }}
     secrets:
       COSIGN_PRIVATE_KEY: ${{ needs.route.outputs.main == 'true' && secrets.COSIGN_PRIVATE_KEY || '' }}
       COSIGN_PASSWORD: ${{ needs.route.outputs.main == 'true' && secrets.COSIGN_PASSWORD || '' }}

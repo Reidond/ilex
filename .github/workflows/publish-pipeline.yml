@@ -77,6 +77,9 @@ on:
       encrypted_upgrade_from:
         description: Signed rollback image pinned by digest
         type: string
+      encrypted_update_kernel:
+        description: Optional exact Fedora kernel for the disposable encrypted CI update image
+        type: string
 
       main:
         type: boolean
@@ -366,6 +369,7 @@ jobs:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
           ILEX_ENCRYPTED_UPGRADE_FROM: ${{ inputs.encrypted_upgrade_from || vars.ILEX_ENCRYPTED_UPGRADE_FROM }}
+          ILEX_ENCRYPTED_UPDATE_KERNEL: ${{ inputs.encrypted_update_kernel }}
         run: bash .github/encrypted-lifecycle.sh
 
       - name: Report unchanged security tier as unqualified

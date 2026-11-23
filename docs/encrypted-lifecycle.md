@@ -48,7 +48,11 @@ policy and requires another unattended unlock before advancing.
 The `publish` workflow's `encrypted_install=true` input includes the lifecycle
 and the earlier installer cases. Provide `encrypted_upgrade_from` or configure
 the `ILEX_ENCRYPTED_UPGRADE_FROM` repository variable with a signed
-`ghcr.io/reidond/ilex@sha256:…` baseline. The exact-ISO release job uses that
+`ghcr.io/reidond/ilex@sha256:…` baseline. When both builds carry the same
+kernel, a CI dispatch can name a distinct Fedora RPM release via
+`encrypted_update_kernel` and exercise the candidate userspace with that
+kernel and a regenerated initramfs. Evidence labels this disposable update
+fixture. The exact-ISO release job tests the unmodified published payload and uses the
 variable and the verified published target digest. It requires the encrypted
 lifecycle and a sealed artifact before releasing the ISO. This supplements the
 ordinary network install test, which checks the production registry and

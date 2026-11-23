@@ -9,8 +9,12 @@ set -euo pipefail
 tier=encrypted-upgrade-rollback
 mkdir -p "$ILEX_ARTIFACTS/$tier"
 qualified=false
+fixture_image=
+fixture_base=
 finish() {
     result=$?
+    if [[ -n "$fixture_image" ]]; then podman untag "$fixture_image" "$fixture_image" || true; fi
+    if [[ -n "$fixture_base" ]]; then podman untag "$fixture_base" "$fixture_base" || true; fi
     if [[ "$qualified" != true ]]; then
         rm -f -- "$ILEX_PRIVATE_FINGERPRINTS/$tier.json"
         printf '{"qualification":"unqualified","exit_code":%s}\n' "$result" > "$ILEX_ARTIFACTS/$tier/ci-result.json"
@@ -24,6 +28,20 @@ if [[ ! "${ILEX_ENCRYPTED_UPGRADE_FROM:-}" =~ ^ghcr\.io/reidond/ilex@sha256:[0-9
 fi
 cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true "$ILEX_ENCRYPTED_UPGRADE_FROM" >/dev/null
 podman pull --quiet "$ILEX_ENCRYPTED_UPGRADE_FROM"
+if [[ -n "${ILEX_ENCRYPTED_UPDATE_KERNEL:-}" ]]; then
+    [[ "$ILEX_ENCRYPTED_UPDATE_KERNEL" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.fc45\.x86_64$ ]]
+    base="localhost/ilex:encrypted-base-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+    update="localhost/ilex:encrypted-update-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+    ! podman image exists "$base" && ! podman image exists "$update" || exit 1
+    podman tag "$ILEX_IMAGE" "$base"
+    fixture_base=$base
+    fixture_image=$update
+    podman build --pull=never --file .github/encrypted-lifecycle.Containerfile \
+        --label "ilex.fixture.kernel=$ILEX_ENCRYPTED_UPDATE_KERNEL" \
+        --build-arg "BASE=$base" --build-arg "KERNEL=$ILEX_ENCRYPTED_UPDATE_KERNEL" \
+        --tag "$update" .github
+    export ILEX_IMAGE="$update"
+fi
 export ILEX_SECURITY_ACCELERATOR
 ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
 case "$ILEX_SECURITY_ACCELERATOR" in kvm|tcg) ;; *) exit 1 ;; esac

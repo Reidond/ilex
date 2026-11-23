@@ -58,6 +58,7 @@ pub(super) fn record_inputs(evidence: &Path, baseline: &str, update: &str) -> Re
             "manifest_digest": metadata["Digest"],
             "image_id": metadata["Id"],
             "revision": metadata["Config"]["Labels"]["org.opencontainers.image.revision"],
+            "fixture_kernel": metadata["Config"]["Labels"]["ilex.fixture.kernel"],
         }))
     };
     let inputs = json!({"baseline":record(baseline)?, "update":record(update)?});
