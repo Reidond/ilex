@@ -2972,7 +2972,8 @@ fn run_fixture(
         stage = "fixture";
         let image = common::image()?;
         let v1 = if lifecycle {
-            lifecycle::source_image(&image)?
+            std::env::var("ILEX_ENCRYPTED_UPGRADE_FROM")
+                .context("set ILEX_ENCRYPTED_UPGRADE_FROM to the qualifying rollback image")?
         } else {
             image.clone()
         };
@@ -2991,7 +2992,7 @@ fn run_fixture(
             let (registry, expected) = registry(&ws, &v1, &work)?;
             (Some(registry), expected)
         };
-        let update = lifecycle
+        let mut update = lifecycle
             .then(|| {
                 registry
                     .as_ref()
@@ -2999,8 +3000,11 @@ fn run_fixture(
                     .push(&image, "update")
             })
             .transpose()?;
-        if lifecycle {
-            lifecycle::record_inputs(&artifacts, &v1, &image)?;
+        if let Some(update) = &mut update {
+            let inputs = lifecycle::record_inputs(&artifacts, &v1, &image)?;
+            expected["boot_payload"] = inputs["baseline"]["boot_payload"].clone();
+            update["boot_payload"] = inputs["update"]["boot_payload"].clone();
+            update["fixture_kernel"] = inputs["update"]["fixture_kernel"].clone();
         }
         expected["preserve_data"] = json!(preserve_data);
         expected["interrupt_completion"] = json!(interrupted);

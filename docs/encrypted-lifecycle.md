@@ -1,7 +1,7 @@
 # Encrypted upgrade and rollback qualification
 
-Qualify one exact installer ISO, a supported rollback image (v1), and an update
-(v2) with a different Fedora kernel and initramfs. Keep the same installed disk,
+Qualify one exact installer ISO, a supported rollback image (v1), and a distinct
+update image (v2). Keep the same installed disk,
 firmware identity, and TPM. Fedora shim, Secure Boot, LUKS2 root, automatic
 SHA-256 PCR 7 unlock without a PIN, and a homed LUKS/btrfs home are required.
 The normal comparison expects equivalent PCR 7 measurements on each backend.
@@ -37,7 +37,10 @@ cargo ilexctl test security::upgrade_rollback -- --test-threads 1
 `encrypted-upgrade-rollback/result.json` must say `passed`. Inspect
 `iso-sha256.txt`, the manifest identities, the kernel and initramfs
 hashes on the actual boot entries, and PCR readings and replay at baseline,
-upgrade and rollback. The fixture requires a rejection for the unsigned update
+upgrade and rollback. Boot evidence must match each image's payloads, including
+when a kernel or initramfs is shared by both deployments. The
+`payload-transition.json` receipt records which fields changed. The fixture
+requires a rejection for the unsigned update
 and stages the same manifest after applying a disposable test signature. It
 preserves the production branch of the installed verification policy.
 A separate recovery boot at each deployment changes Secure Boot on the
@@ -47,19 +50,26 @@ an authenticated user edit to a profile-managed file. It restores firmware
 policy and requires another unattended unlock before advancing.
 
 The `publish` workflow's `encrypted_install=true` input includes the lifecycle
-and the earlier installer cases. Provide `encrypted_upgrade_from` or configure
-the `ILEX_ENCRYPTED_UPGRADE_FROM` repository variable with a signed
-`ghcr.io/reidond/ilex@sha256:…` baseline. When both builds carry the same
-kernel, a CI dispatch can name a distinct Fedora RPM release via
-`encrypted_update_kernel` and exercise the candidate userspace with that
-kernel and a regenerated initramfs. Evidence labels this disposable update
-fixture. The exact-ISO release job requires both a fresh encrypted install
-from the verified production digest under the shipped signature policy and the
-encrypted lifecycle through that unmodified published target. It seals both
+and the earlier installer cases. Its default v1 comes from the published
+installer composition captured before promotion. For an ISO-only refresh it
+uses the previous distinct signed digest from retained composition history.
+The workflow verifies the pin with the production key and records its source
+in `security/encrypted-baseline.json`. If no predecessor exists it records the
+reason and still qualifies a fresh encrypted install. Optional overrides are
+`encrypted_upgrade_from` and then `ILEX_ENCRYPTED_UPGRADE_FROM`; both take a
+signed `ghcr.io/reidond/ilex@sha256:…` reference.
+
+A CI dispatch can request a distinct Fedora RPM kernel via
+`encrypted_update_kernel`. This disposable update fixture requires a changed
+kernel release, kernel hash and regenerated initramfs hash. The release job
+always tests a fresh encrypted install from the verified production digest
+under the shipped signature policy. When a baseline exists, the job also tests
+the lifecycle through that unmodified published target. It seals the required
 results before releasing the ISO. The ordinary network install test also checks
-the production registry and composition. The lifecycle imports v1 and v2 into an isolated registry with a
-throwaway verification key. Its manifest digests identify those delivered test
-images. The release scope is the default installer composition.
+the production registry and composition. The lifecycle imports v1 and v2 into
+an isolated registry with a throwaway verification key. Its manifest digests
+identify those delivered test images. The release scope is the default
+installer composition.
 
 For a focused retry, dispatch with both `encrypted_install=true` and
 `encrypted_lifecycle_only=true`. It still installs the exact ISO and seals
@@ -69,8 +79,9 @@ installer cases retain their separate verdicts in the full workflow.
 The hosted runner must pass the firmware and 6 GiB lifecycle budget with KVM
 plus SMM or TCG. If it cannot, set `ILEX_RUNNER` to a dedicated Linux runner
 with secure OVMF, swtpm, and enough RAM, storage and runtime for the complete
-suite. A failed probe, timeout, missing baseline, or skipped lifecycle is
-unqualified. Retain the run URL and sealed evidence for a passing run.
+suite. A failed probe, timeout or failed lifecycle is unqualified. A fresh-only
+result qualifies that install and records why no lifecycle could run. Retain
+the run URL and sealed evidence for a passing run.
 
 ## Windows Hyper-V
 

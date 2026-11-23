@@ -5,7 +5,7 @@ inputs:
     description: Artifact name
     required: true
   encrypted:
-    description: Sealed scope (false for firmware, true for the full suite, lifecycle for an isolated run, release for the installer gate)
+    description: Sealed scope (false, true, fresh, installer, lifecycle, or release)
     required: true
 runs:
   using: composite

@@ -2,6 +2,8 @@
 use super::*;
 
 const BOOT_EVIDENCE: &str = include_str!("lifecycle-boot.py");
+const IMAGE_PAYLOAD: &str = include_str!("lifecycle-image.py");
+const PAYLOAD_FIELDS: [&str; 3] = ["kernel_release", "kernel_sha256", "initramfs_sha256"];
 
 pub(super) fn run() -> Result<()> {
     for program in ["openssl", "cosign", "mkfs.ext4", "debugfs"] {
@@ -16,35 +18,7 @@ pub(super) fn valid_digest(value: &str) -> bool {
         .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-pub(super) fn source_image(candidate: &str) -> Result<String> {
-    // Require the operator to name the compatibility floor explicitly. A
-    // moving tag or a second build of the same kernel is not an update proof.
-    let source = std::env::var("ILEX_ENCRYPTED_UPGRADE_FROM")
-        .context("set ILEX_ENCRYPTED_UPGRADE_FROM to an older qualifying image")?;
-    let podman = |image: &str| {
-        cmd::output(Command::new("podman").args([
-            "run",
-            "--pull=never",
-            "--rm",
-            "--read-only",
-            "--network=none",
-            "--entrypoint",
-            "/bin/sh",
-            image,
-            "-ec",
-            "for k in /usr/lib/modules/*; do test ! -f \"$k/vmlinuz\" || basename \"$k\"; done",
-        ]))
-    };
-    let old = podman(&source).context("inspect the locally available baseline kernel")?;
-    let new = podman(candidate).context("inspect the locally available update kernel")?;
-    ensure!(
-        old.lines().count() == 1 && new.lines().count() == 1 && old != new,
-        "baseline and candidate must each carry one distinct kernel release"
-    );
-    Ok(source)
-}
-
-pub(super) fn record_inputs(evidence: &Path, baseline: &str, update: &str) -> Result<()> {
+pub(super) fn record_inputs(evidence: &Path, baseline: &str, update: &str) -> Result<Value> {
     let record = |reference: &str| -> Result<Value> {
         let metadata = cmd::output(Command::new("podman").args([
             "image",
@@ -54,11 +28,32 @@ pub(super) fn record_inputs(evidence: &Path, baseline: &str, update: &str) -> Re
             reference,
         ]))?;
         let metadata: Value = serde_json::from_str(&metadata)?;
+        let payload = cmd::output(Command::new("podman").args([
+            "run",
+            "--pull=never",
+            "--rm",
+            "--read-only",
+            "--network=none",
+            "--entrypoint",
+            "/usr/bin/python3",
+            reference,
+            "-I",
+            "-S",
+            "-c",
+            IMAGE_PAYLOAD,
+        ]))
+        .with_context(|| format!("inspect the immutable boot payloads in {reference}"))?;
+        let payload: Value = serde_json::from_str(&payload)?;
+        ensure!(
+            PAYLOAD_FIELDS.iter().all(|key| payload[key].is_string()),
+            "image boot payload receipt incomplete"
+        );
         Ok(json!({
             "manifest_digest": metadata["Digest"],
             "image_id": metadata["Id"],
             "revision": metadata["Config"]["Labels"]["org.opencontainers.image.revision"],
             "fixture_kernel": metadata["Config"]["Labels"]["ilex.fixture.kernel"],
+            "boot_payload": payload,
         }))
     };
     let inputs = json!({"baseline":record(baseline)?, "update":record(update)?});
@@ -66,7 +61,7 @@ pub(super) fn record_inputs(evidence: &Path, baseline: &str, update: &str) -> Re
         evidence.join("input-images.json"),
         serde_json::to_vec_pretty(&inputs)?,
     )?;
-    Ok(())
+    Ok(inputs)
 }
 
 pub(super) fn home_password() -> Result<Secret> {
@@ -115,7 +110,15 @@ pub(super) fn qualify(
         evidence.join("update.json"),
         serde_json::to_vec_pretty(update)?,
     )?;
-    let mut first_kernel = None;
+    let mut transition = serde_json::Map::new();
+    for field in PAYLOAD_FIELDS {
+        let changed = baseline["boot_payload"][field] != update["boot_payload"][field];
+        ensure!(
+            update["fixture_kernel"].is_null() || changed,
+            "disposable kernel fixture did not change {field}"
+        );
+        transition.insert(field.into(), json!(changed));
+    }
     let mut home_data = None;
     let mut boots = Vec::new();
     let mut header = None;
@@ -146,25 +149,15 @@ pub(super) fn qualify(
         let payload = boot_payload(vm, &auto)?;
         record_boot(vm, &mut boots)?;
         ensure!(
-            !payload["kernel_release"].is_null(),
-            "running kernel release absent"
+            payload == manifest["boot_payload"],
+            "{phase} boot payload differs from the expected image payload"
         );
-        if let Some(first) = &first_kernel {
-            if phase == "upgrade" {
-                compare_kernels(first, &payload)?;
-                let bootc: Value = serde_json::from_slice(&fs::read(auto.join("bootc.json"))?)?;
-                ensure!(
-                    bootc["status"]["rollback"]["image"]["imageDigest"] == baseline["digest"],
-                    "upgrade did not retain the original deployment"
-                );
-            } else {
-                ensure!(
-                    first == &payload,
-                    "rollback did not restore both original boot payloads"
-                );
-            }
-        } else {
-            first_kernel = Some(payload.clone());
+        if phase == "upgrade" {
+            let bootc: Value = serde_json::from_slice(&fs::read(auto.join("bootc.json"))?)?;
+            ensure!(
+                bootc["status"]["rollback"]["image"]["imageDigest"] == baseline["digest"],
+                "upgrade did not retain the original deployment"
+            );
         }
         *stage = "running_root_header";
         check_tokens(vm, &auto, uuid, tokens, &mut header)?;
@@ -258,6 +251,10 @@ pub(super) fn qualify(
             fixture.disk_boot()?;
         }
     }
+    fs::write(
+        evidence.join("payload-transition.json"),
+        serde_json::to_vec_pretty(&transition)?,
+    )?;
     Ok(())
 }
 
@@ -274,16 +271,6 @@ fn boot_payload(vm: &qemu::Vm, path: &Path) -> Result<Value> {
         "timeout -k 10s 120s python3 -I -S - <<'ILEX_BOOT_EVIDENCE'\n{BOOT_EVIDENCE}\nILEX_BOOT_EVIDENCE"
     );
     guest_json(vm, path, "boot-payload.json", &cmd)
-}
-
-fn compare_kernels(prior: &Value, new: &Value) -> Result<()> {
-    for key in ["kernel_release", "kernel_sha256", "initramfs_sha256"] {
-        ensure!(
-            new[key].is_string() && prior[key].is_string() && new[key] != prior[key],
-            "actual upgrade did not change {key}"
-        );
-    }
-    Ok(())
 }
 
 fn check_tokens(

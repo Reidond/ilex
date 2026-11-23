@@ -30,11 +30,11 @@ on:
         options: [probe, kvm, tcg]
         default: probe
       encrypted_install:
-        description: Qualify encrypted installation, recovery, privacy, and a real kernel upgrade and rollback (6 GiB)
+        description: Qualify encrypted installation, recovery, privacy, upgrade and rollback (6 GiB)
         type: boolean
         default: false
       encrypted_upgrade_from:
-        description: Signed rollback image pinned by digest (defaults to the ILEX_ENCRYPTED_UPGRADE_FROM repository variable)
+        description: Optional signed rollback digest (then repository variable, then published installer history)
         type: string
       encrypted_update_kernel:
         description: Optional exact Fedora kernel for the disposable encrypted CI update image

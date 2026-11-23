@@ -174,15 +174,6 @@ jobs:
         run: |
           echo '::error::encrypted_install requires the build/qualification job; v1_disk is a separate cache-only run.'
           exit 1
-      - name: Require a pinned encrypted rollback baseline
-        if: inputs.encrypted_install
-        env:
-          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ inputs.encrypted_upgrade_from || vars.ILEX_ENCRYPTED_UPGRADE_FROM }}
-        run: |
-          if [[ ! "$ILEX_ENCRYPTED_UPGRADE_FROM" =~ ^ghcr\.io/reidond/ilex@sha256:[0-9a-f]{64}$ ]]; then
-            echo '::error::Encrypted lifecycle UNQUALIFIED. Provide a supported signed rollback digest.'
-            exit 1
-          fi
       - name: Reject a lifecycle-only run without encrypted qualification
         if: inputs.encrypted_lifecycle_only && !inputs.encrypted_install
         run: |
@@ -357,13 +348,24 @@ jobs:
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
+      - name: Select and verify the encrypted rollback baseline
+        id: encrypted-baseline
+        if: inputs.encrypted_install
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_BASELINE_SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
+          INSTALLER_BASELINE_TARGET: ${{ steps.changed.outputs.changed == 'false' && inputs.encrypted_update_kernel == '' && steps.composition.outputs.snapshot || '' }}
+          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ inputs.encrypted_upgrade_from || vars.ILEX_ENCRYPTED_UPGRADE_FROM }}
+          ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
+        run: bash .github/encrypted-baseline.sh
+
       - name: Build exact ISO for encrypted candidate gate
         if: inputs.encrypted_install
         timeout-minutes: 40
         run: bash .github/encrypted-iso.sh
 
       - name: Exact encrypted installer qualification
-        id: encrypted-qualification
         if: inputs.encrypted_install && !inputs.encrypted_lifecycle_only
         timeout-minutes: 180
         env:
@@ -377,32 +379,53 @@ jobs:
           echo "ILEX_PRIVATE_FINGERPRINTS=$private" >> "$GITHUB_ENV"
 
       - name: Qualify encrypted upgrade and rollback
-        if: inputs.encrypted_install
-        id: encrypted-lifecycle
+        if: inputs.encrypted_install && steps.encrypted-baseline.outputs.reference != ''
         timeout-minutes: 115
         env:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
-          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ inputs.encrypted_upgrade_from || vars.ILEX_ENCRYPTED_UPGRADE_FROM }}
+          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ steps.encrypted-baseline.outputs.reference }}
           ILEX_ENCRYPTED_UPDATE_KERNEL: ${{ inputs.encrypted_update_kernel }}
         run: bash .github/encrypted-lifecycle.sh
+
+      - name: Qualify a fresh encrypted install when no rollback image exists
+        if: inputs.encrypted_install && inputs.encrypted_lifecycle_only && steps.encrypted-baseline.outputs.reference == ''
+        timeout-minutes: 85
+        env:
+          ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
+          ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
+        run: |
+          export ILEX_SECURITY_ACCELERATOR
+          ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
+          timeout --signal=TERM --kill-after=30s 80m cargo ilexctl test security::encrypted_install -- --exact --test-threads 1
 
       - name: Report unchanged security tier as unqualified
         if: steps.changed.outputs.changed != 'true' && !inputs.test && !inputs.encrypted_install
         run: echo 'security::firmware **UNQUALIFIED** (unchanged image; tier not run). Use test=true to qualify this runner.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Scan and seal qualification evidence
-        if: steps.security-qualification.outcome == 'success' && (!inputs.encrypted_install || ((inputs.encrypted_lifecycle_only || steps.encrypted-qualification.outcome == 'success') && steps.encrypted-lifecycle.outcome == 'success'))
+        if: steps.security-qualification.outcome == 'success'
         id: qualification-scan
         env:
-          ENCRYPTED_EVIDENCE_SCOPE: ${{ inputs.encrypted_lifecycle_only && 'lifecycle' || inputs.encrypted_install && 'true' || 'false' }}
+          ENCRYPTED_INSTALL: ${{ inputs.encrypted_install }}
+          LIFECYCLE_ONLY: ${{ inputs.encrypted_lifecycle_only }}
+          BASELINE: ${{ steps.encrypted-baseline.outputs.reference }}
         run: |
-          if [[ "$ENCRYPTED_EVIDENCE_SCOPE" != false ]]; then
+          scope=false
+          if [[ "$ENCRYPTED_INSTALL" == true ]]; then
+            if [[ "$LIFECYCLE_ONLY" == true ]]; then
+              if [[ -n "$BASELINE" ]]; then scope=lifecycle; else scope=fresh; fi
+            elif [[ -n "$BASELINE" ]]; then
+              scope=true
+            else
+              scope=installer
+            fi
             case "$ILEX_PRIVATE_FINGERPRINTS" in "$RUNNER_TEMP"/ilex-fingerprints.*) ;; *) exit 1 ;; esac
-            python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" "$ENCRYPTED_EVIDENCE_SCOPE" "$ILEX_PRIVATE_FINGERPRINTS"
+            python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" "$scope" "$ILEX_PRIVATE_FINGERPRINTS"
           else
             python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" false
           fi
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
 
       - name: Remove private qualification fingerprints
         if: always() && env.ILEX_PRIVATE_FINGERPRINTS != ''
@@ -418,21 +441,21 @@ jobs:
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: security-evidence
-          encrypted: ${{ inputs.encrypted_install || false }}
+          encrypted: ${{ steps.qualification-scan.outputs.scope }}
 
       - name: Keep encrypted installer public evidence
         if: steps.qualification-scan.outcome == 'success' && inputs.encrypted_install && !inputs.encrypted_lifecycle_only
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: encrypted-installer-evidence
-          encrypted: 'true'
+          encrypted: ${{ steps.qualification-scan.outputs.scope }}
 
-      - name: Keep sealed focused lifecycle evidence
+      - name: Keep sealed focused encrypted evidence
         if: steps.qualification-scan.outcome == 'success' && inputs.encrypted_lifecycle_only
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: encrypted-lifecycle-evidence
-          encrypted: lifecycle
+          encrypted: ${{ steps.qualification-scan.outputs.scope }}
 
       - name: e2e apps installation (opt-in)
         id: apps
@@ -1148,14 +1171,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: Qualify fresh encrypted release installs and rollback
+      - name: Select and verify the published rollback baseline
+        id: encrypted-baseline
+        if: success() && steps.install.outcome == 'success'
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_TAG: ${{ needs.iso.outputs.tag }}
+          INSTALLER_BASELINE_SNAPSHOT: ${{ needs.build.outputs.snapshot }}
+          INSTALLER_BASELINE_TARGET: ${{ steps.target.outputs.digest }}
+          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ inputs.encrypted_upgrade_from || vars.ILEX_ENCRYPTED_UPGRADE_FROM }}
+          ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
+        run: bash .github/encrypted-baseline.sh
+
+      - name: Qualify encrypted release installation and rollback
         id: encrypted-release
         if: success() && steps.install.outcome == 'success'
         timeout-minutes: 220
         env:
           ILEX_ISO: ${{ env.ISO_DIR }}/ilex-installer.iso
           ILEX_IMAGE: ${{ env.IMAGE_REPO }}@${{ steps.target.outputs.digest }}
-          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ inputs.encrypted_upgrade_from || vars.ILEX_ENCRYPTED_UPGRADE_FROM }}
+          ILEX_ENCRYPTED_UPGRADE_FROM: ${{ steps.encrypted-baseline.outputs.reference }}
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
           ILEX_SECURITY_MEMORY: 6G
         run: |
@@ -1170,28 +1206,35 @@ jobs:
           ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
           ILEX_ENCRYPTED_PUBLISHED_INSTALL=1 timeout --signal=TERM --kill-after=30s 85m \
             cargo ilexctl test security::encrypted_install -- --exact --test-threads 1
-          bash .github/encrypted-lifecycle.sh
-          python3 - "$ILEX_ARTIFACTS" "${ILEX_IMAGE##*@}" "$ISO_DIR/ilex-installer.iso.sha256" <<'PY'
+          scope=fresh
+          if [[ -n "$ILEX_ENCRYPTED_UPGRADE_FROM" ]]; then
+            bash .github/encrypted-lifecycle.sh
+            scope=release
+          fi
+          python3 - "$ILEX_ARTIFACTS" "${ILEX_IMAGE##*@}" "$ISO_DIR/ilex-installer.iso.sha256" "$ILEX_ENCRYPTED_UPGRADE_FROM" <<'PY'
           import json, pathlib, sys
           evidence = pathlib.Path(sys.argv[1])
           fresh = evidence / 'encrypted-install'
-          lifecycle = evidence / 'encrypted-upgrade-rollback'
           install = json.loads((fresh / 'candidate.json').read_text())
-          inputs = json.loads((lifecycle / 'input-images.json').read_text())
           assert install['published_source'] and install['digest'] == sys.argv[2], 'fresh encrypted install did not use the published digest'
-          assert inputs['update']['manifest_digest'] == sys.argv[2], 'published digest differs from tested update'
           expected = pathlib.Path(sys.argv[3]).read_text().split()[0]
-          for tier in (fresh, lifecycle):
-              assert (tier / 'iso-sha256.txt').read_text().split()[0] == expected, 'installer hash differs from tested ISO'
+          assert (fresh / 'iso-sha256.txt').read_text().split()[0] == expected, 'installer hash differs from fresh-install ISO'
+          if sys.argv[4]:
+              lifecycle = evidence / 'encrypted-upgrade-rollback'
+              inputs = json.loads((lifecycle / 'input-images.json').read_text())
+              assert inputs['baseline']['manifest_digest'] == sys.argv[4].split('@')[1], 'pinned digest differs from tested baseline'
+              assert inputs['update']['manifest_digest'] == sys.argv[2], 'published digest differs from tested update'
+              assert (lifecycle / 'iso-sha256.txt').read_text().split()[0] == expected, 'installer hash differs from lifecycle ISO'
           PY
-          python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$ILEX_ARTIFACTS" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" release "$ILEX_PRIVATE_FINGERPRINTS"
+          python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$ILEX_ARTIFACTS" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" "$scope" "$ILEX_PRIVATE_FINGERPRINTS"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
 
       - name: Keep sealed release lifecycle evidence
         if: steps.encrypted-release.outcome == 'success'
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: encrypted-release-lifecycle-evidence
-          encrypted: release
+          encrypted: ${{ steps.encrypted-release.outputs.scope }}
 
       - name: Publish the release
         if: success() && steps.target.outputs.available == 'true' && steps.install.outcome == 'success' && steps.encrypted-release.outcome == 'success'

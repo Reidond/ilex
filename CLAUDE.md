@@ -235,13 +235,15 @@ verification/repair. `security::encrypted_install` requires T6 qualification
 for its exact 6 GiB/two-vCPU profile and tests a disposable signed local
 candidate. It must not be reported as a passing released-image install.
 
-`security::upgrade_rollback` uses the same exact-ISO encrypted fixture with
-an explicit rollback baseline (`ILEX_ENCRYPTED_UPGRADE_FROM`) and a distinct
-kernel/initramfs in the candidate. It checks unattended and recovery-key
-boots, the LUKS header, authenticated homed data and an edited file from
-the selected home profile on each deployment. Installer release requires
-both the lifecycle and an independent fresh encrypted install of the exact
-published digest, with both results sealed before upload.
+`security::upgrade_rollback` uses the same exact-ISO encrypted fixture and
+checks that each deployment boots the expected kernel and initramfs. It tests
+unattended and recovery-key boots, the LUKS header, authenticated homed data
+and an edited file from the selected home profile on each deployment. CI pins
+and verifies the published installer composition from its pre-promotion
+snapshot, or the previous distinct signed composition for an ISO-only refresh.
+Installer release always requires a fresh encrypted install of the verified
+published digest and also requires the lifecycle when a baseline exists.
+The gate seals the required evidence before upload.
 See the [encrypted lifecycle runbook](docs/encrypted-lifecycle.md) for the
 CI baseline, native Gen2 console fixture, and owner-run MS-7C35 qualification.
 

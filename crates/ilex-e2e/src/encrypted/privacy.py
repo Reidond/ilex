@@ -320,6 +320,7 @@ EXPORT_REPORT = 'final-export-privacy.json'
 
 def encrypted_tiers(mode):
     return {'false': (), 'true': (*ENCRYPTED_TIERS, LIFECYCLE_TIER),
+            'fresh': (ENCRYPTED_TIERS[0],), 'installer': ENCRYPTED_TIERS,
             'lifecycle': (LIFECYCLE_TIER,), 'release': (ENCRYPTED_TIERS[0], LIFECYCLE_TIER)}[mode]
 
 
@@ -460,10 +461,10 @@ if __name__ == '__main__':
             name = sys.argv[5]
             if name == 'security-evidence':
                 paths = ['security']
-            elif name == 'encrypted-installer-evidence' and mode == 'true':
+            elif name == 'encrypted-installer-evidence' and mode in ('true', 'installer'):
                 paths = [*encrypted_tiers(mode), EXPORT_REPORT]
-            elif (name, mode) in (('encrypted-lifecycle-evidence', 'lifecycle'),
-                                  ('encrypted-release-lifecycle-evidence', 'release')):
+            elif ((name == 'encrypted-lifecycle-evidence' and mode in ('lifecycle', 'fresh'))
+                  or (name == 'encrypted-release-lifecycle-evidence' and mode in ('release', 'fresh'))):
                 paths = ['security', *encrypted_tiers(mode), EXPORT_REPORT]
             else:
                 raise ValueError('unknown artifact scope')

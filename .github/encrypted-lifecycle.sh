@@ -18,7 +18,7 @@ finish() {
     if [[ "$qualified" != true ]]; then
         rm -f -- "$ILEX_PRIVATE_FINGERPRINTS/$tier.json"
         printf '{"qualification":"unqualified","exit_code":%s}\n' "$result" > "$ILEX_ARTIFACTS/$tier/ci-result.json"
-        echo 'Encrypted upgrade/rollback **UNQUALIFIED**. A compatible signed baseline with a different kernel and a runner that completes the secure lifecycle within the job budget are required.' >> "$GITHUB_STEP_SUMMARY"
+        echo 'Encrypted upgrade/rollback **UNQUALIFIED**. Check the signed baseline and the secure lifecycle result within the job budget.' >> "$GITHUB_STEP_SUMMARY"
     fi
 }
 trap finish EXIT
