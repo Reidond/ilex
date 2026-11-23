@@ -235,6 +235,14 @@ verification/repair. `security::encrypted_install` requires T6 qualification
 for its exact 6 GiB/two-vCPU profile and tests a disposable signed local
 candidate. It must not be reported as a passing released-image install.
 
+`security::upgrade_rollback` uses the same exact-ISO encrypted fixture with
+an explicit rollback baseline (`ILEX_ENCRYPTED_UPGRADE_FROM`) and a distinct
+kernel/initramfs in the candidate. It checks unattended and recovery-key
+boots, the LUKS header and authenticated homed data on each deployment. The
+workflow requires it for encrypted CI qualification and installer release.
+See the [encrypted lifecycle runbook](docs/encrypted-lifecycle.md) for the
+CI baseline, native Gen2 console fixture, and owner-run MS-7C35 qualification.
+
 The installed `ilex-security-verify.service` runs `ilexctl security verify`
 to record pending, verified or error from this boot's root unlock evidence.
 After passphrase or recovery-key fallback, `sudo ilexctl security repair`

@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use ilex_devkit::{
     Workspace, cmd,
-    core::{BootSource, Capability, DiskFormat, Resources, VmProvider},
+    core::{BootSource, Capability, DiskFormat, NetworkIntent, Resources, VmProvider},
 };
 use ilex_tooling_windows::gen2;
 use std::{path::PathBuf, process::Command};
@@ -23,6 +23,9 @@ pub fn run(ws: &Workspace, args: crate::security::Args) -> Result<()> {
         .memory
         .or_else(|| std::env::var("ILEX_SECURITY_MEMORY").ok())
         .unwrap_or_else(|| "6G".into());
+    if args.encrypted_console {
+        return encrypted_console(ws, &provider, resources(&memory)?);
+    }
     let request = gen2::spec(
         &ws.identity()?,
         "security-probe",
@@ -63,6 +66,93 @@ fn resources(memory: &str) -> Result<Resources> {
             .transpose()?
             .unwrap_or(2),
     })
+}
+
+fn encrypted_console(
+    ws: &Workspace,
+    provider: &gen2::Provider,
+    resources: Resources,
+) -> Result<()> {
+    use std::time::Duration;
+
+    ilex_tooling_windows::transport::install_cancel_handler()?;
+    let (iso, declared) = installer_media()?;
+    ensure!(
+        gen2::sha256_file(&iso)?.eq_ignore_ascii_case(&format!("sha256:{declared}")),
+        "installer ISO hash mismatch"
+    );
+    ensure!(
+        resources.memory_bytes == (6 << 30) && resources.vcpus == 2,
+        "encrypted console requires 6 GiB and 2 vCPUs"
+    );
+    let mut spec = gen2::spec(
+        &ws.identity()?,
+        "encrypted-lifecycle",
+        resources,
+        BootSource::BlankDisk {
+            bytes: 40 << 30,
+            format: DiskFormat::Vhdx,
+        },
+    )?;
+    spec.iso = Some(iso);
+    spec.network = NetworkIntent::User { ssh: false };
+    let caps = provider.probe(&spec)?;
+    caps.require(Capability::FirmwareEnforcement)?;
+    caps.require(Capability::PersistentTpm)?;
+    let mut vm = provider.create(spec)?;
+    let result = (|| -> Result<()> {
+        // The actual Anaconda enrollment displays a recovery key. Keep
+        // backend capture suppressed for the entire operator session.
+        vm.conceal_console()?;
+        let handle = provider.start(&mut vm)?;
+        eprintln!(
+            "Gen2 encrypted installer VM: {} ({}). Open its console and use the encrypted lifecycle runbook.",
+            vm.name(),
+            handle.opaque_id
+        );
+        eprintln!(
+            "Choose power off at installer completion. The same VM will then start from its installed disk."
+        );
+        vm.wait_off(Duration::from_secs(3600))?;
+        provider.stop(&mut vm)?;
+        ensure!(
+            provider.boot_installed(&mut vm, false)? == handle,
+            "installer changed VM identity"
+        );
+        ensure!(
+            provider.start(&mut vm)? == handle,
+            "disk boot changed VM identity"
+        );
+        eprintln!(
+            "Use guest reboots for the lifecycle. Power off after collecting evidence. Console operation does not grant qualification."
+        );
+        vm.wait_off(Duration::from_secs(7200))
+    })();
+    let cleanup = provider.destroy_owned(&mut vm);
+    result.and(cleanup)
+}
+
+fn installer_media() -> Result<(PathBuf, String)> {
+    let iso = PathBuf::from(
+        std::env::var_os("ILEX_ISO").context("set ILEX_ISO to the exact installer ISO")?,
+    );
+    let declared = std::env::var("ILEX_ISO_SHA256")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(iso.with_extension("iso.sha256"))
+                .ok()
+                .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+        })
+        .context(
+            "provide the installer asset SHA256 through ILEX_ISO_SHA256 or its .iso.sha256 file",
+        )?;
+    ensure!(
+        declared.len() == 64 && declared.bytes().all(|b| b.is_ascii_hexdigit()),
+        "invalid installer SHA256"
+    );
+    let iso = std::path::absolute(iso)?;
+    ensure!(iso.is_file(), "installer ISO does not exist");
+    Ok((iso, declared))
 }
 
 pub fn partition(
@@ -112,20 +202,7 @@ fn native(ws: &Workspace, args: crate::test::Args, memory: &str) -> Result<()> {
         .env("ILEX_ROOT", &ws.root)
         .env("ILEX_XTASK", std::env::current_exe()?);
     if !args.test_args.iter().any(|a| a == "--list") {
-        let iso = PathBuf::from(
-            std::env::var_os("ILEX_ISO")
-                .context("set ILEX_ISO to the exact signed installer ISO")?,
-        );
-        let declared = std::env::var("ILEX_ISO_SHA256").ok()
-            .or_else(|| std::fs::read_to_string(iso.with_extension("iso.sha256")).ok()
-                .and_then(|s| s.split_whitespace().next().map(str::to_owned)))
-            .context("provide the installer asset SHA256 through ILEX_ISO_SHA256 or its .iso.sha256 file")?;
-        ensure!(
-            declared.len() == 64 && declared.bytes().all(|b| b.is_ascii_hexdigit()),
-            "invalid installer SHA256"
-        );
-        let iso = std::path::absolute(iso)?;
-        ensure!(iso.is_file(), "installer ISO does not exist");
+        let (iso, declared) = installer_media()?;
         let image = std::env::var("ILEX_IMAGE").ok().filter(|s| !s.is_empty());
         let selection = args
             .selection
@@ -166,7 +243,7 @@ fn native(ws: &Workspace, args: crate::test::Args, memory: &str) -> Result<()> {
 /// Launch an ordinary qualified Gen2 guest. The same handle owns its disk and
 /// vTPM from launch until cleanup. A console client is only an attachment.
 pub fn vm(ws: &Workspace, args: crate::vm::Args, resolved: crate::select::Resolved) -> Result<()> {
-    use ilex_devkit::core::{NetworkIntent, SshProvisioning, VmControl};
+    use ilex_devkit::core::{SshProvisioning, VmControl};
     use std::time::Duration;
     if args.print_image {
         println!("{}", crate::dev_image::reference(ws, &resolved.image, true));

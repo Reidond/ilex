@@ -37,12 +37,13 @@ if zstd:
 
 PATTERNS = {
     48: re.compile(rb'(?=([a-z]{48}))'),
+    52: re.compile(rb'(?=(Ix9-[0-9a-f]{48}))'),
     71: re.compile(rb'(?=([cbdefghijklnrtuv]{8}(?:-[cbdefghijklnrtuv]{8}){7}))'),
 }
 EDGE_BYTES = 8
-EDGE_PATTERN = re.compile(rb'(?=([a-z]{8}))')
+EDGE_PATTERN = re.compile(rb'(?=(Ix9-[0-9a-f]{4}|[a-z]{8}|[0-9a-f]{8}))')
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.ppm'}
-SECRET_KINDS = {48: 'disk-passphrase', 71: 'recovery-key'}
+SECRET_KINDS = {48: 'disk-passphrase', 52: 'home-password', 71: 'recovery-key'}
 
 
 def fingerprint(value):
@@ -301,11 +302,23 @@ def verify_export(root, tiers, required=False):
 
 
 ENCRYPTED_TIERS = ('encrypted-install', 'encrypted-existing-space', 'encrypted-interrupted')
+LIFECYCLE_TIER = 'encrypted-upgrade-rollback'
+FINGERPRINT_LENGTHS = {
+    'encrypted-install': [48, 71],
+    'encrypted-existing-space': [48, 71],
+    'encrypted-interrupted': [48, 71, 71],
+    LIFECYCLE_TIER: [48, 52, 71],
+}
 EXPORT_REPORT = 'final-export-privacy.json'
 
 
-def artifact_roots(root, encrypted):
-    tiers = ('security', *ENCRYPTED_TIERS) if encrypted else ('security',)
+def encrypted_tiers(mode):
+    return {'false': (), 'true': (*ENCRYPTED_TIERS, LIFECYCLE_TIER),
+            'lifecycle': (LIFECYCLE_TIER,)}[mode]
+
+
+def artifact_roots(root, mode):
+    tiers = ('security', *encrypted_tiers(mode))
     verify_export(root, tiers, required=True)
     return [root / tier for tier in tiers]
 
@@ -319,24 +332,26 @@ def artifact_snapshot(root, paths):
     return contents
 
 
-def seal_export(root, marker, encrypted, private_directory=None):
+def seal_export(root, marker, mode, private_directory=None):
     with evidence_io(marker, 'seal-reset'):
         marker.unlink(missing_ok=True)
-    paths = artifact_roots(root, encrypted)
+    paths = artifact_roots(root, mode)
     initial = artifact_snapshot(root, paths)
     credentials = [entry for name in initial if name.endswith('credentials.json')
                    for entry in fingerprint_records(root / name)]
     edges = {}
-    if encrypted:
-        for tier in ENCRYPTED_TIERS:
+    tiers = encrypted_tiers(mode)
+    if tiers:
+        for tier in tiers:
             definition = root / tier / 'result.json'
             outcome = evidence_json(definition, 'qualification-result')
             if not isinstance(outcome, dict) or outcome.get('qualification') != 'passed':
                 raise EvidenceError(definition, 'qualification-result')
             fingerprints = definition.with_name('installer-credentials.json')
-            required = [48, 71, 71] if tier == 'encrypted-interrupted' else [48, 71]
             public = fingerprint_records(fingerprints)
-            if sorted(entry['length'] for entry in public) != required:
+            if tier == LIFECYCLE_TIER:
+                public += fingerprint_records(definition.with_name('home-credentials.json'))
+            if sorted(entry['length'] for entry in public) != FINGERPRINT_LENGTHS[tier]:
                 raise EvidenceError(fingerprints, 'public-fingerprints')
             private_path = private_directory / (tier + '.json')
             private = fingerprint_records(private_path, private=True)
@@ -349,12 +364,12 @@ def seal_export(root, marker, encrypted, private_directory=None):
                     raise EvidenceError(private_path, 'private-fingerprints')
                 for digest in entry['edges']:
                     edges.setdefault(digest, set()).add(entry['length'])
-    report = scan(paths, credentials, require_credentials=encrypted, private_edges=edges)
+    report = scan(paths, credentials, require_credentials=bool(tiers), private_edges=edges)
     if report['secret_found'] or report['read_errors']:
         return report
-    require_same_snapshot(root, initial, artifact_snapshot(root, artifact_roots(root, encrypted)))
+    require_same_snapshot(root, initial, artifact_snapshot(root, artifact_roots(root, mode)))
     receipt = json.dumps(report) + '\n'
-    if encrypted:
+    if tiers:
         path = root / EXPORT_REPORT
         with evidence_io(path, 'privacy-report-write'):
             with path.open('x') as output:
@@ -372,9 +387,9 @@ def require_same_snapshot(root, expected, current):
             raise EvidenceError(root / name, 'artifact-changed')
 
 
-def check_seal(root, marker, encrypted):
-    current = artifact_snapshot(root, artifact_roots(root, encrypted))
-    if encrypted:
+def check_seal(root, marker, mode):
+    current = artifact_snapshot(root, artifact_roots(root, mode))
+    if encrypted_tiers(mode):
         report = root / EXPORT_REPORT
         with evidence_io(report, 'privacy-report-read'):
             if not stat.S_ISREG(report.lstat().st_mode):
@@ -434,13 +449,15 @@ if __name__ == '__main__':
             verify_export(root, sys.argv[3:])
             raise SystemExit(0)
         if sys.argv[2:3] == ['--check-seal']:
-            encrypted = sys.argv[4] == 'true'
-            check_seal(root, pathlib.Path(sys.argv[3]), encrypted)
+            mode = sys.argv[4]
+            check_seal(root, pathlib.Path(sys.argv[3]), mode)
             name = sys.argv[5]
             if name == 'security-evidence':
                 paths = ['security']
-            elif name == 'encrypted-installer-evidence' and encrypted:
-                paths = [*ENCRYPTED_TIERS, EXPORT_REPORT]
+            elif name == 'encrypted-installer-evidence' and mode == 'true':
+                paths = [*encrypted_tiers(mode), EXPORT_REPORT]
+            elif name == 'encrypted-release-lifecycle-evidence' and mode == 'lifecycle':
+                paths = ['security', LIFECYCLE_TIER, EXPORT_REPORT]
             else:
                 raise ValueError('unknown artifact scope')
             print('paths<<VERIFIED_QUALIFICATION_PATHS')
@@ -451,7 +468,7 @@ if __name__ == '__main__':
         if sys.argv[2:3] == ['--seal-profile-export']:
             result = seal_profile_export(root, pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]))
         elif sys.argv[2:3] == ['--seal-export']:
-            result = seal_export(root, pathlib.Path(sys.argv[3]), sys.argv[4] == 'true',
+            result = seal_export(root, pathlib.Path(sys.argv[3]), sys.argv[4],
                                  pathlib.Path(sys.argv[5]) if len(sys.argv) > 5 else None)
         else:
             fingerprints = []

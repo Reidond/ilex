@@ -61,6 +61,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             || f.contains("encrypted_")
             || f.contains("installer_profile_setup")
             || f.contains("installer_no_profile")
+            || f.contains("security::upgrade")
     }) {
         prepare_iso(ws, &mut test)?;
     }

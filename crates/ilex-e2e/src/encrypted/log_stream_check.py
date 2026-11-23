@@ -9,7 +9,7 @@ import tempfile
 
 from diagnostics import LOG_BYTES, emit, extract, redacted_tail, tail
 from log_stream import CANCEL, CSI, ESC, OSC, ST, STRINGS, Normalizer
-from privacy import (ENCRYPTED_TIERS, PATTERNS, EvidenceError, check_seal, fingerprint,
+from privacy import (ENCRYPTED_TIERS, LIFECYCLE_TIER, PATTERNS, EvidenceError, check_seal, fingerprint,
                      private_fingerprint, seal_export, stream_matches, verify_export)
 
 
@@ -47,20 +47,24 @@ def check_artifact_seal(root):
     secret = b'z' * 48
     recovery = b'-'.join([b'u' * 8] * 8)
     reissued = b'-'.join([b'v' * 8] * 8)
-    for tier in ENCRYPTED_TIERS:
+    home = b'Ix9-' + b'0a' * 24
+    for tier in (*ENCRYPTED_TIERS, LIFECYCLE_TIER):
         path = root / tier
         path.mkdir()
         (path / 'result.json').write_text('{"qualification":"passed"}')
         values = [secret, recovery, reissued] if tier == 'encrypted-interrupted' else [secret, recovery]
         (path / 'installer-credentials.json').write_text(
             json.dumps([fingerprint(value) for value in values]))
+        if tier == LIFECYCLE_TIER:
+            (path / 'home-credentials.json').write_text(json.dumps([fingerprint(home)]))
+            values.append(home)
         (private / (tier + '.json')).write_text(
             json.dumps([private_fingerprint(value) for value in values]))
     log = security / 'fixture-serial.redacted.log'
 
     def refuses_upload():
         try:
-            check_seal(root, marker, encrypted=True)
+            check_seal(root, marker, 'true')
         except (OSError, ValueError):
             return
         raise AssertionError('upload accepted unscanned evidence')
@@ -85,11 +89,14 @@ def check_artifact_seal(root):
     rejected_export(fallback, 'public-fingerprints')
     fallback.rename(fallback.with_name('repair-fallback-authentication.json'))
     log.write_bytes(secret[:4] + b'\x9b3\0;1m\r\n' + secret[4:8])
-    assert seal_export(root, marker, encrypted=True, private_directory=private)['secret_found']
+    assert seal_export(root, marker, 'true', private)['secret_found']
+    refuses_upload()
+    log.write_bytes(home[:4] + b'\x1b[1m' + home[4:8])
+    assert seal_export(root, marker, 'true', private)['secret_found']
     refuses_upload()
     log.write_bytes(b'boot complete')
-    assert not seal_export(root, marker, encrypted=True, private_directory=private)['secret_found']
-    check_seal(root, marker, encrypted=True)
+    assert not seal_export(root, marker, 'true', private)['secret_found']
+    check_seal(root, marker, 'true')
     log.write_bytes(b'changed after successful scan')
     refuses_upload()
     receipt = private / (ENCRYPTED_TIERS[0] + '.json')

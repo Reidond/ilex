@@ -35,6 +35,8 @@ pub(crate) const LOCAL_SOURCE: &str = include_str!("encrypted/source.py");
 const PRIVACY: &str = include_str!("encrypted/privacy.py");
 const DIAGNOSTICS: &str = include_str!("encrypted/diagnostics.py");
 const LOG_STREAM: &str = include_str!("encrypted/log_stream.py");
+#[path = "encrypted/lifecycle.rs"]
+mod lifecycle;
 mod profile_setup;
 
 #[derive(Clone, Debug, Serialize)]
@@ -134,9 +136,13 @@ pub fn trials() -> Vec<Trial> {
             run(false, true, false)
         }),
         common::trial("security::installer_profile_setup", || {
-            run_fixture(false, false, true, false, true)
+            run_fixture(false, false, true, false, FixtureCase::ProfileSetup)
         }),
-        common::trial("security::installer_no_profile", crate::iso::install_no_profile),
+        common::trial(
+            "security::installer_no_profile",
+            crate::iso::install_no_profile,
+        ),
+        common::trial("security::upgrade_rollback", lifecycle::run),
     ];
     if std::env::var_os("ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS").is_some() {
         trials.push(common::trial(
@@ -491,6 +497,8 @@ fn checkpoint() -> Result<()> {
 pub(crate) struct Registry {
     id: String,
     owner: String,
+    port: u16,
+    work: PathBuf,
 }
 impl Drop for Registry {
     fn drop(&mut self) {
@@ -534,22 +542,9 @@ pub(crate) fn registry(ws: &Workspace, image: &str, work: &Path) -> Result<(Regi
     let registry = Registry {
         id: id.trim().into(),
         owner,
+        port,
+        work: work.to_owned(),
     };
-    let local = format!("localhost:{port}/ilex:test");
-    let repository = format!("10.0.2.2:{port}/ilex");
-    let digestfile = work.join("digest");
-    cmd::run(
-        Command::new("podman")
-            .args(["push", "--tls-verify=false", "--digestfile"])
-            .arg(&digestfile)
-            .arg(image)
-            .arg(&local),
-    )?;
-    let digest = fs::read_to_string(digestfile)?.trim().to_string();
-    ensure!(
-        digest.starts_with("sha256:") && digest.len() == 71,
-        "invalid candidate digest"
-    );
     let key = work.join("cosign");
     cmd::run(
         Command::new("cosign")
@@ -557,24 +552,55 @@ pub(crate) fn registry(ws: &Workspace, image: &str, work: &Path) -> Result<(Regi
             .arg(&key)
             .env("COSIGN_PASSWORD", ""),
     )?;
-    cmd::run(
-        Command::new("cosign")
-            .args([
-                "sign",
-                "--yes",
-                "--tlog-upload=false",
-                "--allow-insecure-registry",
-                "--key",
-            ])
-            .arg(key.with_extension("key"))
-            .args(["--sign-container-identity", &repository])
-            .arg(format!("localhost:{port}/ilex@{digest}"))
-            .env("COSIGN_PASSWORD", ""),
+    let manifest = registry.push(image, "test")?;
+    registry.sign(
+        manifest["digest"]
+            .as_str()
+            .context("fixture digest missing")?,
     )?;
-    Ok((
-        registry,
-        json!({"repository": repository, "source":format!("{repository}@{digest}"), "digest":digest, "fixture":"candidate-signed-local-registry"}),
-    ))
+    Ok((registry, manifest))
+}
+
+impl Registry {
+    fn push(&self, image: &str, tag: &str) -> Result<Value> {
+        let port = self.port;
+        let local = format!("localhost:{port}/ilex:{tag}");
+        let repository = format!("10.0.2.2:{port}/ilex");
+        let digestfile = self.work.join("digest");
+        cmd::run(
+            Command::new("podman")
+                .args(["push", "--tls-verify=false", "--digestfile"])
+                .arg(&digestfile)
+                .arg(image)
+                .arg(&local),
+        )?;
+        let digest = fs::read_to_string(digestfile)?.trim().to_string();
+        ensure!(lifecycle::valid_digest(&digest), "invalid fixture digest");
+        Ok(
+            json!({"repository": repository, "source":format!("{repository}@{digest}"), "digest":digest, "fixture":"candidate-signed-local-registry"}),
+        )
+    }
+
+    fn sign(&self, digest: &str) -> Result<()> {
+        let port = self.port;
+        cmd::run(
+            Command::new("cosign")
+                .args([
+                    "sign",
+                    "--yes",
+                    "--tlog-upload=false",
+                    "--allow-insecure-registry",
+                    "--key",
+                ])
+                .arg(self.work.join("cosign.key"))
+                .args([
+                    "--sign-container-identity",
+                    &format!("10.0.2.2:{port}/ilex"),
+                ])
+                .arg(format!("localhost:{port}/ilex@{digest}"))
+                .env("COSIGN_PASSWORD", ""),
+        )
+    }
 }
 
 struct PrivateConsole {
@@ -2458,38 +2484,8 @@ fn same_tpm_mismatch(
     installer_probe: &Value,
     tokens: &Value,
 ) -> Result<()> {
-    let mut negative = fixture.spec.clone();
-    negative.security_launch = ilex_devkit::core::SecurityLaunch::QualificationFixture;
-    let vars = security::bundle_path(ws, &negative)?.join("VARS.fd");
-    let original_vars = fs::read(&vars)?;
-    security::disable_fixture_secure_boot(ws, &negative)?;
-    fixture.disk_boot()?;
-    fixture.private_console()?;
+    let (vars, original_vars) = recovery_boot(ws, fixture, artifacts, passphrase)?;
     let vm = fixture.vm.running_mut()?;
-    let ctl = Vmctl::from_info(vm.info.clone());
-    let start = Instant::now();
-    loop {
-        let serial = fs::read_to_string(vm.info.dir.join("serial.log"))
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if serial.contains("please enter")
-            && (serial.contains("passphrase") || serial.contains("password"))
-        {
-            break;
-        }
-        ensure!(
-            vm.exited()?.is_none() && start.elapsed() < Duration::from_secs(1800),
-            "same-TPM PCR mismatch did not retain a prompt"
-        );
-        thread::sleep(Duration::from_secs(2));
-    }
-    ctl.save_screenshot(&artifacts.join("same-tpm-pcr-mismatch-prompt.png"))?;
-    fixture
-        .console
-        .as_mut()
-        .context("private console unavailable")?
-        .credential(passphrase)?;
-    vm.wait_ssh(Duration::from_secs(1800))?;
     let probe = guest_json(
         vm,
         artifacts,
@@ -2529,12 +2525,51 @@ fn same_tpm_mismatch(
         "policy mismatch automatically resealed or changed fallback slots"
     );
     guest_privacy(vm, artifacts, "same-tpm-mismatch", credentials)?;
-    fixture.logs(artifacts, "same-tpm-mismatch")?;
     poweroff(fixture, artifacts, "same-tpm-mismatch")?;
-    // Restore only this stopped disposable firmware store; its TPM, LUKS
-    // header and every enrolled slot remain intact throughout the negative.
     fs::write(vars, original_vars)?;
     Ok(())
+}
+
+/// The caller must stop the disposable guest before restoring its saved VARS.
+fn recovery_boot(
+    ws: &Workspace,
+    fixture: &mut Fixture,
+    artifacts: &Path,
+    credential: &Secret,
+) -> Result<(PathBuf, Vec<u8>)> {
+    let mut negative = fixture.spec.clone();
+    negative.security_launch = ilex_devkit::core::SecurityLaunch::QualificationFixture;
+    let vars = security::bundle_path(ws, &negative)?.join("VARS.fd");
+    let original_vars = fs::read(&vars)?;
+    security::disable_fixture_secure_boot(ws, &negative)?;
+    fixture.disk_boot()?;
+    fixture.private_console()?;
+    let vm = fixture.vm.running_mut()?;
+    let ctl = Vmctl::from_info(vm.info.clone());
+    let start = Instant::now();
+    loop {
+        let serial = fs::read_to_string(vm.info.dir.join("serial.log"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if serial.contains("please enter")
+            && (serial.contains("passphrase") || serial.contains("password"))
+        {
+            break;
+        }
+        ensure!(
+            vm.exited()?.is_none() && start.elapsed() < Duration::from_secs(1800),
+            "same-TPM PCR mismatch did not retain a prompt"
+        );
+        thread::sleep(Duration::from_secs(2));
+    }
+    ctl.save_screenshot(&artifacts.join("same-tpm-pcr-mismatch-prompt.png"))?;
+    fixture
+        .console
+        .as_mut()
+        .context("private console unavailable")?
+        .credential(credential)?;
+    vm.wait_ssh(Duration::from_secs(1800))?;
+    Ok((vars, original_vars))
 }
 
 fn assertions(
@@ -2604,7 +2639,7 @@ fn assertions(
             .any(|t| t["pcr7_sha256"] == true),
         "explicit token policy missing"
     );
-    vm.ssh_ok("systemctl is-enabled --quiet ilex-security-verify.service; systemctl is-system-running --wait")?;
+    vm.ssh_ok("systemctl is-enabled --quiet ilex-security-verify.service && timeout -k 10s 240s systemctl is-system-running --wait")?;
     let state = guest_json(
         vm,
         artifacts,
@@ -2639,7 +2674,7 @@ fn assertions(
         failed.as_array().is_some_and(Vec::is_empty),
         "installed system health: failed units"
     );
-    let health = vm.ssh("systemctl is-system-running --wait")?;
+    let health = vm.ssh("timeout -k 10s 240s systemctl is-system-running --wait")?;
     let state = String::from_utf8_lossy(&health.stdout).trim().to_string();
     fs::write(
         artifacts.join("system-health.json"),
@@ -2743,8 +2778,14 @@ fn run_layout(
         interrupted,
         local_diagnostic,
         layout_refusal,
-        false,
+        FixtureCase::Standard,
     )
+}
+
+enum FixtureCase {
+    Standard,
+    ProfileSetup,
+    UpgradeRollback,
 }
 
 fn run_fixture(
@@ -2752,9 +2793,11 @@ fn run_fixture(
     interrupted: bool,
     local_diagnostic: bool,
     layout_refusal: bool,
-    profile_setup: bool,
+    case: FixtureCase,
 ) -> Result<()> {
     ilex_enroll::harden()?;
+    let profile_setup = matches!(case, FixtureCase::ProfileSetup);
+    let lifecycle = matches!(case, FixtureCase::UpgradeRollback);
     ensure!(
         !local_diagnostic || std::env::var_os("CI").is_none(),
         "local diagnostic is outside the hosted qualification"
@@ -2766,6 +2809,8 @@ fn run_fixture(
     let ws = common::workspace()?;
     let tier = if profile_setup {
         "installer-profile-setup"
+    } else if lifecycle {
+        "encrypted-upgrade-rollback"
     } else if layout_refusal {
         "enrollment-diagnostic-layout-refusal"
     } else if local_diagnostic && interrupted {
@@ -2842,6 +2887,8 @@ fn run_fixture(
         let mut config = VmConfig::new(
             if profile_setup {
                 "profile-setup"
+            } else if lifecycle {
+                "encrypted-upgrade"
             } else if layout_refusal {
                 "ed-l"
             } else {
@@ -2884,7 +2931,18 @@ fn run_fixture(
         }
         stage = "fixture";
         let image = common::image()?;
-        let (_registry, mut expected) = registry(&ws, &image, &work)?;
+        let v1 = if lifecycle {
+            lifecycle::source_image(&image)?
+        } else {
+            image.clone()
+        };
+        let (registry, mut expected) = registry(&ws, &v1, &work)?;
+        let update = lifecycle
+            .then(|| registry.push(&image, "update"))
+            .transpose()?;
+        if lifecycle {
+            lifecycle::record_inputs(&artifacts, &v1, &image)?;
+        }
         expected["preserve_data"] = json!(preserve_data);
         expected["interrupt_completion"] = json!(interrupted);
         expected["local_diagnostic"] = json!(local_diagnostic);
@@ -2908,7 +2966,7 @@ fn run_fixture(
             expected["composition"] = json!(composition);
             expected["profile_setup"] = json!(true);
         }
-        let tpm_slot_budget = !local_diagnostic && !interrupted && !preserve_data;
+        let tpm_slot_budget = !lifecycle && !local_diagnostic && !interrupted && !preserve_data;
         expected["tpm_slot_budget"] = json!(tpm_slot_budget);
         fs::write(
             artifacts.join("candidate.json"),
@@ -3079,7 +3137,9 @@ fn run_fixture(
                 "offline app preload did not exercise the failure path"
             );
             let daily = profile_setup::secret()?;
-            let maintenance = maintenance.as_ref().context("installer maintenance credential missing")?;
+            let maintenance = maintenance
+                .as_ref()
+                .context("installer maintenance credential missing")?;
             credentials = fingerprints(&[&passphrase, &recovery, maintenance, &daily]);
             let profile_result = profile_setup::run(
                 fixture,
@@ -3095,6 +3155,37 @@ fn run_fixture(
             }
             profile_result?;
             export_fingerprints.push(private_fingerprint(&daily));
+            return finish(
+                fixture,
+                &iso,
+                &credentials,
+                &export_fingerprints,
+                &mut stage,
+            );
+        }
+        if let Some(update) = update {
+            stage = "encrypted_lifecycle";
+            let home_password = lifecycle::home_password()?;
+            credentials = fingerprints(&[&passphrase, &recovery, &home_password]);
+            export_fingerprints.push(private_fingerprint(&home_password));
+            fs::write(
+                artifacts.join("home-credentials.json"),
+                serde_json::to_vec_pretty(&fingerprints(&[&home_password]))?,
+            )?;
+            lifecycle::qualify(
+                &ws,
+                fixture,
+                &artifacts,
+                &registry,
+                &expected,
+                &update,
+                &installer_probe,
+                &original_tokens,
+                &recovery,
+                &home_password,
+                &credentials,
+                &mut stage,
+            )?;
             return finish(
                 fixture,
                 &iso,
@@ -3244,6 +3335,12 @@ fn run_fixture(
             &mut stage,
         )
     })();
+    if lifecycle
+        && result.is_err()
+        && let Some(fixture) = active_fixture.as_mut()
+    {
+        let _ = fixture.logs(&artifacts, "lifecycle-failure");
+    }
     let guest_failure = result.as_ref().err().map(|error| {
         error
             .downcast_ref::<GuestFailure>()

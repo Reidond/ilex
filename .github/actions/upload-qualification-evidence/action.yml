@@ -5,7 +5,7 @@ inputs:
     description: Artifact name
     required: true
   encrypted:
-    description: Whether the privacy scan included encrypted qualification
+    description: Sealed scope (false for firmware, true for the full suite, lifecycle for the release gate)
     required: true
 runs:
   using: composite

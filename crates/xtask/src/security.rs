@@ -28,6 +28,9 @@ pub struct Args {
     /// Reconcile one interrupted, journaled Gen2 run owned by this checkout
     #[arg(long, conflicts_with_all = ["self_check", "require_qualified"])]
     pub(super) cleanup_run: Option<String>,
+    /// Open an owned blank Gen2 installer fixture for the manual encrypted lifecycle
+    #[arg(long, conflicts_with_all = ["self_check", "require_qualified", "cleanup_run"])]
+    pub(super) encrypted_console: bool,
 }
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     #[cfg(target_os = "windows")]
@@ -43,8 +46,8 @@ fn linux(ws: &Workspace, args: Args) -> Result<()> {
         "security backend is unavailable on this host"
     );
     anyhow::ensure!(
-        args.cleanup_run.is_none(),
-        "--cleanup-run requires the Windows Gen2 provider"
+        args.cleanup_run.is_none() && !args.encrypted_console,
+        "--cleanup-run and --encrypted-console require the Windows Gen2 provider"
     );
     let accelerator = args.accelerator.as_deref().unwrap_or("kvm");
     anyhow::ensure!(accelerator != "hyperv", "Hyper-V requires native Windows");

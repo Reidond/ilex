@@ -232,6 +232,37 @@ timeout 60 bash -c 'until test -s ~/.local/state/ilex/profile.json; do sleep 1; 
 python3 -c 'import json,pathlib; assert json.loads((pathlib.Path.home()/".local/state/ilex/profile.json").read_text())["profile"] == "andriishafar"' &&
 test -s ~/.config/ilex/welcome.txt""".replace("\n", " "))
         return "authenticated PAM login with encrypted btrfs and installer profile applied"
+    if action == "encrypted-lifecycle":
+        assert run("getenforce") == "Enforcing"
+        home = "/var/home/" + name
+        mount = ["findmnt", "--noheadings", "--mountpoint", home]
+        assert sp.run(mount, stdout=sp.DEVNULL).returncode == 1
+        if request["create"]:
+            create(name, secrets[0])
+        # Write only on the first boot. A missing file on later deployments
+        # must fail instead of being recreated by the checksum helper.
+        write = ""
+        if request["create"]:
+            write = "umask 077 && dd if=/dev/urandom of=~/e2e-data bs=1M count=4 status=none && sync -f ~/e2e-data && "
+        text = tty(name, secrets[0], write +
+                   "test \"$SYSTEMD_HOME\" = 1 && "
+                   "test \"$(findmnt -nro TARGET --target ~)\" = \"$(realpath ~)\" && "
+                   "findmnt -nro SOURCE --target ~ | grep -q '^/dev/mapper/' && "
+                   "test \"$(findmnt -nro FSTYPE --target ~)\" = btrfs && "
+                   "test -s ~/e2e-data && printf 'ILEX-HOME-%s\\n' \"$(sha256sum ~/e2e-data | cut -d ' ' -f 1)\"")
+        checksum, = re.findall(r"(?:^|\n)ILEX-HOME-([0-9a-f]{64})\r?\n", text)
+        backing = home + ".home"
+        record = json.loads(run("homectl", "inspect", name, "--json=short"))
+        assert record["storage"] == "luks"
+        assert os.path.isfile(backing)
+        status = sp.run(mount, stdout=sp.DEVNULL).returncode
+        if status == 0:
+            run("homectl", "deactivate", name)
+        else:
+            assert status == 1
+        assert sp.run(mount, stdout=sp.DEVNULL).returncode == 1
+        return {"data_sha256": checksum, "uid": int(run("id", "-u", name)),
+                "storage": record["storage"], "filesystem": "btrfs"}
     if action == "profiles":
         tty(name, secrets[0], "python3 -I -S /run/ilex-profiles-user.py")
         return "password-authenticated profile application and safety regressions passed"

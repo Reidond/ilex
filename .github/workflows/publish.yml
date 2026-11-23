@@ -30,9 +30,12 @@ on:
         options: [probe, kvm, tcg]
         default: probe
       encrypted_install:
-        description: Qualify exact 6 GiB firmware, encrypted storage, interruption, recovery boot and privacy on the build runner
+        description: Qualify encrypted installation, recovery, privacy, and a real kernel upgrade and rollback (6 GiB)
         type: boolean
         default: false
+      encrypted_upgrade_from:
+        description: Signed rollback image pinned by digest (defaults to the ILEX_ENCRYPTED_UPGRADE_FROM repository variable)
+        type: string
 
 permissions: {}
 
@@ -82,6 +85,7 @@ jobs:
       v1_disk: ${{ inputs.v1_disk || false }}
       security_accelerator: ${{ inputs.security_accelerator || 'probe' }}
       encrypted_install: ${{ inputs.encrypted_install || false }}
+      encrypted_upgrade_from: ${{ inputs.encrypted_upgrade_from || '' }}
     secrets:
       COSIGN_PRIVATE_KEY: ${{ needs.route.outputs.main == 'true' && secrets.COSIGN_PRIVATE_KEY || '' }}
       COSIGN_PASSWORD: ${{ needs.route.outputs.main == 'true' && secrets.COSIGN_PASSWORD || '' }}
