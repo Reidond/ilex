@@ -80,6 +80,10 @@ on:
       encrypted_update_kernel:
         description: Optional exact Fedora kernel for the disposable encrypted CI update image
         type: string
+      encrypted_lifecycle_only:
+        description: Run the encrypted lifecycle by itself for a focused qualification
+        type: boolean
+        default: false
 
       main:
         type: boolean
@@ -179,6 +183,11 @@ jobs:
             echo '::error::Encrypted lifecycle UNQUALIFIED. Provide a supported signed rollback digest.'
             exit 1
           fi
+      - name: Reject a lifecycle-only run without encrypted qualification
+        if: inputs.encrypted_lifecycle_only && !inputs.encrypted_install
+        run: |
+          echo '::error::encrypted_lifecycle_only requires encrypted_install=true.'
+          exit 1
       - uses: actions/checkout@v7
 
       - name: Check configured Flathub apps (metadata only)
@@ -355,11 +364,17 @@ jobs:
 
       - name: Exact encrypted installer qualification
         id: encrypted-qualification
-        if: inputs.encrypted_install
+        if: inputs.encrypted_install && !inputs.encrypted_lifecycle_only
         timeout-minutes: 180
         env:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
         run: bash .github/encrypted-tier.sh
+
+      - name: Prepare private lifecycle evidence
+        if: inputs.encrypted_install && inputs.encrypted_lifecycle_only
+        run: |
+          private=$(mktemp -d "$RUNNER_TEMP/ilex-fingerprints.XXXXXXXX")
+          echo "ILEX_PRIVATE_FINGERPRINTS=$private" >> "$GITHUB_ENV"
 
       - name: Qualify encrypted upgrade and rollback
         if: inputs.encrypted_install
@@ -377,14 +392,14 @@ jobs:
         run: echo 'security::firmware **UNQUALIFIED** (unchanged image; tier not run). Use test=true to qualify this runner.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Scan and seal qualification evidence
-        if: steps.security-qualification.outcome == 'success' && (!inputs.encrypted_install || (steps.encrypted-qualification.outcome == 'success' && steps.encrypted-lifecycle.outcome == 'success'))
+        if: steps.security-qualification.outcome == 'success' && (!inputs.encrypted_install || ((inputs.encrypted_lifecycle_only || steps.encrypted-qualification.outcome == 'success') && steps.encrypted-lifecycle.outcome == 'success'))
         id: qualification-scan
         env:
-          HAS_ENCRYPTED_EVIDENCE: ${{ inputs.encrypted_install || false }}
+          ENCRYPTED_EVIDENCE_SCOPE: ${{ inputs.encrypted_lifecycle_only && 'lifecycle' || inputs.encrypted_install && 'true' || 'false' }}
         run: |
-          if [[ "$HAS_ENCRYPTED_EVIDENCE" == true ]]; then
+          if [[ "$ENCRYPTED_EVIDENCE_SCOPE" != false ]]; then
             case "$ILEX_PRIVATE_FINGERPRINTS" in "$RUNNER_TEMP"/ilex-fingerprints.*) ;; *) exit 1 ;; esac
-            python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" true "$ILEX_PRIVATE_FINGERPRINTS"
+            python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" "$ENCRYPTED_EVIDENCE_SCOPE" "$ILEX_PRIVATE_FINGERPRINTS"
           else
             python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" false
           fi
@@ -399,18 +414,25 @@ jobs:
           rmdir -- "$ILEX_PRIVATE_FINGERPRINTS"
 
       - name: Keep security qualification evidence
-        if: steps.qualification-scan.outcome == 'success'
+        if: steps.qualification-scan.outcome == 'success' && !inputs.encrypted_lifecycle_only
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: security-evidence
           encrypted: ${{ inputs.encrypted_install || false }}
 
       - name: Keep encrypted installer public evidence
-        if: steps.qualification-scan.outcome == 'success' && inputs.encrypted_install
+        if: steps.qualification-scan.outcome == 'success' && inputs.encrypted_install && !inputs.encrypted_lifecycle_only
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: encrypted-installer-evidence
           encrypted: 'true'
+
+      - name: Keep sealed focused lifecycle evidence
+        if: steps.qualification-scan.outcome == 'success' && inputs.encrypted_lifecycle_only
+        uses: ./.github/actions/upload-qualification-evidence
+        with:
+          name: encrypted-lifecycle-evidence
+          encrypted: lifecycle
 
       - name: e2e apps installation (opt-in)
         id: apps

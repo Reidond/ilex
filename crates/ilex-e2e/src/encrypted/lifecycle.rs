@@ -135,6 +135,8 @@ pub(super) fn qualify(
             _ => "rollback_automatic_unlock",
         };
         assertions(fixture, &auto, manifest, installer_probe)?;
+        eprintln!("encrypted lifecycle {phase}: automatic TPM unlock verified");
+        *stage = "boot_payload_and_versions";
         let vm = fixture.vm.running_mut()?;
         vm.ssh_ok("timeout 30s systemctl mask --now bootc-fetch-apply-updates.timer")?;
         fs::write(
@@ -164,8 +166,11 @@ pub(super) fn qualify(
         } else {
             first_kernel = Some(payload.clone());
         }
+        *stage = "running_root_header";
         check_tokens(vm, &auto, uuid, tokens, &mut header)?;
+        *stage = "authenticated_home";
         home(&mut home_data, vm, &auto, home_password)?;
+        *stage = "installed_privacy";
         guest_privacy(vm, &auto, "automatic", credentials)?;
         poweroff(fixture, evidence, phase)?;
 
@@ -216,7 +221,9 @@ pub(super) fn qualify(
             "the recovery key did not unlock the expected root on this boot"
         );
         check_tokens(vm, &manual, uuid, tokens, &mut header)?;
+        *stage = "recovery_authenticated_home";
         home(&mut home_data, vm, &manual, home_password)?;
+        *stage = "recovery_privacy";
         guest_privacy(vm, &manual, "recovery", credentials)?;
         poweroff(fixture, evidence, &format!("{phase}-recovery"))?;
         fs::write(vars, saved)?;

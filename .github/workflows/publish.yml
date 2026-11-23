@@ -39,6 +39,10 @@ on:
       encrypted_update_kernel:
         description: Optional exact Fedora kernel for the disposable encrypted CI update image
         type: string
+      encrypted_lifecycle_only:
+        description: Run the encrypted lifecycle by itself for a focused qualification
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -90,6 +94,7 @@ jobs:
       encrypted_install: ${{ inputs.encrypted_install || false }}
       encrypted_upgrade_from: ${{ inputs.encrypted_upgrade_from || '' }}
       encrypted_update_kernel: ${{ inputs.encrypted_update_kernel || '' }}
+      encrypted_lifecycle_only: ${{ inputs.encrypted_lifecycle_only || false }}
     secrets:
       COSIGN_PRIVATE_KEY: ${{ needs.route.outputs.main == 'true' && secrets.COSIGN_PRIVATE_KEY || '' }}
       COSIGN_PASSWORD: ${{ needs.route.outputs.main == 'true' && secrets.COSIGN_PASSWORD || '' }}

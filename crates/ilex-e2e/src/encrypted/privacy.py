@@ -456,7 +456,7 @@ if __name__ == '__main__':
                 paths = ['security']
             elif name == 'encrypted-installer-evidence' and mode == 'true':
                 paths = [*encrypted_tiers(mode), EXPORT_REPORT]
-            elif name == 'encrypted-release-lifecycle-evidence' and mode == 'lifecycle':
+            elif name in ('encrypted-lifecycle-evidence', 'encrypted-release-lifecycle-evidence') and mode == 'lifecycle':
                 paths = ['security', LIFECYCLE_TIER, EXPORT_REPORT]
             else:
                 raise ValueError('unknown artifact scope')

@@ -60,6 +60,11 @@ composition. The lifecycle imports v1 and v2 into an isolated registry with a
 throwaway verification key. Its manifest digests identify those delivered test
 images. The release scope is the default installer composition.
 
+For a focused retry, dispatch with both `encrypted_install=true` and
+`encrypted_lifecycle_only=true`. It still installs the exact ISO and seals
+the firmware and lifecycle evidence. The other encrypted installer cases
+retain their separate verdict in the full suite.
+
 The hosted runner must pass the firmware and 6 GiB lifecycle budget with KVM
 plus SMM or TCG. If it cannot, set `ILEX_RUNNER` to a dedicated Linux runner
 with secure OVMF, swtpm, and enough RAM, storage and runtime for the complete

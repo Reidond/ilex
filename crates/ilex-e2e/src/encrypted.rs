@@ -2578,121 +2578,138 @@ fn assertions(
     expected: &Value,
     installer_probe: &Value,
 ) -> Result<()> {
-    let vm = fixture.vm.running_mut()?;
-    vm.wait_ssh(Duration::from_secs(900))?; // No keyboard/password on first boot.
-    let bootc = guest_json(vm, artifacts, "bootc.json", "bootc status --json")?;
-    ensure!(
-        bootc["status"]["booted"]["image"]["imageDigest"] == expected["digest"],
-        "installed digest differs from signed candidate"
-    );
-    ensure!(
-        bootc["spec"]["image"]["signature"] == "containerPolicy",
-        "target origin is not enforcing"
-    );
-    let probe = guest_json(vm, artifacts, "probe.json", "ilex-enroll probe --json")?;
-    ensure!(
-        probe["verdict"] == "eligible" && probe["pcr7"] == installer_probe["pcr7"],
-        "ISO/installed PCR 7 mismatch"
-    );
-    let raw = vm.ssh("cat /sys/kernel/security/tpm0/binary_bios_measurements")?;
-    ensure!(raw.status.success(), "installed event log unavailable");
-    fs::write(artifacts.join("eventlog.bin"), &raw.stdout)?;
-    let replay = security::replay_pcr7(&raw.stdout)?;
-    ensure!(
-        probe["pcr7"] == replay.sha256,
-        "installed event log replay mismatch"
-    );
-    fs::write(
-        artifacts.join("replay.json"),
-        serde_json::to_vec_pretty(&replay)?,
-    )?;
-    let layout = guest_json(vm, artifacts, "layout.json", "ilex-enroll layout --root /")?;
-    let evidence = guest_json(
-        vm,
-        artifacts,
-        "root-unlock.json",
-        "cat /run/ilex/root-unlock.json",
-    )?;
-    ensure!(
-        evidence["schema"] == 1
-            && evidence["uuid"] == layout["uuid"]
-            && evidence["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim()
-            && evidence["method"] == "tpm2",
-        "first boot lacks direct TPM unlock evidence"
-    );
-    let uuid = layout["uuid"].as_str().context("no root UUID")?;
-    ensure!(
-        uuid.len() == 36 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
-        "invalid root UUID"
-    );
-    let tokens = guest_json(
-        vm,
-        artifacts,
-        "tokens.json",
-        &format!("ilex-enroll status --json --device /dev/disk/by-uuid/{uuid}"),
-    )?;
-    ensure!(
-        tokens["tokens"]
-            .as_array()
-            .context("no tokens")?
-            .iter()
-            .any(|t| t["pcr7_sha256"] == true),
-        "explicit token policy missing"
-    );
-    vm.ssh_ok("systemctl is-enabled --quiet ilex-security-verify.service && timeout -k 10s 240s systemctl is-system-running --wait")?;
-    let state = guest_json(
-        vm,
-        artifacts,
-        "enrollment.json",
-        "cat /var/lib/ilex/security/enrollment.json",
-    )?;
-    ensure!(
-        state["state"] == "verified"
-            && state["recovery"]["acknowledged"] == true
-            && state["verification"]["boot_id"] == evidence["boot_id"]
-            && state["verification"]["method"] == "tpm2",
-        "the boot verifier did not persist the observed TPM unlock"
-    );
-    ensure!(
-        evidence["token"]
-            .as_str()
-            .and_then(|id| id.parse::<u64>().ok())
-            == state["tpm"]["token"].as_u64()
-            && evidence["slot"] == state["tpm"]["slot"],
-        "unlock evidence differs from the enrolled token/slot"
-    );
-    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; grep -qw 'rd.luks.options=tpm2-device=auto' /proc/cmdline; ! grep -q headless /etc/crypttab")?;
-    // Preserve structured health before asserting it; a partial diagnostic
-    // can identify a failed unit without exposing raw command error chains.
-    let failed = guest_json(
-        vm,
-        artifacts,
-        "failed-units.json",
-        "systemctl list-units --all --state=failed --output=json --no-pager",
-    )?;
-    ensure!(
-        failed.as_array().is_some_and(Vec::is_empty),
-        "installed system health: failed units"
-    );
-    let health = vm.ssh("timeout -k 10s 240s systemctl is-system-running --wait")?;
-    let state = String::from_utf8_lossy(&health.stdout).trim().to_string();
-    fs::write(
-        artifacts.join("system-health.json"),
-        serde_json::to_vec_pretty(&json!({"state":state,"success":health.status.success()}))?,
-    )?;
-    ensure!(
-        health.status.success() && state == "running",
-        "installed system health"
-    );
-    vm.ssh_ok("ilex-enroll --self-check")
-        .context("installed enrollment self-check")?;
-    if expected["preserve_data"] == true {
-        preserved_data(vm, artifacts)?;
-    }
-    vm.ssh_ok(&format!("grep 'UUID={uuid}' /etc/crypttab | grep -q tpm2-device=auto; ! grep -q headless /proc/cmdline"))?;
-    let topology = vm.ssh_ok("set -eu; lsblk --json --output NAME,TYPE,FSTYPE,UUID,MOUNTPOINTS; cat /etc/crypttab; cat /proc/cmdline; cat /proc/swaps; for path in /sysroot /var /boot /boot/efi; do findmnt --target \"$path\"; done")?;
-    fs::write(artifacts.join("storage.txt"), topology)?;
-    Ok(())
+    let mut check = "automatic_ssh";
+    let result = (|| {
+        let vm = fixture.vm.running_mut()?;
+        vm.wait_ssh(Duration::from_secs(900))?; // No keyboard/password on first boot.
+        check = "installed_manifest";
+        let bootc = guest_json(vm, artifacts, "bootc.json", "bootc status --json")?;
+        ensure!(
+            bootc["status"]["booted"]["image"]["imageDigest"] == expected["digest"],
+            "installed digest differs from signed candidate"
+        );
+        check = "installed_signature_policy";
+        ensure!(
+            bootc["spec"]["image"]["signature"] == "containerPolicy",
+            "target origin is not enforcing"
+        );
+        check = "installed_pcr7";
+        let probe = guest_json(vm, artifacts, "probe.json", "ilex-enroll probe --json")?;
+        ensure!(
+            probe["verdict"] == "eligible" && probe["pcr7"] == installer_probe["pcr7"],
+            "ISO/installed PCR 7 mismatch"
+        );
+        check = "installed_pcr7_replay";
+        let raw = vm.ssh("cat /sys/kernel/security/tpm0/binary_bios_measurements")?;
+        ensure!(raw.status.success(), "installed event log unavailable");
+        fs::write(artifacts.join("eventlog.bin"), &raw.stdout)?;
+        let replay = security::replay_pcr7(&raw.stdout)?;
+        ensure!(
+            probe["pcr7"] == replay.sha256,
+            "installed event log replay mismatch"
+        );
+        fs::write(
+            artifacts.join("replay.json"),
+            serde_json::to_vec_pretty(&replay)?,
+        )?;
+        check = "installed_root_unlock";
+        let layout = guest_json(vm, artifacts, "layout.json", "ilex-enroll layout --root /")?;
+        let evidence = guest_json(
+            vm,
+            artifacts,
+            "root-unlock.json",
+            "cat /run/ilex/root-unlock.json",
+        )?;
+        ensure!(
+            evidence["schema"] == 1
+                && evidence["uuid"] == layout["uuid"]
+                && evidence["boot_id"] == vm.ssh_ok("cat /proc/sys/kernel/random/boot_id")?.trim()
+                && evidence["method"] == "tpm2",
+            "first boot lacks direct TPM unlock evidence"
+        );
+        check = "installed_token_policy";
+        let uuid = layout["uuid"].as_str().context("no root UUID")?;
+        ensure!(
+            uuid.len() == 36 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
+            "invalid root UUID"
+        );
+        let tokens = guest_json(
+            vm,
+            artifacts,
+            "tokens.json",
+            &format!("ilex-enroll status --json --device /dev/disk/by-uuid/{uuid}"),
+        )?;
+        ensure!(
+            tokens["tokens"]
+                .as_array()
+                .context("no tokens")?
+                .iter()
+                .any(|t| t["pcr7_sha256"] == true),
+            "explicit token policy missing"
+        );
+        check = "installed_verifier_service";
+        vm.ssh_ok("systemctl is-enabled --quiet ilex-security-verify.service && timeout -k 10s 240s systemctl is-system-running --wait")?;
+        check = "installed_enrollment_state";
+        let state = guest_json(
+            vm,
+            artifacts,
+            "enrollment.json",
+            "cat /var/lib/ilex/security/enrollment.json",
+        )?;
+        ensure!(
+            state["state"] == "verified"
+                && state["recovery"]["acknowledged"] == true
+                && state["verification"]["boot_id"] == evidence["boot_id"]
+                && state["verification"]["method"] == "tpm2",
+            "the boot verifier did not persist the observed TPM unlock"
+        );
+        ensure!(
+            evidence["token"]
+                .as_str()
+                .and_then(|id| id.parse::<u64>().ok())
+                == state["tpm"]["token"].as_u64()
+                && evidence["slot"] == state["tpm"]["slot"],
+            "unlock evidence differs from the enrolled token/slot"
+        );
+        check = "installed_root_configuration";
+        vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; grep -qw 'rd.luks.options=tpm2-device=auto' /proc/cmdline; ! grep -q headless /etc/crypttab")?;
+        // Preserve structured health before asserting it; a partial diagnostic
+        // can identify a failed unit without exposing raw command error chains.
+        check = "installed_system_health";
+        let failed = guest_json(
+            vm,
+            artifacts,
+            "failed-units.json",
+            "systemctl list-units --all --state=failed --output=json --no-pager",
+        )?;
+        ensure!(
+            failed.as_array().is_some_and(Vec::is_empty),
+            "installed system health: failed units"
+        );
+        let health = vm.ssh("timeout -k 10s 240s systemctl is-system-running --wait")?;
+        let state = String::from_utf8_lossy(&health.stdout).trim().to_string();
+        fs::write(
+            artifacts.join("system-health.json"),
+            serde_json::to_vec_pretty(&json!({"state":state,"success":health.status.success()}))?,
+        )?;
+        ensure!(
+            health.status.success() && state == "running",
+            "installed system health"
+        );
+        check = "installed_enrollment_self_check";
+        vm.ssh_ok("ilex-enroll --self-check")
+            .context("installed enrollment self-check")?;
+        if expected["preserve_data"] == true {
+            check = "installed_existing_data";
+            preserved_data(vm, artifacts)?;
+        }
+        check = "installed_storage_topology";
+        vm.ssh_ok(&format!("grep 'UUID={uuid}' /etc/crypttab | grep -q tpm2-device=auto; ! grep -q headless /proc/cmdline"))?;
+        let topology = vm.ssh_ok("set -eu; lsblk --json --output NAME,TYPE,FSTYPE,UUID,MOUNTPOINTS; cat /etc/crypttab; cat /proc/cmdline; cat /proc/swaps; for path in /sysroot /var /boot /boot/efi; do findmnt --target \"$path\"; done")?;
+        fs::write(artifacts.join("storage.txt"), topology)?;
+        Ok::<(), anyhow::Error>(())
+    })();
+    result.with_context(|| GuestFailure::capture(Some(fixture), check))
 }
 
 fn evidence_files(directory: &Path) -> Result<Vec<PathBuf>> {
