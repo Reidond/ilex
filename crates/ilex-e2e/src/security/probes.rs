@@ -5,13 +5,7 @@ use ilex_devkit::{config::Selection, core::VmControl, security};
 use serde_json::Value;
 use std::{fs, path::Path};
 
-fn probe_deadline() -> u64 {
-    if std::env::var("ILEX_SECURITY_ACCELERATOR").as_deref() == Ok("tcg") {
-        300
-    } else {
-        60
-    }
-}
+const PROBE_DEADLINE: u64 = 60;
 
 fn exec(control: &impl VmControl, script: &str) -> Result<Vec<u8>> {
     // VmControl returns successful stdout. Preserve both diagnostic streams
@@ -23,8 +17,8 @@ try:
 except subprocess.TimeoutExpired as error:
     print(json.dumps({'code': 124, 'stdout': (error.stdout or b'').decode(errors='replace'), 'stderr': (error.stderr or b'').decode(errors='replace') + '\nguest probe exceeded ' + sys.argv[1] + ' seconds'}))
 "#;
-    let deadline = probe_deadline().to_string();
-    let outer_deadline = format!("{}s", probe_deadline() + 5);
+    let deadline = PROBE_DEADLINE.to_string();
+    let outer_deadline = format!("{}s", PROBE_DEADLINE + 5);
     let bytes = control.guest_exec(
         &[
             "timeout",
@@ -201,8 +195,8 @@ pub fn amdgpu(control: &impl VmControl, artifacts: &Path) -> Result<()> {
     fs::write(
         artifacts.join("amdgpu-deadline.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "accelerator":std::env::var("ILEX_SECURITY_ACCELERATOR").unwrap_or_else(|_| "kvm".into()),
-            "deadline_seconds":probe_deadline(),
+            "accelerator":"kvm",
+            "deadline_seconds":PROBE_DEADLINE,
             "assertions":"unchanged; RPM metadata, signed module, alias and lockdown load"
         }))?,
     )?;

@@ -99,29 +99,16 @@ impl Fixture {
         ensure!(!self.root.exists(), "security fixture disk cleanup failed");
         Ok(())
     }
-    fn new(
-        ws: &Workspace,
-        source: &Path,
-        purpose: &str,
-        accelerator: Accelerator,
-        secure: bool,
-        tpm: bool,
-    ) -> Result<Self> {
+    fn new(ws: &Workspace, source: &Path, purpose: &str, secure: bool, tpm: bool) -> Result<Self> {
         let mut config = VmConfig::new(purpose, source);
         config.memory = std::env::var("ILEX_SECURITY_MEMORY").unwrap_or_else(|_| "4G".into());
         config.purpose = format!(
-            "{}-{}-{}",
+            "{}-kvm-{}",
             config.purpose,
-            if accelerator == Accelerator::Native {
-                "kvm"
-            } else {
-                "tcg"
-            },
             ilex_devkit::provider::memory_bytes(&config.memory)? / (1024 * 1024)
         );
         config.snapshot = false;
         let mut spec = ilex_devkit::provider::spec(ws, &config)?;
-        spec.accelerator = accelerator;
         spec.security_launch = SecurityLaunch::QualificationFixture;
         spec.secure_boot = if secure {
             Requirement::Required
@@ -229,23 +216,12 @@ fn qualify(
     selection: &ilex_devkit::config::Selection,
     stage: &mut &'static str,
 ) -> Result<()> {
-    let accelerator = match std::env::var("ILEX_SECURITY_ACCELERATOR").as_deref() {
-        Ok("tcg") => Accelerator::Tcg,
-        Ok("kvm") | Err(_) => Accelerator::Native,
-        Ok(value) => anyhow::bail!(
-            "unsupported ILEX_SECURITY_ACCELERATOR={value}; use kvm or tcg explicitly"
-        ),
-    };
-    let deadline = Duration::from_secs(if accelerator == Accelerator::Tcg {
-        900
-    } else {
-        420
-    });
+    let deadline = Duration::from_secs(420);
     *stage = "disk_delivery";
     // The disk installer leases its own slot. Finish before starting the guest.
     let disk = vmtest::disk(ws)?;
     *stage = "platform";
-    let mut fixture = Fixture::new(ws, &disk, "security-firmware", accelerator, true, true)?;
+    let mut fixture = Fixture::new(ws, &disk, "security-firmware", true, true)?;
     let mut qualification = ilex_devkit::qualification::begin(ws, &fixture.spec, artifacts)?;
     let mut result = (|| -> Result<()> {
         let caps = fixture.provider.probe(&fixture.spec)?;
@@ -266,7 +242,7 @@ fn qualify(
             "unqualified regular launch accepted"
         );
         println!(
-            "security: {accelerator:?}, {} bytes, 2 vCPUs; each boot deadline {deadline:?}",
+            "security: KVM, {} bytes, 2 vCPUs; each boot deadline {deadline:?}",
             fixture.spec.resources.memory_bytes
         );
         let first = match fixture.start(deadline, stage) {
@@ -340,7 +316,7 @@ fn qualify(
             fs::write(
                 artifacts.join("timing.json"),
                 serde_json::to_vec_pretty(
-                    &serde_json::json!({"accelerator": accelerator, "memory_bytes": fixture.spec.resources.memory_bytes, "vcpus": 2, "boot_deadline_seconds": deadline.as_secs(), "first_ssh_seconds": first, "warm_ssh_seconds": warm, "cold_ssh_seconds": cold, "tpm_decrypt_after_warm_and_cold": true}),
+                    &serde_json::json!({"accelerator": Accelerator::Native, "memory_bytes": fixture.spec.resources.memory_bytes, "vcpus": 2, "boot_deadline_seconds": deadline.as_secs(), "first_ssh_seconds": first, "warm_ssh_seconds": warm, "cold_ssh_seconds": cold, "tpm_decrypt_after_warm_and_cold": true}),
                 )?,
             )?;
             Ok(())
@@ -348,7 +324,7 @@ fn qualify(
         fixture.logs(artifacts, "final")?;
         result?;
         fixture.provider.stop(&mut fixture.vm)?; // Keep identity; release its slot.
-        unsigned_control(ws, artifacts, accelerator, deadline, stage)?;
+        unsigned_control(ws, artifacts, deadline, stage)?;
         ensure!(
             !qemu::running_vms(ws)
                 .iter()
@@ -517,7 +493,6 @@ fn measurements(
 fn unsigned_control(
     ws: &Workspace,
     artifacts: &Path,
-    accelerator: Accelerator,
     deadline: Duration,
     stage: &mut &'static str,
 ) -> Result<()> {
@@ -545,7 +520,6 @@ fn unsigned_control(
             ws,
             &source,
             &format!("security-efi-{}", if secure { "on" } else { "off" }),
-            accelerator,
             secure,
             false,
         )?;

@@ -4,7 +4,7 @@ use ilex_devkit::Workspace;
 #[cfg(not(target_os = "windows"))]
 use ilex_devkit::{
     cmd,
-    core::{Accelerator, Capability, Requirement, TpmLifecycle, VmProvider},
+    core::{Capability, Requirement, TpmLifecycle, VmProvider},
     provider::{LinuxProvider, spec},
     qemu::VmConfig,
 };
@@ -16,8 +16,8 @@ pub struct Args {
     /// Boot the selected image and qualify firmware, measurements and lifecycle
     #[arg(long)]
     pub(super) self_check: bool,
-    /// Native acceleration or explicit Linux software emulation
-    #[arg(long, value_parser = ["kvm", "tcg", "hyperv"])]
+    /// Hardware accelerator: KVM on Linux, Hyper-V on Windows
+    #[arg(long, value_parser = ["kvm", "hyperv"])]
     pub(super) accelerator: Option<String>,
     /// Assert T6's existing qualification for this exact resource profile; no VM is launched
     #[arg(long, conflicts_with = "self_check")]
@@ -60,11 +60,6 @@ fn linux(ws: &Workspace, args: Args) -> Result<()> {
         config.memory = memory;
         config.snapshot = false;
         let mut request = spec(ws, &config)?;
-        request.accelerator = if accelerator == "tcg" {
-            Accelerator::Tcg
-        } else {
-            Accelerator::Native
-        };
         request.secure_boot = Requirement::Required;
         request.tpm = TpmLifecycle::Persistent {
             bundle_id: request.run.clone(),
@@ -85,7 +80,6 @@ fn linux(ws: &Workspace, args: Args) -> Result<()> {
             Command::new(cargo)
                 .current_dir(&ws.root)
                 .args(["ilexctl", "test", "security::firmware"])
-                .env("ILEX_SECURITY_ACCELERATOR", accelerator)
                 .env("ILEX_SECURITY_MEMORY", memory),
         )?;
     }

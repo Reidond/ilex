@@ -24,11 +24,6 @@ on:
         description: Only install the published installer composition to a disk for the upgrade tier's cache (the publish job starts this after each publish)
         type: boolean
         default: false
-      security_accelerator:
-        description: Security tier accelerator (probe selects KVM only with SMM; tcg explicitly forces emulation)
-        type: choice
-        options: [probe, kvm, tcg]
-        default: probe
       encrypted_install:
         description: Qualify encrypted installation, recovery, privacy, upgrade and rollback (6 GiB)
         type: boolean
@@ -90,7 +85,6 @@ jobs:
       test: ${{ inputs.test || false }}
       apps: ${{ inputs.apps || false }}
       v1_disk: ${{ inputs.v1_disk || false }}
-      security_accelerator: ${{ inputs.security_accelerator || 'probe' }}
       encrypted_install: ${{ inputs.encrypted_install || false }}
       encrypted_upgrade_from: ${{ inputs.encrypted_upgrade_from || '' }}
       encrypted_update_kernel: ${{ inputs.encrypted_update_kernel || '' }}

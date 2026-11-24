@@ -280,15 +280,15 @@ to restore a passing profile; `on` selects the second control for local checks.
 security prerequisites. Its result is explicitly `not_yet_qualified` until
 the booted-guest tier passes. `ilexctl doctor security --self-check` runs
 `security::firmware` against this checkout's image (`ILEX_IMAGE` can select
-the CI candidate). `--accelerator tcg` explicitly selects emulation; a failed
-KVM/SMM probe never silently changes accelerators. On Windows the security
+the CI candidate). Secure guests require KVM with SMM; there is no software
+emulation route, and a failed KVM/SMM probe is unqualified. On Windows the security
 subcommand selects native Gen2 and accepts the exact signed installer via
 `ILEX_ISO`.
 
 The shared `VmSpec` remains the contract for part 4: `secure_boot=required`
 and `tpm=persistent { bundle_id }`, with a writable owned disk, UEFI and no
-external `firmware_state`. Native acceleration is the default; the additive
-`accelerator=tcg` choice uses an emulated `max` CPU. Existing ordinary VMs
+external `firmware_state`. Native acceleration (KVM's `host` CPU) is the only
+accelerator. Existing ordinary VMs
 keep their nonsecure firmware and no TPM. Secure requests select a distro
 firmware descriptor declaring Microsoft-enrolled keys, Secure Boot and SMM,
 and require the matching CODE/VARS pair's combined 4 MiB layout. Fedora's
@@ -344,8 +344,8 @@ secure CODE and enrolled VARS template. The off copy changes only the
 `SecureBootEnable` boolean, retaining all enrolled keys. When the factory
 template omits that boolean (Ubuntu), it is added with value zero rather than
 replacing the enrolled key store. Manifest hashes record the common firmware
-and the private off-state change. The tier uses 4 GiB and two vCPUs; each SSH/control deadline is 420s
-with KVM or 900s with TCG. This does not qualify encrypted installation,
+and the private off-state change. The tier uses 4 GiB and two vCPUs; each SSH/control deadline is 420s.
+This does not qualify encrypted installation,
 desktop performance or the unresolved 4 GiB nested Hyper-V builder failure.
 `ILEX_SECURITY_MEMORY=2G` selects an explicit smaller diagnostic fixture;
 timing evidence records its actual memory. It does not qualify a 4 GiB VM.
@@ -353,10 +353,8 @@ The 16 November 2026 WSL run also reproduced a 4 GiB KVM SMM entry failure
 after shim/GRUB (`hardware error 0xffffffff`, QMP `internal-error`). A host
 SMM capability of 1 alone is therefore insufficient. Entry failures fail
 early; neither SMM nor Secure Boot is disabled to continue the test.
-Disk construction still uses bcvk's KVM installer; a host with no KVM at all
-needs an already delivered, checkout-owned `ILEX_DISK` to qualify TCG. Missing
-disk-construction support fails as unqualified. The hosted workflow's existing
-ordinary KVM tiers still require KVM independently of the SMM decision.
+Disk construction uses bcvk's KVM installer. Missing disk-construction support
+fails as unqualified.
 For immutable `sha256:...` image IDs, disk construction gives bcvk an
 ID-verified checkout-owned local alias: its inner containers-storage transport
 otherwise parses the ID as a registry name. The disk key remains the original
@@ -364,13 +362,11 @@ immutable ID. The alias retains only an additional local name for the existing
 image; no registry upload or extra image contents are created.
 
 CI runs the tier on the tested candidate, probes the actual runner each
-time, explicitly chooses KVM or TCG, and enforces a 45-minute guest-tier deadline.
+time, requires KVM with SMM, and enforces a 45-minute guest-tier deadline.
 Failures/timeouts are unqualified and fail the build; an unchanged image's
 unrun tier is labelled **UNQUALIFIED** in the summary. `test=true` forces it.
-The optional dispatch input `security_accelerator=tcg` forces the explicit
-emulation route even when the host advertises SMM; `kvm` requires KVM/SMM,
-and the default `probe` selects from the actual runner probe. A KVM entry
-failure never silently retries another accelerator within a qualification.
+A runner without KVM SMM, or a KVM entry failure, leaves the tier
+unqualified; nothing retries with another accelerator.
 Serial logs, firmware identity, versions, PCR replay, timing and cleanup
 evidence are retained under `artifacts/security/` (CI: `security-evidence`).
 Startup failure collection authorizes the fixture's runtime path independently

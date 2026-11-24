@@ -177,21 +177,20 @@ changes to firmware, Secure Boot policy or TPM identity.
 ## Qualification
 
 Run only from this checkout's namespace. First build/qualify the exact 6 GiB,
-two-vCPU profile; WSL nested KVM's smaller passing profiles do not qualify the
-installer. Explicit TCG is the local large-guest alternative.
+two-vCPU profile on a host whose KVM enters SMM at that size; WSL nested KVM's
+smaller passing profiles do not qualify the installer.
 
-The PR 17 guest probes retain a 60-second KVM deadline and allow 300 seconds
-under explicit TCG for RPM queries and signed-module loading. The selected
-deadline is retained in `amdgpu-deadline.json`; assertions and boot deadlines
-remain mandatory, and timeouts stay unqualified.
+The PR 17 guest probes keep a 60-second deadline for RPM queries and
+signed-module loading. It is retained in `amdgpu-deadline.json`; assertions and
+boot deadlines remain mandatory, and timeouts stay unqualified.
 
 ```sh
 cargo ilexctl build --shell none
-ILEX_SHELLS=none cargo ilexctl doctor security --self-check --accelerator tcg --memory 6G
+ILEX_SHELLS=none cargo ilexctl doctor security --self-check --accelerator kvm --memory 6G
 ILEX_SHELLS=none cargo ilexctl test disk::install
-ILEX_SECURITY_ACCELERATOR=tcg cargo ilexctl test security::encrypted_install
-ILEX_SECURITY_ACCELERATOR=tcg cargo ilexctl test security::encrypted_existing_space
-ILEX_SECURITY_ACCELERATOR=tcg cargo ilexctl test security::encrypted_interrupted
+cargo ilexctl test security::encrypted_install
+cargo ilexctl test security::encrypted_existing_space
+cargo ilexctl test security::encrypted_interrupted
 ```
 
 `security::encrypted_install` builds/reuses `ILEX_ISO`, installs this candidate
@@ -284,14 +283,14 @@ To diagnose installation and fallback locally, point `ILEX_ISO` and
 `ILEX_IMAGE` at this checkout's installer and candidate and run
 `ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS=1 cargo ilexctl test security::enrollment_diagnostic_ -- --test-threads 1`.
 These trials use a firmware profile with Secure Boot off and no TPM. They
-retain an unqualified result and run outside the hosted filter. Use explicit
-TCG qualification for a local Secure Boot run with the hosted memory profile.
+retain an unqualified result and run outside the hosted filter. A local Secure
+Boot run uses the qualified KVM profile at the hosted memory size.
 The encrypted LVM diagnostic also hides the LUKS UUID link in a private mount
 namespace, checks that discovery failure is retryable, then exercises legacy
 state repair and interruption before recovery confirmation.
 
-The install deadline defaults to three hours for explicit TCG and can be set
-with positive `ILEX_ENCRYPTED_INSTALL_TIMEOUT` seconds. Missing qualification,
+The install deadline defaults to three hours and can be set with positive
+`ILEX_ENCRYPTED_INSTALL_TIMEOUT` seconds. Missing qualification,
 missing evidence, failure and timeout remain **unqualified**, with a failed
 stage. The interrupted trial kills the shipped completion while its first
 recovery key is visible, before acknowledgement/TPM enrollment, and waits for
@@ -321,12 +320,11 @@ the cache-only `v1_disk=true` combination fails explicitly. It requires both
 exact encrypted storage gates plus the interrupted trial. Public evidence for automatic
 storage and existing free space is retained separately; the gate is opt-in
 while being qualified. A hosted qualifying run should select branch
-`phase0/18-luks-enroll`, `encrypted_install=true`, `security_accelerator=kvm`,
-`v1_disk=false`, `test=true`, `iso=false`. The encrypted gate builds its own
+`phase0/18-luks-enroll`, `encrypted_install=true`, `v1_disk=false`, `test=true`, `iso=false`. The encrypted gate builds its own
 exact ISO; `iso=true` additionally runs the independent publication ISO path.
 The hosted runner's earlier 4 GiB KVM result does not qualify 6 GiB: this run
 must measure the 6 GiB/two-vCPU contract before the encrypted tests. A KVM SMM
-failure remains unqualified; explicit TCG is a separately measured alternative.
+failure remains unqualified.
 Physical fTPM, firmware changes and actual kernel-upgrade/rollback behavior
 remain later qualification, never inferred from this fixture.
 

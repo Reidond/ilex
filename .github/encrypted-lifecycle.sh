@@ -42,10 +42,7 @@ if [[ -n "${ILEX_ENCRYPTED_UPDATE_KERNEL:-}" ]]; then
         --tag "$update" .github
     export ILEX_IMAGE="$update"
 fi
-export ILEX_SECURITY_ACCELERATOR
-ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
-case "$ILEX_SECURITY_ACCELERATOR" in kvm|tcg) ;; *) exit 1 ;; esac
-cargo ilexctl doctor security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
+cargo ilexctl doctor security --require-qualified --accelerator kvm --memory 6G
 timeout --signal=TERM --kill-after=30s 105m cargo ilexctl test security::upgrade_rollback -- --test-threads 1
 python3 - "$ILEX_ARTIFACTS/$tier/result.json" <<'PY'
 import json, sys
@@ -53,4 +50,4 @@ with open(sys.argv[1]) as source:
     assert json.load(source)['qualification'] == 'passed', 'encrypted lifecycle remains unqualified'
 PY
 qualified=true
-echo "Encrypted upgrade/rollback **passed** on $ILEX_SECURITY_ACCELERATOR / 6G / 2 vCPUs. Hyper-V and physical qualification are tracked separately." >> "$GITHUB_STEP_SUMMARY"
+echo "Encrypted upgrade/rollback **passed** on kvm / 6G / 2 vCPUs. Hyper-V and physical qualification are tracked separately." >> "$GITHUB_STEP_SUMMARY"

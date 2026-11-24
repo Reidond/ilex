@@ -25,12 +25,10 @@ export ILEX_ISO=/absolute/path/to/ilex-installer.iso
 export ILEX_IMAGE=localhost/ilex:checkout-candidate
 export ILEX_ENCRYPTED_UPGRADE_FROM='ghcr.io/reidond/ilex@sha256:<v1-digest>'
 podman pull "$ILEX_ENCRYPTED_UPGRADE_FROM"
+# Requires a positive KVM SMM probe and successful guest qualification.
 cargo ilexctl doctor security
-# Use kvm with a positive SMM probe and successful guest qualification.
-# Use tcg for the same profile if KVM with SMM is unavailable.
-export ILEX_SECURITY_ACCELERATOR=kvm
-cargo ilexctl doctor security --self-check --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
-cargo ilexctl doctor security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
+cargo ilexctl doctor security --self-check --accelerator kvm --memory 6G
+cargo ilexctl doctor security --require-qualified --accelerator kvm --memory 6G
 cargo ilexctl test security::upgrade_rollback -- --test-threads 1
 ```
 
@@ -77,7 +75,7 @@ the firmware and lifecycle evidence. The ephemeral suite and other encrypted
 installer cases retain their separate verdicts in the full workflow.
 
 The hosted runner must pass the firmware and 6 GiB lifecycle budget with KVM
-plus SMM or TCG. If it cannot, set `ILEX_RUNNER` to a dedicated Linux runner
+plus SMM. If it cannot, set `ILEX_RUNNER` to a dedicated Linux runner
 with secure OVMF, swtpm, and enough RAM, storage and runtime for the complete
 suite. A failed probe, timeout or failed lifecycle is unqualified. A fresh-only
 result qualifies that install and records why no lifecycle could run. Retain

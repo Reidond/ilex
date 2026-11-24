@@ -5,8 +5,6 @@ set -euo pipefail
 : "${ILEX_ARTIFACTS:?select the public evidence directory}"
 control=${1:-off}
 case "$control" in off|on) ;; *) echo 'control must be off or on' >&2; exit 1 ;; esac
-accel=${ILEX_SECURITY_ACCELERATOR:-kvm}
-case "$accel" in kvm|tcg) ;; *) echo 'select kvm or tcg explicitly' >&2; exit 1 ;; esac
 evidence="$ILEX_ARTIFACTS/security/control-startup-self-check/$control"
 mkdir -p "$evidence"
 # A fresh artifact generation cannot inherit an earlier control's evidence.
@@ -46,7 +44,7 @@ chmod 700 "$fixture/bin/qemu-system-x86_64"
 if env -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER \
     PATH="$fixture/bin:$PATH" ILEX_ARTIFACTS="$output" \
     timeout --signal=TERM --kill-after=20s 45m \
-    cargo ilexctl doctor security --self-check --accelerator "$accel" \
+    cargo ilexctl doctor security --self-check --accelerator kvm \
     > "$output/command.log" 2>&1; then
     echo 'injected unsigned-control startup failure unexpectedly qualified' >&2
     exit 1

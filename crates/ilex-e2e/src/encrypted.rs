@@ -4,7 +4,7 @@ use crate::common;
 use anyhow::{Context, Result, bail, ensure};
 use ilex_devkit::{
     Workspace, cmd,
-    core::{Accelerator, Capability, Requirement, TpmLifecycle, VmProvider, VmSpec},
+    core::{Capability, Requirement, TpmLifecycle, VmProvider, VmSpec},
     provider::{LinuxProvider, LinuxVm},
     qemu::{self, VmConfig},
     security,
@@ -304,11 +304,6 @@ fn checkpoint() -> Result<()> {
         config.memory = "6G".into();
         let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
         spec.run = run.to_string();
-        spec.accelerator = match std::env::var("ILEX_SECURITY_ACCELERATOR").as_deref() {
-            Ok("tcg") => Accelerator::Tcg,
-            Ok("kvm") => Accelerator::Native,
-            _ => bail!("explicit checkpoint accelerator required"),
-        };
         spec.secure_boot = Requirement::Required;
         spec.tpm = TpmLifecycle::Persistent {
             bundle_id: run.to_string(),
@@ -2948,11 +2943,6 @@ fn run_fixture(
         config.cdrom = Some(iso.clone());
         let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
         spec.run = run.clone();
-        spec.accelerator = match std::env::var("ILEX_SECURITY_ACCELERATOR").as_deref() {
-            Ok("tcg") => Accelerator::Tcg,
-            Ok("kvm") | Err(_) => Accelerator::Native,
-            Ok(_) => bail!("explicit kvm/tcg accelerator required"),
-        };
         if !local_diagnostic {
             spec.secure_boot = Requirement::Required;
             spec.tpm = TpmLifecycle::Persistent {

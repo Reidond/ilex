@@ -2,7 +2,7 @@
 //! consumers must also prove enforcement, replay PCRs and exercise persistence.
 use crate::{Workspace, cmd};
 use anyhow::{Context, Result, bail, ensure};
-use ilex_tooling_core::{Accelerator, Requirement, SCHEMA_VERSION, TpmLifecycle, VmSpec};
+use ilex_tooling_core::{Requirement, SCHEMA_VERSION, TpmLifecycle, VmSpec};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -87,12 +87,10 @@ pub fn requested(spec: &VmSpec) -> bool {
 
 pub fn validate(spec: &VmSpec) -> Result<()> {
     crate::require_linux()?;
-    if spec.accelerator == Accelerator::Native {
-        ensure!(
-            kvm_smm()? > 0,
-            "KVM_CAP_X86_SMM is unavailable; request accelerator=tcg explicitly (never automatic fallback)"
-        );
-    }
+    ensure!(
+        kvm_smm()? > 0,
+        "KVM_CAP_X86_SMM is unavailable; secure guests require KVM with SMM"
+    );
     firmware()?;
     cmd::require("qemu-img")?;
     if !matches!(spec.tpm, TpmLifecycle::Off) {

@@ -617,11 +617,7 @@ impl Vm {
             .args(["-run-with", "exit-with-parent=on"])
             .args([
                 "-accel",
-                if spec.accelerator == ilex_tooling_core::Accelerator::Tcg {
-                    "tcg,thread=multi"
-                } else {
-                    "kvm"
-                },
+                "kvm",
                 "-machine",
                 if security.is_some() {
                     "q35,smm=on"
@@ -629,11 +625,7 @@ impl Vm {
                     "q35"
                 },
                 "-cpu",
-                if spec.accelerator == ilex_tooling_core::Accelerator::Tcg {
-                    "max"
-                } else {
-                    "host"
-                },
+                "host",
             ])
             .args(["-smp", &config.vcpus.to_string(), "-m", &config.memory])
             .arg("-drive")
@@ -870,7 +862,7 @@ impl Vm {
                     "KVM entry failed (SMM); see retained qemu.log",
                 )?;
                 bail!(
-                    "secure KVM guest is unqualified: KVM entry failed (see {}); select TCG explicitly",
+                    "secure KVM guest is unqualified: KVM entry failed (see {})",
                     self.info.dir.join("qemu.log").display()
                 );
             }

@@ -12,13 +12,12 @@ pub enum Requirement {
     Required,
 }
 
-/// Native acceleration never silently falls back to software emulation.
+/// Hardware acceleration (KVM, WHPX or Hyper-V). ilex never emulates a guest CPU.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Accelerator {
     #[default]
     Native,
-    Tcg,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -56,7 +56,7 @@ for phase in emulator setup; do
         XDG_RUNTIME_DIR="$fixture" ILEX_DISK="$fixture/input.qcow2" \
         ILEX_SECURITY_MEMORY=128M ILEX_CHECK_PHASE="$phase" \
         ILEX_CHECK_LAUNCHED="$fixture/qemu-launched" ILEX_ARTIFACTS="$evidence/$phase" \
-        timeout --signal=TERM --kill-after=10s 5m cargo ilexctl doctor security --self-check --accelerator tcg \
+        timeout --signal=TERM --kill-after=10s 5m cargo ilexctl doctor security --self-check --accelerator kvm \
         > "$evidence/$phase/command.log" 2>&1; then
         echo "injected $phase startup failure unexpectedly qualified" >&2
         exit 1

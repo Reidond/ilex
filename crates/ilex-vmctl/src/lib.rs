@@ -145,14 +145,9 @@ impl Vmctl {
         caps.vm_id = Some(format!("{}:{}", self.info.pid, self.info.process_start));
         #[cfg(target_os = "linux")]
         {
-            use ilex_tooling_core::{Accelerator, Capability, CapabilityStatus};
+            use ilex_tooling_core::{Capability, CapabilityStatus};
 
             // Provisioning is separate from profile evidence and current QMP state.
-            if self.info.accelerator == Accelerator::Tcg {
-                caps.provider = "linux-qemu-tcg".into();
-                caps.features
-                    .insert(Capability::Start, CapabilityStatus::Available);
-            }
             if self.info.secure_boot {
                 caps.provisioning
                     .insert(Capability::FirmwareEnforcement, CapabilityStatus::Available);
@@ -181,11 +176,7 @@ impl Vmctl {
         #[cfg(target_os = "windows")]
         let provider = "windows-qemu-whpx";
         #[cfg(not(target_os = "windows"))]
-        let provider = if self.info.accelerator == ilex_tooling_core::Accelerator::Tcg {
-            "linux-qemu-tcg"
-        } else {
-            "linux-qemu-kvm"
-        };
+        let provider = "linux-qemu-kvm";
         ilex_tooling_core::VmHandle {
             schema: self.info.schema,
             owner: self.info.owner.clone(),

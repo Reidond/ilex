@@ -24,10 +24,7 @@ trap finish EXIT
 [[ -n "${ILEX_IMAGE:-}" && -f "${ILEX_ISO:-}" ]] || { echo '::error::encrypted qualification requires a local candidate and exact ISO'; exit 1; }
 command -v openssl >/dev/null
 python3 -B crates/ilex-e2e/src/encrypted/log_stream_check.py
-export ILEX_SECURITY_ACCELERATOR
-ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
-case "$ILEX_SECURITY_ACCELERATOR" in kvm|tcg) ;; *) exit 1 ;; esac
-cargo ilexctl doctor security --require-qualified --accelerator "$ILEX_SECURITY_ACCELERATOR" --memory 6G
+cargo ilexctl doctor security --require-qualified --accelerator kvm --memory 6G
 # Endpoint hashes stay in a private runner directory, outside the evidence.
 private_fingerprints=$(mktemp -d "$RUNNER_TEMP/ilex-fingerprints.XXXXXXXX")
 export ILEX_PRIVATE_FINGERPRINTS="$private_fingerprints"
@@ -41,4 +38,4 @@ for tier in ('encrypted-install', 'encrypted-existing-space', 'encrypted-interru
 PY
 printf 'ILEX_PRIVATE_FINGERPRINTS=%s\n' "$private_fingerprints" >> "$GITHUB_ENV"
 qualified=true
-echo "Exact encrypted install gates: **passed**, automatic storage, existing free space, interrupted completion, PCR mismatch and recovery-key boots, $ILEX_SECURITY_ACCELERATOR / 6G / 2 vCPUs." >> "$GITHUB_STEP_SUMMARY"
+echo "Exact encrypted install gates: **passed**, automatic storage, existing free space, interrupted completion, PCR mismatch and recovery-key boots, kvm / 6G / 2 vCPUs." >> "$GITHUB_STEP_SUMMARY"

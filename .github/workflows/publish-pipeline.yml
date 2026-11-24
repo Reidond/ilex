@@ -66,10 +66,6 @@ on:
         description: Only install the published installer composition to a disk for the upgrade tier's cache (the publish job starts this after each publish)
         type: boolean
         default: false
-      security_accelerator:
-        description: Security tier accelerator (probe selects KVM only with SMM; tcg explicitly forces emulation)
-        type: string
-        default: probe
       encrypted_install:
         description: Qualify encrypted installation, recovery, privacy, and a real kernel upgrade and rollback (6 GiB)
         type: boolean
@@ -339,7 +335,6 @@ jobs:
         if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.encrypted_install
         env:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
-          ILEX_SECURITY_ACCELERATOR: ${{ inputs.security_accelerator || 'probe' }}
           ILEX_SECURITY_MEMORY: ${{ inputs.encrypted_install && '6G' || '4G' }}
         run: bash .github/security-tier.sh
 
@@ -394,10 +389,7 @@ jobs:
         env:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
-        run: |
-          export ILEX_SECURITY_ACCELERATOR
-          ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
-          timeout --signal=TERM --kill-after=30s 80m cargo ilexctl test security::encrypted_install -- --exact --test-threads 1
+        run: timeout --signal=TERM --kill-after=30s 80m cargo ilexctl test security::encrypted_install -- --exact --test-threads 1
 
       - name: Report unchanged security tier as unqualified
         if: steps.changed.outputs.changed != 'true' && !inputs.test && !inputs.encrypted_install
@@ -1202,8 +1194,6 @@ jobs:
           ILEX_PRIVATE_FINGERPRINTS=$(mktemp -d "$RUNNER_TEMP/ilex-fingerprints.XXXXXXXX")
           trap 'rm -f -- "$ILEX_PRIVATE_FINGERPRINTS/encrypted-install.json" "$ILEX_PRIVATE_FINGERPRINTS/encrypted-upgrade-rollback.json"; rmdir -- "$ILEX_PRIVATE_FINGERPRINTS"' EXIT
           bash .github/security-tier.sh
-          export ILEX_SECURITY_ACCELERATOR
-          ILEX_SECURITY_ACCELERATOR=$(cat "$ILEX_ARTIFACTS/security/selected-accelerator")
           ILEX_ENCRYPTED_PUBLISHED_INSTALL=1 timeout --signal=TERM --kill-after=30s 85m \
             cargo ilexctl test security::encrypted_install -- --exact --test-threads 1
           scope=fresh

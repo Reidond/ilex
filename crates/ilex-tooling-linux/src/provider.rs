@@ -253,11 +253,6 @@ impl VmProvider for LinuxProvider {
             VmDisplay::Window { width, height, .. } => ("gtk", width, height),
         };
         let mut caps = capabilities(display, (width, height));
-        if spec.accelerator == Accelerator::Tcg {
-            caps.provider = "linux-qemu-tcg".into();
-            caps.features
-                .insert(Capability::Start, CapabilityStatus::Available);
-        }
         if crate::security::requested(spec) {
             let status = match crate::security::validate(spec) {
                 Ok(()) => CapabilityStatus::Available,
@@ -402,12 +397,7 @@ impl VmProvider for LinuxProvider {
             schema: SCHEMA_VERSION,
             owner: vm.spec.owner.clone(),
             run: vm.spec.run.clone(),
-            provider: if vm.spec.accelerator == Accelerator::Tcg {
-                "linux-qemu-tcg"
-            } else {
-                "linux-qemu-kvm"
-            }
-            .into(),
+            provider: "linux-qemu-kvm".into(),
             opaque_id: format!("{}:{}", running.info.pid, running.info.process_start),
             guest_arch: vm.spec.guest_arch,
         })

@@ -16,8 +16,6 @@ ILEX_SHELLS=none cargo ilexctl doctor security --self-check --memory 2G
 cargo ilexctl doctor security --require-qualified --memory 2G
 # A different resource profile must have its own passing T6 record:
 cargo ilexctl doctor security --require-qualified --memory 2049M
-# Explicit emulation, with independent qualification:
-ILEX_SHELLS=none cargo ilexctl doctor security --self-check --accelerator tcg --memory 4G
 ```
 
 `doctor security` alone is an inventory and explicitly says no guest was qualified.
@@ -86,7 +84,6 @@ sealed-root design. No disk-unlock result is implied by these probes.
 | Backend | Required provisioning and qualification |
 | --- | --- |
 | Linux QEMU/KVM | Probe `KVM_CAP_X86_SMM` on the actual host. Use q35/SMM, secure pflash, a matching Microsoft-enrolled 4 MiB OVMF CODE/VARS pair and manufactured SHA-256 swtpm. Own disk/vars/TPM as a coherent bundle. Pass actual guest and unsigned controls for the requested resource profile. |
-| Linux QEMU/TCG | Explicit `--accelerator tcg`, emulated CPU and the same firmware/TPM assertions, with its own timing budget and profile. Disk construction currently needs KVM or an already delivered owned disk. No silent retry after a KVM guest failure. |
 | Windows Hyper-V Gen 2 (tooling T5 dependency) | `MicrosoftUEFICertificateAuthority`, persistent vTPM/key protector and checkout-owned UEFI/GPT VHDX; record host/Hyper-V versions, firmware/template identity and protected-state lifecycle. Management access, disk delivery, guest SSH, serial/enforcement diagnostics and unsigned on/off fixtures must be provided by T5. This PR contains no Hyper-V implementation or support stub. |
 | Windows QEMU/WHPX | Not qualified for security: the measured Windows build lacks the TPM backend and rejects SMM. GPU development availability does not imply security support. |
 
@@ -101,8 +98,8 @@ installer boot capabilities must be supplied and tested by their owning
 tooling/installer work before those later tiers can run.
 
 WSL KVM at 2 GiB passed the earlier T6 measurements, while its 4 GiB guest
-failed at SMM entry despite ioctl=1. TCG passed at 4/6 GiB, and hosted KVM
-passed at 4 GiB (run 44091377698). These are host/profile observations, not a
+failed at SMM entry despite ioctl=1, and hosted KVM passed at 4 GiB
+(run 44091377698). These are host/profile observations, not a
 universal RAM ceiling. The test uses the explicitly requested profile and
 retains its qualification independently. Do not promote 2 GiB evidence to
 4 GiB or infer hosted support from WSL results.

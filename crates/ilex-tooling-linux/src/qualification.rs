@@ -60,12 +60,7 @@ pub fn profile(ws: &Workspace, spec: &VmSpec) -> Result<SecurityProfile> {
         protocol: 2,
         accelerator: spec.accelerator,
         resources: spec.resources.clone(),
-        cpu_model: if spec.accelerator == Accelerator::Native {
-            "host"
-        } else {
-            "max"
-        }
-        .into(),
+        cpu_model: "host".into(),
         guest_arch: spec.guest_arch,
         host,
         firmware: security::firmware_identity(ws, spec)?,
