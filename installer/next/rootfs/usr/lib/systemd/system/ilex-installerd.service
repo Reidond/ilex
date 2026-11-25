@@ -1,0 +1,20 @@
+[Unit]
+Description=ilex installer helper
+Documentation=https://github.com/Reidond/ilex
+After=dbus.socket
+Requires=dbus.socket
+
+[Service]
+Type=dbus
+BusName=org.ilex.Installer1
+ExecStart=/usr/libexec/ilex-installer/ilex-installerd
+RuntimeDirectory=ilex-installer
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+LimitCORE=0
+# The helper does not restart while an installation runs (a later PR); until
+# then a crash is simply reported.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

@@ -12,3 +12,18 @@ xorrisofs
 NetworkManager-wifi
 util-linux
 iproute
+# The root helper (ilex-installerd) probes with lsblk/sfdisk (util-linux), plans
+# with systemd-repart (systemd-udev), which formats through mkfs.vfat, mkfs.ext4
+# and mkfs.btrfs even in a dry run, reads the registry with skopeo and checks
+# console keymaps and zone names against kbd and tzdata. cryptsetup and
+# tpm2-tss are what ilex-enroll's eligibility probe measures. fedora-bootc
+# already has all of them (they add no size); they are listed so that a change
+# to the base cannot drop a tool the helper needs.
+dosfstools
+e2fsprogs
+btrfs-progs
+skopeo
+kbd
+tzdata
+cryptsetup
+tpm2-tss

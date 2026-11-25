@@ -129,7 +129,7 @@ pub struct Build<'a> {
     pub output_dir: Option<&'a Path>,
 }
 
-fn validated_table(root: &Path, testing_tag: Option<&str>) -> Result<installer::Table> {
+pub(crate) fn validated_table(root: &Path, testing_tag: Option<&str>) -> Result<installer::Table> {
     let mut table = installer::table(root, testing_tag)?;
     let output = cmd::output(
         Command::new("python3")
@@ -302,7 +302,7 @@ fn release_notes(fingerprint: &str, sha256: &str, table: &installer::Table) -> S
     notes
 }
 
-fn table_bytes(table: &installer::Table) -> Result<Vec<u8>> {
+pub(crate) fn table_bytes(table: &installer::Table) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(table)?;
     bytes.push(b'\n');
     Ok(bytes)
