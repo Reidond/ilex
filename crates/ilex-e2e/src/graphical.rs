@@ -74,7 +74,9 @@ fn run(apps: bool) -> Result<()> {
     // 1. Boot the installed disk.
     let disk = vmtest::disk(&ws)?;
     let mut config = VmConfig::graphical(tier, disk);
-    config.apps = apps;
+    // The GNOME apps test lets the timer install the shell's list. KDE's test installs its
+    // own few Flatpaks and leaves the timer off.
+    config.apps = apps && shell == "gnome";
     let mut vm = vmtest::boot(&ws, config)?;
     let ctl = Vmctl::from_info(vm.info.clone());
 
