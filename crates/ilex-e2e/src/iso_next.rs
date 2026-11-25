@@ -337,21 +337,21 @@ fn observe(
 fn surface(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     const SCRIPT: &str = r#"set -u
 pid=$(systemctl show ilex-installer-session.service -p MainPID --value)
-echo "## session (main pid $pid)"
+echo "=== session (main pid $pid)"
 loginctl list-sessions --no-pager --no-legend
 loginctl show-session "$(loginctl --no-legend list-sessions | awk '$3 == "ilex-installer" {print $1; exit}')" -p Active -p Remote -p Class -p Type -p State
-echo "## polkit: authorized for the session without a password"
+echo "=== polkit: authorized for the session without a password"
 for action in $(pkaction); do
     pkcheck --action-id "$action" --process "$pid" >/dev/null 2>&1 && echo "AUTHORIZED $action"
 done
-echo "## polkit: end"
-echo "## system bus: names in use"
+echo "=== polkit: end"
+echo "=== system bus: names in use"
 busctl --system list --no-legend --no-pager | awk '{print $1}'
-echo "## system bus: activatable"
+echo "=== system bus: activatable"
 busctl --system list --activatable --no-legend --no-pager | awk '{print $1}'
-echo "## listening sockets"
+echo "=== listening sockets"
 ss -tulnH
-echo "## units running"
+echo "=== units running"
 systemctl list-units --type=service --state=running --no-legend --no-pager | awk '{print $1}'
 "#;
     vm.wait_ssh(Duration::from_secs(180))
