@@ -653,12 +653,40 @@ fn check_topology(parent: &Path) -> Result<()> {
     // sdf: nothing uses it. A loop device whose file is on no mount.
     tree.disk("sdf", 8, 80)?;
     tree.loop_device("loop1", 7, 1, "/nowhere/x.iso")?;
+    // The other ways a loop device's file can be out of reach or out of the way.
+    tree.loop_device("loop2", 7, 2, "/run/initramfs/isoscan/live.iso")?;
+    tree.loop_device("loop3", 7, 3, "/live.iso")?;
+    tree.loop_device("loop4", 7, 4, "/run/ram.iso")?;
+    tree.loop_device("loop5", 7, 5, "/mnt/btrfs/sub/live.iso")?;
+    tree.loop_device("loop6", 7, 6, "/mnt/unknown/live.iso")?;
+    tree.loop_device("loop7", 7, 7, "/mnt/host/iso/live.iso (deleted)")?;
     let roots = tree.roots();
 
+    // The files the fixture mounts hold, by `stat`'s device number: what the
+    // helper asks the kernel about a loop device's file (a path that is not
+    // listed cannot be read from here).
+    let file_dev = |path: &str| -> Option<topology::DevNum> {
+        match path {
+            "/mnt/host/iso/live.iso" | "/run/initramfs/isoscan/live.iso" => Some((8, 33)),
+            "/mnt/data/swap file" => Some((8, 65)),
+            // tmpfs: an anonymous number that /run's mount carries.
+            "/run/ram.iso" => Some((0, 31)),
+            // A btrfs subvolume's number is not the mount's.
+            "/mnt/btrfs/sub/live.iso" => Some((0, 99)),
+            // A block device sysfs does not list.
+            "/mnt/unknown/live.iso" => Some((8, 200)),
+            _ => None,
+        }
+    };
+    // Every case runs beside the mounts every running system has: `/` (the
+    // live system's root is an overlay, which holds no disk) contains every
+    // path, so a mount table's longest prefix proves nothing about a file.
+    const BASE: &str =
+        "1 0 0:30 / / rw - overlay overlay rw\n2 1 0:31 / /run rw - tmpfs tmpfs rw\n";
     let run = |mountinfo: &str, swaps: &str| {
-        let mounts = topology::parse_mountinfo(mountinfo);
+        let mounts = topology::parse_mountinfo(&format!("{BASE}{mountinfo}"));
         topology::usage(
-            &Topology::new(&roots, &mounts),
+            &Topology::new(&roots, &mounts).with_file_dev(&file_dev),
             &mounts,
             &topology::parse_swaps(swaps),
         )
@@ -697,7 +725,7 @@ fn check_topology(parent: &Path) -> Result<()> {
     );
     // ... and where dracut itself mounts the host disk.
     let dracut = run(
-        "41 1 7:0 / /run/initramfs/live ro - iso9660 /dev/loop0 ro\n\
+        "41 1 7:2 / /run/initramfs/live ro - iso9660 /dev/loop2 ro\n\
          42 1 8:33 / /run/initramfs/isoscan rw - ext4 /dev/sdc1 rw\n",
         "",
     );
@@ -719,8 +747,6 @@ fn check_topology(parent: &Path) -> Result<()> {
     // through the partition's holders.
     let busy = run(
         "45 1 8:65 / /mnt/data rw - ext4 /dev/sde1 rw\n\
-         46 1 0:30 / / rw - virtiofs rootfs rw\n\
-         47 1 0:31 / /run rw - tmpfs tmpfs rw\n\
          48 1 0:32 / /run/initramfs rw - tmpfs tmpfs rw\n",
         "Filename\tType\tSize\tUsed\tPriority\n/dev/sde2 partition 1024 0 -2\n/mnt/data/swap\\040file file 1024 0 -3\n",
     );
@@ -749,7 +775,8 @@ fn check_topology(parent: &Path) -> Result<()> {
             && topology.holders("sdf").is_empty(),
         "holders"
     );
-    // A medium that cannot be followed is said so, never guessed.
+    // A medium that cannot be followed is said so, never guessed: its file is
+    // on no mount, whatever contains its name ...
     let lost = run(
         "49 1 7:1 / /run/initramfs/live ro - iso9660 /dev/loop1 ro\n",
         "",
@@ -758,13 +785,110 @@ fn check_topology(parent: &Path) -> Result<()> {
         lost.live.contains("loop1") && !lost.unresolved.is_empty(),
         "an unresolvable medium: {lost:?}"
     );
-    let missing = run(
-        "49 1 0:9 / /run/initramfs/live ro - iso9660 /dev/missing ro\n",
+    // ... its mount was detached and only the name relative to it is left
+    // (the kernel prints `/live.iso` for a lazily unmounted `/mnt/x/live.iso`,
+    // and `/` contains that) ...
+    let detached = run(
+        "49 1 7:3 / /run/initramfs/live ro - iso9660 /dev/loop3 ro\n",
         "",
     );
     ensure!(
-        missing.live.is_empty() && !missing.unresolved.is_empty(),
-        "a missing device node: {missing:?}"
+        detached.live.contains("loop3") && !detached.unresolved.is_empty(),
+        "a detached mount: {detached:?}"
+    );
+    // ... its file was deleted, or sits on a block device sysfs does not list.
+    for (loop_device, major_minor) in [("loop7", "7:7"), ("loop6", "7:6")] {
+        let lost = run(
+            &format!(
+                "49 1 {major_minor} / /run/initramfs/live ro - iso9660 /dev/{loop_device} ro\n\
+                 50 1 8:33 / /mnt/host rw - ext4 /dev/sdc1 rw\n\
+                 51 1 0:98 / /mnt/unknown rw - ext4 /dev/sdc1 rw\n"
+            ),
+            "",
+        );
+        ensure!(
+            !lost.unresolved.is_empty(),
+            "{loop_device} was taken for resolved: {lost:?}"
+        );
+    }
+    // A file that is really on tmpfs holds no disk: nothing to find, nothing lost.
+    let ram = run(
+        "49 1 7:4 / /run/initramfs/live ro - iso9660 /dev/loop4 ro\n",
+        "",
+    );
+    ensure!(
+        ram.live.contains("loop4") && ram.live.len() == 1 && ram.unresolved.is_empty(),
+        "an ISO file in RAM: {ram:?}"
+    );
+    // A btrfs subvolume has a device number mountinfo does not show.
+    let btrfs = run(
+        "49 1 7:5 / /run/initramfs/live ro - iso9660 /dev/loop5 ro\n\
+         50 1 0:98 / /mnt/btrfs rw - btrfs /dev/sdc1 rw\n",
+        "",
+    );
+    ensure!(
+        btrfs.live.contains("sdc") && btrfs.unresolved.is_empty(),
+        "a btrfs subvolume: {btrfs:?}"
+    );
+    // A live mount that is on a disk by its number, its source or its file
+    // system type but cannot be found is never taken for tmpfs.
+    for (what, line) in [
+        (
+            "a device node that is not there",
+            "49 1 0:9 / /run/initramfs/live ro - iso9660 /dev/missing ro\n",
+        ),
+        (
+            "a device number sysfs does not list",
+            "49 1 8:250 / /run/initramfs/live ro - ext4 none ro\n",
+        ),
+        (
+            "an optical file system with no device",
+            "49 1 0:60 / /run/media/x ro - udf none ro\n",
+        ),
+    ] {
+        let missing = run(line, "");
+        ensure!(
+            missing.live.is_empty() && !missing.unresolved.is_empty(),
+            "{what}: {missing:?}"
+        );
+    }
+    // A swap file that cannot be placed counts too.
+    let swap = run(
+        "",
+        "Filename\tType\tSize\tUsed\tPriority\n/nowhere/swapfile file 1024 0 -2\n",
+    );
+    ensure!(
+        !swap.unresolved.is_empty(),
+        "an unplaceable swap file: {swap:?}"
+    );
+    // The tables are read or the probe fails: no mount table, or a swap list
+    // that is not a file, is an error, never an empty system; no swap list at
+    // all is a system with no swap.
+    let tables = TestDir::new(parent, "tables")?;
+    write(
+        &tables.0.join("mountinfo"),
+        "1 0 0:30 / / rw - overlay overlay rw\n",
+    )?;
+    write(
+        &tables.0.join("swaps"),
+        "Filename\tType\tSize\tUsed\tPriority\n/dev/sde2 partition 1024 0 -2\n",
+    )?;
+    fs::create_dir(tables.0.join("swapdir"))?;
+    let (mounts, swaps) =
+        topology::read_tables(&tables.0.join("mountinfo"), &tables.0.join("swaps"))?;
+    ensure!(
+        mounts.len() == 1 && swaps == ["/dev/sde2"],
+        "tables: {mounts:?} {swaps:?}"
+    );
+    let (_, no_swaps) =
+        topology::read_tables(&tables.0.join("mountinfo"), &tables.0.join("no-such-swaps"))?;
+    ensure!(no_swaps.is_empty(), "swaps of a kernel without swap");
+    ensure!(
+        topology::read_tables(&tables.0.join("no-such-mountinfo"), &tables.0.join("swaps"))
+            .is_err()
+            && topology::read_tables(&tables.0.join("mountinfo"), &tables.0.join("swapdir"))
+                .is_err(),
+        "an unreadable table was taken for an empty one"
     );
     // mountinfo's escapes.
     let escaped =
