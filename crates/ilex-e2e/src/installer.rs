@@ -16,7 +16,10 @@
 //! Nothing here installs: no test writes to the helper's disks.
 //!
 //! * `installer::probe`: the helper's self-check; what it reports about this
-//!   VM and its disks, the live medium and the disks in use among them;
+//!   VM and its disks, the live medium and the disks in use among them, and
+//!   the uses the mount table does not show (a loop device on a block device
+//!   node, an unmounted loop device on a lazily unmounted file system,
+//!   dracut's live layout with either mount unmounted lazily);
 //!   detection and the boot override through the real bus path (the SMBIOS
 //!   identity and kernel command line are fixtures the unit is pointed at: a
 //!   VM cannot carry an MSI board); the bus policy and bus activation.
@@ -1155,7 +1158,7 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
     );
 
     old_linux_activation(vm)?;
-    lost_medium(vm)?;
+    detached_uses(vm)?;
     Ok(())
 }
 
@@ -1195,89 +1198,279 @@ fn guest_script(vm: &EphemeralVm, script: &str, what: &str) -> Result<String> {
     Ok(printed(&out))
 }
 
-/// A loop device whose file's mount is gone: the medium cannot be located, and
-/// then no disk can be shown not to hold it. (The kernel reports a lazily
-/// unmounted file as its name below the detached mount, `/lost.iso`, which the
-/// root file system, `/`, contains by name: a mount table's longest prefix would
-/// have called that "on no disk" and left every disk unmarked.)
-fn lost_medium(vm: &EphemeralVm) -> Result<()> {
-    let result = lost_medium_body(vm);
-    let restored = guest_script(
-        vm,
-        r#"loop=$(cat /run/ilex-test/lost.loop 2>/dev/null || true)
-umount /run/ilex-test/lost 2>/dev/null || true
-[ -z "$loop" ] || losetup -d "$loop" || true
-rm -f /run/ilex-test/lost.loop
-rmdir /run/ilex-test/lost 2>/dev/null || true
-for i in $(seq 1 30); do mountpoint -q /run/ilex-test/busy && break; mount /dev/disk/by-id/virtio-busy-part1 /run/ilex-test/busy 2>/dev/null || sleep 1; done
-rm -f /run/ilex-test/busy/lost.iso
-mountpoint -q /run/ilex-test/busy && echo restored
-"#,
-        "restoring the busy disk's mount",
-    );
-    result?;
-    ensure!(
-        restored?.trim().ends_with("restored"),
-        "the busy disk's mount could not be put back"
-    );
-    let probe = probe_document(vm)?;
-    let busy = probe
+/// A disk of a probe, by name.
+fn probed<'a>(
+    probe: &'a Probe,
+    name: &str,
+) -> Result<&'a ilex_devkit::installer_model::probe::Disk> {
+    probe
         .disks
         .iter()
-        .find(|d| d.id == "virtio-busy")
-        .context("no busy disk")?;
-    let blank = probe
-        .disks
-        .iter()
-        .find(|d| d.id == "virtio-blank")
-        .context("no blank disk")?;
+        .find(|d| d.id == format!("virtio-{name}"))
+        .with_context(|| format!("no disk {name}"))
+}
+
+/// The disks nothing uses are still offered: no `live_medium`, no `in_use`, no
+/// `notes`. (A use that cannot be traced would mark every one of them.)
+fn offered(probe: &Probe, names: &[&str]) -> Result<()> {
+    for name in names {
+        let disk = probed(probe, name)?;
+        ensure!(
+            !disk.live_medium && disk.in_use.is_empty() && disk.notes.is_empty(),
+            "{name} is marked though nothing of it is in use: {disk:?}"
+        );
+    }
+    Ok(())
+}
+
+/// One reproduction of a use the mount table does not show, for real. Its
+/// `setup` script runs in the guest, then the probe is read and, when `plan_on`
+/// names a disk and the code its refusal must carry, a plan on that disk is
+/// asked for (the helper run on a UEFI firmware directory fixture for the call,
+/// then put back); `restore` always puts the guest back as it was, and the
+/// shared state is checked again afterwards. Everything runs in one SSH session
+/// (each `bcvk ephemeral ssh` leaves a podman exec session behind that holds an
+/// inotify instance, and the host's default limit is 128).
+fn detached_use(
+    vm: &EphemeralVm,
+    what: &str,
+    setup: &str,
+    restore: &str,
+    plan_on: Option<(&str, &str)>,
+    check: impl FnOnce(&str, &Probe) -> Result<()>,
+) -> Result<()> {
+    let mut scripts = vec![setup.to_owned(), busctl("ilex-installer", "Probe", None)];
+    if let Some((disk, _)) = plan_on {
+        scripts.push(format!(
+            "rm -rf {FIXTURES}; mkdir -p {FIXTURES}/efi\n{}",
+            restart_helper(&format!("--efi-dir {FIXTURES}/efi"))
+        ));
+        scripts.push(busctl(
+            "ilex-installer",
+            "Plan",
+            Some(&plan_request(|r| {
+                r["disk"] = json!(format!("virtio-{disk}"))
+            })),
+        ));
+        scripts.push(format!("{RESTORE_HELPER}\n{WAIT_FOR_HELPER}"));
+    }
+    let restore_at = scripts.len();
+    scripts.push(restore.to_owned());
+    scripts.push(busctl("ilex-installer", "Probe", None));
+    let ran = batch(vm, &scripts)?;
+    wait_for_helper(vm)?;
+    // The guest is put back whatever the checks find: read them after.
     ensure!(
-        busy.in_use.len() == 3 && blank.in_use.is_empty(),
-        "the disks are not as before the lost medium: {:?} / {:?}",
-        busy.in_use,
-        blank.in_use
+        ran[restore_at].code == 0,
+        "restoring the guest after {what} failed: {}",
+        ran[restore_at].text
+    );
+    let result = (|| -> Result<()> {
+        ensure!(ran[0].code == 0, "setting up failed: {}", ran[0].text);
+        let probe: Probe = serde_json::from_value(document(&ran[1], "Probe")?)?;
+        check(&ran[0].text, &probe)?;
+        if let Some((_, code)) = plan_on {
+            let refusal = refusal_document(&ran[3])?;
+            ensure!(
+                refusal["code"] == code && refusal["field"] == "disk",
+                "a plan on the disk was not refused as {code}: {refusal}"
+            );
+        }
+        Ok(())
+    })();
+    result.with_context(|| what.to_owned())?;
+    let probe: Probe = serde_json::from_value(document(&ran[restore_at + 1], "Probe")?)?;
+    offered(&probe, &["blank", "layout", "oldlinux", "small"])?;
+    for name in ["live", "isoscan", "ventoy"] {
+        ensure!(
+            probed(&probe, name)?.live_medium,
+            "after {what}, {name} is no longer the live medium"
+        );
+    }
+    ensure!(
+        probed(&probe, "isoscan")?.in_use.is_empty(),
+        "after {what}, the live medium is also in use"
     );
     Ok(())
 }
 
-fn lost_medium_body(vm: &EphemeralVm) -> Result<()> {
-    let made = guest_script(
+/// Uses of a disk the mount table does not show, each reproduced with real
+/// devices and mounts, and what the helper makes of them. A disk is offered
+/// only if every use of block storage is traced and none reaches it; what is
+/// traced is not offered, and what is not touched stays offered:
+///
+/// * a loop device attached to a block device node (`losetup /dev/vde4`): the
+///   kernel records the device of `/dev` and the node's inode, not the disk;
+/// * a loop device attached to a file that nothing mounts, whose file system
+///   was unmounted lazily (the kernel then prints a name relative to the
+///   detached mount, `/x.img`, which `/` contains);
+/// * dracut's live layout (an ISO file on a mounted partition, attached to a
+///   loop device mounted as the medium) with either mount unmounted lazily.
+fn detached_uses(vm: &EphemeralVm) -> Result<()> {
+    let reason = |disk: &ilex_devkit::installer_model::probe::Disk, text: &str| {
+        disk.in_use.iter().any(|r| r.contains(text))
+    };
+    // A loop device on a partition's device node.
+    detached_use(
         vm,
+        "a loop device on a block device node",
         r#"set -eu
-mkdir -p /run/ilex-test/lost
-xorrisofs -quiet -V ILEXLOST -o /run/ilex-test/busy/lost.iso /run/ilex-test/iso
-loop=$(losetup --find --show --read-only /run/ilex-test/busy/lost.iso)
-echo "$loop" > /run/ilex-test/lost.loop
-mount -t iso9660 -o ro "$loop" /run/ilex-test/lost
-umount -l /run/ilex-test/busy
-test ! -e /lost.iso
-echo "backing [$(cat /sys/block/$(basename "$loop")/loop/backing_file)]"
+node=$(readlink -f /dev/disk/by-id/virtio-layout-part4)
+loop=$(losetup --find --show --read-only "$node")
+echo "$loop" > /run/ilex-test/node.loop
+echo "node $node backing [$(cat /sys/block/$(basename "$loop")/loop/backing_file)]"
+losetup --json --list --output NAME,BACK-FILE,BACK-INO,BACK-MAJ:MIN
 "#,
-        "attaching an ISO file and detaching its mount",
+        r#"loop=$(cat /run/ilex-test/node.loop 2>/dev/null || true)
+[ -z "$loop" ] || losetup -d "$loop" || true
+rm -f /run/ilex-test/node.loop
+"#,
+        Some(("layout", "in-use")),
+        |made, probe| {
+            ensure!(
+                made.contains("backing [/dev/vd"),
+                "the kernel names the node differently: {made}"
+            );
+            let layout = probed(probe, "layout")?;
+            ensure!(
+                !layout.live_medium && reason(layout, "is attached to /dev/vd"),
+                "a loop device on the layout disk's partition is not reported: {layout:?}"
+            );
+            offered(probe, &["blank", "oldlinux", "small"])?;
+            println!(
+                "     loop device on a block device node: virtio-layout live medium {}, in use {:?}",
+                layout.live_medium, layout.in_use
+            );
+            // (not a target: a plan on it is refused `in-use`)
+            Ok(())
+        },
     )?;
-    ensure!(
-        made.contains("backing [/lost.iso]"),
-        "the kernel names the detached file differently: {made}"
-    );
-    let probe = probe_document(vm)?;
-    let reason = "cannot tell whether this disk holds the medium it started from";
-    for disk in &probe.disks {
-        ensure!(
-            disk.in_use.iter().any(|r| r.contains(reason)),
-            "{} is not marked though the live medium cannot be located: {:?}",
-            disk.id,
-            disk.in_use
-        );
-    }
-    let refusal = plan_refusal_on_uefi(vm, &plan_request(|_| {}))?;
-    ensure!(
-        refusal["code"] == "in-use" && refusal["field"] == "disk",
-        "a plan on the blank disk was not refused: {refusal}"
-    );
-    println!(
-        "     a loop device whose file's mount is gone: every disk marked ({})",
-        probe.disks[0].in_use.first().map_or("", String::as_str)
-    );
+    // A loop device nothing mounts, on a file whose file system is detached.
+    detached_use(
+        vm,
+        "an unmounted loop device on a file of a lazily unmounted file system",
+        r#"set -eu
+d=/dev/disk/by-id/virtio-small
+mkfs.ext4 -q -F -L smallfs "$d"
+mkdir -p /run/ilex-test/small
+mount "$d" /run/ilex-test/small
+truncate -s 16M /run/ilex-test/small/x.img
+loop=$(losetup --find --show --read-only /run/ilex-test/small/x.img)
+echo "$loop" > /run/ilex-test/small.loop
+umount -l /run/ilex-test/small
+! mountpoint -q /run/ilex-test/small
+echo "backing [$(cat /sys/block/$(basename "$loop")/loop/backing_file)] mounted [$(grep -c "^$loop " /proc/mounts || true)]"
+"#,
+        r#"loop=$(cat /run/ilex-test/small.loop 2>/dev/null || true)
+[ -z "$loop" ] || losetup -d "$loop" || true
+rm -f /run/ilex-test/small.loop
+umount -l /run/ilex-test/small 2>/dev/null || true
+rmdir /run/ilex-test/small 2>/dev/null || true
+# an exclusive open fails while anything still holds the device (the file system
+# a lazy unmount left behind goes with the loop device, a moment later)
+for i in $(seq 1 60); do dd if=/dev/zero of=/dev/disk/by-id/virtio-small bs=1M count=8 oflag=excl conv=fsync status=none 2>/dev/null && break; sleep 1; done
+udevadm settle
+"#,
+        None,
+        |made, probe| {
+            ensure!(
+                made.contains("backing [/x.img] mounted [0]"),
+                "the kernel names the detached file differently: {made}"
+            );
+            let small = probed(probe, "small")?;
+            ensure!(
+                !small.live_medium && reason(small, "is attached to /x.img"),
+                "the unmounted loop device's disk is not reported: {small:?}"
+            );
+            offered(probe, &["blank", "layout", "oldlinux"])?;
+            println!(
+                "     unmounted loop device on a lazily unmounted file system: virtio-small in use {:?}",
+                small.in_use
+            );
+            Ok(())
+        },
+    )?;
+    // dracut's live layout: the disk the ISO file is on (mounted at
+    // `/run/initramfs/isoscan`, as the medium's loop device is at
+    // `/run/initramfs/live`), with the host disk's mount unmounted lazily, the
+    // medium's, and then both.
+    let restore_live = r#"d=/dev/disk/by-id
+mountpoint -q /run/initramfs/isoscan || mount "$d/virtio-isoscan-part1" /run/initramfs/isoscan
+loop=$(losetup -j /run/initramfs/isoscan/live.iso -O NAME -n | head -1)
+mountpoint -q /run/initramfs/live || mount -t iso9660 -o ro "$loop" /run/initramfs/live
+mountpoint -q /run/initramfs/isoscan && mountpoint -q /run/initramfs/live && echo restored
+"#;
+    detached_use(
+        vm,
+        "dracut's host disk mount unmounted lazily",
+        "set -eu\numount -l /run/initramfs/isoscan\n! mountpoint -q /run/initramfs/isoscan\ncat /sys/block/$(basename \"$(findmnt -n -o SOURCE /run/initramfs/live)\")/loop/backing_file\n",
+        restore_live,
+        Some(("isoscan", "live-medium")),
+        |made, probe| {
+            // The kernel prints the file relative to the detached mount.
+            ensure!(
+                made.trim().ends_with("/live.iso") && !made.contains("isoscan"),
+                "the kernel names the detached file differently: {made}"
+            );
+            let iso = probed(probe, "isoscan")?;
+            ensure!(
+                iso.live_medium && iso.in_use.is_empty(),
+                "the live medium is not found through its loop device's numbers: {iso:?}"
+            );
+            offered(probe, &["blank", "layout", "oldlinux", "small"])?;
+            println!(
+                "     host disk mount unmounted lazily: virtio-isoscan live medium {}, in use {:?}",
+                iso.live_medium, iso.in_use
+            );
+            Ok(())
+        },
+    )?;
+    detached_use(
+        vm,
+        "dracut's medium mount unmounted lazily",
+        "set -eu\numount -l /run/initramfs/live\n! mountpoint -q /run/initramfs/live\nlosetup -j /run/initramfs/isoscan/live.iso -O NAME -n\n",
+        restore_live,
+        Some(("isoscan", "live-medium")),
+        |made, probe| {
+            ensure!(
+                made.trim().starts_with("/dev/loop"),
+                "the loop device is gone: {made}"
+            );
+            let iso = probed(probe, "isoscan")?;
+            ensure!(
+                iso.live_medium && iso.in_use.is_empty(),
+                "the host disk is not the live medium: {iso:?}"
+            );
+            offered(probe, &["blank", "layout", "oldlinux", "small"])?;
+            println!(
+                "     medium mount unmounted lazily: virtio-isoscan live medium {}, in use {:?}",
+                iso.live_medium, iso.in_use
+            );
+            Ok(())
+        },
+    )?;
+    detached_use(
+        vm,
+        "both of dracut's mounts unmounted lazily",
+        "set -eu\numount -l /run/initramfs/live\numount -l /run/initramfs/isoscan\n! mountpoint -q /run/initramfs/live\n! mountpoint -q /run/initramfs/isoscan\nlosetup -j /run/initramfs/isoscan/live.iso -O NAME -n 2>&1 || losetup -l -O NAME,BACK-FILE\n",
+        restore_live,
+        Some(("isoscan", "in-use")),
+        |_, probe| {
+            // Only the attached loop device is left of the medium: its disk is
+            // in use (not offered) and nothing else is touched.
+            let iso = probed(probe, "isoscan")?;
+            ensure!(
+                reason(iso, "is attached to /live.iso"),
+                "the loop device that is all that is left of the medium is not reported: {iso:?}"
+            );
+            offered(probe, &["blank", "layout", "oldlinux", "small"])?;
+            println!(
+                "     both mounts unmounted lazily: virtio-isoscan live medium {}, in use {:?}",
+                iso.live_medium, iso.in_use
+            );
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
