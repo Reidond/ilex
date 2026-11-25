@@ -105,7 +105,7 @@ pub(crate) fn fingerprint_report(ws: &Workspace, image: &str) -> Result<serde_js
         use sha2::{Digest, Sha256};
         let mut legacy = Sha256::new();
         let mut current = Sha256::new();
-        for path in ilex_devkit::fingerprint::selection_inputs(&selection) {
+        for path in ilex_devkit::fingerprint::selection_inputs(ws, &selection)? {
             legacy.update(format!(
                 "tree {path} {}\n",
                 git::tree_hash(&ws.root, &path)?
@@ -114,7 +114,7 @@ pub(crate) fn fingerprint_report(ws: &Workspace, image: &str) -> Result<serde_js
         ilex_devkit::fingerprint::hash_inputs(
             ws,
             &mut current,
-            ilex_devkit::fingerprint::selection_inputs(&selection),
+            ilex_devkit::fingerprint::selection_inputs(ws, &selection)?,
         )?;
         ensure!(
             legacy.finalize() == current.finalize(),
