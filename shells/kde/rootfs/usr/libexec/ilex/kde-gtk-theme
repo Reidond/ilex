@@ -7,10 +7,16 @@
 call() {
     busctl --user call org.kde.kded6 /modules/gtkconfig org.kde.GtkConfig "$@"
 }
-# kded loads the gtkconfig module early in the session; allow it a moment.
+# kded loads the gtkconfig module early in the session, a slow machine late.
+# Give up only after two minutes, and act only on a value actually read.
 i=0
-while [ "$i" -lt 30 ]; do
-    theme=$(call gtkTheme 2>/dev/null) && break
+theme=
+while [ "$i" -lt 120 ]; do
+    busctl --user call org.kde.kded6 /kded org.kde.kded6 loadModule s gtkconfig >/dev/null 2>&1
+    if theme=$(call gtkTheme 2>/dev/null); then
+        break
+    fi
+    theme=
     i=$((i + 1))
     sleep 1
 done

@@ -264,11 +264,90 @@ pub(super) fn gtk3_window(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, name: &str
 }
 
 /// `graphical::apps` on KDE: real GTK 3 and libadwaita Flatpaks from Flathub
-/// in the Plasma session. Needs the network.
+/// in the Plasma session, beside the host-side checks of [`theming`]. Needs the
+/// network, and installs the two GTK applications and the Breeze GTK theme
+/// extension rather than the shell's application list.
 mod apps {
     use super::*;
 
-    pub(super) fn checks(_vm: &mut Vm, _ctl: &Vmctl, _artifacts: &Path) -> Result<()> {
-        bail!("graphical::apps on KDE is not implemented yet")
+    /// Flathub downloads the GNOME runtime (about a gigabyte).
+    const INSTALL: Duration = Duration::from_secs(2400);
+
+    pub(super) fn checks(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
+        theming(vm, ctl, artifacts)?;
+
+        vm.ssh_ok(
+            "systemd-run --unit=ilex-kde-flatpaks --collect --quiet flatpak install --system -y --noninteractive flathub \
+             org.gnome.Calculator org.gnome.gedit org.gtk.Gtk3theme.Breeze",
+        )?;
+        vm.wait_for(
+            "the GTK Flatpaks to be installed",
+            "! systemctl is-active --quiet ilex-kde-flatpaks.service && flatpak info --system org.gnome.Calculator \
+             && flatpak info --system org.gnome.gedit && flatpak info --system org.gtk.Gtk3theme.Breeze",
+            INSTALL,
+        )?;
+        println!("ok   installed a libadwaita and a GTK 3 Flatpak and the Breeze GTK theme extension");
+
+        // The two applications, in the session (still Breeze Dark from `theming`).
+        for (unit, app) in [("ilex-flatpak-calculator", "org.gnome.Calculator"), ("ilex-flatpak-gedit", "org.gnome.gedit")] {
+            user(vm, &format!("systemd-run --user --collect --quiet --unit={unit} flatpak run {app}"))?;
+        }
+        vm.wait_for(
+            "both Flatpaks to be running",
+            &format!("pgrep -u {USER} -x gnome-calculator && pgrep -u {USER} -x gedit"),
+            SESSION_TIMEOUT,
+        )?;
+        std::thread::sleep(Duration::from_secs(5));
+        settle(ctl)?;
+        shot(ctl, artifacts, "07-flatpaks-dark")?;
+
+        let mut report = vmtest::Report::default();
+        report.check("libadwaita Flatpak: the portal hands it Plasma's dark scheme", sandbox_scheme(vm, 1));
+        report.check("GTK 3 Flatpak: the Breeze theme extension is mounted and selected", sandbox_gtk3_theme(vm));
+        report.finish()?;
+
+        // And in light.
+        user(vm, "plasma-apply-colorscheme BreezeLight")?;
+        vm.wait_for(
+            "the portal to report the light scheme",
+            &format!(
+                "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/$(id -u {USER}) \
+                 busctl --user call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop \
+                 org.freedesktop.portal.Settings Read ss org.freedesktop.appearance color-scheme | grep -x 'v v u 2'"
+            ),
+            Duration::from_secs(60),
+        )?;
+        std::thread::sleep(Duration::from_secs(5));
+        settle(ctl)?;
+        shot(ctl, artifacts, "08-flatpaks-light")?;
+        let mut report = vmtest::Report::default();
+        report.check("libadwaita Flatpak: the portal hands it Plasma's light scheme", sandbox_scheme(vm, 2));
+        report.finish()
+    }
+
+    /// What a libadwaita application in the sandbox reads from the portal.
+    fn sandbox_scheme(vm: &Vm, want: u32) -> Result<()> {
+        let out = user(
+            vm,
+            "flatpak run --command=gdbus org.gnome.Calculator call --session --dest org.freedesktop.portal.Desktop \
+             --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Settings.Read \
+             org.freedesktop.appearance color-scheme",
+        )?;
+        println!("     sandbox: {out}");
+        if out.contains(&format!("uint32 {want}")) { Ok(()) } else { Err(anyhow!("color-scheme in the sandbox is `{out}`, expected {want}")) }
+    }
+
+    /// The extension is where the GNOME runtime looks for GTK 3 themes, and the
+    /// portal tells the sandbox to use it.
+    fn sandbox_gtk3_theme(vm: &Vm) -> Result<()> {
+        let themes = user(vm, "flatpak run --command=ls org.gnome.gedit /usr/share/runtime/share/themes")?;
+        let theme = user(
+            vm,
+            "flatpak run --command=gdbus org.gnome.gedit call --session --dest org.freedesktop.portal.Desktop \
+             --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Settings.Read \
+             org.gnome.desktop.interface gtk-theme",
+        )?;
+        println!("     sandbox themes: {themes}; gtk-theme via the portal: {theme}");
+        if themes.lines().any(|l| l == "Breeze") && theme.contains("Breeze") { Ok(()) } else { Err(anyhow!("themes `{themes}`, gtk-theme `{theme}`")) }
     }
 }
