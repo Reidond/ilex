@@ -1076,6 +1076,130 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
         "the helper does not answer after a refused call: {}",
         ran[6].text
     );
+
+    lost_medium(vm)?;
+    Ok(())
+}
+
+/// The refusal of a plan request on a computer that booted through UEFI: the
+/// tier's VM did not, so the helper is pointed at a firmware directory fixture
+/// for the call (a BIOS boot is refused before anything else) and put back.
+fn plan_refusal_on_uefi(vm: &EphemeralVm, request: &str) -> Result<Value> {
+    let ran = batch(
+        vm,
+        &[
+            format!(
+                "rm -rf {FIXTURES}; mkdir -p {FIXTURES}/efi\n{}",
+                restart_helper(&format!("--efi-dir {FIXTURES}/efi"))
+            ),
+            busctl("ilex-installer", "Plan", Some(request)),
+            RESTORE_HELPER.into(),
+        ],
+    )?;
+    wait_for_helper(vm)?;
+    ensure!(
+        ran[0].code == 0 && ran[2].code == 0,
+        "pointing the helper at a firmware fixture and back: {} / {}",
+        ran[0].text,
+        ran[2].text
+    );
+    refusal_document(&ran[1])
+}
+
+/// Run a script in the guest and return what it printed.
+fn guest_script(vm: &EphemeralVm, script: &str, what: &str) -> Result<String> {
+    let out = vm
+        .ssh(&format!(
+            "printf %s {} | base64 -d | bash -s",
+            base64(script.as_bytes())
+        ))?
+        .ok(what)?;
+    Ok(printed(&out))
+}
+
+/// A loop device whose file's mount is gone: the medium cannot be located, and
+/// then no disk can be shown not to hold it. (The kernel reports a lazily
+/// unmounted file as its name below the detached mount, `/lost.iso`, which the
+/// root file system, `/`, contains by name: a mount table's longest prefix would
+/// have called that "on no disk" and left every disk unmarked.)
+fn lost_medium(vm: &EphemeralVm) -> Result<()> {
+    let result = lost_medium_body(vm);
+    let restored = guest_script(
+        vm,
+        r#"loop=$(cat /run/ilex-test/lost.loop 2>/dev/null || true)
+umount /run/ilex-test/lost 2>/dev/null || true
+[ -z "$loop" ] || losetup -d "$loop" || true
+rm -f /run/ilex-test/lost.loop
+rmdir /run/ilex-test/lost 2>/dev/null || true
+for i in $(seq 1 30); do mountpoint -q /run/ilex-test/busy && break; mount /dev/disk/by-id/virtio-busy-part1 /run/ilex-test/busy 2>/dev/null || sleep 1; done
+rm -f /run/ilex-test/busy/lost.iso
+mountpoint -q /run/ilex-test/busy && echo restored
+"#,
+        "restoring the busy disk's mount",
+    );
+    result?;
+    ensure!(
+        restored?.trim().ends_with("restored"),
+        "the busy disk's mount could not be put back"
+    );
+    let probe = probe_document(vm)?;
+    let busy = probe
+        .disks
+        .iter()
+        .find(|d| d.id == "virtio-busy")
+        .context("no busy disk")?;
+    let blank = probe
+        .disks
+        .iter()
+        .find(|d| d.id == "virtio-blank")
+        .context("no blank disk")?;
+    ensure!(
+        busy.in_use.len() == 3 && blank.in_use.is_empty(),
+        "the disks are not as before the lost medium: {:?} / {:?}",
+        busy.in_use,
+        blank.in_use
+    );
+    Ok(())
+}
+
+fn lost_medium_body(vm: &EphemeralVm) -> Result<()> {
+    let made = guest_script(
+        vm,
+        r#"set -eu
+mkdir -p /run/ilex-test/lost
+xorrisofs -quiet -V ILEXLOST -o /run/ilex-test/busy/lost.iso /run/ilex-test/iso
+loop=$(losetup --find --show --read-only /run/ilex-test/busy/lost.iso)
+echo "$loop" > /run/ilex-test/lost.loop
+mount -t iso9660 -o ro "$loop" /run/ilex-test/lost
+umount -l /run/ilex-test/busy
+test ! -e /lost.iso
+echo "backing [$(cat /sys/block/$(basename "$loop")/loop/backing_file)]"
+"#,
+        "attaching an ISO file and detaching its mount",
+    )?;
+    ensure!(
+        made.contains("backing [/lost.iso]"),
+        "the kernel names the detached file differently: {made}"
+    );
+    let probe = probe_document(vm)?;
+    let reason = "cannot tell whether this disk holds the medium it started from";
+    for disk in &probe.disks {
+        ensure!(
+            disk.in_use.iter().any(|r| r.contains(reason)),
+            "{} is not marked though the live medium cannot be located: {:?}",
+            disk.id,
+            disk.in_use
+        );
+    }
+    let refusal = plan_refusal_on_uefi(vm, &plan_request(|_| {}))?;
+    ensure!(
+        refusal["code"] == "in-use" && refusal["field"] == "disk",
+        "a plan on the blank disk was not refused: {refusal}"
+    );
+    println!(
+        "     a loop device whose file's mount is gone: every disk marked ({})",
+        probe.disks[0].in_use.first().map_or("", String::as_str)
+    );
     Ok(())
 }
 

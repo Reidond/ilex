@@ -489,10 +489,11 @@ fn scan_esp(device: &str, scratch: &mut Scratch, n: usize) -> (Vec<OtherSystem>,
     (loader_systems(&scan.loaders, device), notes)
 }
 
-/// A reason every disk is refused: the live medium could not be located.
+/// A reason every disk is refused: the live medium, or something in use, could
+/// not be located.
 fn unlocated(reason: &str) -> String {
     format!(
-        "the installer cannot tell whether this disk holds the medium it started from ({reason})"
+        "the installer cannot tell whether this disk holds the medium it started from or is in use ({reason})"
     )
 }
 
@@ -510,9 +511,9 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
         TOOL_TIMEOUT,
     )?;
     let mut raws = parse_lsblk(&output.stdout_text(), &sysfs_start, &sysfs_nvme_transport)?;
-    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let mounts = topology::parse_mountinfo(&mountinfo);
-    let swaps = topology::parse_swaps(&fs::read_to_string("/proc/swaps").unwrap_or_default());
+    // What the system is using is read or the probe fails.
+    let (mounts, swaps) =
+        topology::read_tables(Path::new("/proc/self/mountinfo"), Path::new("/proc/swaps"))?;
     let topology = Topology::new(roots, &mounts);
     let usage = topology::usage(&topology, &mounts, &swaps);
     let mut taken = BTreeSet::new();

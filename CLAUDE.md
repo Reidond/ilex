@@ -2817,8 +2817,18 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     else its canonicalised `/dev` source, then up from a partition to its disk,
     down through `slaves/` (device-mapper, MD: Ventoy's `/dev/mapper/ventoy`) and
     through a loop device's `backing_file` to the device the file lives on
-    (dracut's iso-scan, with the host disk at `/run/initramfs/isoscan`). A live
-    mount that cannot be followed marks every disk in use rather than guessing.
+    (dracut's iso-scan, with the host disk at `/run/initramfs/isoscan`). That
+    file is looked at itself, never placed by the mount table's longest prefix
+    (`/` contains every path, and a file whose mount was detached is named below
+    it): its `st_dev` must be readable from the helper, a number with a major is
+    the block device sysfs lists for it, and an anonymous number counts as no disk
+    (tmpfs, overlay, virtiofs) only when a mount of that very number says so (a
+    btrfs subvolume's own number falls back to the btrfs mount around it). Anything
+    else (a file that is gone, a deleted one, a path that cannot be read, a
+    device sysfs does not list, a live mount that names or numbers a device, or an
+    iso9660 or udf mount, that cannot be found) marks every disk in use rather
+    than guessing, as does a swap file that cannot be placed, and so does a mount
+    table or `/proc/swaps` that cannot be read (the probe then fails).
   - `in_use`: why the running system is using the disk otherwise, one sentence
     each: a mounted partition, an entry of `/proc/swaps` (device or file), or a
     device stacked on it or a partition (non-empty `holders/`: LVM, MD, dm-crypt).

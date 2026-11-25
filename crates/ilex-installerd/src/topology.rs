@@ -7,9 +7,11 @@
 //! (device-mapper, MD: `slaves/`) and through a loop device to the file it is
 //! backed by and the device that file lives on.
 
+use anyhow::{Context, Result};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs, io,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -28,6 +30,23 @@ impl Roots {
             dev: "/dev".into(),
         }
     }
+}
+
+/// A device number: major and minor.
+pub type DevNum = (u32, u32);
+
+/// `st_dev` as glibc's `major()` and `minor()` split it.
+pub fn split_dev(dev: u64) -> DevNum {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+    (major as u32, minor as u32)
+}
+
+/// The device number of the file system that holds `path`, as `stat` reports
+/// it from this process's own mount namespace; `None` when the path cannot be
+/// read from here (not there, unreachable, unlinked, in another namespace).
+pub fn stat_dev(path: &str) -> Option<DevNum> {
+    fs::metadata(path).ok().map(|m| split_dev(m.dev()))
 }
 
 /// One line of `/proc/self/mountinfo`.
@@ -84,6 +103,20 @@ pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
         .collect()
 }
 
+/// The mount table and the swap areas, read or an error: a table that cannot
+/// be read must never look like one with nothing in it, which would let every
+/// disk pass as unused. A system with no `/proc/swaps` at all (a kernel built
+/// without swap) has no swap areas.
+pub fn read_tables(mountinfo: &Path, swaps: &Path) -> Result<(Vec<Mount>, Vec<String>)> {
+    let mounts = fs::read(mountinfo).with_context(|| format!("reading {}", mountinfo.display()))?;
+    let swaps = match fs::read(swaps) {
+        Ok(bytes) => parse_swaps(&String::from_utf8_lossy(&bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(e).with_context(|| format!("reading {}", swaps.display())),
+    };
+    Ok((parse_mountinfo(&String::from_utf8_lossy(&mounts)), swaps))
+}
+
 /// The files and devices `/proc/swaps` lists (its first column).
 pub fn parse_swaps(text: &str) -> Vec<String> {
     text.lines()
@@ -117,20 +150,32 @@ const DEPTH: u32 = 16;
 
 enum Holder {
     Device(String),
-    /// A filesystem with no block device (tmpfs, virtiofs, overlay).
+    /// A file system with no block device behind it (tmpfs, virtiofs, overlay,
+    /// nfs), established from the thing itself and not from a path prefix.
     NotBlock,
-    /// No mount contains the path.
-    Unknown,
+    /// It could not be established: why, as a sentence.
+    Unresolved(String),
 }
 
 pub struct Topology<'a> {
     roots: &'a Roots,
     mounts: &'a [Mount],
+    /// `stat`'s device number of a path; the self-check supplies its own.
+    file_dev: &'a dyn Fn(&str) -> Option<DevNum>,
 }
 
 impl<'a> Topology<'a> {
     pub fn new(roots: &'a Roots, mounts: &'a [Mount]) -> Self {
-        Self { roots, mounts }
+        Self {
+            roots,
+            mounts,
+            file_dev: &stat_dev,
+        }
+    }
+
+    pub fn with_file_dev(mut self, file_dev: &'a dyn Fn(&str) -> Option<DevNum>) -> Self {
+        self.file_dev = file_dev;
+        self
     }
 
     /// `/sys/class/block/<name>` with its links followed: the device's own
@@ -142,18 +187,23 @@ impl<'a> Topology<'a> {
         fs::canonicalize(self.roots.sys.join("class/block").join(name)).ok()
     }
 
+    /// The kernel name of the block device with this number (sysfs).
+    fn device_of_number(&self, (major, minor): DevNum) -> Option<String> {
+        let link = self
+            .roots
+            .sys
+            .join("dev/block")
+            .join(format!("{major}:{minor}"));
+        fs::canonicalize(link)
+            .ok()
+            .and_then(|p| Some(p.file_name()?.to_str()?.to_owned()))
+    }
+
     /// The kernel name of the device a mount is on: from its device number,
     /// else from its source when that is a device node.
     pub fn device_of_mount(&self, mount: &Mount) -> Option<String> {
         if mount.major != 0 {
-            let link = self
-                .roots
-                .sys
-                .join("dev/block")
-                .join(format!("{}:{}", mount.major, mount.minor));
-            let name = fs::canonicalize(link)
-                .ok()
-                .and_then(|p| Some(p.file_name()?.to_str()?.to_owned()));
+            let name = self.device_of_number((mount.major, mount.minor));
             if name.is_some() {
                 return name;
             }
@@ -169,11 +219,28 @@ impl<'a> Topology<'a> {
         self.class_path(&name).map(|_| name)
     }
 
-    /// The device the file system holding `path` is on: the mount with the
-    /// longest mount point that contains it.
-    fn device_holding(&self, path: &str) -> Holder {
-        let best = self
-            .mounts
+    /// The device of a mount, or why it cannot be found. A mount that names a
+    /// device node, carries a device number or is an optical-style file system
+    /// is on a disk: that it cannot be followed is never "not block storage".
+    fn holder_of_mount(&self, mount: &Mount) -> Holder {
+        match self.device_of_mount(mount) {
+            Some(device) => Holder::Device(device),
+            None if mount.source.starts_with("/dev/")
+                || mount.major != 0
+                || ["iso9660", "udf"].contains(&mount.fstype.as_str()) =>
+            {
+                Holder::Unresolved(format!(
+                    "{} (mounted at {}) is not a block device the installer can find",
+                    mount.source, mount.mount_point
+                ))
+            }
+            None => Holder::NotBlock,
+        }
+    }
+
+    /// The mount with the longest mount point that contains `path`.
+    fn mount_containing(&self, path: &str) -> Option<&Mount> {
+        self.mounts
             .iter()
             .filter(|m| {
                 m.mount_point == "/"
@@ -182,13 +249,51 @@ impl<'a> Topology<'a> {
                         .strip_prefix(m.mount_point.as_str())
                         .is_some_and(|rest| rest.starts_with('/'))
             })
-            .max_by_key(|m| m.mount_point.len());
-        match best {
-            None => Holder::Unknown,
-            Some(mount) => self
-                .device_of_mount(mount)
-                .map_or(Holder::NotBlock, Holder::Device),
+            .max_by_key(|m| m.mount_point.len())
+    }
+
+    /// The device a file is on, from the file itself: its `st_dev` must be
+    /// readable from here, and a file system with no block device counts only
+    /// when a mount of that very device number says so. The mount table's
+    /// longest prefix proves nothing alone: `/` contains every path, and a file
+    /// whose mount is gone (lazily unmounted, another namespace, unlinked)
+    /// still has a name that lies below it.
+    fn holder_of_file(&self, path: &str) -> Holder {
+        let Some(dev) = (self.file_dev)(path) else {
+            return Holder::Unresolved(format!(
+                "{path}, which the installer cannot read from here (its mount may be gone)"
+            ));
+        };
+        if dev.0 != 0 {
+            // A file system on a block device: the number names the device.
+            return self.device_of_number(dev).map_or_else(
+                || {
+                    Holder::Unresolved(format!(
+                        "{path}, on device {}:{}, which sysfs does not list",
+                        dev.0, dev.1
+                    ))
+                },
+                Holder::Device,
+            );
         }
+        // An anonymous number: tmpfs, overlay, virtiofs, nfs, FUSE, btrfs.
+        if let Some(mount) = self.mounts.iter().find(|m| (m.major, m.minor) == dev) {
+            return match self.holder_of_mount(mount) {
+                Holder::Unresolved(why) => Holder::Unresolved(format!("{path}: {why}")),
+                holder => holder,
+            };
+        }
+        // A btrfs subvolume has a number of its own that mountinfo does not
+        // show: the file system around it is the mount's.
+        if let Some(mount) = self.mount_containing(path).filter(|m| m.fstype == "btrfs")
+            && let Holder::Device(device) = self.holder_of_mount(mount)
+        {
+            return Holder::Device(device);
+        }
+        Holder::Unresolved(format!(
+            "{path}, on device {}:{}, which no mount accounts for",
+            dev.0, dev.1
+        ))
     }
 
     fn entries(dir: &Path) -> Vec<String> {
@@ -242,17 +347,30 @@ impl<'a> Topology<'a> {
             for slave in Self::entries(&dir.join("slaves")) {
                 queue.push((slave, depth + 1));
             }
-            // A loop device is its backing file's file system's device.
-            if let Ok(text) = fs::read_to_string(dir.join("loop/backing_file")) {
-                let file = text.trim_end_matches('\n');
-                let file = file.strip_suffix(" (deleted)").unwrap_or(file);
-                match self.device_holding(file) {
-                    Holder::Device(device) => queue.push((device, depth + 1)),
-                    Holder::NotBlock => {}
-                    Holder::Unknown => footprint.unresolved.push(format!(
-                        "{name} is backed by {file}, which is on no mount the installer can see"
-                    )),
+            // A loop device is the device its backing file's file system is on.
+            match fs::read(dir.join("loop/backing_file")) {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    let file = text.trim_end_matches('\n');
+                    if let Some(file) = file.strip_suffix(" (deleted)") {
+                        footprint
+                            .unresolved
+                            .push(format!("{name} is backed by {file}, which was deleted"));
+                    } else {
+                        match self.holder_of_file(file) {
+                            Holder::Device(device) => queue.push((device, depth + 1)),
+                            Holder::NotBlock => {}
+                            Holder::Unresolved(why) => footprint
+                                .unresolved
+                                .push(format!("{name} is backed by {why}")),
+                        }
+                    }
                 }
+                // Not a loop device (or not in use).
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => footprint
+                    .unresolved
+                    .push(format!("the backing file of {name} cannot be read: {e}")),
             }
         }
         footprint
@@ -266,7 +384,8 @@ pub struct Usage {
     pub live: BTreeSet<String>,
     /// Kernel names touched by anything else in use, with what uses them.
     pub in_use: BTreeMap<String, BTreeSet<String>>,
-    /// Why the live medium could not be fully located, if so.
+    /// Why the live medium or a disk's use could not be fully located, if so:
+    /// then no disk can be shown not to hold it.
     pub unresolved: Vec<String>,
 }
 
@@ -275,16 +394,19 @@ pub fn usage(topology: &Topology, mounts: &[Mount], swaps: &[String]) -> Usage {
     let mut usage = Usage::default();
     for mount in mounts {
         let live = is_live_mount(mount);
-        let Some(device) = topology.device_of_mount(mount) else {
-            // Not block storage (tmpfs, virtiofs, overlay), unless a device
-            // node was named and could not be found.
-            if live && mount.source.starts_with("/dev/") {
-                usage.unresolved.push(format!(
-                    "{} (mounted at {}) is not a block device the installer can find",
-                    mount.source, mount.mount_point
-                ));
+        let device = match topology.holder_of_mount(mount) {
+            Holder::Device(device) => device,
+            // Not block storage (tmpfs, virtiofs, overlay).
+            Holder::NotBlock => continue,
+            // Something that is on a disk but cannot be followed: for the
+            // live medium that is never skipped. (Another mount that is on no
+            // device sysfs lists is on none of the disks we list.)
+            Holder::Unresolved(why) => {
+                if live {
+                    usage.unresolved.push(why);
+                }
+                continue;
             }
-            continue;
         };
         let footprint = topology.footprint(&device);
         if live {
@@ -301,22 +423,30 @@ pub fn usage(topology: &Topology, mounts: &[Mount], swaps: &[String]) -> Usage {
         }
     }
     for swap in swaps {
-        let device = if swap.starts_with("/dev/") {
-            topology.device_of_node(swap)
+        let holder = if swap.starts_with("/dev/") {
+            topology.device_of_node(swap).map_or_else(
+                || {
+                    Holder::Unresolved(format!(
+                        "{swap} is not a block device the installer can find"
+                    ))
+                },
+                Holder::Device,
+            )
         } else {
-            match topology.device_holding(swap) {
-                Holder::Device(device) => Some(device),
-                Holder::NotBlock | Holder::Unknown => None,
-            }
+            topology.holder_of_file(swap)
         };
-        if let Some(device) = device {
-            for name in topology.footprint(&device).names {
-                usage
-                    .in_use
-                    .entry(name)
-                    .or_default()
-                    .insert(format!("{swap} is in use as swap"));
+        match holder {
+            Holder::Device(device) => {
+                for name in topology.footprint(&device).names {
+                    usage
+                        .in_use
+                        .entry(name)
+                        .or_default()
+                        .insert(format!("{swap} is in use as swap"));
+                }
             }
+            Holder::NotBlock => {}
+            Holder::Unresolved(why) => usage.unresolved.push(format!("the swap area {why}")),
         }
     }
     usage
