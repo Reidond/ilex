@@ -38,9 +38,12 @@ RUN --mount=type=cache,id=ilex-cargo,target=/root/.cargo/registry \
 set -euo pipefail
 export RUSTC_WRAPPER=kache
 cargo build --release --locked -p ilex-installer --features gui
+cargo build --release --locked -p ilex-installerd -p ilex-enroll
 kache daemon stop || true
 kache stats --last-build --root /src
 install -Dm755 target/release/ilex-installer /out/usr/bin/ilex-installer
+install -Dm755 target/release/ilex-installerd /out/usr/libexec/ilex-installer/ilex-installerd
+install -Dm755 target/release/ilex-enroll /out/usr/bin/ilex-enroll
 BUILD
 
 FROM quay.io/fedora/fedora-bootc:45
@@ -118,11 +121,16 @@ RUN cp --remove-destination /usr/lib/os-release /etc/os-release && \
 COPY rootfs/ /
 COPY editions/${EDITION}/rootfs/ /
 COPY --from=generated edition.json /usr/share/ilex-installer/edition.json
+COPY --from=generated compositions.json /usr/share/ilex-installer/compositions.json
 COPY --from=generated iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 COPY --from=ui-build /out/ /
+# image-builder omits the live ISO's RPM database: bind the tool versions the
+# helper's eligibility probe compares to the files actually shipped.
 RUN dconf update && \
-    systemctl enable ilex-installer-session.service ilex-installer-fallback.service && \
-    ilex-installer --version
+    systemctl enable ilex-installer-session.service ilex-installer-fallback.service ilex-installerd.service && \
+    ilex-installer --version && \
+    mkdir -p /usr/lib/ilex/security && \
+    ilex-enroll tool-manifest > /usr/lib/ilex/security/tools.json
 
 # Rebuild the initramfs with dracut's live-boot module, generic (not
 # host-only) so it boots on whatever the ISO is written to.

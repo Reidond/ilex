@@ -116,22 +116,34 @@ fn edition_json(edition: &Edition) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Build the live image and the ISO and return the ISO's path; its checksum
-/// and package sizes are written next to it.
-pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
-    ws.ensure_state()?;
-    let edition = edition(&ws.root, spec.edition)?;
+/// Where an edition's files and ISO go.
+fn output_dir(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
     let out_dir = spec
         .output_dir
         .map_or_else(|| ws.state_dir().join("iso-next"), Path::to_path_buf);
     ilex_devkit::ownership::ensure_directory(&out_dir, &ws.identity()?)?;
-    let out_dir = std::path::absolute(&out_dir)?;
+    Ok(std::path::absolute(&out_dir)?)
+}
+
+/// Build the edition's live image (the container the ISO is made from) and
+/// return its reference. The `installer::` tier boots this image without
+/// building an ISO.
+pub fn build_image(ws: &Workspace, spec: &Build) -> Result<String> {
+    ws.ensure_state()?;
+    let edition = edition(&ws.root, spec.edition)?;
+    let out_dir = output_dir(ws, spec)?;
 
     // The builder stage compiles the interface from this snapshot of the
     // workspace; stale copies of removed crates must not survive.
     let generated = out_dir.join("generated");
     fs::create_dir_all(&generated)?;
     fs::write(generated.join("edition.json"), edition_json(&edition)?)?;
+    // The catalogue the root helper offers: the Anaconda installer's table,
+    // which the helper narrows to this edition.
+    fs::write(
+        generated.join("compositions.json"),
+        crate::iso::table_bytes(&crate::iso::validated_table(&ws.root, None)?)?,
+    )?;
     fs::write(
         generated.join("iso.yaml"),
         MENU.replace("{edition}", &edition.id),
@@ -172,7 +184,15 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         "source changed during the installer build; refusing promotion"
     );
     transaction.promote(ws)?;
+    Ok(image)
+}
 
+/// Build the live image and the ISO and return the ISO's path; its checksum
+/// and package sizes are written next to it.
+pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
+    let image = build_image(ws, spec)?;
+    let edition = edition(&ws.root, spec.edition)?;
+    let out_dir = output_dir(ws, spec)?;
     let build_dir = out_dir.join("build");
     if build_dir.exists() {
         fs::remove_dir_all(&build_dir)?;
