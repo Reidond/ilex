@@ -187,7 +187,9 @@ test -z "$out" || { echo "dconf profile ilex-kde: $out"; exit 1; }
 "#,
     )?
     .ok("KDE shell Plasma-only defaults")?;
-    println!("     KDE shell: GTK integration, KDE dconf profile and Plasma-only autostart present");
+    println!(
+        "     KDE shell: GTK integration, KDE dconf profile and Plasma-only autostart present"
+    );
     // Everything the shell's overlay ships is scoped to Plasma.
     let overlay = common::workspace()?.root.join("shells/kde/rootfs");
     let mut seen = Vec::new();
@@ -197,19 +199,29 @@ test -z "$out" || { echo "dconf profile ilex-kde: $out"; exit 1; }
             || path == "etc/xdg/autostart/ilex-kde-gtk-theme.desktop"
             || path == "usr/libexec/ilex/kde-gtk-theme"
             || path == "usr/share/dconf/profile/ilex-kde";
-        ensure(scoped, || format!("KDE overlay path {path} is not scoped to a Plasma session"))?;
+        ensure(scoped, || {
+            format!("KDE overlay path {path} is not scoped to a Plasma session")
+        })?;
     }
     println!("     KDE overlay: {} files, all Plasma-scoped", seen.len());
     Ok(())
 }
 
-fn kde_overlay_paths(root: &std::path::Path, directory: &std::path::Path, out: &mut Vec<String>) -> Result<()> {
+fn kde_overlay_paths(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    out: &mut Vec<String>,
+) -> Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();
         if path.is_dir() && !path.is_symlink() {
             kde_overlay_paths(root, &path, out)?;
         } else {
-            out.push(path.strip_prefix(root)?.to_string_lossy().replace('\\', "/"));
+            out.push(
+                path.strip_prefix(root)?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
         }
     }
     Ok(())
@@ -525,7 +537,9 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         {
             let state = vm.ssh(&format!("systemctl is-enabled -- {}", common::quote(&unit)))?;
             ensure(state.out() != "enabled", || {
-                format!("shell {name}: greeter {unit} must not be enabled beside the default shell's")
+                format!(
+                    "shell {name}: greeter {unit} must not be enabled beside the default shell's"
+                )
             })?;
             println!("     shell {name}: greeter {unit} is {}", state.out());
         }

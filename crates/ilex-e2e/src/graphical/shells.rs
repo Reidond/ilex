@@ -18,19 +18,23 @@ use libtest_mimic::{Failed, Trial};
 
 use super::kde::{self, user};
 use super::{
-    SESSION_TIMEOUT, USER, clear_artifacts, create_user, no_failed_user_units, session_active, settle, shot,
-    test_password, wait_greeter,
+    SESSION_TIMEOUT, USER, clear_artifacts, create_user, no_failed_user_units, session_active,
+    settle, shot, test_password, wait_greeter,
 };
 use crate::common;
 use crate::disk::vmtest;
 
 pub fn trial() -> Trial {
-    Trial::test("graphical::shells", || run().map_err(|e| Failed::from(format!("{e:#}"))))
+    Trial::test("graphical::shells", || {
+        run().map_err(|e| Failed::from(format!("{e:#}")))
+    })
 }
 
 fn run() -> Result<()> {
     let selection = common::selection()?;
-    if selection.default_shell.as_deref() != Some("gnome") || !selection.shells.iter().any(|s| s == "kde") {
+    if selection.default_shell.as_deref() != Some("gnome")
+        || !selection.shells.iter().any(|s| s == "kde")
+    {
         bail!(
             "graphical::shells needs shells gnome (default) and kde, got {:?}",
             selection.shells
@@ -46,7 +50,11 @@ fn run() -> Result<()> {
     if result.is_err() {
         let _ = ctl.save_screenshot(&artifacts.join("failure.png"));
         if let Ok(journal) = vm.ssh("journalctl -b --no-pager -n 500 -o short-monotonic") {
-            let _ = qemu::write_artifact(&artifacts, "failure-journal.txt", &String::from_utf8_lossy(&journal.stdout));
+            let _ = qemu::write_artifact(
+                &artifacts,
+                "failure-journal.txt",
+                &String::from_utf8_lossy(&journal.stdout),
+            );
         }
         println!("artifacts: {}", artifacts.display());
     }
@@ -67,7 +75,8 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     // GDM's greeter lists AccountsService users, so the user is created first,
     // the session chosen through AccountsService, and the guest restarted.
     choose_session(vm, "plasma")?;
-    vm.reboot(vmtest::BOOT_TIMEOUT).context("rebooting with the test user in place")?;
+    vm.reboot(vmtest::BOOT_TIMEOUT)
+        .context("rebooting with the test user in place")?;
     wait_greeter(vm)?;
     settle(ctl)?;
     shot(ctl, artifacts, "02-gdm-login")?;
@@ -132,7 +141,9 @@ fn login(vm: &mut Vm, ctl: &Vmctl, password: &str) -> Result<()> {
     ctl.key("Return")?;
     vm.wait_for(
         "a graphical session for the test user",
-        &format!("loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep ."),
+        &format!(
+            "loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep ."
+        ),
         SESSION_TIMEOUT,
     )?;
     Ok(())
@@ -143,7 +154,9 @@ fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     let mut report = vmtest::Report::default();
     report.check("the session is GNOME", {
         let env = user(vm, "systemctl --user show-environment")?;
-        if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME") && !env.lines().any(|l| l.starts_with("DCONF_PROFILE=")) {
+        if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME")
+            && !env.lines().any(|l| l.starts_with("DCONF_PROFILE="))
+        {
             Ok(())
         } else {
             Err(anyhow!("session environment:\n{env}"))
@@ -151,25 +164,45 @@ fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     });
     report.check("GNOME's own dconf database holds no interface setting", {
         let keys = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
-        if keys.trim().is_empty() { Ok(()) } else { Err(anyhow!("Plasma wrote into GNOME's database:\n{keys}")) }
-    });
-    report.check("GNOME keeps its GTK, icon and cursor themes and its colour scheme", {
-        let mut wrong = Vec::new();
-        for (key, want) in [
-            ("gtk-theme", "'Adwaita'"),
-            ("icon-theme", "'Adwaita'"),
-            ("cursor-theme", "'Adwaita'"),
-            ("color-scheme", "'default'"),
-        ] {
-            let got = user(vm, &format!("gsettings get org.gnome.desktop.interface {key}"))?;
-            if got != want {
-                wrong.push(format!("{key}: {got}, expected {want}"));
-            }
+        if keys.trim().is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("Plasma wrote into GNOME's database:\n{keys}"))
         }
-        if wrong.is_empty() { Ok(()) } else { Err(anyhow!("{}", wrong.join("; "))) }
     });
+    report.check(
+        "GNOME keeps its GTK, icon and cursor themes and its colour scheme",
+        {
+            let mut wrong = Vec::new();
+            for (key, want) in [
+                ("gtk-theme", "'Adwaita'"),
+                ("icon-theme", "'Adwaita'"),
+                ("cursor-theme", "'Adwaita'"),
+                ("color-scheme", "'default'"),
+            ] {
+                let got = user(
+                    vm,
+                    &format!("gsettings get org.gnome.desktop.interface {key}"),
+                )?;
+                if got != want {
+                    wrong.push(format!("{key}: {got}, expected {want}"));
+                }
+            }
+            if wrong.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!("{}", wrong.join("; ")))
+            }
+        },
+    );
     report.check("no user units failed", no_failed_user_units(vm));
     report.finish()?;
     // The GTK 3 window reads the home's ~/.config/gtk-3.0 too.
-    kde::gtk3_window(vm, ctl, artifacts, "08-gtk3-in-gnome", &["theme=Adwaita", "icons=Adwaita", "dark=False"])
+    kde::gtk3_window(
+        vm,
+        ctl,
+        artifacts,
+        "08-gtk3-in-gnome",
+        &["theme=Adwaita", "icons=Adwaita", "dark=False"],
+    )
 }

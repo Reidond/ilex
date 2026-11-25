@@ -2,7 +2,8 @@
 
 Personal Fedora bootc image: a small base (fedora-bootc, ilex's own files and
 drupe's signed-image runtime),
-an ordered list of shells (GNOME by default, with desktop apps), then one
+an ordered list of shells (GNOME by default, KDE Plasma as the second, each with its
+desktop apps), then one
 machine configuration. One `Containerfile` builds each root
 image: base packages, shells' packages in their own transaction and image layer,
 then ilex files and configuration, overlays, lint. A machine is one derived
@@ -528,6 +529,8 @@ the authority for the image's name. Publications add no image label or file.
 | Base | `T.s-none` | `base` (always listed) | root | yes |
 | Base + GNOME | `T` | `generic.gnome` | root | yes |
 | Base + GNOME + ms-7c35 | `T.m-ms-7c35` | `ms-7c35.gnome` | layer on `generic.gnome` | no |
+| Base + KDE | `T.s-kde` | `generic.kde` | root | yes |
+| Base + KDE + ms-7c35 | `T.s-kde.m-ms-7c35` | `ms-7c35.kde` | layer on `generic.kde` | no |
 | Base + ms-7c35 | `T.s-none.m-ms-7c35` | `ms-7c35`, only if listed with `shells = []` | layer on `base` | no |
 | Base + GNOME + ilex (future) | `T.s-gnome.s-ilex` | `generic.gnome.ilex`, once listed | root | yes |
 
@@ -738,6 +741,119 @@ literal packages excluded by `shells/packages.toml` installed, even through the
 base or machine transaction. Tmpfiles are per transaction: `ilex-var.conf` for base
 packages, `ilex-var-shells.conf` for shells, `ilex-var-machine.conf` for a
 machine; an empty transaction emits no file.
+
+### The KDE shell
+
+`shells/kde/` is Plasma 6.8 on Wayland as Fedora 45 packages it, with the KDE
+applications. `generic.kde` and `ms-7c35.kde` are published beside the GNOME
+compositions; the local default and the installer's default stay GNOME. Its session
+is `plasma` (`/usr/share/wayland-sessions/plasma.desktop`), its compositor
+`kwin_wayland`, and its greeter **Plasma Login Manager** (`plasmalogin.service`):
+Fedora 45's KDE edition lists `plasma-login-manager` as mandatory in `@kde-desktop`.
+SDDM is still packaged and is not installed. A fresh install has no user, so
+the greeter shows only a clock; any key raises a user's password prompt.
+
+The manifest names packages instead of installing `@kde-desktop`, whose defaults
+add a mail server (`akonadi-server-mysql`), mobile sync, remote-desktop servers,
+vendor repositories and `plasma-setup`. That first-boot account wizard runs
+whenever `/etc/plasma-setup-done` is absent, with or without users, so it stays
+out: ilex creates accounts with `ilexctl home`. As in the GNOME shell, the file
+manager (Dolphin, with Ark, `kio-admin` and the thumbnailers), terminal
+(Konsole), settings (System Settings, KInfoCenter, KScreen, Bluetooth, network
+and audio applets), software centre (Discover with its Flatpak backend and
+`flatpak-kcm`), system monitor, partition tool (KDE Partition Manager, Plasma
+Disks), screenshot tool (Spectacle) and portals (`xdg-desktop-portal-kde`) are
+host RPMs: they need the compositor, polkit helpers or hardware. The other
+KDE applications and Firefox are 22 Flathub Flatpaks in `[apps] flatpak`
+(KWrite, KCalc, Merkuro, KClock, KWeather, Marble, Gwenview, Okular, Kamoso,
+KCharSelect, Filelight, KFind, Haruna, Elisa, KRDC, Skanpage, KJournald
+Browser, KWalletManager, KTorrent, NeoChat, KolourPaint, Firefox), installed by
+the same preinstall machinery as GNOME's and checked by `ilexctl doctor apps`.
+Games, education and PIM suites, Kate, Krita and KDE Connect are not
+preinstalled; install them from Discover. Discover's PackageKit, rpm-ostree and
+offline-update backends, Plasma Welcome and online-account web logins are
+excluded (bootc owns OS updates). `plasma-discover` still requires
+`qt6-qtwebview`, so Qt WebEngine (277 MiB) is on the host.
+
+With several shells each package enables its own greeter, and the first to
+install wins. The composer writes the default shell's greeter first into
+`greeters`, and the Containerfile disables the others and enables that one with
+`--force`: `display-manager.service` always belongs to the default shell. In
+`--shell gnome --shell kde` GDM is the greeter and lists Plasma as a session;
+in `--shell kde --shell gnome` Plasma Login Manager lists GNOME.
+
+**GTK 3, GTK 4 and libadwaita in Plasma (measured on Plasma 6.8.3, GTK 3.24.52,
+libadwaita 1.10.0).** The host has GTK 3 (`kde-gtk-config` requires it) and no
+GTK 4 or libadwaita: those applications are Flatpaks with the GNOME runtime.
+
+- Left alone, `kde-gtk-config` writes `~/.config/gtk-3.0` and `gtk-4.0`
+  `settings.ini` (icon and cursor theme, fonts, dark preference, no theme name)
+  and GSettings keys, but selects **no GTK theme**: GTK 3 applications are
+  Adwaita. The shell therefore chooses Breeze once, through
+  `org.kde.GtkConfig.setGtkTheme`, from a KDE-only autostart
+  (`/etc/xdg/autostart/ilex-kde-gtk-theme.desktop`, `OnlyShowIn=KDE;`, runs
+  `/usr/libexec/ilex/kde-gtk-theme`) when `gtkTheme` is empty. A theme the user
+  picks later in System Settings is kept.
+- GTK 4 and libadwaita applications need no theme: libadwaita 1.10 reads
+  `org.freedesktop.appearance` from the settings portal, and
+  `xdg-desktop-portal-kde` answers `color-scheme` (2 light, 1 dark) and
+  `accent-color` (Plasma's selection colour, Breeze blue 61,174,233). Observed:
+  a libadwaita Flatpak (GNOME Calculator) follows Breeze Light/Dark live; it
+  maps the accent to its nearest of nine, here Blue. `kde-portals.conf`
+  (`plasma-workspace`) puts the GTK portal second for `Settings`, which gives
+  sandboxed GTK 3 applications `org.gnome.desktop.interface` keys. The
+  portal does not signal a change of accent alone (an accent set with
+  `plasma-apply-colorscheme --accent-color` reached it after the portal
+  restarted, not live).
+- Flatpak GTK 3 applications need the Flathub extension
+  `org.gtk.Gtk3theme.Breeze` (branch `3.22`) next to the Breeze choice above;
+  with it GNOME gedit renders in Breeze and Breeze Dark, without it in Adwaita.
+  It is not preinstalled: the preinstall lists carry `Branch=stable` only
+  (`ilexctl apps --self-check` requires it), and this extension is a runtime on
+  `3.22`. Install it with
+  `flatpak install flathub org.gtk.Gtk3theme.Breeze`.
+  The extension does not affect libadwaita applications.
+
+*Nothing changes GNOME.* GNOME keeps Adwaita because the shell ships only
+Plasma-scoped files (`ephemeral::shell_themes` checks that the overlay holds
+nothing else, and that no global GTK, portal or GSettings default exists):
+`/etc/xdg/plasma-workspace/env/50-ilex-kde.sh` (sourced by `startplasma` only),
+the `OnlyShowIn=KDE;` autostart and its helper, and the dconf profile
+`/usr/share/dconf/profile/ilex-kde`. The env script exports
+`DCONF_PROFILE=ilex-kde`, which keeps what `kde-gtk-config` and a Plasma
+session's GTK applications write to GSettings (GTK theme, icon theme `breeze`,
+cursor, fonts, scale, colour scheme, button layout) in `~/.config/dconf/kde`;
+without it they land in the shared `~/.config/dconf/user` and restyle a GNOME
+session of the same user (measured). The variable reaches the user manager,
+`dconf-service` and the GTK portal. `graphical::shells` runs one account in
+Plasma and then in GNOME from one image: GNOME's database holds no interface
+key and GNOME's GTK, icon, cursor and colour keys stay at their defaults. **Not
+isolated:** `settings.ini`, `gtk.css` and `colors.css` are shared files. Their
+`@define-color *_breeze` names, theme name, icons and fonts are inert in GNOME
+(GSettings override them), but the dark preference is not: after a Plasma
+session ended in Breeze Dark, GNOME's non-libadwaita GTK 3 windows are dark
+(GNOME Shell and libadwaita applications are unaffected). `graphical::shells`
+leaves Plasma light. A later change could neutralise those keys when the Plasma
+session ends, or give each shell its own home. KDE with systemd-homed accounts
+is not qualified (the homed tier uses GDM and GNOME's settings; the profile
+writer sets GNOME keys only for the default shell `gnome`).
+
+Plasma picks its own display scale (KScreen): 2.7 on the VM's virtual 4K
+panel; nothing is measured for the AOC panel of `ms-7c35`.
+
+Tests: `ephemeral::` runs on a KDE root like any other (`shell_themes` is
+the GTK inertness check; `configuration` also requires a non-default shell's
+greeter not to be enabled). `graphical::login` with a KDE default shell logs
+into Plasma through the greeter and checks the GTK look offline: the KDE dconf
+database, Breeze for GTK 3 (a GTK 3 window from the host's `python3-gobject`,
+screenshotted in light and dark) and the portal values libadwaita reads.
+`graphical::apps` on KDE installs GNOME Calculator (libadwaita), gedit (GTK 3)
+and the Breeze extension from Flathub (**network**, about a gigabyte) and
+screenshots them in dark and light; it does not install the KDE list.
+`graphical::shells` is explicit-only and needs `--shell gnome --shell kde`.
+Screenshots land in `<state dir>/artifacts/graphical*/`. The installer's
+catalogue now offers the KDE compositions, but `iso::install` still installs
+only the published `generic.gnome`; a KDE install is not covered.
 
 ### This PC: `ms-7c35`
 
@@ -1529,9 +1645,11 @@ claude mcp add -s local --transport stdio ilex-vm -- ilexctl mcp
 - Tests assert over SSH, not pixels. Screenshots are evidence: the
   `graphical::` tier saves them to `<state dir>/artifacts/graphical/` (or
   `$ILEX_ARTIFACTS/graphical/`).
-- `disk::` also checks headless images. `graphical::login` exercises GNOME's
-  login and scaling, and fails immediately before installing or booting a VM
-  when the image's default shell is not `gnome`, including `--shell none`.
+- `disk::` also checks headless images. `graphical::login` exercises the default
+  shell's login: GNOME's login and scaling, or KDE's Plasma Login Manager, Plasma
+  and GTK look (see "The KDE shell"). It fails immediately before installing or
+  booting a VM when the default shell is neither `gnome` nor `kde`, including
+  `--shell none`.
 - The SSH test key and the throwaway disk overlays live in the state dir;
   `ilexctl vm run --disk` prints the exact `ssh` command line.
 - On Linux, `--gui` selects virgl when a DRM render node is available.
