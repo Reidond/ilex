@@ -76,6 +76,10 @@ fn main() {
     if filters.iter().any(|f| f.contains("graphical::apps")) {
         trials.push(graphical::apps_trial());
     }
+    // One image with two shells, one home: needs `--shell gnome --shell kde`.
+    if filters.iter().any(|f| f.contains("graphical::shells")) {
+        trials.push(graphical::shells_trial());
+    }
     trials.extend(tool::trials());
     // Installed, enforcing SELinux homes are an explicit, slow qualification.
     if filters.iter().any(|f| f.contains("homed")) {

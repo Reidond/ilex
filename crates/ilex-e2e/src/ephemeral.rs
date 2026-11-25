@@ -58,6 +58,7 @@ pub fn trials() -> Vec<Trial> {
         trial("ephemeral::configuration", || GROUP.run(configuration)),
         trial("ephemeral::apps_plan", || GROUP.run(apps_plan)),
         trial("ephemeral::user_profiles", || GROUP.run(user_profiles)),
+        trial("ephemeral::shell_themes", || GROUP.run(shell_themes)),
     ]
 }
 
@@ -125,6 +126,92 @@ fn user_profiles(vm: &EphemeralVm) -> Result<()> {
         .ssh("timeout 120 python3 -I -S /run/ilex-profiles-build/check.py")?
         .ok("public profile regressions")?;
     println!("     {}", result.stdout);
+    Ok(())
+}
+
+/// Each desktop keeps its own look. Nothing a shell ships may restyle another
+/// shell's session, so GTK, portal and GSettings defaults are never global;
+/// the KDE shell's GTK defaults are reachable only from a Plasma session.
+fn shell_themes(vm: &EphemeralVm) -> Result<()> {
+    let selection = common::selection()?;
+    if selection.shells.is_empty() {
+        return Ok(());
+    }
+    // No global GTK theme, portal selection or GSettings interface override.
+    vm.ssh(
+        r#"set -eu
+for f in /etc/gtk-2.0/gtkrc /etc/gtk-3.0/settings.ini /etc/gtk-4.0/settings.ini \
+         /etc/xdg/gtk-3.0/settings.ini /etc/xdg/gtk-4.0/settings.ini \
+         /etc/xdg-desktop-portal/portals.conf /usr/share/xdg-desktop-portal/portals.conf; do
+    test ! -e "$f" || { echo "global default $f"; exit 1; }
+done
+if grep -rIls -E '(^|[[:space:]])(export[[:space:]]+)?(GTK_THEME|GTK2_RC_FILES|DCONF_PROFILE|QT_QPA_PLATFORMTHEME)=' \
+    /etc/environment /etc/environment.d /usr/lib/environment.d /etc/profile.d \
+    /usr/lib/systemd/user.conf.d /etc/systemd/user.conf.d /usr/lib/systemd/user-environment-generators 2>/dev/null; then
+    echo "a global environment default sets a toolkit theme"; exit 1
+fi
+for f in /usr/share/glib-2.0/schemas/*ilex*.override; do
+    ! grep -q 'org.gnome.desktop' "$f" || { echo "$f restyles GNOME"; exit 1; }
+done
+"#,
+    )?
+    .ok("no global GTK, portal or GSettings theme default")?;
+    println!("     no global GTK theme, portal or GSettings interface default");
+    if !selection.shells.iter().any(|s| s == "kde") {
+        return Ok(());
+    }
+    // The KDE shell's GTK pieces are all there.
+    vm.ssh(
+        r#"set -eu
+grep -qx 'UseIn=KDE' /usr/share/xdg-desktop-portal/portals/kde.portal
+grep -q 'org.freedesktop.impl.portal.Settings' /usr/share/xdg-desktop-portal/portals/kde.portal
+grep -qx 'org.freedesktop.impl.portal.Settings=kde;gtk;' /usr/share/xdg-desktop-portal/kde-portals.conf
+test -f /usr/share/themes/Breeze/gtk-3.0/gtk.css -a -f /usr/share/themes/Breeze/gtk-4.0/gtk.css
+test -f /usr/lib64/qt6/plugins/kf6/kded/gtkconfig.so
+test -f /usr/lib64/gtk-3.0/modules/libcolorreload-gtk-module.so
+"#,
+    )?
+    .ok("KDE shell GTK integration files")?;
+    // The Plasma-only defaults: the env script is sourced by startplasma only,
+    // the autostart is KDE-only, and the dconf profile resolves and is empty.
+    vm.ssh(
+        r#"set -eu
+grep -qx 'export DCONF_PROFILE=ilex-kde' /etc/xdg/plasma-workspace/env/50-ilex-kde.sh
+test "$(cat /usr/share/dconf/profile/ilex-kde)" = user-db:kde
+grep -qx 'OnlyShowIn=KDE;' /etc/xdg/autostart/ilex-kde-gtk-theme.desktop
+grep -qx 'Exec=/usr/libexec/ilex/kde-gtk-theme' /etc/xdg/autostart/ilex-kde-gtk-theme.desktop
+test -x /usr/libexec/ilex/kde-gtk-theme
+sh -n /usr/libexec/ilex/kde-gtk-theme
+out=$(DCONF_PROFILE=ilex-kde dconf read /org/gnome/desktop/interface/gtk-theme 2>&1 || true)
+test -z "$out" || { echo "dconf profile ilex-kde: $out"; exit 1; }
+"#,
+    )?
+    .ok("KDE shell Plasma-only defaults")?;
+    println!("     KDE shell: GTK integration, KDE dconf profile and Plasma-only autostart present");
+    // Everything the shell's overlay ships is scoped to Plasma.
+    let overlay = common::workspace()?.root.join("shells/kde/rootfs");
+    let mut seen = Vec::new();
+    kde_overlay_paths(&overlay, &overlay, &mut seen)?;
+    for path in &seen {
+        let scoped = path.starts_with("etc/xdg/plasma-workspace/env/")
+            || path == "etc/xdg/autostart/ilex-kde-gtk-theme.desktop"
+            || path == "usr/libexec/ilex/kde-gtk-theme"
+            || path == "usr/share/dconf/profile/ilex-kde";
+        ensure(scoped, || format!("KDE overlay path {path} is not scoped to a Plasma session"))?;
+    }
+    println!("     KDE overlay: {} files, all Plasma-scoped", seen.len());
+    Ok(())
+}
+
+fn kde_overlay_paths(root: &std::path::Path, directory: &std::path::Path, out: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() && !path.is_symlink() {
+            kde_overlay_paths(root, &path, out)?;
+        } else {
+            out.push(path.strip_prefix(root)?.to_string_lossy().replace('\\', "/"));
+        }
+    }
     Ok(())
 }
 
@@ -431,6 +518,17 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
             })?;
         }
         check_packages(vm, &manifest)?;
+        // Only the default shell's greeter is enabled: with several shells each
+        // package enables its own, and the Containerfile leaves the default's.
+        if Some(name.as_str()) != selection.default_shell.as_deref()
+            && let Ok(unit) = common::shell_property(&manifest, "greeter", "unit")
+        {
+            let state = vm.ssh(&format!("systemctl is-enabled -- {}", common::quote(&unit)))?;
+            ensure(state.out() != "enabled", || {
+                format!("shell {name}: greeter {unit} must not be enabled beside the default shell's")
+            })?;
+            println!("     shell {name}: greeter {unit} is {}", state.out());
+        }
         if let Some(excludes) = manifest.get("packages").and_then(|a| a.get("exclude")).and_then(|a| a.as_array()) {
             for package in excludes {
                 let name = package.as_str().context("exclude must be a string")?;

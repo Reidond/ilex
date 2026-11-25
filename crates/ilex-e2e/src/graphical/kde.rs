@@ -74,14 +74,20 @@ pub(super) fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, apps: bool) ->
     if apps { apps::checks(vm, ctl, artifacts) } else { theming(vm, ctl, artifacts) }
 }
 
-/// The test account. Plasma's screen locker and power management are switched
-/// off in its configuration, so a slow run is not interrupted by a locked or
-/// blanked screen.
+/// The test account, with Plasma's configuration seeded.
 fn create_user(vm: &Vm, password: &str) -> Result<()> {
     vm.ssh_ok(&format!(
-        "set -e; useradd --create-home --shell /bin/bash {USER}; \
-         echo '{USER}:{password}' | chpasswd; \
-         home=/var/home/{USER}; install -d -o {USER} -g {USER} -m 0700 $home/.config; \
+        "useradd --create-home --shell /bin/bash {USER} && echo '{USER}:{password}' | chpasswd"
+    ))?;
+    seed_plasma_config(vm)
+}
+
+/// Plasma's screen locker and power management are switched off in the
+/// account's configuration, so a slow run is not interrupted by a locked or
+/// blanked screen.
+pub(super) fn seed_plasma_config(vm: &Vm) -> Result<()> {
+    vm.ssh_ok(&format!(
+        "set -e; home=/var/home/{USER}; install -d -o {USER} -g {USER} -m 0700 $home/.config; \
          printf '[Daemon]\\nAutolock=false\\nLockOnResume=false\\nTimeout=0\\n' > $home/.config/kscreenlockerrc; \
          printf '[AC][Display]\\nDimDisplayWhenIdle=false\\nTurnOffDisplayWhenIdle=false\\n\\n[AC][SuspendAndShutdown]\\nAutoSuspendAction=0\\n' > $home/.config/powerdevilrc; \
          chown {USER}:{USER} $home/.config/kscreenlockerrc $home/.config/powerdevilrc; \
@@ -102,7 +108,7 @@ fn session_is_plasma(vm: &Vm) -> Result<()> {
 
 /// Run `cmd` as the test user, in their session: the user manager's
 /// environment (Wayland socket, `DCONF_PROFILE`, ...) and bus.
-fn user(vm: &Vm, cmd: &str) -> Result<String> {
+pub(super) fn user(vm: &Vm, cmd: &str) -> Result<String> {
     let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
     let env = vm.ssh_ok(&format!(
         "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/{uid} systemctl --user show-environment"
@@ -138,7 +144,7 @@ fn appearance(vm: &Vm, key: &str) -> Result<String> {
 }
 
 /// The GTK look of the Plasma session, light and dark.
-fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
+pub(super) fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     let mut report = vmtest::Report::default();
     report.check("Plasma's session selects the KDE dconf database", {
         let env = user(vm, "systemctl --user show-environment")?;
@@ -169,7 +175,7 @@ fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     report.finish()?;
     println!("     light: portal {} accent {}", appearance(vm, "color-scheme")?, appearance(vm, "accent-color")?);
 
-    gtk3_window(vm, ctl, artifacts, "05-gtk3-breeze-light", "dark=False")?;
+    gtk3_window(vm, ctl, artifacts, "05-gtk3-breeze-light", &["theme=Breeze", "icons=breeze", "dark=False"])?;
 
     // The user picks Breeze Dark in Plasma; GTK follows without help.
     user(vm, "plasma-apply-colorscheme BreezeDark")?;
@@ -196,7 +202,7 @@ fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         }
     });
     report.finish()?;
-    gtk3_window(vm, ctl, artifacts, "06-gtk3-breeze-dark", "dark=True")?;
+    gtk3_window(vm, ctl, artifacts, "06-gtk3-breeze-dark", &["theme=Breeze", "icons=breeze", "dark=True"])?;
     println!("     dark: portal {} accent {}", appearance(vm, "color-scheme")?, appearance(vm, "accent-color")?);
     Ok(())
 }
@@ -207,7 +213,7 @@ fn portal_follows(vm: &Vm, want: u32) -> Result<()> {
     if scheme != format!("v v u {want}") {
         bail!("color-scheme is `{scheme}`, expected `v v u {want}`");
     }
-    // `v v (ddd) r g b`, 0..1; Plasma's accent is the focus decoration colour.
+    // `v v (ddd) r g b`, 0..1; Plasma's accent is its selection background.
     let accent = appearance(vm, "accent-color")?;
     let got: Vec<f64> = accent
         .split_whitespace()
@@ -215,7 +221,7 @@ fn portal_follows(vm: &Vm, want: u32) -> Result<()> {
         .map(|v| v.parse::<f64>())
         .collect::<Result<_, _>>()
         .with_context(|| format!("parsing the accent `{accent}`"))?;
-    let plasma = user(vm, "kreadconfig6 --file kdeglobals --group Colors:Button --key DecorationFocus")?;
+    let plasma = user(vm, "kreadconfig6 --file kdeglobals --group Colors:Selection --key BackgroundNormal")?;
     let plasma: Vec<f64> = plasma.split(',').map(|v| v.trim().parse::<f64>().map(|c| c / 255.0)).collect::<Result<_, _>>()?;
     if got.len() != 3 || plasma.len() != 3 || got.iter().zip(&plasma).any(|(a, b)| (a - b).abs() > 0.01) {
         bail!("the portal's accent {got:?} is not Plasma's {plasma:?}");
@@ -224,7 +230,7 @@ fn portal_follows(vm: &Vm, want: u32) -> Result<()> {
 }
 
 /// Open the GTK 3 probe in the session, check what it resolved, screenshot it.
-fn gtk3_window(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, name: &str, dark: &str) -> Result<()> {
+pub(super) fn gtk3_window(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, name: &str, expect: &[&str]) -> Result<()> {
     let script = qemu::base64(GTK3_PROBE);
     vm.ssh_ok(&format!(
         "printf %s {script} | base64 -d > /tmp/ilex-gtk3-probe.py && chmod 644 /tmp/ilex-gtk3-probe.py"
@@ -247,8 +253,8 @@ fn gtk3_window(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, name: &str, dark: &st
         Duration::from_secs(60),
     )?;
     println!("     {seen}");
-    if !seen.contains("theme=Breeze") || !seen.contains("icons=breeze") || !seen.contains(dark) {
-        bail!("GTK 3 resolved `{seen}`, expected Breeze, breeze icons and {dark}");
+    if let Some(missing) = expect.iter().find(|want| !seen.contains(**want)) {
+        bail!("GTK 3 resolved `{seen}`, expected `{missing}` (all of {expect:?})");
     }
     std::thread::sleep(Duration::from_secs(4));
     settle(ctl)?;

@@ -34,6 +34,7 @@ use crate::common;
 use crate::disk::vmtest;
 
 mod kde;
+mod shells;
 
 const USER: &str = "ilextest";
 /// The user's stored display configuration (what GNOME Settings writes).
@@ -46,6 +47,11 @@ const FRAMEBUFFER: (u32, u32) = (3840, 2160);
 
 pub fn trials() -> Vec<Trial> {
     vec![Trial::test("graphical::login", || run(false).map_err(|e| Failed::from(format!("{e:#}"))))]
+}
+
+/// `graphical::shells`: one home in Plasma, then in GNOME (explicit only).
+pub fn shells_trial() -> Trial {
+    shells::trial()
 }
 
 pub fn apps_trial() -> Trial {
