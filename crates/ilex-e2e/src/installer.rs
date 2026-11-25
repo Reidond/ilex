@@ -2,11 +2,13 @@
 //!
 //! The next installer's live image (`ILEX_INSTALLER_IMAGE`, built by
 //! `ilexctl iso --next`'s image stage) boots as an ephemeral VM with an SSH
-//! layer added for the harness and seven disks: a blank 40 GiB one, one
-//! carrying a fake other-OS layout, an 8 GiB one, and four the running system
-//! is using (an ISO mounted by its label, an ISO file attached to a loop device
-//! from a mounted partition as dracut's iso-scan does, Ventoy's device-mapper
-//! device, and a disk with a mounted partition, swap and a stacked device). The
+//! layer added for the harness and eight disks: a blank 40 GiB one, one
+//! carrying a fake other-OS layout, one carrying an old Linux installation (an
+//! LVM volume group and an MD array, inactive), an 8 GiB one, and four the
+//! running system is using (an ISO mounted by its label, an ISO file attached to
+//! a loop device from a mounted partition as dracut's iso-scan does, Ventoy's
+//! device-mapper device, and a disk with a mounted partition, swap and a stacked
+//! device). The
 //! tests call `org.ilex.Installer1` with `busctl` as the unprivileged
 //! `ilex-installer` user, exactly as the interface will, and assert the JSON;
 //! another user must be refused by the bus policy. The tests share one VM and
@@ -47,9 +49,10 @@ type Case<'a> = (&'a str, Vec<(&'a str, &'a str)>, &'a str);
 
 /// Disks attached to the VM: stable ids `virtio-<name>` (bcvk names the
 /// virtio serial), and their sizes.
-const DISKS: [(&str, u64); 7] = [
+const DISKS: [(&str, u64); 8] = [
     ("blank", 40 * GIB),
     ("layout", 48 * GIB),
+    ("oldlinux", 36 * GIB),
     ("small", 8 * GIB),
     ("live", GIB),
     ("isoscan", 2 * GIB),
@@ -165,6 +168,7 @@ fn boot() -> Result<Mutex<EphemeralVm>> {
         vm.slot_index()
     );
     prepare_layout_disk(&vm)?;
+    prepare_old_linux_disk(&vm)?;
     prepare_medium_disks(&vm)?;
     wait_for_helper(&vm)?;
     Ok(Mutex::new(vm))
@@ -206,6 +210,51 @@ blkid -p -o value -s TYPE "$d-part3"
         out.out() == "crypto_LUKS",
         "libblkid does not take the volume for LUKS: {:?}",
         out.out()
+    );
+    Ok(())
+}
+
+/// A disk the way an earlier Linux installation leaves it: a `/boot`, an LVM
+/// volume group (a root and a swap volume) and an MD RAID 1 array, all
+/// deactivated. Nothing here is activated by the live image, so the disk has
+/// no holders and is offered like any other.
+fn prepare_old_linux_disk(vm: &EphemeralVm) -> Result<()> {
+    let script = r#"set -eu
+d=/dev/disk/by-id/virtio-oldlinux
+sfdisk --quiet "$d" <<'PARTITIONS'
+label: gpt
+size=1GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="old boot"
+size=1GiB, type=E6D6D379-F507-44C2-A23C-238F2A3DF928, name="old lvm"
+size=512MiB, type=A19D880F-05FC-4D3B-A006-743F0F84911E, name="old raid 1"
+size=512MiB, type=A19D880F-05FC-4D3B-A006-743F0F84911E, name="old raid 2"
+PARTITIONS
+udevadm settle
+for n in 1 2 3 4; do test -b "$d-part$n"; done
+mkfs.ext4 -q -L oldboot "$d-part1"
+pvcreate -ff -y "$d-part2" >/dev/null
+vgcreate vgold "$d-part2" >/dev/null
+lvcreate -y -L 256M -n root vgold >/dev/null
+lvcreate -y -L 128M -n swap vgold >/dev/null
+mkfs.ext4 -q -L oldroot /dev/vgold/root
+mkswap -q /dev/vgold/swap
+mdadm --create /dev/md0 --run --level=1 --raid-devices=2 --metadata=1.2 "$d-part3" "$d-part4" >/dev/null 2>&1
+mkfs.ext4 -q -L olddata /dev/md0
+udevadm settle
+vgchange -an vgold >/dev/null
+mdadm --stop /dev/md0 >/dev/null
+udevadm settle
+blkid -p -o value -s TYPE "$d-part2" "$d-part3"
+"#;
+    let out = vm
+        .ssh(&format!(
+            "printf %s {} | base64 -d | bash -se",
+            base64(script.as_bytes())
+        ))?
+        .ok("preparing the old Linux disk")?;
+    ensure!(
+        printed(&out).trim() == "LVM2_member\nlinux_raid_member",
+        "libblkid does not take the volumes for LVM and MD: {:?}",
+        printed(&out)
     );
     Ok(())
 }
@@ -663,6 +712,7 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
             "virtio-isoscan",
             "virtio-layout",
             "virtio-live",
+            "virtio-oldlinux",
             "virtio-small",
             "virtio-ventoy"
         ],
@@ -685,8 +735,9 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
             "{name}: {disk:?}"
         );
     }
-    // Nothing uses the three the tests plan on.
-    for name in ["blank", "layout", "small"] {
+    // Nothing uses the four the tests plan on (the old installation's volume
+    // group and array are inactive: the live image does not activate them).
+    for name in ["blank", "layout", "oldlinux", "small"] {
         let disk = find(name)?;
         ensure!(
             !disk.live_medium && disk.in_use.is_empty() && disk.notes.is_empty(),
@@ -802,6 +853,25 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
         find("small")?.partitions.is_empty(),
         "small disk is not blank"
     );
+    // The old Linux installation: found for what it is, held by nothing.
+    let old = find("oldlinux")?;
+    ensure!(
+        old.partition_table.as_deref() == Some("gpt") && old.partitions.len() == 4,
+        "oldlinux: {old:?}"
+    );
+    for wanted in [
+        "LVM2_member filesystem",
+        "linux_raid_member filesystem",
+        "ext4 filesystem \"oldboot\"",
+    ] {
+        ensure!(
+            old.other_systems
+                .iter()
+                .any(|s| s.kind == "linux" && s.description.starts_with(wanted)),
+            "{wanted} not found among {:?}",
+            old.other_systems
+        );
+    }
 
     // Detection through the real bus path: the helper reads its identity from
     // a fixture directory and its command line from a fixture file. One
@@ -1084,6 +1154,7 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
         ran[6].text
     );
 
+    old_linux_activation(vm)?;
     lost_medium(vm)?;
     Ok(())
 }
@@ -1210,6 +1281,119 @@ echo "backing [$(cat /sys/block/$(basename "$loop")/loop/backing_file)]"
     Ok(())
 }
 
+/// The guest's view of the old installation's volume group (`vgold`, two
+/// volumes) and array (`md0`), and the udev event a disk appearing at boot
+/// (or hotplugged) causes: `add` for the disk and each partition.
+const OLD_LINUX: &str = r#"d=/dev/disk/by-id/virtio-oldlinux
+active() { printf 'lvm=%s md=%s\n' "$(dmsetup ls 2>/dev/null | grep -c '^vgold-')" "$(grep -c '^md' /proc/mdstat)"; }
+trigger() { udevadm trigger --action=add "$(readlink -f $d)" $(readlink -f $d-part*); udevadm settle; }
+release() { vgchange -an vgold >/dev/null 2>&1 || true; mdadm --stop /dev/md0 >/dev/null 2>&1 || true; udevadm settle; }
+"#;
+
+/// Put the guest back as the image ships it: the live image's LVM and MD
+/// configuration in place, the old installation inactive.
+const OLD_LINUX_RESTORE: &str = r#"[ ! -e /etc/lvm/lvmlocal.conf.off ] || mv /etc/lvm/lvmlocal.conf.off /etc/lvm/lvmlocal.conf
+[ ! -e /etc/mdadm.conf.off ] || mv /etc/mdadm.conf.off /etc/mdadm.conf
+release
+trigger
+sleep 5
+udevadm settle
+echo "restored $(active)"
+"#;
+
+/// A disk that carries an old Linux installation is offered like any other: the
+/// live image does not activate its LVM volume group or MD array (the udev
+/// event of a disk appearing starts neither), so nothing holds it. A control
+/// with the image's configuration out of the way shows that the same event
+/// does activate them otherwise, and a disk the system really does hold stays
+/// refused; with the configuration back, it is offered again.
+fn old_linux_activation(vm: &EphemeralVm) -> Result<()> {
+    let result = old_linux_activation_body(vm);
+    let restored = guest_script(
+        vm,
+        &format!("{OLD_LINUX}{OLD_LINUX_RESTORE}"),
+        "restoring the old installation's state",
+    );
+    result?;
+    ensure!(
+        restored?.trim().ends_with("restored lvm=0 md=0"),
+        "the old installation could not be put back inactive"
+    );
+    let old = probe_document(vm)?
+        .disks
+        .into_iter()
+        .find(|d| d.id == "virtio-oldlinux")
+        .context("no oldlinux disk")?;
+    ensure!(
+        old.in_use.is_empty() && !old.live_medium,
+        "oldlinux after the control: {old:?}"
+    );
+    Ok(())
+}
+
+fn old_linux_activation_body(vm: &EphemeralVm) -> Result<()> {
+    // As shipped: the event leaves everything inactive.
+    let shipped = guest_script(
+        vm,
+        &format!(
+            "{OLD_LINUX}release\ntrigger\nsleep 5\nudevadm settle\necho \"config $(lvmconfig --type full global/event_activation) $(grep -c '^AUTO -all' /etc/mdadm.conf)\"\necho \"shipped $(active)\"\n"
+        ),
+        "the event of the old disk appearing",
+    )?;
+    ensure!(
+        shipped.contains("config event_activation=0 1")
+            && shipped.trim().ends_with("shipped lvm=0 md=0"),
+        "the live image activated the old installation: {shipped}"
+    );
+    let probe = probe_document(vm)?;
+    let old = probe
+        .disks
+        .iter()
+        .find(|d| d.id == "virtio-oldlinux")
+        .context("no oldlinux disk")?;
+    ensure!(
+        old.in_use.is_empty() && !old.live_medium && old.notes.is_empty(),
+        "the old installation's disk is not offered: {old:?}"
+    );
+    println!(
+        "     virtio-oldlinux: LVM volume group and MD array not activated, in use {:?}",
+        old.in_use
+    );
+
+    // Control: without the image's configuration the same event activates them,
+    // and the disk, now held, is refused.
+    let control = guest_script(
+        vm,
+        &format!(
+            "{OLD_LINUX}mv /etc/lvm/lvmlocal.conf /etc/lvm/lvmlocal.conf.off\nmv /etc/mdadm.conf /etc/mdadm.conf.off\ntrigger\nfor i in $(seq 1 30); do [ \"$(active)\" = 'lvm=2 md=1' ] && break; sleep 1; done\necho \"control $(active)\"\n"
+        ),
+        "the control: the event without the image's configuration",
+    )?;
+    ensure!(
+        control.trim().ends_with("control lvm=2 md=1"),
+        "the control did not activate the old installation (the check proves nothing): {control}"
+    );
+    let probe = probe_document(vm)?;
+    let held = probe
+        .disks
+        .iter()
+        .find(|d| d.id == "virtio-oldlinux")
+        .context("no oldlinux disk")?;
+    ensure!(
+        held.in_use.iter().any(|r| r.contains("is used by dm-"))
+            && held.in_use.iter().any(|r| r.contains("is used by md0")),
+        "a held old installation is not reported: {held:?}"
+    );
+    println!("     virtio-oldlinux, activated: in use {:?}", held.in_use);
+    let refusal =
+        plan_refusal_on_uefi(vm, &plan_request(|r| r["disk"] = json!("virtio-oldlinux")))?;
+    ensure!(
+        refusal["code"] == "in-use" && refusal["field"] == "disk",
+        "a held disk was not refused: {refusal}"
+    );
+    Ok(())
+}
+
 // --- installer::plan --------------------------------------------------------
 
 /// Every disk's partition table, first 4 MiB and signature probe, to prove a
@@ -1217,7 +1401,7 @@ echo "backing [$(cat /sys/block/$(basename "$loop")/loop/backing_file)]"
 fn disk_fingerprints(vm: &EphemeralVm) -> Result<String> {
     let out = vm
         .ssh(
-            "for n in blank layout small; do d=/dev/disk/by-id/virtio-$n; echo \"$n $(sfdisk --dump \"$d\" 2>&1 | sed 's/^device:.*//' | sha256sum) $(head -c 4194304 \"$d\" | sha256sum) $(blkid -p \"$d\" >/dev/null 2>&1; echo blkid=$?)\"; done",
+            "for n in blank layout oldlinux small; do d=/dev/disk/by-id/virtio-$n; echo \"$n $(sfdisk --dump \"$d\" 2>&1 | sed 's/^device:.*//' | sha256sum) $(head -c 4194304 \"$d\" | sha256sum) $(blkid -p \"$d\" >/dev/null 2>&1; echo blkid=$?)\"; done",
         )?
         .ok("fingerprinting the disks")?;
     Ok(printed(&out))
@@ -1475,6 +1659,42 @@ fn plan_body(vm: &EphemeralVm) -> Result<()> {
             .any(|w| w.contains("other system(s) found on it")),
         "warnings {:?}",
         layout_plan.warnings
+    );
+
+    // The old Linux installation's disk: offered and plannable, its LVM and MD
+    // volumes listed among what would be erased. Nothing activated them.
+    let old_plan: Plan = serde_json::from_value(call(
+        vm,
+        "Plan",
+        Some(&plan_request(|r| r["disk"] = json!("virtio-oldlinux"))),
+    )?)?;
+    ensure!(
+        old_plan.disk.id == "virtio-oldlinux"
+            && old_plan.erases.partitions.len() == 4
+            && old_plan
+                .erases
+                .systems
+                .iter()
+                .any(|s| s.description.starts_with("LVM2_member"))
+            && old_plan
+                .erases
+                .systems
+                .iter()
+                .any(|s| s.description.starts_with("linux_raid_member"))
+            && old_plan
+                .warnings
+                .iter()
+                .any(|w| w.contains("other system(s) found on it")),
+        "the old installation's plan: {:?} {:?}",
+        old_plan.erases,
+        old_plan.warnings
+    );
+    let still_inactive = vm
+        .ssh("test \"$(dmsetup ls 2>/dev/null | grep -c '^vgold-')\" = 0 && ! grep -q '^md' /proc/mdstat")?
+        .success();
+    ensure!(
+        still_inactive,
+        "planning activated the old installation's volumes"
     );
 
     // Refusals: each names its code and the field at fault.
