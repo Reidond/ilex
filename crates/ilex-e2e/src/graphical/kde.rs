@@ -176,6 +176,7 @@ pub(super) fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> 
             "gtkTheme to be Breeze",
             &format!(
                 "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/$(id -u {USER}) \
+                 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u {USER})/bus \
                  busctl --user call org.kde.kded6 /modules/gtkconfig org.kde.GtkConfig gtkTheme | grep -x 's \"Breeze\"'"
             ),
             Duration::from_secs(120),
@@ -231,6 +232,7 @@ pub(super) fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> 
         "the portal to report the dark scheme",
         &format!(
             "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/$(id -u {USER}) \
+                 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u {USER})/bus \
              busctl --user call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop \
              org.freedesktop.portal.Settings Read ss org.freedesktop.appearance color-scheme | grep -x 'v v u 1'"
         ),
@@ -345,6 +347,7 @@ pub(super) fn gtk3_window(
         "the GTK 3 probe to report",
         &format!(
             "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/$(id -u {USER}) \
+                 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u {USER})/bus \
              journalctl --user -u {PROBE_UNIT}.service --no-pager -o cat | grep '^gtk3 theme='"
         ),
         Duration::from_secs(60),
@@ -423,6 +426,7 @@ mod apps {
             "the portal to report the light scheme",
             &format!(
                 "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/$(id -u {USER}) \
+                 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u {USER})/bus \
                  busctl --user call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop \
                  org.freedesktop.portal.Settings Read ss org.freedesktop.appearance color-scheme | grep -x 'v v u 2'"
             ),
