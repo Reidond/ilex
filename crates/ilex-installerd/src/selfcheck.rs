@@ -613,7 +613,33 @@ fn check_nvme(parent: &Path) -> Result<()> {
             .to_string_lossy(),
         "pcie\n",
     )?;
-    let transports: Vec<Option<String>> = (0..9)
+    // One of two controllers whose transport cannot be read: not provably local.
+    let s9 = subsystem(9)?;
+    attach(&s9, "nvme9", &controller("pci9/nvme/nvme9", "pcie\n")?)?;
+    attach(&s9, "nvme10", &make("pci10/nvme/nvme10")?)?;
+    namespace(&s9, "nvme9n1")?;
+    // Entries of the subsystem that are not controllers (`nvme-fabrics`, a
+    // namespace's own directory) are not read, so they cannot make it remote.
+    let s10 = subsystem(10)?;
+    attach(&s10, "nvme11", &controller("pci11/nvme/nvme11", "pcie\n")?)?;
+    make("virtual/nvme-subsystem/nvme-subsys10/nvme-fabrics")?;
+    namespace(&s10, "nvme10n1")?;
+    // A path under `multipath/` whose transport cannot be read, beside a PCIe
+    // controller, and a subsystem whose own `transport` is not a file.
+    let s11 = subsystem(11)?;
+    attach(&s11, "nvme12", &controller("pci12/nvme/nvme12", "pcie\n")?)?;
+    let ns11 = namespace(&s11, "nvme11n1")?;
+    make(
+        &ns11
+            .strip_prefix(sys.join("devices"))?
+            .join("multipath/nvme11c0n1/device")
+            .to_string_lossy(),
+    )?;
+    let s12 = subsystem(12)?;
+    attach(&s12, "nvme13", &controller("pci13/nvme/nvme13", "pcie\n")?)?;
+    fs::create_dir(s12.join("transport"))?;
+    namespace(&s12, "nvme12n1")?;
+    let transports: Vec<Option<String>> = (0..13)
         .map(|n| disks::nvme_transport(&sys, &format!("nvme{n}n1")))
         .collect();
     let some = |t: &str| Some(t.to_owned());
@@ -629,6 +655,10 @@ fn check_nvme(parent: &Path) -> Result<()> {
                 None,
                 some("fc"),
                 some("pcie"),
+                None,
+                some("pcie"),
+                None,
+                None,
             ],
         "NVMe transports: {transports:?}"
     );
@@ -639,7 +669,7 @@ fn check_nvme(parent: &Path) -> Result<()> {
     // Only the local ones survive lsblk's list, though lsblk says `nvme` of all.
     let lsblk = format!(
         r#"{{"blockdevices":[{}]}}"#,
-        (0..9)
+        (0..13)
             .map(|n| format!(
                 r#"{{"name":"/dev/nvme{n}n1","kname":"/dev/nvme{n}n1","type":"disk","size":16000000000,"tran":"nvme","rm":false,"ro":false,"log-sec":512}}"#
             ))
@@ -649,7 +679,7 @@ fn check_nvme(parent: &Path) -> Result<()> {
     let raws = disks::parse_lsblk(&lsblk, &|_| None, &|name| disks::nvme_transport(&sys, name))?;
     let local: Vec<&str> = raws.iter().map(|r| r.kname.as_str()).collect();
     ensure!(
-        local == ["nvme0n1", "nvme1n1", "nvme2n1", "nvme8n1"],
+        local == ["nvme0n1", "nvme1n1", "nvme2n1", "nvme8n1", "nvme10n1"],
         "local NVMe disks: {local:?}"
     );
     Ok(())

@@ -76,31 +76,44 @@ fn is_network(kname: &str, tran: &str, nvme_transport: Option<&str>) -> bool {
         || (kname.starts_with("nvme") && nvme_transport != Some(NVME_LOCAL))
 }
 
+/// Whether a directory entry is an NVMe controller (`nvme0`, `nvme12`): not a
+/// namespace (`nvme0n1`), a path (`nvme0c0n1`) or the subsystem (`nvme-subsys0`).
+fn is_nvme_controller(entry: &str) -> bool {
+    entry
+        .strip_prefix("nvme")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// The transport of the controllers behind an NVMe namespace, from sysfs:
-/// `pcie` when every controller found is on PCIe, else the first other one;
-/// `None` when no controller's transport could be read. Without native
-/// multipath `device` is the controller; with it (Fedora's default) it is the
-/// NVMe subsystem, whose `nvme*` entries are its controllers, and newer
-/// kernels also list each path under `multipath/`.
+/// `pcie` only when at least one controller was found and every one of them
+/// reads as PCIe; the first other transport when a controller reads as one;
+/// `None` when any controller's transport cannot be read or reads empty, or no
+/// controller is found. Without native multipath `device` is the controller;
+/// with it (Fedora's default) it is the NVMe subsystem, which has no transport
+/// of its own (a missing file there is expected, any other error is not) and
+/// whose `nvme<digits>` entries are its controllers; newer kernels also list
+/// each path under `multipath/`.
 pub fn nvme_transport(sys: &Path, name: &str) -> Option<String> {
     let block = fs::canonicalize(sys.join("class/block").join(name)).ok()?;
-    let mut found: Vec<String> = Vec::new();
-    let mut read = |controller: &Path| {
-        if let Ok(text) = fs::read_to_string(controller.join("transport")) {
-            found.push(text.trim().to_owned());
-        }
-    };
     let subsystem = block.join("device");
-    read(&subsystem);
+    let mut found: Vec<String> = Vec::new();
+    match fs::read_to_string(subsystem.join("transport")) {
+        Ok(text) => found.push(text.trim().to_owned()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
     for entry in directory_names(&subsystem) {
-        if entry.starts_with("nvme") {
-            read(&subsystem.join(entry));
+        if is_nvme_controller(&entry) {
+            let text = fs::read_to_string(subsystem.join(&entry).join("transport")).ok()?;
+            found.push(text.trim().to_owned());
         }
     }
     for path in directory_names(&block.join("multipath")) {
-        read(&block.join("multipath").join(path).join("device"));
+        let text =
+            fs::read_to_string(block.join("multipath").join(path).join("device/transport")).ok()?;
+        found.push(text.trim().to_owned());
     }
-    if found.iter().any(String::is_empty) {
+    if found.is_empty() || found.iter().any(String::is_empty) {
         return None;
     }
     found
