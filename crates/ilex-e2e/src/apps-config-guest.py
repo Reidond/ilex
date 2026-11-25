@@ -36,5 +36,16 @@ if any(shell['name'] == 'gnome' and shell.get('apps', {}).get('flatpak') for she
                     'gnome-system-monitor', 'gnome-disk-utility', 'sushi',
                     'papers-nautilus', 'papers-libs', 'papers-thumbnailer', 'papers-previewer']:
         subprocess.run(['rpm', '-q', package], check=True)
+if any(shell['name'] == 'kde' and shell.get('apps', {}).get('flatpak') for shell in image['shells']):
+    assert not Path('/usr/bin/firefox').exists()
+    for package in ['dolphin', 'konsole', 'spectacle', 'plasma-systemmonitor', 'kde-partitionmanager',
+                    'plasma-discover', 'plasma-discover-flatpak', 'flatpak-kcm', 'xdg-desktop-portal-kde',
+                    'ark', 'kio-admin', 'kdegraphics-thumbnailers', 'ffmpegthumbs']:
+        subprocess.run(['rpm', '-q', package], check=True)
+    # Applications delivered as Flatpaks are not also host packages.
+    for package in ['kwrite', 'kcalc', 'okular', 'gwenview', 'haruna', 'elisa-player', 'krdc', 'ktorrent',
+                    'neochat', 'kolourpaint', 'kamoso', 'filelight', 'kfind', 'kcharselect', 'marble',
+                    'merkuro', 'kclock', 'kweather', 'skanpage', 'kwalletmanager5', 'plasma-discover-packagekit']:
+        assert subprocess.run(['rpm', '-q', package], capture_output=True).returncode == 1, package
 assert not Path('/var/lib/flatpak/app').exists(), 'default tests must not download Flathub apps'
 subprocess.run(['ilexctl', 'apps', '--self-check'], check=True)

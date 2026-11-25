@@ -1,6 +1,7 @@
 //! `graphical::` tier: A 4K virtio-vga VM driven over QMP; assertions over SSH.
 //!
-//! The plan's four steps, on one VM (headless, 3840x2160):
+//! The default shell selects the flow: GNOME below, KDE in [`kde`]. The plan's
+//! four steps, on one VM (headless, 3840x2160):
 //!
 //! 1. boot the qcow2 from `bcvk to-disk`;
 //! 2. wait for `gdm` over SSH, then until the screen is not blank;
@@ -32,6 +33,8 @@ use libtest_mimic::{Failed, Trial};
 use crate::common;
 use crate::disk::vmtest;
 
+mod kde;
+
 const USER: &str = "ilextest";
 /// The user's stored display configuration (what GNOME Settings writes).
 const MONITORS_XML: &str = "/var/home/ilextest/.config/monitors.xml";
@@ -51,24 +54,29 @@ pub fn apps_trial() -> Trial {
 
 fn run(apps: bool) -> Result<()> {
     let selection = common::selection()?;
-    if selection.default_shell.as_deref() != Some("gnome") {
-        bail!(
-            "graphical::login requires default shell `gnome`, got {:?}; this tier exercises GNOME's login and scaling",
-            selection.default_shell
-        );
-    }
+    let shell = match selection.default_shell.as_deref() {
+        Some(shell @ ("gnome" | "kde")) => shell,
+        other => bail!(
+            "graphical::login requires default shell `gnome` or `kde`, got {other:?}; this tier exercises their login and look"
+        ),
+    };
     let ws = common::workspace()?;
-    let artifacts = qemu::artifact_dir(&ws, if apps { "graphical-apps" } else { "graphical" })?;
+    let tier = if apps { "graphical-apps" } else { "graphical" };
+    let artifacts = qemu::artifact_dir(&ws, tier)?;
     clear_artifacts(&artifacts);
 
     // 1. Boot the installed disk.
     let disk = vmtest::disk(&ws)?;
-    let mut config = VmConfig::graphical(if apps { "graphical-apps" } else { "graphical" }, disk);
+    let mut config = VmConfig::graphical(tier, disk);
     config.apps = apps;
     let mut vm = vmtest::boot(&ws, config)?;
     let ctl = Vmctl::from_info(vm.info.clone());
 
-    let result = session(&mut vm, &ctl, &artifacts, apps);
+    let result = if shell == "kde" {
+        kde::session(&mut vm, &ctl, &artifacts, apps)
+    } else {
+        session(&mut vm, &ctl, &artifacts, apps)
+    };
     if result.is_err() {
         // Evidence for whoever reads the failure.
         let _ = ctl.save_screenshot(&artifacts.join("failure.png"));
@@ -87,7 +95,7 @@ fn run(apps: bool) -> Result<()> {
 fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, apps: bool) -> Result<()> {
     // 2. GDM is up and has drawn something. On a fresh install that is GNOME
     // Initial Setup, run by GDM because there is no user yet.
-    wait_gdm(vm)?;
+    wait_greeter(vm)?;
     let frame = settle(ctl)?;
     println!("ok   gdm is active and the screen settled at {}x{}", frame.width, frame.height);
     shot(ctl, artifacts, "01-first-boot")?;
@@ -104,7 +112,7 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, apps: bool) -> Result<()>
     }
     println!("ok   created test user {USER}");
     vm.reboot(vmtest::BOOT_TIMEOUT).context("rebooting with the test user in place")?;
-    wait_gdm(vm)?;
+    wait_greeter(vm)?;
     settle(ctl)?;
     let sessions = vm.ssh_ok("loginctl list-sessions --no-legend")?;
     if sessions.contains("gnome-initial-setup") {
@@ -200,7 +208,7 @@ fn scaling(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result
 
     // A fresh login after a reboot, so the whole stack restarts, must honour it.
     vm.reboot(vmtest::BOOT_TIMEOUT).context("rebooting with the stored display config")?;
-    wait_gdm(vm)?;
+    wait_greeter(vm)?;
     settle(ctl)?;
     ctl.key("Return")?;
     std::thread::sleep(Duration::from_secs(3));
@@ -413,9 +421,9 @@ fn wait_session(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-/// `gdm` is active and a greeter-class session (login screen or initial
-/// setup) exists.
-fn wait_gdm(vm: &mut Vm) -> Result<()> {
+/// The shell's greeter unit is active and a greeter-class session (login
+/// screen, or GNOME's initial setup) exists.
+fn wait_greeter(vm: &mut Vm) -> Result<()> {
     let greeter = common::greeter()?.context("graphical::login needs a greeter")?;
     vm.wait_for(
         &format!("{greeter} to be active"),
@@ -423,7 +431,7 @@ fn wait_gdm(vm: &mut Vm) -> Result<()> {
         SESSION_TIMEOUT,
     )?;
     vm.wait_for(
-        "a GDM greeter session",
+        "a greeter session",
         "loginctl list-sessions --no-legend | grep -w greeter",
         SESSION_TIMEOUT,
     )?;

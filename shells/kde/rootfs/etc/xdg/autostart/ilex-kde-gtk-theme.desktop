@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ilex GTK theme default
+Comment=Select the Breeze GTK theme once, if no GTK theme has been chosen
+Exec=/usr/libexec/ilex/kde-gtk-theme
+OnlyShowIn=KDE;
+NoDisplay=true
+X-KDE-autostart-phase=2
