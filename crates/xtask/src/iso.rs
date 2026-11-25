@@ -41,6 +41,8 @@ const INSTALLER_INPUTS: &[&str] = &[
     "crates/xtask/src/iso.rs",
     "crates/ilex-tooling-core/src/installer.rs",
     "crates/ilex-tooling-core/src/config.rs",
+    // The catalogue's types and their validator write compositions.json.
+    "crates/ilex-installer-model",
     "crates/ilex-enroll",
     "Cargo.toml",
     "Cargo.lock",
