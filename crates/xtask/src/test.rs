@@ -40,21 +40,22 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
-    // The next installer's live ISO carries no image: `iso::next…` alone needs
-    // neither the checkout's image nor a build of it.
-    let only_next = !args.filters.is_empty()
+    // The next installer's live ISO and live image carry no OS image:
+    // `iso::next…` and `installer::` alone need neither the checkout's image
+    // nor a build of it.
+    let installer_only = !args.filters.is_empty()
         && args
             .filters
             .iter()
-            .all(|f| crate::iso_next::is_next_filter(f));
-    let image = if only_next {
+            .all(|f| crate::iso_next::is_next_filter(f) || f.contains("installer::"));
+    let image = if installer_only {
         None
     } else {
         Some(image_under_test(ws, &args)?)
     };
     eprintln!(
         "ilex: testing {} from {} (slug {})",
-        image.as_deref().unwrap_or("the live installer ISO"),
+        image.as_deref().unwrap_or("the live installer"),
         ws.root.display(),
         ws.slug
     );
@@ -87,7 +88,27 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     {
         prepare_iso_next(ws, &mut test)?;
     }
+    if args.filters.iter().any(|f| f.contains("installer::")) {
+        prepare_installer_image(ws, &mut test)?;
+    }
     cmd::run(&mut test)
+}
+
+/// Build the next installer's live image (unless `ILEX_INSTALLER_IMAGE` names
+/// one) for `installer::`: the root helper's tier boots it without an ISO.
+fn prepare_installer_image(ws: &Workspace, test: &mut Command) -> Result<()> {
+    if std::env::var_os("ILEX_INSTALLER_IMAGE").is_some_and(|p| !p.is_empty()) {
+        return Ok(());
+    }
+    let image = crate::iso_next::build_image(
+        ws,
+        &crate::iso_next::Build {
+            edition: crate::iso_next::DEFAULT_EDITION,
+            output_dir: None,
+        },
+    )?;
+    test.env("ILEX_INSTALLER_IMAGE", image);
+    Ok(())
 }
 
 /// Build the next installer's live ISO (unless `ILEX_ISO_NEXT` names one
