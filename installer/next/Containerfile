@@ -133,9 +133,14 @@ RUN dconf update && \
     ilex-enroll tool-manifest > /usr/lib/ilex/security/tools.json
 
 # Rebuild the initramfs with dracut's live-boot module, generic (not
-# host-only) so it boots on whatever the ISO is written to.
+# host-only) so it boots on whatever the ISO is written to. It activates no LVM
+# volume group and assembles no MD array (`rd.lvm=0 rd.md=0`, also on the boot
+# entries, which a bootloader of someone else's, Ventoy's for one, replaces):
+# what an earlier installation left on a disk must not hold the disk. The
+# running system's own udev rules are quieted in rootfs/etc/lvm/lvmlocal.conf and
+# rootfs/etc/mdadm.conf.
 RUN mkdir -p "$(realpath /root)" && \
     kernel=$(basename "$(ls -d /usr/lib/modules/*/ | head -n 1)") && \
     DRACUT_NO_XATTR=1 dracut --force -v --zstd --reproducible --no-hostonly \
-        --add dmsquash-live \
+        --add dmsquash-live --kernel-cmdline "rd.lvm=0 rd.md=0" \
         "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}"

@@ -2550,7 +2550,9 @@ the Windows paths of this change: no Windows host was available.
   nothing to the session and stay as fedora-bootc ships them.
 - **Boot entries.** "Install ilex" and "Install ilex (basic graphics)"
   (`nomodeset`); the second makes the session set `GSK_RENDERER=cairo` and
-  `LIBGL_ALWAYS_SOFTWARE=1`. The ISO's volume label is
+  `LIBGL_ALWAYS_SOFTWARE=1`. Both carry `rd.lvm=0 rd.md=0` (also baked into the
+  initramfs): the live system activates no LVM volume group and assembles no MD
+  array, so a disk with an old installation is offered. The ISO's volume label is
   `ilex-installer-<edition>`.
 - **SELinux: the live image boots permissive and unlabeled.** The kernel
   command line is `root=live:CDLABEL=… rd.live.image quiet rhgb enforcing=0
@@ -2957,6 +2959,15 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   - `in_use`: why the running system is using the disk otherwise, one sentence
     each: a mounted partition, an entry of `/proc/swaps` (device or file), or a
     device stacked on it or a partition (non-empty `holders/`: LVM, MD, dm-crypt).
+    A disk that carries an old Linux installation is therefore offered only while
+    the live system has not activated its volume group or array, so the live
+    image activates none: `rd.lvm=0 rd.md=0` is on both boot entries and baked
+    into the initramfs (dracut's `--kernel-cmdline`, for a bootloader that brings
+    its own command line), and `/etc/lvm/lvmlocal.conf` (`event_activation = 0`,
+    an empty `auto_activation_volume_list`) and `/etc/mdadm.conf` (`AUTO -all`) quiet
+    udev once the system is up. Activating one by hand (`vgchange -ay`) makes its
+    disks `in-use` again until it is deactivated from the tty2 shell; the helper
+    never deactivates anything.
   An ESP is mounted read-only (`noexec,nodev,nosuid`) by a child of the helper
   (`--scan-esp`) inside `unshare --mount`, at a per-call mount point in a
   private 0700 directory the helper made under its runtime directory (never a
@@ -3045,9 +3056,11 @@ otherwise it is built, without the OS image or an ISO) as an ephemeral VM with
 an SSH server added in a layer of the harness's own (tagged
 `localhost/ilex-installer-next-test:<slug>.<image id>` and labelled with the
 checkout's owner, like the images the tooling builds), the kiosk session masked
-and seven disks: a blank 40 GiB disk, a 48 GiB disk carrying a fake dual-boot
+and eight disks: a blank 40 GiB disk, a 48 GiB disk carrying a fake dual-boot
 layout (an ESP with Windows and Ubuntu loader directories, a reserved partition,
-a LUKS volume and a labelled ext4 partition), an 8 GiB disk, and four the running
+a LUKS volume and a labelled ext4 partition), a 36 GiB disk carrying an old Linux
+installation (`/boot`, an LVM volume group with two volumes, an MD RAID 1 array),
+an 8 GiB disk, and four the running
 system uses: an ISO mounted by its `/dev/disk/by-label` name as given, an ISO file
 on a mounted partition attached to a loop device and mounted where dracut mounts
 the medium (iso-scan), a device-mapper device over a partition holding an ISO
@@ -3057,7 +3070,13 @@ share the VM and one of them restarts the helper with fixtures, so the group run
 them one at a time; `--test-threads 1` is not needed. `installer::probe` runs the
 self-check beside a loop of probes, compares the probe with what the guest
 reports, checks the disks (free extents and other systems included, the three
-live media and the disk in use), points the unit at SMBIOS and command-line
+live media and the disk in use), shows that the event of the old installation's
+disk appearing activates neither its volume group nor its array, then that the
+same event does activate both once the image's LVM and MD configuration is moved
+aside (so the first check proves something) and that the disk, now held, is
+refused (`in-use`) and offered again once the configuration is back, shows that a
+loop device whose file's mount was lazily unmounted (the kernel then names the
+file `/lost.iso`, which `/` contains) marks every disk in use, points the unit at SMBIOS and command-line
 fixtures to exercise detection through the bus (MS-7C35 by system and by board
 alone, case, a vendor alone, the boot override and an unknown one), requires
 `Access denied` for `nobody` and `daemon` on every method and on introspection,
@@ -3066,7 +3085,8 @@ user is denied. `installer::plan` first points the helper at an absent
 firmware directory (a BIOS boot is refused), then at a present one: whole-disk
 plans for the blank disk plain and encrypted, the pinned digest against an
 independent resolution in the guest, the layout disk and its five systems in the
-warning, a refusal with its code and field for every way a request can be
+warning, the old installation's disk (plannable, its volumes among what would
+be erased, nothing activated), a refusal with its code and field for every way a request can be
 refused (the live media, the disk in use, the reserved and system names, the
 language, zone and keymap, the malformed requests, and the rest), a secret never
 quoted back, no disk changed and no scratch file left behind. The registry,
