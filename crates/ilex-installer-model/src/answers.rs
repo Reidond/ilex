@@ -5,7 +5,7 @@
 //! belong to the installation itself.
 
 use crate::plan::{ErrorCode, Mode, PlanError, PlanRequest, TpmMode};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use std::fmt;
 
@@ -94,8 +94,22 @@ pub struct AdministratorAnswers {
 }
 
 impl Answers {
+    /// Parse `answers.toml`. A syntax or schema error says where, never what:
+    /// toml's own message quotes the offending line, and the file holds
+    /// passwords.
     pub fn parse(text: &str) -> Result<Self> {
-        let answers: Self = toml::from_str(text).context("reading answers.toml")?;
+        let answers: Self = toml::from_str(text).map_err(|error| {
+            let (line, column) = error.span().map_or((0, 0), |span| {
+                let before = &text[..span.start.min(text.len())];
+                (
+                    before.matches('\n').count() + 1,
+                    before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1,
+                )
+            });
+            anyhow::anyhow!(
+                "answers.toml is not valid near line {line}, column {column} (the message is withheld: the file may hold secrets)"
+            )
+        })?;
         anyhow::ensure!(
             answers.schema == ANSWERS_SCHEMA,
             "unsupported answers schema {}",
@@ -144,6 +158,31 @@ impl Answers {
             return invalid(
                 "administrator.password",
                 "the administrator needs a password",
+            );
+        }
+        // The account is created with a shadow entry and a password read from
+        // a line: a line break or NUL would end it early.
+        if self
+            .administrator
+            .password
+            .expose()
+            .contains(['\n', '\r', '\0'])
+        {
+            return invalid(
+                "administrator.password",
+                "the password may not contain a line break or a NUL character",
+            );
+        }
+        // A NUL ends a C string wherever the passphrase is handed on.
+        if self
+            .encryption
+            .passphrase
+            .as_ref()
+            .is_some_and(|p| p.expose().contains('\0'))
+        {
+            return invalid(
+                "encryption.passphrase",
+                "the passphrase may not contain a NUL character",
             );
         }
         let defaults = PlanRequest::parse(

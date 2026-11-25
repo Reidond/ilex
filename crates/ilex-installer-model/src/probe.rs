@@ -64,8 +64,19 @@ pub struct Disk {
     pub sector_size: u32,
     pub bus: String,
     pub removable: bool,
-    /// The disk the live system booted from. Never a target.
+    /// The disk the live system booted from, found through its mounts, the
+    /// devices stacked on it and the files loop devices are backed by. Never
+    /// a target.
     pub live_medium: bool,
+    /// Why the running system is using this disk (a mounted partition,
+    /// active swap, a device-mapper or MD device built on it): one sentence
+    /// each. A disk with any is never a target.
+    #[serde(default)]
+    pub in_use: Vec<String>,
+    /// What the probe could not read (an EFI system partition that would not
+    /// mount): the list of other systems may then be incomplete.
+    #[serde(default)]
+    pub notes: Vec<String>,
     pub partition_table: Option<String>,
     pub partitions: Vec<Partition>,
     pub free_extents: Vec<Extent>,
