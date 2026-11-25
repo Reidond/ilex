@@ -441,8 +441,14 @@ def image(args):
             "packages": base_packages, "shell-packages": shell_packages,
         }))
         generated.write("usr/share/ilex/machine.json", json_bytes(machine))
+    # The default shell's greeter owns display-manager.service. Every shell's
+    # package enables its own greeter, so with several shells the last scriptlet
+    # would win: the Containerfile disables the others and enables this one.
+    greeters = [m["greeter"]["unit"] for m in manifests if m["name"] == shell_default] + \
+               [m["greeter"]["unit"] for m in manifests if m["name"] != shell_default and "greeter" in m]
     with Tree(out / "install", "installation staging", create=True) as staging:
         staging.write("overlays.json", json_bytes(overlays))
+        staging.write("greeters", "".join(unit + "\n" for unit in greeters).encode("utf-8"))
         staging.write("install-files.py", Path(__file__).with_name("image_tree.py").read_bytes())
     for part, package_set in (("base", base_packages), ("shells", flattened(shell_sets))):
         arguments = package_set["install"] + [f"--exclude={p}" for p in package_set["exclude"]]
