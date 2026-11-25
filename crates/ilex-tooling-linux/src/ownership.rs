@@ -102,6 +102,7 @@ fn check_output_namespace(ws: &Workspace, image: &str) -> Result<()> {
     let reserved = [
         "localhost/ilex:main",
         "localhost/ilex-installer:main",
+        "localhost/ilex-installer-next:main",
         "localhost/ilex-image-builder:main",
     ];
     ensure!(
