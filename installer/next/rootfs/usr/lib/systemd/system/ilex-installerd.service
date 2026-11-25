@@ -3,18 +3,30 @@ Description=ilex installer helper
 Documentation=https://github.com/Reidond/ilex
 After=dbus.socket
 Requires=dbus.socket
+# A crash or two does not end the installation session (the interface
+# re-attaches with State()); systemd's default start limit (five starts in ten
+# seconds) stops a helper that keeps crashing, and it stays down and reported.
 
 [Service]
 Type=dbus
 BusName=org.ilex.Installer1
 ExecStart=/usr/libexec/ilex-installer/ilex-installerd
 RuntimeDirectory=ilex-installer
-RuntimeDirectoryMode=0755
+# Root's own: nothing in it is for another user (plans' scratch, the state
+# record, and later the key files an installation hands to its tools).
+RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 LimitCORE=0
-# The helper does not restart while an installation runs (a later PR); until
-# then a crash is simply reported.
-Restart=no
+# The helper's mounts (an ESP mounted read-only to name its loaders, and
+# anything a later stage mounts) stay out of the host's mount namespace; the
+# host's mounts still reach the helper, which needs them to see what is in use.
+PrivateMounts=yes
+# Probe, Plan and State read; they hold nothing an installation needs, so a
+# restart loses only the latest plans. Apply (a later PR) records its stage
+# on disk before it writes anything and must not resume a half-done
+# installation on its own.
+Restart=on-failure
+RestartSec=1s
 
 [Install]
 WantedBy=multi-user.target
