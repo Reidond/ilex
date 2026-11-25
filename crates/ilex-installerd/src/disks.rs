@@ -6,7 +6,7 @@
 use crate::{
     exec,
     scratch::Scratch,
-    topology::{self, Roots, Topology},
+    topology::{self, Roots, System, Tracer},
 };
 use anyhow::{Context, Result};
 use ilex_installer_model::probe::{Disk, Extent, OtherSystem, Partition};
@@ -555,11 +555,21 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
     let mut raws = parse_lsblk(&output.stdout_text(), &sysfs_start, &|name| {
         nvme_transport(&roots.sys, name)
     })?;
-    // What the system is using is read or the probe fails.
+    // What the system is using is read or the probe fails: the mount table,
+    // the swap areas and the loop devices (the kernel's own record of each
+    // one's file), none of which may look empty for being unreadable.
     let (mounts, swaps) =
         topology::read_tables(Path::new("/proc/self/mountinfo"), Path::new("/proc/swaps"))?;
-    let topology = Topology::new(roots, &mounts);
-    let usage = topology::usage(&topology, &mounts, &swaps);
+    let loops = topology::parse_losetup(
+        &exec::run_ok("losetup", &topology::LOSETUP_ARGS, TOOL_TIMEOUT)?.stdout_text(),
+    )?;
+    let system = System {
+        mounts,
+        swaps,
+        loops,
+    };
+    let tracer = Tracer::new(roots, &system);
+    let usage = tracer.usage();
     let mut taken = BTreeSet::new();
     let mut esp_count = 0;
     for raw in &mut raws {
@@ -583,7 +593,7 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
         for name in std::iter::once(raw.kname.clone())
             .chain(disk.partitions.iter().map(|p| kernel_name(&p.path)))
         {
-            let holders = topology.holders(&name);
+            let holders = tracer.holders(&name);
             if !holders.is_empty() {
                 reasons.insert(format!(
                     "/dev/{name} is used by {} (an LVM, MD or dm-crypt device)",

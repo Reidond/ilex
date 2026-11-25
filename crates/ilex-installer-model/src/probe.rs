@@ -69,8 +69,10 @@ pub struct Disk {
     /// a target.
     pub live_medium: bool,
     /// Why the running system is using this disk (a mounted partition,
-    /// active swap, a device-mapper or MD device built on it): one sentence
-    /// each. A disk with any is never a target.
+    /// active swap, a loop device attached to a file or node on it, a
+    /// device-mapper or MD device built on it), or why the helper cannot tell
+    /// (a use it could not trace marks every disk): one sentence each. A disk
+    /// with any is never a target.
     #[serde(default)]
     pub in_use: Vec<String>,
     /// What the probe could not read (an EFI system partition that would not
