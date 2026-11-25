@@ -2759,78 +2759,142 @@ still builds the table with `installer::table`, and its serialization is
 byte-identical (field order and names are the file format), so the Anaconda ISO's
 `compositions.json`, `iso.yaml` and release notes do not change. The installer
 fingerprint does change once, because its inputs include `ilex-tooling-core`'s
-`installer.rs` and `config.rs` and the Cargo files.
+`installer.rs` and `config.rs`, the model crate and the Cargo files.
 
 - **Editions.** One ISO installs one shell. `edition.json` (written into the live
   image from `installer/next/editions.toml`, where the display name lives) names
   it; the identifier is the shell. `Table::for_edition` keeps the compositions
-  whose default (first) shell is the edition's, with that edition's own default:
-  the table's when it belongs to the edition, else its first generic
-  composition. There is no desktop choice; a machine gets the default's shell
+  whose shell list is exactly the edition default's, in order: the table's default
+  when it starts with the edition's shell, else the edition's first generic
+  composition. A composition that merely starts with the edition's shell
+  (`generic.gnome.ilex` for the GNOME edition) belongs to another edition and is
+  not offered. There is no desktop choice; a machine gets the default's shell
   list or nothing. A table with neither an edition record nor `--edition` is the
-  Anaconda path's: its default composition's shell (GNOME).
+  Anaconda path's: its default composition's shell (GNOME). `--table` brings the
+  `edition.json` beside it; a record that exists but cannot be read stops the
+  helper, only an absent one means the Anaconda path.
 - **Detection** is `installer/chooser/ilex-installer-choice` ported with the same
   meaning: exact, case-sensitive comparison of the four SMBIOS strings (stripped
   as Python's `strip` does); a vendor or model alone never matches; two
   matching machines fall back to the default and say so; a recognised machine
-  without a composition of the default's shells falls back with its own
-  reason. The choice order is the last `ilex.composition=<tag>` kernel argument,
+  without a composition falls back with its own reason. `Table::detect` is the
+  chooser's own rule on a whole table; the helper uses `detect_for_edition`, which
+  runs it on the whole catalogue and maps the result into the edition, so two
+  machines matching the same computer are a conflict even when one has no
+  composition in this edition, and a machine that has none here is reported
+  as such. The choice order is the last `ilex.composition=<tag>` kernel argument,
   then `/run/ilex-installer/choice` (a tag or the schema-1 record), then
   detection. An unknown tag is an error that lists the offers. `Selected::serial_line`
   keeps `ILEX-COMPOSITION <tag> (<reason>) installs <ref>`; the interface prints it.
 - **`ilex-installerd`** is a root service on the system bus, `org.ilex.Installer1`
   at `/org/ilex/Installer1` (zbus), started at boot by `ilex-installerd.service`
-  (`Type=dbus`, no restart, no core files) and by bus activation if a caller
-  gets there first. Its bus policy
-  (`org.ilex.Installer1.conf`) lets only root and `ilex-installer` own or call
-  it; anyone else, including introspection, gets `Access denied`. Every method
-  takes and returns JSON text and none takes a path, an image reference, a
-  kernel argument or a command. `Probe()` reports the helper and edition,
-  firmware (UEFI, Secure Boot, setup mode), `ilex-enroll`'s probe verbatim,
-  the DMI identity and detection, the boot-argument selection (or its error),
-  this edition's catalogue, the disks and memory. A disk has a stable id
+  (`Type=dbus`, `Restart=on-failure` within a start limit, no core files,
+  `PrivateMounts=yes`, a 0700 runtime directory) and by bus activation if a
+  caller gets there first. Its bus policy (`org.ilex.Installer1.conf`) lets root
+  own the name and call it and `ilex-installer` call it; anyone else, including
+  introspection, gets `Access denied`. The shell on tty2 is a root autologin, so
+  it is allowed like root. With the helper stopped, the installer's call starts
+  it and a refused user is denied (the tier checks both); dbus-broker starts an
+  activatable service for any call to its name before it applies the policy, so
+  a refused call still starts the helper, which is harmless: it is started at
+  boot anyway and answers only the allowed. Every method takes and returns JSON text and none takes
+  a path, an image reference, a kernel argument or a command. A crashed helper
+  restarts and forgets its plans (a later Apply must record its stage before it
+  writes anything and must not resume by itself). `Probe()` reports the helper
+  and edition, firmware (UEFI, Secure Boot, setup mode), `ilex-enroll`'s probe
+  verbatim, the DMI identity and detection, the boot-argument selection (or its
+  error), this edition's catalogue, the disks and memory. A disk has a stable id
   (`/dev/disk/by-id`: `nvme-eui.*`, `wwn-*`, any other, then the bus path, then
-  the kernel name), model, serial, size, bus, `removable`, `live_medium` (the
-  disk behind `/run/initramfs/live` or any mounted iso9660/udf), the partition
-  table, partitions, free extents (whole MiB between partitions, inside GPT's
-  usable range) and other systems found: EFI loader directories (an ESP is
-  mounted read-only, `noexec,nodev,nosuid`, and unmounted), Windows, BitLocker,
-  Linux, LUKS and Apple filesystems. Zram, loop, network and read-only devices
-  are not disks. `Plan(request)` takes `composition`, `disk`, `mode`, and
+  the kernel name), model, serial, size, bus, `removable`, the partition table,
+  partitions, free extents (whole MiB between partitions, inside GPT's usable
+  range) and other systems found: EFI loader directories, Windows, BitLocker,
+  Linux, LUKS and Apple filesystems. Zram, loop, optical, read-only and
+  network-attached devices (nbd, iSCSI, Fibre Channel, SRP, NVMe over fabrics)
+  are not disks. Two flags keep the running system's own disks out of reach:
+  - `live_medium`: the disk the live system came from. Every mount at or under
+    `/run/initramfs` and every iso9660 or udf mount is followed through the kernel,
+    not through the text of its source: its device number (`/sys/dev/block/M:m`),
+    else its canonicalised `/dev` source, then up from a partition to its disk,
+    down through `slaves/` (device-mapper, MD: Ventoy's `/dev/mapper/ventoy`) and
+    through a loop device's `backing_file` to the device the file lives on
+    (dracut's iso-scan, with the host disk at `/run/initramfs/isoscan`). A live
+    mount that cannot be followed marks every disk in use rather than guessing.
+  - `in_use`: why the running system is using the disk otherwise, one sentence
+    each: a mounted partition, an entry of `/proc/swaps` (device or file), or a
+    device stacked on it or a partition (non-empty `holders/`: LVM, MD, dm-crypt).
+  An ESP is mounted read-only (`noexec,nodev,nosuid`) by a child of the helper
+  (`--scan-esp`) inside `unshare --mount`, at a per-call mount point in a
+  private 0700 directory the helper made under its runtime directory (never a
+  symlink, owner-checked, removed empty): the mount exists in that child's mount
+  namespace only, so neither the host, the daemon, another probe nor the
+  `--self-check` shares it, and an unmount failure is reported (in `notes`, and as
+  a plan warning) rather than ignored. An ESP that cannot be read says so and the
+  list of other systems may be incomplete.
+  `Plan(request)` takes `composition`, `disk`, `mode`, and
   optionally `encrypt` (on), `tpm` (`auto` with encryption, else `off`),
   `keyboard` (`us`), `language` (`en_US.UTF-8`), `time_zone` (`Etc/UTC`),
   `host_name` (`ilex`) and `administrator`; unknown fields are refused. It
   probes afresh and refuses, with a JSON `{code, field, message}` as the error
-  message: a composition outside the edition (`vm` is named as never installed
+  message: a BIOS boot (`unsupported-firmware`: the installer is UEFI only), a
+  composition outside the edition (`vm` is named as never installed
   on hardware), `free-space` mode (a later PR), a disk id not in the probe, the
-  live medium, a disk under `MIN_DISK_BYTES` (512 MiB ESP + 1 GiB `/boot` + 30 GiB
-  root + alignment, to be set from a measured install), TPM without
-  encryption, system and daily-profile account names for the administrator,
-  a malformed language, keymap, zone or host name, and a zone or keymap this
-  system lacks. It resolves the tag with `skopeo inspect --raw` to the manifest
-  digest (it hashes exactly the returned bytes), reads the download size and
-  `org.opencontainers.image.version`/`revision` from the config, and
-  runs `systemd-repart --dry-run=yes --empty=force --seed=<plan seed>` on the
-  whole-disk definitions (`/usr/lib/ilex-installer/repart/whole-disk`; the
-  encrypted root replaces the plain one). The plan holds a 128-bit id, the seed
-  that makes Apply create the same UUIDs, the normalised request, the image
-  (`target` tag and pinned `source@digest`), the partitions, what is erased and
-  the other systems it destroys, the planned unlock method with the probe's reason
-  code, and warnings. The registry answer is metadata: signatures are enforced
-  when the image is pulled. `State()` reports the stage (`idle` until Apply
-  exists), the latest plan id and a record at `/run/ilex-installer/state.json`.
+  live medium, a disk in use (`in-use`), a disk under `MIN_DISK_BYTES` (512 MiB ESP
+  + 1 GiB `/boot` + 30 GiB root + alignment, to be set from a measured install),
+  TPM without encryption, an administrator name that is reserved, and a malformed
+  or unavailable language, keymap, zone or host name. An administrator name is
+  at most 31 bytes (as systemd and `build/compose.py` limit them) and may not be
+  any name the live image defines in `/etc/passwd`, `/etc/group` or `sysusers.d`,
+  a `systemd-` name, one of the installed image's own (`ilex-homed`, `gamemode`,
+  `sshd`, `tss`, `chrony`, ...) or a daily-profile name. A time zone is a zone
+  file of the zoneinfo tree that starts with the TZif magic (so not `zone.tab` or
+  `leapseconds`), outside `posix/` and `right/` and not `posixrules`. A language
+  is a UTF-8 glibc locale name (`ll[l]_TT.UTF-8`, `C.UTF-8`, an optional `@modifier`);
+  that is a syntax check only, because the live image carries no list of the
+  locales the installed system can generate (glibc's `SUPPORTED` is not in it), so
+  a well-formed name for a locale the system lacks falls back to the C locale there.
+  A refusal names its field and may repeat that field's own (non-secret) value
+  (`unknown time zone X`); a request that is not valid JSON of the schema is
+  refused with a message that never quotes a value of the document, only a
+  position and the name of a missing or unknown field, because a caller may have
+  put anything, a secret included, in a mistyped field. The tier sends a secret in
+  an unknown field, a mistyped field and an unknown mode and requires that it
+  never comes back. `Plan` resolves the tag with `skopeo inspect --raw` to the
+  manifest digest (it hashes exactly the returned bytes), reads the download
+  size and `org.opencontainers.image.version`/`revision` from the config, and runs
+  `systemd-repart --dry-run=yes --empty=force --seed=<plan seed>` on the shipped
+  layout directory itself: `/usr/lib/ilex-installer/repart/whole-disk` or
+  `whole-disk-encrypted`, each a complete layout (one root partition) that
+  repart is pointed at as it is, never assembled or copied. The registry is
+  untrusted until the signature is checked at pull, so its answers are checked
+  before use: a digest must be `sha256:` and 64 lower-case hex digits before it
+  reaches skopeo, a child manifest fetched by digest must hash to that digest, an
+  image manifest must have a config and layers with sizes (added with checked
+  arithmetic), only `manifest unknown` and `name unknown` (any case) mean the image
+  is absent, text shown from it has no control characters, and every tool's output
+  is bounded (a tool that prints more is stopped and the call fails). The plan holds
+  a 128-bit id, the seed that makes Apply create the same UUIDs, the normalised
+  request, the image (`target` tag and pinned `source@digest`), the partitions, what
+  is erased and the other systems it destroys, the planned unlock method with the
+  probe's reason code, and warnings. The registry answer is metadata: signatures
+  are enforced when the image is pulled. `State()` reports the stage (`idle` until
+  Apply exists), the latest plan id and a record at `/run/ilex-installer/state.json`.
   The helper keeps the last eight plans in memory. `ilex-installerd --self-check`
   prints `ILEX-INSTALLERD-CHECK OK: …` after exercising the model's rules and
-  the parsers on fixtures, the shipped definitions against the model's sizes,
+  the parsers on fixtures (manifests a registry could send, the live medium and
+  disks in use in a sysfs tree of the kernel's shape, scratch directories, output
+  limits, zone and name files), the shipped definitions against the model's sizes,
   `systemd-repart` on a sparse file (both layouts, repeatable with a seed) and
   a real probe of the system. `--table`, `--edition`, `--definitions` and
-  `--run-dir` are for development; `--dmi-dir` and `--cmdline` are hidden and
-  exist for the `installer::` tier.
+  `--run-dir` are for development; `--dmi-dir`, `--efi-dir` and `--cmdline` are
+  hidden and exist for the `installer::` tier.
 - **Answers** (`answers.toml` on a volume labelled `ILEX-ANSWERS`) have their
   schema and syntax checks in the model: `[install]` (`composition`, `disk`,
   `mode`, `confirm-erase` repeating the disk id), `[encryption]` (`enabled`,
   `tpm`, `passphrase`), `[system]` and `[administrator]` (`name`, `password`).
-  Secrets never print. Reading the volume and applying the answers are later work.
+  Secrets never print, and a TOML error names the line and column but never the
+  text (toml's own message quotes the line). The administrator's password may not
+  contain a line break or NUL, the passphrase no NUL.
+  Reading the volume and applying the answers are later work.
 - **The live image** gains the helper and `ilex-enroll` (built in the same
   builder stage), `compositions.json` generated like the Anaconda ISO's, the
   bus policy, the unit and the repart definitions under
@@ -2843,25 +2907,42 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
 
 `ilexctl test installer::` boots that image (`ILEX_INSTALLER_IMAGE` names one;
 otherwise it is built, without the OS image or an ISO) as an ephemeral VM with
-an SSH server added in a layer of the harness's own, the kiosk session masked, a
-blank 40 GiB disk, a 48 GiB disk carrying a fake dual-boot layout (an ESP with
-Windows and Ubuntu loader directories, a reserved partition, a LUKS volume
-and a labelled ext4 partition) and an 8 GiB disk. It calls the helper
-with `busctl` as `ilex-installer`. `installer::probe` runs the self-check,
-compares the probe with what the guest reports, checks the three disks (free
-extents and other systems included), points the unit at SMBIOS and
-command-line fixtures to exercise detection through the bus (MS-7C35 by system
-and by board alone, case, a vendor alone, the boot override and an unknown one),
-and requires `Access denied` for `nobody` and `daemon` on every method and on
-introspection. `installer::plan` plans the blank disk plain and encrypted,
-compares the pinned digest with an independent resolution in the guest, plans the
-layout disk and expects its five systems in the warning, expects every refusal
-above with its code and field, and checks that no disk changed and no scratch
-file stayed behind. Planning needs the registry (`ghcr.io/reidond/ilex:generic.gnome`).
-A VM cannot carry another board's firmware identity or a live medium, and
-libblkid only takes a real BitLocker header for BitLocker: the `--self-check`
-covers a disk flagged as the live medium, conflicting machines and the
-BitLocker and NTFS classification; the live ISO's own boot is `iso::next…`.
+an SSH server added in a layer of the harness's own (tagged
+`localhost/ilex-installer-next-test:<slug>.<image id>` and labelled with the
+checkout's owner, like the images the tooling builds), the kiosk session masked
+and seven disks: a blank 40 GiB disk, a 48 GiB disk carrying a fake dual-boot
+layout (an ESP with Windows and Ubuntu loader directories, a reserved partition,
+a LUKS volume and a labelled ext4 partition), an 8 GiB disk, and four the running
+system uses: an ISO mounted by its `/dev/disk/by-label` name as given, an ISO file
+on a mounted partition attached to a loop device and mounted where dracut mounts
+the medium (iso-scan), a device-mapper device over a partition holding an ISO
+(Ventoy), and a disk with a mounted partition, active swap and a device stacked
+on a partition. It calls the helper with `busctl` as `ilex-installer`. The tests
+share the VM and one of them restarts the helper with fixtures, so the group runs
+them one at a time; `--test-threads 1` is not needed. `installer::probe` runs the
+self-check beside a loop of probes, compares the probe with what the guest
+reports, checks the disks (free extents and other systems included, the three
+live media and the disk in use), points the unit at SMBIOS and command-line
+fixtures to exercise detection through the bus (MS-7C35 by system and by board
+alone, case, a vendor alone, the boot override and an unknown one), requires
+`Access denied` for `nobody` and `daemon` on every method and on introspection,
+and stops the helper to check that the installer's call activates it and a refused
+user is denied. `installer::plan` first points the helper at an absent
+firmware directory (a BIOS boot is refused), then at a present one: whole-disk
+plans for the blank disk plain and encrypted, the pinned digest against an
+independent resolution in the guest, the layout disk and its five systems in the
+warning, a refusal with its code and field for every way a request can be
+refused (the live media, the disk in use, the reserved and system names, the
+language, zone and keymap, the malformed requests, and the rest), a secret never
+quoted back, no disk changed and no scratch file left behind. The registry,
+`systemd-repart` and internal errors cannot be provoked by a request; the
+registry's classification is exercised in the self-check on fixtures of what a
+registry answers. Planning needs the registry (`ghcr.io/reidond/ilex:generic.gnome`).
+A VM cannot carry another board's firmware identity, and libblkid only takes a
+real BitLocker header for BitLocker: the `--self-check` covers conflicting
+machines, the BitLocker and NTFS classification, a live medium that cannot be
+followed and a live ISO's own mount layout; the live ISO's own boot is
+`iso::next…`.
 
 ## Conventions
 
