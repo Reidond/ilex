@@ -44,6 +44,8 @@ fn disk(id: &str, size: u64, live: bool) -> Disk {
         bus: "virtio".into(),
         removable: false,
         live_medium: live,
+        in_use: vec![],
+        notes: vec![],
         partition_table: None,
         partitions: vec![],
         free_extents: vec![],
@@ -53,7 +55,7 @@ fn disk(id: &str, size: u64, live: bool) -> Disk {
 
 fn probe_of(table: &Table, edition: &Edition) -> Result<Probe> {
     let catalogue = table.for_edition(edition)?;
-    let detection = catalogue.detect(Identity::default())?;
+    let detection = table.detect_for_edition(edition, Identity::default())?;
     Ok(Probe {
         schema: 1,
         helper: HelperInfo {
@@ -78,6 +80,10 @@ fn probe_of(table: &Table, edition: &Edition) -> Result<Probe> {
             disk("blank", MIN_DISK_BYTES, false),
             disk("live", 64 << 30, true),
             disk("tiny", MIN_DISK_BYTES - 1, false),
+            Disk {
+                in_use: vec!["/dev/busy1 is mounted at /mnt".into()],
+                ..disk("busy", 64 << 30, false)
+            },
         ],
         memory: Memory {
             total_bytes: 8 << 30,
@@ -145,12 +151,25 @@ pub fn run() -> Result<String> {
         "the default's edition is not gnome"
     );
     let view = table.for_edition(&gnome)?;
+    // Only the default's own shell list: a composition that merely starts
+    // with gnome (generic.gnome.ilex) belongs to another edition.
     ensure!(
-        view.compositions.len() == 4
+        view.compositions
+            .iter()
+            .map(|c| c.tag.as_str())
+            .collect::<Vec<_>>()
+            == ["generic.gnome", "ms-7c35.gnome"]
             && view.default == "generic.gnome"
-            && !view.shells.contains_key("zzz"),
+            && !view.shells.contains_key("ilex"),
         "the gnome edition offers {}",
         view.offered()
+    );
+    ensure!(
+        table
+            .for_edition(&gnome)?
+            .composition("generic.gnome.ilex")
+            .is_none(),
+        "the gnome edition accepts generic.gnome.ilex"
     );
     ensure!(
         view.machine_offers()?
@@ -189,52 +208,66 @@ pub fn run() -> Result<String> {
             .unwrap()
             .push(json!({"board_vendor": MSI, "board_name": "MEG X570 UNIFY (MS-7C35)"}));
     };
-    let with_board = Table::parse(&mutate(board_rule)?)?.for_edition(&gnome)?;
-    let system = with_board.detect(identity(MSI, "MS-7C35", "", ""))?;
+    let full_with_board = Table::parse(&mutate(board_rule)?)?;
+    let with_board = full_with_board.for_edition(&gnome)?;
+    let system = full_with_board.detect_for_edition(&gnome, identity(MSI, "MS-7C35", "", ""))?;
     ensure!(
         system.tag == "ms-7c35.gnome" && system.reason == "detected",
         "system match: {system:?}"
     );
-    let board = with_board.detect(identity("", "", MSI, "MEG X570 UNIFY (MS-7C35)"))?;
+    let board = full_with_board
+        .detect_for_edition(&gnome, identity("", "", MSI, "MEG X570 UNIFY (MS-7C35)"))?;
     ensure!(
         board.tag == "ms-7c35.gnome" && board.matches == ["ms-7c35"],
         "board-only match: {board:?}"
     );
-    let lower = with_board.detect(identity(
-        "micro-star international co., ltd.",
-        "MS-7C35",
-        "",
-        "",
-    ))?;
+    let lower = full_with_board.detect_for_edition(
+        &gnome,
+        identity("micro-star international co., ltd.", "MS-7C35", "", ""),
+    )?;
     ensure!(
         lower.tag == "generic.gnome" && lower.matches.is_empty(),
         "matching is not case-sensitive"
     );
-    let half = with_board.detect(identity(MSI, "", "", ""))?;
+    let half = full_with_board.detect_for_edition(&gnome, identity(MSI, "", "", ""))?;
     ensure!(half.matches.is_empty(), "a vendor alone matched");
-    let conflict = Table::parse(&mutate(|v| {
+    // A conflict counts every machine of the catalogue: here the second
+    // machine only has a composition in another edition, and the two still
+    // fall back to the default with both named.
+    let conflict_table = Table::parse(&mutate(|v| {
         v["machines"]["other"] = json!({"description": "Another", "match": [{"sys_vendor": MSI, "product_name": "MS-7C35"}]});
-        v["compositions"].as_array_mut().unwrap().push(json!({"tag": "other.gnome", "machine": "other", "shells": ["gnome"]}));
-    })?)?
-    .for_edition(&gnome)?
-    .detect(identity(MSI, "MS-7C35", "", ""))?;
+        v["compositions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"tag": "other.ilex", "machine": "other", "shells": ["ilex"]}));
+    })?)?;
+    let conflict = conflict_table.detect_for_edition(&gnome, identity(MSI, "MS-7C35", "", ""))?;
     ensure!(
         conflict.tag == "generic.gnome"
-            && conflict.reason == "matches more than one machine configuration: ms-7c35, other",
+            && conflict.reason == "matches more than one machine configuration: ms-7c35, other"
+            && conflict.matches == ["ms-7c35", "other"],
         "conflict: {conflict:?}"
     );
+    // The Anaconda chooser's own rule on the whole table, kept for parity.
+    let chooser = conflict_table.detect(identity(MSI, "MS-7C35", "", ""))?;
+    ensure!(
+        chooser.tag == "generic.gnome" && chooser.reason == conflict.reason,
+        "chooser conflict: {chooser:?}"
+    );
+    // A recognised machine with a composition only in another edition (or
+    // another shell list) is reported as having none here.
     let no_composition = Table::parse(&mutate(|v| {
         v["compositions"] = json!([
             {"tag": "generic.gnome", "machine": "generic", "shells": ["gnome"]},
             {"tag": "ms-7c35.gnome.ilex", "machine": "ms-7c35", "shells": ["gnome", "ilex"]}
         ]);
     })?)?
-    .for_edition(&gnome)?
-    .detect(identity(MSI, "MS-7C35", "", ""))?;
+    .detect_for_edition(&gnome, identity(MSI, "MS-7C35", "", ""))?;
     ensure!(
         no_composition.tag == "generic.gnome"
+            && no_composition.matches == ["ms-7c35"]
             && no_composition.reason
-                == "detected machine has no published composition with the default desktops",
+                == "detected machine ms-7c35 has no composition in the gnome edition",
         "no composition: {no_composition:?}"
     );
     ensure!(
@@ -253,11 +286,11 @@ pub fn run() -> Result<String> {
     let boot = select(
         &with_board,
         &system,
-        "a ilex.composition=generic.gnome b ilex.composition=generic.gnome.ilex",
-        Some("ms-7c35.gnome"),
+        "a ilex.composition=generic.gnome b ilex.composition=ms-7c35.gnome",
+        Some("generic.gnome"),
     )?;
     ensure!(
-        boot.tag == "generic.gnome.ilex" && boot.reason == "chosen at boot",
+        boot.tag == "ms-7c35.gnome" && boot.reason == "chosen at boot",
         "boot override: {boot:?}"
     );
     let plain = select(&with_board, &system, "", Some("generic.gnome\n"))?;
@@ -320,7 +353,7 @@ pub fn run() -> Result<String> {
         ok.request.tpm == Some(crate::plan::TpmMode::Auto) && ok.request.encrypt,
         "defaults"
     );
-    let refusals: [(&str, ErrorCode, Edit); 15] = [
+    let refusals: [(&str, ErrorCode, Edit); 25] = [
         (
             "unknown tag",
             ErrorCode::UnknownComposition,
@@ -345,6 +378,11 @@ pub fn run() -> Result<String> {
             "live medium",
             ErrorCode::LiveMedium,
             Box::new(|v| v["disk"] = json!("live")),
+        ),
+        (
+            "in use",
+            ErrorCode::InUse,
+            Box::new(|v| v["disk"] = json!("busy")),
         ),
         (
             "too small",
@@ -399,6 +437,51 @@ pub fn run() -> Result<String> {
             ErrorCode::InvalidField,
             Box::new(|v| v["administrator"] = json!("a b")),
         ),
+        (
+            "user name of 32 bytes",
+            ErrorCode::InvalidField,
+            Box::new(|v| v["administrator"] = json!("a".repeat(32))),
+        ),
+        (
+            "reserved service account",
+            ErrorCode::ReservedName,
+            Box::new(|v| v["administrator"] = json!("sshd")),
+        ),
+        (
+            "reserved marker group",
+            ErrorCode::ReservedName,
+            Box::new(|v| v["administrator"] = json!("ilex-homed")),
+        ),
+        (
+            "reserved systemd account",
+            ErrorCode::ReservedName,
+            Box::new(|v| v["administrator"] = json!("systemd-oops")),
+        ),
+        (
+            "language without a codeset",
+            ErrorCode::InvalidField,
+            Box::new(|v| v["language"] = json!("en_US")),
+        ),
+        (
+            "language in upper case",
+            ErrorCode::InvalidField,
+            Box::new(|v| v["language"] = json!("EN_us.UTF-8")),
+        ),
+        (
+            "time zone below posix",
+            ErrorCode::InvalidField,
+            Box::new(|v| v["time_zone"] = json!("posix/Europe/Berlin")),
+        ),
+        (
+            "time zone below right",
+            ErrorCode::InvalidField,
+            Box::new(|v| v["time_zone"] = json!("right/Europe/Berlin")),
+        ),
+        (
+            "posixrules",
+            ErrorCode::InvalidField,
+            Box::new(|v| v["time_zone"] = json!("posixrules")),
+        ),
     ];
     for (name, code, edit) in refusals {
         let error = check_request(&request(edit)?, &probe).err();
@@ -407,6 +490,16 @@ pub fn run() -> Result<String> {
             "{name}: {error:?}"
         );
     }
+    // UEFI only: a computer that booted in BIOS mode is refused before
+    // anything else is looked at, however valid the request.
+    let mut bios = probe_of(&table, &gnome)?;
+    bios.firmware.uefi = false;
+    let error = check_request(&request(|_| {})?, &bios).err();
+    ensure!(
+        error.as_ref().map(|e| e.code) == Some(ErrorCode::UnsupportedFirmware)
+            && error.as_ref().is_some_and(|e| e.message.contains("BIOS")),
+        "a BIOS boot was not refused: {error:?}"
+    );
     let profiled = Table::parse(&mutate(|v| {
         v["profiles"] = json!({"andriishafar": {"schema": 1, "display-name": "Andrii Shafar"}});
     })?)?;
@@ -422,6 +515,29 @@ pub fn run() -> Result<String> {
     ensure!(
         PlanRequest::parse(r#"{"composition":"generic.gnome","disk":"blank","mode":"whole-disk","administrator":"a","password":"x"}"#).is_err(),
         "an unknown field was accepted"
+    );
+    // A refused request never quotes what the caller sent as a value.
+    for text in [
+        r#"{"composition":"generic.gnome","disk":"blank","mode":"hunter2","administrator":"a"}"#,
+        r#"{"composition":"generic.gnome","disk":"blank","mode":"whole-disk","encrypt":"hunter2","administrator":"a"}"#,
+        r#"{"composition":"generic.gnome","disk":"blank","mode":"whole-disk","administrator":"a","password":"hunter2"}"#,
+        r#"{"composition":"generic.gnome","disk":["hunter2"],"mode":"whole-disk","administrator":"a"}"#,
+        r#"{"composition": hunter2}"#,
+    ] {
+        let error = PlanRequest::parse(text)
+            .err()
+            .context("a bad request was accepted")?;
+        ensure!(
+            error.code == ErrorCode::InvalidRequest && !error.message.contains("hunter2"),
+            "the refusal quotes a value: {error:?}"
+        );
+    }
+    let missing = PlanRequest::parse(r#"{"composition":"x"}"#)
+        .err()
+        .context("accepted")?;
+    ensure!(
+        missing.message.starts_with("missing field `disk`"),
+        "missing field: {missing:?}"
     );
 
     // Answers.
@@ -450,7 +566,36 @@ password = "hunter2"
             && !format!("{answers:?}").contains("correct horse"),
         "answers print their secrets"
     );
+    // Parse errors say where, never what: the file holds passwords.
+    let error = Answers::parse(&text.replace("mode = \"whole-disk\"", "mode = hunter2 wrongly"))
+        .err()
+        .context("broken answers were accepted")?
+        .to_string();
+    ensure!(
+        error.contains("line 5") && !error.contains("hunter2") && !error.contains("whole-disk"),
+        "answers error: {error}"
+    );
+    let error = Answers::parse(&text.replace("password = \"hunter2\"", "password = 12345"))
+        .err()
+        .context("a numeric password was accepted")?
+        .to_string();
+    ensure!(
+        !error.contains("12345") && error.contains("withheld"),
+        "answers error: {error}"
+    );
     for (name, text) in [
+        (
+            "line break in the password",
+            text.replace("password = \"hunter2\"", "password = \"hunter2\\nmore\""),
+        ),
+        (
+            "NUL in the password",
+            text.replace("password = \"hunter2\"", "password = \"hunter2\\u0000\""),
+        ),
+        (
+            "NUL in the passphrase",
+            text.replace("correct horse", "correct\\u0000horse"),
+        ),
         ("erase", text.replace("confirm-erase = \"blank\"\n", "")),
         (
             "passphrase",

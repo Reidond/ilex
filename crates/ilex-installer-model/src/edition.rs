@@ -5,6 +5,7 @@
 //! `edition.json` (an [`EditionRecord`]).
 
 use crate::catalogue::{Composition, Machine, Shell, Table, is_name};
+use crate::detect::{Detection, Identity};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,9 +79,9 @@ impl Edition {
 }
 
 impl Table {
-    /// The compositions whose default (first) shell is the edition's shell, in
-    /// table order.
-    pub fn edition_compositions(&self, edition: &Edition) -> Vec<&Composition> {
+    /// The compositions whose default (first) shell is the edition's shell,
+    /// in table order: the candidates for the edition.
+    fn first_shell_matches(&self, edition: &Edition) -> Vec<&Composition> {
         self.compositions
             .iter()
             .filter(|c| c.shells.first() == Some(&edition.shell))
@@ -91,7 +92,7 @@ impl Table {
     /// default when it belongs to the edition, otherwise the first generic
     /// composition of the edition.
     pub fn edition_default(&self, edition: &Edition) -> Result<&Composition> {
-        let offered = self.edition_compositions(edition);
+        let offered = self.first_shell_matches(edition);
         offered
             .iter()
             .find(|c| c.tag == self.default)
@@ -106,14 +107,28 @@ impl Table {
             })
     }
 
+    /// The compositions the edition installs, in table order: those with
+    /// exactly the shell list of the edition's default. A composition that
+    /// merely starts with the edition's shell (`generic.gnome.ilex` for the
+    /// GNOME edition) is another edition's, not an option of this one.
+    pub fn edition_compositions(&self, edition: &Edition) -> Result<Vec<&Composition>> {
+        let shells = &self.edition_default(edition)?.shells;
+        Ok(self
+            .first_shell_matches(edition)
+            .into_iter()
+            .filter(|c| &c.shells == shells)
+            .collect())
+    }
+
     /// The catalogue as this edition's installer sees it: only the edition's
     /// compositions, their machines and shells, and its own default. The
-    /// result is itself a valid table, so detection and the plan checks run on
-    /// it unchanged.
+    /// result is itself a valid table, so the plan checks run on it unchanged.
+    /// Detection goes through [`Table::detect_for_edition`] on the whole
+    /// catalogue instead, so that machines of other editions still count.
     pub fn for_edition(&self, edition: &Edition) -> Result<Table> {
         let default = self.edition_default(edition)?.clone();
         let compositions: Vec<Composition> = self
-            .edition_compositions(edition)
+            .edition_compositions(edition)?
             .into_iter()
             .cloned()
             .collect();
@@ -149,5 +164,49 @@ impl Table {
     /// An edition has no desktop choice; a machine gets this list or nothing.
     pub fn edition_shells(&self, edition: &Edition) -> Result<Vec<String>> {
         Ok(self.edition_default(edition)?.shells.clone())
+    }
+
+    /// Detect this computer for `edition`, on the whole catalogue (`self`), as
+    /// the Anaconda chooser does: every machine's rules take part, so two
+    /// machines matching the same computer are a conflict even when one has
+    /// no composition in this edition, and the conflict is named. The result
+    /// is then mapped into the edition's own table: the one composition of the
+    /// detected machine, or the edition's default with the reason it is not
+    /// the machine's.
+    pub fn detect_for_edition(&self, edition: &Edition, identity: Identity) -> Result<Detection> {
+        let view = self.for_edition(edition)?;
+        let default = view
+            .composition(&view.default)
+            .context("default composition is not offered")?;
+        let matches = self.matching_machines(&identity);
+        let (selected, reason) = match matches.as_slice() {
+            [] => (
+                default,
+                "no machine configuration matches this computer".to_string(),
+            ),
+            [machine] => match view.compositions.iter().find(|c| &c.machine == machine) {
+                Some(composition) => (composition, "detected".to_string()),
+                None => (
+                    default,
+                    format!(
+                        "detected machine {machine} has no composition in the {} edition",
+                        edition.shell
+                    ),
+                ),
+            },
+            several => (
+                default,
+                format!(
+                    "matches more than one machine configuration: {}",
+                    several.join(", ")
+                ),
+            ),
+        };
+        Ok(Detection {
+            tag: selected.tag.clone(),
+            reason,
+            identity,
+            matches,
+        })
     }
 }

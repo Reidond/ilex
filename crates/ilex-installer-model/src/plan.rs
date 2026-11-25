@@ -84,9 +84,12 @@ pub struct PlanRequest {
 }
 
 impl PlanRequest {
+    /// Parse a request. A malformed request is refused with a message that
+    /// never quotes a value of the document: serde's own text repeats the
+    /// value of a mistyped field, and a caller may have put anything there.
     pub fn parse(text: &str) -> Result<Self, PlanError> {
         serde_json::from_str(text)
-            .map_err(|e| PlanError::new(ErrorCode::InvalidRequest, None, e.to_string()))
+            .map_err(|e| PlanError::new(ErrorCode::InvalidRequest, None, redact_json_error(&e)))
     }
 
     pub fn tpm_mode(&self) -> TpmMode {
@@ -135,33 +138,71 @@ impl PlanRequest {
         if !is_user_name(&self.administrator) {
             return bad(
                 "administrator",
-                "expected a user name: lower-case letters, digits, _ and -, starting with a letter or _",
+                "expected a user name of at most 31 bytes: lower-case letters, digits, _ and -, starting with a letter or _",
             );
         }
         Ok(())
     }
 }
 
-/// `en_US.UTF-8`, `C.UTF-8`, `de_DE@euro`.
+/// What serde_json said about a request, without any of its values: the
+/// position, and the names of a missing or unknown field (names, not values).
+fn redact_json_error(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let at = format!("line {}, column {}", error.line(), error.column());
+    if error.classify() != Category::Data {
+        return format!("the request is not valid JSON ({at})");
+    }
+    // `missing field `x`` and `unknown field `x`, expected one of ...` carry
+    // names; `invalid type: string "..."` and `unknown variant `...`` carry
+    // what the caller sent.
+    let text = error.to_string();
+    for kind in ["missing field", "unknown field"] {
+        let name = text
+            .strip_prefix(kind)
+            .and_then(|rest| rest.strip_prefix(" `"))
+            .and_then(|rest| rest.split('`').next())
+            .filter(|name| {
+                name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            });
+        if let Some(name) = name {
+            return format!("{kind} `{name}` ({at})");
+        }
+    }
+    format!(
+        "a field of the request has the wrong type or an unknown value ({at}); its value is not repeated"
+    )
+}
+
+/// A UTF-8 locale name as glibc spells it: `en_US.UTF-8`, `C.UTF-8`,
+/// `de_DE.UTF-8@euro`. The installed system is UTF-8 only, so the codeset is
+/// required. This is a syntax check: the live image carries no list of the
+/// locales the installed system can generate (glibc's `SUPPORTED` is not in
+/// it), so a well-formed name for a language the system lacks is accepted and
+/// falls back to the C locale there.
 pub fn is_language(value: &str) -> bool {
     let (rest, modifier) = match value.split_once('@') {
         Some((rest, modifier)) => (rest, Some(modifier)),
         None => (value, None),
     };
-    let (rest, charset) = match rest.split_once('.') {
-        Some((rest, charset)) => (rest, Some(charset)),
-        None => (rest, None),
+    let Some((rest, charset)) = rest.split_once('.') else {
+        return false;
     };
     let (name, territory) = match rest.split_once('_') {
         Some((name, territory)) => (name, Some(territory)),
         None => (rest, None),
     };
     value.len() <= 32
-        && (1..=3).contains(&name.len())
-        && name.bytes().all(|b| b.is_ascii_alphabetic())
+        && (name == "C"
+            || ((2..=3).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase())))
         && territory.is_none_or(|t| t.len() == 2 && t.bytes().all(|b| b.is_ascii_uppercase()))
-        && charset.is_none_or(|c| c == "UTF-8")
-        && modifier.is_none_or(|m| !m.is_empty() && m.bytes().all(|b| b.is_ascii_alphanumeric()))
+        && !(name == "C" && territory.is_some())
+        && charset == "UTF-8"
+        && modifier.is_none_or(|m| {
+            (1..=16).contains(&m.len())
+                && m.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 pub fn is_keymap(value: &str) -> bool {
@@ -171,10 +212,15 @@ pub fn is_keymap(value: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
 }
 
+/// A zone name of the zoneinfo tree. The `posix/` and `right/` trees repeat
+/// every zone (the second with leap seconds) and `posixrules` is a link kept
+/// for old programs: none is a zone a person chooses.
 pub fn is_time_zone(value: &str) -> bool {
     let parts: Vec<&str> = value.split('/').collect();
     value.len() <= 64
         && (1..=3).contains(&parts.len())
+        && !["posix", "right"].contains(&parts[0])
+        && value != "posixrules"
         && parts.iter().all(|p| {
             !p.is_empty()
                 && p.bytes()
@@ -199,17 +245,22 @@ pub fn is_host_name(value: &str) -> bool {
         })
 }
 
+/// A Unix account name: at most 31 bytes, as systemd and `build/compose.py`
+/// limit them.
 pub fn is_user_name(value: &str) -> bool {
     let mut bytes = value.bytes();
-    value.len() <= 32
+    value.len() <= 31
         && bytes
             .next()
             .is_some_and(|b| b.is_ascii_lowercase() || b == b'_')
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
 }
 
-/// Accounts the installer must never create: the system's own, and the
-/// installer's.
+/// Accounts and groups the installer must never create: the ones Fedora and
+/// the installed ilex image define. The helper adds every name the live image
+/// itself defines (its `/etc/passwd`, `/etc/group` and `sysusers.d`), which
+/// covers most of them; these are the ones the installed system has and the
+/// live image may not, and the ones every system needs.
 const RESERVED_USERS: &[&str] = &[
     "root",
     "nobody",
@@ -224,12 +275,39 @@ const RESERVED_USERS: &[&str] = &[
     "operator",
     "games",
     "ftp",
-    "systemd-homed",
-    "ilex-installer",
-    "gdm",
-    "polkitd",
     "wheel",
+    "users",
+    "sshd",
+    "dbus",
+    "tss",
+    "chrony",
+    "polkitd",
+    "gdm",
+    "avahi",
+    "colord",
+    "geoclue",
+    "pipewire",
+    "rtkit",
+    "libvirt",
+    "qemu",
+    "kvm",
+    "input",
+    "video",
+    "render",
+    "audio",
+    "disk",
+    "tty",
+    "utmp",
+    "ilex-installer",
+    "ilex-homed",
+    "gamemode",
 ];
+
+/// Is `name` an account or group the installed system defines? `systemd-`
+/// names belong to systemd's own accounts.
+pub fn is_reserved_user(name: &str) -> bool {
+    RESERVED_USERS.contains(&name) || name.starts_with("systemd-")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -237,10 +315,15 @@ pub enum ErrorCode {
     /// Not JSON, or not this schema.
     InvalidRequest,
     InvalidField,
+    /// The computer started in BIOS (legacy) mode; the installer is UEFI only.
+    UnsupportedFirmware,
     UnknownComposition,
     UnknownDisk,
     /// The disk is the one this system booted from.
     LiveMedium,
+    /// The running system is using the disk: a mounted partition, swap, or a
+    /// device stacked on it.
+    InUse,
     DiskTooSmall,
     UnsupportedMode,
     TpmNeedsEncryption,
@@ -295,6 +378,13 @@ pub fn check_request<'a>(
     probe: &'a Probe,
 ) -> Result<Checked<'a>, PlanError> {
     request.check_syntax()?;
+    if !probe.firmware.uefi {
+        return Err(PlanError::new(
+            ErrorCode::UnsupportedFirmware,
+            None,
+            "this computer started in BIOS (legacy) mode; ilex installs on UEFI computers only. Restart it in UEFI mode",
+        ));
+    }
     let table: &Table = &probe.catalogue;
     let Some(composition) = table.composition(&request.composition) else {
         let message = if request.composition.split('.').next() == Some("vm") {
@@ -342,6 +432,17 @@ pub fn check_request<'a>(
             format!("{} is the medium this installer started from", disk.id),
         ));
     }
+    if !disk.in_use.is_empty() {
+        return Err(PlanError::new(
+            ErrorCode::InUse,
+            Some("disk"),
+            format!(
+                "{} is in use by the running system: {}",
+                disk.id,
+                disk.in_use.join("; ")
+            ),
+        ));
+    }
     if disk.size_bytes < MIN_DISK_BYTES {
         return Err(PlanError::new(
             ErrorCode::DiskTooSmall,
@@ -359,7 +460,7 @@ pub fn check_request<'a>(
             "automatic unlock needs an encrypted disk",
         ));
     }
-    if RESERVED_USERS.contains(&request.administrator.as_str())
+    if is_reserved_user(&request.administrator)
         || table.profiles.contains_key(&request.administrator)
     {
         return Err(PlanError::new(
