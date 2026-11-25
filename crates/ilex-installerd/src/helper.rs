@@ -3,7 +3,7 @@
 //! disk; the partitions a plan names are repart's dry run of them.
 
 use crate::{disks, registry, repart, sys};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ilex_installer_model::{
     Edition, Identity, Table,
     edition::EditionRecord,
@@ -16,8 +16,9 @@ use ilex_installer_model::{
     state::State,
 };
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     fs,
+    io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -32,9 +33,16 @@ pub struct Config {
     pub definitions: PathBuf,
     pub run_dir: PathBuf,
     pub dmi_dir: PathBuf,
+    /// `/sys/firmware/efi`: present when the computer booted in UEFI mode.
+    pub efi_dir: PathBuf,
     pub cmdline: PathBuf,
     pub zoneinfo: PathBuf,
     pub keymaps: PathBuf,
+    /// The live image's own accounts and groups: names the administrator
+    /// may not take.
+    pub passwd: PathBuf,
+    pub group: PathBuf,
+    pub sysusers: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -46,9 +54,17 @@ impl Default for Config {
             definitions: "/usr/lib/ilex-installer/repart".into(),
             run_dir: "/run/ilex-installer".into(),
             dmi_dir: "/sys/class/dmi/id".into(),
+            efi_dir: "/sys/firmware/efi".into(),
             cmdline: "/proc/cmdline".into(),
             zoneinfo: "/usr/share/zoneinfo".into(),
             keymaps: "/usr/lib/kbd/keymaps".into(),
+            passwd: "/etc/passwd".into(),
+            group: "/etc/group".into(),
+            sysusers: vec![
+                "/usr/lib/sysusers.d".into(),
+                "/etc/sysusers.d".into(),
+                "/run/sysusers.d".into(),
+            ],
         }
     }
 }
@@ -59,6 +75,8 @@ const PLANS_KEPT: usize = 8;
 pub struct Helper {
     pub config: Config,
     pub edition: Edition,
+    /// The whole catalogue: detection counts every machine of it.
+    full: Table,
     /// This edition's catalogue.
     pub table: Table,
     /// The edition's display name.
@@ -78,8 +96,21 @@ impl Helper {
         // (a development image), and a table without either is the Anaconda
         // path's GNOME table.
         let record = match fs::read(&config.edition_file) {
-            Ok(bytes) => Some(EditionRecord::parse(&bytes)?),
-            Err(_) => None,
+            Ok(bytes) => Some(EditionRecord::parse(&bytes).with_context(|| {
+                format!(
+                    "reading the edition record {}",
+                    config.edition_file.display()
+                )
+            })?),
+            // Absent is the Anaconda path's table; anything else (a record
+            // that cannot be read) is a broken image, not a missing record.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                bail!(
+                    "reading the edition record {}: {e}",
+                    config.edition_file.display()
+                );
+            }
         };
         let edition = match (&config.edition, &record) {
             (Some(shell), _) => Edition::new(shell)?,
@@ -95,6 +126,7 @@ impl Helper {
             edition_name,
             config,
             edition,
+            full,
             table,
             plans: Mutex::default(),
             state: Mutex::new(State::idle(sys::unix_time())),
@@ -124,7 +156,9 @@ impl Helper {
 
     fn probe_locked(&self) -> Result<Probe> {
         let identity = Identity::read(&self.config.dmi_dir);
-        let detection = self.table.detect(identity)?;
+        // Detection sees every machine of the catalogue, then maps into this
+        // edition: a conflict with a machine of another edition still counts.
+        let detection = self.full.detect_for_edition(&self.edition, identity)?;
         let cmdline = fs::read_to_string(&self.config.cmdline).unwrap_or_default();
         let choice = fs::read_to_string(self.config.run_dir.join("choice")).ok();
         let (selection, selection_error) =
@@ -132,9 +166,7 @@ impl Helper {
                 Ok(selected) => (Some(selected), None),
                 Err(error) => (None, Some(error.to_string())),
             };
-        let scratch = self.config.run_dir.join("scratch");
-        fs::create_dir_all(&scratch).with_context(|| format!("creating {}", scratch.display()))?;
-        let disks = disks::scan(&scratch)?;
+        let disks = disks::scan(&self.config.run_dir)?;
         Ok(Probe {
             schema: ilex_installer_model::probe::PROBE_SCHEMA,
             helper: HelperInfo {
@@ -145,7 +177,7 @@ impl Helper {
                 id: self.edition.id().into(),
                 name: self.edition_name.clone(),
             },
-            firmware: sys::firmware(),
+            firmware: sys::firmware(&self.config.efi_dir),
             enrollment: serde_json::to_value(ilex_enroll::probe())?,
             detection,
             selection,
@@ -175,15 +207,12 @@ impl Helper {
 
         let id = sys::hex(&sys::random_bytes::<16>().map_err(internal)?);
         let seed = sys::random_uuid().map_err(internal)?;
-        let scratch = self.config.run_dir.join("plans").join(&id);
-        let layout = repart::assemble(&self.config.definitions, checked.request.encrypt, &scratch)
-            .map_err(internal);
-        let partitions = layout.and_then(|layout| {
-            repart::dry_run(&layout, &checked.disk.path, &seed)
-                .map_err(|e| PlanError::new(ErrorCode::Repart, None, format!("{e:#}")))
-        });
-        let _ = fs::remove_dir_all(&scratch);
-        let partitions = partitions?;
+        // The shipped directory of this layout is what repart reads: it is
+        // never copied or assembled, and holds exactly one root partition.
+        let layout =
+            repart::layout(&self.config.definitions, checked.request.encrypt).map_err(internal)?;
+        let partitions = repart::dry_run(&layout, &checked.disk.path, &seed)
+            .map_err(|e| PlanError::new(ErrorCode::Repart, None, format!("{e:#}")))?;
 
         let mut warnings = Vec::new();
         let enrollment_reason = probe.enrollment["reason"]
@@ -195,6 +224,8 @@ impl Helper {
         if checked.disk.removable {
             warnings.push(format!("{} is a removable disk", checked.disk.id));
         }
+        // The list of other systems may be incomplete: say so.
+        warnings.extend(checked.disk.notes.iter().cloned());
         if !checked.disk.other_systems.is_empty() {
             warnings.push(format!(
                 "everything on {} will be erased, including {} other system(s) found on it",
@@ -285,16 +316,103 @@ impl Helper {
                 format!("unknown console keymap {}", request.keyboard),
             ));
         }
+        let names = system_names(
+            &self.config.passwd,
+            &self.config.group,
+            &self.config.sysusers,
+        );
+        if names.contains(&request.administrator) {
+            return Err(PlanError::new(
+                ErrorCode::ReservedName,
+                Some("administrator"),
+                format!(
+                    "{} is an account or group the system defines; pick a distinct maintenance name such as ilexmaint",
+                    request.administrator
+                ),
+            ));
+        }
         Ok(())
     }
 }
 
-/// A zone file inside the zoneinfo tree (a symlink may not leave it).
+/// Every user and group name this (live) system defines: its `/etc/passwd`
+/// and `/etc/group`, and the `u`, `g` and `m` lines of `sysusers.d`, which
+/// the installed system, built from the same distribution, shares.
+pub fn system_names(passwd: &Path, group: &Path, sysusers: &[PathBuf]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for file in [passwd, group] {
+        for line in fs::read_to_string(file).unwrap_or_default().lines() {
+            if let Some((name, _)) = line.split_once(':') {
+                names.insert(name.to_owned());
+            }
+        }
+    }
+    for dir in sysusers {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "conf") {
+                continue;
+            }
+            for line in fs::read_to_string(&path).unwrap_or_default().lines() {
+                let mut fields = line.split_whitespace();
+                let kind = fields.next().unwrap_or("");
+                // `u name ...`, `g name ...`, `m user group`; `r` and
+                // `#` lines name no one.
+                let wanted = match kind.chars().next() {
+                    Some('u' | 'g') => 1,
+                    Some('m') => 2,
+                    _ => continue,
+                };
+                names.extend(
+                    fields
+                        .take(wanted)
+                        .filter(|n| !n.starts_with(['-', '/', '%']))
+                        .map(str::to_owned),
+                );
+            }
+        }
+    }
+    names
+}
+
+/// A zone file inside the zoneinfo tree: a regular file that starts with
+/// the TZif magic (so not `zone.tab`, `tzdata.zi` or a directory), whose name
+/// is not one of the duplicate trees (`posix/`, `right/`) or `posixrules`, and
+/// whose links stay inside the tree.
 pub fn time_zone_exists(root: &Path, zone: &str) -> bool {
+    if zone
+        .split('/')
+        .next()
+        .is_some_and(|first| ["posix", "right"].contains(&first))
+        || zone == "posixrules"
+    {
+        return false;
+    }
     let Ok(root) = fs::canonicalize(root) else {
         return false;
     };
-    fs::canonicalize(root.join(zone)).is_ok_and(|p| p.starts_with(&root) && p.is_file())
+    let Ok(path) = fs::canonicalize(root.join(zone)) else {
+        return false;
+    };
+    let Ok(relative) = path.strip_prefix(&root) else {
+        return false;
+    };
+    if relative
+        .components()
+        .next()
+        .is_some_and(|c| ["posix", "right"].iter().any(|d| c.as_os_str() == *d))
+    {
+        return false;
+    }
+    let mut magic = [0u8; 4];
+    path.is_file()
+        && fs::File::open(&path)
+            .and_then(|mut file| file.read_exact(&mut magic))
+            .is_ok()
+        && &magic == b"TZif"
 }
 
 /// A console keymap `<name>.map[.gz]` anywhere in the kbd keymaps tree.

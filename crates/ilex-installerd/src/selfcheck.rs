@@ -2,10 +2,21 @@
 //! system for real (its disks, its repart and the shipped definitions). Run in
 //! the installer VM by the `installer::` tier.
 
-use crate::{disks, helper, registry, repart, sys};
+use crate::{
+    disks, exec, helper, registry, repart,
+    scratch::Scratch,
+    sys,
+    topology::{self, Roots, Topology},
+};
 use anyhow::{Context, Result, ensure};
 use ilex_installer_model::probe::{Extent, Partition};
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const LSBLK: &str = r#"{"blockdevices":[
  {"name":"/dev/vda","kname":"/dev/vda","type":"disk","size":42949672960,"model":"QEMU HARDDISK","serial":"fixture","tran":"virtio","rm":false,"ro":false,"log-sec":512,"pttype":"gpt","parttype":null,"partlabel":null,"fstype":null,"label":null,"pkname":null,
@@ -17,22 +28,34 @@ const LSBLK: &str = r#"{"blockdevices":[
    {"name":"/dev/sdb1","kname":"/dev/sdb1","type":"part","size":4000000000,"fstype":"iso9660","label":"ilex-installer","parttype":"0x83","partlabel":null,"pkname":"/dev/sdb"}]},
  {"name":"/dev/zram0","kname":"/dev/zram0","type":"disk","size":4294967296,"tran":null,"rm":false,"ro":false,"log-sec":4096},
  {"name":"/dev/sr0","kname":"/dev/sr0","type":"rom","size":1073741824,"tran":"sata","rm":true,"ro":false,"log-sec":2048},
- {"name":"/dev/sdc","kname":"/dev/sdc","type":"disk","size":16000000000,"tran":"usb","rm":true,"ro":true,"log-sec":512}]}"#;
+ {"name":"/dev/sdc","kname":"/dev/sdc","type":"disk","size":16000000000,"tran":"usb","rm":true,"ro":true,"log-sec":512},
+ {"name":"/dev/sdd","kname":"/dev/sdd","type":"disk","size":16000000000,"model":"LUN","tran":"iscsi","rm":false,"ro":false,"log-sec":512},
+ {"name":"/dev/sde","kname":"/dev/sde","type":"disk","size":16000000000,"model":"SAN","tran":"fc","rm":false,"ro":false,"log-sec":512},
+ {"name":"/dev/nvme1n1","kname":"/dev/nvme1n1","type":"disk","size":16000000000,"model":"Fabric","tran":"nvme","rm":false,"ro":false,"log-sec":512},
+ {"name":"/dev/nbd0","kname":"/dev/nbd0","type":"disk","size":16000000000,"tran":null,"rm":false,"ro":false,"log-sec":512}]}"#;
 
 const SFDISK: &str = r#"{"partitiontable":{"label":"gpt","id":"X","device":"/dev/vda","unit":"sectors","firstlba":2048,"lastlba":83886046,"sectorsize":512,"partitions":[]}}"#;
-
-const MOUNTINFO: &str = "\
-24 1 0:21 / /run/initramfs/live ro,relatime shared:5 - iso9660 /dev/sdb1 ro,nojoliet\n\
-25 1 0:22 / /sysroot ro - squashfs /dev/loop0 ro\n\
-26 1 0:23 / /run/media/x rw - iso9660 /dev/sr0 ro\n\
-27 1 0:24 / /boot rw - vfat /dev/vda1 rw\n";
 
 const REPART: &str = r#"[
  {"type":"esp","label":"ilex-esp","uuid":"e2857866-e04d-4eb3-915d-101cbf838697","partno":0,"file":"/x/10-esp.conf","node":"/dev/vdb1","offset":1048576,"old_size":0,"raw_size":536870912,"old_padding":0,"raw_padding":0,"activity":"create"},
  {"type":"root-x86-64","label":"ilex-root","uuid":"644b2311-535f-46d4-adab-8cff81f14455","partno":1,"file":"/x/30-root.conf","node":"/dev/vdb2","offset":537919488,"old_size":0,"raw_size":41337991168,"old_padding":0,"raw_padding":0,"activity":"create"}]"#;
 
-const IMAGE: &str = r#"{"schemaVersion":2,"config":{"digest":"sha256:aa","size":100},"layers":[{"size":1000},{"size":2000}],"annotations":{"org.opencontainers.image.version":"45.1"}}"#;
-const INDEX: &str = r#"{"schemaVersion":2,"manifests":[{"digest":"sha256:arm","platform":{"os":"linux","architecture":"arm64"}},{"digest":"sha256:amd","platform":{"os":"linux","architecture":"amd64"}}]}"#;
+fn hex(c: char) -> String {
+    format!("sha256:{}", c.to_string().repeat(64))
+}
+
+fn image_manifest() -> String {
+    format!(
+        r#"{{"schemaVersion":2,"config":{{"digest":"{}","size":100}},"layers":[{{"digest":"{}","size":1000}},{{"digest":"{}","size":2000}}],"annotations":{{"org.opencontainers.image.version":"45.1"}}}}"#,
+        hex('a'),
+        hex('b'),
+        hex('c')
+    )
+}
+
+fn index_manifest(children: &str) -> String {
+    format!(r#"{{"schemaVersion":2,"manifests":[{children}]}}"#)
+}
 
 fn part(
     path: &str,
@@ -57,11 +80,17 @@ fn part(
 fn check_parsers() -> Result<()> {
     const MIB: u64 = 1024 * 1024;
     // lsblk: disks only, installable only, with their partitions.
-    let raws = disks::parse_lsblk(LSBLK, &|name| match name {
-        "vda1" => Some(2048),
-        "vda2" => Some(2048 + 1_048_576),
-        _ => None,
-    })?;
+    let raws = disks::parse_lsblk(
+        LSBLK,
+        &|name| match name {
+            "vda1" => Some(2048),
+            "vda2" => Some(2048 + 1_048_576),
+            _ => None,
+        },
+        &|name| Some(if name == "nvme1n1" { "tcp" } else { "pcie" }.to_owned()),
+    )?;
+    // Zram, optical, read-only and network disks (iSCSI, Fibre Channel, NVMe
+    // over fabrics, nbd) are not somewhere to install.
     let names: Vec<&str> = raws.iter().map(|r| r.kname.as_str()).collect();
     ensure!(names == ["vda", "nvme0n1", "sdb"], "lsblk disks: {names:?}");
     let vda = &raws[0].disk;
@@ -153,14 +182,6 @@ fn check_parsers() -> Result<()> {
         "false positive"
     );
 
-    // The live medium, from mountinfo.
-    let parent = |name: &str| (name == "sdb1").then(|| "sdb".to_owned());
-    let live = disks::live_disks(MOUNTINFO, &parent);
-    ensure!(
-        live == BTreeSet::from(["sdb".to_owned(), "sr0".to_owned()]),
-        "live disks: {live:?}"
-    );
-
     // Stable names: eui, then wwn, then other ids, then the bus path.
     let link = |by: &str, name: &str| (by.to_owned(), name.to_owned());
     let id = disks::stable_ids(
@@ -208,19 +229,7 @@ fn check_parsers() -> Result<()> {
         repart::parse(&REPART.replace("create", "resize"), &layout).is_err(),
         "repart resize accepted"
     );
-    match registry::parse_manifest(IMAGE.as_bytes())? {
-        registry::Parsed::Image(m) => ensure!(
-            m.download_bytes == 3100
-                && m.digest.starts_with("sha256:")
-                && m.annotations_version.as_deref() == Some("45.1"),
-            "image manifest"
-        ),
-        registry::Parsed::Index { .. } => anyhow::bail!("an image parsed as an index"),
-    }
-    match registry::parse_manifest(INDEX.as_bytes())? {
-        registry::Parsed::Index { amd64, .. } => ensure!(amd64 == "sha256:amd", "index child"),
-        registry::Parsed::Image(_) => anyhow::bail!("an index parsed as an image"),
-    }
+    check_registry()?;
     let memory = sys::parse_meminfo(
         "MemTotal:        8000000 kB\nMemFree: 1 kB\nMemAvailable:    6000000 kB\n",
     )?;
@@ -231,10 +240,11 @@ fn check_parsers() -> Result<()> {
     Ok(())
 }
 
-/// A scratch directory under `parent`, removed on drop.
-struct Scratch(std::path::PathBuf);
+/// A throwaway directory for fixtures, removed (recursively: it is ours and
+/// holds only what a check wrote) on drop.
+struct TestDir(PathBuf);
 
-impl Scratch {
+impl TestDir {
     fn new(parent: &Path, name: &str) -> Result<Self> {
         let path = parent.join(format!("{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
@@ -243,14 +253,537 @@ impl Scratch {
     }
 }
 
-impl Drop for Scratch {
+impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
 
+fn write(path: &Path, text: &str) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, text)?;
+    Ok(())
+}
+
+// --- registry ---------------------------------------------------------------
+
+fn check_registry() -> Result<()> {
+    let image = image_manifest();
+    match registry::parse_manifest(image.as_bytes())? {
+        registry::Parsed::Image(m) => ensure!(
+            m.download_bytes == 3100
+                && m.digest.starts_with("sha256:")
+                && m.annotations_version.as_deref() == Some("45.1"),
+            "image manifest"
+        ),
+        registry::Parsed::Index { .. } => anyhow::bail!("an image parsed as an index"),
+    }
+    // An index: the amd64 child, among entries that are not images for it.
+    let index = index_manifest(&format!(
+        r#"{{"digest":"{}","platform":{{"os":"linux","architecture":"arm64"}}}},{{"digest":"{}","platform":{{"os":"unknown","architecture":"unknown"}}}},{{"digest":"{}","platform":{{"os":"linux","architecture":"amd64"}}}}"#,
+        hex('1'),
+        hex('2'),
+        hex('3')
+    ));
+    match registry::parse_manifest(index.as_bytes())? {
+        registry::Parsed::Index { amd64, .. } => ensure!(amd64 == hex('3'), "index child"),
+        registry::Parsed::Image(_) => anyhow::bail!("an index parsed as an image"),
+    }
+    // What a registry may send that must not be accepted: every case is a
+    // manifest the installer would otherwise pin or pass on to skopeo.
+    let sized = |a: &str, b: &str| {
+        format!(
+            r#"{{"schemaVersion":2,"config":{{"digest":"{}","size":{a}}},"layers":[{{"digest":"{}","size":{b}}},{{"digest":"{}","size":1}}]}}"#,
+            hex('a'),
+            hex('b'),
+            hex('c')
+        )
+    };
+    let max = u64::MAX.to_string();
+    let bad: [(&str, String); 12] = [
+        ("sizes that overflow", sized(&max, "5")),
+        ("a layer size that overflows", sized("1", &max)),
+        ("a negative size", sized("-1", "1")),
+        ("a size that is not a number", sized("\"big\"", "1")),
+        (
+            "no layers",
+            format!(
+                r#"{{"schemaVersion":2,"config":{{"digest":"{}","size":1}}}}"#,
+                hex('a')
+            ),
+        ),
+        (
+            "empty layers",
+            format!(
+                r#"{{"schemaVersion":2,"config":{{"digest":"{}","size":1}},"layers":[]}}"#,
+                hex('a')
+            ),
+        ),
+        (
+            "no config",
+            format!(
+                r#"{{"schemaVersion":2,"layers":[{{"digest":"{}","size":1}}]}}"#,
+                hex('a')
+            ),
+        ),
+        (
+            "an upper-case digest",
+            image.replace(&hex('a'), &format!("sha256:{}", "A".repeat(64))),
+        ),
+        (
+            "a layer without a digest",
+            format!(
+                r#"{{"schemaVersion":2,"config":{{"digest":"{}","size":1}},"layers":[{{"size":1}}]}}"#,
+                hex('a')
+            ),
+        ),
+        (
+            "schema 1",
+            image.replace("\"schemaVersion\":2", "\"schemaVersion\":1"),
+        ),
+        (
+            "an index child that is an option",
+            index_manifest(
+                r#"{"digest":"--help","platform":{"os":"linux","architecture":"amd64"}}"#,
+            ),
+        ),
+        (
+            "an index without amd64",
+            index_manifest(&format!(
+                r#"{{"digest":"{}","platform":{{"os":"linux","architecture":"arm64"}}}}"#,
+                hex('1')
+            )),
+        ),
+    ];
+    for (what, manifest) in &bad {
+        ensure!(
+            registry::parse_manifest(manifest.as_bytes()).is_err(),
+            "a manifest with {what} was accepted"
+        );
+    }
+    ensure!(
+        registry::parse_manifest(b"not json").is_err(),
+        "garbage accepted"
+    );
+    // Digests: the one shape.
+    for good in [hex('0'), hex('f')] {
+        ensure!(registry::is_digest(&good), "{good} refused");
+    }
+    for wrong in [
+        "sha256:".to_owned(),
+        format!("sha256:{}", "a".repeat(63)),
+        format!("sha256:{}", "a".repeat(65)),
+        format!("sha256:{}", "A".repeat(64)),
+        format!("sha512:{}", "a".repeat(64)),
+        format!("sha256:{}\n", "a".repeat(64)),
+        format!("sha256:{}/../x", "a".repeat(64)),
+        "--help".to_owned(),
+        String::new(),
+    ] {
+        ensure!(!registry::is_digest(&wrong), "{wrong:?} accepted");
+    }
+    // Only an explicit absence is absence, whatever the case; the rest is the
+    // registry not answering.
+    for (stderr, code) in [
+        (
+            "Error: reading manifest x in ghcr.io/o/r: manifest unknown",
+            ilex_installer_model::plan::ErrorCode::ImageNotFound,
+        ),
+        (
+            "Error: MANIFEST UNKNOWN: manifest unknown",
+            ilex_installer_model::plan::ErrorCode::ImageNotFound,
+        ),
+        (
+            "requested name Unknown: Name Unknown",
+            ilex_installer_model::plan::ErrorCode::ImageNotFound,
+        ),
+        (
+            "Error: 404 not found",
+            ilex_installer_model::plan::ErrorCode::Registry,
+        ),
+        (
+            "Error: unauthorized: authentication required",
+            ilex_installer_model::plan::ErrorCode::Registry,
+        ),
+        (
+            "dial tcp: lookup ghcr.io: no such host",
+            ilex_installer_model::plan::ErrorCode::Registry,
+        ),
+    ] {
+        let error = registry::failure("ghcr.io/o/r:t", stderr);
+        ensure!(
+            error.code == code,
+            "{stderr:?} classified as {:?}",
+            error.code
+        );
+    }
+    let error = registry::failure("ghcr.io/o/r:t", "oops \u{1b}[31mred\u{7} and \nbad");
+    ensure!(
+        !error.message.chars().any(char::is_control),
+        "control characters shown: {:?}",
+        error.message
+    );
+    Ok(())
+}
+
+// --- subprocess output, scratch directories ---------------------------------
+
+fn check_exec_and_scratch(parent: &Path) -> Result<()> {
+    let tool = |count: &str, stdout: usize| {
+        exec::run_limited(
+            "head",
+            &["-c", count, "/dev/zero"],
+            Duration::from_secs(20),
+            exec::Limits {
+                stdout,
+                stderr: 1024,
+            },
+        )
+    };
+    ensure!(
+        tool("1000", 1000)?.stdout.len() == 1000,
+        "output of exactly the ceiling was refused"
+    );
+    ensure!(
+        tool("1001", 1000).is_err(),
+        "output over the ceiling was kept"
+    );
+    // A tool that never stops printing is stopped, not waited for.
+    let started = std::time::Instant::now();
+    ensure!(
+        exec::run_limited(
+            "yes",
+            &[],
+            Duration::from_secs(30),
+            exec::Limits {
+                stdout: 4096,
+                stderr: 1024
+            }
+        )
+        .is_err()
+            && started.elapsed() < Duration::from_secs(10),
+        "an endless tool was not stopped"
+    );
+    ensure!(
+        exec::run_limited(
+            "sh",
+            &["-c", "head -c 3000 /dev/zero >&2"],
+            Duration::from_secs(20),
+            exec::Limits {
+                stdout: 10,
+                stderr: 1000
+            }
+        )
+        .is_err(),
+        "stderr over its ceiling was kept"
+    );
+
+    // Private scratch directories: fresh, ours, 0700, never a link.
+    let dir = TestDir::new(parent, "scratch")?;
+    let (first, second);
+    {
+        let mut one = Scratch::new(&dir.0, "scan")?;
+        let two = Scratch::new(&dir.0, "scan")?;
+        first = one.path().to_path_buf();
+        second = two.path().to_path_buf();
+        let meta = fs::symlink_metadata(&first)?;
+        ensure!(
+            meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700,
+            "scratch mode {:o}",
+            meta.permissions().mode()
+        );
+        ensure!(first != second, "two scratch directories share a path");
+        let mount_point = one.subdir("esp1")?;
+        ensure!(
+            fs::symlink_metadata(&mount_point)?.permissions().mode() & 0o777 == 0o700,
+            "mount point mode"
+        );
+        ensure!(one.subdir("../x").is_err(), "a path was taken for a name");
+    }
+    ensure!(
+        !first.exists() && !second.exists(),
+        "scratch directories were left behind"
+    );
+    // A parent that is a link, or that others can write to, is refused.
+    let real = dir.0.join("real");
+    fs::create_dir(&real)?;
+    symlink(&real, dir.0.join("link"))?;
+    ensure!(
+        Scratch::new(&dir.0.join("link"), "scan").is_err(),
+        "a symlinked parent was accepted"
+    );
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o777))?;
+    ensure!(
+        Scratch::new(&real, "scan").is_err(),
+        "a world-writable parent was accepted"
+    );
+    ensure!(
+        fs::read_dir(&real)?.next().is_none(),
+        "something was made in a refused parent"
+    );
+    // The ESP child refuses what is not a device and a plain directory, and
+    // says so instead of mounting.
+    let refused = disks::scan_esp_child("/dev/null", &dir.0.join("nowhere"));
+    ensure!(
+        refused.error.is_some() && refused.loaders.is_empty(),
+        "the ESP child tried a mount point that is not there"
+    );
+    let refused = disks::scan_esp_child("relative", &real);
+    ensure!(
+        refused.error.is_some(),
+        "the ESP child took a relative device"
+    );
+    Ok(())
+}
+
+// --- the live medium and what is in use -------------------------------------
+
+/// A sysfs and `/dev` tree of the shape the kernel makes, in a directory: block
+/// devices below `sys/devices/virtual/block`, `class/block` and `dev/block`
+/// links to them, `slaves/` and `holders/` links, loop devices' backing files.
+struct Tree {
+    root: PathBuf,
+}
+
+impl Tree {
+    fn new(root: PathBuf) -> Result<Self> {
+        fs::create_dir_all(root.join("sys/class/block"))?;
+        fs::create_dir_all(root.join("sys/dev/block"))?;
+        fs::create_dir_all(root.join("sys/devices/virtual/block"))?;
+        fs::create_dir_all(root.join("dev/mapper"))?;
+        fs::create_dir_all(root.join("dev/disk/by-label"))?;
+        Ok(Self { root })
+    }
+
+    fn roots(&self) -> Roots {
+        Roots {
+            sys: self.root.join("sys"),
+            dev: self.root.join("dev"),
+        }
+    }
+
+    /// The device directory below `devices/virtual/block`: `sdb` or `sdb/sdb1`.
+    fn device(&self, name: &str, major: u32, minor: u32, parent: Option<&str>) -> Result<PathBuf> {
+        let relative = parent.map_or(name.to_owned(), |p| format!("{p}/{name}"));
+        let dir = self.root.join("sys/devices/virtual/block").join(&relative);
+        fs::create_dir_all(&dir)?;
+        let target = format!("../../devices/virtual/block/{relative}");
+        symlink(&target, self.root.join("sys/class/block").join(name))?;
+        symlink(
+            &target,
+            self.root
+                .join("sys/dev/block")
+                .join(format!("{major}:{minor}")),
+        )?;
+        fs::write(self.root.join("dev").join(name), b"")?;
+        Ok(dir)
+    }
+
+    fn disk(&self, name: &str, major: u32, minor: u32) -> Result<()> {
+        self.device(name, major, minor, None).map(|_| ())
+    }
+
+    fn partition(&self, disk: &str, name: &str, major: u32, minor: u32) -> Result<()> {
+        let dir = self.device(name, major, minor, Some(disk))?;
+        fs::write(dir.join("partition"), b"1\n")?;
+        Ok(())
+    }
+
+    /// A device-mapper device built on `slaves` (`sdb2`, or `sdb/sdb2` for a
+    /// partition's place in the tree).
+    fn stacked(&self, name: &str, major: u32, minor: u32, slaves: &[&str]) -> Result<()> {
+        let dir = self.device(name, major, minor, None)?;
+        fs::create_dir_all(dir.join("slaves"))?;
+        for slave in slaves {
+            let leaf = slave.rsplit('/').next().unwrap_or(slave);
+            symlink(format!("../../{slave}"), dir.join("slaves").join(leaf))?;
+            // The device below also lists what is built on it.
+            let below = self.root.join("sys/devices/virtual/block").join(slave);
+            fs::create_dir_all(below.join("holders"))?;
+            let depth = "../".repeat(slave.matches('/').count() + 2);
+            symlink(format!("{depth}{name}"), below.join("holders").join(name))?;
+        }
+        Ok(())
+    }
+
+    fn loop_device(&self, name: &str, major: u32, minor: u32, backing: &str) -> Result<()> {
+        let dir = self.device(name, major, minor, None)?;
+        write(&dir.join("loop/backing_file"), &format!("{backing}\n"))
+    }
+
+    /// A device node link under `dev`, `target` relative to its directory.
+    fn node_link(&self, path: &str, target: &str) -> Result<()> {
+        symlink(target, self.root.join("dev").join(path))?;
+        Ok(())
+    }
+}
+
+fn names(set: &BTreeSet<String>) -> Vec<&str> {
+    set.iter().map(String::as_str).collect()
+}
+
+/// The live medium and the disks in use, found through the kernel's tree and
+/// not through the text of a mount's source: Ventoy's device-mapper device,
+/// dracut's iso-scan loop device, a by-label source, a partition's disk, and
+/// what is merely in use (mounted, swap, stacked on).
+fn check_topology(parent: &Path) -> Result<()> {
+    let dir = TestDir::new(parent, "topology")?;
+    let tree = Tree::new(dir.0.join("tree"))?;
+    // sdb: Ventoy's stick; its second partition carries the dm device.
+    tree.disk("sdb", 8, 16)?;
+    tree.partition("sdb", "sdb1", 8, 17)?;
+    tree.partition("sdb", "sdb2", 8, 18)?;
+    tree.stacked("dm-0", 253, 0, &["sdb/sdb2"])?;
+    tree.node_link("mapper/ventoy", "../dm-0")?;
+    // sdc: the disk dracut's iso-scan found the ISO file on.
+    tree.disk("sdc", 8, 32)?;
+    tree.partition("sdc", "sdc1", 8, 33)?;
+    tree.loop_device("loop0", 7, 0, "/mnt/host/iso/live.iso")?;
+    // sdd: an optical-style medium, named by its label.
+    tree.disk("sdd", 8, 48)?;
+    tree.node_link("disk/by-label/ILEX", "../../sdd")?;
+    // sde: in use: a mounted partition, swap, a stacked device.
+    tree.disk("sde", 8, 64)?;
+    for (n, minor) in [("sde1", 65), ("sde2", 66), ("sde3", 67)] {
+        tree.partition("sde", n, 8, minor)?;
+    }
+    tree.stacked("dm-1", 253, 1, &["sde/sde3"])?;
+    // sdf: nothing uses it. A loop device whose file is on no mount.
+    tree.disk("sdf", 8, 80)?;
+    tree.loop_device("loop1", 7, 1, "/nowhere/x.iso")?;
+    let roots = tree.roots();
+
+    let run = |mountinfo: &str, swaps: &str| {
+        let mounts = topology::parse_mountinfo(mountinfo);
+        topology::usage(
+            &Topology::new(&roots, &mounts),
+            &mounts,
+            &topology::parse_swaps(swaps),
+        )
+    };
+
+    // Ventoy: a device-mapper device on a partition, mounted where dracut
+    // mounts the medium, named by /dev/mapper/ventoy.
+    let ventoy = run(
+        "40 1 253:0 / /run/initramfs/live ro,relatime shared:5 - iso9660 /dev/mapper/ventoy ro\n",
+        "",
+    );
+    ensure!(
+        names(&ventoy.live) == ["dm-0", "sdb", "sdb2"] && ventoy.unresolved.is_empty(),
+        "ventoy: {:?}",
+        ventoy
+    );
+    // The same mount where the kernel's number is wrong but the node is right.
+    let by_node = run(
+        "40 1 0:9 / /run/initramfs/live ro - iso9660 /dev/mapper/ventoy ro\n",
+        "",
+    );
+    ensure!(
+        names(&by_node.live) == ["dm-0", "sdb", "sdb2"],
+        "ventoy by node: {by_node:?}"
+    );
+    // dracut's iso-scan: the ISO is a file on the host disk, mounted aside,
+    // and attached to a loop device that is mounted as the medium.
+    let aside = run(
+        "41 1 7:0 / /run/initramfs/live ro - iso9660 /dev/loop0 ro\n\
+         42 1 8:33 / /mnt/host rw - ext4 /dev/sdc1 rw\n",
+        "",
+    );
+    ensure!(
+        aside.live.contains("sdc") && aside.live.contains("loop0") && aside.unresolved.is_empty(),
+        "iso-scan: {aside:?}"
+    );
+    // ... and where dracut itself mounts the host disk.
+    let dracut = run(
+        "41 1 7:0 / /run/initramfs/live ro - iso9660 /dev/loop0 ro\n\
+         42 1 8:33 / /run/initramfs/isoscan rw - ext4 /dev/sdc1 rw\n",
+        "",
+    );
+    ensure!(
+        dracut.live.contains("sdc") && dracut.in_use.is_empty(),
+        "dracut iso-scan: {dracut:?}"
+    );
+    // A /dev/disk/by-label source (no usable device number), and a source
+    // that is no path at all with the right number.
+    let label = run(
+        "43 1 0:55 / /run/media/ilex ro - iso9660 /dev/disk/by-label/ILEX ro\n",
+        "",
+    );
+    ensure!(names(&label.live) == ["sdd"], "by-label: {label:?}");
+    let number = run("44 1 8:48 / /somewhere ro - udf none ro\n", "");
+    ensure!(names(&number.live) == ["sdd"], "by number: {number:?}");
+    // Anything else mounted is in use, not the medium; so is swap, by device
+    // and by file; and what is stacked on a partition is found by the helper
+    // through the partition's holders.
+    let busy = run(
+        "45 1 8:65 / /mnt/data rw - ext4 /dev/sde1 rw\n\
+         46 1 0:30 / / rw - virtiofs rootfs rw\n\
+         47 1 0:31 / /run rw - tmpfs tmpfs rw\n\
+         48 1 0:32 / /run/initramfs rw - tmpfs tmpfs rw\n",
+        "Filename\tType\tSize\tUsed\tPriority\n/dev/sde2 partition 1024 0 -2\n/mnt/data/swap\\040file file 1024 0 -3\n",
+    );
+    ensure!(
+        busy.live.is_empty() && busy.unresolved.is_empty(),
+        "busy: {busy:?}"
+    );
+    let reasons: Vec<&str> = busy.in_use["sde"].iter().map(String::as_str).collect();
+    ensure!(
+        reasons
+            == [
+                "/dev/sde1 is mounted at /mnt/data",
+                "/dev/sde2 is in use as swap",
+                "/mnt/data/swap file is in use as swap",
+            ],
+        "in use: {reasons:?}"
+    );
+    ensure!(
+        !busy.in_use.contains_key("sdf") && !busy.in_use.contains_key("sdb"),
+        "an unrelated disk is in use: {busy:?}"
+    );
+    let topology = Topology::new(&roots, &[]);
+    ensure!(
+        topology.holders("sde3") == ["dm-1"]
+            && topology.holders("sde1").is_empty()
+            && topology.holders("sdf").is_empty(),
+        "holders"
+    );
+    // A medium that cannot be followed is said so, never guessed.
+    let lost = run(
+        "49 1 7:1 / /run/initramfs/live ro - iso9660 /dev/loop1 ro\n",
+        "",
+    );
+    ensure!(
+        lost.live.contains("loop1") && !lost.unresolved.is_empty(),
+        "an unresolvable medium: {lost:?}"
+    );
+    let missing = run(
+        "49 1 0:9 / /run/initramfs/live ro - iso9660 /dev/missing ro\n",
+        "",
+    );
+    ensure!(
+        missing.live.is_empty() && !missing.unresolved.is_empty(),
+        "a missing device node: {missing:?}"
+    );
+    // mountinfo's escapes.
+    let escaped =
+        topology::parse_mountinfo("50 1 8:65 / /mnt/with\\040space rw - ext4 /dev/sde1 rw\n");
+    ensure!(
+        escaped.len() == 1 && escaped[0].mount_point == "/mnt/with space",
+        "escapes: {escaped:?}"
+    );
+    Ok(())
+}
+
+// --- files ------------------------------------------------------------------
+
+fn tzif(path: &Path) -> Result<()> {
+    write(path, "TZif2\0\0\0")
+}
+
 fn check_files(parent: &Path) -> Result<()> {
-    let scratch = Scratch::new(parent, "files")?;
+    let scratch = TestDir::new(parent, "files")?;
     let root = &scratch.0;
     // An ESP's loaders.
     for dir in ["EFI/Microsoft/Boot", "EFI/BOOT", "EFI/ubuntu"] {
@@ -263,25 +796,86 @@ fn check_files(parent: &Path) -> Result<()> {
             && loaders[1].description == "EFI loader directory EFI/ubuntu",
         "loaders: {loaders:?}"
     );
-    // Zone and keymap names stay inside their trees.
-    fs::create_dir_all(root.join("zoneinfo/Europe"))?;
-    fs::write(root.join("zoneinfo/Europe/Berlin"), b"TZif")?;
-    fs::write(root.join("outside"), b"x")?;
-    std::os::unix::fs::symlink("../../outside", root.join("zoneinfo/Europe/Escape"))?;
-    let zones = root.join("zoneinfo");
+    // A link in place of EFI, or of a loader directory, counts for nothing.
+    fs::create_dir_all(root.join("outside/EFI/evil"))?;
+    fs::create_dir_all(root.join("linked"))?;
+    symlink(root.join("outside/EFI"), root.join("linked/EFI"))?;
+    fs::create_dir_all(root.join("linked2/EFI"))?;
+    symlink(root.join("outside/EFI/evil"), root.join("linked2/EFI/evil"))?;
     ensure!(
-        helper::time_zone_exists(&zones, "Europe/Berlin")
-            && !helper::time_zone_exists(&zones, "Europe/Escape")
-            && !helper::time_zone_exists(&zones, "Europe")
-            && !helper::time_zone_exists(&zones, "Nowhere/Land"),
-        "zone names"
+        disks::efi_loader_names(&root.join("linked")).is_empty()
+            && disks::efi_loader_names(&root.join("linked2")).is_empty(),
+        "a link was followed into an ESP"
     );
+    // Zone names: TZif files inside their tree, not the duplicates.
+    let zones = root.join("zoneinfo");
+    tzif(&zones.join("Europe/Berlin"))?;
+    tzif(&zones.join("posix/Europe/Berlin"))?;
+    tzif(&zones.join("right/Europe/Berlin"))?;
+    tzif(&zones.join("America/New_York"))?;
+    write(&zones.join("zone.tab"), "# not a zone\n")?;
+    write(&zones.join("Europe/Notzone"), "TZi")?;
+    write(&root.join("outside/file"), "TZif")?;
+    symlink("../../outside/file", zones.join("Europe/Escape"))?;
+    symlink("America/New_York", zones.join("posixrules"))?;
+    symlink("../posix/Europe/Berlin", zones.join("Europe/ViaPosix"))?;
+    let exists = |zone: &str| helper::time_zone_exists(&zones, zone);
+    ensure!(
+        exists("Europe/Berlin") && exists("America/New_York"),
+        "real zones refused"
+    );
+    for (name, zone) in [
+        ("a link out of the tree", "Europe/Escape"),
+        ("a directory", "Europe"),
+        ("a zone that is not there", "Nowhere/Land"),
+        ("a text file", "zone.tab"),
+        ("a file that is not TZif", "Europe/Notzone"),
+        ("the posix tree", "posix/Europe/Berlin"),
+        ("the right tree", "right/Europe/Berlin"),
+        ("posixrules", "posixrules"),
+        ("a link into the posix tree", "Europe/ViaPosix"),
+    ] {
+        ensure!(!exists(zone), "{name} ({zone}) was accepted as a zone");
+    }
     fs::create_dir_all(root.join("keymaps/i386/qwertz"))?;
     fs::write(root.join("keymaps/i386/qwertz/de-latin1.map.gz"), b"")?;
     ensure!(
         helper::keymap_exists(&root.join("keymaps"), "de-latin1")
             && !helper::keymap_exists(&root.join("keymaps"), "de"),
         "keymap names"
+    );
+    // Account and group names the live image defines.
+    write(
+        &root.join("etc/passwd"),
+        "root:x:0:0::/root:/bin/bash\nsshd:x:74:74::/:/sbin/nologin\n",
+    )?;
+    write(&root.join("etc/group"), "root:x:0:\ntss:x:59:\n")?;
+    write(
+        &root.join("sysusers/a.conf"),
+        "# a comment\nu chrony - \"chrony\" /var/lib/chrony\ng ilex-homed -\nm chrony wheel\nr - 500-900\nu! locked - -\nu -skipped -\n",
+    )?;
+    write(&root.join("sysusers/ignored.txt"), "u hidden -\n")?;
+    let defined = helper::system_names(
+        &root.join("etc/passwd"),
+        &root.join("etc/group"),
+        &[root.join("sysusers"), root.join("not-there")],
+    );
+    for wanted in [
+        "root",
+        "sshd",
+        "tss",
+        "chrony",
+        "ilex-homed",
+        "wheel",
+        "locked",
+    ] {
+        ensure!(defined.contains(wanted), "{wanted} is not a defined name");
+    }
+    ensure!(
+        !defined.contains("hidden")
+            && !defined.contains("-skipped")
+            && !defined.contains("ilexmaint"),
+        "names: {defined:?}"
     );
     Ok(())
 }
@@ -297,30 +891,54 @@ fn parse_size(text: &str) -> Option<u64> {
     Some(number.parse::<u64>().ok()? * unit)
 }
 
-/// The sizes the model plans with are the sizes the shipped files ask for.
+/// The sizes the model plans with are the sizes the shipped files ask for, in
+/// both layouts; the two directories are complete layouts of their own, with
+/// the same ESP and `/boot` files, and one root partition each.
 fn check_definition_sizes(definitions: &Path) -> Result<()> {
     use ilex_installer_model::plan::{BOOT_BYTES, ESP_BYTES, MIN_ROOT_BYTES};
-    let size = |file: &str, key: &str| -> Result<u64> {
-        let text = fs::read_to_string(definitions.join("whole-disk").join(file))?;
-        text.lines()
-            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
-            .and_then(|v| parse_size(v.trim()))
-            .with_context(|| format!("{file} has no {key}"))
-    };
-    ensure!(
-        size("10-esp.conf", "SizeMinBytes")? == ESP_BYTES
-            && size("10-esp.conf", "SizeMaxBytes")? == ESP_BYTES,
-        "ESP size"
-    );
-    ensure!(
-        size("20-boot.conf", "SizeMinBytes")? == BOOT_BYTES
-            && size("20-boot.conf", "SizeMaxBytes")? == BOOT_BYTES,
-        "boot size"
-    );
-    for file in ["30-root.conf", "30-root-encrypted.conf"] {
+    for (encrypt, directory) in [(false, "whole-disk"), (true, "whole-disk-encrypted")] {
+        let dir = definitions.join(directory);
+        let size = |file: &str, key: &str| -> Result<u64> {
+            let text = fs::read_to_string(dir.join(file))?;
+            text.lines()
+                .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+                .and_then(|v| parse_size(v.trim()))
+                .with_context(|| format!("{directory}/{file} has no {key}"))
+        };
         ensure!(
-            size(file, "SizeMinBytes")? == MIN_ROOT_BYTES,
-            "{file}: root minimum"
+            size("10-esp.conf", "SizeMinBytes")? == ESP_BYTES
+                && size("10-esp.conf", "SizeMaxBytes")? == ESP_BYTES,
+            "{directory}: ESP size"
+        );
+        ensure!(
+            size("20-boot.conf", "SizeMinBytes")? == BOOT_BYTES
+                && size("20-boot.conf", "SizeMaxBytes")? == BOOT_BYTES,
+            "{directory}: boot size"
+        );
+        ensure!(
+            size("30-root.conf", "SizeMinBytes")? == MIN_ROOT_BYTES,
+            "{directory}: root minimum"
+        );
+        let files: Vec<String> = fs::read_dir(&dir)?
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        ensure!(
+            files.len() == 3,
+            "{directory} holds {files:?}, not exactly the three definitions of a layout"
+        );
+        // One root partition, encrypted when (and only when) asked.
+        repart::read_layout(&dir, encrypt).with_context(|| directory.to_owned())?;
+        ensure!(
+            repart::read_layout(&dir, !encrypt).is_err(),
+            "{directory} passes for the other kind of layout"
+        );
+    }
+    for shared in ["10-esp.conf", "20-boot.conf"] {
+        ensure!(
+            fs::read(definitions.join("whole-disk").join(shared))?
+                == fs::read(definitions.join("whole-disk-encrypted").join(shared))?,
+            "{shared} differs between the two layouts"
         );
     }
     Ok(())
@@ -329,17 +947,13 @@ fn check_definition_sizes(definitions: &Path) -> Result<()> {
 /// The shipped definitions and this system's `systemd-repart`, on a sparse file.
 fn check_repart(config: &helper::Config, parent: &Path) -> Result<String> {
     check_definition_sizes(&config.definitions)?;
-    let scratch = Scratch::new(parent, "repart")?;
+    let scratch = TestDir::new(parent, "repart")?;
     let image = scratch.0.join("disk.img");
     fs::File::create(&image)?.set_len(40 * 1024 * 1024 * 1024)?;
     let device = image.to_string_lossy().into_owned();
     let mut sizes = Vec::new();
     for encrypt in [false, true] {
-        let layout = repart::assemble(
-            &config.definitions,
-            encrypt,
-            &scratch.0.join(encrypt.to_string()),
-        )?;
+        let layout = repart::layout(&config.definitions, encrypt)?;
         let plan = repart::dry_run(&layout, &device, "0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11")?;
         let kinds: Vec<&str> = plan.iter().map(|p| p.kind.as_str()).collect();
         ensure!(
@@ -383,6 +997,20 @@ fn check_repart(config: &helper::Config, parent: &Path) -> Result<String> {
 
 fn check_system(config: &helper::Config) -> Result<String> {
     let helper = helper::Helper::new(config.clone()).context("loading the catalogue")?;
+    // An edition record that is absent means the Anaconda path's table; one
+    // that is there and cannot be read (here a directory) stops the helper.
+    let mut absent = config.clone();
+    absent.edition_file = config.run_dir.join("no-such-edition.json");
+    ensure!(
+        helper::Helper::new(absent).is_ok(),
+        "a table without an edition record was refused"
+    );
+    let mut unreadable = config.clone();
+    unreadable.edition_file = config.run_dir.clone();
+    ensure!(
+        helper::Helper::new(unreadable).is_err(),
+        "an edition record that cannot be read was ignored"
+    );
     let probe = helper.probe()?;
     ensure!(
         probe.schema == 1 && probe.catalogue.default == helper.table.default,
@@ -392,13 +1020,23 @@ fn check_system(config: &helper::Config) -> Result<String> {
         probe.memory.total_bytes > 0 && probe.memory.available_bytes <= probe.memory.total_bytes,
         "memory"
     );
+    // Every offer is this edition's, with the default's own shell list.
+    let default = probe
+        .catalogue
+        .composition(&probe.catalogue.default)
+        .context("the default is not offered")?;
     ensure!(
-        probe
-            .catalogue
-            .compositions
-            .iter()
-            .all(|c| c.shells.first() == Some(&probe.edition.id)),
+        default.shells.first() == Some(&probe.edition.id)
+            && probe
+                .catalogue
+                .compositions
+                .iter()
+                .all(|c| c.shells == default.shells),
         "an offered composition is not this edition's"
+    );
+    ensure!(
+        probe.firmware.uefi == config.efi_dir.is_dir(),
+        "the firmware is not what the directory says"
     );
     let mut ids = BTreeSet::new();
     for disk in &probe.disks {
@@ -444,11 +1082,15 @@ fn check_system(config: &helper::Config) -> Result<String> {
 pub fn run(config: &helper::Config) -> Result<String> {
     let model = ilex_installer_model::selfcheck::run().context("model")?;
     check_parsers().context("parsers")?;
-    let parent = config.run_dir.join("selfcheck");
-    fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
-    check_files(&parent).context("files")?;
-    let repart = check_repart(config, &parent).context("repart")?;
+    // A private directory of its own: a self-check run beside the daemon (or
+    // another self-check) shares no path with it.
+    let parent = Scratch::new(&config.run_dir, "selfcheck")?;
+    check_exec_and_scratch(parent.path()).context("subprocess output and scratch directories")?;
+    check_topology(parent.path()).context("the live medium and disks in use")?;
+    check_files(parent.path()).context("files")?;
+    let repart = check_repart(config, parent.path()).context("repart")?;
     let system = check_system(config).context("system")?;
-    let _ = fs::remove_dir(&parent);
-    Ok(format!("{model}; parsers, files, {repart}; {system}"))
+    Ok(format!(
+        "{model}; parsers, registry, subprocess limits, scratch, topology, files, {repart}; {system}"
+    ))
 }

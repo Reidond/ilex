@@ -1507,6 +1507,7 @@ dependencies = [
  "clap",
  "ilex-enroll",
  "ilex-installer-model",
+ "serde",
  "serde_json",
  "sha2",
  "zbus",
