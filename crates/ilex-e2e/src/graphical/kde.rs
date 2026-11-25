@@ -404,7 +404,8 @@ mod apps {
         }
         vm.wait_for(
             "both Flatpaks to be running",
-            &format!("pgrep -u {USER} -x gnome-calculator && pgrep -u {USER} -x gedit"),
+            // comm is cut at 15 characters: match the command line instead.
+            &format!("pgrep -u {USER} -f '^gnome-calculator' && pgrep -u {USER} -f '^gedit'"),
             SESSION_TIMEOUT,
         )?;
         std::thread::sleep(Duration::from_secs(5));
