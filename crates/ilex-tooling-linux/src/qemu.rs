@@ -429,6 +429,10 @@ pub struct VmConfig {
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
+    /// Give the guest the harness's SSH key as the `ssh.authorized_keys.root`
+    /// credential (the default). An image that keeps its SSH server off
+    /// unless that credential exists can be booted without it.
+    pub ssh_credential: bool,
     /// Extra SMBIOS structures; double commas inside values for QEMU.
     pub smbios: Vec<String>,
     /// Keep the UEFI variable store here, copying the firmware's template when
@@ -457,6 +461,7 @@ impl VmConfig {
             secondary_serial: false,
             usb_keyboard: false,
             extra_disks: Vec::new(),
+            ssh_credential: true,
             smbios: Vec::new(),
             efi_vars: None,
         }
@@ -692,13 +697,14 @@ impl Vm {
             } else {
                 format!("user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22")
             })
-            .args(["-device", "virtio-net-pci,netdev=net0,id=internet"])
-            .arg("-smbios")
-            .arg(format!(
+            .args(["-device", "virtio-net-pci,netdev=net0,id=internet"]);
+        if config.ssh_credential {
+            qemu.arg("-smbios").arg(format!(
                 "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root={}",
                 base64(key.public.as_bytes())
-            ))
-            .arg("-serial")
+            ));
+        }
+        qemu.arg("-serial")
             .arg(format!("file:{}", dir.join("serial.log").display()))
             .arg("-qmp")
             .arg(format!("unix:{},server=on,wait=off", qmp_sock.display()));

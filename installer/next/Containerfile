@@ -104,7 +104,7 @@ COPY --from=generated edition.json /usr/share/ilex-installer/edition.json
 COPY --from=generated iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 COPY --from=ui-build /out/ /
 RUN dconf update && \
-    systemctl enable ilex-installer-session.service && \
+    systemctl enable ilex-installer-session.service ilex-installer-fallback.service && \
     ilex-installer --version
 
 # Rebuild the initramfs with dracut's live-boot module, generic (not

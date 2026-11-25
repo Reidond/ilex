@@ -63,13 +63,13 @@ const UNREPORTED: &str = "unknown";
 
 impl Machine {
     /// The vendor and model of the whole system, as the firmware reports them.
-    #[cfg(feature = "gui")]
+    #[cfg(all(target_os = "linux", feature = "gui"))]
     pub fn computer(&self) -> String {
         describe(&self.sys_vendor, &self.product_name)
     }
 
     /// The vendor and model of the board.
-    #[cfg(feature = "gui")]
+    #[cfg(all(target_os = "linux", feature = "gui"))]
     pub fn board(&self) -> String {
         describe(&self.board_vendor, &self.board_name)
     }
@@ -92,7 +92,7 @@ impl Machine {
 }
 
 /// "Vendor Model", or one word when the firmware reports neither.
-#[cfg(feature = "gui")]
+#[cfg(all(target_os = "linux", feature = "gui"))]
 fn describe(vendor: &str, model: &str) -> String {
     match (vendor == UNREPORTED, model == UNREPORTED) {
         (true, true) => "Not reported by the firmware".into(),

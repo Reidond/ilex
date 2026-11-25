@@ -72,6 +72,13 @@ impl SimpleComponent for Installer {
         content.set_content(Some(&status));
         root.set_content(Some(&content));
         root.set_fullscreened(fullscreen);
+        if fullscreen {
+            // The only window of a live session: the compositor's close
+            // request (Alt+F4, a window menu) must not end the installer,
+            // which would leave tty1 with nothing on it. Only the session
+            // unit stops it. `--windowed` (development) closes normally.
+            root.connect_close_request(|_| glib::Propagation::Stop);
+        }
 
         let edition = page.edition.edition;
         root.connect_map(move |window| announce(window, &edition));

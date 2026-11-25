@@ -9,10 +9,12 @@ Wants=systemd-logind.service
 Conflicts=getty@tty1.service
 After=getty@tty1.service
 ConditionPathExists=/usr/share/ilex-installer/edition.json
-# Three failures in a row: print what happened on tty1 (see the fallback unit).
+# Three starts in five minutes, then the unit gives up (start-limit-hit) and
+# stays failed. ilex-installer-fallback.service sees that final state and says
+# so on tty1; there is no OnFailure= here, which would fire after every failed
+# attempt and not only after the last.
 StartLimitIntervalSec=300
 StartLimitBurst=3
-OnFailure=ilex-installer-fallback.service
 
 [Service]
 Type=simple
@@ -31,11 +33,16 @@ UtmpMode=user
 SupplementaryGroups=dialout
 Environment=XDG_SESSION_TYPE=wayland
 Environment=XDG_SESSION_CLASS=user
-# Fixed test-only fault credential (ilex.installer.fault=session), read by the
-# session script. It can only make the installer fail to start.
+# Fixed test-only credentials, read by the session script and the interface:
+# ilex.installer.fault=session makes the session fail to start;
+# ilex.installer.serial-test=unavailable|backpressure makes the serial mirror
+# of the markers fail. They can only make the installer fail or stay quiet.
 ImportCredential=ilex.installer.fault
+ImportCredential=ilex.installer.serial-test
 ExecStart=/usr/libexec/ilex-installer/session
-Restart=on-failure
+# The session script exits non-zero whenever either of its processes ends, but
+# any end of this unit's main process, clean or not, is a failed session.
+Restart=always
 RestartSec=2
 
 [Install]

@@ -7,6 +7,8 @@ grub2-efi-x64-cdboot
 isomd5sum
 squashfs-tools
 xorrisofs
-# The session: logind sessions, the Wi-Fi support later pages use, tty2's shell.
+# The session: logind sessions, the Wi-Fi support later pages use, tty2's shell,
+# and `ss`, which the session script uses to see that the compositor listens.
 NetworkManager-wifi
 util-linux
+iproute

@@ -3,22 +3,43 @@
 //! explicitly: `iso::` alone is the Anaconda release gate and must not boot an
 //! ISO of another product.
 //!
-//! The live ISO has no SSH server: the session prints marker lines on the
-//! serial console (`ILEX-INSTALLER-SESSION …` from the session script,
-//! `ILEX-INSTALLER page=…` once the window is mapped, `ILEX-INSTALLER-STATS …`
-//! after the page has settled) and the harness takes a QMP screenshot of what
-//! was actually drawn.
+//! The session prints marker lines on the serial console
+//! (`ILEX-INSTALLER-SESSION …` from the session script, `ILEX-INSTALLER page=…`
+//! once the window is mapped, `ILEX-INSTALLER-STATS …` after the page has
+//! settled), and the harness takes a QMP screenshot of what was actually drawn.
+//! Markers are matched as complete lines (one still being written is not a
+//! line yet) by their first word and a key, never as substrings.
 //!
-//! * `iso::next_boot`: UEFI with Secure Boot required on KVM (the secure
-//!   fixture path; unqualified hosts fail), default boot entry.
+//! The live image's SSH server starts only when the harness supplies its key
+//! (the `ssh.authorized_keys.root` SMBIOS credential every VM here gets); the
+//! guest's own diagnostics and the polkit report use it. The serial trials
+//! boot without the key and check that nothing answers on the forwarded port.
+//!
+//! * `iso::next_boot`: UEFI with Secure Boot required on KVM, default boot
+//!   entry; also reports what polkit lets the installer's session do.
 //! * `iso::next_basic_graphics`: the same, choosing "Install ilex (basic
 //!   graphics)" in GRUB with real key input; GTK must report its cairo
 //!   renderer.
 //! * `iso::next_fallback`: a fixed test credential makes the session fail; the
-//!   unit gives up after three failures and tells the person on tty1.
+//!   unit gives up after three failures and the message appears, once, on tty1
+//!   (read back from the VT's own text, `/dev/vcs1`).
+//! * `iso::next_restart`: a window close request does not end the session; a
+//!   compositor that is killed leaves its socket behind and the next attempt
+//!   still comes up; so does a killed client.
+//! * `iso::next_serial_backpressure` / `iso::next_serial_unavailable`: the
+//!   serial mirror of the markers fails on purpose (a fixed test credential);
+//!   the page still comes up promptly, each failed write is reported on the
+//!   second UART within a second, and no SSH server runs without the key.
+//!
+//! The boot trials use `SecurityLaunch::QualificationFixture`: provisioning
+//! (KVM with SMM, a Secure Boot firmware pair) is required, a passing
+//! qualification of the host is not. They measure whatever the host gives them
+//! and never promote its qualification record.
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -42,19 +63,34 @@ const STATS_TIMEOUT: Duration = Duration::from_secs(90);
 /// What the installer VM gets unless `ILEX_ISO_NEXT_MEMORY` says otherwise.
 const MEMORY: &str = "4G";
 const GRUB_COUNTDOWN: &str = "The highlighted entry will be executed automatically";
+/// What a failed mirror write may take the interface: the worker's budget is
+/// 200 ms, with margin for a loaded guest.
+const SERIAL_BUDGET_SECONDS: f64 = 1.0;
+/// The polkit actions the installer's session may do without a password. None
+/// today: the placeholder page asks for nothing, and each later page that does
+/// (a restart button, the network page) adds its action here with the rule that
+/// allows it.
+const POLKIT_ALLOWED: &[&str] = &[];
 
 pub fn trials() -> Vec<Trial> {
     vec![
-        Trial::test("iso::next_boot", || {
-            boot(Entry::Normal).map_err(|e| Failed::from(format!("{e:#}")))
+        trial("iso::next_boot", || boot(Entry::Normal)),
+        trial("iso::next_basic_graphics", || boot(Entry::BasicGraphics)),
+        trial("iso::next_fallback", fallback),
+        trial("iso::next_restart", restart),
+        trial("iso::next_serial_backpressure", || {
+            serial("backpressure", "Backpressure")
         }),
-        Trial::test("iso::next_basic_graphics", || {
-            boot(Entry::BasicGraphics).map_err(|e| Failed::from(format!("{e:#}")))
-        }),
-        Trial::test("iso::next_fallback", || {
-            fallback().map_err(|e| Failed::from(format!("{e:#}")))
+        trial("iso::next_serial_unavailable", || {
+            serial("unavailable", "Unavailable")
         }),
     ]
+}
+
+fn trial(name: &'static str, run: fn() -> Result<()>) -> Trial {
+    Trial::test(name, move || {
+        run().map_err(|error| Failed::from(format!("{error:#}")))
+    })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -152,7 +188,8 @@ fn boot(entry: Entry) -> Result<()> {
     config.memory = memory.clone();
     config.cdrom = Some(iso.clone());
     let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
-    // Measure whatever size the run asks for; this never promotes the host's
+    // Provisioning is required, a qualified host is not: this tier measures
+    // whatever size the run asks for and never promotes the host's
     // qualification (see CLAUDE.md, "Linux security qualification").
     spec.security_launch = SecurityLaunch::QualificationFixture;
     spec.secure_boot = Requirement::Required;
@@ -196,55 +233,67 @@ fn observe(
 
     if entry == Entry::BasicGraphics {
         // The countdown is the point at which GRUB accepts keys. Moving down
-        // stops it and selects the second entry.
-        wait_for(vm, &serial, GRUB_COUNTDOWN, PAGE_TIMEOUT)?;
+        // stops it and selects the second entry. GRUB redraws its menu with
+        // cursor movements, not lines: this one is a substring match.
+        wait_for_text(vm, &serial, GRUB_COUNTDOWN, PAGE_TIMEOUT)?;
         grub_key(&ctl, "down")?;
         ctl.save_screenshot(&artifacts.join("next-basic-graphics-grub.png"))?;
         grub_key(&ctl, "Return")?;
     }
 
-    let console = wait_for(vm, &serial, "ILEX-INSTALLER page=", PAGE_TIMEOUT)?;
+    let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 1, PAGE_TIMEOUT)?;
     let to_page = started.elapsed();
-    let session = fields(&console, "ILEX-INSTALLER-SESSION compositor=")
-        .context("the session script printed no ILEX-INSTALLER-SESSION line")?;
-    let page = fields(&console, "ILEX-INSTALLER page=")
-        .context("the page printed no ILEX-INSTALLER line")?;
+    let session = fields(&console, "ILEX-INSTALLER-SESSION", "compositor")?;
+    let page = fields(&console, "ILEX-INSTALLER", "page")?;
+    let graphics = field(&session, "graphics")?;
     ensure!(
-        session["graphics"] == entry.graphics(),
-        "booted graphics={} but the {} entry was chosen",
-        session["graphics"],
+        graphics == entry.graphics(),
+        "booted graphics={graphics} but the {} entry was chosen",
         entry.name()
     );
     ensure!(
-        session["secure-boot"] == "1",
+        field(&session, "secure-boot")? == "1",
         "the guest does not report Secure Boot on: {session:?}"
     );
-    ensure!(page["page"] == "placeholder", "unexpected page: {page:?}");
-    ensure!(page["edition"] == "gnome", "unexpected edition: {page:?}");
+    ensure!(
+        field(&page, "page")? == "placeholder",
+        "unexpected page: {page:?}"
+    );
+    ensure!(
+        field(&page, "edition")? == "gnome",
+        "unexpected edition: {page:?}"
+    );
+    let renderer = field(&page, "renderer")?;
     if entry == Entry::BasicGraphics {
         ensure!(
-            page["renderer"] == "GskCairoRenderer",
-            "basic graphics must draw with cairo, GTK chose {}",
-            page["renderer"]
+            renderer == "GskCairoRenderer",
+            "basic graphics must draw with cairo, GTK chose {renderer}"
         );
     }
     ensure!(
-        !console.contains("ILEX-INSTALLER-FALLBACK"),
+        !has_marker(&console, "ILEX-INSTALLER-FALLBACK", None),
         "the session fell back: {console}"
     );
 
     // What was actually drawn: a settled frame that is the libadwaita page.
-    let frame = wait_page(vm, &ctl, artifacts, entry)?;
+    let frame = wait_page(vm, &ctl, artifacts, entry.name())?;
     let shot = artifacts.join(format!("next-{}.png", entry.name()));
     ctl.save_screenshot(&shot)?;
 
-    let console = wait_for(vm, &serial, "ILEX-INSTALLER-STATS ", STATS_TIMEOUT)?;
-    let stats = fields(&console, "ILEX-INSTALLER-STATS ").context("no memory sample")?;
+    let console = wait_for_marker(
+        vm,
+        &serial,
+        "ILEX-INSTALLER-STATS",
+        "mem_total_kib",
+        1,
+        STATS_TIMEOUT,
+    )?;
+    let stats = fields(&console, "ILEX-INSTALLER-STATS", "mem_total_kib")?;
     let kib = |key: &str| -> Result<u64> {
-        stats
-            .get(key)
-            .and_then(|v| v.parse().ok())
-            .with_context(|| format!("memory sample lacks {key}: {stats:?}"))
+        let value = field(&stats, key)?;
+        value
+            .parse()
+            .with_context(|| format!("memory sample {key}={value} is not a number: {stats:?}"))
     };
     let (total, available) = (kib("mem_total_kib")?, kib("mem_available_kib")?);
     let report = serde_json::json!({
@@ -255,8 +304,8 @@ fn observe(
         "iso_bytes": fs::metadata(iso)?.len(),
         "seconds_power_on_to_page": to_page.as_secs_f64(),
         "guest_uptime_at_page": page.get("uptime"),
-        "renderer": page["renderer"],
-        "scale": page["scale"],
+        "renderer": renderer,
+        "scale": page.get("scale"),
         "screen": format!("{}x{}", frame.width, frame.height),
         "guest_mem_total_kib": total,
         "guest_mem_available_kib": available,
@@ -274,14 +323,60 @@ fn observe(
         fs::read(&serial)?,
     )?;
     println!("iso::next {}: {report}", entry.name());
+
+    if entry == Entry::Normal {
+        surface(vm, artifacts)?;
+    }
     Ok(())
 }
 
-/// After a failure: what the live system says about itself. The harness'
-/// test key is in the guest as a credential and the image keeps sshd, so this
-/// usually works; when it does not, the serial log and screenshot remain.
+/// What the installer's session can reach, from the running guest: the polkit
+/// actions authorized for it without a password (each one is checked with
+/// `pkcheck` against the session's own process), the names on the system bus,
+/// the listening sockets. The authorized set must be exactly [`POLKIT_ALLOWED`].
+fn surface(vm: &mut Vm, artifacts: &Path) -> Result<()> {
+    const SCRIPT: &str = r#"set -u
+pid=$(systemctl show ilex-installer-session.service -p MainPID --value)
+echo "## session (main pid $pid)"
+loginctl list-sessions --no-pager --no-legend
+loginctl show-session "$(loginctl --no-legend list-sessions | awk '$3 == "ilex-installer" {print $1; exit}')" -p Active -p Remote -p Class -p Type -p State
+echo "## polkit: authorized for the session without a password"
+for action in $(pkaction); do
+    pkcheck --action-id "$action" --process "$pid" >/dev/null 2>&1 && echo "AUTHORIZED $action"
+done
+echo "## polkit: end"
+echo "## system bus: names in use"
+busctl --system list --no-legend --no-pager | awk '{print $1}'
+echo "## system bus: activatable"
+busctl --system list --activatable --no-legend --no-pager | awk '{print $1}'
+echo "## listening sockets"
+ss -tulnH
+echo "## units running"
+systemctl list-units --type=service --state=running --no-legend --no-pager | awk '{print $1}'
+"#;
+    vm.wait_ssh(Duration::from_secs(180))
+        .context("the harness's SSH key did not give a login to the live ISO")?;
+    let report = vm.ssh_ok(SCRIPT).context("collecting the polkit surface")?;
+    fs::write(artifacts.join("next-surface.txt"), &report)?;
+    let mut authorized: Vec<&str> = report
+        .lines()
+        .filter_map(|line| line.strip_prefix("AUTHORIZED "))
+        .collect();
+    authorized.sort_unstable();
+    let mut allowed = POLKIT_ALLOWED.to_vec();
+    allowed.sort_unstable();
+    ensure!(
+        authorized == allowed,
+        "polkit authorizes {authorized:?} for the installer's session without a password, expected {allowed:?} (full report: next-surface.txt)"
+    );
+    Ok(())
+}
+
+/// After a failure: what the live system says about itself, over the
+/// harness's SSH key when the guest has one (and a login to give it), and the
+/// serial log and a screenshot regardless.
 fn diagnostics(vm: &mut Vm, artifacts: &Path, name: &str) {
-    if let Ok(console) = fs::read_to_string(vm.info.dir.join("serial.log")) {
+    if let Ok(console) = fs::read(vm.info.dir.join("serial.log")) {
         let _ = fs::write(
             artifacts.join(format!("next-{name}-failure-serial.txt")),
             console,
@@ -291,7 +386,7 @@ fn diagnostics(vm: &mut Vm, artifacts: &Path, name: &str) {
         .save_screenshot(&artifacts.join(format!("next-{name}-failure.png")));
     // A deadline of its own: a guest without sshd must not hang the failure path.
     let script = "systemctl --no-pager --failed; \
-         systemctl --no-pager status ilex-installer-session ilex-installer-fallback; \
+         systemctl --no-pager status ilex-installer-session ilex-installer-fallback sshd; \
          loginctl list-sessions --no-pager; getenforce; \
          journalctl -b --no-pager -o short-monotonic -n 400";
     let report = Command::new("timeout")
@@ -305,16 +400,88 @@ fn diagnostics(vm: &mut Vm, artifacts: &Path, name: &str) {
     }
 }
 
-/// Wait until the serial log holds `wanted`; fails fast when the guest exited
-/// or the installer gave up. Returns the whole log.
-fn wait_for(vm: &mut Vm, serial: &Path, wanted: &str, timeout: Duration) -> Result<String> {
+/// The serial log as text (invalid bytes replaced: GRUB and the kernel print
+/// escape sequences). A log that does not exist yet is empty.
+fn console(serial: &Path) -> Result<String> {
+    match fs::read(serial) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", serial.display())),
+    }
+}
+
+/// The complete lines of a console: a line still being written has no newline
+/// yet and is not a line.
+fn complete_lines(console: &str) -> impl DoubleEndedIterator<Item = &str> {
+    let complete = console.rfind('\n').map_or("", |end| &console[..end]);
+    complete.lines().map(|line| line.trim_end_matches('\r'))
+}
+
+/// A marker line: its first word is `name` and, when given, one of its words
+/// is `key=…`.
+fn is_marker(line: &str, name: &str, key: Option<&str>) -> bool {
+    let mut words = line.split_whitespace();
+    words.next() == Some(name)
+        && key.is_none_or(|key| {
+            words.any(|word| word.split_once('=').is_some_and(|(found, _)| found == key))
+        })
+}
+
+fn has_marker(console: &str, name: &str, key: Option<&str>) -> bool {
+    complete_lines(console).any(|line| is_marker(line, name, key))
+}
+
+fn count_markers(console: &str, name: &str, key: Option<&str>) -> usize {
+    complete_lines(console)
+        .filter(|line| is_marker(line, name, key))
+        .count()
+}
+
+/// The `key=value` words of the last complete marker line.
+fn fields(console: &str, name: &str, key: &str) -> Result<BTreeMap<String, String>> {
+    let line = complete_lines(console)
+        .rev()
+        .find(|line| is_marker(line, name, Some(key)))
+        .with_context(|| {
+            format!("no complete {name} line with {key}= on the serial console: {console}")
+        })?;
+    Ok(line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|word| {
+            let (key, value) = word.split_once('=')?;
+            Some((key.to_owned(), value.to_owned()))
+        })
+        .collect())
+}
+
+fn field<'a>(fields: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str> {
+    fields
+        .get(key)
+        .map(String::as_str)
+        .with_context(|| format!("the serial marker has no {key}=: {fields:?}"))
+}
+
+/// Wait until the serial log holds `count` complete `name … key=…` lines;
+/// fails fast when the guest exited or the installer gave up. Returns the whole
+/// log.
+fn wait_for_marker(
+    vm: &mut Vm,
+    serial: &Path,
+    name: &str,
+    key: &str,
+    count: usize,
+    timeout: Duration,
+) -> Result<String> {
     let started = Instant::now();
+    let wanted = format!("{count} x {name} {key}=");
     loop {
-        let console = fs::read_to_string(serial).unwrap_or_default();
-        if console.contains(wanted) {
+        let console = console(serial)?;
+        if count_markers(&console, name, Some(key)) >= count {
             return Ok(console);
         }
-        if console.contains("ILEX-INSTALLER-FALLBACK") && wanted != "ILEX-INSTALLER-FALLBACK" {
+        if name != "ILEX-INSTALLER-FALLBACK" && has_marker(&console, "ILEX-INSTALLER-FALLBACK", None)
+        {
             bail!("the session gave up while waiting for {wanted:?}; serial: {console}");
         }
         if let Some(status) = vm.exited()? {
@@ -327,17 +494,23 @@ fn wait_for(vm: &mut Vm, serial: &Path, wanted: &str, timeout: Duration) -> Resu
     }
 }
 
-/// `key=value` words of the last line starting with `prefix`.
-fn fields(console: &str, prefix: &str) -> Option<BTreeMap<String, String>> {
-    let line = console.lines().rev().find(|l| l.starts_with(prefix))?;
-    Some(
-        line.split_whitespace()
-            .filter_map(|word| {
-                let (key, value) = word.split_once('=')?;
-                Some((key.to_owned(), value.to_owned()))
-            })
-            .collect(),
-    )
+/// Wait until the serial log contains `wanted` as text (GRUB's menu is drawn
+/// with cursor movements, not lines).
+fn wait_for_text(vm: &mut Vm, serial: &Path, wanted: &str, timeout: Duration) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let console = console(serial)?;
+        if console.contains(wanted) {
+            return Ok(());
+        }
+        if let Some(status) = vm.exited()? {
+            bail!("the VM exited with {status} while waiting for {wanted:?}; serial: {console}");
+        }
+        if started.elapsed() > timeout {
+            bail!("no {wanted:?} within {timeout:?}; serial: {console}");
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn process_rss_kib(pid: u32) -> Option<u64> {
@@ -353,7 +526,7 @@ fn process_rss_kib(pid: u32) -> Option<u64> {
 
 /// The page is up once two frames three seconds apart are the same and are
 /// libadwaita's light window with content on it.
-fn wait_page(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, entry: Entry) -> Result<Frame> {
+fn wait_page(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, name: &str) -> Result<Frame> {
     let started = Instant::now();
     let mut previous = None;
     loop {
@@ -368,8 +541,7 @@ fn wait_page(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, entry: Entry) -> Result
             previous = Some(fingerprint);
         }
         if started.elapsed() > Duration::from_secs(120) {
-            let _ =
-                ctl.save_screenshot(&artifacts.join(format!("next-{}-failure.png", entry.name())));
+            let _ = ctl.save_screenshot(&artifacts.join(format!("next-{name}-failure.png")));
             bail!("the page was not drawn within two minutes of its marker");
         }
         std::thread::sleep(Duration::from_secs(3));
@@ -393,23 +565,52 @@ fn page_drawn(frame: &Frame) -> bool {
     luma > 235 && n * 100 > total * 40 && (total - n) * 1000 > total * 5
 }
 
-/// The session unit gives up after three failures and the fallback unit says
-/// so on tty1. A fixed test credential makes the session script fail.
-fn fallback() -> Result<()> {
-    let ws = common::workspace()?;
+/// Light text on a dark screen: most pixels dark, some clearly light. A black
+/// screen has none and a drawn page is mostly light.
+fn text_drawn(frame: &Frame) -> bool {
+    let (mut dark, mut light, mut total) = (0u32, 0u32, 0u32);
+    for pixel in frame.rgb.as_chunks::<3>().0.iter().step_by(7) {
+        let luma = (u32::from(pixel[0]) * 3 + u32::from(pixel[1]) * 6 + u32::from(pixel[2])) / 10;
+        total += 1;
+        if luma < 60 {
+            dark += 1;
+        } else if luma > 150 {
+            light += 1;
+        }
+    }
+    total > 0 && dark * 100 > total * 60 && light * 2000 > total
+}
+
+/// A plain (not Secure Boot) guest booted from the ISO on a blank disk.
+fn plain_vm(
+    ws: &ilex_devkit::Workspace,
+    purpose: &str,
+    configure: impl FnOnce(&mut VmConfig),
+) -> Result<(Vm, PathBuf)> {
     let iso = iso_path()?;
-    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
-    let work = ws.state_dir().join("iso-next-fallback");
+    let work = ws.state_dir().join(format!("{purpose}-fixture"));
     fs::create_dir_all(&work)?;
     let disk = work.join("blank.qcow2");
     blank_disk(&disk)?;
-    let mut config = VmConfig::new("iso-next-fallback", &disk);
+    let mut config = VmConfig::new(purpose, &disk);
     config.memory = "2G".into();
     config.cdrom = Some(iso);
-    config
-        .smbios
-        .push("type=11,value=io.systemd.credential:ilex.installer.fault=session".into());
-    let mut vm = Vm::boot(&ws, &config)?;
+    configure(&mut config);
+    let vm = Vm::boot(ws, &config)?;
+    let serial = vm.info.dir.join("serial.log");
+    Ok((vm, serial))
+}
+
+/// The session unit gives up after three failures and the fallback unit says
+/// so on tty1, once. A fixed test credential makes the session script fail.
+fn fallback() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let (mut vm, _) = plain_vm(&ws, "iso-next-fallback", |config| {
+        config
+            .smbios
+            .push("type=11,value=io.systemd.credential:ilex.installer.fault=session".into());
+    })?;
     let outcome = observe_fallback(&mut vm, &artifacts);
     if outcome.is_err() {
         diagnostics(&mut vm, &artifacts, "fallback");
@@ -420,26 +621,235 @@ fn fallback() -> Result<()> {
 fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     let serial = vm.info.dir.join("serial.log");
     let ctl = Vmctl::from_info(vm.info.clone());
-    let console = wait_for(vm, &serial, "ILEX-INSTALLER-FALLBACK", PAGE_TIMEOUT)?;
-    let failures = console
-        .matches("ILEX-INSTALLER-SESSION fault=session")
-        .count();
+    let console = wait_for_marker(
+        vm,
+        &serial,
+        "ILEX-INSTALLER-FALLBACK",
+        "result",
+        1,
+        PAGE_TIMEOUT,
+    )?;
+    let failures = count_markers(&console, "ILEX-INSTALLER-SESSION", Some("fault"));
     ensure!(
         failures == 3,
         "expected three session failures before the fallback, saw {failures}: {console}"
     );
     ensure!(
-        !console.contains("ILEX-INSTALLER page="),
+        !has_marker(&console, "ILEX-INSTALLER", Some("page")),
         "a page was shown although the session was made to fail: {console}"
     );
-    // The message is text on tty1: the frame is not blank and not the page.
-    std::thread::sleep(Duration::from_secs(3));
+
+    // Say once, and leave it there: no second message while the guest idles.
+    std::thread::sleep(Duration::from_secs(8));
+    let console = self::console(&serial)?;
+    let said = count_markers(&console, "ILEX-INSTALLER-FALLBACK", None);
+    ensure!(
+        said == 1,
+        "the fallback fired {said} times, expected exactly once: {console}"
+    );
+
+    // What the screen holds, from the VT's own text (not from pixels): a black
+    // tty1 would pass a "no page drawn" test.
+    vm.wait_ssh(Duration::from_secs(180))
+        .context("the harness's SSH key did not give a login to the live ISO")?;
+    let vcs = vm.ssh_ok("cat /dev/vcs1")?;
+    fs::write(artifacts.join("next-fallback-vcs1.txt"), &vcs)?;
+    let squeezed = vcs.split_whitespace().collect::<Vec<_>>().join(" ");
+    ensure!(
+        squeezed.contains("ilex installer")
+            && squeezed.contains("could not start its graphical session")
+            && squeezed.contains("journalctl -b -u ilex-installer-session"),
+        "tty1 does not show the fallback message: {vcs:?}"
+    );
     let frame = ctl.save_screenshot(&artifacts.join("next-fallback.png"))?;
     ensure!(
         !page_drawn(&frame),
         "the screen shows a drawn page, not the fallback message"
     );
+    ensure!(
+        text_drawn(&frame),
+        "the screen is not light text on a dark background"
+    );
     fs::write(artifacts.join("next-fallback-serial.txt"), console)?;
-    println!("iso::next fallback: three failures, then the message on tty1");
+    println!("iso::next fallback: three failures, then the message on tty1, once");
     Ok(())
+}
+
+/// Nothing may end the session but a failure the unit counts: a close request
+/// is refused by the window, and a compositor or a client that dies is replaced
+/// by a session that comes up (the compositor's socket survives a hard kill and
+/// must not be mistaken for the next compositor's).
+fn restart() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let (mut vm, _) = plain_vm(&ws, "iso-next-restart", |config| {
+        config.memory = "3G".into();
+    })?;
+    let outcome = observe_restart(&mut vm, &artifacts);
+    if outcome.is_err() {
+        diagnostics(&mut vm, &artifacts, "restart");
+    }
+    outcome
+}
+
+fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
+    let serial = vm.info.dir.join("serial.log");
+    let ctl = Vmctl::from_info(vm.info.clone());
+    wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 1, PAGE_TIMEOUT)?;
+    wait_page(vm, &ctl, artifacts, "restart")?;
+    vm.wait_ssh(Duration::from_secs(180))
+        .context("the harness's SSH key did not give a login to the live ISO")?;
+    let restarts = |vm: &Vm| -> Result<u32> {
+        let value = vm.ssh_ok("systemctl show ilex-installer-session.service -p NRestarts --value")?;
+        value
+            .parse()
+            .with_context(|| format!("NRestarts={value:?} is not a number"))
+    };
+    ensure!(restarts(vm)? == 0, "the session restarted before anything was done to it");
+
+    // 1. The compositor asks the window to close (Alt+F4): the installer stays.
+    ctl.key("alt+F4")?;
+    std::thread::sleep(Duration::from_secs(6));
+    let console = console(&serial)?;
+    ensure!(
+        count_markers(&console, "ILEX-INSTALLER", Some("page")) == 1
+            && !has_marker(&console, "ILEX-INSTALLER-SESSION", Some("child")),
+        "a close request ended the session: {console}"
+    );
+    ensure!(
+        page_drawn(&ctl.save_screenshot(&artifacts.join("next-restart-after-close.png"))?),
+        "the page is gone after a close request"
+    );
+    ensure!(restarts(vm)? == 0, "a close request restarted the session");
+
+    // 2. The compositor is killed hard: its socket stays in the kept runtime
+    //    directory, and the next attempt must come up on the first try.
+    vm.ssh_ok(KILL_COMPOSITOR)?;
+    let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 2, PAGE_TIMEOUT)?;
+    ensure!(
+        console.lines().any(|l| l.starts_with("ILEX-INSTALLER-SESSION ended child=compositor status=137")),
+        "the session did not report the compositor's death: {console}"
+    );
+    ensure!(
+        !console.contains("compositor exited before listening")
+            && !console.contains("compositor is not listening"),
+        "the second attempt was spent on a stale socket: {console}"
+    );
+    wait_page(vm, &ctl, artifacts, "restart")?;
+    ensure!(restarts(vm)? == 1, "expected one restart after the compositor died");
+
+    // 3. The client dies: the compositor is stopped with it and both return.
+    vm.ssh_ok(KILL_INSTALLER)?;
+    let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 3, PAGE_TIMEOUT)?;
+    ensure!(
+        console.lines().any(|l| l.starts_with("ILEX-INSTALLER-SESSION ended child=installer")),
+        "the session did not report the installer's death: {console}"
+    );
+    wait_page(vm, &ctl, artifacts, "restart")?;
+    ensure!(restarts(vm)? == 2, "expected two restarts after the client died");
+    ensure!(
+        !has_marker(&console, "ILEX-INSTALLER-FALLBACK", None),
+        "the fallback fired after two recoverable failures: {console}"
+    );
+    fs::write(artifacts.join("next-restart-serial.txt"), console)?;
+    println!("iso::next restart: close refused, compositor and client deaths recovered");
+    Ok(())
+}
+
+/// A hard kill of the compositor, by process name (procps need not be in the image).
+const KILL_COMPOSITOR: &str = "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = gnome-kiosk ] && kill -KILL ${p#/proc/}; done; true";
+const KILL_INSTALLER: &str = "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = ilex-installer ] && kill -KILL ${p#/proc/}; done; true";
+
+/// The serial mirror of the markers fails on purpose; the interface must not
+/// notice, and every failed write must be reported on the second UART. Boots
+/// without the harness's key: the live image's SSH server must stay off.
+fn serial(mode: &'static str, status: &'static str) -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let purpose = format!("iso-next-ser-{}", &mode[..2]);
+    let (mut vm, _) = plain_vm(&ws, &purpose, |config| {
+        config.memory = "3G".into();
+        config.secondary_serial = true;
+        config.ssh_credential = false;
+        config.smbios.push(format!(
+            "type=11,value=io.systemd.credential:ilex.installer.serial-test={mode}"
+        ));
+    })?;
+    let outcome = observe_serial(&mut vm, &artifacts, mode, status);
+    if outcome.is_err() {
+        diagnostics(&mut vm, &artifacts, &format!("serial-{mode}"));
+    }
+    outcome
+}
+
+fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str, status: &str) -> Result<()> {
+    let primary = vm.info.dir.join("serial.log");
+    let secondary = vm.info.dir.join("serial-secondary.log");
+    let ctl = Vmctl::from_info(vm.info.clone());
+    // The faulted sink never sees a marker: readiness comes from the other UART.
+    let console = wait_for_marker(vm, &secondary, "ILEX-INSTALLER", "page", 1, PAGE_TIMEOUT)?;
+    wait_page(vm, &ctl, artifacts, &format!("serial-{mode}"))?;
+
+    let mut audited = 0;
+    for line in complete_lines(&console).filter(|l| is_marker(l, "ILEX-INSTALLER-SERIAL", Some("mode"))) {
+        let words: BTreeMap<String, String> = line
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|w| w.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
+            .collect();
+        ensure!(
+            field(&words, "mode")? == mode && field(&words, "status")? == status,
+            "a marker write did not fail as {mode}: {line}"
+        );
+        let seconds: f64 = field(&words, "seconds")?
+            .parse()
+            .with_context(|| format!("unparsable duration in {line}"))?;
+        ensure!(
+            seconds < SERIAL_BUDGET_SECONDS,
+            "a faulted marker write took {seconds}s (limit {SERIAL_BUDGET_SECONDS}s): {line}"
+        );
+        audited += 1;
+    }
+    ensure!(
+        audited >= 2,
+        "expected an audit line for the session's and the page's markers, saw {audited}: {console}"
+    );
+    ensure!(
+        has_marker(&console, "ILEX-INSTALLER-SERIAL", Some("message"))
+            && !has_marker(&self::console(&primary)?, "ILEX-INSTALLER", Some("page")),
+        "the page marker reached the faulted console"
+    );
+    // No key, no SSH server.
+    let banner = ssh_banner(vm.info.ssh_port)?;
+    ensure!(
+        !banner.starts_with("SSH-"),
+        "an SSH server answers on the live ISO without the harness's key: {banner:?}"
+    );
+    fs::write(artifacts.join(format!("next-serial-{mode}-secondary.txt")), console)?;
+    println!("iso::next serial {mode}: {audited} faulted writes, each reported within {SERIAL_BUDGET_SECONDS}s; no SSH server");
+    Ok(())
+}
+
+/// Whatever the forwarded SSH port sends first: QEMU accepts the connection
+/// and relays it to the guest, which resets it when nothing listens.
+fn ssh_banner(port: u16) -> Result<String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
+        .with_context(|| format!("connecting to the forwarded SSH port {port}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(8)))?;
+    let mut banner = [0u8; 64];
+    match stream.read(&mut banner) {
+        Ok(n) => Ok(String::from_utf8_lossy(&banner[..n]).into_owned()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            Ok(String::new())
+        }
+        Err(error) => Err(error).context("reading from the forwarded SSH port"),
+    }
 }
