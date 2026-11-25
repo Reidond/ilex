@@ -36,6 +36,11 @@
 # since the latest one, or the latest one is a week old (Fedora and Anaconda
 # fixes). A manual run with `iso` checked builds it regardless.
 #
+# The next installer (installer/next, no Anaconda) has its own job, on request
+# only: a manual run with `iso_next` checked builds its live ISO, boots it with
+# Secure Boot and keeps it as the `installer-next-iso` artifact. That run does
+# nothing else, and no run ever releases or publishes this ISO.
+#
 # Runner: `vars.ILEX_RUNNER` (repository variable) or ubuntu-26.04. One
 # setting moves every job to a larger or self-hosted runner.
 #
@@ -52,6 +57,10 @@ on:
     inputs:
       iso:
         description: Build the installer ISO even if it isn't due (on main it is released; from a branch it is kept as an artifact)
+        type: boolean
+        default: false
+      iso_next:
+        description: Only build the next installer's live ISO and boot-test it (kept as an artifact, never released; the image pipeline is skipped)
         type: boolean
         default: false
       test:
@@ -106,7 +115,9 @@ env:
 
 jobs:
   snapshot:
-    if: ${{ !inputs.v1_disk }}
+    # `iso_next` asks for the next installer's ISO alone: with no snapshot,
+    # build, upgrade and everything that needs them are skipped.
+    if: ${{ !inputs.v1_disk && !inputs.iso_next }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 15
     permissions:
@@ -947,7 +958,7 @@ jobs:
   # no ilex image, so it needn't wait for the publish, and `installer/` can
   # change alone. Reads the latest installer release.
   installer-due:
-    if: ${{ !inputs.v1_disk && (inputs.main || inputs.iso) && (!inputs.encrypted_install || inputs.iso) }}
+    if: ${{ !inputs.v1_disk && !inputs.iso_next && (inputs.main || inputs.iso) && (!inputs.encrypted_install || inputs.iso) }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 15
     outputs:
@@ -1063,6 +1074,113 @@ jobs:
             /mnt/ilex/state/iso/compositions.json
             /mnt/ilex/state/iso/release-notes.md
           compression-level: 0
+          retention-days: 3
+
+  # The next installer's live ISO (installer/next; no Anaconda), built and
+  # boot-tested on request only (`iso_next`). Never released or published: the
+  # ISO is a workflow artifact, and the job has no write permission. The image
+  # pipeline does not run beside it.
+  installer-next:
+    if: ${{ inputs.iso_next && !inputs.v1_disk }}
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Test paths
+        run: |
+          {
+            echo "ILEX_STATE_DIR=$RUNNER_TEMP/installer-next-state"
+            echo "ILEX_ARTIFACTS=$RUNNER_TEMP/installer-next-artifacts"
+            # The ISO is built as root with /src bind-mounted, which leaves a
+            # root-owned target/ there: host Cargo needs a directory of its own.
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/installer-next-target"
+          } >> "$GITHUB_ENV"
+
+      - name: Disk
+        run: df -h / /mnt
+
+      - name: apt's packages from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ env.APT_DEBS }}
+          restore-keys: ${{ env.APT_DEBS }}
+
+      # The same rootful, privileged Fedora 45 container as the `iso` job (see
+      # there for why bubblewrap's AppArmor profile is unloaded), building
+      # installer/next/Containerfile and its ISO.
+      - name: Build the live installer ISO
+        run: |
+          if [ -e /etc/apparmor.d/bwrap-userns-restrict ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          for knob in kernel.apparmor_restrict_unprivileged_userns \
+                      kernel.apparmor_restrict_unprivileged_unconfined; do
+            if sudo sysctl -n "$knob" >/dev/null 2>&1; then sudo sysctl -w "$knob=0"; fi
+          done
+          trap 'if [ $? -ne 0 ]; then sudo dmesg | grep -iE "apparmor|denied" | tail -40; fi' EXIT
+          sudo mkdir -p /mnt/ilex/containers /mnt/ilex/image-builder /mnt/ilex/state/tmp
+          sudo podman run --rm --privileged --security-opt label=disable \
+              --security-opt apparmor=unconfined --security-opt seccomp=unconfined \
+              -v "$PWD:/src" -w /src \
+              -v /mnt/ilex/containers:/var/lib/containers \
+              -v /mnt/ilex/image-builder:/var/cache/image-builder \
+              -v /mnt/ilex/state:/mnt/ilex-state \
+              -e ILEX_STATE_DIR=/mnt/ilex-state -e TMPDIR=/mnt/ilex-state/tmp \
+              quay.io/fedora/fedora:45 bash -euxc '
+                dnf -y install git cargo gcc podman skopeo
+                dnf -y install image-builder
+                image-builder version
+                git config --global --add safe.directory /src
+                cargo ilexctl iso --next --output-dir /mnt/ilex-state/iso-next
+              '
+          ls -l /mnt/ilex/state/iso-next/
+          cat /mnt/ilex/state/iso-next/largest-packages.txt || true
+          size=$(stat -c %s /mnt/ilex/state/iso-next/ilex-installer-gnome.iso)
+          {
+            echo "next installer ISO (gnome): $size bytes ($((size / 1048576)) MiB; the Anaconda network installer measured 1863 MiB; a release asset has to be under 2048 MiB)"
+            echo '```'
+            cat /mnt/ilex/state/iso-next/largest-packages.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the ISO (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-next-iso
+          path: |
+            /mnt/ilex/state/iso-next/ilex-installer-gnome.iso
+            /mnt/ilex/state/iso-next/ilex-installer-gnome.iso.sha256
+            /mnt/ilex/state/iso-next/largest-packages.txt
+          compression-level: 0
+          retention-days: 3
+
+      # Secure Boot needs KVM with SMM on this runner; an unqualified runner
+      # fails here, as it does in every security tier.
+      - name: Prepare the VM stack
+        run: |
+          test -c /dev/kvm
+          bash .github/vm-prep.sh ephemeral
+          bash .github/vm-prep.sh wait vm-stack
+
+      - name: Boot the ISO with Secure Boot (both boot entries) and the session fallback
+        env:
+          ILEX_ISO_NEXT: /mnt/ilex/state/iso-next/ilex-installer-gnome.iso
+        run: |
+          (cd /mnt/ilex/state/iso-next && sha256sum --check ilex-installer-gnome.iso.sha256)
+          sg libvirt -c 'cargo ilexctl test iso::next -- --test-threads 1'
+          cat "$ILEX_ARTIFACTS"/iso-next/next-*.json
+
+      - name: Keep the boot evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-next-evidence
+          path: ${{ env.ILEX_ARTIFACTS }}
+          if-no-files-found: ignore
           retention-days: 3
 
   # Only due/forced ISOs incur this ~15 minute KVM installation. !cancelled()

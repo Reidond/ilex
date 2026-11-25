@@ -2349,6 +2349,113 @@ For the profile trial, set `ILEX_PRIVATE_FINGERPRINTS` to a fresh private
 directory outside the artifacts. Seal the successful export with
 `encrypted/privacy.py --seal-profile-export` before attaching screenshots.
 
+## The next installer
+
+`installer/next/` is the live installer of ilex's own installer, which will
+replace Anaconda. This version delivers the live image only: no Anaconda,
+Cockpit, Firefox or Python chooser, and a placeholder interface that names
+the edition and shows the machine's DMI identity. Nothing is installed. The
+Anaconda network installer above is unchanged and stays the released one:
+`installer/next` is excluded from its fingerprint (`ilexctl iso --due`).
+
+```sh
+ilexctl iso --next [--edition gnome] [--output-dir D]  # <state dir>/iso-next/ilex-installer-gnome.iso
+ilexctl test iso::next                                  # boots it: Secure Boot, both boot entries, fallback
+```
+
+- **Editions.** One ISO per edition, as Fedora ships Silverblue (GNOME) and
+  Kinoite (KDE). The identifier (`gnome`) names the image stage, the files
+  below `installer/next/editions/<id>/` (package lists, the session script and
+  other overlay files) and the ISO. What a person reads as its name is the
+  `display-name` in `installer/next/editions.toml`, the only place it lives;
+  the build writes it into the image as `/usr/share/ilex-installer/edition.json`.
+  The owner has not chosen edition names yet: `ilex GNOME` is a placeholder.
+- **Build.** `installer/next/Containerfile` is `fedora-bootc:45`, the shared
+  live-boot packages (`packages.txt`: dracut's `dmsquash-live`, and what
+  image-builder's `generic-iso` needs inside the container) and the edition's,
+  installed without weak dependencies, with the same GPU/audio firmware and
+  Vulkan removals as the Anaconda installer's image (in the install layer,
+  ended by `rpm --verifydb`: removing in a later layer left rpm's database
+  corrupt on one build host). `rootfs/` and the
+  edition's `rootfs/` are copied over it (ordinary `COPY`), then the initramfs
+  is rebuilt generic with `dmsquash-live`. The same `image-builder … generic-iso`
+  path as the Anaconda ISO builds it (`localhost/ilex-installer-next:<slug>.<edition>`
+  is the image; the helper container, osbuild cache and 2 GiB check are shared).
+  `bootloader-update.service` and the sleep targets are masked.
+- **Interface.** `crates/ilex-installer` is built by the Containerfile's builder
+  stage with kache, exactly like the OS image's crates (the pinned kache
+  release must be bumped in both Containerfiles). Its GTK 4 + libadwaita
+  interface (relm4) sits behind the `gui` cargo feature, off by default, so
+  `cargo clippy --workspace` needs no `gtk4-devel`: lint it with
+  `cargo clippy -p ilex-installer --features gui --all-targets` where
+  `gtk4-devel` and `libadwaita-devel` are installed. `ilex-installer
+  --self-check` reads the edition record and the DMI strings without a display
+  and fails when the live image is incomplete; the session unit runs it first.
+- **Session.** `ilex-installer-session.service` opens a logind session for the
+  unprivileged `ilex-installer` user (sysusers.d, PAM service `ilex-installer`
+  with `pam_systemd`) on tty1, so GNOME Kiosk (mutter) gets seat0's DRM and
+  input devices without root. The edition's `session` script runs
+  `ilex-installer --self-check`, starts `gnome-kiosk` and then `ilex-installer`
+  as its only window; if either ends, the other is stopped and the unit
+  restarts (`Restart=on-failure`). Every failure starts
+  `ilex-installer-fallback.service` (`OnFailure=`), which acts only once the
+  start limit is hit (three failures in five minutes): it prints on tty1 what
+  failed and where to look (Ctrl+Alt+F2 has a root shell, an agetty autologin).
+  Fedora 45's `kmscon` is masked and the virtual terminals get agetty: kmscon
+  is a DRM client of seat0 and takes the GPU on tty1 before the compositor can.
+  Blanking, locking and sleep are off (dconf defaults, a logind drop-in and
+  masked sleep targets): an installation must not stop when the screen would
+  lock.
+- **Boot entries.** "Install ilex" and "Install ilex (basic graphics)"
+  (`nomodeset`); the second makes the session set `GSK_RENDERER=cairo` and
+  `LIBGL_ALWAYS_SOFTWARE=1`. The ISO's volume label is
+  `ilex-installer-<edition>`.
+- **Serial markers.** The session script and the interface print marker lines
+  to `/dev/ttyS0` (best effort, never blocking; the user is in `dialout`):
+  `ILEX-INSTALLER-SESSION compositor=… graphics=default|basic secure-boot=0|1`,
+  `ILEX-INSTALLER page=placeholder edition=… renderer=… uptime=…` once the
+  window is mapped, and `ILEX-INSTALLER-STATS mem_total_kib=…` fifteen seconds
+  later. `ILEX-INSTALLER-FALLBACK` marks the give-up. The fixed credential
+  `ilex.installer.fault=session` (SMBIOS, `io.systemd.credential:`) makes the
+  session script fail; it can only stop the installer from starting.
+- **Tests.** `iso::next_boot`, `iso::next_basic_graphics` and
+  `iso::next_fallback` are registered only when a filter names `iso::next`
+  (so `iso::`, the Anaconda release gate, never boots this ISO). `cargo
+  ilexctl test iso::next` builds the ISO (or uses `ILEX_ISO_NEXT=<path>`) and
+  needs no OS image. The two boot trials start the ISO under QEMU/KVM with
+  Secure Boot required (the secure fixture path with
+  `security_launch=qualification_fixture`, so an unqualified host fails; a
+  disposable 1 GiB disk, no TPM, `ILEX_ISO_NEXT_MEMORY` defaults to 4G), assert
+  the markers (including `secure-boot=1` read by the guest and cairo for the
+  basic entry), wait for a settled QMP screenshot that is libadwaita's light
+  window with content, and record timing, memory and ISO size in
+  `<state dir>/artifacts/iso-next/next-<entry>.json` beside the screenshots.
+  The basic graphics entry is chosen in GRUB with real key input over a USB
+  keyboard (`LinuxProvider::with_usb_keyboard`).
+- **CI.** `publish.yml`'s `iso_next` input starts only the `installer-next` job
+  and skips the image pipeline and the Anaconda ISO jobs. It builds the ISO in
+  the same privileged Fedora 45 container as the `iso` job, keeps it as the
+  `installer-next-iso` artifact, boots both entries with Secure Boot and keeps
+  `installer-next-evidence`. Nothing releases or publishes it. Runs without
+  `iso_next` are unchanged.
+- **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
+  GNOME edition). The ISO is 1,494,847,488 bytes (1.39 GiB): 437 MiB under the
+  Anaconda network ISO's 1.82 GiB and 0.61 GiB under the 2 GiB limit. The image
+  has 706 packages, 1,850 MiB installed (largest: llvm-libs 146 MiB,
+  python3-botocore 121, kernel-core 102, kernel-modules 80, mesa-dri-drivers 53,
+  podman 53; `largest-packages.txt` lists ten). `iso --next` took 14 minutes
+  with the base images and RPMs already local, mostly image-builder; the
+  interface's builder stage took 1 minute 42 seconds with a cold kache (0 of 136
+  crates restored, `gtk4` the slowest at 33 seconds). Booted under QEMU/KVM with
+  Secure Boot, 2 vCPUs and 4 GiB, the window was up 5 to 25 seconds after the
+  kernel started (6 to 8 on a quiet host; GRUB's 10 second countdown comes
+  before that, and the basic entry's key press skips it). GTK draws with
+  `GskGLRenderer` (llvmpipe) on the default entry and `GskCairoRenderer` on the
+  basic one. Fifteen seconds after the window the guest used 595 to 626 MiB
+  (default) or 503 to 520 MiB (basic), with 3.2 GiB available; at 2 GiB it used
+  513 and 410 MiB and had 1.3 GiB available. GNOME Kiosk was not compared with
+  cage.
+
 ## Conventions
 
 - `packages.toml` belongs to the base and stays within its 322 MiB growth
