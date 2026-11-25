@@ -1,4 +1,5 @@
 //! Compatibility facade for the portable contracts and Linux backend.
+pub use ilex_installer_model as installer_model;
 pub use ilex_tooling_core as core;
 pub use ilex_tooling_linux::fingerprint;
 pub use ilex_tooling_linux::main_claim;

@@ -1,0 +1,153 @@
+//! Editions: an installer ISO installs one shell, as Fedora ships Silverblue
+//! and Kinoite. Edition names are not chosen yet, so the edition identifier is
+//! the shell's name. What a person reads as its name lives in one place only,
+//! `installer/next/editions.toml`, which the ISO build writes into the image as
+//! `edition.json` (an [`EditionRecord`]).
+
+use crate::catalogue::{Composition, Machine, Shell, Table, is_name};
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The edition record of the live image (`/usr/share/ilex-installer/edition.json`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditionRecord {
+    pub schema: u32,
+    /// The edition identifier: the shell this ISO installs.
+    pub edition: String,
+    #[serde(rename = "display-name")]
+    pub display_name: String,
+}
+
+impl EditionRecord {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        let record: Self = serde_json::from_slice(bytes).context("reading the edition record")?;
+        ensure!(
+            record.schema == 1
+                && is_name(&record.edition)
+                && !record.display_name.is_empty()
+                && !record.display_name.chars().any(char::is_control),
+            "not a schema 1 edition record"
+        );
+        Ok(record)
+    }
+
+    pub fn edition(&self) -> Edition {
+        Edition {
+            shell: self.edition.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edition {
+    /// The shell this ISO installs: also the edition identifier.
+    pub shell: String,
+}
+
+impl Edition {
+    pub fn new(shell: &str) -> Result<Self> {
+        ensure!(is_name(shell), "invalid edition {shell:?}");
+        Ok(Self {
+            shell: shell.into(),
+        })
+    }
+
+    /// The edition of a table written for the Anaconda path: the default
+    /// shell of its default composition (the released ISO is the GNOME edition).
+    pub fn of_default(table: &Table) -> Result<Self> {
+        let default = table
+            .composition(&table.default)
+            .context("default composition is not offered")?;
+        Self::new(default.shells.first().context("default has no shells")?)
+    }
+
+    pub fn id(&self) -> &str {
+        &self.shell
+    }
+
+    /// The shell's catalogue label: what is shown when no edition record gives
+    /// the edition's own name.
+    pub fn fallback_name(&self, table: &Table) -> String {
+        table
+            .shells
+            .get(&self.shell)
+            .map_or_else(|| self.shell.clone(), |s| s.label.clone())
+    }
+}
+
+impl Table {
+    /// The compositions whose default (first) shell is the edition's shell, in
+    /// table order.
+    pub fn edition_compositions(&self, edition: &Edition) -> Vec<&Composition> {
+        self.compositions
+            .iter()
+            .filter(|c| c.shells.first() == Some(&edition.shell))
+            .collect()
+    }
+
+    /// What an edition installs on a machine nothing matches: the table's own
+    /// default when it belongs to the edition, otherwise the first generic
+    /// composition of the edition.
+    pub fn edition_default(&self, edition: &Edition) -> Result<&Composition> {
+        let offered = self.edition_compositions(edition);
+        offered
+            .iter()
+            .find(|c| c.tag == self.default)
+            .or_else(|| offered.iter().find(|c| c.machine == "generic"))
+            .copied()
+            .with_context(|| {
+                format!(
+                    "edition {} has no generic composition; the catalogue offers: {}",
+                    edition.shell,
+                    self.offered()
+                )
+            })
+    }
+
+    /// The catalogue as this edition's installer sees it: only the edition's
+    /// compositions, their machines and shells, and its own default. The
+    /// result is itself a valid table, so detection and the plan checks run on
+    /// it unchanged.
+    pub fn for_edition(&self, edition: &Edition) -> Result<Table> {
+        let default = self.edition_default(edition)?.clone();
+        let compositions: Vec<Composition> = self
+            .edition_compositions(edition)
+            .into_iter()
+            .cloned()
+            .collect();
+        let machines: BTreeMap<String, Machine> = self
+            .machines
+            .iter()
+            .filter(|(name, _)| compositions.iter().any(|c| &c.machine == *name))
+            .map(|(name, machine)| (name.clone(), machine.clone()))
+            .collect();
+        let used: BTreeSet<&String> = compositions.iter().flat_map(|c| &c.shells).collect();
+        let shells: BTreeMap<String, Shell> = self
+            .shells
+            .iter()
+            .filter(|(name, _)| used.contains(name))
+            .map(|(name, shell)| (name.clone(), shell.clone()))
+            .collect();
+        let table = Table {
+            schema: self.schema,
+            repository: self.repository.clone(),
+            default: default.tag,
+            testing_tag: self.testing_tag.clone(),
+            machines,
+            shells,
+            compositions,
+            profiles: self.profiles.clone(),
+            security_capabilities: self.security_capabilities.clone(),
+        };
+        table.validate()?;
+        Ok(table)
+    }
+
+    /// The shells list the edition installs on any machine: the default's.
+    /// An edition has no desktop choice; a machine gets this list or nothing.
+    pub fn edition_shells(&self, edition: &Edition) -> Result<Vec<String>> {
+        Ok(self.edition_default(edition)?.shells.clone())
+    }
+}
