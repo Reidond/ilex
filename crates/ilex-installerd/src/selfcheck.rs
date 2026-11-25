@@ -538,6 +538,123 @@ fn check_exec_and_scratch(parent: &Path) -> Result<()> {
     Ok(())
 }
 
+// --- NVMe transports ---------------------------------------------------------
+
+/// NVMe namespaces in a sysfs tree of the kernel's shapes: a controller's own
+/// namespace (no native multipath), and the subsystem's namespace (Fedora's
+/// default), whose controllers are the subsystem's `nvme*` entries and, on newer
+/// kernels, `multipath/*/device`. Only a namespace whose controllers are all on
+/// PCIe is a local disk.
+fn check_nvme(parent: &Path) -> Result<()> {
+    let dir = TestDir::new(parent, "nvme")?;
+    let sys = dir.0.join("sys");
+    fs::create_dir_all(sys.join("class/block"))?;
+    let make = |path: &str| -> Result<PathBuf> {
+        let dir = sys.join("devices").join(path);
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    };
+    let controller = |path: &str, transport: &str| -> Result<PathBuf> {
+        let dir = make(path)?;
+        write(&dir.join("transport"), transport)?;
+        Ok(dir)
+    };
+    // The namespace's `device` link is its parent: the controller, or the subsystem.
+    let namespace = |parent: &Path, name: &str| -> Result<PathBuf> {
+        let dir = parent.join(name);
+        fs::create_dir_all(&dir)?;
+        symlink("..", dir.join("device"))?;
+        symlink(&dir, sys.join("class/block").join(name))?;
+        Ok(dir)
+    };
+    // A local drive with no multipath: `device` is its controller.
+    let nvme0 = controller("pci0/nvme/nvme0", "pcie\n")?;
+    namespace(&nvme0, "nvme0n1")?;
+    // Native multipath, one PCIe controller, two, a fabric, a mixture.
+    let subsystem = |n: u32| make(&format!("virtual/nvme-subsystem/nvme-subsys{n}"));
+    let attach = |subsystem: &Path, name: &str, controller: &Path| -> Result<()> {
+        symlink(controller, subsystem.join(name))?;
+        Ok(())
+    };
+    let s1 = subsystem(1)?;
+    attach(&s1, "nvme1", &controller("pci1/nvme/nvme1", "pcie\n")?)?;
+    namespace(&s1, "nvme1n1")?;
+    let s2 = subsystem(2)?;
+    attach(&s2, "nvme2", &controller("pci2/nvme/nvme2", "pcie\n")?)?;
+    attach(&s2, "nvme3", &controller("pci3/nvme/nvme3", "pcie\n")?)?;
+    namespace(&s2, "nvme2n1")?;
+    let s3 = subsystem(3)?;
+    attach(&s3, "nvme4", &controller("net/nvme/nvme4", "tcp\n")?)?;
+    namespace(&s3, "nvme3n1")?;
+    let s4 = subsystem(4)?;
+    attach(&s4, "nvme5", &controller("pci5/nvme/nvme5", "pcie\n")?)?;
+    attach(&s4, "nvme6", &controller("net/nvme/nvme6", "rdma\n")?)?;
+    namespace(&s4, "nvme4n1")?;
+    // No controller found, or one whose transport reads empty: not provably local.
+    let s5 = subsystem(5)?;
+    namespace(&s5, "nvme5n1")?;
+    let s6 = subsystem(6)?;
+    attach(&s6, "nvme7", &controller("pci7/nvme/nvme7", "\n")?)?;
+    namespace(&s6, "nvme6n1")?;
+    // The paths a newer kernel lists under the namespace itself.
+    let s7 = subsystem(7)?;
+    let ns7 = namespace(&s7, "nvme7n1")?;
+    controller(
+        &ns7.strip_prefix(sys.join("devices"))?
+            .join("multipath/nvme7c0n1/device")
+            .to_string_lossy(),
+        "fc\n",
+    )?;
+    let s8 = subsystem(8)?;
+    let ns8 = namespace(&s8, "nvme8n1")?;
+    controller(
+        &ns8.strip_prefix(sys.join("devices"))?
+            .join("multipath/nvme8c0n1/device")
+            .to_string_lossy(),
+        "pcie\n",
+    )?;
+    let transports: Vec<Option<String>> = (0..9)
+        .map(|n| disks::nvme_transport(&sys, &format!("nvme{n}n1")))
+        .collect();
+    let some = |t: &str| Some(t.to_owned());
+    ensure!(
+        transports
+            == [
+                some("pcie"),
+                some("pcie"),
+                some("pcie"),
+                some("tcp"),
+                some("rdma"),
+                None,
+                None,
+                some("fc"),
+                some("pcie"),
+            ],
+        "NVMe transports: {transports:?}"
+    );
+    ensure!(
+        disks::nvme_transport(&sys, "nvme9n1").is_none(),
+        "a namespace sysfs does not list"
+    );
+    // Only the local ones survive lsblk's list, though lsblk says `nvme` of all.
+    let lsblk = format!(
+        r#"{{"blockdevices":[{}]}}"#,
+        (0..9)
+            .map(|n| format!(
+                r#"{{"name":"/dev/nvme{n}n1","kname":"/dev/nvme{n}n1","type":"disk","size":16000000000,"tran":"nvme","rm":false,"ro":false,"log-sec":512}}"#
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let raws = disks::parse_lsblk(&lsblk, &|_| None, &|name| disks::nvme_transport(&sys, name))?;
+    let local: Vec<&str> = raws.iter().map(|r| r.kname.as_str()).collect();
+    ensure!(
+        local == ["nvme0n1", "nvme1n1", "nvme2n1", "nvme8n1"],
+        "local NVMe disks: {local:?}"
+    );
+    Ok(())
+}
+
 // --- the live medium and what is in use -------------------------------------
 
 /// A sysfs and `/dev` tree of the shape the kernel makes, in a directory: block
@@ -1210,6 +1327,7 @@ pub fn run(config: &helper::Config) -> Result<String> {
     // another self-check) shares no path with it.
     let parent = Scratch::new(&config.run_dir, "selfcheck")?;
     check_exec_and_scratch(parent.path()).context("subprocess output and scratch directories")?;
+    check_nvme(parent.path()).context("NVMe transports")?;
     check_topology(parent.path()).context("the live medium and disks in use")?;
     check_files(parent.path()).context("files")?;
     let repart = check_repart(config, parent.path()).context("repart")?;

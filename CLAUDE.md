@@ -2930,7 +2930,12 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   range) and other systems found: EFI loader directories, Windows, BitLocker,
   Linux, LUKS and Apple filesystems. Zram, loop, optical, read-only and
   network-attached devices (nbd, iSCSI, Fibre Channel, SRP, NVMe over fabrics)
-  are not disks. Two flags keep the running system's own disks out of reach:
+  are not disks. An NVMe disk is local only when sysfs shows every controller
+  behind it on PCIe: with native multipath (Fedora's default) `device` is the
+  NVMe subsystem, so the helper reads the `transport` of its `nvme*` controllers
+  and of `multipath/*/device`, and a fabric, an unreadable transport or a
+  namespace with no controller found counts as the network. Two flags keep the
+  running system's own disks out of reach:
   - `live_medium`: the disk the live system came from. Every mount at or under
     `/run/initramfs` and every iso9660 or udf mount is followed through the kernel,
     not through the text of its source: its device number (`/sys/dev/block/M:m`),

@@ -61,22 +61,64 @@ fn is_installable(kname: &str) -> bool {
 }
 
 /// Transports of disks that live on a network or a SAN: iSCSI, Fibre Channel
-/// (also over Ethernet) and SCSI over RDMA. lsblk calls every NVMe disk
-/// `nvme`, so a fabric is told from sysfs.
-const NETWORK_TRANSPORTS: &[&str] = &["iscsi", "fc", "fcoe", "srp"];
-/// NVMe controllers that are not on the PCIe bus (`device/transport`).
-const NVME_FABRICS: &[&str] = &["rdma", "fc", "tcp", "loop"];
+/// (also over Ethernet) and SCSI over RDMA, and the NVMe fabrics, as lsblk
+/// names them. lsblk calls every NVMe disk `nvme`, so those are told from sysfs.
+const NETWORK_TRANSPORTS: &[&str] = &["iscsi", "fc", "fcoe", "srp", "tcp", "rdma"];
+/// The one NVMe transport that is a local disk.
+const NVME_LOCAL: &str = "pcie";
 
-/// Reached over a network, whatever its kernel name says.
-fn is_network(tran: &str, nvme_transport: Option<&str>) -> bool {
-    NETWORK_TRANSPORTS.contains(&tran) || nvme_transport.is_some_and(|t| NVME_FABRICS.contains(&t))
+/// Reached over a network, whatever its kernel name says. An NVMe disk is local
+/// only when sysfs says every controller behind it is PCIe: a fabric, a
+/// transport that cannot be read and a namespace with no controller found are
+/// all treated as the network.
+fn is_network(kname: &str, tran: &str, nvme_transport: Option<&str>) -> bool {
+    NETWORK_TRANSPORTS.contains(&tran)
+        || (kname.starts_with("nvme") && nvme_transport != Some(NVME_LOCAL))
 }
 
-/// An NVMe controller's transport, from sysfs.
-pub fn sysfs_nvme_transport(name: &str) -> Option<String> {
-    let link = fs::canonicalize(Path::new("/sys/class/block").join(name)).ok()?;
-    let text = fs::read_to_string(link.join("device/transport")).ok()?;
-    Some(text.trim().to_owned())
+/// The transport of the controllers behind an NVMe namespace, from sysfs:
+/// `pcie` when every controller found is on PCIe, else the first other one;
+/// `None` when no controller's transport could be read. Without native
+/// multipath `device` is the controller; with it (Fedora's default) it is the
+/// NVMe subsystem, whose `nvme*` entries are its controllers, and newer
+/// kernels also list each path under `multipath/`.
+pub fn nvme_transport(sys: &Path, name: &str) -> Option<String> {
+    let block = fs::canonicalize(sys.join("class/block").join(name)).ok()?;
+    let mut found: Vec<String> = Vec::new();
+    let mut read = |controller: &Path| {
+        if let Ok(text) = fs::read_to_string(controller.join("transport")) {
+            found.push(text.trim().to_owned());
+        }
+    };
+    let subsystem = block.join("device");
+    read(&subsystem);
+    for entry in directory_names(&subsystem) {
+        if entry.starts_with("nvme") {
+            read(&subsystem.join(entry));
+        }
+    }
+    for path in directory_names(&block.join("multipath")) {
+        read(&block.join("multipath").join(path).join("device"));
+    }
+    if found.iter().any(String::is_empty) {
+        return None;
+    }
+    found
+        .iter()
+        .find(|t| t.as_str() != NVME_LOCAL)
+        .or_else(|| found.first())
+        .cloned()
+}
+
+fn directory_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 /// How a disk is attached, from lsblk's transport and the device's name.
@@ -127,7 +169,7 @@ pub fn parse_lsblk(
             .flatten();
         if text(device, "type") != "disk"
             || !is_installable(&kname)
-            || is_network(&text(device, "tran"), nvme_transport.as_deref())
+            || is_network(&kname, &text(device, "tran"), nvme_transport.as_deref())
             || flag(device, "ro")
             || number(device, "size") == 0
         {
@@ -510,7 +552,9 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
         &["--json", "--bytes", "--paths", "--output", LSBLK_COLUMNS],
         TOOL_TIMEOUT,
     )?;
-    let mut raws = parse_lsblk(&output.stdout_text(), &sysfs_start, &sysfs_nvme_transport)?;
+    let mut raws = parse_lsblk(&output.stdout_text(), &sysfs_start, &|name| {
+        nvme_transport(&roots.sys, name)
+    })?;
     // What the system is using is read or the probe fails.
     let (mounts, swaps) =
         topology::read_tables(Path::new("/proc/self/mountinfo"), Path::new("/proc/swaps"))?;
