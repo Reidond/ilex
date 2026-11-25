@@ -1,0 +1,63 @@
+name = "kde"
+description = "KDE Plasma on Wayland, signed in through Plasma Login Manager"
+
+[packages]
+# Fedora 45's KDE edition lists one comps group (@kde-desktop) whose defaults
+# add a mail server, mobile-device sync, remote-desktop servers and vendor
+# repositories, so this names the parts a desktop session needs. The file
+# manager, terminal, settings, software centre, system monitor, partition tool,
+# screenshot tool and portals stay host RPMs, as in the GNOME shell; the other
+# KDE applications are Flatpaks below. plasma-setup (a first-boot account
+# wizard that runs whether or not users exist) is deliberately not installed:
+# ilex creates accounts with `ilexctl home`.
+install = [
+    # Session, shell, compositor (kwin) and the Plasma Login Manager greeter.
+    "plasma-workspace", "plasma-desktop", "plasma-login-manager",
+    "kcm-plasmalogin", "kde-settings-plasmalogin",
+    # Hardware and system integration that cannot run in a sandbox.
+    "kscreen", "kscreenlocker", "plasma-nm", "plasma-pa", "bluedevil",
+    "plasma-systemmonitor", "plasma-disks", "kde-partitionmanager",
+    "kinfocenter", "kio-admin", "polkit-kde", "kde-inotify-survey",
+    "plasma-drkonqi", "cups-pk-helper", "plasma-print-manager",
+    # Files, terminal, screenshots, archives.
+    "dolphin", "konsole", "spectacle", "ark",
+    # Software centre with the Flatpak backend, and Flatpak permissions.
+    "plasma-discover", "plasma-discover-flatpak", "flatpak-kcm",
+    # Look: Breeze style, icons, and the GTK side of it.
+    "plasma-breeze", "breeze-icon-theme", "xdg-desktop-portal-kde",
+    "kde-gtk-config", "breeze-gtk",
+    # Public profile settings confine the session's dconf writer.
+    "bubblewrap",
+]
+exclude = [
+    # Plasma Welcome and online-account web logins (which need Qt WebEngine,
+    # 277 MiB) are not part of ilex's first-run or account flow.
+    "plasma-welcome", "kaccounts-providers", "signon-ui",
+    # bootc owns OS updates: no Discover backend may manage the OS itself.
+    "plasma-discover-packagekit", "plasma-discover-rpm-ostree",
+    "plasma-discover-offline-updates",
+]
+
+[apps]
+# System-wide Flathub apps, installed by the installer and ilex-apps.timer.
+# Firefox keeps the ID the GNOME shell uses.
+flatpak = [
+    "org.kde.kwrite", "org.kde.kcalc", "org.kde.merkuro", "org.kde.kclock",
+    "org.kde.kweather", "org.kde.marble", "org.kde.gwenview", "org.kde.okular",
+    "org.kde.kamoso", "org.kde.kcharselect", "org.kde.filelight",
+    "org.kde.kfind", "org.kde.haruna", "org.kde.elisa", "org.kde.krdc",
+    "org.kde.skanpage", "org.kde.kjournaldbrowser", "org.kde.kwalletmanager",
+    "org.kde.ktorrent", "org.kde.neochat", "org.kde.kolourpaint",
+    "org.mozilla.firefox",
+]
+# Host integrations for the Flatpaks above: Dolphin's thumbnails for what Okular,
+# Gwenview and Haruna open, and Flatpak's desktop-database triggers.
+rpm = ["kdegraphics-thumbnailers", "ffmpegthumbs", "desktop-file-utils", "xdg-utils"]
+
+[session]
+# The session file in /usr/share/wayland-sessions, without .desktop.
+desktop = "plasma"
+compositor = "kwin_wayland"
+
+[greeter]
+unit = "plasmalogin.service"

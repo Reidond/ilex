@@ -19,3 +19,7 @@ installer = "generic.gnome"
 [[publish]]
 shells = ["gnome"]
 machines = ["generic", "ms-7c35"]
+
+[[publish]]
+shells = ["kde"]
+machines = ["generic", "ms-7c35"]
