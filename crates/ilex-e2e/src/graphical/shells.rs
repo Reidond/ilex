@@ -85,6 +85,11 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     report.check("GDM started a Plasma Wayland session", session_active(vm));
     report.finish()?;
     kde::theming(vm, ctl, artifacts)?;
+    // Plasma writes the GTK preference of its last colour scheme into the home's
+    // gtk-3.0/gtk-4.0 settings.ini, which every desktop reads: a dark scheme
+    // left behind makes GNOME's non-libadwaita GTK applications dark (CLAUDE.md,
+    // "KDE shell"). This test leaves Plasma light, as most sessions end.
+    kde::light(vm)?;
 
     // 2. The same home in GNOME.
     vm.ssh_ok(&format!("loginctl terminate-user {USER}"))?;

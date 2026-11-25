@@ -207,6 +207,20 @@ pub(super) fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> 
     Ok(())
 }
 
+/// Switch the session back to Breeze Light and wait until GTK's files say so.
+pub(super) fn light(vm: &mut Vm) -> Result<()> {
+    user(vm, "plasma-apply-colorscheme BreezeLight")?;
+    vm.wait_for(
+        "kde-gtk-config to write the light preference",
+        &format!(
+            "grep -qx 'gtk-application-prefer-dark-theme=false' /var/home/{USER}/.config/gtk-3.0/settings.ini \\
+             && grep -qx 'gtk-application-prefer-dark-theme=false' /var/home/{USER}/.config/gtk-4.0/settings.ini"
+        ),
+        Duration::from_secs(60),
+    )?;
+    Ok(())
+}
+
 /// `color-scheme` is `want` (1 dark, 2 light) and the accent is Plasma's.
 fn portal_follows(vm: &Vm, want: u32) -> Result<()> {
     let scheme = appearance(vm, "color-scheme")?;
