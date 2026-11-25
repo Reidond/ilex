@@ -1,0 +1,15 @@
+// The installer's session is an active local session, which polkit's defaults
+// treat as the person at the machine: without a rule it may mount any block
+// device (udisks2), reboot, change the clock, hostname and locale, create
+// colord devices and more, all without a password. The interface does none of
+// that: it is a client of the install helper, and an unprivileged user that
+// can drive the machine is exactly what the helper's own checks exist to stop.
+// So this user is denied every action. A page that needs one (a restart
+// button, the network page) adds it to this file, naming the action, in the
+// change that adds the page; the iso::next trials list what polkit authorizes
+// for this session and fail on any action that is not named here.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "ilex-installer") {
+        return polkit.Result.NO;
+    }
+});

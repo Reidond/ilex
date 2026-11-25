@@ -59,7 +59,12 @@ LABEL ilex.installer-edition="${EDITION}"
 # user-mode emulators or audio firmware (the machines that need a GPU driver
 # use the basic graphics entry), so they are removed here, before the
 # initramfs is built (it is `--no-hostonly`): that shrinks both the squashfs
-# and the initramfs. Wi-Fi and NIC firmware stay. Install and removal share one
+# and the initramfs. Wi-Fi and NIC firmware stay. A live session needs no disk
+# mounter for its user (udisks2 lets an active session mount any block device
+# without a password), no firmware updater or its metadata cache (fwupd,
+# passim) and no mDNS responder (avahi, which listens on the network): nothing
+# requires them, and `rpm -e` without --nodeps fails the build if that changes.
+# Install and removal share one
 # RUN so that rpm's database is written inside one layer (removing in a later
 # layer left it corrupt on one build host), and the final check fails the build
 # rather than ship an inconsistent database.
@@ -74,9 +79,13 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
         'mesa-vulkan-drivers' 'intel-mediasdk' 'qemu-user-static*' \
         'intel-audio-firmware' 'cirrus-audio-firmware' \
     | xargs -r rpm -e --nodeps && \
+    rpm -qa 'udisks2' 'fwupd' 'passim' 'avahi' \
+    | xargs -r rpm -e && \
     rpm --verifydb
 
-# A live environment has no bootloader to update, and no business sleeping.
+# A live environment has no bootloader to update, and no business sleeping or
+# updating itself: no bootc/rpm-ostree updates or their metrics, no homed (the
+# installer creates no home directory) and no sssd (no network accounts).
 # Fedora 45 runs kmscon on the virtual terminals; as a DRM client of seat0 it
 # takes the GPU on tty1 before the compositor can ("Device or resource busy"),
 # so the terminals get plain agetty (the tty2 shell's autologin drop-in is on
@@ -84,7 +93,10 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
 RUN mkdir -p /etc/systemd/system && \
     for unit in bootloader-update.service sleep.target suspend.target \
                 hibernate.target hybrid-sleep.target suspend-then-hibernate.target \
-                kmsconvt@.service; do \
+                kmsconvt@.service \
+                bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service \
+                rpm-ostreed.service rpm-ostree-countme.timer rpm-ostree-countme.service \
+                systemd-homed.service systemd-homed-activate.service sssd.service; do \
         ln -sf /dev/null "/etc/systemd/system/${unit}"; \
     done && \
     rm -f /etc/systemd/system/getty.target.wants/kmsconvt@tty1.service && \
