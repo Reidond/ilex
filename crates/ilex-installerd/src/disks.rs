@@ -1,10 +1,16 @@
-//! The disks of this computer: what is on them, where the free space is, and
-//! which one the live system came from. Reading only: the one thing this module
-//! mounts is an EFI system partition, read-only, to name the loaders in it.
+//! The disks of this computer: what is on them, where the free space is, which
+//! one the live system came from and which the running system is using. Reading
+//! only: the one thing this module mounts is an EFI system partition,
+//! read-only, in a mount namespace of its own that ends with the scan.
 
-use crate::exec;
+use crate::{
+    exec,
+    scratch::Scratch,
+    topology::{self, Roots, Topology},
+};
 use anyhow::{Context, Result};
 use ilex_installer_model::probe::{Disk, Extent, OtherSystem, Partition};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
@@ -42,8 +48,8 @@ fn kernel_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_owned()
 }
 
-/// Devices that are not somewhere to install: compressed RAM, network block
-/// devices, floppy drives.
+/// Devices that are not somewhere to install by their kernel name: compressed
+/// RAM, network block devices, floppy and optical drives, loop devices.
 fn is_installable(kname: &str) -> bool {
     !["zram", "ram", "nbd", "fd", "loop", "sr"]
         .iter()
@@ -52,6 +58,25 @@ fn is_installable(kname: &str) -> bool {
                 .strip_prefix(prefix)
                 .is_some_and(|rest| rest.is_empty() || rest.bytes().all(|b| b.is_ascii_digit()))
         })
+}
+
+/// Transports of disks that live on a network or a SAN: iSCSI, Fibre Channel
+/// (also over Ethernet) and SCSI over RDMA. lsblk calls every NVMe disk
+/// `nvme`, so a fabric is told from sysfs.
+const NETWORK_TRANSPORTS: &[&str] = &["iscsi", "fc", "fcoe", "srp"];
+/// NVMe controllers that are not on the PCIe bus (`device/transport`).
+const NVME_FABRICS: &[&str] = &["rdma", "fc", "tcp", "loop"];
+
+/// Reached over a network, whatever its kernel name says.
+fn is_network(tran: &str, nvme_transport: Option<&str>) -> bool {
+    NETWORK_TRANSPORTS.contains(&tran) || nvme_transport.is_some_and(|t| NVME_FABRICS.contains(&t))
+}
+
+/// An NVMe controller's transport, from sysfs.
+pub fn sysfs_nvme_transport(name: &str) -> Option<String> {
+    let link = fs::canonicalize(Path::new("/sys/class/block").join(name)).ok()?;
+    let text = fs::read_to_string(link.join("device/transport")).ok()?;
+    Some(text.trim().to_owned())
 }
 
 /// How a disk is attached, from lsblk's transport and the device's name.
@@ -81,8 +106,13 @@ pub struct Raw {
 }
 
 /// Parse `lsblk --json --bytes --paths` into disks with their partitions.
-/// `start_of` gives a partition's first sector in 512-byte units (sysfs).
-pub fn parse_lsblk(json: &str, start_of: &dyn Fn(&str) -> Option<u64>) -> Result<Vec<Raw>> {
+/// `start_of` gives a partition's first sector in 512-byte units (sysfs);
+/// `nvme_transport_of` an NVMe disk's controller transport.
+pub fn parse_lsblk(
+    json: &str,
+    start_of: &dyn Fn(&str) -> Option<u64>,
+    nvme_transport_of: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<Raw>> {
     let root: Value = serde_json::from_str(json).context("reading lsblk")?;
     let devices = root["blockdevices"]
         .as_array()
@@ -91,8 +121,13 @@ pub fn parse_lsblk(json: &str, start_of: &dyn Fn(&str) -> Option<u64>) -> Result
     for device in devices {
         let path = text(device, "name");
         let kname = kernel_name(&text(device, "kname"));
+        let nvme_transport = kname
+            .starts_with("nvme")
+            .then(|| nvme_transport_of(&kname))
+            .flatten();
         if text(device, "type") != "disk"
             || !is_installable(&kname)
+            || is_network(&text(device, "tran"), nvme_transport.as_deref())
             || flag(device, "ro")
             || number(device, "size") == 0
         {
@@ -136,6 +171,8 @@ pub fn parse_lsblk(json: &str, start_of: &dyn Fn(&str) -> Option<u64>) -> Result
                 bus: bus_of(&text(device, "tran"), &kname),
                 removable: flag(device, "rm"),
                 live_medium: false,
+                in_use: vec![],
+                notes: vec![],
                 partition_table: (!table.is_empty()).then_some(table),
                 partitions,
                 free_extents: vec![],
@@ -204,42 +241,6 @@ pub fn free_extents(
         });
     }
     extents
-}
-
-/// The kernel names of the disks the live system is mounted from, read from
-/// `/proc/self/mountinfo`: dracut's `dmsquash-live` mounts the medium at
-/// `/run/initramfs/live`; an installer started otherwise still names its
-/// optical or ISO file system. `parent` maps a partition name to its disk.
-pub fn live_disks(mountinfo: &str, parent: &dyn Fn(&str) -> Option<String>) -> BTreeSet<String> {
-    let mut found = BTreeSet::new();
-    for line in mountinfo.lines() {
-        let Some((head, tail)) = line.split_once(" - ") else {
-            continue;
-        };
-        let head: Vec<&str> = head.split(' ').collect();
-        let tail: Vec<&str> = tail.split(' ').collect();
-        let (Some(mount_point), Some(fstype), Some(source)) =
-            (head.get(4), tail.first(), tail.get(1))
-        else {
-            continue;
-        };
-        if !(*mount_point == "/run/initramfs/live" || ["iso9660", "udf"].contains(fstype)) {
-            continue;
-        }
-        if let Some(device) = source.strip_prefix("/dev/") {
-            let name = device.rsplit('/').next().unwrap_or(device);
-            found.insert(parent(name).unwrap_or_else(|| name.to_owned()));
-        }
-    }
-    found
-}
-
-/// The disk a partition belongs to, from sysfs (`/sys/class/block/<name>` is a
-/// symlink into its parent's directory); `None` for a whole disk.
-pub fn sysfs_parent(name: &str) -> Option<String> {
-    let link = fs::canonicalize(Path::new("/sys/class/block").join(name)).ok()?;
-    link.join("partition").exists().then_some(())?;
-    link.parent()?.file_name()?.to_str().map(str::to_owned)
 }
 
 fn sysfs_start(name: &str) -> Option<u64> {
@@ -320,10 +321,15 @@ pub fn classify(partition: &Partition) -> Option<OtherSystem> {
     })
 }
 
-/// The loader directories of a mounted ESP (`<root>/EFI/*`) other than the
-/// fallback path, as systems found.
-pub fn efi_loaders(esp_root: &Path, partition: &str) -> Vec<OtherSystem> {
-    let Ok(entries) = fs::read_dir(esp_root.join("EFI")) else {
+/// The names of the loader directories of a mounted ESP (`<root>/EFI/*`)
+/// other than the fallback path. A link is never followed: only real
+/// directories count.
+pub fn efi_loader_names(esp_root: &Path) -> Vec<String> {
+    let efi = esp_root.join("EFI");
+    if !fs::symlink_metadata(&efi).is_ok_and(|m| m.is_dir()) {
+        return vec![];
+    }
+    let Ok(entries) = fs::read_dir(&efi) else {
         return vec![];
     };
     let mut names: Vec<String> = entries
@@ -333,29 +339,56 @@ pub fn efi_loaders(esp_root: &Path, partition: &str) -> Vec<OtherSystem> {
         .filter(|n| !n.eq_ignore_ascii_case("BOOT"))
         .collect();
     names.sort();
+    names.truncate(16);
     names
-        .into_iter()
-        .take(16)
+}
+
+/// What those loader directories say about the computer's other systems.
+pub fn loader_systems(names: &[String], partition: &str) -> Vec<OtherSystem> {
+    names
+        .iter()
         .map(|name| OtherSystem {
             kind: "efi-loader".into(),
             partition: Some(partition.into()),
             description: if name.eq_ignore_ascii_case("microsoft") {
                 "Windows Boot Manager (EFI/Microsoft)".into()
             } else {
-                format!("EFI loader directory EFI/{name}")
+                // A name from a disk is shown to a person: nothing but
+                // printable characters.
+                let clean: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
+                format!("EFI loader directory EFI/{clean}")
             },
         })
         .collect()
 }
 
-/// Mount an ESP read-only (no execution, no devices, no setuid), list its
-/// loaders and unmount it.
-fn scan_esp(device: &str, scratch: &Path) -> Vec<OtherSystem> {
-    let mountpoint = scratch.join("esp");
-    if fs::create_dir_all(&mountpoint).is_err() {
-        return vec![];
+/// The loader directories of a mounted ESP as systems found.
+pub fn efi_loaders(esp_root: &Path, partition: &str) -> Vec<OtherSystem> {
+    loader_systems(&efi_loader_names(esp_root), partition)
+}
+
+/// What `ilex-installerd --scan-esp` prints: the child process that mounts one
+/// ESP in a mount namespace of its own.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct EspScan {
+    pub loaders: Vec<String>,
+    /// The mount failed.
+    pub error: Option<String>,
+    /// Unmounting failed (the namespace's end drops the mount regardless).
+    pub unmount_error: Option<String>,
+}
+
+/// The `--scan-esp` child: mount the ESP read-only (no execution, no devices,
+/// no setuid) at `mountpoint`, list its loaders, unmount it explicitly. It runs
+/// inside `unshare --mount`, so the mount is visible to this process only and
+/// disappears when it exits, whatever happens here.
+pub fn scan_esp_child(device: &str, mountpoint: &Path) -> EspScan {
+    let mut scan = EspScan::default();
+    if !device.starts_with("/dev/") || !fs::symlink_metadata(mountpoint).is_ok_and(|m| m.is_dir()) {
+        scan.error = Some("not a device and a plain directory".into());
+        return scan;
     }
-    let mounted = exec::run(
+    let mount = exec::run(
         "mount",
         &[
             "-t",
@@ -366,28 +399,124 @@ fn scan_esp(device: &str, scratch: &Path) -> Vec<OtherSystem> {
             &mountpoint.to_string_lossy(),
         ],
         TOOL_TIMEOUT,
-    )
-    .is_ok_and(|o| o.success());
-    if !mounted {
-        return vec![];
+    );
+    match mount {
+        Ok(out) if out.success() => {}
+        Ok(out) => {
+            scan.error = Some(format!(
+                "mount failed: {}",
+                out.stderr.lines().last().unwrap_or("no message")
+            ));
+            return scan;
+        }
+        Err(e) => {
+            scan.error = Some(format!("{e:#}"));
+            return scan;
+        }
     }
-    let found = efi_loaders(&mountpoint, device);
-    let _ = exec::run("umount", &[&mountpoint.to_string_lossy()], TOOL_TIMEOUT);
-    found
+    scan.loaders = efi_loader_names(mountpoint);
+    match exec::run("umount", &[&mountpoint.to_string_lossy()], TOOL_TIMEOUT) {
+        Ok(out) if out.success() => {}
+        Ok(out) => {
+            scan.unmount_error = Some(format!(
+                "umount failed: {}",
+                out.stderr.lines().last().unwrap_or("no message")
+            ));
+        }
+        Err(e) => scan.unmount_error = Some(format!("{e:#}")),
+    }
+    scan
 }
 
-/// Scan every disk of this computer. `scratch` is a private directory for the
-/// read-only ESP mount.
-pub fn scan(scratch: &Path) -> Result<Vec<Disk>> {
+/// List an ESP's loaders by running this program's `--scan-esp` in a mount
+/// namespace of its own. Failure is reported, not hidden: the other systems
+/// on that disk may then be missing from the list.
+fn scan_esp(device: &str, scratch: &mut Scratch, n: usize) -> (Vec<OtherSystem>, Vec<String>) {
+    let unreadable = |why: String| {
+        (
+            vec![],
+            vec![format!(
+                "could not read the EFI system partition {device} ({why}); other systems on this disk may be missing from the list"
+            )],
+        )
+    };
+    let (Ok(exe), Ok(mountpoint)) = (std::env::current_exe(), scratch.subdir(&format!("esp{n}")))
+    else {
+        return unreadable("no private mount point".into());
+    };
+    let (exe, mountpoint) = (
+        exe.to_string_lossy().into_owned(),
+        mountpoint.to_string_lossy().into_owned(),
+    );
+    let out = exec::run_limited(
+        "unshare",
+        &[
+            "--mount",
+            "--propagation",
+            "private",
+            "--",
+            &exe,
+            "--scan-esp",
+            device,
+            &mountpoint,
+        ],
+        TOOL_TIMEOUT,
+        exec::Limits {
+            stdout: 64 << 10,
+            stderr: 64 << 10,
+        },
+    );
+    let scan: EspScan = match out {
+        Ok(out) if out.success() => match serde_json::from_slice(&out.stdout) {
+            Ok(scan) => scan,
+            Err(e) => return unreadable(format!("unreadable answer: {e}")),
+        },
+        Ok(out) => {
+            return unreadable(out.stderr.lines().last().unwrap_or("it failed").to_owned());
+        }
+        Err(e) => return unreadable(format!("{e:#}")),
+    };
+    if let Some(error) = scan.error {
+        return unreadable(error);
+    }
+    let mut notes = vec![];
+    if let Some(error) = scan.unmount_error {
+        // The mount lived in the child's namespace, which has ended.
+        notes.push(format!(
+            "{device}: {error} (the private mount ended with its scan)"
+        ));
+    }
+    (loader_systems(&scan.loaders, device), notes)
+}
+
+/// A reason every disk is refused: the live medium could not be located.
+fn unlocated(reason: &str) -> String {
+    format!(
+        "the installer cannot tell whether this disk holds the medium it started from ({reason})"
+    )
+}
+
+/// Scan every disk of this computer. `run_dir` holds the call's private
+/// scratch directory, where an ESP is mounted for reading.
+pub fn scan(run_dir: &Path) -> Result<Vec<Disk>> {
+    scan_with(run_dir, &Roots::real())
+}
+
+fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
+    let mut scratch = Scratch::new(run_dir, "scan")?;
     let output = exec::run_ok(
         "lsblk",
         &["--json", "--bytes", "--paths", "--output", LSBLK_COLUMNS],
         TOOL_TIMEOUT,
     )?;
-    let mut raws = parse_lsblk(&output.stdout_text(), &sysfs_start)?;
+    let mut raws = parse_lsblk(&output.stdout_text(), &sysfs_start, &sysfs_nvme_transport)?;
     let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let live = live_disks(&mountinfo, &sysfs_parent);
+    let mounts = topology::parse_mountinfo(&mountinfo);
+    let swaps = topology::parse_swaps(&fs::read_to_string("/proc/swaps").unwrap_or_default());
+    let topology = Topology::new(roots, &mounts);
+    let usage = topology::usage(&topology, &mounts, &swaps);
     let mut taken = BTreeSet::new();
+    let mut esp_count = 0;
     for raw in &mut raws {
         let disk = &mut raw.disk;
         let links: Vec<(String, String)> = ["by-id", "by-path"]
@@ -400,7 +529,27 @@ pub fn scan(scratch: &Path) -> Result<Vec<Disk>> {
             taken.insert(id.clone());
         }
         disk.id = id;
-        disk.live_medium = live.contains(&raw.kname);
+        disk.live_medium = usage.live.contains(&raw.kname);
+        // What the running system is doing with it: a mounted partition or
+        // swap (usage names the disk through its partitions), and anything
+        // stacked on the disk or one of its partitions.
+        let mut reasons: BTreeSet<String> =
+            usage.in_use.get(&raw.kname).cloned().unwrap_or_default();
+        for name in std::iter::once(raw.kname.clone())
+            .chain(disk.partitions.iter().map(|p| kernel_name(&p.path)))
+        {
+            let holders = topology.holders(&name);
+            if !holders.is_empty() {
+                reasons.insert(format!(
+                    "/dev/{name} is used by {} (an LVM, MD or dm-crypt device)",
+                    holders.join(", ")
+                ));
+            }
+        }
+        if let Some(why) = usage.unresolved.first() {
+            reasons.insert(unlocated(why));
+        }
+        disk.in_use = reasons.into_iter().collect();
         let usable = if disk.partition_table.is_some() {
             exec::run("sfdisk", &["--json", "--", &disk.path], TOOL_TIMEOUT)
                 .ok()
@@ -410,12 +559,14 @@ pub fn scan(scratch: &Path) -> Result<Vec<Disk>> {
             None
         };
         disk.free_extents = free_extents(disk.size_bytes, usable, &disk.partitions);
-        for partition in &disk.partitions {
+        for partition in disk.partitions.clone() {
             if partition.type_id == ESP_TYPE {
-                disk.other_systems
-                    .extend(scan_esp(&partition.path, scratch));
+                esp_count += 1;
+                let (systems, notes) = scan_esp(&partition.path, &mut scratch, esp_count);
+                disk.other_systems.extend(systems);
+                disk.notes.extend(notes);
             }
-            disk.other_systems.extend(classify(partition));
+            disk.other_systems.extend(classify(&partition));
         }
     }
     raws.sort_by(|a, b| a.disk.id.cmp(&b.disk.id));

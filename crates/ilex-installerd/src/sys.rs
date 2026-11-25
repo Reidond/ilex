@@ -63,18 +63,20 @@ pub fn memory() -> Result<Memory> {
     parse_meminfo(&fs::read_to_string("/proc/meminfo")?)
 }
 
-fn efi_flag(name: &str) -> Option<bool> {
-    let data = fs::read(format!(
-        "/sys/firmware/efi/efivars/{name}-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-    ))
+fn efi_flag(efi_dir: &Path, name: &str) -> Option<bool> {
+    let data = fs::read(efi_dir.join(format!(
+        "efivars/{name}-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+    )))
     .ok()?;
     (data.len() == 5 && data[4] <= 1).then(|| data[4] == 1)
 }
 
-pub fn firmware() -> Firmware {
+/// The firmware this computer booted with, from `/sys/firmware/efi` (or the
+/// directory standing in for it): that directory exists only after a UEFI boot.
+pub fn firmware(efi_dir: &Path) -> Firmware {
     Firmware {
-        uefi: Path::new("/sys/firmware/efi").is_dir(),
-        secure_boot: efi_flag("SecureBoot"),
-        setup_mode: efi_flag("SetupMode"),
+        uefi: efi_dir.is_dir(),
+        secure_boot: efi_flag(efi_dir, "SecureBoot"),
+        setup_mode: efi_flag(efi_dir, "SetupMode"),
     }
 }

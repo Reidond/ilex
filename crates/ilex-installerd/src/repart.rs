@@ -30,52 +30,58 @@ fn setting(text: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Assemble this plan's definitions in `scratch`: the shipped files, with the
-/// encrypted root in place of the plain one when `encrypt`.
-pub fn assemble(shipped: &Path, encrypt: bool, scratch: &Path) -> Result<Layout> {
-    let source = shipped.join("whole-disk");
-    let dir = scratch.join("repart.d");
-    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let root = if encrypt {
-        "30-root-encrypted.conf"
+/// The directory of one complete layout below the shipped definitions. Each
+/// layout is a directory of its own, and repart is pointed at that directory:
+/// there is no assembling from parts, and no directory repart reads ever
+/// holds two root partitions.
+pub fn layout_dir(shipped: &Path, encrypt: bool) -> PathBuf {
+    shipped.join(if encrypt {
+        "whole-disk-encrypted"
     } else {
-        "30-root.conf"
-    };
-    let skipped = if encrypt {
-        "30-root.conf"
-    } else {
-        "30-root-encrypted.conf"
-    };
-    let mut names: Vec<String> = fs::read_dir(&source)
-        .with_context(|| format!("reading {}", source.display()))?
+        "whole-disk"
+    })
+}
+
+/// Read a layout directory: its files, what each makes, and that it is a
+/// whole layout (one root partition, encrypted exactly when asked).
+pub fn read_layout(dir: &Path, encrypt: bool) -> Result<Layout> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".conf") && n != skipped)
+        .filter(|n| n.ends_with(".conf"))
         .collect();
     names.sort();
-    ensure!(
-        names.iter().any(|n| n == root),
-        "{} is missing from {}",
-        root,
-        source.display()
-    );
     let mut formats = Vec::new();
+    let mut roots = Vec::new();
     for name in names {
-        let text = fs::read_to_string(source.join(&name))?;
-        // The encrypted variant is installed under the plain name: one root.
-        let installed = if name == "30-root-encrypted.conf" {
-            "30-root.conf".to_owned()
-        } else {
-            name.clone()
-        };
-        fs::write(dir.join(&installed), &text)?;
+        let text = fs::read_to_string(dir.join(&name))?;
+        let encrypted = setting(&text, "Encrypt").is_some_and(|v| v != "off");
+        if setting(&text, "Type").is_some_and(|t| t == "root" || t.starts_with("root-")) {
+            roots.push(encrypted);
+        }
         formats.push((
-            installed,
+            name,
             setting(&text, "Format").unwrap_or_default(),
-            setting(&text, "Encrypt").is_some_and(|v| v != "off"),
+            encrypted,
         ));
     }
-    Ok(Layout { dir, formats })
+    ensure!(
+        roots == [encrypt],
+        "{} must hold exactly one root partition, {}encrypted (it has {} root partition(s))",
+        dir.display(),
+        if encrypt { "" } else { "un" },
+        roots.len()
+    );
+    Ok(Layout {
+        dir: dir.to_path_buf(),
+        formats,
+    })
+}
+
+/// The layout a plan uses.
+pub fn layout(shipped: &Path, encrypt: bool) -> Result<Layout> {
+    read_layout(&layout_dir(shipped, encrypt), encrypt)
 }
 
 /// Parse `systemd-repart --json=pretty` into planned partitions, numbered from 1.
