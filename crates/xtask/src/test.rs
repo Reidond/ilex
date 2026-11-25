@@ -42,7 +42,7 @@ pub struct Args {
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     // The next installer's live ISO carries no image: `iso::next…` alone needs
     // neither the checkout's image nor a build of it.
-    let only_next = !args.filters.is_empty() && args.filters.iter().all(|f| is_next(f));
+    let only_next = !args.filters.is_empty() && args.filters.iter().all(|f| crate::iso_next::is_next_filter(f));
     let image = if only_next {
         None
     } else {
@@ -68,7 +68,7 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     // `iso::` exercises the installer and its published payload, independently of this image.
     // `iso::next…` boots the next installer's live ISO instead, which has no payload.
     if args.filters.iter().any(|f| {
-        (f.contains("iso") && !is_next(f))
+        (f.contains("iso") && !crate::iso_next::is_next_filter(f))
             || f.contains("encrypted_")
             || f.contains("installer_profile_setup")
             || f.contains("installer_no_profile")
@@ -76,15 +76,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     }) {
         prepare_iso(ws, &mut test)?;
     }
-    if args.filters.iter().any(|f| is_next(f)) {
+    if args.filters.iter().any(|f| crate::iso_next::is_next_filter(f)) {
         prepare_iso_next(ws, &mut test)?;
     }
     cmd::run(&mut test)
-}
-
-/// Does this filter select the next installer's `iso::next…` trials?
-fn is_next(filter: &str) -> bool {
-    filter.contains("iso::next")
 }
 
 /// Build the next installer's live ISO (unless `ILEX_ISO_NEXT` names one

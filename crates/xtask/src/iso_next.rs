@@ -46,6 +46,19 @@ struct Edition {
     display_name: String,
 }
 
+/// Does this `ilexctl test` filter select the next installer's `iso::next…`
+/// trials (which boot its ISO) rather than the Anaconda installer's `iso::`?
+pub fn is_next_filter(filter: &str) -> bool {
+    filter.contains("iso::next")
+}
+
+/// Why the remote (native Windows) path refuses `iso --next` and `test
+/// iso::next`: the builder collects only `<state dir>/iso` (the Anaconda ISO)
+/// and stages only `ILEX_ISO`, while the next installer writes
+/// `<state dir>/iso-next` and the trials read `ILEX_ISO_NEXT`. Run them on a
+/// Linux host.
+pub const REMOTE_UNSUPPORTED: &str = "the next installer's live ISO (`iso --next`, `test iso::next`) is not supported from native Windows yet: the builder returns only the Anaconda installer's ISO directory, so its ISO would never reach this machine and `ILEX_ISO_NEXT` is never staged. Run it on a Linux host";
+
 /// File name of the ISO of an edition.
 pub fn iso_name(edition: &str) -> String {
     format!("ilex-installer-{edition}")
