@@ -29,7 +29,8 @@ use crate::disk::vmtest;
 
 const GTK3_PROBE: &[u8] = include_bytes!("gtk3-probe.py");
 
-/// The unit that keeps the probe window open.
+/// The unit that keeps a probe window open, one per window: the journal of an
+/// earlier window must not answer for a later one.
 const PROBE_UNIT: &str = "ilex-gtk3-probe";
 
 pub(super) fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, apps: bool) -> Result<()> {
@@ -335,11 +336,12 @@ pub(super) fn gtk3_window(
         "printf %s {script} | base64 -d > /tmp/ilex-gtk3-probe.py && chmod 644 /tmp/ilex-gtk3-probe.py"
     ))?;
     // A previous window is closed first; the unit is not a Plasma child.
-    let _ = user(vm, &format!("systemctl --user stop {PROBE_UNIT}.service"));
+    let _ = user(vm, &format!("systemctl --user stop '{PROBE_UNIT}-*.service'"));
+    let unit = format!("{PROBE_UNIT}-{name}");
     user(
         vm,
         &format!(
-            "systemd-run --user --collect --quiet --unit={PROBE_UNIT} -p RuntimeMaxSec=300 \
+            "systemd-run --user --collect --quiet --unit={unit} -p RuntimeMaxSec=300 \
              python3 -I /tmp/ilex-gtk3-probe.py 280"
         ),
     )?;
@@ -348,7 +350,7 @@ pub(super) fn gtk3_window(
         &format!(
             "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/$(id -u {USER}) \
                  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u {USER})/bus \
-             journalctl --user -u {PROBE_UNIT}.service --no-pager -o cat | grep '^gtk3 theme='"
+             journalctl --user -u {unit}.service --no-pager -o cat | grep '^gtk3 theme='"
         ),
         Duration::from_secs(60),
     )?;
@@ -359,7 +361,7 @@ pub(super) fn gtk3_window(
     std::thread::sleep(Duration::from_secs(4));
     settle(ctl)?;
     shot(ctl, artifacts, name)?;
-    user(vm, &format!("systemctl --user stop {PROBE_UNIT}.service"))?;
+    user(vm, &format!("systemctl --user stop {unit}.service"))?;
     Ok(())
 }
 
