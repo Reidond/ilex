@@ -52,26 +52,37 @@ jobs:
     outputs:
       main: ${{ steps.ref.outputs.main }}
       group: ${{ steps.ref.outputs.group }}
+      sign: ${{ steps.ref.outputs.sign }}
     steps:
       - name: Route the exact Git ref
         id: ref
         shell: bash
         env:
           V1_DISK: ${{ inputs.v1_disk || false }}
+          ISO_NEXT: ${{ inputs.iso_next || false }}
         run: |
           main=false
           if [ "$GITHUB_REF" = refs/heads/main ]; then main=true; fi
           hash=$(printf '%s' "$GITHUB_REF" | sha256sum)
+          # Only a run that can sign gets the signing secrets: a push or
+          # nightly on main, or a manual run of main that is neither of the
+          # two key-less runs below.
+          sign=false
           if [ "$V1_DISK" = true ]; then
             group="v1-disk-${hash%% *}"
             if [ "$main" = true ]; then group=v1-disk-refs/heads/main; fi
+          elif [ "$ISO_NEXT" = true ]; then
+            # The next installer's ISO builds and boots in a group of its own,
+            # on main too: it must neither wait for nor replace a real publish.
+            group="iso-next-${hash%% *}"
           elif [ "$main" = true ]; then
             group=publish
+            sign=true
           else
             group="publish-${hash%% *}"
           fi
-          printf 'main=%s\ngroup=%s\n' "$main" "$group" >> "$GITHUB_OUTPUT"
-          echo "Ref $GITHUB_REF uses concurrency group $group"
+          printf 'main=%s\ngroup=%s\nsign=%s\n' "$main" "$group" "$sign" >> "$GITHUB_OUTPUT"
+          echo "Ref $GITHUB_REF uses concurrency group $group (signing secrets: $sign)"
 
   pipeline:
     needs: route
@@ -84,7 +95,8 @@ jobs:
       actions: write
     uses: ./.github/workflows/publish-pipeline.yml
     with:
-      main: ${{ needs.route.outputs.main == 'true' }}
+      # An iso_next run is never a main run: it publishes and releases nothing.
+      main: ${{ needs.route.outputs.main == 'true' && !inputs.iso_next }}
       iso: ${{ inputs.iso || false }}
       iso_next: ${{ inputs.iso_next || false }}
       test: ${{ inputs.test || false }}
@@ -95,5 +107,5 @@ jobs:
       encrypted_update_kernel: ${{ inputs.encrypted_update_kernel || '' }}
       encrypted_lifecycle_only: ${{ inputs.encrypted_lifecycle_only || false }}
     secrets:
-      COSIGN_PRIVATE_KEY: ${{ needs.route.outputs.main == 'true' && secrets.COSIGN_PRIVATE_KEY || '' }}
-      COSIGN_PASSWORD: ${{ needs.route.outputs.main == 'true' && secrets.COSIGN_PASSWORD || '' }}
+      COSIGN_PRIVATE_KEY: ${{ needs.route.outputs.sign == 'true' && secrets.COSIGN_PRIVATE_KEY || '' }}
+      COSIGN_PASSWORD: ${{ needs.route.outputs.sign == 'true' && secrets.COSIGN_PASSWORD || '' }}
