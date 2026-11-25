@@ -19,6 +19,7 @@ ilexctl test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 ilexctl vm run                 # interactive ephemeral VM of this checkout's image (--gui: a window)
                                # on Windows: ephemeral VM on the builder, native window with --gui
 ilexctl vm run --gui --print-image # show the selected image without building
+ilexctl test installer::       # the next installer's root helper, on its live image (no ISO)
 ilexctl info               # resource identity, selection and available configurations
 ```
 
@@ -2740,6 +2741,127 @@ the Windows paths of this change: no Windows host was available.
   (default) or 503 to 520 MiB (basic), with 3.2 GiB available; at 2 GiB it used
   513 and 410 MiB and had 1.3 GiB available. GNOME Kiosk was not compared with
   cage.
+
+## The next installer's root helper
+
+The next installer (a Rust interface per shell on its own live ISO, replacing
+Anaconda) is built beside the released Anaconda ISO. Its live image is
+`installer/next/`; this section covers the shared model and the root helper
+only. Nothing here installs: the helper probes and plans, and writes to no disk.
+
+`crates/ilex-installer-model` holds what the host that writes the composition
+table and the installer that reads it must agree on: the table types
+(`Table`, `Machine`, `Shell`, `Composition`, `Profile`) and their validator,
+editions, DMI detection and the choice order, and the probe, plan, answers and
+state schemas. The types moved out of `ilex-tooling-core`; `ilex_devkit::installer`
+still re-exports them and `ilex_devkit::installer_model` is the crate. The host
+still builds the table with `installer::table`, and its serialization is
+byte-identical (field order and names are the file format), so the Anaconda ISO's
+`compositions.json`, `iso.yaml` and release notes do not change. The installer
+fingerprint does change once, because its inputs include `ilex-tooling-core`'s
+`installer.rs` and `config.rs` and the Cargo files.
+
+- **Editions.** One ISO installs one shell. `edition.json` (written into the live
+  image from `installer/next/editions.toml`, where the display name lives) names
+  it; the identifier is the shell. `Table::for_edition` keeps the compositions
+  whose default (first) shell is the edition's, with that edition's own default:
+  the table's when it belongs to the edition, else its first generic
+  composition. There is no desktop choice; a machine gets the default's shell
+  list or nothing. A table with neither an edition record nor `--edition` is the
+  Anaconda path's: its default composition's shell (GNOME).
+- **Detection** is `installer/chooser/ilex-installer-choice` ported with the same
+  meaning: exact, case-sensitive comparison of the four SMBIOS strings (stripped
+  as Python's `strip` does); a vendor or model alone never matches; two
+  matching machines fall back to the default and say so; a recognised machine
+  without a composition of the default's shells falls back with its own
+  reason. The choice order is the last `ilex.composition=<tag>` kernel argument,
+  then `/run/ilex-installer/choice` (a tag or the schema-1 record), then
+  detection. An unknown tag is an error that lists the offers. `Selected::serial_line`
+  keeps `ILEX-COMPOSITION <tag> (<reason>) installs <ref>`; the interface prints it.
+- **`ilex-installerd`** is a root service on the system bus, `org.ilex.Installer1`
+  at `/org/ilex/Installer1` (zbus), started at boot by `ilex-installerd.service`
+  (`Type=dbus`, no restart, no core files) and by bus activation if a caller
+  gets there first. Its bus policy
+  (`org.ilex.Installer1.conf`) lets only root and `ilex-installer` own or call
+  it; anyone else, including introspection, gets `Access denied`. Every method
+  takes and returns JSON text and none takes a path, an image reference, a
+  kernel argument or a command. `Probe()` reports the helper and edition,
+  firmware (UEFI, Secure Boot, setup mode), `ilex-enroll`'s probe verbatim,
+  the DMI identity and detection, the boot-argument selection (or its error),
+  this edition's catalogue, the disks and memory. A disk has a stable id
+  (`/dev/disk/by-id`: `nvme-eui.*`, `wwn-*`, any other, then the bus path, then
+  the kernel name), model, serial, size, bus, `removable`, `live_medium` (the
+  disk behind `/run/initramfs/live` or any mounted iso9660/udf), the partition
+  table, partitions, free extents (whole MiB between partitions, inside GPT's
+  usable range) and other systems found: EFI loader directories (an ESP is
+  mounted read-only, `noexec,nodev,nosuid`, and unmounted), Windows, BitLocker,
+  Linux, LUKS and Apple filesystems. Zram, loop, network and read-only devices
+  are not disks. `Plan(request)` takes `composition`, `disk`, `mode`, and
+  optionally `encrypt` (on), `tpm` (`auto` with encryption, else `off`),
+  `keyboard` (`us`), `language` (`en_US.UTF-8`), `time_zone` (`Etc/UTC`),
+  `host_name` (`ilex`) and `administrator`; unknown fields are refused. It
+  probes afresh and refuses, with a JSON `{code, field, message}` as the error
+  message: a composition outside the edition (`vm` is named as never installed
+  on hardware), `free-space` mode (a later PR), a disk id not in the probe, the
+  live medium, a disk under `MIN_DISK_BYTES` (512 MiB ESP + 1 GiB `/boot` + 30 GiB
+  root + alignment, to be set from a measured install), TPM without
+  encryption, system and daily-profile account names for the administrator,
+  a malformed language, keymap, zone or host name, and a zone or keymap this
+  system lacks. It resolves the tag with `skopeo inspect --raw` to the manifest
+  digest (it hashes exactly the returned bytes), reads the download size and
+  `org.opencontainers.image.version`/`revision` from the config, and
+  runs `systemd-repart --dry-run=yes --empty=force --seed=<plan seed>` on the
+  whole-disk definitions (`/usr/lib/ilex-installer/repart/whole-disk`; the
+  encrypted root replaces the plain one). The plan holds a 128-bit id, the seed
+  that makes Apply create the same UUIDs, the normalised request, the image
+  (`target` tag and pinned `source@digest`), the partitions, what is erased and
+  the other systems it destroys, the planned unlock method with the probe's reason
+  code, and warnings. The registry answer is metadata: signatures are enforced
+  when the image is pulled. `State()` reports the stage (`idle` until Apply
+  exists), the latest plan id and a record at `/run/ilex-installer/state.json`.
+  The helper keeps the last eight plans in memory. `ilex-installerd --self-check`
+  prints `ILEX-INSTALLERD-CHECK OK: …` after exercising the model's rules and
+  the parsers on fixtures, the shipped definitions against the model's sizes,
+  `systemd-repart` on a sparse file (both layouts, repeatable with a seed) and
+  a real probe of the system. `--table`, `--edition`, `--definitions` and
+  `--run-dir` are for development; `--dmi-dir` and `--cmdline` are hidden and
+  exist for the `installer::` tier.
+- **Answers** (`answers.toml` on a volume labelled `ILEX-ANSWERS`) have their
+  schema and syntax checks in the model: `[install]` (`composition`, `disk`,
+  `mode`, `confirm-erase` repeating the disk id), `[encryption]` (`enabled`,
+  `tpm`, `passphrase`), `[system]` and `[administrator]` (`name`, `password`).
+  Secrets never print. Reading the volume and applying the answers are later work.
+- **The live image** gains the helper and `ilex-enroll` (built in the same
+  builder stage), `compositions.json` generated like the Anaconda ISO's, the
+  bus policy, the unit and the repart definitions under
+  `installer/next/rootfs`, `ilex-enroll tool-manifest` as
+  `/usr/lib/ilex/security/tools.json` (image-builder drops the RPM database)
+  and the packages the helper runs (`dosfstools`, `e2fsprogs`, `btrfs-progs`,
+  `skopeo`, `kbd`, `tzdata`, `cryptsetup`, `tpm2-tss`; fedora-bootc has them all,
+  so they add no size, and listing them keeps a base change from dropping one). `ilexctl iso --next`
+  shares its image stage with the tier (`iso_next::build_image`).
+
+`ilexctl test installer::` boots that image (`ILEX_INSTALLER_IMAGE` names one;
+otherwise it is built, without the OS image or an ISO) as an ephemeral VM with
+an SSH server added in a layer of the harness's own, the kiosk session masked, a
+blank 40 GiB disk, a 48 GiB disk carrying a fake dual-boot layout (an ESP with
+Windows and Ubuntu loader directories, a reserved partition, a LUKS volume
+and a labelled ext4 partition) and an 8 GiB disk. It calls the helper
+with `busctl` as `ilex-installer`. `installer::probe` runs the self-check,
+compares the probe with what the guest reports, checks the three disks (free
+extents and other systems included), points the unit at SMBIOS and
+command-line fixtures to exercise detection through the bus (MS-7C35 by system
+and by board alone, case, a vendor alone, the boot override and an unknown one),
+and requires `Access denied` for `nobody` and `daemon` on every method and on
+introspection. `installer::plan` plans the blank disk plain and encrypted,
+compares the pinned digest with an independent resolution in the guest, plans the
+layout disk and expects its five systems in the warning, expects every refusal
+above with its code and field, and checks that no disk changed and no scratch
+file stayed behind. Planning needs the registry (`ghcr.io/reidond/ilex:generic.gnome`).
+A VM cannot carry another board's firmware identity or a live medium, and
+libblkid only takes a real BitLocker header for BitLocker: the `--self-check`
+covers a disk flagged as the live medium, conflicting machines and the
+BitLocker and NTFS classification; the live ISO's own boot is `iso::next…`.
 
 ## Conventions
 
