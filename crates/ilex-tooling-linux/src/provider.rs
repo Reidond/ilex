@@ -219,6 +219,7 @@ pub fn validate_config(ws: &Workspace, config: &VmConfig) -> Result<VmSpec> {
 pub struct LinuxProvider {
     ws: Workspace,
     identity: CheckoutIdentity,
+    usb_keyboard: bool,
 }
 pub struct LinuxVm {
     spec: VmSpec,
@@ -237,7 +238,19 @@ impl LinuxVm {
 impl LinuxProvider {
     pub fn new(ws: Workspace) -> Result<Self> {
         let identity = ws.identity()?;
-        Ok(Self { ws, identity })
+        Ok(Self {
+            ws,
+            identity,
+            usb_keyboard: false,
+        })
+    }
+    /// Give the guest an xHCI USB keyboard instead of a virtio one, for
+    /// firmware that loses navigation keys from virtio-keyboard (GRUB menus
+    /// driven through QMP). Off by default: it changes no existing launch.
+    #[must_use]
+    pub fn with_usb_keyboard(mut self, enabled: bool) -> Self {
+        self.usb_keyboard = enabled;
+        self
     }
 }
 impl VmProvider for LinuxProvider {
@@ -376,6 +389,7 @@ impl VmProvider for LinuxProvider {
             }
         }
         config.cdrom = vm.spec.iso.clone();
+        config.usb_keyboard = self.usb_keyboard;
         config.efi_vars = vm.spec.firmware_state.clone();
         config.extra_disks = vm
             .spec

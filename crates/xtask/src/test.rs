@@ -40,9 +40,17 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
-    let image = image_under_test(ws, &args)?;
+    // The next installer's live ISO carries no image: `iso::next…` alone needs
+    // neither the checkout's image nor a build of it.
+    let only_next = !args.filters.is_empty() && args.filters.iter().all(|f| is_next(f));
+    let image = if only_next {
+        None
+    } else {
+        Some(image_under_test(ws, &args)?)
+    };
     eprintln!(
-        "ilex: testing {image} from {} (slug {})",
+        "ilex: testing {} from {} (slug {})",
+        image.as_deref().unwrap_or("the live installer ISO"),
         ws.root.display(),
         ws.slug
     );
@@ -53,11 +61,14 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         .args(["test", "--package", "ilex-e2e", "--test", "e2e", "--"])
         .args(&args.filters)
         .args(&args.test_args)
-        .env("ILEX_IMAGE", &image)
         .env("ILEX_ROOT", &ws.root);
+    if let Some(image) = &image {
+        test.env("ILEX_IMAGE", image);
+    }
     // `iso::` exercises the installer and its published payload, independently of this image.
+    // `iso::next…` boots the next installer's live ISO instead, which has no payload.
     if args.filters.iter().any(|f| {
-        f.contains("iso")
+        (f.contains("iso") && !is_next(f))
             || f.contains("encrypted_")
             || f.contains("installer_profile_setup")
             || f.contains("installer_no_profile")
@@ -65,7 +76,32 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     }) {
         prepare_iso(ws, &mut test)?;
     }
+    if args.filters.iter().any(|f| is_next(f)) {
+        prepare_iso_next(ws, &mut test)?;
+    }
     cmd::run(&mut test)
+}
+
+/// Does this filter select the next installer's `iso::next…` trials?
+fn is_next(filter: &str) -> bool {
+    filter.contains("iso::next")
+}
+
+/// Build the next installer's live ISO (unless `ILEX_ISO_NEXT` names one
+/// already) for `iso::next…`.
+fn prepare_iso_next(ws: &Workspace, test: &mut Command) -> Result<()> {
+    if std::env::var_os("ILEX_ISO_NEXT").is_some_and(|p| !p.is_empty()) {
+        return Ok(());
+    }
+    let iso = crate::iso_next::build(
+        ws,
+        &crate::iso_next::Build {
+            edition: crate::iso_next::DEFAULT_EDITION,
+            output_dir: None,
+        },
+    )?;
+    test.env("ILEX_ISO_NEXT", iso);
+    Ok(())
 }
 
 /// Build the installer ISO (unless `ILEX_ISO` names one already) and tell the

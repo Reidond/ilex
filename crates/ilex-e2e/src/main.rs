@@ -30,6 +30,8 @@ mod homed;
 #[cfg(target_os = "linux")]
 mod iso;
 #[cfg(target_os = "linux")]
+mod iso_next;
+#[cfg(target_os = "linux")]
 mod security;
 #[cfg(target_os = "windows")]
 mod security_windows;
@@ -92,6 +94,11 @@ fn main() {
     if filters.iter().any(|f| f.contains("iso")) {
         trials.extend(iso::trials());
     }
+    // The next installer's live ISO has trials of its own, named explicitly:
+    // `iso::` alone (the release gate) must not boot an ISO it was not given.
+    if filters.iter().any(|f| f.contains("iso::next")) {
+        trials.extend(iso_next::trials());
+    }
     // Security is opt-in, but an explicitly selected unqualified host fails.
     if filters.iter().any(|f| f.contains("security")) {
         trials.extend(security::trials());
@@ -113,7 +120,7 @@ fn main() {
             .count()
     };
     if !args.list
-        && will_run("iso::") > 0
+        && will_run("iso::") > will_run("iso::next")
         && let Err(error) = iso::preflight()
     {
         eprintln!("{error:#}");

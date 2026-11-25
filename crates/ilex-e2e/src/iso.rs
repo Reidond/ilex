@@ -599,7 +599,7 @@ fn kernel_argument(
 
 /// GRUB polls firmware input and drops the desktop typing path's 10 ms key
 /// presses. Use vmctl's QMP transport with 100 ms physical key holds and a gap.
-fn grub_key(ctl: &Vmctl, combo: &str) -> Result<()> {
+pub(crate) fn grub_key(ctl: &Vmctl, combo: &str) -> Result<()> {
     let keys = ilex_vmctl::keys::parse_combo(combo)?
         .into_iter()
         .map(|key| serde_json::json!({"type": "qcode", "data": key}))
