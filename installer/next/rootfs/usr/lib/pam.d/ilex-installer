@@ -1,0 +1,10 @@
+# PAM service of ilex-installer-session.service. systemd opens (it does not
+# authenticate) the session: pam_setcred and pam_acct_mgmt must succeed, and
+# pam_systemd registers the session with logind, which gives the compositor
+# seat0's DRM and input devices without root. No password is ever asked.
+auth       required     pam_permit.so
+account    required     pam_permit.so
+password   required     pam_deny.so
+session    required     pam_permit.so
+session    required     pam_env.so
+-session   optional     pam_systemd.so

@@ -17,6 +17,7 @@ mod doctor;
 mod identity;
 mod info;
 mod iso;
+mod iso_next;
 mod migrate;
 mod prepare_publish;
 mod publish;

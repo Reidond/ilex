@@ -15,6 +15,9 @@
 //! writes `iso_due=` to `$GITHUB_OUTPUT`) by looking at the latest
 //! `installer-*` release: none yet, `installer/` (or this module) changed
 //! since it, or it is a week old (to pick up Fedora and Anaconda fixes).
+//!
+//! `--next` builds the live installer of the next installer instead (no
+//! Anaconda; see `iso_next`). It is built beside this ISO and never released.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,6 +47,9 @@ const INSTALLER_INPUTS: &[&str] = &[
     "rootfs/etc/containers/registries.d/ilex.yaml",
     "rootfs/etc/pki/containers/ilex.pub",
 ];
+/// Paths below [`INSTALLER_INPUTS`] that belong to another product: the next
+/// installer (`iso --next`) has its own build and is never part of this ISO.
+const FINGERPRINT_EXCLUDED: &[&str] = &["installer/next"];
 /// The line of a release's notes that says what the installer was built from.
 const FINGERPRINT_LINE: &str = "installer-fingerprint: ";
 /// Release tags are `installer-YYYYMMDD` (with a `-N` suffix on a second one
@@ -59,8 +65,15 @@ pub struct Args {
     #[arg(long)]
     pub testing_tag: Option<String>,
     /// Check that every offered composition and its signature tag exist
-    #[arg(long, conflicts_with_all = ["due", "testing_tag"])]
+    #[arg(long, conflicts_with_all = ["due", "testing_tag", "next"])]
     pub check_registry: bool,
+    /// Build the next installer's live ISO (no Anaconda) instead of this
+    /// network installer; written to `<state dir>/iso-next`, never released
+    #[arg(long, conflicts_with_all = ["due", "testing_tag", "check_registry"])]
+    pub next: bool,
+    /// With `--next`: the edition to build (see `installer/next/editions.toml`)
+    #[arg(long, default_value = crate::iso_next::DEFAULT_EDITION, requires = "next")]
+    pub edition: String,
     /// Don't build: say whether a new ISO is due, from the latest
     /// `installer-*` release of `--repository`
     #[arg(long)]
@@ -74,6 +87,18 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    if args.next {
+        cmd::require("podman")?;
+        let iso = crate::iso_next::build(
+            ws,
+            &crate::iso_next::Build {
+                edition: &args.edition,
+                output_dir: args.output_dir.as_deref(),
+            },
+        )?;
+        println!("{}", iso.display());
+        return Ok(());
+    }
     if args.check_registry {
         let table = installer::table(&ws.root, args.testing_tag.as_deref())?;
         if !check_registry(&table)? {
@@ -188,7 +213,7 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         fs::remove_dir_all(&build_dir)?;
     }
     fs::create_dir_all(&build_dir)?;
-    run_image_builder(ws, &installer, &build_dir)?;
+    run_image_builder(ws, &installer, &build_dir, ISO_NAME)?;
 
     // image-builder puts the ISO in a subdirectory; the release wants it flat.
     let built = find_iso(&build_dir)?;
@@ -225,7 +250,7 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
     Ok(iso)
 }
 
-fn copy_sources(source: &Path, target: &Path) -> Result<()> {
+pub(crate) fn copy_sources(source: &Path, target: &Path) -> Result<()> {
     fs::create_dir_all(target)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -241,7 +266,7 @@ fn copy_sources(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hash = Sha256::new();
     std::io::copy(&mut file, &mut hash)?;
@@ -348,6 +373,14 @@ fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> Result<()> {
             .collect::<std::io::Result<Vec<_>>>()?;
         entries.sort();
         for entry in entries {
+            let relative = entry
+                .strip_prefix(root)
+                .unwrap_or(&entry)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if FINGERPRINT_EXCLUDED.contains(&relative.as_str()) {
+                continue;
+            }
             hash_tree(root, &entry, hash)?;
         }
     } else {
@@ -455,7 +488,12 @@ fn host_image_builder() -> Option<u32> {
 /// is new enough (CI), otherwise inside a privileged Fedora 45 container that
 /// shares this host's container storage, so a dev machine with an older
 /// image-builder (or none) works the same.
-fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<()> {
+pub(crate) fn run_image_builder(
+    ws: &Workspace,
+    installer: &str,
+    out_dir: &Path,
+    output_name: &str,
+) -> Result<()> {
     let cache = ws.ensure_state()?.join("image-builder-cache");
     fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
     let build_args = |out: &str, cache_path: &str| -> Vec<String> {
@@ -470,7 +508,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
             "--bootc-default-fs",
             "ext4",
             "--output-name",
-            ISO_NAME,
+            output_name,
             "--output-dir",
             out,
             "generic-iso",
@@ -559,7 +597,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
 }
 
 /// The `.iso` image-builder wrote somewhere below `dir`.
-fn find_iso(dir: &Path) -> Result<PathBuf> {
+pub(crate) fn find_iso(dir: &Path) -> Result<PathBuf> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         for entry in fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {

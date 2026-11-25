@@ -1,0 +1,116 @@
+# The next ilex installer's live image, without Anaconda: fedora-bootc plus
+# one edition's compositor and interface. `image-builder` turns this container
+# into a live ISO (`cargo ilexctl iso --next`): its kernel and an initramfs with
+# dracut's dmsquash-live module boot the container's root as a squashfs with a
+# RAM overlay. Follows osbuild's example for a non-Anaconda container ISO:
+# https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/
+#
+# One image stage per edition (`--build-arg EDITION=gnome`): the edition's
+# package lists, build tools and overlay live in `editions/<EDITION>/`; what is
+# shared (the session unit, the user, the tty2 shell) lives in `rootfs/`.
+
+# Builder: the interface is compiled on Fedora 45 against the libraries the
+# image ships. gtk4-devel and libadwaita-devel stay in this stage only.
+FROM quay.io/fedora/fedora:45 AS ui-build
+ARG EDITION=gnome
+COPY editions/${EDITION}/build-packages.txt /tmp/build-packages.txt
+RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
+    dnf -y install --setopt=keepcache=1 cargo gcc \
+        $(sed -e 's/#.*//' /tmp/build-packages.txt)
+
+# kache, exactly as the OS image's builder stage (../../Containerfile) installs
+# it: a compiler cache keyed by the content of each rustc invocation's inputs,
+# in the podman cache mount every worktree shares. Bump both together.
+ARG KACHE_VERSION=2.0.0
+ARG KACHE_SHA256=6c59665faf1b14d0944391e6f2a1b510195e6be92c63060a9d1770ed00676824
+RUN curl -fsSL -o /tmp/kache.tar.gz \
+      "https://github.com/kunobi-ninja/kache/releases/download/v${KACHE_VERSION}/kache-x86_64-unknown-linux-musl.tar.gz" && \
+    echo "${KACHE_SHA256}  /tmp/kache.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/kache.tar.gz -C /usr/local/bin kache kache-engine && \
+    rm /tmp/kache.tar.gz && \
+    kache --version
+
+WORKDIR /src
+COPY --from=generated Cargo.toml Cargo.lock ./
+COPY --from=generated crates/ crates/
+RUN --mount=type=cache,id=ilex-cargo,target=/root/.cargo/registry \
+    --mount=type=cache,id=ilex-kache,target=/root/.cache/kache,sharing=locked <<'BUILD'
+set -euo pipefail
+export RUSTC_WRAPPER=kache
+cargo build --release --locked -p ilex-installer --features gui
+kache daemon stop || true
+kache stats --last-build --root /src
+install -Dm755 target/release/ilex-installer /out/usr/bin/ilex-installer
+BUILD
+
+FROM quay.io/fedora/fedora-bootc:45
+LABEL org.opencontainers.image.source="https://github.com/Reidond/ilex"
+ARG EDITION=gnome
+LABEL ilex.installer-edition="${EDITION}"
+
+# Live-boot plumbing (the contract of image-builder's generic-iso for a
+# container: dmsquash-live in the initramfs, shim and GRUB on the ISO's
+# boot partition, xorrisofs and squashfs-tools to assemble it) and the
+# edition's own packages. Weak dependencies stay out: whatever the session
+# needs is listed.
+#
+# The ISO has to stay under GitHub's 2 GiB limit per release asset. An
+# installer doesn't need GPU firmware, Vulkan drivers, video acceleration,
+# user-mode emulators or audio firmware (the machines that need a GPU driver
+# use the basic graphics entry), so they are removed here, before the
+# initramfs is built (it is `--no-hostonly`): that shrinks both the squashfs
+# and the initramfs. Wi-Fi and NIC firmware stay. Install and removal share one
+# RUN so that rpm's database is written inside one layer (removing in a later
+# layer left it corrupt on one build host), and the final check fails the build
+# rather than ship an inconsistent database.
+COPY packages.txt /tmp/ilex-installer-packages.txt
+COPY editions/${EDITION}/packages.txt /tmp/ilex-edition-packages.txt
+RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
+    dnf -y install --setopt=keepcache=1 --setopt=install_weak_deps=0 \
+        $(sed -e 's/#.*//' /tmp/ilex-installer-packages.txt /tmp/ilex-edition-packages.txt) && \
+    rm /tmp/ilex-installer-packages.txt /tmp/ilex-edition-packages.txt && \
+    mkdir -p /boot/efi && cp -ra /usr/lib/efi/*/*/EFI /boot/efi && \
+    rpm -qa 'nvidia-gpu-firmware' 'amd-gpu-firmware' 'intel-gpu-firmware' \
+        'mesa-vulkan-drivers' 'intel-mediasdk' 'qemu-user-static*' \
+        'intel-audio-firmware' 'cirrus-audio-firmware' \
+    | xargs -r rpm -e --nodeps && \
+    rpm --verifydb
+
+# A live environment has no bootloader to update, and no business sleeping.
+# Fedora 45 runs kmscon on the virtual terminals; as a DRM client of seat0 it
+# takes the GPU on tty1 before the compositor can ("Device or resource busy"),
+# so the terminals get plain agetty (the tty2 shell's autologin drop-in is on
+# getty@).
+RUN mkdir -p /etc/systemd/system && \
+    for unit in bootloader-update.service sleep.target suspend.target \
+                hibernate.target hybrid-sleep.target suspend-then-hibernate.target \
+                kmsconvt@.service; do \
+        ln -sf /dev/null "/etc/systemd/system/${unit}"; \
+    done && \
+    rm -f /etc/systemd/system/getty.target.wants/kmsconvt@tty1.service && \
+    ln -sf /usr/lib/systemd/system/getty@.service /etc/systemd/system/autovt@.service
+
+# What the interface is called, and by whom: GRUB and the session read the
+# installer's os-release. Only /etc is branded; Fedora's ID/VERSION_ID and
+# /usr/lib/os-release stay.
+RUN cp --remove-destination /usr/lib/os-release /etc/os-release && \
+    sed -i 's/^NAME=.*/NAME="ilex"/; s/^PRETTY_NAME=.*/PRETTY_NAME="ilex installer"/' /etc/os-release
+
+# Shared files, then the edition's, then what was built or generated for it.
+# Ordinary COPY keeps the parent directories' modes.
+COPY rootfs/ /
+COPY editions/${EDITION}/rootfs/ /
+COPY --from=generated edition.json /usr/share/ilex-installer/edition.json
+COPY --from=generated iso.yaml /usr/lib/image-builder/bootc/iso.yaml
+COPY --from=ui-build /out/ /
+RUN dconf update && \
+    systemctl enable ilex-installer-session.service && \
+    ilex-installer --version
+
+# Rebuild the initramfs with dracut's live-boot module, generic (not
+# host-only) so it boots on whatever the ISO is written to.
+RUN mkdir -p "$(realpath /root)" && \
+    kernel=$(basename "$(ls -d /usr/lib/modules/*/ | head -n 1)") && \
+    DRACUT_NO_XATTR=1 dracut --force -v --zstd --reproducible --no-hostonly \
+        --add dmsquash-live \
+        "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}"

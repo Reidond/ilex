@@ -1,0 +1,30 @@
+#!/bin/sh
+# What a person sees on tty1 when the installer session failed three times.
+# It runs as root and writes to tty1 itself (the unit sets up no terminal, so
+# the failures it ignores cannot disturb a session that is about to restart).
+#
+# The session unit starts this on every failure (OnFailure=), including the
+# ones it restarts after. Only the failure that exhausts its start limit is
+# the end of the road: until then the session unit is about to try again.
+[ "$(systemctl show ilex-installer-session.service -p Result --value)" = start-limit-hit ] || exit 0
+
+exec > /dev/tty1 2>&1
+printf '\033c'
+cat <<'MESSAGE'
+
+  ilex installer
+
+  The installer could not start its graphical session.
+
+  What to try:
+    - Restart, and choose "Install ilex (basic graphics)" in the boot menu.
+    - Press Ctrl+Alt+F2 for a shell and run
+        journalctl -b -u ilex-installer-session
+      to see what failed.
+
+  Nothing has been written to any disk.
+
+MESSAGE
+# The same fact for whoever watches the serial console (never blocks).
+timeout 1 sh -c "echo 'ILEX-INSTALLER-FALLBACK session failed three times' > /dev/ttyS0" 2>/dev/null || true
+exec sleep infinity

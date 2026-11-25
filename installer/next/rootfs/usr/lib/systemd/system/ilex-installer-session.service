@@ -1,0 +1,42 @@
+[Unit]
+Description=ilex installer session (kiosk compositor on tty1)
+Documentation=https://github.com/Reidond/ilex
+# A logind session for an unprivileged user on the first virtual terminal
+# (the pattern kiosk compositors use under systemd): the compositor starts as
+# ilex-installer, and logind hands it seat0's DRM and input devices.
+After=systemd-user-sessions.service systemd-logind.service systemd-sysusers.service systemd-tmpfiles-setup.service
+Wants=systemd-logind.service
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+ConditionPathExists=/usr/share/ilex-installer/edition.json
+# Three failures in a row: print what happened on tty1 (see the fallback unit).
+StartLimitIntervalSec=300
+StartLimitBurst=3
+OnFailure=ilex-installer-fallback.service
+
+[Service]
+Type=simple
+User=ilex-installer
+PAMName=ilex-installer
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+# Marker lines on the serial console (the user cannot open /dev/ttyS0 itself).
+SupplementaryGroups=dialout
+Environment=XDG_SESSION_TYPE=wayland
+Environment=XDG_SESSION_CLASS=user
+# Fixed test-only fault credential (ilex.installer.fault=session), read by the
+# session script. It can only make the installer fail to start.
+ImportCredential=ilex.installer.fault
+ExecStart=/usr/libexec/ilex-installer/session
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

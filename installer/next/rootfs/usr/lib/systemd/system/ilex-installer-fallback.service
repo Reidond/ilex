@@ -1,0 +1,17 @@
+[Unit]
+Description=ilex installer: say why the session did not start
+# Started by OnFailure= of the session unit, which also fires for the failures
+# it restarts after; the script acts only once the unit gave up (three failures
+# in a row). No text-mode installer: the person is told where to look, and the
+# shell on tty2 stays available.
+After=ilex-installer-session.service
+
+[Service]
+Type=simple
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+ExecStart=/usr/libexec/ilex-installer/fallback
+# The message must stay on screen: start it again if something kills it.
+Restart=on-failure
+RestartSec=1

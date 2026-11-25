@@ -1,0 +1,12 @@
+# Installed in every edition's live image (dnf, weak dependencies off).
+# Live boot: dmsquash-live for the initramfs, and what image-builder's
+# generic-iso needs inside the container to assemble the ISO.
+dracut-live
+dracut-config-generic
+grub2-efi-x64-cdboot
+isomd5sum
+squashfs-tools
+xorrisofs
+# The session: logind sessions, the Wi-Fi support later pages use, tty2's shell.
+NetworkManager-wifi
+util-linux

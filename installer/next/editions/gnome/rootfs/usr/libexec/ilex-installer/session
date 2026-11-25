@@ -1,0 +1,67 @@
+#!/bin/bash
+# The GNOME edition's session: GNOME Kiosk as the compositor and ilex-installer
+# as its only window. Runs as the unprivileged ilex-installer user inside the
+# logind session ilex-installer-session.service opened on tty1; if either
+# process ends, the other is stopped and the unit restarts the session.
+set -u
+
+# Marker lines for the serial console: best effort, never blocking.
+marker() {
+    echo "$1"
+    timeout 1 sh -c 'printf "%s\n" "$1" > /dev/ttyS0' sh "$1" 2>/dev/null || true
+}
+
+# Test-only fault, from the fixed credential ilex.installer.fault.
+if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "$CREDENTIALS_DIRECTORY/ilex.installer.fault" ] \
+    && [ "$(cat "$CREDENTIALS_DIRECTORY/ilex.installer.fault")" = session ]; then
+    marker "ILEX-INSTALLER-SESSION fault=session"
+    exit 1
+fi
+
+# The page's inputs (edition record, DMI) must be readable before anything
+# starts; this prints ILEX-INSTALLER-SELFCHECK on the serial console.
+ilex-installer --self-check || { marker "ILEX-INSTALLER-SESSION self-check failed"; exit 1; }
+
+# Basic graphics: the boot entry's nomodeset leaves the display on the
+# firmware's framebuffer, so GTK draws on the CPU too.
+graphics=default
+if grep -qw nomodeset /proc/cmdline; then
+    graphics=basic
+    export GSK_RENDERER=cairo
+    export LIBGL_ALWAYS_SOFTWARE=1
+fi
+
+# Did the firmware verify the boot chain? (efivarfs: 4 attribute bytes, then
+# the value.) Reported for whoever reads the serial console.
+secure_boot=unknown
+sb_var=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+if [ -r "$sb_var" ]; then
+    secure_boot=$(od -An -t u1 -j4 -N1 "$sb_var" | tr -d ' ')
+fi
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=GNOME
+export GSETTINGS_BACKEND=dconf
+# The session bus pam_systemd's user manager provides.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR:?}/bus"
+
+marker "ILEX-INSTALLER-SESSION compositor=gnome-kiosk graphics=$graphics secure-boot=$secure_boot"
+
+gnome-kiosk --wayland --no-x11 &
+compositor=$!
+trap 'kill "$compositor" "${installer:-}" 2>/dev/null' EXIT
+
+# Wait for the compositor's socket.
+for _ in $(seq 300); do
+    [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && break
+    kill -0 "$compositor" 2>/dev/null || { marker "ILEX-INSTALLER-SESSION compositor exited"; exit 1; }
+    sleep 0.1
+done
+[ -S "$XDG_RUNTIME_DIR/wayland-0" ] || { marker "ILEX-INSTALLER-SESSION compositor has no socket"; exit 1; }
+
+WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland ilex-installer &
+installer=$!
+wait -n "$compositor" "$installer"
+status=$?
+marker "ILEX-INSTALLER-SESSION ended status=$status"
+exit "$status"

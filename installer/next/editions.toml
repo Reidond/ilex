@@ -1,0 +1,9 @@
+# The live installer's editions. One ISO per edition, as Fedora ships Silverblue
+# (GNOME) and Kinoite (KDE). The identifier names the image stage, its files
+# (`editions/<id>/`) and the ISO; the display name is what a person reads, and
+# this file is the only place it lives, so it can change without touching code.
+# The owner has not chosen edition names yet: until then the display name is
+# the shell's own.
+
+[gnome]
+display-name = "ilex GNOME"
