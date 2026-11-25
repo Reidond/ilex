@@ -539,6 +539,14 @@ fn fixture_probe(dmi: &[(&str, &str)], cmdline: &str, setup: &str, extra: &str) 
     script
 }
 
+/// No `scan-*` or `selfcheck-*` directory is left in the helper's run
+/// directory: its scratch directories are removed with the call that made them.
+fn no_scratch_left(vm: &EphemeralVm) -> Result<bool> {
+    Ok(vm
+        .ssh("test -d /run/ilex-installer && test -z \"$(ls -A /run/ilex-installer | grep -E '^(scan|selfcheck)-')\"")?
+        .success())
+}
+
 /// The script that puts the helper back as the image ships it.
 const RESTORE_HELPER: &str = "rm -rf /run/ilex-fixture /run/systemd/system/ilex-installerd.service.d; systemctl daemon-reload; systemctl reset-failed ilex-installerd 2>/dev/null; systemctl restart ilex-installerd || exit 1";
 
@@ -565,8 +573,7 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
     );
     println!("     {}", check.out());
     ensure!(
-        vm.ssh("test -z \"$(ls -A /run/ilex-installer | grep -E '^(scan|selfcheck)-')\"")?
-            .success(),
+        no_scratch_left(vm)?,
         "a scan or self-check left its scratch directory behind"
     );
 
@@ -1687,9 +1694,8 @@ fn plan_body(vm: &EphemeralVm) -> Result<()> {
         "planning changed a disk:\n{before:?}\n{after:?}"
     );
     ensure!(
-        vm.ssh("test -z \"$(ls -A /run/ilex-installer/plans 2>/dev/null)\"")?
-            .success(),
-        "a plan left its scratch files behind"
+        no_scratch_left(vm)?,
+        "a probe, plan or self-check left its scratch directory behind"
     );
     Ok(())
 }
