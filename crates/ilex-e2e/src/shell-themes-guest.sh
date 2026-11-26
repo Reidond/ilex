@@ -109,7 +109,7 @@ show-session)
 esac
 STUB
 # Each wait of the watch runs the next line of the scenario, then really waits a
-# moment. Once the scenario is over the watch is ended after 30 more waits
+# moment. Once the scenario is over the watch is ended after 12 more waits
 # (SIGTERM, status 143): a watch that decides nothing is counted, not timed, so
 # a loaded host cannot cut a scenario short.
 cat >"$watch/bin/sleep" <<'STUB'
@@ -122,9 +122,9 @@ if [ -s "$S/events" ]; then
 else
     idle=$(($(cat "$S/idle" 2>/dev/null || echo 0) + 1))
     echo "$idle" >"$S/idle"
-    [ "$idle" -lt 30 ] || kill -TERM "$PPID"
+    [ "$idle" -lt 12 ] || kill -TERM "$PPID"
 fi
-exec /usr/bin/sleep 0.05
+exec /usr/bin/sleep 0.2
 STUB
 chmod 755 "$watch"/bin/*
 
@@ -140,7 +140,7 @@ scenario() {
     : >"$S/plasma-up" >"$S/user-sessions" >"$S/gnome" >"$S/calls"
     printf '%s' "${2:-}" >"$S/events"
     wstatus=0
-    { env PATH="$watch/bin:$PATH" WATCH_LIB="$watch/lib.sh" timeout 120 bash "$watch/script" 2>"$S/log" || wstatus=$?; } 2>/dev/null
+    { nice -n 19 env PATH="$watch/bin:$PATH" WATCH_LIB="$watch/lib.sh" timeout 120 bash "$watch/script" 2>"$S/log" || wstatus=$?; } 2>/dev/null
     echo "     $1: status $wstatus; $(tr '\n' '|' <"$S/calls")"
 }
 # The calls record the sessions logind listed at the moment of the stop.
