@@ -17,7 +17,17 @@
 //!    SIGKILL, so no shutdown script runs), then GNOME again in the same
 //!    lingering user manager: no GTK settings portal that reads the KDE
 //!    database may be left running, and GNOME's GTK 3, GTK 4 and libadwaita
-//!    applications must look as GNOME chose.
+//!    applications must look as GNOME chose;
+//! 6. a crash followed by a GNOME login before the session watch has acted, and
+//! 7. a crash followed by a Plasma login before it has acted. A real login takes
+//!    longer than the watch's poll, so the watch is stopped (SIGSTOP) before the
+//!    crash: it wakes as late as the login manager's auto-relogin or a slow
+//!    `loginctl` could make it. The GNOME login fails by itself (gnome-session
+//!    will not start over a graphical session that is still up), the late watch
+//!    must then clear Plasma's leftovers without stopping what it must not, and
+//!    the next GNOME login must work and look as GNOME chose. The Plasma login
+//!    must get a stack of its own (the login stops the leftovers), show the
+//!    desktop rather than the greeter, and keep it when the watch wakes.
 //!
 //! Select it explicitly (`ilexctl test graphical::shells --shell gnome --shell kde`).
 
@@ -201,6 +211,10 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         "adw",
         None,
     )?;
+
+    // 6 and 7. The watch is late: a login arrives before it acts.
+    late_watch_gnome(vm, ctl, artifacts, &password)?;
+    late_watch_plasma(vm, ctl, artifacts, &password)?;
     Ok(())
 }
 
@@ -217,17 +231,10 @@ fn kde_profile_holders(vm: &Vm) -> Result<Vec<String>> {
     Ok(out.lines().map(str::to_string).collect())
 }
 
-/// SIGKILL the Plasma session's compositor and session leader, as a crash would:
-/// no logout, no shutdown script. logind ends the session, but the lingering
-/// user manager keeps Plasma's units (upstream stops `plasma-workspace.target`
-/// only on a logout), so the shell's session watch must stop them; nothing that
-/// reads the KDE database may outlive it.
-fn crash_plasma(vm: &mut Vm) -> Result<()> {
-    let before = kde_profile_holders(vm)?;
-    println!("     before the crash, processes selecting the KDE database: {before:?}");
-    if before.is_empty() {
-        bail!("no process selects the KDE database in a running Plasma session: nothing to leak");
-    }
+/// SIGKILL the Plasma session's compositor and session leader, as a crash would
+/// (no logout, no shutdown script), and wait until logind has dropped the
+/// session and the greeter is back.
+fn kill_plasma(vm: &mut Vm) -> Result<()> {
     // `-f` with a bracket keeps the pattern from matching this very command line.
     vm.ssh_ok(&format!(
         "pkill -KILL -u {USER} -x kwin_wayland; pkill -KILL -u {USER} -f '^[/a-z]*startplasma-wayland'; true"
@@ -238,7 +245,28 @@ fn crash_plasma(vm: &mut Vm) -> Result<()> {
         SESSION_TIMEOUT,
     )
     .map(drop)?;
-    wait_greeter(vm)?;
+    wait_greeter(vm)
+}
+
+/// A crash of the Plasma session: logind ends the session, but the lingering
+/// user manager keeps Plasma's units (upstream stops `plasma-workspace.target`
+/// only on a logout), so the shell's session watch must stop them; nothing that
+/// reads the KDE database may outlive it.
+fn crash_plasma(vm: &mut Vm) -> Result<()> {
+    let before = kde_profile_holders(vm)?;
+    println!("     before the crash, processes selecting the KDE database: {before:?}");
+    if before.is_empty() {
+        bail!("no process selects the KDE database in a running Plasma session: nothing to leak");
+    }
+    // What logind announces around the crash, to print below: the watch polls
+    // logind because a session turning `closing` has to be noticed.
+    vm.ssh_ok(
+        "systemd-run --quiet --unit=ilex-test-logind-signals \
+         gdbus monitor --system --dest org.freedesktop.login1",
+    )?;
+    let crashed = vm.ssh_ok("date +%T.%N | cut -c1-12")?;
+    println!("     crashing Plasma at {crashed}");
+    kill_plasma(vm)?;
     // The watch stops Plasma's stack once logind calls the session closing.
     let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
     let down = vm.wait_for(
@@ -263,6 +291,12 @@ fn crash_plasma(vm: &mut Vm) -> Result<()> {
     println!("     after the crash, in the user manager: {manager}");
     let failed = user(vm, "systemctl --user --failed --no-legend --plain || true")?;
     println!("     failed user units: {}", failed.replace('\n', "; "));
+    let signals = vm.ssh_ok(
+        "systemctl stop ilex-test-logind-signals; \
+         journalctl -u ilex-test-logind-signals -o short-precise --no-pager | grep -E 'Session|State' \
+         | sed 's/ [^ ]* gdbus\\[[0-9]*\\]://' | cut -c1-200; true",
+    )?;
+    println!("     logind's signals around the crash:\n{signals}");
     let env = user(vm, "systemctl --user show-environment")?;
     println!(
         "     user manager environment keeps: {:?}",
@@ -695,4 +729,361 @@ fn plasma_unchanged(vm: &mut Vm) -> Result<()> {
         }
     });
     report.finish()
+}
+
+/// Pids of the test user's processes called `name`, sorted.
+fn pids(vm: &Vm, name: &str) -> Result<Vec<u32>> {
+    let out = vm.ssh_ok(&format!("pgrep -u {USER} -x {name} | sort -n; true"))?;
+    Ok(out.lines().filter_map(|l| l.trim().parse().ok()).collect())
+}
+
+/// The ids of the test user's graphical sessions, as logind lists them. The
+/// test's own `runuser` commands open short-lived sessions of the user that are
+/// not graphical and not counted.
+fn user_sessions(vm: &Vm) -> Result<Vec<String>> {
+    let out = vm.ssh_ok(&format!(
+        "for s in $(loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\" {{print $1}}'); do \
+           [ \"$(loginctl show-session $s -p Type --value 2>/dev/null)\" = wayland ] && echo $s; \
+         done; true"
+    ))?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
+/// The session watch's own log since `since` (a `date` stamp): what it decided,
+/// and why.
+fn watch_log(vm: &Vm, since: &str) -> Result<String> {
+    vm.ssh_ok(&format!(
+        "journalctl -b --no-pager -o cat --since '{since}' _UID=$(id -u {USER}) \
+         _SYSTEMD_USER_UNIT=ilex-kde-session.service; true"
+    ))
+}
+
+fn now(vm: &Vm) -> Result<String> {
+    vm.ssh_ok("date '+%Y-%m-%d %H:%M:%S'")
+}
+
+/// Stop the session watch (SIGSTOP of its process), so that the crash and the
+/// login after it happen before it acts: as late as an auto-relogin or a slow
+/// `loginctl` could make it. Returns its pid.
+fn freeze_watch(vm: &mut Vm) -> Result<String> {
+    let pid = user(
+        vm,
+        "systemctl --user show -P MainPID ilex-kde-session.service",
+    )?;
+    if pid == "0" || pid.is_empty() {
+        bail!("the session watch is not running in the Plasma session");
+    }
+    user(
+        vm,
+        "systemctl --user kill --kill-whom=main --signal=SIGSTOP ilex-kde-session.service",
+    )?;
+    vm.wait_for(
+        "the session watch to be stopped",
+        &format!("ps -o stat= -p {pid} | grep -q '^T'"),
+        Duration::from_secs(15),
+    )?;
+    println!("     session watch (pid {pid}) frozen");
+    Ok(pid)
+}
+
+/// Let the watch run again. systemd sends SIGCONT along with the SIGTERM of a
+/// stop, so a watch whose unit went down while it was stopped is already gone.
+fn thaw_watch(vm: &Vm) -> Result<()> {
+    let out = user(
+        vm,
+        "systemctl --user kill --kill-whom=main --signal=SIGCONT ilex-kde-session.service 2>&1 \
+         && echo continued || echo 'already gone: the unit was stopped'",
+    )?;
+    println!("     session watch: {}", out.lines().last().unwrap_or(""));
+    Ok(())
+}
+
+/// Plasma's stack as the crash left it, printed. Fails when
+/// `plasma-workspace.target` is already down, which would leave nothing for a
+/// late watch to act on. Returns the compositor's and the shell's pids.
+fn stale_plasma(vm: &Vm, what: &str) -> Result<(Vec<u32>, Vec<u32>)> {
+    let state = |unit: &str| user(vm, &format!("systemctl --user is-active {unit} || true"));
+    let target = state("plasma-workspace.target")?;
+    let (compositor, shell) = (pids(vm, "kwin_wayland")?, pids(vm, "plasmashell")?);
+    println!(
+        "     {what}: plasma-workspace.target {target}, graphical-session.target {}, \
+         plasma-kwin_wayland.service {}, xdg-desktop-portal.service {}; kwin_wayland {compositor:?}, \
+         plasmashell {shell:?}",
+        state("graphical-session.target")?,
+        state("plasma-kwin_wayland.service")?,
+        state("xdg-desktop-portal.service")?,
+    );
+    if target != "active" {
+        bail!(
+            "{what}: plasma-workspace.target is {target}: nothing is left for a late watch to act on"
+        );
+    }
+    Ok((compositor, shell))
+}
+
+/// The most common colour's share of the screen, over a sample of its pixels
+/// (colours in steps of 16): the greeter is one flat colour with a small tile,
+/// a Plasma desktop is not.
+fn flat_share(rgb: &[u8], width: u32, height: u32) -> f64 {
+    let mut buckets = std::collections::HashMap::new();
+    let mut total = 0u32;
+    for y in (0..height).step_by(8) {
+        for x in (0..width).step_by(8) {
+            let i = (y as usize * width as usize + x as usize) * 3;
+            let key = (rgb[i] / 16, rgb[i + 1] / 16, rgb[i + 2] / 16);
+            *buckets.entry(key).or_insert(0u32) += 1;
+            total += 1;
+        }
+    }
+    f64::from(buckets.values().copied().max().unwrap_or(0)) / f64::from(total.max(1))
+}
+
+/// A Plasma session from GDM, and its shell up.
+fn plasma_login(vm: &mut Vm, ctl: &Vmctl, password: &str) -> Result<()> {
+    choose_session(vm, "plasma")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    vm.wait_for(
+        "the Plasma shell in the user session",
+        &format!("pgrep -u {USER} -x plasmashell"),
+        SESSION_TIMEOUT,
+    )?;
+    let frame = settle(ctl)?;
+    println!(
+        "     Plasma on screen: {:.2} of it is one colour",
+        flat_share(&frame.rgb, frame.width, frame.height)
+    );
+    Ok(())
+}
+
+/// A GNOME session from GDM, its shell up and the first-login noise cleared.
+fn gnome_login(vm: &mut Vm, ctl: &Vmctl, password: &str) -> Result<()> {
+    choose_session(vm, "gnome")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    vm.wait_for(
+        "gnome-shell in the user session",
+        &format!("pgrep -u {USER} -x gnome-shell"),
+        SESSION_TIMEOUT,
+    )?;
+    settle(ctl)?;
+    ctl.key("Escape")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.key("Escape")?;
+    settle(ctl).map(drop)
+}
+
+/// Step 6: Plasma crashes and a GNOME login starts before the session watch has
+/// acted. Upstream makes that login fail: gnome-session-init-worker will not
+/// start over a graphical session that is still up ("A graphical session is
+/// already running!") and GDM drops the login, so no GNOME session can be live
+/// next to a leftover Plasma (the watch relies on it too: Plasma's target is
+/// bound to graphical-session.target). The failed attempt still exports GNOME's
+/// desktop into the manager, which is what the late watch wakes to: it must stop
+/// Plasma's leftovers without graphical-session.target being left active, and
+/// the next GNOME login must work and look as GNOME chose.
+fn late_watch_gnome(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
+    gnome_logout(vm)?;
+    plasma_login(vm, ctl, password)?;
+    let since = now(vm)?;
+    freeze_watch(vm)?;
+    kill_plasma(vm)?;
+    stale_plasma(vm, "after the crash, the watch late")?;
+    choose_session(vm, "gnome")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    // The attempt fails on its own; the session can stay listed for a while
+    // (the keyring helper of the password login holds its scope).
+    vm.wait_for(
+        "the failed GNOME login to end",
+        &format!(
+            "! loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep -q ."
+        ),
+        SESSION_TIMEOUT,
+    )
+    .map(drop)?;
+    wait_greeter(vm)?;
+    let env = user(vm, "systemctl --user show-environment")?;
+    println!(
+        "     after the failed GNOME login the manager exports {:?}; gnome-shell of the user: {:?}",
+        env.lines()
+            .filter(|l| l.starts_with("XDG_CURRENT_DESKTOP=") || l.starts_with("XDG_SESSION_ID="))
+            .collect::<Vec<_>>(),
+        pids(vm, "gnome-shell")?
+    );
+    stale_plasma(vm, "the watch still late")?;
+
+    thaw_watch(vm)?;
+    let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
+    let down = vm.wait_for(
+        "the crashed Plasma's targets to stop once the watch wakes",
+        &kde::user_cmd(
+            &uid,
+            "sh -c '! systemctl --user is-active --quiet plasma-workspace.target && \
+             ! systemctl --user is-active --quiet graphical-session.target'",
+        ),
+        Duration::from_secs(60),
+    );
+    let log = watch_log(vm, &since)?;
+    println!("     the watch says:\n{log}");
+    let mut report = vmtest::Report::default();
+    report.check(
+        "the late watch stopped Plasma's targets, graphical-session.target included",
+        down.map(drop),
+    );
+    report.check(
+        "none of the crashed Plasma's compositor or shell is left",
+        {
+            let left: Vec<_> = ["kwin_wayland", "plasmashell"]
+                .iter()
+                .map(|name| pids(vm, name).map(|p| (*name, p)))
+                .collect::<Result<_>>()?;
+            if left.iter().all(|(_, p)| p.is_empty()) {
+                Ok(())
+            } else {
+                Err(anyhow!("still running: {left:?}"))
+            }
+        },
+    );
+    report.check("no process selects the KDE database", {
+        let holders = kde_profile_holders(vm)?;
+        if holders.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("still running: {holders:?}"))
+        }
+    });
+    report.finish()?;
+
+    // GNOME can log in now, and looks as GNOME chose.
+    gnome_login(vm, ctl, password)?;
+    shot(ctl, artifacts, "18-gnome-after-the-late-watch")?;
+    gnome_after_crash(vm)?;
+    show(
+        vm,
+        ctl,
+        artifacts,
+        "19-gnome-libadwaita-after-the-late-watch",
+        "adw",
+        None,
+    )?;
+    Ok(())
+}
+
+/// Step 7: Plasma crashes and Plasma logs in again before the session watch has
+/// acted. The leftover stack has no seat, so a session that started over it
+/// would show nothing (the greeter stays on screen): the login must stop the
+/// leftovers and start its own stack, and the late watch, waking in the middle
+/// of that, must neither stop what the new session starts nor be needed for it.
+fn late_watch_plasma(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
+    gnome_logout(vm)?;
+    plasma_login(vm, ctl, password)?;
+    let first = user_sessions(vm)?;
+    let since = now(vm)?;
+    freeze_watch(vm)?;
+    kill_plasma(vm)?;
+    let (stale_compositor, stale_shell) = stale_plasma(vm, "after the crash, the watch late")?;
+
+    // The second login, with the leftovers up; the watch wakes as soon as the
+    // new session exists, which is as late as an auto-relogin makes it.
+    choose_session(vm, "plasma")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    thaw_watch(vm)?;
+    let not_stale = |name: &str, stale: &[u32]| {
+        let skip: String = stale.iter().map(|p| format!(" -e {p}")).collect();
+        format!("pgrep -u {USER} -x {name} | grep -qvxF{skip}")
+    };
+    vm.wait_for(
+        "a Plasma compositor of the new session",
+        &not_stale("kwin_wayland", &stale_compositor),
+        SESSION_TIMEOUT,
+    )?;
+    vm.wait_for(
+        "a Plasma shell of the new session",
+        &not_stale("plasmashell", &stale_shell),
+        SESSION_TIMEOUT,
+    )?;
+    let frame = settle(ctl)?;
+    let flat = flat_share(&frame.rgb, frame.width, frame.height);
+    println!("     the new session on screen: {flat:.2} of it is one colour");
+    shot(ctl, artifacts, "21-plasma-over-a-crashed-plasma")?;
+    let second = user_sessions(vm)?;
+    let (compositor, shell) = (pids(vm, "kwin_wayland")?, pids(vm, "plasmashell")?);
+    let log = watch_log(vm, &since)?;
+    println!(
+        "     sessions: first {first:?}, second {second:?}; kwin_wayland {stale_compositor:?} -> {compositor:?}, \
+         plasmashell {stale_shell:?} -> {shell:?}\n     the watch says:\n{log}"
+    );
+
+    let mut report = vmtest::Report::default();
+    report.check(
+        "the new login is a session of its own, active",
+        if second.len() == 1 && first != second {
+            session_active(vm)
+        } else {
+            Err(anyhow!("sessions: first {first:?}, second {second:?}"))
+        },
+    );
+    report.check(
+        "none of the crashed Plasma's compositor or shell is left, the new session has its own",
+        {
+            let kept = |now: &[u32], stale: &[u32]| now.iter().any(|p| stale.contains(p));
+            if kept(&compositor, &stale_compositor) || kept(&shell, &stale_shell) {
+                Err(anyhow!("a leftover is still running"))
+            } else if compositor.is_empty() || shell.is_empty() {
+                Err(anyhow!("no compositor or no shell"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    report.check("the screen shows the new session, not the greeter", {
+        if flat < 0.9 {
+            Ok(())
+        } else {
+            Err(anyhow!("{flat:.2} of the screen is one colour"))
+        }
+    });
+    report.check("Plasma's targets and the session watch are up", {
+        let mut down = Vec::new();
+        for unit in [
+            "plasma-workspace.target",
+            "graphical-session.target",
+            "ilex-kde-session.service",
+        ] {
+            let state = user(vm, &format!("systemctl --user is-active {unit} || true"))?;
+            if state != "active" {
+                down.push(format!("{unit} {state}"));
+            }
+        }
+        if down.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("{}", down.join(", ")))
+        }
+    });
+    report.check("the watch stopped nothing of the new session", {
+        if log.contains("stopping") {
+            Err(anyhow!("the watch's log:\n{log}"))
+        } else {
+            Ok(())
+        }
+    });
+    report.finish()?;
+    // Plasma's look, with the database the crashed session left.
+    plasma_unchanged(vm)?;
+    toolkits(vm, ToolkitLook::Plasma { dark: true })?;
+    show(
+        vm,
+        ctl,
+        artifacts,
+        "22-plasma-gtk3-after-the-late-watch",
+        "gtk3",
+        None,
+    )?
+    .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
+    // And its logout ends the session the way it always does.
+    kde::logout(vm)?;
+    manager_clean(vm)
 }
