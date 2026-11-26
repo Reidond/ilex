@@ -35,6 +35,24 @@
 //! `iso::next_unattended_fat` reads the answers from a FAT stick labelled
 //! `ILEXANSWERS` (the label a FAT volume can carry); `iso::next_unattended_late`
 //! plugs a stick in after the interface is up and requires that nothing changes.
+//!
+//! `iso::next_unattended_repeat` installs with `reinstall = true`, then boots the
+//! ISO again with the same sticks (the machine powered off after its
+//! installation and the firmware boots USB first): the answers refuse
+//! ("already installed"), the whole target disk is byte for byte what the
+//! installation left, and answers that differ in one word are not refused for
+//! that reason.
+//!
+//! `iso::next_unattended_handover` makes the machine fail before it has written
+//! anything, in two ways (a fixed test credential): the helper cannot start, and
+//! the unattended process is killed before it has asked the helper for
+//! anything. In both the interface starts, so that tty1 is not left empty, and
+//! the disk is untouched.
+//!
+//! The installation of `iso::next_unattended` goes over a whole-disk LVM
+//! physical volume (a signature with no partition table), which is also refused
+//! without `reinstall = true`: its `/dev/disk/by-id/lvm-pv-uuid-*` link goes
+//! when the disk is wiped, so the disk must be named by its hardware's link.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -114,6 +132,11 @@ impl Layout {
 /// `answers.toml` for the target disk: answers that are not the defaults, so
 /// that applying them is visible.
 fn answers(disk: &str, confirm: &str, reinstall: bool) -> String {
+    answers_named(disk, confirm, reinstall, "ilextest")
+}
+
+/// [`answers`] with a host name of its own.
+fn answers_named(disk: &str, confirm: &str, reinstall: bool, host: &str) -> String {
     format!(
         r#"schema = 1
 
@@ -129,7 +152,7 @@ enabled = false
 keyboard = "de-latin1"
 language = "de_DE.UTF-8"
 time-zone = "Europe/Berlin"
-host-name = "ilextest"
+host-name = "{host}"
 
 [administrator]
 name = "{ADMIN}"
@@ -223,6 +246,14 @@ struct Setup<'a> {
     existing: bool,
     /// An empty slot a disk can be added to while the guest runs.
     hotplug: bool,
+    /// The target is a whole-disk LVM physical volume: no partition table, an
+    /// LVM2 label in its second sector (what `pvcreate` writes).
+    lvm: bool,
+    /// Leave the target as the last boot left it (an installed disk).
+    keep_target: bool,
+    /// The test fault the guest is given (`ilex.installer.fault`): `helper` or
+    /// `answers`.
+    fault: Option<&'a str>,
 }
 
 /// [`boot_once`], started again (up to twice) when the guest never ran: on a
@@ -231,6 +262,13 @@ struct Setup<'a> {
 /// started). That is the sandbox, not the installer, and a guest that has not
 /// printed a byte in two and a half minutes will not: a fresh one is started,
 /// and the retry is said out loud.
+///
+/// **A temporary workaround.** It stays until this stack is rebased onto the
+/// change that fixes QEMU's audio-probe hang (PR #90), which is what the
+/// silent guests are suspected to be; it is then removed, with the retry. Each
+/// failed attempt's `qemu.log` and `serial.log` are kept in the artifacts
+/// (never overwritten by the next attempt's, which reuses the VM's directory),
+/// so that the cause can still be found.
 fn boot(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
     const ATTEMPTS: u32 = 3;
     const ALIVE_WITHIN: Duration = Duration::from_secs(150);
@@ -251,12 +289,45 @@ fn boot(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
             }
             std::thread::sleep(Duration::from_secs(2));
         }
+        let kept = keep_silent_attempt(vm.info.dir.as_path(), root, layout, attempt);
         eprintln!(
-            "iso::next: attempt {attempt} of {ATTEMPTS}: the guest printed nothing on its serial console in {ALIVE_WITHIN:?} (the sandbox's idle-vCPU flake); starting it again"
+            "iso::next: attempt {attempt} of {ATTEMPTS}: the guest printed nothing on its serial console in {ALIVE_WITHIN:?} (the sandbox's idle-vCPU flake; a temporary workaround); {kept}; starting it again"
         );
         drop(guest);
     }
     bail!("the guest printed nothing on its serial console in {ATTEMPTS} attempts")
+}
+
+/// Copy the logs of a silent attempt into the artifacts under names that no
+/// later attempt reuses; says where they went.
+fn keep_silent_attempt(vm_dir: &Path, root: &Path, layout: &Layout, attempt: u32) -> String {
+    let Ok(ws) = common::workspace() else {
+        return "its logs were not kept (no workspace)".into();
+    };
+    let Ok(artifacts) = qemu::artifact_dir(&ws, "iso-next") else {
+        return "its logs were not kept (no artifact directory)".into();
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let part = root
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let mut kept = Vec::new();
+    for file in ["qemu.log", "serial.log"] {
+        let to = artifacts.join(format!(
+            "next-{}-{part}-silent-attempt{attempt}-{stamp}-{file}",
+            layout.name()
+        ));
+        if fs::copy(vm_dir.join(file), &to).is_ok() {
+            kept.push(to.display().to_string());
+        }
+    }
+    if kept.is_empty() {
+        "its logs could not be copied".into()
+    } else {
+        format!("its logs are kept in {}", kept.join(" and "))
+    }
 }
 
 /// The ISO, a target and (usually) an answers volume, booted: UEFI, Secure
@@ -267,10 +338,15 @@ fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
     let ws = common::workspace()?;
     let target = layout.target(root);
     let memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| MEMORY.into());
-    let _ = fs::remove_file(&target);
-    fs::File::create(&target)
-        .and_then(|file| file.set_len(TARGET_BYTES))
-        .with_context(|| format!("creating {}", target.display()))?;
+    if !setup.keep_target {
+        let _ = fs::remove_file(&target);
+        fs::File::create(&target)
+            .and_then(|file| file.set_len(TARGET_BYTES))
+            .with_context(|| format!("creating {}", target.display()))?;
+    }
+    if setup.lvm {
+        write_lvm_pv(&target)?;
+    }
     if setup.existing {
         // What an earlier installation left: a GPT with ilex's partition.
         cmd::require("sfdisk")?;
@@ -307,6 +383,13 @@ fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
     };
     config.snapshot = false;
     config.memory = memory;
+    if let Some(fault) = setup.fault {
+        // A fixed test credential the helper's and the answers' units import:
+        // it can only make the installer fail.
+        config.smbios.push(format!(
+            "type=11,value=io.systemd.credential:ilex.installer.fault={fault}"
+        ));
+    }
     let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
     spec.security_launch = SecurityLaunch::QualificationFixture;
     spec.secure_boot = Requirement::Required;
@@ -376,11 +459,15 @@ fn run_from(source: Source) -> Result<()> {
         found.target,
         found.live.as_deref().unwrap_or("none")
     );
-    // The CD-ROM source installs over what an ilex installation left (the
-    // answers must say so); the file source installs on a blank disk.
+    // The CD-ROM source installs over what was on the disk (the answers must
+    // say so): first an ilex installation's partition table, refused without
+    // `reinstall = true`; then a whole-disk LVM physical volume, which is
+    // refused too and is what the installation goes over. The file source
+    // installs on a blank disk.
     let existing = layout.source == Source::Cdrom;
     if existing {
         refuse_existing(&root, &artifacts, &layout, &found.target)?;
+        refuse_whole_disk(&root, &artifacts, &layout, &found.target)?;
     }
     if let Some(live) = &found.live {
         // The install path's own view of the medium: answers that name it are
@@ -401,8 +488,8 @@ fn run_from(source: Source) -> Result<()> {
         Setup {
             volume: Some(&volume.path),
             serials: true,
-            existing,
-            hotplug: false,
+            lvm: existing,
+            ..Setup::default()
         },
     )?;
     let vm = guest.vm.running_mut()?;
@@ -425,12 +512,16 @@ fn run_from(source: Source) -> Result<()> {
         .context("the plan line has no image=")?
         .clone();
     ensure!(digest.starts_with("sha256:"), "the plan's image: {digest}");
-    // The target held an installation: the answers' `reinstall = true` was
-    // what let it be erased, and the console says what went.
+    // The target held an LVM physical volume: the answers' `reinstall = true`
+    // was what let it be erased, and the console says what went.
     ensure!(
         console.contains("reinstall=true erases:") == existing,
         "the reinstall line is {} on the console: {console}",
         if existing { "missing" } else { "unexpected" }
+    );
+    ensure!(
+        !existing || console.contains("LVM2_member"),
+        "the console does not say that an LVM physical volume was erased: {console}"
     );
     // No interface was ever drawn: the session did not get to start before an
     // answers volume was found, and no page was reported.
@@ -798,6 +889,142 @@ fn refuse_existing(root: &Path, artifacts: &Path, layout: &Layout, target: &str)
     Ok(())
 }
 
+/// CRC-32 as LVM computes it over a label: the reflected polynomial
+/// 0xedb88320, an initial value of 0xf597a6cf and no final inversion.
+fn lvm_crc(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xf597_a6cf;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc
+}
+
+/// An LVM2 physical volume on the whole of `target`: the label `pvcreate`
+/// writes into the disk's second sector (`LABELONE`, its CRC, `LVM2 001`, a
+/// 32-character PV UUID, the device size and the data and metadata areas), with
+/// no partition table. udev's blkid probe then calls the disk `LVM2_member` and
+/// makes `/dev/disk/by-id/lvm-pv-uuid-<uuid>` for it: a name that sorts ahead
+/// of `virtio-...` and goes when the signature is wiped. Written by hand so
+/// that no root, loop device or LVM tool is needed; blkid, run on the result,
+/// says whether it is one.
+fn write_lvm_pv(target: &Path) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut sector = [0u8; 512];
+    sector[0..8].copy_from_slice(b"LABELONE");
+    sector[8..16].copy_from_slice(&1u64.to_le_bytes());
+    sector[20..24].copy_from_slice(&32u32.to_le_bytes());
+    sector[24..32].copy_from_slice(b"LVM2 001");
+    sector[32..64].copy_from_slice(b"IlexTrialPhysicalVolumeUuid00001");
+    sector[64..72].copy_from_slice(&TARGET_BYTES.to_le_bytes());
+    // The data area starts at 1 MiB and runs to the end (size 0); the list is
+    // ended by an empty descriptor. One metadata area follows, ended likewise.
+    sector[72..80].copy_from_slice(&(1u64 << 20).to_le_bytes());
+    sector[104..112].copy_from_slice(&4096u64.to_le_bytes());
+    sector[112..120].copy_from_slice(&1_044_480u64.to_le_bytes());
+    let crc = lvm_crc(&sector[20..]);
+    sector[16..20].copy_from_slice(&crc.to_le_bytes());
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(target)
+        .with_context(|| format!("opening {}", target.display()))?;
+    file.seek(SeekFrom::Start(512))?;
+    file.write_all(&sector)?;
+    file.sync_all()?;
+    // Not vacuous: what the guest's udev will call it.
+    if let Ok(out) = Command::new("blkid")
+        .args(["--probe", "--output", "value", "--match-tag", "TYPE"])
+        .arg(target)
+        .output()
+    {
+        let kind = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        ensure!(
+            kind == "LVM2_member",
+            "blkid does not take the hand-made label for an LVM physical volume (it says {kind:?})"
+        );
+    }
+    Ok(())
+}
+
+/// A disk that is, whole, an LVM physical volume (a signature with no
+/// partition table, so no partition says what is there) is data a person would
+/// want to keep: refused without `reinstall = true`, naming what is there, and
+/// left as it was. It also has a `/dev/disk/by-id/lvm-pv-uuid-*` link that is
+/// no identity: the probe names the disk by its hardware's link.
+fn refuse_whole_disk(root: &Path, artifacts: &Path, layout: &Layout, target: &str) -> Result<()> {
+    let name = layout.name();
+    let dir = root.join("whole-disk");
+    fs::create_dir_all(&dir)?;
+    let volume = answers_volume(&dir, &answers(target, target, false))?;
+    let mut guest = boot(
+        &dir,
+        layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            lvm: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-whole-disk")))?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-whole-disk-serial.txt")),
+        &console,
+    );
+    ensure!(
+        console.contains("result=failed")
+            && console.contains("reinstall = true")
+            && console.contains("LVM2_member")
+            && !console.contains("apply=started")
+            && !console.contains("plan=ready"),
+        "a whole-disk LVM physical volume was not refused without reinstall = true: {console}"
+    );
+    // The disk is as it was (the signature, no table), and the LVM link that
+    // exists for it is not the name the probe gives it.
+    vm.wait_ssh(PAGE_TIMEOUT)
+        .context("the live system did not accept the harness's SSH key")?;
+    let out = vm.ssh_ok(&format!(
+        "d=$(lsblk -b -d -n -o NAME,SIZE | awk -v s={TARGET_BYTES} '$2==s{{print $1}}'); [ -n \"$d\" ] || {{ echo no-target-disk; exit 3; }}; echo type=$(blkid -p -o value -s TYPE /dev/$d); echo pttype=$(lsblk -n -d -o PTTYPE /dev/$d); echo parts=$(lsblk -n -o TYPE /dev/$d | grep -c part); ls /dev/disk/by-id | sed 's/^/link=/'"
+    ))?;
+    ensure!(
+        out.contains("type=LVM2_member")
+            && out.lines().any(|l| l == "pttype=")
+            && out.contains("parts=0")
+            && out.contains("link=lvm-pv-uuid-")
+            && out.contains("link=virtio-ilex-disk-"),
+        "the refused installation changed the disk, or it has no LVM link to test with: {out}"
+    );
+    let probe = probe_of(vm)?;
+    let disk = target_of(&probe)?;
+    ensure!(
+        disk.id == target && disk.id.starts_with("virtio-ilex-disk-"),
+        "the probe names the disk {} (answers use {target}), not by its hardware's link",
+        disk.id
+    );
+    ensure!(
+        disk.other_systems
+            .iter()
+            .any(|s| s.description.contains("LVM2_member") && s.partition.is_none()),
+        "the probe does not list the whole-disk physical volume: {:?}",
+        disk.other_systems
+    );
+    volume.unchanged()?;
+    println!(
+        "iso::next {name}: a whole-disk LVM physical volume is refused without reinstall = true (named {}, not by its lvm-pv-uuid link)",
+        disk.id
+    );
+    Ok(())
+}
+
 /// Answers that name the disk the ISO file lies on are refused as the live
 /// medium, before anything is written: the target stays blank, and the
 /// caller compares the host disk's checksum.
@@ -1037,4 +1264,310 @@ pub(super) fn run_late() -> Result<()> {
         "iso::next unattended-late: a stick plugged in after the boot is ignored (once, with a message) and changes nothing"
     );
     Ok(())
+}
+
+// --- iso::next_unattended_repeat ----------------------------------------------
+
+/// What an installed disk is made of, from the host: every byte of the target.
+fn target_digest(root: &Path, layout: &Layout) -> Result<String> {
+    sha256_of(&layout.target(root))
+}
+
+/// The machine that powered off after an unattended installation boots the ISO
+/// again with the same sticks in it (the firmware tries USB first). The answers
+/// say `reinstall = true`, so nothing but the stamp the first installation left
+/// on `/boot` keeps them from erasing the fresh installation, every boot.
+///
+/// 1. install over a blank disk and power off;
+/// 2. boot the ISO again with the same answers volume: refused (the console
+///    says the answers already installed the disk), the interface starts, and
+///    the whole target disk is byte for byte what the installation left (its
+///    SHA-256, taken from the host before and after), and the stamp, read
+///    in the guest read-only, is the 64-digit digest;
+/// 3. boot with answers that differ in a word (the host name): they are not
+///    refused as an installation of the same answers (here `reinstall` is
+///    off, so they are refused for the ilex installation the disk holds, and
+///    nothing is written either).
+pub(super) fn run_repeat() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let iso = iso_path()?;
+    let name = "unattended-repeat";
+    let root = fixtures(name)?;
+    let layout = Layout::new(Source::Cdrom, &root, &iso)?;
+    // The target is the VM's main disk: `ilex-disk-0`, so its by-id name is
+    // known before any boot (the plan line says so, and is checked below).
+    let target = "virtio-ilex-disk-0";
+
+    // 1. The installation.
+    let volume = answers_volume(&root, &answers(target, target, true))?;
+    let mut guest = boot(
+        &root,
+        &layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let started = Instant::now();
+    let console = install(vm, &serial, &artifacts, name).inspect_err(|_| {
+        diagnostics(vm, &artifacts, name);
+    })?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-install-serial.txt")),
+        &console,
+    );
+    ensure!(
+        fields(&console, MARKER, "plan")?
+            .get("disk")
+            .map(String::as_str)
+            == Some(target),
+        "the plan is not for {target}: {console}"
+    );
+    println!(
+        "iso::next {name}: installed and powered off in {:?}",
+        started.elapsed()
+    );
+    drop(guest);
+    volume.unchanged()?;
+    let installed = target_digest(&root, &layout)?;
+
+    // 2. The same sticks again.
+    let mut guest = boot(
+        &root,
+        &layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            keep_target: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+        .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-again")))?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-again-serial.txt")),
+        &console,
+    );
+    ensure!(
+        console.contains("result=failed")
+            && console.contains("already installed")
+            && !console.contains("plan=ready")
+            && !console.contains("apply=started")
+            && !console.contains("reinstall=true erases"),
+        "the answers that installed this disk were not refused: {console}"
+    );
+    ensure!(
+        !console.contains(PASSWORD),
+        "the password was printed: {console}"
+    );
+    vm.wait_for(
+        "the interface after a refusal that wrote nothing",
+        "systemctl is-active ilex-installer-session.service",
+        PAGE_TIMEOUT,
+    )
+    .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-again")))?;
+    ensure!(
+        console.contains("handover=interface"),
+        "the refusal did not hand over to the interface: {console}"
+    );
+    // The stamp, read as the installer reads it (read-only, without replaying a
+    // journal): the digest of the request, 64 hexadecimal digits.
+    let stamp = vm.ssh_ok(
+        "set -e; d=/dev/disk/by-partlabel/ilex-boot; mkdir -p /run/stamp-look; mount -t ext4 -o ro,noload,nodev,nosuid,noexec $d /run/stamp-look; cat /run/stamp-look/ilex-install-request.sha256; stat -c 'mode=%a owner=%U' /run/stamp-look/ilex-install-request.sha256; ls -Z /run/stamp-look/ilex-install-request.sha256; umount /run/stamp-look",
+    )?;
+    let _ = fs::write(artifacts.join(format!("next-{name}-stamp.txt")), &stamp);
+    let digest = stamp.lines().next().unwrap_or_default();
+    ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && stamp.contains("mode=600 owner=root"),
+        "the stamp on /boot is not a digest: {stamp}"
+    );
+    drop(guest);
+    volume.unchanged()?;
+    ensure!(
+        target_digest(&root, &layout)? == installed,
+        "the refused answers changed the installed disk"
+    );
+    println!(
+        "iso::next {name}: the same answers boot again and are refused ({digest}); the {} MiB disk is byte for byte what the installation left",
+        TARGET_BYTES >> 20
+    );
+
+    // 3. Answers that differ in one word are another request: they get past the
+    // stamp (here to the next rule: the disk holds an installation and
+    // `reinstall` is off), and write nothing either.
+    let edited = answers_volume(
+        &root.join("edited"),
+        &answers_named(target, target, false, "ilextest-two"),
+    )?;
+    let mut guest = boot(
+        &root,
+        &layout,
+        Setup {
+            volume: Some(&edited.path),
+            serials: true,
+            keep_target: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+        .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-edited")))?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-edited-serial.txt")),
+        &console,
+    );
+    ensure!(
+        console.contains("result=failed")
+            && console.contains("reinstall = true")
+            && !console.contains("already installed")
+            && !console.contains("apply=started"),
+        "answers that differ in a word were refused for the stamp, or not at the reinstall rule: {console}"
+    );
+    drop(guest);
+    edited.unchanged()?;
+    ensure!(
+        target_digest(&root, &layout)? == installed,
+        "the edited answers changed the installed disk"
+    );
+    println!(
+        "iso::next {name}: answers that differ in a word are not taken for the same installation (and write nothing)"
+    );
+    Ok(())
+}
+
+// --- iso::next_unattended_handover --------------------------------------------
+
+/// Unattended mode fails before it has written anything, in the two ways that
+/// the program's own hand-over cannot cover alone, and the interface starts
+/// both times (tty1 is never left empty), the answers volume and the target
+/// untouched. A fixed test credential (`ilex.installer.fault`) makes each:
+///
+/// * `helper`: the helper exits as soon as it starts and never takes its bus
+///   name. The answers unit does not `Require=` it, so it still starts, fails
+///   at its first call and hands over.
+/// * `answers`: the unattended process kills itself (SIGKILL) after reading the
+///   answers and before it asks the helper for anything: no code of its own
+///   runs again, so only systemd can start the interface (`OnFailure=` of the
+///   unit, through `ilex-installer-answers-handover.service`).
+pub(super) fn run_handover() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let iso = iso_path()?;
+    let root = fixtures("unattended-handover")?;
+    let layout = Layout::new(Source::Cdrom, &root, &iso)?;
+    let target = "virtio-ilex-disk-0";
+    for fault in ["helper", "answers"] {
+        let dir = root.join(fault);
+        fs::create_dir_all(&dir)?;
+        let volume = answers_volume(&dir, &answers(target, target, false))?;
+        let mut guest = boot(
+            &dir,
+            &layout,
+            Setup {
+                volume: Some(&volume.path),
+                serials: true,
+                fault: Some(fault),
+                ..Setup::default()
+            },
+        )?;
+        let vm = guest.vm.running_mut()?;
+        let serial = vm.info.dir.join("serial.log");
+        let tag = format!("unattended-handover-{fault}");
+        // The interface starts: the session unit is active (it is skipped for
+        // as long as the gate's file exists, and nothing starts it but the
+        // hand-over).
+        vm.wait_for(
+            "the interface after a failure that wrote nothing",
+            "systemctl is-active ilex-installer-session.service",
+            PAGE_TIMEOUT,
+        )
+        .inspect_err(|_| diagnostics(vm, &artifacts, &tag))?;
+        // What the console says of it (systemd's own hand-over may print its
+        // line a moment after the session is up).
+        let wanted = if fault == "answers" {
+            "handover=interface by=systemd"
+        } else {
+            "handover=interface"
+        };
+        let console = wait_for_text(&serial, wanted, Duration::from_secs(60))
+            .inspect_err(|_| diagnostics(vm, &artifacts, &tag))?;
+        let _ = fs::write(artifacts.join(format!("next-{tag}-serial.txt")), &console);
+        ensure!(
+            !console.contains("apply=started") && !console.contains("plan=ready"),
+            "something was written or planned although unattended mode was made to fail: {console}"
+        );
+        ensure!(
+            !console.contains(PASSWORD),
+            "the password was printed: {console}"
+        );
+        // What systemd says of the units, and that nothing is left in the way
+        // of the interface: the gate's file is gone, Apply's flag never was.
+        let facts = vm.ssh_ok(
+            "echo marker=$(test -e /run/ilex-answers-volume && echo present || echo gone); echo applying=$(test -e /run/ilex-answers-applying && echo present || echo absent); echo answers=$(systemctl show -p ActiveState,Result --value ilex-installer-answers.service | tr '\n' ' '); echo helper=$(systemctl show -p ActiveState,Result --value ilex-installerd.service | tr '\n' ' '); echo handover=$(systemctl show -p ActiveState,Result --value ilex-installer-answers-handover.service | tr '\n' ' ')",
+        )?;
+        let _ = fs::write(artifacts.join(format!("next-{tag}-units.txt")), &facts);
+        ensure!(
+            facts.contains("marker=gone") && facts.contains("applying=absent"),
+            "the hand-over left the gate's file, or Apply's flag was raised: {facts}"
+        );
+        if fault == "answers" {
+            ensure!(
+                facts.contains("answers=failed signal"),
+                "the unattended unit did not end by the signal: {facts}"
+            );
+            ensure!(
+                console.contains("handover=interface by=systemd"),
+                "systemd's hand-over did not run: {console}"
+            );
+            ensure!(
+                console.contains("fault=answers") && !console.contains("result=failed"),
+                "a killed program printed a verdict, or never said it was made to fail: {console}"
+            );
+        } else {
+            ensure!(
+                facts.contains("answers=failed"),
+                "the unattended unit did not fail: {facts}"
+            );
+            ensure!(
+                console.contains("handover=interface"),
+                "the failure did not hand over: {console}"
+            );
+        }
+        assert_untouched(vm, &dir, &layout)?;
+        drop(guest);
+        volume.unchanged()?;
+        println!(
+            "iso::next unattended-handover: with fault={fault} the interface starts, nothing was written and the disk is untouched"
+        );
+    }
+    Ok(())
+}
+
+/// The serial console once it holds `text` (a complete line's worth of it).
+fn wait_for_text(serial: &Path, text: &str, timeout: Duration) -> Result<String> {
+    let started = Instant::now();
+    loop {
+        let console = fs::read(serial)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        if console.contains(text) {
+            return Ok(console);
+        }
+        ensure!(
+            started.elapsed() < timeout,
+            "no {text:?} on the serial console in {timeout:?}: {console}"
+        );
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }

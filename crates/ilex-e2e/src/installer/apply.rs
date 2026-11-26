@@ -1413,6 +1413,25 @@ pub(crate) fn check_installed(save: &dyn Fn(&str, &str), vm: &Vm, e: &Expected<'
         })(),
     );
     check(
+        "the request's digest is stamped on /boot (root's, mode 600, one line of 64 hex digits)",
+        (|| {
+            let out = vm.ssh_ok(
+                "f=/boot/ilex-install-request.sha256; stat -c 'mode=%a owner=%U links=%h' $f; ls -Z $f; cat $f",
+            )?;
+            save("request-stamp.txt", &out);
+            let digest = out.lines().last().unwrap_or_default();
+            ensure!(
+                out.contains("mode=600 owner=root links=1")
+                    && digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "the stamp on /boot: {out}"
+            );
+            Ok(())
+        })(),
+    );
+    check(
         "the booted digest is the one the plan pinned, enforcing the container policy",
         (|| {
             let status: Value = serde_json::from_str(&vm.ssh_ok("bootc status --json")?)?;
