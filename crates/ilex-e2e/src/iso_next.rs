@@ -63,7 +63,8 @@
 //!   is `live_medium` and is no target, and the blank disks are offered.
 //!
 //! * `iso::next_welcome`, `iso::next_detect_board`, `iso::next_detect_generic`,
-//!   `iso::next_kernel_argument` and `iso::next_kernel_argument_unknown`: the
+//!   `iso::next_kernel_argument`, `iso::next_kernel_argument_unknown` and
+//!   `iso::next_account`: the
 //!   interface's own first pages with real key input (see `iso_next/ui.rs`):
 //!   the welcome page, the session's keyboard layout switched at run time, the
 //!   machine detected from SMBIOS or named on the kernel command line.

@@ -21,6 +21,10 @@
 //! * `iso::next_kernel_argument_unknown`: a tag the edition does not offer is
 //!   reported with the model's list of offers and the page stays usable on the
 //!   detected configuration.
+//! * `iso::next_account`: the administrator page typed with the keyboard on a
+//!   VM with a disk the installer could use; Enter in the last field asks the
+//!   real helper to `Plan` the choices (it resolves the image at the
+//!   registry), and the closing page reports the plan checked.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -36,8 +40,8 @@ use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
 
 use super::{
-    GRUB_COUNTDOWN, Guest, MEMORY, PAGE_TIMEOUT, blank_disk, complete_lines, console, diagnostics,
-    field, is_marker, iso_path, trial, wait_for_text, wait_page, words,
+    GRUB_COUNTDOWN, Guest, MEMORY, PAGE_TIMEOUT, blank_disk_of, complete_lines, console,
+    diagnostics, field, is_marker, iso_path, trial, wait_for_text, wait_page, words,
 };
 use crate::common;
 use crate::iso;
@@ -64,6 +68,7 @@ pub(super) fn trials() -> Vec<Trial> {
         trial("iso::next_kernel_argument_unknown", || {
             kernel_argument("iso-next-karg-bad", UNKNOWN_TAG)
         }),
+        trial("iso::next_account", account),
     ]
 }
 
@@ -78,7 +83,12 @@ struct Booted {
 /// Boot the ISO under Secure Boot on KVM, as the boot trials do, with the
 /// given SMBIOS structures. A USB keyboard is attached when the trial edits
 /// GRUB (some OVMF builds drop navigation keys from virtio-keyboard there).
-fn boot(purpose: &'static str, usb_keyboard: bool, smbios: Vec<String>) -> Result<Booted> {
+fn boot(
+    purpose: &'static str,
+    usb_keyboard: bool,
+    smbios: Vec<String>,
+    disk_size: &str,
+) -> Result<Booted> {
     let ws = common::workspace()?;
     let iso = iso_path()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
@@ -86,7 +96,7 @@ fn boot(purpose: &'static str, usb_keyboard: bool, smbios: Vec<String>) -> Resul
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root)?;
     let disk = root.join("blank.qcow2");
-    blank_disk(&disk)?;
+    blank_disk_of(&disk, disk_size)?;
 
     let memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| MEMORY.into());
     let mut config = VmConfig::new(purpose, &disk);
@@ -208,7 +218,7 @@ fn welcome_up(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &
 }
 
 fn welcome() -> Result<()> {
-    let mut booted = boot("iso-next-welcome", false, vec![])?;
+    let mut booted = boot("iso-next-welcome", false, vec![], "1G")?;
     let artifacts = booted.artifacts.clone();
     let vm = booted.guest.vm.running_mut()?;
     let outcome = observe_welcome(vm, &artifacts);
@@ -296,7 +306,7 @@ fn detect(purpose: &'static str, board: bool, expected: &str, origin: &str) -> R
     } else {
         vec![]
     };
-    let mut booted = boot(purpose, false, smbios)?;
+    let mut booted = boot(purpose, false, smbios, "1G")?;
     let artifacts = booted.artifacts.clone();
     let vm = booted.guest.vm.running_mut()?;
     let outcome = observe_machine(vm, &artifacts, purpose, expected, origin);
@@ -364,7 +374,7 @@ fn check_machine(
 }
 
 fn kernel_argument(purpose: &'static str, tag: &str) -> Result<()> {
-    let mut booted = boot(purpose, true, vec![])?;
+    let mut booted = boot(purpose, true, vec![], "1G")?;
     let artifacts = booted.artifacts.clone();
     let (iso, work) = (booted.iso.clone(), booted.work.clone());
     let vm = booted.guest.vm.running_mut()?;
@@ -423,5 +433,64 @@ fn observe_kernel_argument(
     }
     wait_page(vm, &ctl, artifacts, name)?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}.png")))?;
+    Ok(())
+}
+
+/// The administrator page by keyboard, against the real helper: the name and
+/// the password twice, Enter in the last field, and the helper's `Plan` (the
+/// image's manifest is read from the registry, so the guest needs `ghcr.io`).
+/// The VM has a 40 GiB disk, which the installer can use.
+fn account() -> Result<()> {
+    let mut booted = boot("iso-next-account", false, vec![], "40G")?;
+    let artifacts = booted.artifacts.clone();
+    let vm = booted.guest.vm.running_mut()?;
+    let outcome = observe_account(vm, &artifacts);
+    if outcome.is_err() {
+        diagnostics(vm, &artifacts, "account");
+    }
+    outcome
+}
+
+fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
+    let serial = vm.info.dir.join("serial.log");
+    let ctl = Vmctl::from_info(vm.info.clone());
+    welcome_up(vm, &ctl, &serial, artifacts, "account")?;
+    continue_to_machine(&ctl)?;
+    wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
+    // The machine page has Continue focused: Enter presses it.
+    ctl.key("Return")?;
+    wait_page_marker(vm, &serial, "account", EVENT_TIMEOUT)?;
+    wait_page(vm, &ctl, artifacts, "account")?;
+    ctl.save_screenshot(&artifacts.join("next-account-empty.png"))?;
+
+    // The name has the focus; Tab moves down the fields. A password the
+    // layout types the same way in every layout.
+    ctl.type_text("ilexmaint")?;
+    ctl.key("Tab")?;
+    ctl.type_text("correct horse battery")?;
+    ctl.key("Tab")?;
+    ctl.type_text("correct horse battery")?;
+    std::thread::sleep(Duration::from_secs(1));
+    ctl.save_screenshot(&artifacts.join("next-account-filled.png"))?;
+    // Enter in the last field continues: the helper plans.
+    ctl.key("Return")?;
+    let plan = wait_event(vm, &serial, "plan", Duration::from_secs(240), |_| true)?;
+    ensure!(
+        field(&plan, "result")? == "ok",
+        "the helper did not plan the choices: {plan:?}"
+    );
+    let ready = wait_page_marker(vm, &serial, "ready", EVENT_TIMEOUT)?;
+    ensure!(
+        field(&ready, "check")? == "ok",
+        "the closing page does not report the plan checked: {ready:?}"
+    );
+    wait_page(vm, &ctl, artifacts, "account-ready")?;
+    ctl.save_screenshot(&artifacts.join("next-account-ready.png"))?;
+    // The password is nowhere on the serial console.
+    let text = console(&serial)?;
+    ensure!(
+        !text.contains("correct horse battery"),
+        "the password reached the serial console"
+    );
     Ok(())
 }
