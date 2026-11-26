@@ -72,6 +72,7 @@ sed "s|/run/systemd/sessions|$watch/sessions|g" /usr/libexec/ilex/kde-session-wa
 cat >"$watch/lib.sh" <<LIB
 S=$watch/state
 sessions=$watch/sessions
+script=$watch/script
 # session ID STATE TYPE: logind lists it.
 session() { : >"\$sessions/\$1"; printf 'State=%s\nType=%s\n' "\$2" "\$3" >"\$S/session.\$1"; }
 # drop ID: logind has removed it.
@@ -109,7 +110,7 @@ show-session)
 esac
 STUB
 # Each wait of the watch runs the next line of the scenario, then really waits a
-# moment. Once the scenario is over the watch is ended after 12 more waits
+# moment. Once the scenario is over the watch is ended after 4 more waits
 # (SIGTERM, status 143): a watch that decides nothing is counted, not timed, so
 # a loaded host cannot cut a scenario short.
 cat >"$watch/bin/sleep" <<'STUB'
@@ -122,7 +123,10 @@ if [ -s "$S/events" ]; then
 else
     idle=$(($(cat "$S/idle" 2>/dev/null || echo 0) + 1))
     echo "$idle" >"$S/idle"
-    [ "$idle" -lt 12 ] || kill -TERM "$PPID"
+    # Only ever the watch itself (never another parent, init included).
+    if [ "$idle" -ge 4 ] && grep -qaF "$script" "/proc/$PPID/cmdline" 2>/dev/null; then
+        kill -TERM "$PPID"
+    fi
 fi
 exec /usr/bin/sleep 0.2
 STUB
