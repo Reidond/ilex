@@ -1540,6 +1540,20 @@ claude mcp add -s local --transport stdio ilex-vm -- ilexctl mcp
   QMP input works with GTK virgl. For QMP screenshots, use `--disk` or
   `--gui --no-gl`. Windows SDL screenshots use the exact client area of
   the VM window.
+- Every VM the Linux harness boots (`ilex_devkit::qemu::Vm::boot`) gets
+  `-audiodev none,id=ilex-noaudio`. Without it, QEMU 11's VNC server asks for
+  a default audio backend and QEMU probes its list in order, PipeWire first.
+  On a host without a PipeWire daemon the probe fails and tears its thread loop
+  down with `pw_thread_loop_stop`, which in libpipewire intermittently never
+  returns: QEMU's main thread waits in `pthread_join` inside `qemu_init`, the
+  QMP socket exists but nothing answers on it, and the guest never runs, so its
+  serial log stays empty until a test's deadline (about one boot in a hundred
+  on the Boat hosts; a rerun passes). No tier wants sound. If a QEMU ever hangs
+  at start-up for another reason, `Vm::boot` fails after 30 s without a QMP
+  greeting and prints `qemu.log`. `ILEX_VM_FIRMWARE_LOG=1` makes every VM also
+  write OVMF's debug console to `firmware.log` beside `serial.log` (about
+  750 KB per boot, so opt-in). The ephemeral VMs (`ephemeral::`) run
+  bcvk's own QEMU, which has no `-vnc`; this is not applied to them.
 
 ## Developer tools: drupe
 
