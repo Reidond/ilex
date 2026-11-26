@@ -3577,8 +3577,9 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   installation stamps what it made: the finalise stage writes
   `/boot/ilex-install-request.sha256` (the partition labelled `ilex-boot`; root's,
   mode 600, labelled by the target's own policy), once the image and the account
-  are in place, so an installation that did not get that far has no stamp and may
-  be run again. **The stamp holds every digest that must not erase the
+  are in place, so an installation that did not get that far has no stamp **of its
+  own digest** (only the provisional one below, which holds the digests it carried)
+  and may be run again. **The stamp holds every digest that must not erase the
   installation, one 64-digit digest (`target::request_digest`: SHA-256 of the
   request as the plan records it, defaults resolved) per line, oldest first**
   (`stamp.rs`): the digests of the disk's *previous* stamp, which the helper reads
@@ -3608,7 +3609,10 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   journal to replay. A failure to write it ends the installation (the disk is
   already wiped, and going on without the protection is worse); the finalise
   stage overwrites the file with the finished stamp. `bootc install
-  to-filesystem` accepts the file in the mounted `/boot` (<BOOTC>). The digests
+  to-filesystem` accepts the file: bootc 1.17's empty-root check
+  (`require_empty_rootdir`) does not look inside a directory that is a mount point,
+  and the image stage reads the file back after `bootc` and requires it to be what
+  was written (`installer::install` asserts the log line). The digests
   answers mode **recorded in this boot** in
   `/run/ilex-answers-seen` (root's file, mode 600, opened without following a
   link and checked on the descriptor; gone at the next boot); and this
