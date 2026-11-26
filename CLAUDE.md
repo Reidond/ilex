@@ -2447,7 +2447,10 @@ the Windows paths of this change: no Windows host was available.
   when the person presses Ctrl+Alt+F2 and back to a tty1 that has no session
   (the fallback's), logind starts `autovt@tty1`, whose agetty clears the screen
   and the message with it. While the session runs, logind finds it on tty1 and
-  starts nothing; the tty2 shell is unaffected. Blanking, locking and sleep are off (dconf defaults, a
+  starts nothing; the tty2 shell is unaffected. (Ctrl+Alt+F2 reaches it from the
+  fallback screen only: while the page is up the compositor would ask logind to
+  change VT, and the polkit rule below denies `org.freedesktop.login1.chvt`;
+  SSH with a key, or root's `chvt 2`, reaches it.) Blanking, locking and sleep are off (dconf defaults, a
   logind drop-in and masked sleep targets): an installation must not stop when
   the screen would lock.
 - **SSH.** The live image keeps fedora-bootc's `sshd`, but a drop-in condition,
@@ -2554,9 +2557,13 @@ the Windows paths of this change: no Windows host was available.
     The basic graphics entry is chosen in GRUB with real key input over a USB
     keyboard (`LinuxProvider::with_usb_keyboard`). The default entry also
     writes `next-surface.txt` (below) and fails on any polkit action beyond
-    the allowlist in `iso_next.rs` (empty). After the page it does the same VT
-    round trip and requires the page again, the session unit still `active`
-    and no getty on tty1.
+    the allowlist in `iso_next.rs` (empty). After the page it presses
+    Ctrl+Alt+F2 and requires that nothing happens (polkit denies
+    `org.freedesktop.login1.chvt` to the installer's user, which is how the
+    compositor would change VT: the live page cannot be left from the keyboard,
+    while the fallback screen, with no compositor, can), then has root run
+    `chvt 2` and `chvt 1` over SSH and requires the page again, the session
+    unit still `active` and no getty on tty1.
   - `iso::next_fallback` makes the session fail (fixed credential), requires
     exactly three failures, then exactly one `ILEX-INSTALLER-FALLBACK` (it
     waits eight seconds for a second), and reads the message back from the
@@ -2564,7 +2571,9 @@ the Windows paths of this change: no Windows host was available.
     must be light text on a dark screen, not a drawn page and not black. It then
     sends Ctrl+Alt+F2 and Ctrl+Alt+F1 (the kernel's active VT, read from the
     guest, must be `tty2` then `tty1`) and requires the same message, no login
-    prompt, no getty on tty1 and no second `ILEX-INSTALLER-FALLBACK`.
+    prompt, no getty on tty1 and no second `ILEX-INSTALLER-FALLBACK`. A control
+    removes the `autovt@tty1` mask at runtime and repeats the round trip: the
+    message must now be replaced by a login prompt, so the check can fail.
   - `iso::next_restart` sends Alt+F4 (the page stays, no restart), kills the
     compositor with SIGKILL (its socket stays behind; the next attempt must
     report no stale socket and bring the page up, `NRestarts=1`), then kills

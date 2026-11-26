@@ -329,10 +329,23 @@ fn observe(
     println!("iso::next {}: {report}", entry.name());
 
     if entry == Entry::Normal {
-        // The session still owns tty1 after a look at the other VT.
         vm.wait_ssh(Duration::from_secs(180))
             .context("the harness's SSH key did not give a login to the live ISO")?;
-        vt_round_trip(vm, &ctl)?;
+        // From the page the chord does nothing: the compositor asks logind to
+        // change VT and polkit denies `org.freedesktop.login1.chvt` to the
+        // installer's user (the allowlist is empty). Whoever allows it later
+        // changes this with POLKIT_ALLOWED.
+        if !POLKIT_ALLOWED.contains(&"org.freedesktop.login1.chvt") {
+            ctl.key("ctrl+alt+F2")?;
+            std::thread::sleep(Duration::from_secs(4));
+            ensure!(
+                active_vt(vm)? == "tty1",
+                "Ctrl+Alt+F2 left the installer's page although polkit denies login1.chvt"
+            );
+        }
+        // The session still owns tty1 after root looks at the other VT: the
+        // compositor gives the VT up and takes it back, with no getty between.
+        vt_round_trip(vm, &Switch::Chvt)?;
         wait_page(vm, &ctl, artifacts, "after-vt-switch")?;
         ctl.save_screenshot(&artifacts.join("next-normal-after-vt-switch.png"))?;
         let session = vm.ssh_ok("systemctl is-active ilex-installer-session.service")?;
@@ -727,19 +740,35 @@ fn wait_vt(vm: &Vm, wanted: &str) -> Result<()> {
     }
 }
 
-/// Ctrl+Alt+F2 and back to tty1, the way a person looks at the shell and
-/// returns. Nothing may take tty1 over meanwhile: logind starts `autovt@tty1`
-/// (a getty) on a switch to a VT without a session, which wipes the fallback
-/// message, and the unit must not be running, active or enabled either way.
-fn vt_round_trip(vm: &Vm, ctl: &Vmctl) -> Result<()> {
+/// How the trial changes VT: the key chord a person presses, or root's
+/// `chvt` over SSH. The chord reaches the kernel only while no compositor holds
+/// the keyboard (the fallback screen); a live session's compositor asks logind
+/// (`org.freedesktop.login1.chvt`), which the installer's polkit rule denies.
+enum Switch<'a> {
+    Keys(&'a Vmctl),
+    Chvt,
+}
+
+fn switch_vt(vm: &Vm, how: &Switch, vt: u8) -> Result<()> {
+    match how {
+        Switch::Keys(ctl) => ctl.key(&format!("ctrl+alt+F{vt}")),
+        Switch::Chvt => vm.ssh_ok(&format!("chvt {vt}")).map(|_| ()),
+    }
+}
+
+/// tty1 to tty2 and back, the way a person looks at the shell and returns.
+/// Nothing may take tty1 over meanwhile: logind starts `autovt@tty1` (a getty,
+/// whose login prompt wipes the fallback message) on a switch to a VT without a
+/// session, so that unit must neither be running nor have run.
+fn vt_round_trip(vm: &Vm, how: &Switch) -> Result<()> {
     ensure!(
         active_vt(vm)? == "tty1",
         "tty1 is not in front before the round trip"
     );
-    ctl.key("ctrl+alt+F2")?;
+    switch_vt(vm, how, 2)?;
     wait_vt(vm, "tty2")?;
     std::thread::sleep(Duration::from_secs(2));
-    ctl.key("ctrl+alt+F1")?;
+    switch_vt(vm, how, 1)?;
     wait_vt(vm, "tty1")?;
     // Past the time logind needs to start autovt@tty1, were it to.
     std::thread::sleep(Duration::from_secs(4));
@@ -843,7 +872,7 @@ fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
 
     // The message must outlast a look at the tty2 shell: no getty may be
     // started on tty1 when the person comes back.
-    vt_round_trip(vm, &ctl)?;
+    vt_round_trip(vm, &Switch::Keys(&ctl))?;
     let after = vm.ssh_ok("cat /dev/vcs1")?;
     fs::write(
         artifacts.join("next-fallback-vcs1-after-vt-switch.txt"),
@@ -865,6 +894,22 @@ fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         "the fallback fired again after a VT round trip: {console}"
     );
     fs::write(artifacts.join("next-fallback-serial.txt"), console)?;
+
+    // Control: the mask is what keeps the message. Without it the same round
+    // trip lets logind start a getty on tty1, whose login prompt replaces it.
+    vm.ssh_ok("rm /etc/systemd/system/autovt@tty1.service && systemctl daemon-reload")?;
+    ctl.key("ctrl+alt+F2")?;
+    wait_vt(vm, "tty2")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.key("ctrl+alt+F1")?;
+    wait_vt(vm, "tty1")?;
+    std::thread::sleep(Duration::from_secs(6));
+    let control = vm.ssh_ok("cat /dev/vcs1")?;
+    fs::write(artifacts.join("next-fallback-vcs1-control.txt"), &control)?;
+    ensure!(
+        control.contains("login:") && !control.contains("could not start its graphical session"),
+        "control: without the autovt@tty1 mask the VT round trip should have replaced the message with a login prompt, tty1 shows {control:?}"
+    );
     println!(
         "iso::next fallback: three failures, then the message on tty1, once, kept across a VT round trip"
     );
