@@ -805,7 +805,10 @@ fn refuse_live_medium(root: &Path, artifacts: &Path, layout: &Layout, live: &str
     let name = layout.name();
     let dir = root.join("medium");
     fs::create_dir_all(&dir)?;
-    let volume = answers_volume(&dir, &answers(live, live, false))?;
+    // `reinstall = true`: the disk holds a file system of its own (the host
+    // partition), which answers mode would otherwise refuse first; the refusal
+    // wanted here is the helper's, for the medium.
+    let volume = answers_volume(&dir, &answers(live, live, true))?;
     let mut guest = boot(
         &dir,
         layout,
