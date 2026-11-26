@@ -6,6 +6,11 @@ use zeroize::Zeroize;
 /// A secret typed by the person: wiped when dropped, never printed. It is
 /// only ever handed to the helper through `Backend::set_secret` (which sends a
 /// file descriptor, not text), never into a plan request, a marker or a log.
+///
+/// Interfaces carry it as a `Secret` from the moment they read the field (the
+/// toolkit's text widget, copied once, straight into this type) to the flow's
+/// setters, and put it in their message enums as one: its `Debug` is redacted,
+/// so a derived `Debug` on such an enum prints nothing of it.
 #[derive(Default)]
 pub struct Secret(Vec<u8>);
 
@@ -14,8 +19,15 @@ impl Secret {
         Self(text.as_bytes().to_vec())
     }
 
+    /// From the bytes of a text a toolkit holds (a C string's contents), with
+    /// no intermediate `String`. `None` when they are not UTF-8.
+    pub fn from_utf8(bytes: &[u8]) -> Option<Self> {
+        std::str::from_utf8(bytes).ok()?;
+        Some(Self(bytes.to_vec()))
+    }
+
     pub fn expose(&self) -> &str {
-        // Built from a `&str` and never modified, so always UTF-8.
+        // Built from UTF-8 and never modified, so always UTF-8.
         std::str::from_utf8(&self.0).unwrap_or_default()
     }
 
@@ -27,12 +39,15 @@ impl Secret {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+}
 
-    pub fn set(&mut self, text: &str) {
-        self.0.zeroize();
-        self.0 = text.as_bytes().to_vec();
+impl PartialEq for Secret {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 }
+
+impl Eq for Secret {}
 
 impl Drop for Secret {
     fn drop(&mut self) {

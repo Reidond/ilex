@@ -46,9 +46,16 @@ Environment=XDG_SESSION_CLASS=user
 # Fixed test-only credentials, read by the session script and the interface:
 # ilex.installer.fault=session makes the session fail to start;
 # ilex.installer.serial-test=unavailable|backpressure makes the serial mirror
-# of the markers fail. They can only make the installer fail or stay quiet.
+# of the markers fail; ilex.installer.echo-test=1 lets the interface print
+# what was typed in the keyboard layout's test field (a normal boot prints
+# nothing of it: people try their passwords there). They can only make the
+# installer fail, stay quiet or print that one field.
 ImportCredential=ilex.installer.fault
 ImportCredential=ilex.installer.serial-test
+ImportCredential=ilex.installer.echo-test
+# The compositor and the interface hold what the person types, the
+# administrator's password among it: no core file of either.
+LimitCORE=0
 ExecStart=/usr/libexec/ilex-installer/session
 # The session script exits non-zero whenever either of its processes ends, but
 # any end of this unit's main process, clean or not, is a failed session.

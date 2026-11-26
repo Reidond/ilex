@@ -3,9 +3,20 @@
 //! shows these instead, so the wording is one and the same for GTK and Kirigami
 //! and changes in one place. All strings are English in the first version.
 
-use ilex_installer_model::plan::{ErrorCode, PlanError};
+use crate::flow::human_bytes;
+use ilex_installer_model::plan::{ErrorCode, MIN_DISK_BYTES, PlanError};
 use serde::Serialize;
 use std::fmt;
+
+/// The label of every page's Continue button, and of the one on the page that
+/// is asking the helper (the person cannot press it then).
+pub const CONTINUE_LABEL: &str = "Continue";
+pub const CHECKING_LABEL: &str = "Checking…";
+/// What the closing page says while the helper checks the choices.
+pub const CHECKING_TITLE: &str = "Checking your choices";
+pub const CHECKING_DETAIL: &str = "The installer is asking its helper to check them against this computer and the image registry.";
+/// A short line under the layout list while the compositor takes the layout.
+pub const SWITCHING_LAYOUT: &str = "Switching the keyboard layout…";
 
 /// A refusal or a problem: a short title that says what happened, and what
 /// the person can do about it (or the model's own sentence naming the cause).
@@ -151,4 +162,28 @@ pub fn plan_error(error: &PlanError) -> Message {
         ErrorCode::Repart => Message::new("The disk layout could not be prepared", cause),
         ErrorCode::Internal => Message::new("The installer's helper failed", cause),
     }
+}
+
+/// Nothing can be installed to: one sentence per disk says why, then what to
+/// do. The detail has one line per disk.
+pub fn no_disk(reasons: &[String]) -> Message {
+    Message::new(
+        "No disk can be installed to",
+        format!(
+            "{}\n\nConnect a disk of at least {} that nothing is using, then try again.",
+            reasons.join("\n"),
+            human_bytes(MIN_DISK_BYTES)
+        ),
+    )
+}
+
+/// The compositor did not take the keyboard layout the person chose.
+pub fn keyboard_switch_failed(why: &str) -> Message {
+    Message::new(
+        "The keyboard layout could not be switched",
+        format!(
+            "The installer's session did not take it ({why}). Try again, or pick another layout: \
+             what you type here and, later, the disk passphrase must match the layout you chose."
+        ),
+    )
 }

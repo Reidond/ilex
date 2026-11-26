@@ -8,25 +8,31 @@
 //! windows: a headless compositor is enough (the `installer::ui` trial runs it
 //! under GNOME Kiosk's own headless mode).
 //!
-//! Files are `<shot>-<light|dark>-<scale>x.png`.
+//! Files are `<shot>-<light|dark>-<scale>x.png`. A shot is taken only when the
+//! application reports the page and the state the shot names (the page shown,
+//! no probe, check or layout switch under way) and the navigation view really
+//! shows that page, never after a fixed wait alone.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ilex_installer_flow::backend::Backend;
 use ilex_installer_flow::flow::PageId;
-use ilex_installer_flow::keyboard::{Layouts, NoSessionKeyboard, Sources};
+use ilex_installer_flow::keyboard::{Layout, Layouts, SessionKeyboard, Sources};
 use ilex_installer_flow::language;
+use ilex_installer_flow::markers;
+use ilex_installer_flow::selfcheck;
 use ilex_installer_flow::simulate::Simulated;
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::{self, gdk, glib, graphene};
 use relm4::prelude::*;
 
-use super::app::{App, Init, Msg};
+use super::app::{App, Init, Msg, Observed};
 use crate::serial;
 
 /// What a shot does after its window is up and the probe answered.
@@ -35,6 +41,8 @@ enum Do {
     Continue,
     Back,
     Jump(PageId),
+    /// From now on the compositor refuses a layout switch.
+    FailSwitches,
     Keyboard(&'static str),
     Language(&'static str),
     Machine(&'static str),
@@ -46,54 +54,73 @@ enum Do {
 struct Shot {
     name: &'static str,
     scenario: &'static str,
+    /// The page the shot ends on, and the word of its check (`Flow::check_word`)
+    /// when it is the point of the shot (`""`: any, as long as none is running).
+    page: PageId,
+    check: &'static str,
     steps: &'static [Do],
 }
 
 const PASSWORD: &str = "correct horse battery";
 
 macro_rules! shots {
-    ($( $name:literal, $scenario:literal, [ $($step:expr),* $(,)? ] );* $(;)?) => {
-        &[ $( Shot { name: $name, scenario: $scenario, steps: &[ $($step),* ] } ),* ]
+    ($( $name:literal, $scenario:literal, $page:ident, $check:literal, [ $($step:expr),* $(,)? ] );* $(;)?) => {
+        &[ $( Shot { name: $name, scenario: $scenario, page: PageId::$page, check: $check, steps: &[ $($step),* ] } ),* ]
     };
 }
 
 #[rustfmt::skip]
 const SHOTS: &[Shot] = shots![
-    "welcome", "generic", [];
-    "welcome-german", "generic", [Do::Keyboard("de-nodeadkeys"), Do::Language("de_DE.UTF-8")];
-    "welcome-bios", "bios", [];
-    "welcome-helper-down", "helper-down", [];
-    "machine-not-recognised", "generic", [Do::Continue];
-    "machine-detected", "ms-7c35", [Do::Continue];
-    "machine-detected-board", "ms-7c35-board", [Do::Continue];
-    "machine-chosen", "ms-7c35", [Do::Continue, Do::Machine("generic.gnome")];
-    "machine-conflict", "conflict", [Do::Continue];
-    "machine-no-composition", "no-composition", [Do::Continue];
-    "machine-boot-argument", "boot-override", [Do::Continue];
-    "machine-boot-argument-unknown", "bad-override", [Do::Continue];
-    "machine-helper-down", "helper-down", [Do::Jump(PageId::Machine)];
-    "account-empty", "generic", [Do::Continue, Do::Continue];
-    "account-name-invalid", "generic", [Do::Continue, Do::Continue, Do::Name("Ilex Maint")];
-    "account-name-reserved", "generic", [Do::Continue, Do::Continue, Do::Name("root")];
-    "account-password-short", "generic", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password("abc"), Do::Confirm("abc")];
-    "account-password-mismatch", "generic", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm("correct horse batter")];
-    "account-valid", "generic", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD)];
-    "account-refused-by-helper", "generic", [Do::Continue, Do::Continue, Do::Name("rpcuser"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready", "generic", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready-machine", "ms-7c35", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready-no-disk", "no-disk", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready-registry-down", "registry-down", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready-back-to-account", "generic", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Back];
+    "welcome", "generic", Welcome, "", [];
+    "welcome-german", "generic", Welcome, "", [Do::Keyboard("de-nodeadkeys"), Do::Language("de_DE.UTF-8")];
+    "welcome-bios", "bios", Welcome, "", [];
+    "welcome-helper-down", "helper-down", Welcome, "", [];
+    "welcome-keyboard-failed", "generic", Welcome, "", [Do::FailSwitches, Do::Keyboard("de-nodeadkeys")];
+    "machine-not-recognised", "generic", Machine, "", [Do::Continue];
+    "machine-detected", "ms-7c35", Machine, "", [Do::Continue];
+    "machine-detected-board", "ms-7c35-board", Machine, "", [Do::Continue];
+    "machine-chosen", "ms-7c35", Machine, "", [Do::Continue, Do::Machine("generic.gnome")];
+    "machine-conflict", "conflict", Machine, "", [Do::Continue];
+    "machine-no-composition", "no-composition", Machine, "", [Do::Continue];
+    "machine-boot-argument", "boot-override", Machine, "", [Do::Continue];
+    "machine-boot-argument-unknown", "bad-override", Machine, "", [Do::Continue];
+    "machine-helper-down", "helper-down", Machine, "", [Do::Jump(PageId::Machine)];
+    "machine-bios", "bios", Machine, "", [Do::Jump(PageId::Machine)];
+    "account-empty", "generic", Account, "not-run", [Do::Continue, Do::Continue];
+    "account-name-invalid", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("Ilex Maint")];
+    "account-name-reserved", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("root")];
+    "account-password-short", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password("abc"), Do::Confirm("abc")];
+    "account-password-mismatch", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm("correct horse batter")];
+    "account-valid", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD)];
+    "account-refused-by-helper", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("rpcuser"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "ready", "generic", Ready, "ok", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "ready-machine", "ms-7c35", Ready, "ok", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "ready-no-disk", "no-disk", Ready, "no-disk", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "ready-registry-down", "registry-down", Ready, "failed", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "ready-back-to-account", "generic", Account, "ok", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Back];
 ];
 
-/// How long a step is given to take effect: the worker threads that answer a
-/// probe or a plan, and the widgets' own updates.
-const SETTLE: Duration = Duration::from_millis(250);
+/// How often the application's state is looked at while a shot waits for it.
+const POLL: Duration = Duration::from_millis(20);
+/// How long a shot waits for the page and state it names before it fails.
+const DEADLINE: Duration = Duration::from_secs(20);
+/// Frames given to GTK to lay out and draw a page it already shows.
+const FRAMES: u32 = 3;
 
 pub fn run(directory: &Path, dark: bool) -> Result<()> {
     std::fs::create_dir_all(directory)
         .with_context(|| format!("creating {}", directory.display()))?;
-    let layouts = Layouts::load(&Sources::default()).context("the keyboard layouts")?;
+    // The live image's own catalogue when it has one; otherwise the
+    // self-check's sample (the same rule `--self-check --render` follows in
+    // `main`: a missing catalogue is reported, not fatal), so that a machine
+    // without xkeyboard-config draws the same pages.
+    let layouts = match Layouts::load(&Sources::default()) {
+        Ok(layouts) => layouts,
+        Err(error) => {
+            eprintln!("ilex-installer: drawing with the sample keyboard layouts: {error:#}");
+            selfcheck::sample_layouts().context("the sample keyboard layouts")?
+        }
+    };
     let outcome: Rc<RefCell<Option<Result<Summary, String>>>> = Rc::new(RefCell::new(None));
     let job = Job {
         directory: directory.to_path_buf(),
@@ -110,12 +137,11 @@ pub fn run(directory: &Path, dark: bool) -> Result<()> {
         .take()
         .context("the renderer ended without a result")?
         .map_err(|e| anyhow::anyhow!(e))?;
-    serial::marker(&format!(
-        "ILEX-INSTALLER-RENDER ok shots={} scheme={} scale={} dir={}",
+    serial::marker(&markers::render_ok(
         summary.files,
-        if dark { "dark" } else { "light" },
+        dark,
         summary.scale,
-        directory.display()
+        directory,
     ));
     Ok(())
 }
@@ -123,6 +149,19 @@ pub fn run(directory: &Path, dark: bool) -> Result<()> {
 struct Summary {
     files: usize,
     scale: f64,
+}
+
+/// A session whose layout switches work until a shot says they do not (a
+/// compositor that is gone or refuses).
+struct RenderKeyboard(Arc<AtomicBool>);
+
+impl SessionKeyboard for RenderKeyboard {
+    fn switch(&self, _layout: &Layout) -> anyhow::Result<()> {
+        if self.0.load(Ordering::SeqCst) {
+            bail!("GNOME Kiosk is not answering");
+        }
+        Ok(())
+    }
 }
 
 struct Job {
@@ -174,8 +213,91 @@ impl SimpleComponent for Driver {
     fn update(&mut self, _message: (), _sender: ComponentSender<Self>) {}
 }
 
-async fn settle() {
-    glib::timeout_future(SETTLE).await;
+async fn pause(time: Duration) {
+    glib::timeout_future(time).await;
+}
+
+/// The page the navigation view shows.
+fn visible_page(window: &adw::ApplicationWindow) -> Option<PageId> {
+    find_navigation(window.upcast_ref())?
+        .visible_page()
+        .and_then(|p| p.tag())
+        .and_then(|t| PageId::from_id(&t))
+}
+
+/// Wait until the application reports that nothing is under way (`want` says
+/// what else must hold) and the navigation view shows `page`.
+async fn until(
+    what: &str,
+    window: &adw::ApplicationWindow,
+    observer: &Arc<Mutex<Observed>>,
+    page: Option<PageId>,
+    want: impl Fn(&Observed) -> bool,
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let seen = observer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let shown = visible_page(window);
+        if seen.settled() && want(&seen) && page.is_none_or(|p| shown == Some(p) && seen.page == p)
+        {
+            return Ok(());
+        }
+        if started.elapsed() > DEADLINE {
+            bail!(
+                "{what}: after {DEADLINE:?} the application reports {seen:?} and shows {shown:?}, \
+                 expected {}",
+                page.map_or("any page".to_owned(), |p| p.id().to_owned())
+            );
+        }
+        pause(POLL).await;
+    }
+}
+
+/// Wait until the application has handled everything sent to it so far (its
+/// queue is in order), then until nothing it started is under way.
+async fn flush(
+    what: &str,
+    controller: &Controller<App>,
+    window: &adw::ApplicationWindow,
+    observer: &Arc<Mutex<Observed>>,
+) -> Result<()> {
+    let handled = Arc::new(AtomicBool::new(false));
+    controller.emit(Msg::Ping(Arc::clone(&handled)));
+    let started = Instant::now();
+    while !handled.load(Ordering::SeqCst) {
+        if started.elapsed() > DEADLINE {
+            bail!("{what}: the application did not handle its messages within {DEADLINE:?}");
+        }
+        pause(POLL).await;
+    }
+    until(what, window, observer, None, |_| true).await
+}
+
+/// A person types into a password field: find it by its widget name and set
+/// its text, so the field's own change reaches the flow.
+fn type_into(window: &adw::ApplicationWindow, name: &str, text: &str) -> Result<()> {
+    fn find(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+        if widget.widget_name() == name {
+            return Some(widget.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            if let Some(found) = find(&c, name) {
+                return Some(found);
+            }
+            child = c.next_sibling();
+        }
+        widget
+            .downcast_ref::<adw::ApplicationWindow>()
+            .and_then(|w| w.content())
+            .and_then(|content| find(&content, name))
+    }
+    let field = find(window.upcast_ref(), name).with_context(|| format!("no field {name}"))?;
+    field
+        .downcast_ref::<gtk::Editable>()
+        .with_context(|| format!("{name} is not a text field"))?
+        .set_text(text);
+    Ok(())
 }
 
 async fn shoot(job: &Job) -> Result<Summary> {
@@ -184,22 +306,39 @@ async fn shoot(job: &Job) -> Result<Summary> {
     let mut scale = 1.0;
     for shot in SHOTS {
         let backend: Arc<dyn Backend> = Arc::new(Simulated::load(shot.scenario)?);
+        let observer = Arc::new(Mutex::new(Observed {
+            page: PageId::Welcome,
+            check: "not-run",
+            probe_pending: true,
+            keyboard_switching: false,
+        }));
+        let failing = Arc::new(AtomicBool::new(false));
         let controller = App::builder()
             .launch(Init {
                 backend,
-                keyboard: Arc::new(NoSessionKeyboard),
+                keyboard: Arc::new(RenderKeyboard(Arc::clone(&failing))),
                 layouts: job.layouts.clone(),
                 fullscreen: false,
                 edition: "gnome".to_owned(),
                 markers: false,
                 stats: false,
+                echo_try: false,
+                observer: Some(Arc::clone(&observer)),
             })
             .detach();
         let window = controller.widget().clone();
         window.set_default_size(1280, 800);
         window.present();
-        settle().await;
-        settle().await;
+        // Every step starts from a settled page: the probe answered, no check
+        // and no layout switch under way, and the first page shown.
+        until(
+            &format!("{}: the first page", shot.name),
+            &window,
+            &observer,
+            Some(PageId::Welcome),
+            |_| true,
+        )
+        .await?;
         for step in shot.steps {
             let message = match *step {
                 Do::Continue => Msg::Continue,
@@ -208,10 +347,20 @@ async fn shoot(job: &Job) -> Result<Summary> {
                     if let Some(nav) = find_navigation(window.upcast_ref()) {
                         nav.pop();
                     }
-                    settle().await;
+                    flush(
+                        &format!("{}: back", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
                     continue;
                 }
                 Do::Jump(page) => Msg::Jump(page),
+                Do::FailSwitches => {
+                    failing.store(true, Ordering::SeqCst);
+                    continue;
+                }
                 Do::Keyboard(id) => Msg::Layout(
                     job.layouts
                         .index_of(id)
@@ -225,13 +374,62 @@ async fn shoot(job: &Job) -> Result<Summary> {
                 ),
                 Do::Machine(tag) => Msg::Machine(tag.to_owned()),
                 Do::Name(text) => Msg::Name(text.to_owned()),
-                Do::Password(text) => Msg::Password(text.to_owned()),
-                Do::Confirm(text) => Msg::Confirmation(text.to_owned()),
+                Do::Password(text) => {
+                    type_into(&window, "password", text)?;
+                    flush(
+                        &format!("{}: password", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::Confirm(text) => {
+                    type_into(&window, "confirmation", text)?;
+                    flush(
+                        &format!("{}: confirmation", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
             };
             controller.emit(message);
-            settle().await;
+            // Each step's effect is complete before the next starts: the
+            // queue has run, and no probe, check or layout switch it began is
+            // still under way.
+            flush(
+                &format!("{}: step", shot.name),
+                &controller,
+                &window,
+                &observer,
+            )
+            .await?;
         }
-        settle().await;
+        until(
+            &format!("{}: the final state", shot.name),
+            &window,
+            &observer,
+            Some(shot.page),
+            |seen| shot.check.is_empty() || seen.check == shot.check,
+        )
+        .await?;
+        for _ in 0..FRAMES {
+            pause(Duration::from_millis(40)).await;
+        }
+        // The page, the state and the view are what the shot names: the
+        // application still agrees after the frames (nothing moved).
+        until(
+            &format!("{}: the state after drawing", shot.name),
+            &window,
+            &observer,
+            Some(shot.page),
+            |seen| shot.check.is_empty() || seen.check == shot.check,
+        )
+        .await?;
         let path = job
             .directory
             .join(format!("{}-{scheme}-pending.png", shot.name));
@@ -242,7 +440,7 @@ async fn shoot(job: &Job) -> Result<Summary> {
         std::fs::rename(&path, &named).with_context(|| format!("naming {}", named.display()))?;
         files += 1;
         window.destroy();
-        settle().await;
+        pause(POLL).await;
     }
     if files == 0 {
         bail!("no shots");

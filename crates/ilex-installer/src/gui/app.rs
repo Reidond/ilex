@@ -4,20 +4,26 @@
 //! widgets and the person's input into flow calls. Nothing here talks to the
 //! helper except through the flow's `Backend`, on a worker thread.
 
-use std::fs;
-use std::sync::Arc;
+use std::ffi::CStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ilex_installer_flow::Message;
 use ilex_installer_flow::backend::Backend;
-use ilex_installer_flow::flow::{Flow, PageId, PlanCheck, ProbeState, Step, human_bytes};
+use ilex_installer_flow::flow::{
+    Flow, KeyboardStatus, PageId, PlanCheck, ProbeState, Step, human_bytes,
+};
 use ilex_installer_flow::keyboard::{Layouts, SessionKeyboard};
 use ilex_installer_flow::language::{self, LANGUAGES};
 use ilex_installer_flow::machine::{MachineView, Severity};
-use ilex_installer_flow::messages::ClientError;
+use ilex_installer_flow::markers;
+use ilex_installer_flow::messages::{self, ClientError};
+use ilex_installer_flow::secret::Secret;
 use ilex_installer_model::plan::Plan;
 use ilex_installer_model::probe::Probe;
 use relm4::adw::{self, prelude::*};
+use relm4::gtk::glib::translate::ToGlibPtr;
 use relm4::gtk::{self, glib};
 use relm4::prelude::*;
 
@@ -38,6 +44,30 @@ pub struct Init {
     pub markers: bool,
     /// Report memory fifteen seconds after the first page.
     pub stats: bool,
+    /// The layout test field's text may be printed in a marker (the test
+    /// credential, or a simulated session). Otherwise the field is not even
+    /// read: people type their intended passwords there.
+    pub echo_try: bool,
+    /// Where the application reports what it shows, for the renderer to wait
+    /// on instead of a fixed time.
+    pub observer: Option<Arc<Mutex<Observed>>>,
+}
+
+/// What the application is showing, in the flow's words.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Observed {
+    pub page: PageId,
+    /// `Flow::check_word`: `not-run`, `running`, `ok`, `no-disk`, `failed`.
+    pub check: &'static str,
+    pub probe_pending: bool,
+    pub keyboard_switching: bool,
+}
+
+impl Observed {
+    /// Nothing is under way: no probe, no check, no layout switch.
+    pub fn settled(&self) -> bool {
+        self.check != "running" && !self.probe_pending && !self.keyboard_switching
+    }
 }
 
 pub struct App {
@@ -47,40 +77,54 @@ pub struct App {
     edition: String,
     markers: bool,
     stats: bool,
+    echo_try: bool,
+    observer: Option<Arc<Mutex<Observed>>>,
     mapped: bool,
     /// The page whose marker was printed last.
     announced: Option<PageId>,
-    /// What the layout test field held last, to print only changes.
-    tried: String,
 }
 
+/// Secrets travel as `Secret`s: their `Debug` is redacted, so this derived
+/// `Debug` prints nothing of a password, and they are wiped when dropped.
 #[derive(Debug)]
 pub enum Msg {
     /// Ask the helper about this computer (again).
     Probe,
     Language(u32),
     Layout(u32),
-    TryText(String),
+    /// Try the layout again after the compositor did not take it.
+    RetryLayout,
+    TryText(Secret),
     Machine(String),
     Name(String),
-    Password(String),
-    Confirmation(String),
+    Password(Secret),
+    Confirmation(Secret),
     Continue,
-    /// The check of the choices once more (the ready page's "Try again").
-    PlanAgain,
+    /// The closing page's Try again: look again, then check the choices.
+    Retry,
     /// The navigation view now shows this page (the person went back).
     Visible(PageId),
     /// The window is on screen.
     Mapped,
     /// Show a page directly (the renderer only).
     Jump(PageId),
+    /// Everything sent before this has been handled when the flag is set
+    /// (the renderer only).
+    Ping(Arc<AtomicBool>),
 }
 
 #[derive(Debug)]
 pub enum Cmd {
-    Probed(Result<Probe, ClientError>),
-    Planned(Result<Plan, ClientError>),
+    Probed {
+        generation: u64,
+        result: Result<Probe, ClientError>,
+    },
+    Planned {
+        generation: u64,
+        result: Result<Plan, ClientError>,
+    },
     Switched {
+        generation: u64,
         layout: String,
         result: Result<(), String>,
     },
@@ -93,14 +137,46 @@ impl App {
         }
     }
 
-    fn start_probe(&mut self, sender: &ComponentSender<Self>) {
-        self.flow.probe_restarted();
-        let backend = Arc::clone(&self.backend);
-        sender.spawn_oneshot_command(move || Cmd::Probed(backend.probe()));
+    /// Carry out what the flow asks for, on a worker: the answer comes back
+    /// as a command output carrying the request's generation, and the flow
+    /// ignores it if a later request replaced it.
+    fn carry_out(&self, step: Step, sender: &ComponentSender<Self>) {
+        match step {
+            Step::RunProbe { generation } => {
+                let backend = Arc::clone(&self.backend);
+                sender.spawn_oneshot_command(move || Cmd::Probed {
+                    generation,
+                    result: backend.probe(),
+                });
+            }
+            Step::RunPlan {
+                generation,
+                request,
+            } => {
+                let backend = Arc::clone(&self.backend);
+                sender.spawn_oneshot_command(move || Cmd::Planned {
+                    generation,
+                    result: backend.plan(&request),
+                });
+            }
+            Step::SwitchKeyboard { generation, layout } => {
+                // The session types in the new layout from now on; the call
+                // blocks on D-Bus. The flow keeps one switch outstanding, so
+                // the compositor ends on the last layout asked for.
+                let keyboard = Arc::clone(&self.keyboard);
+                sender.spawn_oneshot_command(move || Cmd::Switched {
+                    generation,
+                    layout: layout.id.clone(),
+                    result: keyboard.switch(&layout).map_err(|e| format!("{e:#}")),
+                });
+            }
+            // The widgets follow the flow's page.
+            Step::Goto(_) | Step::Stay => {}
+        }
     }
 
-    /// Print the page's marker (and the composition line on the machine page)
-    /// when the flow's page changed.
+    /// Print the page's marker (and the composition line and the notice on
+    /// the machine page) when the flow's page changed.
     fn announce(&mut self, root: &adw::ApplicationWindow) {
         let page = self.flow.page();
         if self.announced == Some(page) {
@@ -108,12 +184,7 @@ impl App {
         }
         let first = self.announced.is_none();
         self.announced = Some(page);
-        let mut line = format!(
-            "ILEX-INSTALLER page={} edition={} {}",
-            page.id(),
-            self.edition,
-            self.flow.marker_fields()
-        );
+        let mut line = self.flow.page_marker(&self.edition);
         if first {
             let renderer = root
                 .native()
@@ -122,14 +193,30 @@ impl App {
             line.push_str(&format!(
                 " renderer={renderer} scale={} uptime={}",
                 root.scale_factor(),
-                uptime()
+                markers::uptime()
             ));
         }
         self.marker(&line);
-        if page == PageId::Machine
-            && let Some(composition) = self.flow.composition_line()
-        {
-            self.marker(&composition);
+        if page == PageId::Machine {
+            if let Some(composition) = self.flow.composition_line() {
+                self.marker(&composition);
+            }
+            if let Some(view) = self.flow.machine_view() {
+                self.marker(&markers::notice(&view.notice()));
+            }
+        }
+    }
+
+    /// Tell the renderer what is shown.
+    fn observe(&self) {
+        if let Some(observer) = &self.observer {
+            let now = Observed {
+                page: self.flow.page(),
+                check: self.flow.check_word(),
+                probe_pending: matches!(self.flow.probe_state(), ProbeState::Pending),
+                keyboard_switching: self.flow.keyboard_status() == KeyboardStatus::Switching,
+            };
+            *observer.lock().unwrap_or_else(|e| e.into_inner()) = now;
         }
     }
 }
@@ -152,7 +239,7 @@ impl Component for App {
 
     fn init(init: Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let flow = Flow::new(init.layouts);
-        let widgets = Widgets::build(&root, &flow, &sender);
+        let widgets = Widgets::build(&root, &flow, &sender, init.echo_try);
         root.set_fullscreened(init.fullscreen);
         if init.fullscreen {
             // The only window of a live session: the compositor's close
@@ -170,30 +257,30 @@ impl Component for App {
             edition: init.edition,
             markers: init.markers,
             stats: init.stats,
+            echo_try: init.echo_try,
+            observer: init.observer,
             mapped: false,
             announced: None,
-            tried: String::new(),
         };
-        model.start_probe(&sender);
+        let step = model.flow.start_probe();
+        model.carry_out(step, &sender);
+        model.observe();
         ComponentParts { model, widgets }
     }
 
     fn update(&mut self, message: Msg, sender: ComponentSender<Self>, root: &Self::Root) {
         match message {
-            Msg::Probe => self.start_probe(&sender),
+            Msg::Probe => {
+                let step = self.flow.start_probe();
+                self.carry_out(step, &sender);
+            }
             Msg::Mapped => {
                 if !self.mapped {
                     self.mapped = true;
                     self.announce(root);
                     if self.stats {
                         glib::timeout_add_local_once(STATS_DELAY, || {
-                            serial::marker(&format!(
-                                "ILEX-INSTALLER-STATS mem_total_kib={} mem_available_kib={} shmem_kib={} uptime={}",
-                                meminfo("MemTotal"),
-                                meminfo("MemAvailable"),
-                                meminfo("Shmem"),
-                                uptime()
-                            ));
+                            serial::marker(&markers::stats());
                         });
                     }
                 }
@@ -203,10 +290,7 @@ impl Component for App {
                     && self.flow.language() != language.locale
                     && self.flow.set_language(language.locale)
                 {
-                    self.marker(&format!(
-                        "ILEX-INSTALLER event=language language={}",
-                        language.locale
-                    ));
+                    self.marker(&markers::language(language.locale));
                 }
             }
             Msg::Layout(index) => {
@@ -218,38 +302,20 @@ impl Component for App {
                     .map(|l| l.id.clone());
                 if let Some(id) = id
                     && self.flow.keyboard() != id
-                    && self.flow.set_keyboard(&id)
-                    && let Some(layout) = self.flow.layouts().get(&id).cloned()
                 {
-                    // The session types in the new layout from now on; the
-                    // call blocks on D-Bus, so it runs on a worker.
-                    let keyboard = Arc::clone(&self.keyboard);
-                    sender.spawn_oneshot_command(move || Cmd::Switched {
-                        layout: layout.id.clone(),
-                        result: keyboard.switch(&layout).map_err(|e| format!("{e:#}")),
-                    });
+                    let step = self.flow.set_keyboard(&id);
+                    self.carry_out(step, &sender);
                 }
             }
+            Msg::RetryLayout => {
+                let step = self.flow.retry_keyboard();
+                self.carry_out(step, &sender);
+            }
             Msg::TryText(text) => {
-                if text != self.tried {
-                    self.tried.clone_from(&text);
-                    // The test field holds nothing private: it exists to be
-                    // typed in so that the layout can be seen to work.
-                    let shown: String = text
-                        .chars()
-                        .take(32)
-                        .map(|c| {
-                            if c.is_whitespace() || c.is_control() {
-                                '_'
-                            } else {
-                                c
-                            }
-                        })
-                        .collect();
-                    self.marker(&format!(
-                        "ILEX-INSTALLER event=try layout={} text={shown}",
-                        self.flow.keyboard()
-                    ));
+                // Only a test can have asked for this (see `markers`): on a
+                // normal boot nothing reads the field and nothing is printed.
+                if let Some(line) = markers::tried(self.flow.keyboard(), &text, self.echo_try) {
+                    self.marker(&line);
                 }
             }
             Msg::Machine(tag) => {
@@ -260,65 +326,78 @@ impl Component for App {
                     self.marker(&line);
                 }
             }
-            Msg::Name(text) => self.flow.set_administrator(&text),
-            Msg::Password(text) => self.flow.set_password(&text),
-            Msg::Confirmation(text) => self.flow.set_confirmation(&text),
-            Msg::Continue | Msg::PlanAgain => {
-                let step = if matches!(message, Msg::PlanAgain) {
-                    self.flow.retry_plan()
-                } else {
-                    self.flow.advance()
-                };
-                if let Step::RunPlan(request) = step {
-                    let backend = Arc::clone(&self.backend);
-                    sender.spawn_oneshot_command(move || Cmd::Planned(backend.plan(&request)));
-                }
+            Msg::Name(text) => {
+                self.flow.set_administrator(&text);
+            }
+            Msg::Password(secret) => {
+                self.flow.set_password(secret);
+            }
+            Msg::Confirmation(secret) => {
+                self.flow.set_confirmation(secret);
+            }
+            Msg::Continue => {
+                let step = self.flow.advance();
+                self.carry_out(step, &sender);
+            }
+            Msg::Retry => {
+                let step = self.flow.retry();
+                self.carry_out(step, &sender);
             }
             Msg::Visible(page) => {
-                if self.flow.page() != page {
-                    self.flow.show(page);
-                }
+                // The view popped to `page` (Back, Escape): the flow steps
+                // back to it, and refuses while the helper is asked (the view
+                // is pushed again then).
+                while self.flow.page() != page && self.flow.back().is_some() {}
             }
             Msg::Jump(page) => self.flow.show(page),
+            Msg::Ping(flag) => flag.store(true, Ordering::SeqCst),
         }
         self.announce(root);
+        self.observe();
     }
 
-    fn update_cmd(&mut self, message: Cmd, _sender: ComponentSender<Self>, root: &Self::Root) {
+    fn update_cmd(&mut self, message: Cmd, sender: ComponentSender<Self>, root: &Self::Root) {
         match message {
-            Cmd::Probed(result) => {
-                let outcome = match &result {
-                    Ok(probe) => format!("ok disks={}", probe.disks.len()),
-                    Err(error) => format!("failed {}", error.message().title.replace(' ', "_")),
+            Cmd::Probed { generation, result } => {
+                let line = if self.flow.probe_is_current(generation) {
+                    markers::probe(&result)
+                } else {
+                    markers::stale("probe")
                 };
-                self.flow.set_probe(result);
-                self.marker(&format!("ILEX-INSTALLER event=probe result={outcome}"));
-                // The machine page may be showing already: its marker and the
-                // composition line follow the answer.
+                let step = self.flow.probe_finished(generation, result);
+                self.marker(&line);
+                self.carry_out(step, &sender);
+                // The machine page may be showing already: its marker, the
+                // composition line and the notice follow the answer.
                 if self.flow.page() == PageId::Machine {
                     self.announced = None;
                 }
             }
-            Cmd::Planned(result) => {
-                let outcome = match &result {
-                    Ok(_) => "ok".to_owned(),
-                    Err(ClientError::Refused(error)) => format!("refused code={:?}", error.code),
-                    Err(_) => "failed".to_owned(),
+            Cmd::Planned { generation, result } => {
+                let line = if self.flow.plan_is_current(generation) {
+                    markers::plan(&result)
+                } else {
+                    markers::stale("plan")
                 };
-                self.flow.plan_finished(result);
-                self.marker(&format!("ILEX-INSTALLER event=plan result={outcome}"));
+                let step = self.flow.plan_finished(generation, result);
+                self.marker(&line);
+                self.carry_out(step, &sender);
             }
-            Cmd::Switched { layout, result } => {
-                self.marker(&format!(
-                    "ILEX-INSTALLER event=layout layout={layout} applied={}",
-                    result.is_ok()
-                ));
-                if let Err(why) = result {
+            Cmd::Switched {
+                generation,
+                layout,
+                result,
+            } => {
+                self.marker(&markers::layout(&layout, result.is_ok()));
+                if let Err(why) = &result {
                     eprintln!("ilex-installer: switching the session's layout to {layout}: {why}");
                 }
+                let step = self.flow.keyboard_switched(generation, result);
+                self.carry_out(step, &sender);
             }
         }
         self.announce(root);
+        self.observe();
     }
 
     fn update_view(&self, widgets: &mut Self::Widgets, sender: ComponentSender<Self>) {
@@ -340,10 +419,16 @@ struct Welcome {
     banner: adw::Banner,
     language: adw::ComboRow,
     keyboard: adw::ComboRow,
+    /// Under the layout list: that the compositor is switching, or why it did
+    /// not take the layout.
+    keyboard_message: gtk::Label,
+    keyboard_retry: gtk::Button,
+    keyboard_line: gtk::Box,
     button: gtk::Button,
 }
 
 struct Machine {
+    page: adw::NavigationPage,
     banner: adw::Banner,
     stack: gtk::Stack,
     problem: adw::StatusPage,
@@ -356,6 +441,7 @@ struct Machine {
 
 struct Account {
     page: adw::NavigationPage,
+    banner: adw::Banner,
     name: adw::EntryRow,
     password: adw::PasswordEntryRow,
     confirmation: adw::PasswordEntryRow,
@@ -506,7 +592,12 @@ fn property_row(title: &str) -> adw::ActionRow {
 }
 
 impl Widgets {
-    fn build(root: &adw::ApplicationWindow, flow: &Flow, sender: &ComponentSender<App>) -> Self {
+    fn build(
+        root: &adw::ApplicationWindow,
+        flow: &Flow,
+        sender: &ComponentSender<App>,
+        echo_try: bool,
+    ) -> Self {
         let nav = adw::NavigationView::new();
         root.set_content(Some(&nav));
 
@@ -540,10 +631,24 @@ impl Widgets {
         );
         keyboard_group.add(&keyboard);
         keyboard_group.add(&test);
+        let keyboard_message = message_label();
+        keyboard_message.set_hexpand(true);
+        let keyboard_retry = gtk::Button::with_label("Try again");
+        keyboard_retry.add_css_class("flat");
+        keyboard_retry.set_valign(gtk::Align::Center);
+        keyboard_retry.set_visible(false);
+        let keyboard_line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        keyboard_line.append(&keyboard_message);
+        keyboard_line.append(&keyboard_retry);
+        keyboard_line.set_visible(false);
         let welcome_form = form(
             "Welcome to ilex",
             "This installs ilex on this computer. Nothing is changed until you confirm it on the last page.",
-            &[language_group.upcast_ref(), keyboard_group.upcast_ref()],
+            &[
+                language_group.upcast_ref(),
+                keyboard_group.upcast_ref(),
+                keyboard_line.upcast_ref(),
+            ],
         );
         let welcome_page = page(
             "Welcome",
@@ -599,9 +704,13 @@ impl Widgets {
         // --- account ---
         let name = adw::EntryRow::builder().title("User name").build();
         name.set_input_hints(gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::LOWERCASE);
-        let password = adw::PasswordEntryRow::builder().title("Password").build();
+        let password = adw::PasswordEntryRow::builder()
+            .title("Password")
+            .name("password")
+            .build();
         let confirmation = adw::PasswordEntryRow::builder()
             .title("Confirm the password")
+            .name("confirmation")
             .build();
         let name_message = message_label();
         let password_message = message_label();
@@ -621,10 +730,11 @@ impl Widgets {
                 password_message.upcast_ref(),
             ],
         );
+        let account_banner = banner(None);
         let account_page = page(
             "Administrator",
             PageId::Account.id(),
-            None,
+            Some(&account_banner),
             &account_form,
             Some(&account_button),
         );
@@ -636,8 +746,8 @@ impl Widgets {
         ready_retry.set_halign(gtk::Align::Center);
         ready_problem.set_child(Some(&ready_retry));
         let ready_running = adw::StatusPage::builder()
-            .title("Checking your choices")
-            .description("The installer is asking its helper to check them against this computer and the image registry.")
+            .title(messages::CHECKING_TITLE)
+            .description(messages::CHECKING_DETAIL)
             .child(&adw::Spinner::new())
             .build();
         let summary = group("Your choices", "");
@@ -689,9 +799,17 @@ impl Widgets {
             let input = input.clone();
             move |row| input.emit(Msg::Layout(row.selected()))
         });
-        test.connect_changed({
+        // The layout test field is read only when a test allows its text in a
+        // marker: people type their intended passwords there.
+        if echo_try {
+            test.connect_changed({
+                let input = input.clone();
+                move |row| input.emit(Msg::TryText(secret_of(row)))
+            });
+        }
+        keyboard_retry.connect_clicked({
             let input = input.clone();
-            move |row| input.emit(Msg::TryText(row.text().to_string()))
+            move |_| input.emit(Msg::RetryLayout)
         });
         name.connect_changed({
             let input = input.clone();
@@ -699,13 +817,13 @@ impl Widgets {
         });
         password.connect_changed({
             let input = input.clone();
-            move |row| input.emit(Msg::Password(row.text().to_string()))
+            move |row| input.emit(Msg::Password(secret_of(row)))
         });
         confirmation.connect_changed({
             let input = input.clone();
-            move |row| input.emit(Msg::Confirmation(row.text().to_string()))
+            move |row| input.emit(Msg::Confirmation(secret_of(row)))
         });
-        for banner in [&welcome_banner, &machine_banner] {
+        for banner in [&welcome_banner, &machine_banner, &account_banner] {
             banner.connect_button_clicked({
                 let input = input.clone();
                 move |_| input.emit(Msg::Probe)
@@ -719,7 +837,7 @@ impl Widgets {
         }
         ready_retry.connect_clicked({
             let input = input.clone();
-            move |_| input.emit(Msg::PlanAgain)
+            move |_| input.emit(Msg::Retry)
         });
         // Back (the header bar's button or Escape) pops the page: the flow
         // follows the view.
@@ -770,9 +888,13 @@ impl Widgets {
                 banner: welcome_banner,
                 language,
                 keyboard,
+                keyboard_message,
+                keyboard_retry,
+                keyboard_line,
                 button: welcome_button,
             },
             machine: Machine {
+                page: machine_page.clone(),
                 banner: machine_banner,
                 stack,
                 problem,
@@ -784,6 +906,7 @@ impl Widgets {
             },
             account: Account {
                 page: account_page,
+                banner: account_banner,
                 name,
                 password,
                 confirmation,
@@ -823,20 +946,16 @@ impl Widgets {
         self.sync_machine(flow, sender);
         self.sync_account(flow);
         self.sync_ready(flow);
-        let busy = matches!(flow.plan_check(), PlanCheck::Running);
-        self.account.page.set_can_pop(!busy);
-        self.ready.page.set_can_pop(!busy);
+        // No way back while the helper is asked.
+        let free = !flow.is_checking();
+        self.machine.page.set_can_pop(free);
+        self.account.page.set_can_pop(free);
+        self.ready.page.set_can_pop(free);
     }
 
     fn sync_welcome(&mut self, flow: &Flow) {
         let w = &self.welcome;
-        let problem = flow.blocking_problem();
-        w.banner.set_revealed(problem.is_some());
-        if let Some(problem) = &problem {
-            w.banner.set_title(&sentence(problem));
-            let retry = matches!(flow.probe_state(), ProbeState::Failed(_));
-            w.banner.set_button_label(retry.then_some("Try again"));
-        }
+        sync_banner(&w.banner, flow);
         if let Some(index) = language::index_of(flow.language())
             && w.language.selected() != index as u32
         {
@@ -847,12 +966,32 @@ impl Widgets {
         {
             w.keyboard.set_selected(index as u32);
         }
+        match flow.keyboard_status() {
+            KeyboardStatus::Applied => w.keyboard_line.set_visible(false),
+            KeyboardStatus::Switching => {
+                w.keyboard_message
+                    .set_css_classes(&["caption", "dim-label"]);
+                w.keyboard_message.set_label(messages::SWITCHING_LAYOUT);
+                w.keyboard_message.set_visible(true);
+                w.keyboard_retry.set_visible(false);
+                w.keyboard_line.set_visible(true);
+            }
+            KeyboardStatus::Failed(message) => {
+                w.keyboard_message.set_css_classes(&["caption", "error"]);
+                w.keyboard_message.set_label(&sentence(&message));
+                w.keyboard_message.set_visible(true);
+                w.keyboard_retry.set_visible(true);
+                w.keyboard_line.set_visible(true);
+            }
+        }
+        w.button.set_label(flow.continue_label());
         w.button
             .set_sensitive(flow.page() != PageId::Welcome || flow.can_continue());
     }
 
     fn sync_machine(&mut self, flow: &Flow, sender: &ComponentSender<App>) {
         let m = &mut self.machine;
+        m.button.set_label(flow.continue_label());
         m.button
             .set_sensitive(flow.page() != PageId::Machine || flow.can_continue());
         match (flow.probe_state(), flow.machine_view()) {
@@ -873,12 +1012,22 @@ impl Widgets {
                         check.set_active(tag == selected);
                     }
                 }
+                // A problem that stops the installation (a BIOS boot found
+                // after the person left the first page) comes before the
+                // notice about how the configuration was chosen.
                 let notice = view.notice();
-                let loud = notice.severity != Severity::Info;
-                m.banner.set_title(&sentence(&notice.message));
-                m.banner.set_revealed(loud);
-                m.notice.set_visible(!loud);
-                m.notice.set_label(&sentence(&notice.message));
+                if flow.blocking_problem().is_some() {
+                    sync_banner(&m.banner, flow);
+                    m.notice.set_visible(true);
+                    m.notice.set_label(&sentence(&notice.message));
+                } else {
+                    let loud = notice.severity != Severity::Info;
+                    m.banner.set_title(&sentence(&notice.message));
+                    m.banner.set_button_label(None);
+                    m.banner.set_revealed(loud);
+                    m.notice.set_visible(!loud);
+                    m.notice.set_label(&sentence(&notice.message));
+                }
             }
             (ProbeState::Ready(_), None) => {}
         }
@@ -886,51 +1035,46 @@ impl Widgets {
 
     fn sync_account(&mut self, flow: &Flow) {
         let a = &self.account;
+        sync_banner(&a.banner, flow);
+        // The choices cannot change while the helper checks them.
+        let editable = !flow.is_checking();
+        a.name.set_sensitive(editable);
+        a.password.set_sensitive(editable);
+        a.confirmation.set_sensitive(editable);
+        // The name is not private and may come from the flow (the renderer
+        // sends it as a message). The passwords never do: the fields are
+        // where they are typed, and the flow takes a copy as they change;
+        // reading them here would copy them again on every update.
         if a.name.text() != flow.administrator() {
             a.name.set_text(flow.administrator());
-        }
-        if a.password.text() != flow.password().expose() {
-            a.password.set_text(flow.password().expose());
         }
         let checks = flow.account_checks();
         show_message(
             &a.name_message,
-            &[checks.name.message().cloned()],
+            checks.name.message(),
             &[a.name.upcast_ref()],
-            None,
         );
-        let advice = flow.password_advice();
-        let wording = [
-            checks.password.message().cloned(),
-            checks.confirmation.message().cloned(),
-        ];
-        let rows: [&adw::PasswordEntryRow; 2] = [&a.password, &a.confirmation];
-        // Only a refusal is an error; a hint is dimmed text.
-        if wording.iter().all(Option::is_none) {
-            a.password_message
-                .set_css_classes(&["caption", "dim-label"]);
-            match &advice {
-                Some(advice) => {
-                    a.password_message.set_label(&sentence(advice));
+        let rows: [&gtk::Widget; 2] = [a.password.upcast_ref(), a.confirmation.upcast_ref()];
+        // Only a refusal is an error; a hint is dimmed text, and the rows go
+        // back to valid (the error style and the accessible state) as soon as
+        // there is none.
+        match checks
+            .password
+            .message()
+            .or_else(|| checks.confirmation.message())
+        {
+            Some(refusal) => show_message(&a.password_message, Some(refusal), &rows),
+            None => {
+                show_message(&a.password_message, None, &rows);
+                if let Some(advice) = flow.password_advice() {
+                    a.password_message
+                        .set_css_classes(&["caption", "dim-label"]);
+                    a.password_message.set_label(&sentence(&advice));
                     a.password_message.set_visible(true);
                 }
-                None => a.password_message.set_visible(false),
             }
-            for row in rows {
-                row.remove_css_class("error");
-            }
-        } else {
-            let refused = wording.iter().flatten().next().cloned();
-            show_message(
-                &a.password_message,
-                &[refused],
-                &[a.password.upcast_ref(), a.confirmation.upcast_ref()],
-                None,
-            );
         }
-        let busy = matches!(flow.plan_check(), PlanCheck::Running);
-        a.button
-            .set_label(if busy { "Checking…" } else { "Continue" });
+        a.button.set_label(flow.continue_label());
         a.button
             .set_sensitive(flow.page() != PageId::Account || flow.can_continue());
     }
@@ -943,23 +1087,19 @@ impl Widgets {
                 self.fill_summary(flow, plan);
                 self.ready.stack.set_visible_child_name("checked");
             }
-            PlanCheck::NoDisk(reasons) => {
-                r.problem.set_icon_name(Some("drive-harddisk-symbolic"));
-                r.problem.set_title("No disk can be installed to");
-                r.problem.set_description(Some(&format!(
-                    "{}\n\nConnect a disk of at least {} that nothing is using, then try again.",
-                    reasons.join("\n"),
-                    human_bytes(ilex_installer_model::plan::MIN_DISK_BYTES)
-                )));
-                r.retry.set_visible(true);
-                r.stack.set_visible_child_name("problem");
-            }
-            PlanCheck::Failed(message) => {
-                r.problem.set_icon_name(Some("dialog-error-symbolic"));
-                r.problem.set_title(&message.title);
-                r.problem.set_description(Some(&message.detail));
-                r.retry.set_visible(true);
-                r.stack.set_visible_child_name("problem");
+            PlanCheck::NoDisk(_) | PlanCheck::Failed(_) => {
+                if let Some(message) = flow.check_problem() {
+                    let icon = if matches!(flow.plan_check(), PlanCheck::NoDisk(_)) {
+                        "drive-harddisk-symbolic"
+                    } else {
+                        "dialog-error-symbolic"
+                    };
+                    r.problem.set_icon_name(Some(icon));
+                    r.problem.set_title(&message.title);
+                    r.problem.set_description(Some(&message.detail));
+                    r.retry.set_visible(true);
+                    r.stack.set_visible_child_name("problem");
+                }
             }
         }
     }
@@ -996,16 +1136,11 @@ impl Widgets {
     }
 }
 
-/// Show the first refusal beside its field, and mark the rows: the error
-/// style, and for assistive technology the rows' invalid state with the
-/// message as their error message.
-fn show_message(
-    label: &gtk::Label,
-    messages: &[Option<Message>],
-    rows: &[&gtk::Widget],
-    _hint: Option<&Message>,
-) {
-    let refusal = messages.iter().flatten().next();
+/// Show a refusal beside its field, or hide the label, and mark the rows to
+/// match: the error style, and for assistive technology the rows' invalid
+/// state with the message as their error message. With no refusal every row
+/// goes back to valid, state and relation included.
+fn show_message(label: &gtk::Label, refusal: Option<&Message>, rows: &[&gtk::Widget]) {
     match refusal {
         Some(message) => {
             label.set_css_classes(&["caption", "error"]);
@@ -1030,6 +1165,35 @@ fn show_message(
             )]);
             row.reset_relation(gtk::AccessibleRelation::ErrorMessage);
         }
+    }
+}
+
+/// A page's banner: the problem that stops the installation, with Try again
+/// when asking the helper again can mend it, whichever page the person is on.
+fn sync_banner(banner: &adw::Banner, flow: &Flow) {
+    let problem = flow.blocking_problem();
+    banner.set_revealed(problem.is_some());
+    if let Some(problem) = &problem {
+        banner.set_title(&sentence(problem));
+        banner.set_button_label(flow.can_retry_probe().then_some("Try again"));
+    }
+}
+
+/// The text of a field, copied once from the toolkit's own buffer straight
+/// into a `Secret`: no `String` or `GString` of it is made, so the only
+/// copies are the field's (secure) buffer and a value that is wiped when it is
+/// dropped.
+fn secret_of(row: &impl IsA<gtk::Editable>) -> Secret {
+    let editable: &gtk::Editable = row.upcast_ref();
+    // SAFETY: `gtk_editable_get_text` returns a NUL-terminated string that
+    // the widget owns and keeps valid until its text changes; it is only read
+    // here, before anything can change it.
+    unsafe {
+        let text = gtk::ffi::gtk_editable_get_text(editable.to_glib_none().0);
+        if text.is_null() {
+            return Secret::default();
+        }
+        Secret::from_utf8(CStr::from_ptr(text).to_bytes()).unwrap_or_default()
     }
 }
 
@@ -1071,23 +1235,4 @@ fn rebuild_choices(m: &mut Machine, view: &MachineView, sender: &ComponentSender
         m.group.add(&row);
         m.rows.push((choice.tag.clone(), check, row));
     }
-}
-
-fn meminfo(key: &str) -> String {
-    fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))
-                .and_then(|rest| rest.split_whitespace().next().map(str::to_owned))
-        })
-        .unwrap_or_else(|| "unknown".into())
-}
-
-/// Seconds since boot, from the kernel.
-fn uptime() -> String {
-    fs::read_to_string("/proc/uptime")
-        .ok()
-        .and_then(|text| text.split_whitespace().next().map(str::to_owned))
-        .unwrap_or_else(|| "unknown".into())
 }

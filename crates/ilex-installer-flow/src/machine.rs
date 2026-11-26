@@ -236,10 +236,7 @@ impl MachineView {
             },
             Origin::Chosen { how } => Notice {
                 severity: Severity::Info,
-                message: Message::new(
-                    format!("{} {}", capitalise(how), "by the boot options"),
-                    "The installer started with a configuration already named. Pick another if that was not meant.",
-                ),
+                message: chosen_before_start(how),
             },
             Origin::BadOverride { error } => Notice {
                 severity: Severity::Error,
@@ -264,4 +261,26 @@ pub fn describe_computer(identity: &Identity) -> String {
     pair(&identity.sys_vendor, &identity.product_name)
         .or_else(|| pair(&identity.board_vendor, &identity.board_name))
         .unwrap_or_else(|| "A computer that does not report its model".to_owned())
+}
+
+/// What to say about a configuration that was named before the installer
+/// started. The model's reason says where the name came from, and each source
+/// gets its own sentence: the boot command line's `ilex.composition=`
+/// (`chosen at boot`), or the choice file a chooser or a kickstart wrote
+/// (`chosen in the installer`).
+fn chosen_before_start(how: &str) -> Message {
+    match how {
+        "chosen at boot" => Message::new(
+            "The boot options chose this configuration",
+            "The installer started with ilex.composition= naming it. Pick another if that was not meant.",
+        ),
+        "chosen in the installer" => Message::new(
+            "A choice made before the installer started selected this configuration",
+            "A choice file prepared for this boot names it. Pick another if that was not meant.",
+        ),
+        other => Message::new(
+            format!("{} before the installer started", capitalise(other)),
+            "Pick another configuration if that was not meant.",
+        ),
+    }
 }

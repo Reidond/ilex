@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ilex_installer_flow::backend::{Backend, DbusBackend};
 use ilex_installer_flow::keyboard::{Layouts, SessionKeyboard, Sources};
+use ilex_installer_flow::markers;
 use ilex_installer_flow::simulate::Simulated;
 use relm4::prelude::*;
 
@@ -39,6 +40,10 @@ pub fn run(launch: Launch) -> Result<()> {
         edition: launch.edition.unwrap_or_else(|| "gnome".to_owned()),
         markers: true,
         stats: true,
+        // The layout test field's text may be printed only for a test: the
+        // fixed credential, or a simulated session (no real person types).
+        echo_try: launch.simulate.is_some() || markers::echo_allowed(),
+        observer: None,
     };
     // The command line is ours, not GTK's.
     RelmApp::new(APP_ID)

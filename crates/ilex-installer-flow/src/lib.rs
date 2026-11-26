@@ -6,7 +6,9 @@
 //! What lives here:
 //!
 //! * [`flow`]: the pages in order, what each needs before Continue works, what
-//!   Continue does ([`flow::Flow`], a state machine with no I/O).
+//!   Continue does ([`flow::Flow`], a state machine with no I/O). Every rule an
+//!   interface follows is here: answers to the helper and the compositor are
+//!   numbered, stale ones are ignored, the layout switch is serialised.
 //! * [`backend`]: the root helper as a trait ([`backend::Backend`]), with the
 //!   real implementation over D-Bus (`org.ilex.Installer1`, Linux) and
 //!   [`simulate::Simulated`], which answers from JSON fixtures.
@@ -14,6 +16,7 @@
 //!   rules of the pages made of what the helper reports and what the live image
 //!   ships.
 //! * [`messages`]: every sentence a refusal or a failure becomes, in one place.
+//! * [`markers`]: the serial-console lines the trials assert on, in one place.
 //! * [`progress`]: the installation's stages as rows, from the helper's state.
 //! * [`selfcheck`]: the rules exercised on the fixtures, for `--self-check`.
 //!
@@ -27,6 +30,7 @@ pub mod flow;
 pub mod keyboard;
 pub mod language;
 pub mod machine;
+pub mod markers;
 pub mod messages;
 pub mod progress;
 pub mod secret;

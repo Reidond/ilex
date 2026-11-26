@@ -15,7 +15,7 @@
 
 use crate::messages::ClientError;
 use crate::secret::Secret;
-use ilex_installer_model::plan::{Plan, PlanError, PlanRequest};
+use ilex_installer_model::plan::{Plan, PlanRequest};
 use ilex_installer_model::probe::Probe;
 use ilex_installer_model::state::{Outcome, Stage, State};
 
@@ -80,11 +80,12 @@ pub enum Report {
 }
 
 #[cfg(target_os = "linux")]
-pub use dbus::DbusBackend;
+pub use dbus::{DbusBackend, classify_bus_error};
 
 #[cfg(target_os = "linux")]
 mod dbus {
     use super::*;
+    use ilex_installer_model::plan::PlanError;
     use std::sync::Mutex;
     use zbus::{Connection, Proxy};
 
@@ -167,43 +168,57 @@ mod dbus {
     }
 
     /// The helper's refusals carry a `PlanError` document as the error's
-    /// message; the bus's own errors say the helper is not there or does not
-    /// accept this user.
+    /// message; the bus's own errors say the helper is not there, does not
+    /// accept this user, or that the connection is gone.
     fn map_error(error: zbus::Error) -> ClientError {
-        use zbus::fdo::Error as Fdo;
+        use zbus::DBusError;
         match &error {
             zbus::Error::MethodError(name, description, _) => {
-                let description = description.clone().unwrap_or_default();
-                if name.as_str().starts_with(ERROR_PREFIX) {
-                    return match serde_json::from_str::<PlanError>(&description) {
-                        Ok(refusal) => ClientError::Refused(refusal),
-                        Err(_) => ClientError::Other(format!(
-                            "{}: {description}",
-                            name.as_str().trim_start_matches(ERROR_PREFIX)
-                        )),
-                    };
-                }
-                match name.as_str() {
-                    "org.freedesktop.DBus.Error.AccessDenied" => {
-                        ClientError::AccessDenied(description)
-                    }
-                    "org.freedesktop.DBus.Error.ServiceUnknown"
-                    | "org.freedesktop.DBus.Error.NameHasNoOwner"
-                    | "org.freedesktop.DBus.Error.NoReply" => {
-                        ClientError::HelperUnavailable(format!("{}: {description}", name.as_str()))
-                    }
-                    other => ClientError::Other(format!("{other}: {description}")),
-                }
+                classify_bus_error(name.as_str(), description.clone().unwrap_or_default())
             }
-            zbus::Error::FDO(fdo) => match &**fdo {
-                Fdo::AccessDenied(why) => ClientError::AccessDenied(why.clone()),
-                Fdo::ServiceUnknown(why) | Fdo::NameHasNoOwner(why) | Fdo::NoReply(why) => {
-                    ClientError::HelperUnavailable(why.clone())
-                }
-                other => ClientError::Other(other.to_string()),
-            },
+            zbus::Error::FDO(fdo) => classify_bus_error(
+                fdo.name().as_str(),
+                fdo.description().unwrap_or_default().to_owned(),
+            ),
             zbus::Error::InputOutput(_) => ClientError::HelperUnavailable(error.to_string()),
             _ => ClientError::Other(error.to_string()),
+        }
+    }
+
+    /// What a D-Bus error name means to the interface. The helper's own
+    /// refusals (`org.ilex.Installer1.Error.*`) carry the model's document;
+    /// everything that says the helper or the bus is not there (not started,
+    /// gone, disconnected, timed out, could not be started on demand by the
+    /// bus or systemd) is [`ClientError::HelperUnavailable`], which also makes
+    /// the backend connect afresh next time.
+    pub fn classify_bus_error(name: &str, description: String) -> ClientError {
+        if let Some(code) = name.strip_prefix(ERROR_PREFIX) {
+            return match serde_json::from_str::<PlanError>(&description) {
+                Ok(refusal) => ClientError::Refused(refusal),
+                Err(_) => ClientError::Other(format!("{code}: {description}")),
+            };
+        }
+        match name {
+            "org.freedesktop.DBus.Error.AccessDenied" | "org.freedesktop.DBus.Error.AuthFailed" => {
+                ClientError::AccessDenied(description)
+            }
+            "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NameHasNoOwner"
+            | "org.freedesktop.DBus.Error.NoReply"
+            | "org.freedesktop.DBus.Error.Disconnected"
+            | "org.freedesktop.DBus.Error.TimedOut"
+            | "org.freedesktop.DBus.Error.Timeout"
+            | "org.freedesktop.DBus.Error.NoServer" => {
+                ClientError::HelperUnavailable(format!("{name}: {description}"))
+            }
+            // The bus could not start the helper (`Spawn.*`), or systemd,
+            // which the bus asks to, could not (`org.freedesktop.systemd1.*`).
+            _ if name.starts_with("org.freedesktop.DBus.Error.Spawn.")
+                || name.starts_with("org.freedesktop.systemd1.") =>
+            {
+                ClientError::HelperUnavailable(format!("{name}: {description}"))
+            }
+            other => ClientError::Other(format!("{other}: {description}")),
         }
     }
 }
