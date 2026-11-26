@@ -64,9 +64,12 @@ rpm = ["kdegraphics-thumbnailers", "ffmpegthumbs", "desktop-file-utils", "xdg-ut
 # The GTK 3 themes sandboxed GTK 3 applications resolve in Plasma: the portal's
 # gtk-theme names Breeze or Breeze-Dark and GTK 3 cannot take a dark variant of
 # one theme from the portal. Breeze-Dark is end of life on Flathub ("replaced by
-# org.gtk.Gtk3theme.Breeze", whose dark variant needs a gtk-3.0 file shared with
-# every desktop); it still installs, its palette is Plasma 5's. Libadwaita and
-# GTK 4 applications need neither.
+# org.gtk.Gtk3theme.Breeze"), whose dark colours (gtk-dark.css) GTK 3 loads only
+# for gtk-application-prefer-dark-theme: a gtk-3.0/settings.ini that every
+# desktop of the home would read, which the settings portal does not carry. The
+# old extension still installs and is kept while `graphical::apps` shows that
+# with Breeze alone a GTK 3 Flatpak stays light in a dark Plasma; its palette is
+# Plasma 5's. Libadwaita and GTK 4 applications need neither.
 [[apps.flatpak-extension]]
 id = "org.gtk.Gtk3theme.Breeze"
 branch = "3.22"
