@@ -136,8 +136,39 @@ fn run(options: Options) -> Result<()> {
             simulate::ALLOW_ENV
         );
     }
+    harden();
     window(&options, simulated)
 }
+
+/// The interface holds what the person types, among it the administrator's
+/// password: no core file of it (the session unit also sets `LimitCORE=0`),
+/// and no other process of the same user can attach to it or read its memory.
+/// Called before the window exists, so that nothing is typed first.
+#[cfg(target_os = "linux")]
+fn harden() {
+    // SAFETY: plain libc calls with constant arguments and a local struct.
+    unsafe {
+        let none = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::setrlimit(libc::RLIMIT_CORE, &none) != 0 {
+            eprintln!(
+                "ilex-installer: no core dump limit: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
+            eprintln!(
+                "ilex-installer: not dumpable: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn harden() {}
 
 #[cfg(all(target_os = "linux", feature = "gui"))]
 fn window(options: &Options, simulated: Option<String>) -> Result<()> {
@@ -168,7 +199,7 @@ fn self_check(options: &Options) -> Result<()> {
             "{}",
             serde_json::json!({"edition": edition, "flow": flow, "keyboard": keyboard})
         );
-        serial::marker("ILEX-INSTALLER-SELFCHECK ok");
+        serial::marker(ilex_installer_flow::markers::SELF_CHECK_OK);
         return Ok(());
     };
     // A catalogue the container lacks is reported, not fatal: the pages are
