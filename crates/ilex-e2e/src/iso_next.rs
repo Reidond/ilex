@@ -1035,8 +1035,11 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     //    directory, and the next attempt must come up on the first try.
     vm.ssh_ok(KILL_COMPOSITOR)?;
     let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 2, PAGE_TIMEOUT)?;
+    // The script reports whichever child it sees end first: the killed
+    // compositor (137), or the client that lost its display and exited (1).
     ensure!(
-        session_ended(&console, "compositor", Some("137")),
+        session_ended(&console, "compositor", Some("137"))
+            || session_ended(&console, "installer", Some("1")),
         "the session did not report the compositor's death: {console}"
     );
     ensure!(
@@ -1054,8 +1057,9 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     // 3. The client dies: the compositor is stopped with it and both return.
     vm.ssh_ok(KILL_INSTALLER)?;
     let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 3, PAGE_TIMEOUT)?;
+    // The compositor outlives its client, so here the client is always first.
     ensure!(
-        session_ended(&console, "installer", None),
+        session_ended(&console, "installer", Some("137")),
         "the session did not report the installer's death: {console}"
     );
     wait_page(vm, &ctl, artifacts, "restart")?;
