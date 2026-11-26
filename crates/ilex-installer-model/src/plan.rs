@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const PLAN_SCHEMA: u32 = 1;
-/// How long Apply (a later PR) accepts a plan.
+/// How long Apply accepts a plan.
 pub const PLAN_VALID_SECONDS: u64 = 15 * 60;
 
 const MIB: u64 = 1024 * 1024;
@@ -309,6 +309,37 @@ pub fn is_reserved_user(name: &str) -> bool {
     RESERVED_USERS.contains(&name) || name.starts_with("systemd-")
 }
 
+/// What `SetSecret` carries. The value crosses as a sealed memfd, never as a
+/// message string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecretKind {
+    /// The disk's passphrase (encryption, a later PR).
+    DiskPassphrase,
+    /// The maintenance administrator's password.
+    AdminPassword,
+}
+
+impl SecretKind {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "disk-passphrase" => Some(Self::DiskPassphrase),
+            "admin-password" => Some(Self::AdminPassword),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DiskPassphrase => "disk-passphrase",
+            Self::AdminPassword => "admin-password",
+        }
+    }
+}
+
+/// The most a secret may hold (a sealed memfd of this size or less).
+pub const SECRET_MAX_BYTES: usize = 4096;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
@@ -333,6 +364,23 @@ pub enum ErrorCode {
     ImageNotFound,
     /// `systemd-repart` refused the layout.
     Repart,
+    /// Apply names a plan the helper does not know (it forgets its plans when
+    /// it restarts, and keeps the latest eight).
+    UnknownPlan,
+    /// The plan is older than [`PLAN_VALID_SECONDS`].
+    PlanExpired,
+    /// The disk is not the one the plan describes: another device answers to
+    /// its id or the partitions on it changed since the plan was made.
+    DiskChanged,
+    /// A secret the plan needs has not been supplied (`SetSecret`).
+    MissingSecret,
+    /// The secret's file descriptor, kind or content is not acceptable.
+    InvalidSecret,
+    /// An installation is running; probing, planning and applying wait for it.
+    InstallationActive,
+    /// The image's signature does not verify against the shipped key and
+    /// policy, or there is none: nothing was written.
+    Signature,
     Internal,
 }
 

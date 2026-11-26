@@ -611,5 +611,53 @@ password = "hunter2"
             "answers with a bad {name} were accepted"
         );
     }
-    Ok("table rules, editions, detection, selection, requests, answers".into())
+
+    // What Apply adds: secrets by kind, the new refusals' names on the wire,
+    // the stages in order, and a state document an older helper wrote.
+    use crate::plan::{SECRET_MAX_BYTES, SecretKind};
+    use crate::state::{Outcome, Stage, State};
+    ensure!(
+        SecretKind::parse("admin-password") == Some(SecretKind::AdminPassword)
+            && SecretKind::parse("disk-passphrase") == Some(SecretKind::DiskPassphrase)
+            && SecretKind::parse("root-password").is_none()
+            && SecretKind::parse("").is_none()
+            && [SecretKind::AdminPassword, SecretKind::DiskPassphrase]
+                .iter()
+                .all(|k| SecretKind::parse(k.name()) == Some(*k))
+            && SECRET_MAX_BYTES >= 1024,
+        "secret kinds"
+    );
+    for (code, name) in [
+        (ErrorCode::UnknownPlan, "unknown-plan"),
+        (ErrorCode::PlanExpired, "plan-expired"),
+        (ErrorCode::DiskChanged, "disk-changed"),
+        (ErrorCode::MissingSecret, "missing-secret"),
+        (ErrorCode::InvalidSecret, "invalid-secret"),
+        (ErrorCode::InstallationActive, "installation-active"),
+        (ErrorCode::Signature, "signature"),
+    ] {
+        ensure!(
+            serde_json::to_value(code)? == json!(name),
+            "the wire name of {code:?}"
+        );
+    }
+    ensure!(
+        Stage::UNENCRYPTED.windows(2).all(|w| w[0] < w[1])
+            && Stage::UNENCRYPTED.iter().all(|s| s.name() == serde_json::to_value(s).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()),
+        "the stages are not in order or their names are not their wire names"
+    );
+    let old: State = serde_json::from_value(json!({
+        "schema": 1, "stage": "idle", "plan": null, "progress": 0.0,
+        "message": "", "outcome": null, "updated": 1
+    }))?;
+    ensure!(
+        old == State::idle(1),
+        "a state document from before Apply does not read as an idle one"
+    );
+    ensure!(
+        serde_json::to_value(Outcome::Failed { stage: Stage::Image, reason: "x".into() })?
+            == json!({"result": "failed", "stage": "image", "reason": "x"}),
+        "the outcome's wire form"
+    );
+    Ok("table rules, editions, detection, selection, requests, answers, secrets, stages".into())
 }
