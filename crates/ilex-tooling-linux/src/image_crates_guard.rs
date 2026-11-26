@@ -8,6 +8,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The declaration of what the root image builds, and the script that builds it
 /// from that declaration. The Containerfile's builder stage runs the script and
@@ -347,11 +348,13 @@ fn check_containerfile(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// The build script's execution part, pinned verbatim: from the line below to
-/// the end of the file. Whatever builds, stages or runs a program is in it, so
-/// an edit there is an edit of this file too (comments and blank lines aside).
+/// The build script's pinned part, verbatim: from the line below to the end of
+/// the file. How the declaration is read (`declared`), whatever makes a cargo
+/// argv, builds, stages or runs a program is in it, so an edit there is an edit
+/// of this file too (comments and blank lines aside). Above it stay the two
+/// lists a routine edit changes (`BINARIES`, `COMPLETIONS`).
 const PINNED_SCRIPT_TAIL: &str = include_str!("build-image-crates.pinned.py");
-const SCRIPT_TAIL_START: &str = "def cargo_commands(builds):";
+const SCRIPT_TAIL_START: &str = r#"PACKAGE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")"#;
 
 /// The only imports of the script before its pinned part: no `runpy`,
 /// `importlib`, `ctypes`, `pty` or `shlex`, nothing that loads code or reaches
@@ -411,18 +414,21 @@ fn code_lines(text: &str) -> Vec<(usize, &str)> {
 /// Fails unless the script builds exactly what [`DECLARATION`] declares and
 /// cannot run anything else:
 ///
-/// - from `def cargo_commands` to the end it is [`PINNED_SCRIPT_TAIL`] (code
-///   lines compared, so comments and blank lines are free). That part makes
-///   every cargo argv in one function, starts cargo at one place, scrubs its
-///   environment, refuses a visible cargo configuration, and holds every other
-///   program the script runs (kache, `install`, the completions);
-/// - before it, the script has only [`SCRIPT_IMPORTS`], no toolchain word
-///   outside comments and none of [`SCRIPT_HEAD_FORBIDDEN`].
+/// - from the `PACKAGE = re.compile(...)` line to the end it is
+///   [`PINNED_SCRIPT_TAIL`] (code lines compared, so comments and blank lines
+///   are free). That part reads the declaration, makes every cargo argv in one
+///   function, starts cargo at one place, scrubs its environment, refuses a
+///   visible cargo configuration, and holds every other program the script
+///   runs (kache, `install`, the completions);
+/// - before it, the script has only [`SCRIPT_IMPORTS`], the two lists a routine
+///   edit changes, no toolchain word outside comments and none of
+///   [`SCRIPT_HEAD_FORBIDDEN`].
 ///
-/// What these lines cannot see (a change to the declaration's reading that
-/// still prints the right argv) is checked by running the script:
+/// What these lines cannot see (a line before the pinned part that rebinds
+/// something the pinned part calls) is checked by running the script:
 /// [`check_script_commands`], [`check_script_environment`] and
-/// [`check_script_configs`].
+/// [`check_script_configs`], which [`derived_image_builds`] runs on every
+/// derivation of the closure.
 fn check_build_script(text: &str) -> Result<()> {
     let lines: Vec<&str> = text.lines().collect();
     let starts: Vec<usize> = lines
@@ -543,9 +549,10 @@ fn build_files(root: &Path) -> Result<Vec<(String, String)>> {
     Ok(files)
 }
 
-/// The packages the root image builds: the declaration, after the guards have
-/// checked that the Containerfile, the script and `build/` build nothing else.
-pub(crate) fn image_builds(root: &Path) -> Result<Vec<CargoBuild>> {
+/// The packages the root image builds: the declaration, after the text guards
+/// have checked that the Containerfile, the script and `build/` build nothing
+/// else. [`derived_image_builds`] adds what running the script shows.
+fn image_builds(root: &Path) -> Result<Vec<CargoBuild>> {
     let read = |path: &str| {
         std::fs::read_to_string(root.join(path)).with_context(|| format!("reading {path}"))
     };
@@ -553,6 +560,31 @@ pub(crate) fn image_builds(root: &Path) -> Result<Vec<CargoBuild>> {
     check_build_script(&read(BUILD_SCRIPT)?).with_context(|| BUILD_SCRIPT.to_owned())?;
     check_build_files(&build_files(root)?).context("build/")?;
     parse_declaration(&read(DECLARATION)?).with_context(|| DECLARATION.to_owned())
+}
+
+/// The packages the root image builds, as every keyless derivation of its crate
+/// closure needs them (`ilexctl changed`, `build`, `info --image-crates`,
+/// `build-publisher.sh`): [`image_builds`], then the script run for real in
+/// its three printing modes ([`check_script_run`]). The text guards alone
+/// cannot see a line before the pinned part that rebinds what the pinned part
+/// calls, and a script check that only `ilexctl doctor --self-check` runs is
+/// one CI never reaches. Runs python3, not cargo; the signing process never
+/// gets here (it reads the recorded closure).
+pub(crate) fn derived_image_builds(root: &Path) -> Result<Vec<CargoBuild>> {
+    let scratch = Scratch::create("ilex-image-script")?;
+    derived_image_builds_in(root, &scratch.0)
+}
+
+fn derived_image_builds_in(root: &Path, scratch: &Path) -> Result<Vec<CargoBuild>> {
+    let builds = image_builds(root)?;
+    check_script_run(
+        &root.join(BUILD_SCRIPT),
+        &root.join(DECLARATION),
+        &builds,
+        scratch,
+    )
+    .with_context(|| format!("running {BUILD_SCRIPT}"))?;
+    Ok(builds)
 }
 
 /// The builder stage of the fixtures: the real Containerfile's, with other
@@ -966,11 +998,17 @@ fn containerfile_fixtures() -> Vec<GuardFixture> {
     fixtures
 }
 
+/// What `--commands` shows when the script prints other commands than the
+/// declaration implies.
+const COMMANDS_DIFFER: &str = "the declaration implies exactly";
+
 /// The one thing a text check cannot see, or a check that runs the script.
 #[derive(Clone, Copy)]
 enum Via {
     /// The text check must refuse it.
     Text,
+    /// The text check refuses it, and `--commands` shows it too: two layers.
+    TextAndCommands,
     /// The text check accepts it, and `--commands` shows what it builds.
     Blind,
     /// `--commands` must show what the declaration does not imply.
@@ -997,23 +1035,27 @@ fn fx(name: &'static str, text: String, via: Via, expect: Option<String>) -> Scr
     }
 }
 
+/// `script` with its one occurrence of `from` replaced; a fixture's anchor that
+/// moved is a failed check, not a silently weaker one.
+fn replace_once(script: &str, from: &str, to: &str) -> Result<String> {
+    ensure!(
+        script.matches(from).count() == 1,
+        "script fixture anchor `{from}` must occur exactly once in {BUILD_SCRIPT}; change the fixtures with the script"
+    );
+    Ok(script.replacen(from, to, 1))
+}
+
 /// Fixtures for the build script, each a one-place change of the real script
 /// (every anchor must occur exactly once, so a rewrite of the script that
 /// moves one is a failed check, not a silently weaker one). A refusal names
 /// the line that was changed.
 fn script_fixtures(script: &str) -> Result<Vec<ScriptFixture>> {
-    let swap = |from: &str, to: &str| -> Result<String> {
-        ensure!(
-            script.matches(from).count() == 1,
-            "script fixture anchor `{from}` must occur exactly once in {BUILD_SCRIPT}; change the fixtures with the script"
-        );
-        Ok(script.replacen(from, to, 1))
-    };
+    let swap = |from: &str, to: &str| replace_once(script, from, to);
     // A line before the pinned part, and one after the command is built.
     let head = |line: &str| {
         swap(
-            "def cargo_commands(builds):\n",
-            &format!("{line}\n\n\ndef cargo_commands(builds):\n"),
+            &format!("{SCRIPT_TAIL_START}\n"),
+            &format!("{line}\n\n\n{SCRIPT_TAIL_START}\n"),
         )
     };
     let in_argv = |line: &str| {
@@ -1024,7 +1066,6 @@ fn script_fixtures(script: &str) -> Result<Vec<ScriptFixture>> {
     };
     let found = |line: &str| Some(format!("found `{line}`"));
     let some = |text: &str| Some(text.to_owned());
-    const COMMANDS: &str = "the declaration implies exactly";
     let mut fixtures = vec![
         fx("the real script", script.to_owned(), Via::Text, None),
         fx(
@@ -1034,8 +1075,8 @@ fn script_fixtures(script: &str) -> Result<Vec<ScriptFixture>> {
                 "    # cargo build --workspace is not run here\n\n    commands = []\n",
             )?
             .replacen(
-                "PACKAGE = ",
-                "# cargo build -p evil (a comment)\n\n\nPACKAGE = ",
+                SCRIPT_TAIL_START,
+                &format!("# cargo build -p evil (a comment)\n\n\n{SCRIPT_TAIL_START}"),
                 1,
             ),
             Via::Text,
@@ -1121,7 +1162,7 @@ fn script_fixtures(script: &str) -> Result<Vec<ScriptFixture>> {
         ("an extra -p (printed)", extra_package),
         ("--target (printed)", target),
     ] {
-        fixtures.push(fx(name, text, Via::Commands, some(COMMANDS)));
+        fixtures.push(fx(name, text, Via::Commands, some(COMMANDS_DIFFER)));
     }
 
     // The text before the pinned part.
@@ -1192,36 +1233,72 @@ fn script_fixtures(script: &str) -> Result<Vec<ScriptFixture>> {
         Via::Text,
         Some(format!("`{flags}` names cargo, rustc")),
     ));
-    let keys = "KEYS = {\"packages\", \"no-default-features\"}";
-    let commented = format!("{keys}  # cargo build -p evil");
+    let list = "COMPLETIONS = [";
+    let commented = format!("{list}  # cargo build -p evil");
     fixtures.push(fx(
         "the toolchain's name in a trailing comment",
-        swap(&format!("{keys}\n"), &format!("{commented}\n"))?,
+        swap(&format!("{list}\n"), &format!("{commented}\n"))?,
         Via::Text,
         Some(format!("`{commented}` names cargo, rustc")),
     ));
     fixtures.push(fx(
         "the pinned part's start line twice",
-        format!("{script}\ndef cargo_commands(builds):\n"),
+        format!("{script}\n{SCRIPT_TAIL_START}\n"),
         Via::Text,
         some("exactly once"),
     ));
-
-    // Invisible to the text: what the declaration reading does at run time.
     fixtures.push(fx(
-        "a build appended while reading the declaration",
-        swap(
-            "    return builds\n",
-            "    builds.append({\"packages\": [\"evil\"], \"no-default-features\": False})\n    return builds\n",
-        )?,
-        Via::Blind,
-        some(COMMANDS),
+        "the pinned part's start line edited (a looser package pattern)",
+        swap(SCRIPT_TAIL_START, "PACKAGE = re.compile(r\".+\")")?,
+        Via::Text,
+        some("exactly once (found 0)"),
     ));
+
+    // How the declaration is read is in the pinned part: the text refuses each
+    // edit of it, and running the script shows the same difference.
+    let reading = "        flag = entry.get(\"no-default-features\", False)";
+    let underscore = "        flag = entry.get(\"no_default_features\", False)";
+    let appended = "    builds.append({\"packages\": [\"evil\"], \"no-default-features\": False})";
+    let widened = "KEYS = {\"packages\", \"no-default-features\", \"features\"}";
+    for (name, text, line) in [
+        (
+            "the declaration's flag read under another key",
+            swap(&format!("{reading}\n"), &format!("{underscore}\n"))?,
+            underscore,
+        ),
+        (
+            "a build appended while reading the declaration",
+            swap(
+                "    return builds\n",
+                &format!("{appended}\n    return builds\n"),
+            )?,
+            appended,
+        ),
+        (
+            "the declaration's builds in another order",
+            swap("    return builds\n", "    return builds[::-1]\n")?,
+            "    return builds[::-1]",
+        ),
+    ] {
+        fixtures.push(fx(name, text, Via::TextAndCommands, found(line)));
+    }
     fixtures.push(fx(
-        "the declaration's builds in another order",
-        swap("    return builds\n", "    return builds[::-1]\n")?,
+        "another key allowed in the declaration",
+        swap(
+            "KEYS = {\"packages\", \"no-default-features\"}\n",
+            &format!("{widened}\n"),
+        )?,
+        Via::Text,
+        found(widened),
+    ));
+    // Invisible to the text: a line before the pinned part that rebinds what
+    // the pinned part calls. Only running the script shows it.
+    let rebound = "tomllib.load = lambda file: {\"build\": [{\"packages\": [\"evil\"]}]}";
+    fixtures.push(fx(
+        "the declaration's reader rebound before the pinned part",
+        head(rebound)?,
         Via::Blind,
-        some(COMMANDS),
+        some(COMMANDS_DIFFER),
     ));
 
     // The environment.
@@ -1431,6 +1508,21 @@ fn check_script_configs(script: &Path, scratch: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The script in its three printing modes, for the real declaration: the argv
+/// the declaration implies, a scrubbed environment, every cargo configuration
+/// seen. A few python3 runs (about 0.2 s); `scratch` holds the configuration
+/// probes.
+fn check_script_run(
+    script: &Path,
+    declaration: &Path,
+    builds: &[CargoBuild],
+    scratch: &Path,
+) -> Result<()> {
+    check_script_commands(script, declaration, builds)?;
+    check_script_environment(script)?;
+    check_script_configs(script, &scratch.join("configs"))
+}
+
 fn run_script_fixture(
     fixture: &ScriptFixture,
     scratch: &Path,
@@ -1443,6 +1535,16 @@ fn run_script_fixture(
     let declaration = root.join(DECLARATION);
     match fixture.via {
         Via::Text => check_build_script(&fixture.text),
+        Via::TextAndCommands => {
+            let shown = check_script_commands(&path, &declaration, builds);
+            ensure!(
+                shown
+                    .as_ref()
+                    .is_err_and(|error| format!("{error:#}").contains(COMMANDS_DIFFER)),
+                "fixture error: running the script must show this edit too, got {shown:?}"
+            );
+            check_build_script(&fixture.text)
+        }
         Via::Blind => {
             check_build_script(&fixture.text).context(
                 "fixture error: this one must pass the text check, only running the script can see it",
@@ -1453,6 +1555,75 @@ fn run_script_fixture(
         Via::Environment => check_script_environment(&path),
         Via::Configs => check_script_configs(&path, &scratch.join(format!("configs-{index}"))),
     }
+}
+
+/// `(name, script, None to accept or Some(text) the refusal must contain)`:
+/// scripts for [`derived_image_builds`], the check every keyless derivation of
+/// the closure runs (`changed`, `build`, `info --image-crates`,
+/// `build-publisher.sh`), not only `doctor --self-check`.
+type DerivedFixture = (&'static str, String, Option<String>);
+
+fn derived_fixtures(script: &str) -> Result<Vec<DerivedFixture>> {
+    let swap = |from: &str, to: &str| replace_once(script, from, to);
+    let found = |line: &str| Some(format!("found `{line}`"));
+    let before_pinned = |line: &str| {
+        swap(
+            &format!("{SCRIPT_TAIL_START}\n"),
+            &format!("{line}\n\n\n{SCRIPT_TAIL_START}\n"),
+        )
+    };
+    let underscore = "        flag = entry.get(\"no_default_features\", False)";
+    let appended = "    builds.append({\"packages\": [\"evil\"], \"no-default-features\": False})";
+    Ok(vec![
+        ("the real script", script.to_owned(), None),
+        (
+            "a binary added to BINARIES (a routine edit)",
+            swap(
+                "    (\"drupe-enter\", \"/usr/libexec/drupe/drupe-enter\"),\n",
+                "    (\"drupe-enter\", \"/usr/libexec/drupe/drupe-enter\"),\n    (\"ilex-extra\", \"/usr/bin/ilex-extra\"),\n",
+            )?,
+            None,
+        ),
+        (
+            "the declaration's flag read under another key (ilexctl would build with its default features)",
+            swap(
+                "        flag = entry.get(\"no-default-features\", False)\n",
+                &format!("{underscore}\n"),
+            )?,
+            found(underscore),
+        ),
+        (
+            "a build appended while reading the declaration",
+            swap(
+                "    return builds\n",
+                &format!("{appended}\n    return builds\n"),
+            )?,
+            found(appended),
+        ),
+        (
+            "the declaration's reader rebound before the pinned part (the run shows it)",
+            before_pinned("tomllib.load = lambda file: {\"build\": [{\"packages\": [\"evil\"]}]}")?,
+            Some(COMMANDS_DIFFER.to_owned()),
+        ),
+        (
+            "the configuration probe rebound before the pinned part (the run shows it)",
+            before_pinned("os.path.lexists = lambda path: False")?,
+            Some("is not listed".to_owned()),
+        ),
+    ])
+}
+
+/// [`derived_image_builds_in`] over a scratch checkout of the real
+/// Containerfile and declaration with `script` as the build script.
+fn run_derived_fixture(root: &Path, scratch: &Path, index: usize, script: &str) -> Result<()> {
+    let checkout = scratch.join(format!("derived-{index}"));
+    std::fs::create_dir_all(checkout.join("build"))?;
+    for path in ["Containerfile", DECLARATION] {
+        std::fs::copy(root.join(path), checkout.join(path))
+            .with_context(|| format!("copying {path}"))?;
+    }
+    std::fs::write(checkout.join(BUILD_SCRIPT), script)?;
+    derived_image_builds_in(&checkout, &checkout.join("run")).map(|_| ())
 }
 
 /// `(name, files of build/, None to accept or Some(text) the refusal must
@@ -1627,6 +1798,25 @@ fn declaration_fixtures() -> Vec<(&'static str, &'static str, Option<&'static st
 }
 
 pub(crate) struct Scratch(pub(crate) PathBuf);
+impl Scratch {
+    /// A new directory under the temporary one, canonical (the script prints
+    /// the working directory with links resolved), removed on drop.
+    fn create(label: &str) -> Result<Scratch> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "{label}-{}-{unique}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&directory)?;
+        let mut scratch = Scratch(directory);
+        scratch.0 = std::fs::canonicalize(&scratch.0)?;
+        Ok(scratch)
+    }
+}
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -1650,7 +1840,13 @@ pub(crate) fn self_check(
     )?;
     let script = std::fs::read_to_string(root.join(BUILD_SCRIPT))
         .with_context(|| format!("reading {BUILD_SCRIPT}"))?;
-    let real = image_builds(root)?;
+    // The checkout's own files pass what every keyless derivation runs: the
+    // text guards, then the real script's `--commands` (exactly the argv the
+    // declaration implies), `--environment` (with `RUSTFLAGS`,
+    // `CARGO_BUILD_TARGET` and 14 other variables planted) and `--configs`
+    // (a configuration planted in the working directory, a parent and cargo's
+    // home).
+    let real = derived_image_builds_in(root, &scratch.join("real-run"))?;
     let fixtures = script_fixtures(&script)?;
     let (script_accepted, script_refused) = run_guard_fixtures(
         "build script",
@@ -1661,6 +1857,20 @@ pub(crate) fn self_check(
                 fixture.expect.as_deref(),
             )
         }),
+    )?;
+    let derived = derived_fixtures(&script)?;
+    let (derived_accepted, derived_refused) = run_guard_fixtures(
+        "derivation",
+        derived
+            .iter()
+            .enumerate()
+            .map(|(index, (name, text, expect))| {
+                (
+                    *name,
+                    run_derived_fixture(root, &scripts, index, text),
+                    expect.as_deref(),
+                )
+            }),
     )?;
     let (declaration_accepted, declaration_refused) = run_guard_fixtures(
         "declaration",
@@ -1674,18 +1884,13 @@ pub(crate) fn self_check(
             .iter()
             .map(|(name, files, expect)| (*name, check_build_files(files), *expect)),
     )?;
-    // The checkout's own files pass the guards (`image_builds` above), and
-    // the real script prints the argv the declaration implies, starts cargo
-    // with a scrubbed environment and sees every cargo configuration.
-    let real_script = root.join(BUILD_SCRIPT);
-    check_script_commands(&real_script, &root.join(DECLARATION), &real)?;
-    check_script_environment(&real_script)?;
-    check_script_configs(&real_script, &scratch.join("real-configs"))?;
     let report = serde_json::json!({
         "containerfile_fixtures_accepted": containerfile_accepted,
         "containerfile_fixtures_refused": containerfile_refused,
         "build_script_fixtures_accepted": script_accepted,
         "build_script_fixtures_refused": script_refused,
+        "derivation_fixtures_accepted": derived_accepted,
+        "derivation_fixtures_refused": derived_refused,
         "declaration_fixtures_accepted": declaration_accepted,
         "declaration_fixtures_refused": declaration_refused,
         "build_files_fixtures_accepted": build_files_accepted,

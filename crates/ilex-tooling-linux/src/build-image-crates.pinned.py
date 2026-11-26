@@ -1,3 +1,36 @@
+PACKAGE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+KEYS = {"packages", "no-default-features"}
+
+
+def fail(message):
+    sys.exit(f"build-image-crates: {message}")
+
+
+def declared(path):
+    with open(path, "rb") as file:
+        data = tomllib.load(file)
+    entries = data.get("build")
+    if set(data) != {"build"} or not isinstance(entries, list) or not entries:
+        fail(f"{path}: want a non-empty [[build]] array and nothing else")
+    builds = []
+    for number, entry in enumerate(entries, 1):
+        where = f"{path}: [[build]] {number}"
+        if not isinstance(entry, dict) or "packages" not in entry or not set(entry) <= KEYS:
+            fail(f"{where}: want `packages` and optionally `no-default-features`")
+        packages = entry["packages"]
+        flag = entry.get("no-default-features", False)
+        if (
+            not isinstance(packages, list)
+            or not packages
+            or not all(isinstance(name, str) and PACKAGE.fullmatch(name) for name in packages)
+        ):
+            fail(f"{where}: `packages` must be a non-empty list of plain package names")
+        if not isinstance(flag, bool):
+            fail(f"{where}: `no-default-features` must be true or false")
+        builds.append({"packages": packages, "no-default-features": flag})
+    return builds
+
+
 def cargo_commands(builds):
     """Every cargo command line of the build; no other code makes one."""
     commands = []

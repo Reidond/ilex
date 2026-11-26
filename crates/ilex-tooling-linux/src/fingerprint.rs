@@ -1,5 +1,5 @@
 //! Shared fingerprint/cache key inputs. Preserve phase 0's publication rules.
-use crate::image_crates_guard::{self, CargoBuild, Scratch, image_builds};
+use crate::image_crates_guard::{self, CargoBuild, Scratch, derived_image_builds};
 use crate::{Workspace, cmd, config::Selection, git};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -256,7 +256,11 @@ pub fn image_crates(ws: &Workspace) -> Result<Vec<String>> {
 }
 
 fn derive_image_crates(ws: &Workspace) -> Result<Vec<String>> {
-    let builds = image_builds(&ws.root)?;
+    ensure!(
+        !CARGO_FORBIDDEN.load(Ordering::SeqCst),
+        "internal error: this process holds signing credentials and does not derive the root image's crates (that runs the build script and cargo); they come from the recorded closure"
+    );
+    let builds = derived_image_builds(&ws.root)?;
     fetch_dependencies(ws)?;
     let mut crates = BTreeSet::new();
     for build in builds {

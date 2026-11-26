@@ -21,11 +21,16 @@
 #   - the build refuses to start while any cargo configuration file is visible
 #     (cargo_configs(), `--configs`): [build] target and rustflags, [env] and
 #     [patch] there change what is built and nothing the fingerprint hashes;
-#   - from `def cargo_commands` to the end this file is pinned verbatim by the
-#     guard (crates/ilex-tooling-linux/src/build-image-crates.pinned.py, which
-#     must be edited with it); before that line the guard allows six imports
-#     and no way to run a program or load code, and the toolchain's name
-#     nowhere but in comments.
+#   - from the `PACKAGE = re.compile(...)` line to the end this file is pinned
+#     verbatim by the guard (crates/ilex-tooling-linux/src/
+#     build-image-crates.pinned.py, which must be edited with it): the reading
+#     of the declaration (declared()), every cargo argv, the one place cargo
+#     runs, and every other program. Before that line the guard allows six
+#     imports and the two lists below, no way to run a program or load code,
+#     and the toolchain's name nowhere but in comments;
+#   - `ilexctl changed`, `build`, `info --image-crates` and build-publisher.sh
+#     run the three printing modes below on every derivation of the image's
+#     crate closure, not only `ilexctl doctor --self-check`.
 import json
 import os
 import re
@@ -33,10 +38,8 @@ import subprocess
 import sys
 import tomllib
 
-PACKAGE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
-KEYS = {"packages", "no-default-features"}
-
-# Files the image takes from target/release, and where.
+# Files the image takes from target/release, and where. Adding a binary or a
+# completion is a routine edit and stays above the pinned part.
 BINARIES = [
     ("ilexctl", "/usr/bin/ilexctl"),
     ("ilex-enroll", "/usr/bin/ilex-enroll"),
@@ -48,6 +51,9 @@ COMPLETIONS = [
     ("zsh", "/usr/share/zsh/site-functions/_ilexctl"),
     ("fish", "/usr/share/fish/vendor_completions.d/ilexctl.fish"),
 ]
+
+PACKAGE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+KEYS = {"packages", "no-default-features"}
 
 
 def fail(message):

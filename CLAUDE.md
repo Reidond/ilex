@@ -1798,8 +1798,9 @@ key-bearing step. No Cargo, rustc, kache or build script runs with the key.
 That includes the one thing the publisher used to ask cargo for: the root
 image's crate closure for the fingerprint (`cargo metadata` starts rustc, so a
 `RUSTC_WRAPPER` such as kache, and can fetch from crates.io). `build-publisher.sh`
-runs `ilexctl info --image-crates` in its keyless step (`cargo fetch --locked`,
-then `cargo metadata --offline --locked`) and records the closure in
+runs `ilexctl info --image-crates` in its keyless step (the build script's
+three printing modes under python3, `cargo fetch --locked`, then
+`cargo metadata --offline --locked`) and records the closure in
 `$RUNNER_TEMP/image-crates`, bound to the checkout's source digest, exporting
 `ILEX_IMAGE_CRATES`. `ilexctl publish` (anything but a loopback registry
 with a throwaway key) refuses to start without that file, reads it, checks the
@@ -2701,9 +2702,13 @@ the Windows paths of this change: no Windows host was available.
   (the input set itself changed).
   **What keeps the build and the closure the same.** Nothing parses shell: the
   root image's Rust build is kept so narrow that a text check sees all of it,
-  and what a text check cannot see is checked by running the script. Before
-  deriving the closure, `image_builds` runs three guards and the declaration's
-  parser; each refusal names the line (drift detection, not adversary-proofing).
+  and what a text check cannot see is checked by running the script. Every
+  keyless derivation of the closure (`ilexctl changed`, `build`,
+  `info --image-crates`, `build-publisher.sh`, not only `doctor --self-check`)
+  runs the three guards, the declaration's parser and the script itself (below)
+  before `cargo fetch`; each refusal names the line (drift detection, not
+  adversary-proofing). The signing process reads the recorded closure and
+  never derives it, so it runs neither the script nor cargo.
   - `check_containerfile` splits the Containerfile into stages (`\`
     continuations joined, full-line comments dropped). A stage **builds the
     Rust packages** when any logical line names `cargo`, `rustc`, `rustup`,
@@ -2722,16 +2727,19 @@ the Windows paths of this change: no Windows host was available.
     rust-toolchain.toml`, a `config.toml` copied into cargo's home, a bind
     mount, `WORKDIR`, `USER`, `SHELL`, `ONBUILD`, another builder image, a
     second stage that installs cargo, an exec-form or heredoc `RUN`.
-  - `check_build_script` pins the script. From `def cargo_commands` to the end
-    it equals `crates/ilex-tooling-linux/src/build-image-crates.pinned.py`
-    (code lines; comments and blank lines are free; edit both files together).
-    That part makes every cargo argv in one function (`cargo_commands`:
-    `--release --locked`, `-p` for each declared package,
-    `--no-default-features` when declared, nothing else), runs its output at
-    one place, starts cargo with `cargo_environment()`, refuses to build while
-    `cargo_configs()` lists any file, and holds every other program the script
-    runs (kache, `install`, the completions). Before it the script has six
-    imports and nothing that runs a program (`subprocess`, `os.system`,
+  - `check_build_script` pins the script. From the line `PACKAGE =
+    re.compile(...)` to the end it equals
+    `crates/ilex-tooling-linux/src/build-image-crates.pinned.py` (code lines;
+    comments and blank lines are free; edit both files together). That part
+    reads the declaration (`declared()`: which keys it accepts, that
+    `no-default-features` is read under that name), makes every cargo argv in
+    one function (`cargo_commands`: `--release --locked`, `-p` for each
+    declared package, `--no-default-features` when declared, nothing else),
+    runs its output at one place, starts cargo with `cargo_environment()`,
+    refuses to build while `cargo_configs()` lists any file, and holds every
+    other program the script runs (kache, `install`, the completions). Above it
+    stay the two lists a routine edit changes (`BINARIES`, `COMPLETIONS`), with
+    six imports and nothing that runs a program (`subprocess`, `os.system`,
     `os.exec*`, `os.spawn*`, `os.popen`), loads or evaluates code (`runpy`,
     `importlib`, `exec`, `eval`, `__import__`, `compile`, `ctypes`), changes the
     environment or the directory (`environ`, `putenv`, `chdir`) or names the
@@ -2740,9 +2748,11 @@ the Windows paths of this change: no Windows host was available.
     the script have their own checks) and refuses the toolchain's name outside
     comments, except the one message in `build/image_tree.py` that tells a
     developer to run `cargo ilexctl build`.
-  - What no line can show is checked by running the script. `--commands
+  - What no line can show (a line above the pinned part that rebinds what the
+    pinned part calls, such as `tomllib.load = ...`) is checked by running the
+    script, in `derived_image_builds` on every derivation. `--commands
     DECLARATION` prints the argv lists `main` will run (from the same function);
-    the self-check compares them with what the declaration implies. `--environment`
+    the derivation compares them with what the declaration implies. `--environment`
     prints what cargo and kache start with: the script drops every `CARGO*`,
     `RUST*` and `KACHE*` variable of the caller (so `RUSTFLAGS`,
     `CARGO_BUILD_TARGET`, `RUSTUP_TOOLCHAIN` cannot turn on a cfg, a target or
@@ -2767,17 +2777,23 @@ the Windows paths of this change: no Windows host was available.
   and its relatives in `ENV`/`ARG`, edits of the declaration, copies of
   `.cargo`/`rust-toolchain`/`config.toml`, mounts, another base image, the
   script run twice or never or on another declaration), the script's (2
-  accepted, 40 refused: an extra `-p`, `--workspace`, `--features`, `--target`,
+  accepted, 44 refused: an extra `-p`, `--workspace`, `--features`, `--target`,
   `--config`, a second `subprocess.run`, another helper, `os.system`/`exec*`/
   `spawn*`, `runpy`/`importlib`/`exec`/`eval`, an unscrubbed or wrongly
-  scrubbed environment, a build appended while reading the declaration, a
-  configuration check that misses a parent or cargo's home), the `build/`
-  scan's (3 accepted, 6 refused) and the declaration's (1 accepted, 12
+  scrubbed environment, the declaration's flag read under `no_default_features`,
+  a build appended while reading it, another key allowed, a looser package
+  pattern, a reader rebound above the pinned part, a configuration check that
+  misses a parent or cargo's home), the derivation's (2 accepted, 4 refused:
+  the checks `changed`, `build`, `info --image-crates` and `build-publisher.sh`
+  run, on a scratch checkout: a binary added to `BINARIES` passes; the
+  underscore key and an appended build are refused by the pinned text, a
+  rebound `tomllib.load` and `os.path.lexists` only by running the script), the
+  `build/` scan's (3 accepted, 6 refused) and the declaration's (1 accepted, 12
   refused). It checks that the checkout's own Containerfile, script and
-  `build/` pass, runs the real script's `--commands`, `--environment` (with
-  `RUSTFLAGS`, `CARGO_BUILD_TARGET` and 14 other variables planted) and
-  `--configs` (a configuration planted in the working directory, a parent and
-  cargo's home), and checks the derivation's scrub. It also runs the closure
+  `build/` pass the same derivation: the real script's `--commands`,
+  `--environment` (with `RUSTFLAGS`, `CARGO_BUILD_TARGET` and 14 other
+  variables planted) and `--configs` (a configuration planted in the working
+  directory, a parent and cargo's home), and it checks the derivation's scrub. It also runs the closure
   fixtures (a path dependency in the checkout, one outside, one at the root,
   registry and git packages, a dev edge) and the recorded-closure fixtures; a
   regression is a failed check.
