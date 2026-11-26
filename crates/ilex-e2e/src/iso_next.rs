@@ -845,11 +845,13 @@ fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     // started on tty1 when the person comes back.
     vt_round_trip(vm, &ctl)?;
     let after = vm.ssh_ok("cat /dev/vcs1")?;
-    fs::write(artifacts.join("next-fallback-vcs1-after-vt-switch.txt"), &after)?;
+    fs::write(
+        artifacts.join("next-fallback-vcs1-after-vt-switch.txt"),
+        &after,
+    )?;
     let squeezed = after.split_whitespace().collect::<Vec<_>>().join(" ");
     ensure!(
-        squeezed.contains("could not start its graphical session")
-            && !squeezed.contains("login:"),
+        squeezed.contains("could not start its graphical session") && !squeezed.contains("login:"),
         "tty1 lost the fallback message after a VT round trip: {after:?}"
     );
     let frame = ctl.save_screenshot(&artifacts.join("next-fallback-after-vt-switch.png"))?;

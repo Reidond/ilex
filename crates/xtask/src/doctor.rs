@@ -48,7 +48,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         // The same call the publisher makes before it reads a signing key.
         crate::publish::use_recorded_image_crates(ws, false)?;
         let fingerprint = crate::rechunk::fingerprint(ws, image)?;
-        println!("{}", serde_json::json!({"recorded_crates_fingerprint": fingerprint}));
+        println!(
+            "{}",
+            serde_json::json!({"recorded_crates_fingerprint": fingerprint})
+        );
         return Ok(());
     }
     let builds = if args.self_check_build {

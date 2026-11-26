@@ -211,8 +211,18 @@ fn parse_cargo_build(line: &str, words: &[&str]) -> Result<CargoBuild> {
                 value(word)?;
                 build.all_features = true;
             }
-            "--release" | "-r" | "--locked" | "--frozen" | "--offline" | "-q" | "--quiet"
-            | "-v" | "-vv" | "--verbose" | "--keep-going" | "--timings"
+            "--release"
+            | "-r"
+            | "--locked"
+            | "--frozen"
+            | "--offline"
+            | "-q"
+            | "--quiet"
+            | "-v"
+            | "-vv"
+            | "--verbose"
+            | "--keep-going"
+            | "--timings"
             | "--future-incompat-report" => {}
             "--profile" | "--target-dir" | "-j" | "--jobs" => {
                 value(word)?;
@@ -328,7 +338,9 @@ fn cargo_builds(containerfile: &str) -> Result<Vec<CargoBuild>> {
         if instruction == "RUN" {
             // `RUN --mount=… --network=… command`.
             while let Some(stripped) = shell.trim_start().strip_prefix("--") {
-                shell = stripped.split_once(char::is_whitespace).map_or("", |(_, r)| r);
+                shell = stripped
+                    .split_once(char::is_whitespace)
+                    .map_or("", |(_, r)| r);
             }
         }
         for words in simple_commands(shell) {
@@ -436,7 +448,9 @@ fn closure_of(
         }
         if local.contains(id) || members.contains(id) {
             let dir = directory.get(id).cloned().with_context(|| {
-                format!("local package {id} is outside the checkout; its source cannot be fingerprinted")
+                format!(
+                    "local package {id} is outside the checkout; its source cannot be fingerprinted"
+                )
             })?;
             ensure!(
                 !dir.is_empty(),
@@ -588,7 +602,10 @@ fn parse_record(root: &Path, current_source: &str, record: &str) -> Result<Vec<S
             && path
                 .split('/')
                 .all(|part| !part.is_empty() && part != "." && part != "..");
-        ensure!(safe, "recorded crate path {path:?} is not a checkout-relative path");
+        ensure!(
+            safe,
+            "recorded crate path {path:?} is not a checkout-relative path"
+        );
         ensure!(
             root.join(path).is_dir(),
             "recorded crate {path} is not a directory of this checkout"
@@ -746,12 +763,12 @@ RUN set -e && CARGO_INCREMENTAL=0 /root/.cargo/bin/cargo +stable build \
             Err("--target"),
         ),
         ("positional", "RUN cargo build -p a extra\n", Err("extra")),
+        ("passthrough", "RUN cargo build -p a -- -x\n", Err("`--`")),
         (
-            "passthrough",
-            "RUN cargo build -p a -- -x\n",
-            Err("`--`"),
+            "-p at the end",
+            "RUN cargo build -p\n",
+            Err("ends after -p"),
         ),
-        ("-p at the end", "RUN cargo build -p\n", Err("ends after -p")),
         (
             "-F at the end",
             "RUN cargo build -p a -F\n",
@@ -783,11 +800,7 @@ RUN set -e && CARGO_INCREMENTAL=0 /root/.cargo/bin/cargo +stable build \
             Err("echo"),
         ),
         ("sh -c", "RUN sh -c 'cargo build -p a'\n", Err("sh")),
-        (
-            "xargs",
-            "RUN echo a | xargs cargo build -p\n",
-            Err("xargs"),
-        ),
+        ("xargs", "RUN echo a | xargs cargo build -p\n", Err("xargs")),
         ("wrapper", "RUN nice cargo build -p a\n", Err("nice")),
         (
             "env wrapper flag",
@@ -814,7 +827,11 @@ RUN set -e && CARGO_INCREMENTAL=0 /root/.cargo/bin/cargo +stable build \
             "RUN <<'EOF'\nenv cargo install foo\nEOF\nRUN cargo build -p a\n",
             Err("cargo install"),
         ),
-        ("subcommand missing", "RUN cargo\n", Err("without a subcommand")),
+        (
+            "subcommand missing",
+            "RUN cargo\n",
+            Err("without a subcommand"),
+        ),
         (
             "no cargo build at all",
             "RUN dnf -y install cargo\n",
@@ -833,9 +850,7 @@ fn fixture_metadata(tmp: &Path, extra_member: Option<&str>) -> serde_json::Value
             .to_string_lossy()
             .into_owned()
     };
-    let package = |name: &str, dir: &str, source: Option<&str>| {
-        json!({"id": name, "name": name, "manifest_path": manifest(dir), "source": source})
-    };
+    let package = |name: &str, dir: &str, source: Option<&str>| json!({"id": name, "name": name, "manifest_path": manifest(dir), "source": source});
     let dep = |pkg: &str, kind: Option<&str>| json!({"pkg": pkg, "dep_kinds": [{"kind": kind}]});
     let mut packages = vec![
         package("app", "root/crates/app", None),
@@ -974,8 +989,9 @@ pub fn self_check() -> Result<serde_json::Value> {
         "closure fixture: a package that is not a workspace member must be refused"
     );
 
-    let good =
-        format!("{RECORD_HEADER}\nsource {SELF_CHECK_SOURCE}\ncrate crates/app\ncrate crates/lib\n");
+    let good = format!(
+        "{RECORD_HEADER}\nsource {SELF_CHECK_SOURCE}\ncrate crates/app\ncrate crates/lib\n"
+    );
     ensure!(
         parse_record(&root, SELF_CHECK_SOURCE, &good)? == ["crates/app", "crates/lib"],
         "record fixture: a valid record must read back"

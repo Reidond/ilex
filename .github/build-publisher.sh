@@ -9,7 +9,7 @@
 # the checkout's source digest, so a file from another tree is refused.
 set -euo pipefail
 cargo build --locked -p ilexctl
-target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
+target=$(cargo metadata --no-deps --format-version 1 --locked --offline | jq -er .target_directory)
 publisher="$target/debug/ilexctl"
 test -x "$publisher"
 echo "prebuilt publisher: $publisher"
