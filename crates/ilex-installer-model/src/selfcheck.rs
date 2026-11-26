@@ -184,9 +184,9 @@ pub fn run() -> Result<String> {
         "an edition without a generic composition was accepted"
     );
     let record =
-        EditionRecord::parse(br#"{"schema":1,"edition":"gnome","display-name":"ilex GNOME"}"#)?;
+        EditionRecord::parse(br#"{"schema":1,"edition":"gnome","display-name":"ilex Glabra"}"#)?;
     ensure!(
-        record.edition() == gnome && record.display_name == "ilex GNOME",
+        record.edition() == gnome && record.display_name == "ilex Glabra",
         "edition record"
     );
     for bad in [

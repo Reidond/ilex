@@ -650,7 +650,7 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
     let probe = probe_document(vm)?;
     ensure!(probe.schema == 1, "probe schema {}", probe.schema);
     ensure!(
-        probe.edition.id == "gnome" && probe.edition.name == "ilex GNOME",
+        probe.edition.id == "gnome" && probe.edition.name == "ilex Glabra",
         "edition {:?}",
         probe.edition
     );
@@ -1002,7 +1002,7 @@ fn probe(vm: &EphemeralVm) -> Result<()> {
     ensure!(
         conflict.edition.name == "Fixture GNOME"
             && elsewhere.edition.name == "Fixture GNOME"
-            && full.edition.name == "ilex GNOME",
+            && full.edition.name == "ilex Glabra",
         "the edition record beside --table: {:?} / {:?}",
         conflict.edition,
         elsewhere.edition
