@@ -278,17 +278,27 @@ fn boot(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
         let vm = guest.vm.running_mut()?;
         let serial = vm.info.dir.join("serial.log");
         let started = Instant::now();
+        // `ILEX_ISO_NEXT_FORCE_SILENT=1` calls the first attempt of every boot
+        // silent after three seconds, whatever it printed: how the retry and the
+        // logs it keeps are exercised without waiting for the flake.
+        let forced = attempt == 1 && std::env::var_os("ILEX_ISO_NEXT_FORCE_SILENT").is_some();
         loop {
-            if fs::metadata(&serial).is_ok_and(|m| m.len() > 0) {
+            if !forced && fs::metadata(&serial).is_ok_and(|m| m.len() > 0) {
                 return Ok(guest);
             }
             if let Some(status) = vm.exited()? {
                 bail!("the VM exited with {status} before it printed anything");
             }
-            if started.elapsed() > ALIVE_WITHIN {
+            if started.elapsed()
+                > if forced {
+                    Duration::from_secs(3)
+                } else {
+                    ALIVE_WITHIN
+                }
+            {
                 break;
             }
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(Duration::from_secs(if forced { 1 } else { 2 }));
         }
         let kept = keep_silent_attempt(vm.info.dir.as_path(), root, layout, attempt);
         eprintln!(
