@@ -308,8 +308,10 @@ pub enum Claim {
 }
 
 /// How often and how far apart a busy disk is tried: a claim that is only
-/// passing (another probe's scan of an EFI system partition, udev's own use)
-/// must not make a disk flicker in and out of the list.
+/// passing (a `mkfs` or file system check someone runs on a partition, a
+/// partition rescan) must not make a disk flicker in and out of the list. The
+/// helper's own scans never overlap: `Probe` and `Plan` run one at a time and
+/// an ESP scan has ended before the next disk is claimed.
 const CLAIM_ATTEMPTS: u32 = 10;
 const CLAIM_PAUSE: Duration = Duration::from_millis(50);
 

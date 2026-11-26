@@ -914,16 +914,30 @@ const KERNEL_MOUNTS: &str = "\
 24 13 0:36 / /dev/mqueue rw,nosuid,nodev,noexec,relatime - mqueue mqueue rw\n\
 25 1 0:37 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw\n";
 
-/// dracut's dmsquash-live layout with the root image on device-mapper: the ISO
-/// at `/run/initramfs/live` (on `sda1`), its squashfs on `loop0` at
-/// `/run/rootfsbase`, the root `ext4` on `/dev/mapper/live-rw` (a snapshot of
-/// `live-base`, which is the loop device `loop1` over `rootfs.img` inside the
-/// squashfs, with its copy-on-write file `loop2` in RAM).
+/// What the ilex ISO boots into, read from the real ISO (written to a USB stick)
+/// under QEMU with Secure Boot (`iso::next_helper_usb`, 2026-11-26): its squashfs
+/// holds the root tree directly (`/proc` is a directory in it), so dracut's
+/// dmsquash-live mounts an overlay root over the squashfs (`/run/rootfsbase`, on
+/// `loop0`) with its upper directory in `/run` (tmpfs), and there is no
+/// device-mapper device and no other loop device. The ISO's file system (on
+/// `sda1`, the stick's first partition) is at `/run/initramfs/live`; `loop0` is
+/// attached to `/LiveOS/squashfs.img` on it, a name the kernel prints relative
+/// to that mount, so no name in this namespace confirms it.
+const ROOT_OVERLAY: &str = "52 1 0:30 / / rw,relatime shared:1 - overlay LiveOS_rootfs rw,seclabel,lowerdir=/run/rootfsbase,upperdir=/run/overlayfs,workdir=/run/ovlwork,uuid=on\n";
+const LIVE_MEDIUM: &str = "63 60 8:1 / /run/initramfs/live ro,relatime shared:17 - iso9660 /dev/sda1 ro,nojoliet,check=s,map=n,blocksize=2048,iocharset=utf8\n";
+const LIVE_MEDIUM_OPTICAL: &str = "63 60 11:0 / /run/initramfs/live ro,relatime shared:17 - iso9660 /dev/sr0 ro,nojoliet,check=s,map=n,blocksize=2048,iocharset=utf8\n";
+const ROOTFSBASE: &str = "64 60 7:0 / /run/rootfsbase ro,relatime shared:18 - squashfs /dev/loop0 ro,seclabel,errors=continue\n";
+/// The name and inode the kernel gives the squashfs's file on the real ISO.
+const SQUASHFS_FILE: &str = "/LiveOS/squashfs.img";
+const SQUASHFS_INODE: u64 = 5126;
+/// dracut's other layout, which the ilex ISO does **not** boot into: a squashfs
+/// holding `LiveOS/rootfs.img` (a root `ext4` on `/dev/mapper/live-rw`, a
+/// snapshot of `live-base`, which is the loop device `loop1` over `rootfs.img`
+/// inside the squashfs) with its copy-on-write file `loop2` in the initramfs'
+/// own memory, the file `/overlay (deleted)` on a device no mount carries once
+/// the initramfs is gone. Kept so that the helper's answer to it is a test:
+/// every disk refused.
 const ROOT_LIVE_RW: &str = "1 0 253:0 / / rw,relatime - ext4 /dev/mapper/live-rw rw\n";
-const ROOT_OVERLAY: &str =
-    "1 0 0:30 / / rw,relatime - overlay overlay rw,lowerdir=/run/rootfsbase\n";
-const LIVE_MEDIUM: &str = "40 16 8:1 / /run/initramfs/live ro,relatime - iso9660 /dev/sda1 ro\n";
-const ROOTFSBASE: &str = "41 16 7:0 / /run/rootfsbase ro,relatime - squashfs /dev/loop0 ro\n";
 /// zram-generator's swap, as every live boot has it (writeback unset).
 const ZRAM_SWAP: &str = "/dev/zram0 partition 8388604 0 100\n";
 
@@ -939,9 +953,11 @@ struct Case<'a> {
     mounts: &'a str,
     /// Swap rows after zram's.
     swaps: &'a str,
-    /// Loop devices after the live image's three (`loop0` to `loop2`).
+    /// Loop devices after the live image's own (`loop0`; with `live_rw` also
+    /// `loop1` and `loop2`).
     loops: Vec<Loop>,
-    /// The three live-image loops' rows, replaced by these when given.
+    /// The live image's loops' rows (`loop0`, then `loop1` and `loop2` with
+    /// `live_rw`), replaced by these when given.
     live_rows: Option<Vec<Option<LoopRow>>>,
     /// What `stat` says of a path (device nodes of the tree are known besides).
     files: Vec<(&'static str, FileId)>,
@@ -951,16 +967,17 @@ struct Case<'a> {
     types: Vec<(&'static str, &'static str)>,
     /// Anything else the case adds to its sysfs and procfs.
     extra: Vec<TreeEdit<'a>>,
-    /// The root is an overlay over the squashfs (only `loop0` is attached),
-    /// not a device-mapper snapshot of `rootfs.img`.
-    overlay_root: bool,
+    /// dracut's other layout (a device-mapper snapshot of `rootfs.img`, with
+    /// two more loop devices), not the overlay over the squashfs the ISO boots
+    /// into.
+    live_rw: bool,
 }
 
 impl<'a> Case<'a> {
     fn new(label: &'a str) -> Self {
         Self {
             label,
-            base: format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{LIVE_MEDIUM}{ROOTFSBASE}"),
+            base: format!("{ROOT_OVERLAY}{KERNEL_MOUNTS}{LIVE_MEDIUM}{ROOTFSBASE}"),
             mounts: "",
             swaps: "",
             loops: vec![],
@@ -970,13 +987,13 @@ impl<'a> Case<'a> {
             // The live medium is an ISO; lsblk knows it by its signature.
             types: vec![("sda1", "iso9660"), ("loop0", "squashfs")],
             extra: vec![],
-            overlay_root: false,
+            live_rw: false,
         }
     }
 
-    /// dracut's other layout: an overlay root over `/run/rootfsbase`.
-    fn overlay_root(mut self, medium: bool, rootfsbase: bool) -> Self {
-        self.overlay_root = true;
+    /// The ISO's layout with some of the live system's mounts gone (detached,
+    /// as `umount -l` does), its loop device still attached.
+    fn mounts_left(mut self, medium: bool, rootfsbase: bool) -> Self {
         self.base = format!(
             "{ROOT_OVERLAY}{KERNEL_MOUNTS}{}{}",
             if medium { LIVE_MEDIUM } else { "" },
@@ -985,8 +1002,10 @@ impl<'a> Case<'a> {
         self
     }
 
-    fn base(mut self, base: String) -> Self {
-        self.base = base;
+    /// dracut's other layout, the one the ISO does not use.
+    fn live_rw(mut self) -> Self {
+        self.live_rw = true;
+        self.base = format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{LIVE_MEDIUM}{ROOTFSBASE}");
         self
     }
 
@@ -1042,14 +1061,15 @@ impl<'a> Case<'a> {
         let dir = TestDir::new(parent, &format!("topology-{}", self.label))?;
         let tree = Tree::new(dir.0.join("tree"))?;
         // sda: the live USB stick; the ISO file system is on sda1 and carries
-        // the squashfs (loop0), whose rootfs.img (loop1) is live-base.
+        // the squashfs (loop0). The other layout's rootfs.img (loop1) is
+        // live-base and its copy-on-write file is loop2.
         tree.disk("sda", 8, 0)?;
         tree.partition("sda", "sda1", 8, 1)?;
         tree.partition("sda", "sda2", 8, 2)?;
-        tree.loop_device("loop0", 7, 0, "/run/initramfs/live/LiveOS/squashfs.img")?;
-        if !self.overlay_root {
+        tree.loop_device("loop0", 7, 0, SQUASHFS_FILE)?;
+        if self.live_rw {
             tree.loop_device("loop1", 7, 1, "/run/initramfs/squashfs/LiveOS/rootfs.img")?;
-            tree.loop_device("loop2", 7, 2, "/run/initramfs/overlayfs/overlay-ilex")?;
+            tree.loop_device("loop2", 7, 2, "/overlay (deleted)")?;
             tree.stacked("dm-1", 253, 1, &["loop1"])?;
             tree.stacked("dm-0", 253, 0, &["dm-1", "loop2"])?;
             tree.node_link("mapper/live-base", "../dm-1")?;
@@ -1107,23 +1127,19 @@ impl<'a> Case<'a> {
         let mut rows: Vec<Option<LoopRow>> = self.live_rows.clone().unwrap_or_else(|| {
             let mut rows = vec![loop_row(
                 "loop0",
-                "/run/initramfs/live/LiveOS/squashfs.img",
-                100,
+                SQUASHFS_FILE,
+                SQUASHFS_INODE,
                 Some((8, 1)),
             )];
-            if !self.overlay_root {
+            if self.live_rw {
                 rows.push(loop_row(
                     "loop1",
                     "/run/initramfs/squashfs/LiveOS/rootfs.img",
                     200,
                     Some((7, 0)),
                 ));
-                rows.push(loop_row(
-                    "loop2",
-                    "/run/initramfs/overlayfs/overlay-ilex",
-                    300,
-                    Some((0, 31)),
-                ));
+                // The initramfs' own file system is gone: no mount carries 0:23.
+                rows.push(loop_row("loop2", "/overlay (deleted)", 300, Some((0, 23))));
             }
             rows
         });
@@ -1237,38 +1253,53 @@ fn iso_by_name(
 /// contains every path and the detached or colliding name of a file is a trap,
 /// so a case that works only without them proves nothing.
 fn check_topology(parent: &Path) -> Result<()> {
-    // The live layout alone: everything resolves, to the stick and nothing else.
+    // The layout of the real ISO alone: everything resolves, to the stick and
+    // nothing else (the loop device's file is named `/LiveOS/squashfs.img`,
+    // which no name here confirms: the stick's ISO file system carries it).
     let live = Case::new("live").trace(parent)?;
     ensure!(
-        names(&live.live) == ["dm-0", "dm-1", "loop0", "loop1", "loop2", "sda", "sda1"]
+        names(&live.live) == ["loop0", "sda", "sda1"]
             && in_use_names(&live).is_empty()
             && live.unresolved.is_empty(),
-        "the dmsquash-live layout: {live:?}"
+        "the dmsquash-live layout of the ISO: {live:?}"
     );
     // ... and the swap on RAM is a use of RAM.
     ensure!(
         live.in_use.keys().all(|n| n.starts_with("zram")),
         "zram's swap reaches a disk: {live:?}"
     );
-    // The other layout: an overlay root over the squashfs (no device-mapper).
-    let overlay = Case::new("overlay")
-        .overlay_root(true, true)
+    // The same ISO in an optical drive (`iso::next_helper_cdrom`): the medium is
+    // `sr0`, which has no partition, and the file is on device 11:0.
+    let optical = Case::new("optical")
+        .mounts_left(false, true)
+        .mounts(LIVE_MEDIUM_OPTICAL)
+        .live_rows(vec![loop_row("loop0", SQUASHFS_FILE, 4102, Some((11, 0)))])
+        .tree(|tree| tree.disk("sr0", 11, 0))
         .trace(parent)?;
     ensure!(
-        names(&overlay.live) == ["loop0", "sda", "sda1"]
-            && in_use_names(&overlay).is_empty()
-            && overlay.unresolved.is_empty(),
-        "an overlay root: {overlay:?}"
+        names(&optical.live) == ["loop0", "sr0"]
+            && in_use_names(&optical).is_empty()
+            && optical.unresolved.is_empty(),
+        "the ISO in an optical drive: {optical:?}"
+    );
+    // dracut's other layout (not the ISO's): the copy-on-write file of the
+    // device-mapper snapshot is a deleted file of the initramfs' own file
+    // system, which nothing carries any more. It could be a device node, so
+    // it is not resolved: every disk refused.
+    let live_rw = Case::new("live-rw").live_rw().trace(parent)?;
+    ensure!(
+        live_rw.unresolved.iter().any(|u| u.contains("loop2")),
+        "the copy-on-write file of a device-mapper snapshot was traced: {live_rw:?}"
     );
 
-    // --- A: the live medium's mount detached, its loop devices still bound.
-    // dracut unmounts `/run/initramfs/squashfs` lazily, and so may anyone with
-    // `umount -l /run/initramfs/live`: the kernel then prints `/LiveOS/…` for
-    // the file, a name `/` contains. The stick is found by the device number
-    // the kernel recorded, not by any name; the file's name no longer confirms
-    // it, so it is accepted because the device is an ISO (lsblk's signature).
+    // --- A: the live medium's mount detached, its loop device still bound.
+    // Anyone with `umount -l /run/initramfs/live` does it; the kernel prints
+    // `/LiveOS/…` for the file whatever the mount, a name `/` does not have
+    // here. The stick is found by the device number the kernel recorded, not
+    // by any name; the file's name does not confirm it, so it is accepted
+    // because the device is an ISO (lsblk's signature).
     let detached_medium = Case::new("lazy-live")
-        .base(format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{ROOTFSBASE}"))
+        .mounts_left(false, true)
         .trace(parent)?;
     ensure!(
         detached_medium.live.contains("sda")
@@ -1284,7 +1315,7 @@ fn check_topology(parent: &Path) -> Result<()> {
         ("ext4", &[("sda1", "ext4"), ("loop0", "squashfs")][..]),
     ] {
         let case = Case::new("lazy-live-type")
-            .base(format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{ROOTFSBASE}"))
+            .mounts_left(false, true)
             .types(types)
             .trace(parent)?;
         ensure!(
@@ -1292,19 +1323,12 @@ fn check_topology(parent: &Path) -> Result<()> {
             "a detached file system of {what} type was taken for an image: {case:?}"
         );
     }
-    // ... and with every mount of the live medium gone but the root's chain.
-    let only_root = Case::new("root-chain")
-        .base(format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}"))
-        .trace(parent)?;
-    ensure!(
-        only_root.live.contains("sda") && only_root.unresolved.is_empty(),
-        "only the root's loop/dm chain is left: {only_root:?}"
-    );
-    // ... and with an overlay root, no medium mount and no squashfs mount: the
-    // loop device is attached and nothing mounts it. The stick is in use (an
-    // unmounted bound loop is a use of its file's disk).
+    // ... and with neither the medium's mount nor the squashfs's: the loop
+    // device is attached and nothing mounts it. The stick is in use (an
+    // unmounted bound loop is a use of its file's disk), no longer the live
+    // medium, and so refused either way.
     let bare_loops = Case::new("bare-loops")
-        .overlay_root(false, false)
+        .mounts_left(false, false)
         .trace(parent)?;
     ensure!(
         in_use_names(&bare_loops).contains(&"sda")
@@ -1316,17 +1340,13 @@ fn check_topology(parent: &Path) -> Result<()> {
     // The same chain with one loop's file unknown to losetup: every disk is in
     // use (the stick is not left looking free).
     let unknown = Case::new("lazy-unknown")
-        .base(format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{ROOTFSBASE}"))
-        .live_rows(vec![
-            Some(LoopRow {
-                name: "/dev/loop0".into(),
-                file: Some("/LiveOS/squashfs.img".into()),
-                inode: Some(100),
-                device: None,
-            }),
-            loop_row("loop1", "/x/rootfs.img", 200, Some((7, 0))),
-            loop_row("loop2", "/x/overlay", 300, Some((0, 31))),
-        ])
+        .mounts_left(false, true)
+        .live_rows(vec![Some(LoopRow {
+            name: "/dev/loop0".into(),
+            file: Some(SQUASHFS_FILE.into()),
+            inode: Some(SQUASHFS_INODE),
+            device: None,
+        })])
         .trace(parent)?;
     ensure!(
         !unknown.unresolved.is_empty() && !unknown.live.contains("sda"),
@@ -1334,12 +1354,8 @@ fn check_topology(parent: &Path) -> Result<()> {
     );
     // A bound loop that losetup does not list at all.
     let unlisted = Case::new("lazy-unlisted")
-        .base(format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{ROOTFSBASE}"))
-        .live_rows(vec![
-            None,
-            loop_row("loop1", "/x/rootfs.img", 200, Some((7, 0))),
-            loop_row("loop2", "/x/overlay", 300, Some((0, 31))),
-        ])
+        .mounts_left(false, true)
+        .live_rows(vec![None])
         .trace(parent)?;
     ensure!(
         unlisted.unresolved.iter().any(|u| u.contains("loop0")),
@@ -1369,7 +1385,7 @@ fn check_topology(parent: &Path) -> Result<()> {
         .file("/dev/sdg1", node)
         .trace(parent)?;
     ensure!(
-        names(&on_node.live) == ["dm-0", "dm-1", "loop0", "loop1", "loop2", "sda", "sda1"]
+        names(&on_node.live) == ["loop0", "sda", "sda1"]
             && in_use_names(&on_node).contains(&"sdg")
             && in_use_names(&on_node).contains(&"sdg1")
             && on_node.unresolved.is_empty(),
@@ -1774,15 +1790,12 @@ fn check_topology(parent: &Path) -> Result<()> {
         ),
         ("overlay, confirmed", (0, 30), "", true, false),
     ] {
-        let mut case = Case::new("ram")
-            .overlay_root(true, true)
-            .mounts(mounts)
-            .loop_device(loop_of(
-                "loop4",
-                4,
-                "/x/live.iso",
-                loop_row("loop4", "/x/live.iso", 9, Some(device)),
-            ));
+        let mut case = Case::new("ram").mounts(mounts).loop_device(loop_of(
+            "loop4",
+            4,
+            "/x/live.iso",
+            loop_row("loop4", "/x/live.iso", 9, Some(device)),
+        ));
         if confirmed {
             case = case.file("/x/live.iso", file_id(device, 9, None));
         }
@@ -2413,7 +2426,7 @@ fn check_tables(parent: &Path) -> Result<()> {
 fn check_namespaces(parent: &Path) -> Result<()> {
     let dir = TestDir::new(parent, "namespaces")?;
     let proc = dir.0.join("proc");
-    let table = |extra: &str| format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{extra}");
+    let table = |extra: &str| format!("{ROOT_OVERLAY}{KERNEL_MOUNTS}{extra}");
     let process = |pid: &str, namespace: Option<&str>, mounts: Option<&str>| -> Result<()> {
         let base = proc.join(pid);
         fs::create_dir_all(base.join("ns"))?;
@@ -2477,8 +2490,6 @@ fn check_namespaces(parent: &Path) -> Result<()> {
     tree.disk("sda", 8, 0)?;
     tree.partition("sda", "sda1", 8, 1)?;
     tree.loop_device("loop0", 7, 0, "")?;
-    tree.stacked("dm-0", 253, 0, &["loop0"])?;
-    tree.node_link("mapper/live-rw", "dm-0")?;
     let roots = tree.roots();
     let stat = |path: &str| tree.stat(path);
     let system = System {
@@ -2519,6 +2530,92 @@ fn check_namespaces(parent: &Path) -> Result<()> {
     ensure!(
         topology::read_mounts(&proc).is_err(),
         "the host's table could not be read and the probe went on"
+    );
+    Ok(())
+}
+
+/// Tasks that are exiting, as `/proc` shows them: `mountinfo` answers `EINVAL`
+/// (the task has no namespace proxy left), `ns/mnt` answers `ENOENT`, `ESRCH` or
+/// `EACCES`. Such a task is gone, whatever else shares its namespace is still
+/// there to be read, and only a table that cannot be read for another reason is
+/// a use that was not seen.
+fn check_exiting_tasks(parent: &Path) -> Result<()> {
+    let dir = TestDir::new(parent, "exiting")?;
+    let proc = dir.0.join("proc");
+    let table = |extra: &str| format!("{ROOT_OVERLAY}{KERNEL_MOUNTS}{extra}");
+    let process = |pid: &str, namespace: &str, mounts: Option<&str>| -> Result<()> {
+        let base = proc.join(pid);
+        fs::create_dir_all(base.join("ns"))?;
+        symlink(format!("mnt:[{namespace}]"), base.join("ns/mnt"))?;
+        if let Some(text) = mounts {
+            write(&base.join("mountinfo"), text)?;
+        }
+        Ok(())
+    };
+    process("self", "4026532001", Some(&table("")))?;
+    process("1", "4026531841", Some(&table("")))?;
+    // Two processes of one service's namespace: whichever /proc lists first
+    // exits (its table is EINVAL and its link is gone), the other is read.
+    let service = "50 1 8:177 / /srv/service rw - xfs /dev/sdl1 rw\n";
+    process("101", "4026532600", Some(service))?;
+    process("102", "4026532600", Some(service))?;
+    // A namespace whose every process exits: nothing to read, nothing unseen.
+    process("201", "4026532700", Some(service))?;
+    // A task whose link answers ESRCH.
+    process("301", "4026532800", Some(service))?;
+    // EINVAL for a table but a link that still reads: not an exiting task.
+    process("401", "4026532900", Some(service))?;
+    // EACCES from the link after EINVAL.
+    process("501", "4026533000", Some(service))?;
+    let calls: RefCell<BTreeMap<String, u32>> = RefCell::new(BTreeMap::new());
+    let key = |path: &Path| {
+        path.strip_prefix(&proc)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let read = |path: &Path| -> io::Result<Vec<u8>> {
+        let key = key(path);
+        let einval = [
+            "101/mountinfo",
+            "201/mountinfo",
+            "401/mountinfo",
+            "501/mountinfo",
+        ];
+        if einval.contains(&key.as_str()) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        fs::read(path)
+    };
+    let read_link = |path: &Path| -> io::Result<PathBuf> {
+        let key = key(path);
+        let n = {
+            let mut calls = calls.borrow_mut();
+            let n = calls.entry(key.clone()).or_default();
+            *n += 1;
+            *n
+        };
+        // The first look finds the namespace; the look after EINVAL finds the
+        // task gone (or, for 401, still there).
+        match (key.as_str(), n) {
+            ("101/ns/mnt" | "201/ns/mnt", 2) => Err(io::Error::from_raw_os_error(libc::ENOENT)),
+            ("301/ns/mnt", _) => Err(io::Error::from_raw_os_error(libc::ESRCH)),
+            ("501/ns/mnt", 2) => Err(io::Error::from_raw_os_error(libc::EACCES)),
+            _ => fs::read_link(path),
+        }
+    };
+    let proc_fs = topology::ProcFs {
+        read_link: &read_link,
+        read: &read,
+    };
+    let (all, _, unreadable) = topology::read_mounts_with(&proc, &proc_fs)?;
+    ensure!(
+        all.iter().any(|m| m.mount_point == "/srv/service"),
+        "the other process of a namespace was not read after the first one exited: {all:?}"
+    );
+    ensure!(
+        unreadable.len() == 1 && unreadable[0].contains("process 401"),
+        "an exiting task was reported as a table that cannot be read, or one that cannot be read was not: {unreadable:?}"
     );
     Ok(())
 }
@@ -2909,6 +3006,7 @@ pub fn run(config: &helper::Config) -> Result<String> {
     check_tables(parent.path()).context("the tables of the running system")?;
     check_topology(parent.path()).context("the live medium and disks in use")?;
     check_namespaces(parent.path()).context("the mount namespaces")?;
+    check_exiting_tasks(parent.path()).context("tasks that are exiting")?;
     check_claims(parent.path()).context("the exclusive open of a disk")?;
     check_files(parent.path()).context("files")?;
     let repart = check_repart(config, parent.path()).context("repart")?;
