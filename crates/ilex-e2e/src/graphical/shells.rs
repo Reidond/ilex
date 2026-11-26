@@ -332,18 +332,23 @@ fn gnome_after_crash(vm: &Vm) -> Result<()> {
     report.finish()?;
     // The look GNOME chose in step 3, whatever Plasma's crash left behind.
     toolkits(vm, ToolkitLook::GnomeDark)?;
-    // Plasma's units that the crash killed are the only failures expected.
+    // What Plasma's crash left failed in the manager is Plasma's own business
+    // (printed); GNOME's units and the portals GNOME uses must be healthy.
     let failed = user(vm, "systemctl --user --failed --no-legend --plain || true")?;
-    let unexpected: Vec<_> = failed
+    println!("     failed user units in GNOME: {}", failed.replace('\n', "; "));
+    let gnome_side: Vec<_> = failed
         .lines()
-        .filter(|l| {
-            !l.trim_start().starts_with("plasma-") && !l.trim_start().starts_with("app-")
+        .map(str::trim_start)
+        .filter(|u| {
+            u.starts_with("gnome-")
+                || u.starts_with("org.gnome")
+                || (u.starts_with("xdg-desktop-portal") && !u.contains("kde"))
         })
         .collect();
-    if unexpected.is_empty() {
+    if gnome_side.is_empty() {
         Ok(())
     } else {
-        Err(anyhow!("failed user units that are not Plasma's: {unexpected:?}"))
+        Err(anyhow!("failed GNOME user units after the crash: {gnome_side:?}"))
     }
 }
 
@@ -430,20 +435,30 @@ fn toolkits(vm: &Vm, look: ToolkitLook) -> Result<()> {
                     p.expect(Some(theme), Some("breeze"), dark)
                 }),
             );
+            // Applications launched from Plasma inherit GTK_USE_PORTAL=1, so
+            // their icons and cursor come through the portal from the KDE
+            // database, not from the user's own (GNOME's) database.
             report.check(
-                "GTK 4 follows the scheme",
+                "GTK 4 follows the scheme, with Plasma's icons and cursor",
                 probe(vm, "gtk4", None).and_then(|p| {
                     println!("     {}", p.describe());
-                    p.expect(None, None, dark)
+                    p.expect(None, Some("breeze"), dark)?;
+                    if p.field("cursor") != Some("breeze_cursors") {
+                        bail!("GTK 4's cursor is not Plasma's: {}", p.describe());
+                    }
+                    Ok(())
                 }),
             );
             report.check(
-                "libadwaita follows the scheme with Plasma's accent",
+                "libadwaita follows the scheme with Plasma's accent, icons and cursor",
                 probe(vm, "adw", None).and_then(|p| {
                     println!("     {}", p.describe());
-                    p.expect(None, None, dark)?;
+                    p.expect(None, Some("breeze"), dark)?;
                     if p.field("accent") != Some("blue") {
                         bail!("libadwaita's accent is not Plasma's blue: {}", p.describe());
+                    }
+                    if p.field("cursor") != Some("breeze_cursors") {
+                        bail!("libadwaita's cursor is not Plasma's: {}", p.describe());
                     }
                     Ok(())
                 }),
