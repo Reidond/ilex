@@ -673,15 +673,23 @@ impl Vm {
                 vars.display()
             ))
             .arg("-drive")
-            .arg(format!(
-                "if=virtio,format={drive_format},file={}{}",
-                drive_file.display(),
-                if config.disk_serials {
-                    ",serial=ilex-disk-0"
-                } else {
-                    ""
-                }
-            ));
+            .arg(if config.disk_serials {
+                // A serial number is a property of the device (QEMU's legacy
+                // `-drive serial=` is refused for qcow2), so the disk is a
+                // device of its own, created where the legacy one would be.
+                format!(
+                    "if=none,id=ilexd0,format={drive_format},file={}",
+                    drive_file.display()
+                )
+            } else {
+                format!(
+                    "if=virtio,format={drive_format},file={}",
+                    drive_file.display()
+                )
+            });
+        if config.disk_serials {
+            qemu.args(["-device", "virtio-blk-pci,drive=ilexd0,serial=ilex-disk-0"]);
+        }
         if security.is_some() {
             qemu.args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
         }
@@ -726,15 +734,23 @@ impl Vm {
             }
         }
         for (index, extra) in config.extra_disks.iter().enumerate() {
-            qemu.arg("-drive").arg(format!(
-                "if=virtio,format=raw,file={}{}",
-                std::path::absolute(extra)?.display(),
-                if config.disk_serials {
-                    format!(",serial=ilex-disk-{}", index + 1)
-                } else {
-                    String::new()
-                }
-            ));
+            if config.disk_serials {
+                let n = index + 1;
+                qemu.arg("-drive")
+                    .arg(format!(
+                        "if=none,id=ilexd{n},format=raw,file={}",
+                        std::path::absolute(extra)?.display()
+                    ))
+                    .args([
+                        "-device",
+                        &format!("virtio-blk-pci,drive=ilexd{n},serial=ilex-disk-{n}"),
+                    ]);
+            } else {
+                qemu.arg("-drive").arg(format!(
+                    "if=virtio,format=raw,file={}",
+                    std::path::absolute(extra)?.display()
+                ));
+            }
         }
         if config.hotplug_port {
             qemu.args([
