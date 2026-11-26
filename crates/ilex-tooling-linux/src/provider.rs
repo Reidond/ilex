@@ -220,6 +220,7 @@ pub struct LinuxProvider {
     ws: Workspace,
     identity: CheckoutIdentity,
     usb_keyboard: bool,
+    usb_medium: bool,
 }
 pub struct LinuxVm {
     spec: VmSpec,
@@ -242,6 +243,7 @@ impl LinuxProvider {
             ws,
             identity,
             usb_keyboard: false,
+            usb_medium: false,
         })
     }
     /// Give the guest an xHCI USB keyboard instead of a virtio one, for
@@ -250,6 +252,13 @@ impl LinuxProvider {
     #[must_use]
     pub fn with_usb_keyboard(mut self, enabled: bool) -> Self {
         self.usb_keyboard = enabled;
+        self
+    }
+    /// Attach the spec's ISO as a USB stick (`/dev/sdX`, removable) instead of
+    /// an optical drive. Off by default: it changes no existing launch.
+    #[must_use]
+    pub fn with_usb_medium(mut self, enabled: bool) -> Self {
+        self.usb_medium = enabled;
         self
     }
 }
@@ -390,6 +399,7 @@ impl VmProvider for LinuxProvider {
         }
         config.cdrom = vm.spec.iso.clone();
         config.usb_keyboard = self.usb_keyboard;
+        config.usb_medium = self.usb_medium;
         config.efi_vars = vm.spec.firmware_state.clone();
         config.extra_disks = vm
             .spec
