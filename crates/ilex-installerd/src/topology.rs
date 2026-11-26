@@ -772,6 +772,47 @@ impl<'a> Tracer<'a> {
                 .is_some_and(|t| IMAGE_FILE_SYSTEMS.contains(&t.as_str()))
     }
 
+    /// The path at which the file the kernel recorded for a loop device can
+    /// be reached from here, and what `stat` says of it. The kernel's
+    /// `(device, inode)` identify the file; a path only gets to it, and counts
+    /// only when `stat` answers with exactly those two numbers (an inode that
+    /// something holds open is not reused, so the numbers are the file's, not a
+    /// namesake's). The name the kernel prints is tried first. It is relative
+    /// to its file system's root when the mount the file was opened through is
+    /// not one this process can reach (dracut's `iso-scan` leaves the ISO's
+    /// loop device that way: `/boot/isos/ilex.iso`, though the disk is mounted
+    /// at `/run/initramfs/isoscan`); the same name below each visible mount of
+    /// the same device is tried next, which finds the file through the host
+    /// disk's own mounted file system. A deleted file has no path, and a file
+    /// no path reaches is not located: whatever it is, the caller decides what
+    /// it might be.
+    fn locate(
+        &self,
+        file: &str,
+        inode: u64,
+        device: DevNum,
+        carrying: &[&Mount],
+    ) -> (String, Option<FileId>) {
+        let matches =
+            |path: &str| (self.stat)(path).filter(|id| id.dev == device && id.ino == inode);
+        let name = file.strip_suffix(" (deleted)").unwrap_or(file);
+        if let Some(id) = matches(name) {
+            return (name.to_owned(), Some(id));
+        }
+        if name.len() == file.len() && name.starts_with('/') {
+            for mount in carrying {
+                if mount.mount_point == "/" {
+                    continue;
+                }
+                let below = format!("{}{name}", mount.mount_point);
+                if let Some(id) = matches(&below) {
+                    return (below, Some(id));
+                }
+            }
+        }
+        (name.to_owned(), None)
+    }
+
     /// Where a loop device's file is, by the kernel's `(device, inode)` and
     /// the file name only to confirm it:
     ///
@@ -799,9 +840,6 @@ impl<'a> Tracer<'a> {
         depth: u32,
         reach: &mut Reach,
     ) {
-        let path = file.strip_suffix(" (deleted)").unwrap_or(file);
-        let confirmed = (self.stat)(path).filter(|id| id.dev == device && id.ino == inode);
-        let node = confirmed.and_then(|id| id.block_device);
         let what = format!("{name} is backed by {file}");
         let carrying: Vec<&Mount> = self
             .system
@@ -809,6 +847,8 @@ impl<'a> Tracer<'a> {
             .iter()
             .filter(|m| (m.major, m.minor) == device)
             .collect();
+        let (path, confirmed) = self.locate(file, inode, device, &carrying);
+        let node = confirmed.and_then(|id| id.block_device);
         let mut explained = false;
         if device.0 != 0 {
             self.number(device, &what, depth, reach);
@@ -833,8 +873,8 @@ impl<'a> Tracer<'a> {
                 // it, which would send the text of the name to other mounts);
                 // if the one on top is btrfs, so is the file, and every btrfs
                 // on the way is traced.
-                if (self.canonical)(path).as_deref() == Some(path) {
-                    let chain = self.mounts_containing(path);
+                if (self.canonical)(&path).as_deref() == Some(path.as_str()) {
+                    let chain = self.mounts_containing(&path);
                     if chain.last().is_some_and(|m| m.fstype == "btrfs") {
                         explained = true;
                         for mount in chain.into_iter().filter(|m| m.fstype == "btrfs") {
