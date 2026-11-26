@@ -254,6 +254,51 @@ fn plan_when_online(vm: &Vm, disk: &Disk) -> Result<Ran> {
     }
 }
 
+/// What the three blank disks look like, for comparing before and after a
+/// plan: their partition table and signature (none), their partitions (none),
+/// and a checksum of the first and last 4 MiB (where an MBR or GPT and its
+/// backup live, and the head of any file system). `sfdisk --dump` of a disk
+/// with no table fails and prints nothing, which is what blank means.
+const BLANK_DISKS: &str = r#"set -u
+for n in vda vdb vdc; do
+    d=/dev/$n
+    [ -b "$d" ] || { echo "$n: not a block device"; continue; }
+    printf '%s: pttype=[%s] signature=[%s] partitions=[%s] dump=[%s] head=%s tail=%s\n' "$n" \
+        "$(blkid -p -s PTTYPE -o value "$d" 2>/dev/null)" \
+        "$(blkid -p -s TYPE -o value "$d" 2>/dev/null)" \
+        "$(find /sys/block/$n -mindepth 1 -maxdepth 1 -name "$n[0-9]*" -printf '%f ' 2>/dev/null)" \
+        "$(sfdisk --dump "$d" 2>/dev/null)" \
+        "$(head -c 4194304 "$d" | sha256sum | cut -c1-16)" \
+        "$(dd if="$d" bs=1M skip=$(( $(blockdev --getsz "$d") / 2048 - 4 )) count=4 status=none | sha256sum | cut -c1-16)"
+done
+"#;
+
+/// The blank disks' state, required to be blank: no partition table, no
+/// signature, no partition. Returned as printed, to be compared later.
+fn blank_disks(vm: &Vm) -> Result<String> {
+    let ran = ssh(vm, BLANK_DISKS)?;
+    ensure!(
+        ran.code == Some(0),
+        "looking at the blank disks failed: {}",
+        ran.text
+    );
+    for name in ["vda", "vdb", "vdc"] {
+        let line = ran
+            .text
+            .lines()
+            .find(|l| l.starts_with(&format!("{name}: ")))
+            .with_context(|| format!("no line for {name}: {}", ran.text))?;
+        ensure!(
+            line.contains("pttype=[]")
+                && line.contains("signature=[]")
+                && line.contains("partitions=[]")
+                && line.contains("dump=[]"),
+            "/dev/{name} is not blank (it has a partition table, a signature or partitions): {line}"
+        );
+    }
+    Ok(ran.text)
+}
+
 fn disk_at<'a>(probe: &'a Probe, path: &str) -> Result<&'a Disk> {
     probe
         .disks
@@ -364,12 +409,13 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
                 live.len() == 1 && live[0].bus == "usb" && live[0].removable,
                 "the boot medium is not the one live_medium disk: {live:?}"
             );
+            // Nothing is said of the stick but that it is the medium: a note
+            // would be a failed scan of its EFI partition (the ESP scan reads
+            // it like any other disk's), a reason a use the trace could not
+            // place.
             ensure!(
-                live[0]
-                    .in_use
-                    .iter()
-                    .all(|reason| !reason.contains("cannot tell")),
-                "the live medium is also reported as something the installer could not trace: {:?}",
+                live[0].in_use.is_empty() && live[0].notes.is_empty(),
+                "the live medium carries a reason or a note besides being the medium: {:?}",
                 live[0]
             );
             ensure!(
@@ -387,7 +433,10 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
     }
 
     // Plan on a blank disk: the whole-disk layout through repart's dry run,
-    // against the registry. Nothing is written.
+    // against the registry. Nothing is written: the disks are looked at first,
+    // blank, and again after every plan.
+    let blank_before = blank_disks(vm).context("the blank disks, before any plan")?;
+    save(artifacts, medium, "disks-before.txt", &blank_before)?;
     let blank = disk_at(&probe, "/dev/vda")?;
     let ran = plan_when_online(vm, blank)?;
     save(artifacts, medium, "plan.txt", &ran.text)?;
@@ -430,8 +479,9 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
         refused.message
     );
 
-    // The same answers after the plans: a plan leaves nothing held, no
-    // scratch directory behind.
+    // The same answers after the plans: a plan leaves nothing held, and the
+    // disks it looked at are what they were (no table, no partition, not a
+    // byte of the first and last MiB changed).
     let ran = ssh(vm, &busctl("ilex-installer", "Probe", None))?;
     let again: Probe = serde_json::from_value(document(&ran, "Probe")?)?;
     for (path, bytes) in [
@@ -441,16 +491,11 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
     ] {
         offered(&again, path, bytes).context("after the plans")?;
     }
-    let leftovers = ssh(
-        vm,
-        "ls /run/ilex-installer 2>&1; find /run/ilex-installer -mindepth 1 -maxdepth 1 \\( -name 'scan-*' -o -name 'selfcheck-*' \\) 2>/dev/null",
-    )?;
+    let blank_after = blank_disks(vm).context("the blank disks, after the plans")?;
+    save(artifacts, medium, "disks-after.txt", &blank_after)?;
     ensure!(
-        leftovers.code == Some(0)
-            && !leftovers.text.contains("scan-")
-            && !leftovers.text.contains("selfcheck-"),
-        "scratch directories were left behind: {}",
-        leftovers.text
+        blank_before == blank_after,
+        "a plan changed a disk it only looked at:\n--- before\n{blank_before}--- after\n{blank_after}"
     );
 
     // The helper's own self-check, with the files this ISO ships.
@@ -464,6 +509,20 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
         "ilex-installerd --self-check on the ISO failed (exit {:?}): {}",
         check.code,
         check.text
+    );
+
+    // No scratch directory is left behind by the plans or by the self-check
+    // (which makes its own beside them): looked for last.
+    let leftovers = ssh(
+        vm,
+        "ls /run/ilex-installer 2>&1; find /run/ilex-installer -mindepth 1 -maxdepth 1 \\( -name 'scan-*' -o -name 'selfcheck-*' \\) 2>/dev/null",
+    )?;
+    ensure!(
+        leftovers.code == Some(0)
+            && !leftovers.text.contains("scan-")
+            && !leftovers.text.contains("selfcheck-"),
+        "scratch directories were left behind: {}",
+        leftovers.text
     );
 
     // SELinux. The live ISO boots permissive (`enforcing=0`) with unlabelled
