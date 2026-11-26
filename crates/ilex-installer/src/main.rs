@@ -16,8 +16,7 @@ mod window;
 
 use anyhow::Result;
 
-const USAGE: &str =
-    "usage: ilex-installer [--self-check | --windowed | --marker LINE | --version]";
+const USAGE: &str = "usage: ilex-installer [--self-check | --windowed | --marker LINE | --version]";
 
 fn main() {
     let mut mode = Mode::Window { fullscreen: true };

@@ -78,12 +78,8 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_basic_graphics", || boot(Entry::BasicGraphics)),
         trial("iso::next_fallback", fallback),
         trial("iso::next_restart", restart),
-        trial("iso::next_serial_backpressure", || {
-            serial("backpressure", "Backpressure")
-        }),
-        trial("iso::next_serial_unavailable", || {
-            serial("unavailable", "Unavailable")
-        }),
+        trial("iso::next_serial_backpressure", || serial("backpressure")),
+        trial("iso::next_serial_unavailable", || serial("unavailable")),
     ]
 }
 
@@ -480,7 +476,8 @@ fn wait_for_marker(
         if count_markers(&console, name, Some(key)) >= count {
             return Ok(console);
         }
-        if name != "ILEX-INSTALLER-FALLBACK" && has_marker(&console, "ILEX-INSTALLER-FALLBACK", None)
+        if name != "ILEX-INSTALLER-FALLBACK"
+            && has_marker(&console, "ILEX-INSTALLER-FALLBACK", None)
         {
             bail!("the session gave up while waiting for {wanted:?}; serial: {console}");
         }
@@ -700,12 +697,16 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     vm.wait_ssh(Duration::from_secs(180))
         .context("the harness's SSH key did not give a login to the live ISO")?;
     let restarts = |vm: &Vm| -> Result<u32> {
-        let value = vm.ssh_ok("systemctl show ilex-installer-session.service -p NRestarts --value")?;
+        let value =
+            vm.ssh_ok("systemctl show ilex-installer-session.service -p NRestarts --value")?;
         value
             .parse()
             .with_context(|| format!("NRestarts={value:?} is not a number"))
     };
-    ensure!(restarts(vm)? == 0, "the session restarted before anything was done to it");
+    ensure!(
+        restarts(vm)? == 0,
+        "the session restarted before anything was done to it"
+    );
 
     // 1. The compositor asks the window to close (Alt+F4): the installer stays.
     ctl.key("alt+F4")?;
@@ -727,7 +728,9 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     vm.ssh_ok(KILL_COMPOSITOR)?;
     let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 2, PAGE_TIMEOUT)?;
     ensure!(
-        console.lines().any(|l| l.starts_with("ILEX-INSTALLER-SESSION ended child=compositor status=137")),
+        console
+            .lines()
+            .any(|l| l.starts_with("ILEX-INSTALLER-SESSION ended child=compositor status=137")),
         "the session did not report the compositor's death: {console}"
     );
     ensure!(
@@ -736,17 +739,25 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         "the second attempt was spent on a stale socket: {console}"
     );
     wait_page(vm, &ctl, artifacts, "restart")?;
-    ensure!(restarts(vm)? == 1, "expected one restart after the compositor died");
+    ensure!(
+        restarts(vm)? == 1,
+        "expected one restart after the compositor died"
+    );
 
     // 3. The client dies: the compositor is stopped with it and both return.
     vm.ssh_ok(KILL_INSTALLER)?;
     let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 3, PAGE_TIMEOUT)?;
     ensure!(
-        console.lines().any(|l| l.starts_with("ILEX-INSTALLER-SESSION ended child=installer")),
+        console
+            .lines()
+            .any(|l| l.starts_with("ILEX-INSTALLER-SESSION ended child=installer")),
         "the session did not report the installer's death: {console}"
     );
     wait_page(vm, &ctl, artifacts, "restart")?;
-    ensure!(restarts(vm)? == 2, "expected two restarts after the client died");
+    ensure!(
+        restarts(vm)? == 2,
+        "expected two restarts after the client died"
+    );
     ensure!(
         !has_marker(&console, "ILEX-INSTALLER-FALLBACK", None),
         "the fallback fired after two recoverable failures: {console}"
@@ -763,7 +774,7 @@ const KILL_INSTALLER: &str = "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev
 /// The serial mirror of the markers fails on purpose; the interface must not
 /// notice, and every failed write must be reported on the second UART. Boots
 /// without the harness's key: the live image's SSH server must stay off.
-fn serial(mode: &'static str, status: &'static str) -> Result<()> {
+fn serial(mode: &'static str) -> Result<()> {
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
     let purpose = format!("iso-next-ser-{}", &mode[..2]);
@@ -775,14 +786,15 @@ fn serial(mode: &'static str, status: &'static str) -> Result<()> {
             "type=11,value=io.systemd.credential:ilex.installer.serial-test={mode}"
         ));
     })?;
-    let outcome = observe_serial(&mut vm, &artifacts, mode, status);
+    let outcome = observe_serial(&mut vm, &artifacts, mode);
     if outcome.is_err() {
         diagnostics(&mut vm, &artifacts, &format!("serial-{mode}"));
     }
     outcome
 }
 
-fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str, status: &str) -> Result<()> {
+/// `mode` is both the injected fault and the status the failed write reports.
+fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
     let primary = vm.info.dir.join("serial.log");
     let secondary = vm.info.dir.join("serial-secondary.log");
     let ctl = Vmctl::from_info(vm.info.clone());
@@ -791,14 +803,16 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str, status: &str) -> Re
     wait_page(vm, &ctl, artifacts, &format!("serial-{mode}"))?;
 
     let mut audited = 0;
-    for line in complete_lines(&console).filter(|l| is_marker(l, "ILEX-INSTALLER-SERIAL", Some("mode"))) {
+    for line in
+        complete_lines(&console).filter(|l| is_marker(l, "ILEX-INSTALLER-SERIAL", Some("mode")))
+    {
         let words: BTreeMap<String, String> = line
             .split_whitespace()
             .skip(1)
             .filter_map(|w| w.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
             .collect();
         ensure!(
-            field(&words, "mode")? == mode && field(&words, "status")? == status,
+            field(&words, "mode")? == mode && field(&words, "status")? == mode,
             "a marker write did not fail as {mode}: {line}"
         );
         let seconds: f64 = field(&words, "seconds")?
@@ -825,8 +839,13 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str, status: &str) -> Re
         !banner.starts_with("SSH-"),
         "an SSH server answers on the live ISO without the harness's key: {banner:?}"
     );
-    fs::write(artifacts.join(format!("next-serial-{mode}-secondary.txt")), console)?;
-    println!("iso::next serial {mode}: {audited} faulted writes, each reported within {SERIAL_BUDGET_SECONDS}s; no SSH server");
+    fs::write(
+        artifacts.join(format!("next-serial-{mode}-secondary.txt")),
+        console,
+    )?;
+    println!(
+        "iso::next serial {mode}: {audited} faulted writes, each reported within {SERIAL_BUDGET_SECONDS}s; no SSH server"
+    );
     Ok(())
 }
 

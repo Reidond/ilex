@@ -42,7 +42,11 @@ pub struct Args {
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     // The next installer's live ISO carries no image: `iso::next…` alone needs
     // neither the checkout's image nor a build of it.
-    let only_next = !args.filters.is_empty() && args.filters.iter().all(|f| crate::iso_next::is_next_filter(f));
+    let only_next = !args.filters.is_empty()
+        && args
+            .filters
+            .iter()
+            .all(|f| crate::iso_next::is_next_filter(f));
     let image = if only_next {
         None
     } else {
@@ -76,7 +80,11 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     }) {
         prepare_iso(ws, &mut test)?;
     }
-    if args.filters.iter().any(|f| crate::iso_next::is_next_filter(f)) {
+    if args
+        .filters
+        .iter()
+        .any(|f| crate::iso_next::is_next_filter(f))
+    {
         prepare_iso_next(ws, &mut test)?;
     }
     cmd::run(&mut test)

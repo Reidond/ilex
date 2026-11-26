@@ -70,9 +70,7 @@ pub fn run(args: Args) -> Result<()> {
         Command::Tool(a) => crate::tool::run(&ws, a),
         Command::Test(a) => {
             ensure!(
-                !a.filters
-                    .iter()
-                    .any(|f| crate::iso_next::is_next_filter(f)),
+                !a.filters.iter().any(|f| crate::iso_next::is_next_filter(f)),
                 "{}",
                 crate::iso_next::REMOTE_UNSUPPORTED
             );

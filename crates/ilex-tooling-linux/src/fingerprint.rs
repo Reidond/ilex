@@ -153,7 +153,11 @@ fn closure(ws: &Workspace, build: &CargoBuild) -> Result<BTreeSet<String>> {
         .filter_map(|id| id.as_str())
         .collect();
     let mut dependencies: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for node in metadata["resolve"]["nodes"].as_array().into_iter().flatten() {
+    for node in metadata["resolve"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
         let Some(id) = node["id"].as_str() else {
             continue;
         };
@@ -162,10 +166,14 @@ fn closure(ws: &Workspace, build: &CargoBuild) -> Result<BTreeSet<String>> {
             .into_iter()
             .flatten()
             .filter(|dep| {
-                dep["dep_kinds"].as_array().into_iter().flatten().any(|kind| {
-                    // null is a normal dependency; "build" a build script's.
-                    kind["kind"].as_str() != Some("dev")
-                })
+                dep["dep_kinds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|kind| {
+                        // null is a normal dependency; "build" a build script's.
+                        kind["kind"].as_str() != Some("dev")
+                    })
             })
             .filter_map(|dep| dep["pkg"].as_str())
             .collect();
