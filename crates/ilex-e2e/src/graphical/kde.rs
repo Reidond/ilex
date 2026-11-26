@@ -780,7 +780,7 @@ mod apps {
         shot(ctl, artifacts, "09-discover-home")?;
         user(
             vm,
-            "systemd-run --user --collect --quiet --unit=ilex-discover-open plasma-discover appstream://org.gnome.baobab.desktop",
+            "systemd-run --user --collect --quiet --unit=ilex-discover-open plasma-discover appstream://org.gnome.baobab",
         )?;
         std::thread::sleep(Duration::from_secs(8));
         shot(ctl, artifacts, "10-discover-page")?;
