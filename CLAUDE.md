@@ -2406,7 +2406,8 @@ the Windows paths of this change: no Windows host was available.
   other overlay files) and the ISO. What a person reads as its name is the
   `display-name` in `installer/next/editions.toml`, the only place it lives;
   the build writes it into the image as `/usr/share/ilex-installer/edition.json`.
-  The owner has not chosen edition names yet: `ilex GNOME` is a placeholder.
+  The owner chose **ilex Glabra** for the GNOME edition (identifier `gnome`) and
+  **ilex Kingiana** for the future KDE edition (identifier `kde`), both holly species.
 - **Build.** `installer/next/Containerfile` is `fedora-bootc:45`, the shared
   live-boot packages (`packages.txt`: dracut's `dmsquash-live`, and what
   image-builder's `generic-iso` needs inside the container) and the edition's,
