@@ -2595,8 +2595,11 @@ the Windows paths of this change: no Windows host was available.
   `iso::next_serial_unavailable`, `iso::next_serial_stall`,
   `iso::next_ssh_tmpfiles`, `iso::next_helper_usb`,
   `iso::next_helper_cdrom`, `iso::next_welcome`, `iso::next_detect_board`,
-  `iso::next_detect_generic`, `iso::next_kernel_argument` and
-  `iso::next_kernel_argument_unknown` are registered only when a filter names
+  `iso::next_ssh_tmpfiles`, `iso::next_helper_usb`,
+  `iso::next_helper_cdrom`, `iso::next_welcome`, `iso::next_detect_board`,
+  `iso::next_detect_generic`, `iso::next_kernel_argument`,
+  `iso::next_kernel_argument_unknown` and `iso::next_account` are registered
+  only when a filter names
   `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO);
   `iso::next_helper_loop` only when a filter names `next_helper_loop` (it needs
   `mke2fs`, `sfdisk` and a second copy of the ISO on the host, which no other
@@ -3315,12 +3318,17 @@ installed, and no page writes to a disk.
     progress rows of an installation) and `selfcheck::system` reads the live
     image's keyboard catalogue.
 - **The pages.** `AdwNavigationView`, a header bar with the automatic Back
-  button (and Escape), Continue at the bottom right of every page, Enter
-  continues where the page is valid (each page's default widget; the entry
-  rows activate it), the first control has the focus when a page is shown, every
-  control has a visible label and the error style of a refused field is also
-  its accessible invalid state with the message as its error message. No
-  window buttons: the session's only window cannot be closed.
+  button (and Escape), Continue at the bottom right of every page. Every control
+  is reachable with Tab and has a visible label; the error style of a refused
+  field is also its accessible invalid state, with the message as its error
+  message. Enter in a text field (the layout test field, the name, the
+  passwords) continues when the page is valid and does nothing otherwise; Enter
+  anywhere else keeps its own meaning (opens a list, toggles a row, presses the
+  focused button). There is deliberately no window default widget: one takes
+  Enter away from the combo rows. The machine page starts on Continue, the
+  administrator page on the name. No window buttons: the session's only window
+  cannot be closed. The real ISO's trials drive the welcome, machine and
+  administrator pages by keyboard; AT-SPI has not been used to walk them.
   - *Welcome.* The installed system's language (a short table of UTF-8 locales:
     the live image has no list of the locales the installed system can
     generate, so the model checks syntax only) and the keyboard layout, with a
@@ -3402,8 +3410,12 @@ installed, and no page writes to a disk.
   `ilex.composition=invalid-first-choice ilex.composition=ms-7c35.gnome` into
   GRUB's editor and requires the last to win, `chosen`, and the model's own
   serial line; `iso::next_kernel_argument_unknown` an unoffered tag: `bad-override`
-  with the detection's choice kept. Screenshots of each are kept in the
-  artifacts.
+  with the detection's choice kept. `iso::next_account` types the administrator
+  page with the keyboard on a VM with a 40 GiB disk, presses Enter in the last
+  field and requires the real helper's `Plan` (the image's manifest is read from
+  the registry, so the guest needs `ghcr.io`) to succeed, the closing page to
+  report `check=ok`, and the password to be nowhere on the serial console.
+  Screenshots of each are kept in the artifacts.
 - **Not done here.** Strings are English constants (no gettext catalogue); the
   installed system's computer name and time zone, the display's scale and the
   network, disk, encryption, review, progress, done and problem pages, the
