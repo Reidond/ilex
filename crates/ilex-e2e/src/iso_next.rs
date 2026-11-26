@@ -47,6 +47,12 @@
 //!   `iso-scan/filename=` (`iso_next/loop_file.rs`): the disk holding the file
 //!   is `live_medium` and is no target, and the blank disks are offered.
 //!
+//! * `iso::next_welcome`, `iso::next_detect_board`, `iso::next_detect_generic`,
+//!   `iso::next_kernel_argument` and `iso::next_kernel_argument_unknown`: the
+//!   interface's own first pages with real key input (see `iso_next/ui.rs`):
+//!   the welcome page, the session's keyboard layout switched at run time, the
+//!   machine detected from SMBIOS or named on the kernel command line.
+//!
 //! The boot trials use `SecurityLaunch::QualificationFixture`: provisioning
 //! (KVM with SMM, a Secure Boot firmware pair) is required, a passing
 //! qualification of the host is not. They measure whatever the host gives them
@@ -73,6 +79,7 @@ use crate::iso::grub_key;
 
 mod helper;
 mod loop_file;
+mod ui;
 
 /// From power-on to the page being mapped. Boot is a few tens of seconds; the
 /// margin is for a contended runner.
@@ -92,7 +99,7 @@ const SERIAL_BUDGET_SECONDS: f64 = 1.0;
 const POLKIT_ALLOWED: &[&str] = &["org.freedesktop.login1.chvt"];
 
 pub fn trials() -> Vec<Trial> {
-    vec![
+    let mut trials = vec![
         trial("iso::next_boot", || boot(Entry::Normal)),
         trial("iso::next_basic_graphics", || boot(Entry::BasicGraphics)),
         trial("iso::next_fallback", fallback),
@@ -105,7 +112,9 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_helper_cdrom", || {
             helper::run(helper::Medium::Cdrom)
         }),
-    ]
+    ];
+    trials.extend(ui::trials());
+    trials
 }
 
 /// `iso::next_helper_loop`: the ISO as a file on another disk. It needs host
@@ -292,7 +301,7 @@ fn observe(
         "the guest does not report Secure Boot on: {session:?}"
     );
     ensure!(
-        field(&page, "page")? == "placeholder",
+        field(&page, "page")? == "welcome",
         "unexpected page: {page:?}"
     );
     ensure!(

@@ -326,19 +326,15 @@ pub struct Widgets {
 }
 
 struct Welcome {
-    page: adw::NavigationPage,
     banner: adw::Banner,
     language: adw::ComboRow,
     keyboard: adw::ComboRow,
-    test: adw::EntryRow,
     button: gtk::Button,
 }
 
 struct Machine {
-    page: adw::NavigationPage,
     banner: adw::Banner,
     stack: gtk::Stack,
-    loading: adw::StatusPage,
     problem: adw::StatusPage,
     computer: adw::ActionRow,
     group: adw::PreferencesGroup,
@@ -520,6 +516,8 @@ impl Widgets {
         let test = adw::EntryRow::builder()
             .title("Type here to try the layout")
             .build();
+        // Enter in the field continues, like on every other page.
+        test.set_activates_default(true);
         let welcome_banner = banner(None);
         let welcome_button = continue_button("Continue");
         let language_group = group(
@@ -750,18 +748,14 @@ impl Widgets {
         Self {
             nav,
             welcome: Welcome {
-                page: welcome_page,
                 banner: welcome_banner,
                 language,
                 keyboard,
-                test,
                 button: welcome_button,
             },
             machine: Machine {
-                page: machine_page,
                 banner: machine_banner,
                 stack,
-                loading,
                 problem,
                 computer,
                 group: machine_group,
@@ -834,8 +828,8 @@ impl Widgets {
         {
             w.keyboard.set_selected(index as u32);
         }
-        w.button.set_sensitive(flow.can_continue() || flow.page() != PageId::Welcome);
-        let _ = (&w.page, &w.test);
+        w.button
+            .set_sensitive(flow.page() != PageId::Welcome || flow.can_continue());
     }
 
     fn sync_machine(&mut self, flow: &Flow, sender: &ComponentSender<App>) {
@@ -869,7 +863,6 @@ impl Widgets {
             }
             (ProbeState::Ready(_), None) => {}
         }
-        let _ = (&m.page, &m.loading, &m.group);
     }
 
     fn sync_account(&mut self, flow: &Flow) {
