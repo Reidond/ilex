@@ -225,11 +225,45 @@ struct Setup<'a> {
     hotplug: bool,
 }
 
+/// [`boot_once`], started again (up to twice) when the guest never ran: on a
+/// Boat sandbox a VM now and then prints nothing at all on its serial console
+/// for as long as it is left (QEMU's vCPU threads at 0 s of CPU: firmware never
+/// started). That is the sandbox, not the installer, and a guest that has not
+/// printed a byte in two and a half minutes will not: a fresh one is started,
+/// and the retry is said out loud.
+fn boot(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
+    const ATTEMPTS: u32 = 3;
+    const ALIVE_WITHIN: Duration = Duration::from_secs(150);
+    for attempt in 1..=ATTEMPTS {
+        let mut guest = boot_once(root, layout, setup)?;
+        let vm = guest.vm.running_mut()?;
+        let serial = vm.info.dir.join("serial.log");
+        let started = Instant::now();
+        loop {
+            if fs::metadata(&serial).is_ok_and(|m| m.len() > 0) {
+                return Ok(guest);
+            }
+            if let Some(status) = vm.exited()? {
+                bail!("the VM exited with {status} before it printed anything");
+            }
+            if started.elapsed() > ALIVE_WITHIN {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        eprintln!(
+            "iso::next: attempt {attempt} of {ATTEMPTS}: the guest printed nothing on its serial console in {ALIVE_WITHIN:?} (the sandbox's idle-vCPU flake); starting it again"
+        );
+        drop(guest);
+    }
+    bail!("the guest printed nothing on its serial console in {ATTEMPTS} attempts")
+}
+
 /// The ISO, a target and (usually) an answers volume, booted: UEFI, Secure
 /// Boot. The target is fresh every time; with a file as the source, the host
 /// disk that holds the file is the VM's own disk and the loader's FAT disk is
 /// attached last.
-fn boot(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
+fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
     let ws = common::workspace()?;
     let target = layout.target(root);
     let memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| MEMORY.into());
