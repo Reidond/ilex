@@ -824,7 +824,8 @@ fn keyboard_round_trip(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()>
     ctl.type_text("echo ILEX-TTY2-ANSWER-$((6*7))-$(id -un)\n")?;
     let text = loop {
         let text = vm.ssh_ok("cat /dev/vcs2")?;
-        if text.lines().any(|line| line.trim() == answer) {
+        // /dev/vcs2 is the screen's rows padded to the width, with no newlines.
+        if text.split_whitespace().any(|word| word == answer) {
             break text;
         }
         ensure!(
