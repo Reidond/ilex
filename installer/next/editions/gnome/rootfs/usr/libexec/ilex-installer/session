@@ -69,7 +69,9 @@ marker "ILEX-INSTALLER-SESSION compositor=gnome-kiosk graphics=$graphics secure-
 gnome-kiosk --wayland --no-x11 &
 compositor=$!
 installer=
-trap 'kill "$compositor" $installer 2>/dev/null; wait 2>/dev/null' EXIT
+# Whatever is left is stopped with the script (and, failing that, by the unit's
+# stop timeout): the next attempt must not find a compositor still holding seat0.
+trap 'kill "$compositor" $installer 2>/dev/null' EXIT
 
 # Wait for the compositor to listen (a slow boot with software rendering can
 # take a while: a minute is allowed before the attempt is given up).

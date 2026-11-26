@@ -44,6 +44,9 @@ ExecStart=/usr/libexec/ilex-installer/session
 # any end of this unit's main process, clean or not, is a failed session.
 Restart=always
 RestartSec=2
+# What the script leaves behind is killed after this long, so that the next
+# attempt does not start while the last compositor still holds seat0.
+TimeoutStopSec=5
 
 [Install]
 WantedBy=multi-user.target
