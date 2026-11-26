@@ -786,10 +786,11 @@ is built and its greeter configuration is checked by `ephemeral::configuration`,
 but a Plasma Login Manager login into GNOME is not tested.
 
 **Each desktop keeps its own look.** GNOME stays Adwaita and Plasma stays Breeze
-in one shared home, across a normal logout, a crash, a user manager that
-outlives its sessions (lingering, SSH, TTY) and a `bootc switch` between a KDE
-and a GNOME composition. The design is that Plasma writes nothing a GNOME
-session reads, and puts nothing in the session that GNOME inherits as a choice.
+in one shared home, across a normal logout, a crash of the Plasma session, a user
+manager that outlives its sessions (lingering, SSH, TTY) and a `bootc switch`
+between a KDE and a GNOME composition. The design is that Plasma writes nothing a
+GNOME session reads, puts nothing in the session that GNOME inherits as a choice,
+and leaves no Plasma process running for a GNOME login to meet.
 
 *Measured on Plasma 6.8.3, GTK 3.24.52, libadwaita 1.10 and the GNOME 51 runtime:*
 
@@ -820,7 +821,12 @@ session reads, and puts nothing in the session that GNOME inherits as a choice.
   Flathub ("replaced by org.gtk.Gtk3theme.Breeze"; the replacement's workaround
   is `flatpak override --user --filesystem=xdg-config/gtk-3.0:ro`, i.e. a shared
   file) and is Plasma 5's palette (window background `#31363b`, Plasma 6's own
-  Breeze Dark is `#202326`).
+  Breeze Dark is `#202326`). With the replacement alone a sandboxed GTK 3
+  application in a dark Plasma stays light: the portal names `Breeze-Dark`, no
+  such theme is installed and GTK 3 falls back to its own (window background
+  `#f6f5f4`). `graphical::apps` takes `Breeze-Dark` away, probes that, and puts it
+  back; it fails if the replacement ever suffices, as the cue to drop the old
+  extension from the shell's list.
 
 *What the shell does* (every path below is Plasma-scoped, and `ephemeral::shell_themes`
 checks that the overlay holds nothing else):
@@ -836,12 +842,38 @@ checks that the overlay holds nothing else):
   `org.gnome.desktop.interface` of the **KDE-only dconf database** (profile
   `/usr/share/dconf/profile/ilex-kde`, file `~/.config/dconf/kde`). The unit sets
   `DCONF_PROFILE` for itself; values that are not names are never written into a
-  GVariant.
+  GVariant. Each colour channel is validated on its own and read in base 10
+  (`08` is not octal, spaces and an alpha channel are accepted, a channel above
+  255, a missing one or too many make the background unreadable, which is Breeze
+  Light), the cursor size is clamped to 8-256 (Plasma's `0` is the default 24),
+  and the watcher exits non-zero when its D-Bus monitor ends, so
+  `Restart=on-failure` starts one that listens again. `ephemeral::shell_themes`
+  feeds it padded, spaced, RGBA, out-of-range and overflowing values and a
+  monitor that ends.
 - `xdg-desktop-portal-gtk.service` has a drop-in that starts
   `/usr/libexec/ilex/portal-gtk`. The wrapper selects the KDE database only when
   `XDG_CURRENT_DESKTOP` is KDE **and** `plasma-workspace.target` is active or
   activating, decided each time the portal starts: nothing persists for a later
-  GNOME login to inherit.
+  GNOME login to inherit. The drop-in also makes the portal `PartOf=plasma-workspace.target`
+  (upstream it is only `PartOf=graphical-session.target`), so it stops whenever
+  Plasma's target does.
+- `ilex-kde-session.service` (Plasma only, `PartOf=plasma-workspace.target`) runs
+  `/usr/libexec/ilex/kde-session-watch`: every 3 seconds it asks logind whether the
+  login session that started Plasma (`XDG_SESSION_ID` of the manager's
+  environment) is gone or `closing`, and then stops `graphical-session.target`, as a
+  GNOME logout does (compositor, shell, portals and `plasma-workspace.target` go
+  with it), only while `plasma-workspace.target` is still up. A normal logout needs
+  none of this: Plasma stops its own target and the watch with it. Measured with
+  SIGKILL of `startplasma-wayland` and `kwin_wayland` in a lingering manager:
+  logind ends the session, but upstream leaves `plasma-workspace.target`,
+  `graphical-session.target`, the compositor (`kwin_wayland_wrapper` even respawns
+  it), the shell, `xdg-desktop-portal` and the GTK portal reading the KDE database
+  running, and the next Plasma login layers over them. A closed session can stay
+  listed as `closing` for a long time (the `oo7-daemon-login` helper of GDM's
+  password login holds its scope), so `closing` counts as over. The Wayland
+  clients that lost the compositor fail (for example `xdg-desktop-portal-gtk`);
+  they are stopped, not running. `GTK_USE_PORTAL=1` stays in the manager (no
+  shutdown script runs after a crash) and is benign: GNOME's own portal answers.
 - Plasma's env script exports only `GTK_USE_PORTAL=1`, so GTK applications of the
   session ask the portal (and Plasma's file dialogs). Left behind by a crash it is
   benign: GNOME's own portal answers from GNOME's own settings. A shutdown script
@@ -855,6 +887,20 @@ checks that the overlay holds nothing else):
   launch from a terminal, say) read GSettings directly and are Adwaita; the shell
   ships none (a KDE image has no host GTK 3 application besides the portal).
 - `profile.py` checks `~/.config/dconf/kde` for symlinks like `user`.
+- **Two shells in one image.** GNOME's host applications (Files, Settings,
+  Software, Ptyxis, anything libadwaita) also run in a Plasma session. Started from
+  Plasma they inherit `GTK_USE_PORTAL=1`, so they are themed like every GTK
+  application of the session: colour scheme and accent from
+  `xdg-desktop-portal-kde`, GTK theme, icons, cursor and font from the KDE database
+  through `xdg-desktop-portal-gtk` (`graphical::shells` checks that host GTK 4 and
+  libadwaita applications resolve Plasma's icons, cursor and font in Plasma and
+  GNOME's in GNOME, from the same home). libadwaita still draws Adwaita widgets,
+  not Breeze. An application started without the session's environment (over
+  `ssh`, from `sudo`) has no `GTK_USE_PORTAL` and reads GSettings directly: the
+  user's own database, which holds GNOME's choices or GNOME's defaults, so it looks
+  as it does in GNOME (its colour scheme and accent, which libadwaita takes from the
+  settings portal, are not covered by this). Plasma's choices exist only in the
+  KDE-only database.
 
 **Discover** lists and installs from a remote of an installation and installs into
 the installation that remote belongs to. The system installation is root's
@@ -862,10 +908,13 @@ the installation that remote belongs to. The system installation is root's
 enumerated), so a user with no remote of their own saw "no Flatpak sources" and an
 "Add Flathub" that was refused. `ilex-kde-flathub.service` (Plasma only, once per
 user, stamp `~/.local/state/ilex/kde-flathub-remote`) runs
-`flatpak remote-add --user --if-not-exists flathub` from the committed trust file,
-offline, the remote `ilexctl profile apply --install-apps` creates too; a remote
-the user later removes is not added again. Discover then shows Flathub and installs
-"from Flathub (user)". Unlike GNOME Software it does not hand the system
+`flatpak remote-add --user --if-not-exists flathub` from the committed trust file
+(no key is downloaded), the remote `ilexctl profile apply --install-apps` creates
+too. It still needs the network: `flatpak remote-add` fetches the remote's summary
+after adding it, so without a connection the unit fails, writes no stamp and runs
+again at the next Plasma session. The AppStream catalogue comes later, when
+Discover refreshes it. A remote the user later removes is not added again.
+Discover then shows Flathub and installs "from Flathub (user)". Unlike GNOME Software it does not hand the system
 installation to Flatpak as a dependency source, so a user-scope application brings
 its own copy of its runtime and extensions into the home (a GNOME application:
 about a gigabyte, which a 2 GiB test home cannot hold; the KDE apps test creates an
@@ -897,7 +946,9 @@ panel; nothing is measured for the AOC panel of `ms-7c35`.
 Tests: `ephemeral::` runs on a KDE root like any other (`shell_themes` runs the
 sync and the portal's choice against fixtures, in a real user session, and checks
 that nothing is written into a shared place; `configuration` also requires a
-non-default shell's greeter not to be enabled unless it shares the default's).
+non-default shell's greeter not to be enabled unless it shares the default's;
+`user_profiles` composes two fixture shells to check that a Flatpak declared with
+different branches or kinds is refused).
 `graphical::login` with a KDE default shell logs into Plasma through the greeter
 and checks the GTK look offline: the KDE database and no shared GTK file, the
 portal reading it, a GTK 3 window that resolves Breeze and Breeze Dark (the
@@ -905,17 +956,23 @@ colours of its window, not a theme name), and the portal values libadwaita reads
 `graphical::apps` on KDE (**network**, a homed account, about two gigabytes)
 installs GNOME Calculator (libadwaita), gedit (GTK 3), dconf-editor and the two
 theme extensions, probes what GTK 3, GTK 4 and libadwaita resolve inside their
-sandboxes in dark and light, writes a setting with the dconf-backed
+sandboxes in dark and light (and, in dark, with `Breeze-Dark` taken away, which
+leaves GTK 3 light), writes a setting with the dconf-backed
 dconf-editor, and installs GNOME Disk Usage Analyzer through Discover's own page and Install
 button with real input, into the user installation; it does not install the KDE
 list. `graphical::shells` is explicit-only and needs `--shell gnome --shell kde`:
-Plasma ending in Breeze Dark, a normal logout, GNOME's GTK 3, GTK 4 and libadwaita
-applications light and Adwaita from the same home and the same lingering user
-manager (a crash's leftover `GTK_USE_PORTAL` included), then GNOME made dark with
-the dark scheme, Adwaita-dark as GTK 3's theme name (Fedora's GTK 3 has no such
-theme directory and does not read `color-scheme`, so the name is checked, not the
-colours) and a purple accent, a normal logout, and Plasma again, Breeze Dark with
-Plasma's blue accent and GNOME's database as GNOME left it. Screenshots land in `<state dir>/artifacts/graphical*/`.
+Plasma ending in Breeze Dark (host GTK 4 and libadwaita applications resolve its
+icons, cursor and font, not GNOME's), a normal logout, GNOME's GTK 3, GTK 4 and
+libadwaita applications light and Adwaita from the same home and the same lingering
+user manager, then GNOME made dark with the dark scheme, Adwaita-dark as GTK 3's
+theme name (Fedora's GTK 3 has no such theme directory and does not read
+`color-scheme`, so the name is checked, not the colours) and a purple accent, a
+normal logout, and Plasma again, Breeze Dark with Plasma's blue accent and GNOME's
+database as GNOME left it. It ends with a real crash: SIGKILL of that Plasma
+session's compositor and session leader, the session watch stopping Plasma's
+targets (waited for, up to a minute), no process left that selects the KDE
+database, and a GNOME login in the same manager whose GTK 3, GTK 4 and libadwaita
+applications are GNOME's dark choice. Screenshots land in `<state dir>/artifacts/graphical*/`.
 The Anaconda installer's catalogue offers only the installer composition's shell
 list (GNOME), so KDE compositions are not offered there and its release does not
 wait for their tags; KDE installs arrive with the KDE installer edition.
@@ -1118,8 +1175,14 @@ branch = "3.22"
 ```
 
 `compose.py` validates the table (only `id` and `branch`; the ID and the branch
-name must be well formed; no ID repeated among applications and extensions) and
-writes `Branch=<branch>` with `IsRuntime=true` into the shell's or machine's list.
+name must be well formed; no ID repeated among applications and extensions of one
+manifest) and writes `Branch=<branch>` with `IsRuntime=true` into the shell's or
+machine's list. Several shells may list the same Flatpak (both desktops ship
+Firefox) but only with the same kind and branch, which `compose.py` enforces for
+the selected shells (`ephemeral::user_profiles` composes two fixture shells to
+check it) and `ilexctl apps --self-check` for the shells together with a machine
+layer: one preinstall group carries one of each, so a differing second
+declaration would silently replace the first.
 Flathub, the system installation and the absence of a `CollectionID` stay fixed.
 `ilexctl apps --self-check` requires applications on `stable` and exactly the
 declared extensions with their branch and `IsRuntime=true`; `ephemeral::configuration`
@@ -1186,7 +1249,11 @@ downloads; `vm run --gui` enables them by default (`--no-apps` opts out).
 Ephemeral assertions parse the lists and trust file without Flathub traffic.
 
 `ilexctl test apps::` opts into an enforcing installed disk and real
-Flathub downloads: offline timer/backoff with the internet NIC down and a
+Flathub downloads. It qualifies the GNOME shell's lists (it removes Decibels from
+them, uninstalls Calculator, adds Chess and updates Text Editor and Extensions), so
+it refuses an image whose default shell is not GNOME and points at
+`graphical::apps --shell kde`; it checks the greeter of the selected shell. It
+covers offline timer/backoff with the internet NIC down and a
 restricted SSH management NIC, automatic recovery without a manual start,
 an interrupted real pull that resumes below 8 GiB free, real installation,
 list additions/removals (including removal below the free-space margin),
