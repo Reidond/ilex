@@ -438,6 +438,12 @@ pub struct VmConfig {
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
+    /// A directory served read-only as a small FAT disk (QEMU's `fat:`), first
+    /// in the boot order: an EFI system partition whose `EFI/BOOT/BOOTX64.EFI`
+    /// is the boot loader. For booting an ISO that is a *file* on another disk
+    /// (GRUB's loopback, as Ventoy and iso-scan boots do), which no attached
+    /// ISO shows. It is attached last, so the other disks keep their names.
+    pub esp_dir: Option<PathBuf>,
     /// Give the guest the harness's SSH key as the `ssh.authorized_keys.root`
     /// credential (the default). An image that keeps its SSH server off
     /// unless that credential exists can be booted without it.
@@ -471,6 +477,7 @@ impl VmConfig {
             usb_keyboard: false,
             usb_medium: false,
             extra_disks: Vec::new(),
+            esp_dir: None,
             ssh_credential: true,
             smbios: Vec::new(),
             efi_vars: None,
@@ -706,6 +713,14 @@ impl Vm {
                 "if=virtio,format=raw,file={}",
                 std::path::absolute(extra)?.display()
             ));
+        }
+        if let Some(dir) = &config.esp_dir {
+            qemu.arg("-drive")
+                .arg(format!(
+                    "if=none,id=esp,format=raw,readonly=on,file=fat:{}",
+                    std::path::absolute(dir)?.display()
+                ))
+                .args(["-device", "virtio-blk-pci,drive=esp,bootindex=1"]);
         }
         let gl = config.gl && config.display != Display::None;
         let vga = if gl { "virtio-vga-gl" } else { "virtio-vga" };

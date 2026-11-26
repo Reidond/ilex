@@ -14,11 +14,18 @@
 //! * the boot medium is `live_medium` (a stick; an optical drive is not a
 //!   candidate disk at all) and is never a target,
 //! * every blank disk is offered, with no reason and no note,
-//! * `Plan` on a blank disk succeeds (it only reads and dry-runs: nothing is
-//!   written), and is refused on the stick and on a disk that is too small,
+//! * `Plan` on a blank disk succeeds (it only reads and dry-runs: the disks
+//!   are looked at before and after and are still blank, with no partition
+//!   table and no partition), and is refused on the stick and on a disk that is
+//!   too small,
 //! * `ilex-installerd --self-check` passes on the ISO's own files,
 //! * no SELinux denial was enforced (the ISO boots permissive today; the ones
 //!   that name the helper are counted and reported).
+//!
+//! A third trial, `iso::next_helper_loop` (named explicitly, never run by a
+//! broader filter), boots the same ISO as a *file* on another disk, the way
+//! GRUB's loopback with `iso-scan/filename=` does (see `loop_file.rs`): the
+//! disk holding the file is the live medium, and the blank disks are offered.
 
 use std::fs;
 use std::path::Path;
@@ -35,7 +42,7 @@ use ilex_devkit::qemu::{self, Vm, VmConfig};
 use serde_json::{Value, json};
 
 use super::{
-    Guest, MEMORY, PAGE_TIMEOUT, blank_disk_of, diagnostics, field, fields, iso_path,
+    Guest, MEMORY, PAGE_TIMEOUT, blank_disk_of, diagnostics, field, fields, iso_path, loop_file,
     wait_for_marker,
 };
 use crate::common;
@@ -54,6 +61,9 @@ pub(super) enum Medium {
     Usb,
     /// The ISO as an optical drive: `/dev/sr0`, which is no candidate disk.
     Cdrom,
+    /// The ISO as a file on another disk (dracut's `iso-scan`, Ventoy): the
+    /// disk that holds the file is the medium, through the loop device.
+    Loop,
 }
 
 impl Medium {
@@ -61,6 +71,7 @@ impl Medium {
         match self {
             Medium::Usb => "usb",
             Medium::Cdrom => "cdrom",
+            Medium::Loop => "loop",
         }
     }
     /// VM purposes stay short: they name Unix socket paths.
@@ -68,6 +79,7 @@ impl Medium {
         match self {
             Medium::Usb => "iso-next-usb",
             Medium::Cdrom => "iso-next-cd",
+            Medium::Loop => "iso-next-loop",
         }
     }
 }
@@ -90,24 +102,48 @@ pub(super) fn run(medium: Medium) -> Result<()> {
         .join(medium.purpose());
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root)?;
-    let first = root.join("first.qcow2");
-    blank_disk_of(&first, "40G")?;
     let second = root.join("second.raw");
     raw_disk(&second, SECOND_BYTES)?;
     let small = root.join("small.raw");
     raw_disk(&small, SMALL_BYTES)?;
-
     let memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| MEMORY.into());
-    let mut config = VmConfig::new(medium.purpose(), &first);
+    let mut provider = LinuxProvider::new(ws.clone())?.with_usb_medium(medium == Medium::Usb);
+    let mut config = match medium {
+        Medium::Usb | Medium::Cdrom => {
+            let first = root.join("first.qcow2");
+            blank_disk_of(&first, "40G")?;
+            let mut config = VmConfig::new(medium.purpose(), &first);
+            config.cdrom = Some(iso);
+            config.extra_disks = vec![second, small];
+            config
+        }
+        Medium::Loop => {
+            // The ISO is a file on the VM's own disk; its boot loader is a
+            // small FAT disk of its own, attached last.
+            let fixture = loop_file::build(&root, &iso)?;
+            save(
+                &artifacts,
+                medium,
+                "kernel-arguments.txt",
+                &format!(
+                    "the ISO's own: {}\nfrom a file: {}\n",
+                    fixture.original_args, fixture.args
+                ),
+            )?;
+            provider = provider.with_esp_dir(&fixture.esp);
+            let blank = root.join("blank.raw");
+            raw_disk(&blank, FIRST_BYTES)?;
+            let mut config = VmConfig::new(medium.purpose(), &fixture.disk);
+            config.extra_disks = vec![blank, second, small];
+            config
+        }
+    };
     config.snapshot = false;
     config.memory = memory;
-    config.cdrom = Some(iso);
-    config.extra_disks = vec![second, small];
     let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
     // Provisioning is required, a qualified host is not (see `boot`).
     spec.security_launch = SecurityLaunch::QualificationFixture;
     spec.secure_boot = Requirement::Required;
-    let provider = LinuxProvider::new(ws.clone())?.with_usb_medium(medium == Medium::Usb);
     let caps = provider.probe(&spec)?;
     fs::write(
         artifacts.join(format!("next-helper-{}-backend.json", medium.name())),
@@ -147,7 +183,7 @@ section "mount namespaces"; for p in /proc/[0-9]*; do readlink "$p/ns/mnt" 2>/de
 section lsblk;              lsblk --paths --output NAME,KNAME,MAJ:MIN,TYPE,SIZE,TRAN,RM,RO,FSTYPE,LABEL,MOUNTPOINTS
 section "lsblk json";       lsblk --json --bytes --paths --output NAME,KNAME,TYPE,SIZE,TRAN,RM,RO,FSTYPE,LABEL,PKNAME
 section swaps;              cat /proc/swaps
-section "/run/initramfs";   ls -la /run/initramfs /run/rootfsbase /run/overlayfs /run/ovlwork 2>&1 | head -40
+section "/run/initramfs";   ls -la /run/initramfs /run/initramfs/isoscan /run/rootfsbase /run/overlayfs /run/ovlwork 2>&1 | head -60
 section "loop sysfs"
 for d in /sys/block/loop*; do [ -r "$d/loop/backing_file" ] && printf '%s %s\n' "${d##*/}" "$(cat "$d/loop/backing_file")"; done
 section "dm sysfs"
@@ -259,10 +295,12 @@ fn plan_when_online(vm: &Vm, disk: &Disk) -> Result<Ran> {
 /// and a checksum of the first and last 4 MiB (where an MBR or GPT and its
 /// backup live, and the head of any file system). `sfdisk --dump` of a disk
 /// with no table fails and prints nothing, which is what blank means.
-const BLANK_DISKS: &str = r#"set -u
-for n in vda vdb vdc; do
+fn blank_script(names: &[&str]) -> String {
+    format!(
+        r#"set -u
+for n in {}; do
     d=/dev/$n
-    [ -b "$d" ] || { echo "$n: not a block device"; continue; }
+    [ -b "$d" ] || {{ echo "$n: not a block device"; continue; }}
     printf '%s: pttype=[%s] signature=[%s] partitions=[%s] dump=[%s] head=%s tail=%s\n' "$n" \
         "$(blkid -p -s PTTYPE -o value "$d" 2>/dev/null)" \
         "$(blkid -p -s TYPE -o value "$d" 2>/dev/null)" \
@@ -271,18 +309,22 @@ for n in vda vdb vdc; do
         "$(head -c 4194304 "$d" | sha256sum | cut -c1-16)" \
         "$(dd if="$d" bs=1M skip=$(( $(blockdev --getsz "$d") / 2048 - 4 )) count=4 status=none | sha256sum | cut -c1-16)"
 done
-"#;
+"#,
+        names.join(" ")
+    )
+}
 
 /// The blank disks' state, required to be blank: no partition table, no
 /// signature, no partition. Returned as printed, to be compared later.
-fn blank_disks(vm: &Vm) -> Result<String> {
-    let ran = ssh(vm, BLANK_DISKS)?;
+fn blank_state(vm: &Vm, blanks: &[(String, u64); 3]) -> Result<String> {
+    let names: Vec<&str> = blanks.iter().map(|(name, _)| name.as_str()).collect();
+    let ran = ssh(vm, &blank_script(&names))?;
     ensure!(
         ran.code == Some(0),
         "looking at the blank disks failed: {}",
         ran.text
     );
-    for name in ["vda", "vdb", "vdc"] {
+    for name in names {
         let line = ran
             .text
             .lines()
@@ -297,6 +339,29 @@ fn blank_disks(vm: &Vm) -> Result<String> {
         );
     }
     Ok(ran.text)
+}
+
+/// The three blank disks the harness attached, by their sizes (the guest's
+/// kernel name of each, and its size).
+fn blank_disks_of(probe: &Probe) -> Result<[(String, u64); 3]> {
+    let find = |bytes: u64| -> Result<(String, u64)> {
+        let found: Vec<&Disk> = probe
+            .disks
+            .iter()
+            .filter(|d| d.size_bytes == bytes)
+            .collect();
+        ensure!(
+            found.len() == 1,
+            "expected one disk of {bytes} bytes, found {:?}",
+            found.iter().map(|d| &d.path).collect::<Vec<_>>()
+        );
+        let name = found[0]
+            .path
+            .strip_prefix("/dev/")
+            .with_context(|| format!("a disk path {}", found[0].path))?;
+        Ok((name.to_owned(), bytes))
+    };
+    Ok([find(FIRST_BYTES)?, find(SECOND_BYTES)?, find(SMALL_BYTES)?])
 }
 
 fn disk_at<'a>(probe: &'a Probe, path: &str) -> Result<&'a Disk> {
@@ -398,9 +463,12 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
     );
 
     // The three blank disks are offered, whatever the live system looks like.
-    offered(&probe, "/dev/vda", FIRST_BYTES)?;
-    offered(&probe, "/dev/vdb", SECOND_BYTES)?;
-    offered(&probe, "/dev/vdc", SMALL_BYTES)?;
+    // They are found by their sizes, which no other disk has: virtio names
+    // them in the order the firmware and the kernel see them.
+    let blanks = blank_disks_of(&probe)?;
+    for (name, bytes) in &blanks {
+        offered(&probe, &format!("/dev/{name}"), *bytes)?;
+    }
     let live: Vec<&Disk> = probe.disks.iter().filter(|d| d.live_medium).collect();
     match medium {
         Medium::Usb => {
@@ -430,19 +498,39 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
                 "expected exactly the three blank disks: {summary:?}"
             );
         }
+        Medium::Loop => {
+            // The disk the ISO file lies on is the medium, nothing else of it
+            // is said (a loop device the installer cannot place would also
+            // refuse every other disk, and the blank ones are offered above).
+            ensure!(
+                live.len() == 1 && live[0].bus == "virtio" && !live[0].removable,
+                "the disk holding the ISO file is not the one live_medium disk: {live:?}"
+            );
+            ensure!(
+                live[0].in_use.is_empty() && live[0].notes.is_empty(),
+                "the live medium carries a reason or a note besides being the medium: {:?}",
+                live[0]
+            );
+            // The host disk and the three blank ones. The boot loader's own
+            // FAT disk is read-only, and a read-only disk is no target.
+            ensure!(
+                probe.disks.len() == 4,
+                "expected the host disk and three blank disks: {summary:?}"
+            );
+        }
     }
 
     // Plan on a blank disk: the whole-disk layout through repart's dry run,
     // against the registry. Nothing is written: the disks are looked at first,
     // blank, and again after every plan.
-    let blank_before = blank_disks(vm).context("the blank disks, before any plan")?;
+    let blank_before = blank_state(vm, &blanks).context("the blank disks, before any plan")?;
     save(artifacts, medium, "disks-before.txt", &blank_before)?;
-    let blank = disk_at(&probe, "/dev/vda")?;
+    let blank = disk_at(&probe, &format!("/dev/{}", blanks[0].0))?;
     let ran = plan_when_online(vm, blank)?;
     save(artifacts, medium, "plan.txt", &ran.text)?;
     let plan: Plan = serde_json::from_value(document(&ran, "Plan")?)?;
     ensure!(
-        plan.disk.path == "/dev/vda"
+        plan.disk.path == blank.path
             && plan.edition == "gnome"
             && plan.composition.tag == "generic.gnome"
             && plan.image.digest.starts_with("sha256:")
@@ -459,8 +547,9 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
         plan.partitions.len()
     );
 
-    // Refusals: the stick itself, and a disk that is too small.
-    if medium == Medium::Usb {
+    // Refusals: the medium itself (the stick, or the disk holding the ISO
+    // file), and a disk that is too small.
+    if medium != Medium::Cdrom {
         let stick = live[0];
         let refused = refusal(&plan_refused(vm, stick)?)?;
         ensure!(
@@ -470,7 +559,7 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
             refused.message
         );
     }
-    let small = disk_at(&probe, "/dev/vdc")?;
+    let small = disk_at(&probe, &format!("/dev/{}", blanks[2].0))?;
     let refused = refusal(&plan_refused(vm, small)?)?;
     ensure!(
         refused.code == ErrorCode::DiskTooSmall,
@@ -484,14 +573,10 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
     // byte of the first and last MiB changed).
     let ran = ssh(vm, &busctl("ilex-installer", "Probe", None))?;
     let again: Probe = serde_json::from_value(document(&ran, "Probe")?)?;
-    for (path, bytes) in [
-        ("/dev/vda", FIRST_BYTES),
-        ("/dev/vdb", SECOND_BYTES),
-        ("/dev/vdc", SMALL_BYTES),
-    ] {
-        offered(&again, path, bytes).context("after the plans")?;
+    for (name, bytes) in &blanks {
+        offered(&again, &format!("/dev/{name}"), *bytes).context("after the plans")?;
     }
-    let blank_after = blank_disks(vm).context("the blank disks, after the plans")?;
+    let blank_after = blank_state(vm, &blanks).context("the blank disks, after the plans")?;
     save(artifacts, medium, "disks-after.txt", &blank_after)?;
     ensure!(
         blank_before == blank_after,
