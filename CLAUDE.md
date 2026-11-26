@@ -2661,7 +2661,7 @@ the Windows paths of this change: no Windows host was available.
   in the checkout, one outside, one at the root, registry and git packages, a
   dev edge) and the recorded-closure fixtures; a regression is a failed check.
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
-  GNOME edition). After the review fixes (2026-11-26) the ISO is 1,494,781,952
+  GNOME edition). After the review fixes (2026-11-26) the ISO is 1,494,851,584
   bytes (1.39 GiB): 438 MiB under the Anaconda network ISO's 1.82 GiB and 0.61
   GiB under the 2 GiB limit, and the image has 698 packages, 1,826 MiB
   installed (the first build: 1,494,847,488 bytes, 706 packages, 1,850 MiB;
