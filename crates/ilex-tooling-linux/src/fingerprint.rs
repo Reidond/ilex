@@ -111,31 +111,182 @@ fn logical_lines(text: &str) -> Vec<(usize, String)> {
     lines
 }
 
-/// Simple commands of a shell line: split at the command separators, ignoring
-/// quoting. A quoted separator therefore splits a command in two, and what is
-/// left of it fails to parse as cargo; quoting can only make this stricter.
-fn simple_commands(line: &str) -> Vec<Vec<&str>> {
-    line.split(['&', '|', ';', '(', ')', '{', '}', '`'])
-        .map(|command| {
-            command
-                .split_whitespace()
-                // A trailing shell comment ends the command.
-                .take_while(|word| !word.starts_with('#'))
-                .collect::<Vec<_>>()
-        })
-        .filter(|words| !words.is_empty())
-        .collect()
+/// One simple command being collected by [`simple_commands`].
+#[derive(Default)]
+struct Frame {
+    words: Vec<String>,
+    word: Option<String>,
+    /// Inside a double-quoted string of this command.
+    double: bool,
+    /// `(` for a `$(…)` substitution, `` ` `` for a backtick one.
+    opener: Option<char>,
+}
+
+impl Frame {
+    fn push(&mut self, c: char) {
+        self.word.get_or_insert_with(String::new).push(c);
+    }
+
+    fn end_word(&mut self) {
+        if let Some(word) = self.word.take() {
+            self.words.push(word);
+        }
+    }
+
+    fn finish(&mut self, commands: &mut Vec<Vec<String>>) {
+        self.end_word();
+        if !self.words.is_empty() {
+            commands.push(std::mem::take(&mut self.words));
+        }
+    }
+}
+
+/// Simple commands of a shell line with their words, quotes kept: split at the
+/// command separators outside quotes, with `$(…)` and backtick substitutions
+/// as commands of their own and `${…}` kept inside its word. A single-quoted
+/// string is one opaque run; a double-quoted one only starts commands through
+/// `$(` and backticks. A redirection's `&` and `|` (`2>&1`, `>&2`, `&>`, `>|`)
+/// do not split. `{` and `}` are separators only as words of their own, so a
+/// brace expansion stays one word; a `#` that starts a word ends the line.
+/// The flag is false when a quote or substitution was still open at the end of
+/// the line, which this model does not trust.
+fn simple_commands(line: &str) -> (Vec<Vec<String>>, bool) {
+    let chars: Vec<char> = line.chars().collect();
+    let mut commands = Vec::new();
+    let mut stack = vec![Frame::default()];
+    let mut balanced = true;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        let previous = i.checked_sub(1).map(|j| chars[j]);
+        let frame = stack
+            .last_mut()
+            .expect("the outermost frame is never popped");
+        match c {
+            '\\' => {
+                frame.push(c);
+                if let Some(escaped) = next {
+                    frame.push(escaped);
+                }
+                i += 2;
+                continue;
+            }
+            '$' if next == Some('(') => {
+                frame.push(c);
+                stack.push(Frame {
+                    opener: Some('('),
+                    ..Frame::default()
+                });
+                i += 2;
+                continue;
+            }
+            '$' if next == Some('{') => {
+                // `${…}`: the whole expansion is part of the word.
+                frame.push(c);
+                i += 1;
+                let mut depth = 0;
+                while let Some(&inner) = chars.get(i) {
+                    frame.push(inner);
+                    i += 1;
+                    match inner {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                balanced &= depth == 0;
+                continue;
+            }
+            '`' => {
+                if frame.opener == Some('`') {
+                    frame.finish(&mut commands);
+                    stack.pop();
+                } else {
+                    frame.push(c);
+                    stack.push(Frame {
+                        opener: Some('`'),
+                        ..Frame::default()
+                    });
+                }
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if frame.double {
+            frame.push(c);
+            frame.double = c != '"';
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' => {
+                frame.push(c);
+                i += 1;
+                loop {
+                    let Some(&inner) = chars.get(i) else {
+                        balanced = false;
+                        break;
+                    };
+                    frame.push(inner);
+                    i += 1;
+                    if inner == '\'' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            '"' => {
+                frame.push(c);
+                frame.double = true;
+            }
+            c if c.is_whitespace() => frame.end_word(),
+            // A comment runs to the end of the line.
+            '#' if frame.word.is_none() => break,
+            '&' if matches!(previous, Some('<' | '>')) || next == Some('>') => frame.push(c),
+            '|' if previous == Some('>') => frame.push(c),
+            ';' | '&' | '|' | '(' => frame.finish(&mut commands),
+            ')' => {
+                frame.finish(&mut commands);
+                if frame.opener == Some('(') {
+                    stack.pop();
+                }
+            }
+            '{' | '}' if frame.word.is_none() && next.is_none_or(char::is_whitespace) => {
+                frame.finish(&mut commands);
+            }
+            _ => frame.push(c),
+        }
+        i += 1;
+    }
+    balanced &= stack.len() == 1 && !stack[0].double;
+    while let Some(mut frame) = stack.pop() {
+        balanced &= !frame.double;
+        frame.finish(&mut commands);
+    }
+    (commands, balanced)
 }
 
 fn basename(word: &str) -> &str {
-    let word = word.trim_matches(|c| matches!(c, '"' | '\'' | '$'));
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// A word that names the Rust toolchain, whatever its quoting or path.
+/// A word that names the Rust toolchain.
 fn names_toolchain(word: &str) -> bool {
-    let name = basename(word);
-    matches!(name, "cargo" | "rustc" | "rustup" | "rustdoc") || name.starts_with("cargo-")
+    matches!(word, "cargo" | "rustc" | "rustup" | "rustdoc") || word.starts_with("cargo-")
+}
+
+/// Whether any word mentions the toolchain, on its own, in a path, in a quoted
+/// string (`sh -c 'cargo …'`) or after an `=`.
+fn mentions_toolchain(words: &[&str]) -> bool {
+    words.iter().any(|word| {
+        word.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+')))
+            .any(names_toolchain)
+    })
 }
 
 fn is_assignment(word: &str) -> Option<&str> {
@@ -146,11 +297,69 @@ fn is_assignment(word: &str) -> Option<&str> {
     .then_some(name)
 }
 
-/// A word of a shell line that is a redirection: the rest of the command is
-/// not an argument.
-fn is_redirection(word: &str) -> bool {
-    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
-    rest.starts_with(['<', '>'])
+/// A command word the shell expands or looks up in a way this model does not
+/// follow (`$CARGO`, `"cargo"`, `c\argo`, `[c]argo`, `{cargo,}`): it could run
+/// cargo or rustc under another spelling. `[` and `[[` are the test builtins.
+fn plain_command_word(word: &str) -> bool {
+    matches!(word, "[" | "[[")
+        || !word.contains(['$', '`', '"', '\'', '\\', '[', ']', '{', '}', '*', '?'])
+}
+
+/// If `word` is a redirection (`>log`, `2>&1`, `&>log`, `<<'EOF'`, `>`), what
+/// follows its operator: empty when its target is the next word.
+fn redirection_rest(word: &str) -> Option<&str> {
+    let word = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    let word = word.strip_prefix('&').unwrap_or(word);
+    word.starts_with(['<', '>'])
+        .then(|| word.trim_start_matches(['<', '>', '&', '|']))
+}
+
+/// The words of a simple command without its redirections and their targets:
+/// the shell removes them before running the command, so the words around
+/// them are still its arguments (`cargo build -p a 2>log -p b` builds `a` and
+/// `b`).
+fn without_redirections<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    let mut kept = Vec::new();
+    let mut words = words.iter().copied();
+    while let Some(word) = words.next() {
+        match redirection_rest(word) {
+            None => kept.push(word),
+            Some("") => {
+                words.next();
+            }
+            Some(_) => {}
+        }
+    }
+    kept
+}
+
+/// An environment variable that can change what cargo builds or how, however
+/// it is set: inline before cargo, `export`, `ENV` or `ARG`.
+fn check_environment(line: &str, name: &str, value: &str) -> Result<()> {
+    ensure!(
+        !name.starts_with("CARGO_") || HARMLESS_CARGO_ENV.contains(&name),
+        "`{line}` sets {name}; it can change what cargo builds, teach `cargo_builds` first"
+    );
+    ensure!(
+        !(matches!(name, "RUSTFLAGS" | "RUSTDOCFLAGS") && value.contains("--cfg")),
+        "`{line}` sets {name} with --cfg; it can change what is compiled, teach `cargo_builds` first"
+    );
+    Ok(())
+}
+
+/// `ENV` and `ARG` instructions: `NAME=value …`, `ENV NAME value` and
+/// `ARG NAME[=default]`. Every word's name is checked, so a value that
+/// contains spaces cannot hide one.
+fn check_environment_instruction(line: &str, rest: &str) -> Result<()> {
+    for word in rest.split_whitespace() {
+        let (name, value) = word.split_once('=').unwrap_or((word, ""));
+        check_environment(line, name.trim_matches(['"', '\'']), value)?;
+    }
+    ensure!(
+        !(rest.contains("RUSTFLAGS") || rest.contains("RUSTDOCFLAGS")) || !rest.contains("--cfg"),
+        "`{line}` sets RUSTFLAGS with --cfg; it can change what is compiled, teach `cargo_builds` first"
+    );
+    Ok(())
 }
 
 /// A cargo package spec this model accepts: a plain package name.
@@ -181,12 +390,6 @@ fn ignored_flag_with_value(word: &str) -> bool {
 /// since either could change which packages the build compiles.
 fn parse_cargo_build(line: &str, words: &[&str]) -> Result<CargoBuild> {
     let mut build = CargoBuild::default();
-    // Redirections end the arguments; everything before them must be literal.
-    let words: Vec<&str> = words
-        .iter()
-        .copied()
-        .take_while(|word| !is_redirection(word))
-        .collect();
     if let Some(word) = words
         .iter()
         .find(|word| word.contains(['$', '`', '"', '\'', '\\', '*', '?', '[', '~']))
@@ -195,7 +398,7 @@ fn parse_cargo_build(line: &str, words: &[&str]) -> Result<CargoBuild> {
             "`{line}`: `{word}` uses shell expansion or quoting the fingerprint's crate closure does not model"
         );
     }
-    let mut words = words.into_iter();
+    let mut words = words.iter().copied();
     while let Some(word) = words.next() {
         let mut value = |flag: &str| {
             words
@@ -268,35 +471,52 @@ fn parse_cargo_build(line: &str, words: &[&str]) -> Result<CargoBuild> {
 /// subcommand, or no cargo at all), an error for any other way of running
 /// cargo or rustc.
 fn parse_command(line: &str, words: &[&str]) -> Result<Option<CargoBuild>> {
-    let mut rest = words;
+    let words = without_redirections(words);
+    let mut rest = &words[..];
     let mut env = Vec::new();
     // Leading environment assignments and words that only wrap a command.
     while let Some((first, tail)) = rest.split_first() {
         if let Some(name) = is_assignment(first) {
-            env.push(name);
+            env.push((name, &first[name.len() + 1..]));
         } else if !SHELL_PREFIXES.contains(first) {
             break;
         }
         rest = tail;
     }
     let Some((command, args)) = rest.split_first() else {
+        // Only assignments: they stay set for the following commands.
+        for (name, value) in env {
+            check_environment(line, name, value)?;
+        }
         return Ok(None);
     };
+    ensure!(
+        plain_command_word(command),
+        "`{line}` runs `{command}`, a command word with an expansion, quote, bracket or backslash that could spell cargo or rustc; write the command as a plain word, or teach `cargo_builds`"
+    );
+    // `export NAME=value` and its relatives set variables for what follows.
+    if matches!(
+        *command,
+        "export" | "declare" | "typeset" | "readonly" | "local"
+    ) {
+        for arg in args {
+            if let Some(name) = is_assignment(arg) {
+                check_environment(line, name, &arg[name.len() + 1..])?;
+            }
+        }
+    }
     if PACKAGE_MANAGERS.contains(&basename(command)) {
         return Ok(None);
     }
-    if !words.iter().any(|word| names_toolchain(word)) {
+    if !mentions_toolchain(&words) {
         return Ok(None);
     }
     ensure!(
         basename(command) == "cargo",
         "`{line}` runs `{command}` with cargo or rustc among its words; only a plain `cargo build -p …` is modeled, teach `cargo_builds` first"
     );
-    for name in env {
-        ensure!(
-            !name.starts_with("CARGO_") || HARMLESS_CARGO_ENV.contains(&name),
-            "`{line}` sets {name} before cargo; it can change what is built, teach `cargo_builds` first"
-        );
+    for (name, value) in env {
+        check_environment(line, name, value)?;
     }
     let mut args = args;
     // `cargo +toolchain build`.
@@ -331,6 +551,10 @@ fn cargo_builds(containerfile: &str) -> Result<Vec<CargoBuild>> {
         let (instruction, rest) = line.split_once(char::is_whitespace).unwrap_or((&line, ""));
         // Case-sensitive on purpose: a lowercase `env cargo build …` in a
         // heredoc is shell, not an `ENV` instruction.
+        if matches!(instruction, "ENV" | "ARG") {
+            check_environment_instruction(&line, rest)
+                .with_context(|| format!("Containerfile line {number}"))?;
+        }
         if NON_SHELL_INSTRUCTIONS.contains(&instruction) {
             continue;
         }
@@ -342,8 +566,30 @@ fn cargo_builds(containerfile: &str) -> Result<Vec<CargoBuild>> {
                     .split_once(char::is_whitespace)
                     .map_or("", |(_, r)| r);
             }
+            // `RUN ["cargo", "build", …]` runs no shell; its JSON is not
+            // parsed, so it must not mention the toolchain at all.
+            if shell.trim_start().starts_with('[') {
+                ensure!(
+                    !shell.contains("cargo")
+                        && !shell.contains("rustc")
+                        && !shell.contains("rustup")
+                        && !shell.contains("rustdoc"),
+                    "Containerfile line {number}: `{line}` is an exec-form RUN that mentions cargo or rustc; use a shell-form `RUN cargo build -p …`"
+                );
+            }
         }
-        for words in simple_commands(shell) {
+        let (commands, balanced) = simple_commands(shell);
+        if !balanced {
+            ensure!(
+                !(line.contains("cargo")
+                    || line.contains("rustc")
+                    || line.contains("rustup")
+                    || line.contains("rustdoc")),
+                "Containerfile line {number}: `{line}` ends inside a quote or substitution and mentions cargo or rustc; the fingerprint's parser does not follow it, teach `cargo_builds` first"
+            );
+        }
+        for words in commands {
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
             if let Some(build) = parse_command(&line, &words)
                 .with_context(|| format!("Containerfile line {number}"))?
             {
@@ -836,6 +1082,157 @@ RUN set -e && CARGO_INCREMENTAL=0 /root/.cargo/bin/cargo +stable build \
             "no cargo build at all",
             "RUN dnf -y install cargo\n",
             Err("no `cargo build"),
+        ),
+        (
+            "redirections keep their neighbours' arguments",
+            "RUN cargo build -p a 2>build.log -p b >&2 -p c &>>all.log -p d >| out -p e 2>&1 --release\n",
+            Ok(vec![build(&["a", "b", "c", "d", "e"], false, false)]),
+        ),
+        (
+            "leading and spaced redirections, a redirection's ampersand",
+            "RUN >log 2>&1 cargo build -p a > out.txt 2> err.txt --locked && echo ok >&2\n",
+            Ok(vec![build(&["a"], false, false)]),
+        ),
+        (
+            "separators and expansions inside quotes",
+            r##"RUN echo "${SUM}  x; y" | sha256sum -c - && mkdir -p "/out$(dirname "$c")" && systemctl set-default "$(python3 -c 'print("a;b")')" && if [ -f /x ]; then echo '(' ; fi && cargo build -p a
+"##,
+            Ok(vec![build(&["a"], false, false)]),
+        ),
+        (
+            "harmless environment in instructions and exports",
+            "ENV CARGO_HOME=/x CARGO_INCREMENTAL=0\nARG CARGO_TARGET_DIR=/t\nRUN export CARGO_TERM_COLOR=always RUSTFLAGS=-Dwarnings && cargo build -p a\n",
+            Ok(vec![build(&["a"], false, false)]),
+        ),
+        (
+            "a flag after a redirection",
+            "RUN cargo build -p a 2>log --workspace\n",
+            Err("--workspace"),
+        ),
+        (
+            "an unknown flag after a combined redirection",
+            "RUN cargo build -p a &>log --frobnicate\n",
+            Err("--frobnicate"),
+        ),
+        (
+            "a positional argument after a descriptor copy",
+            "RUN cargo build -p a 2>&1 extra\n",
+            Err("extra"),
+        ),
+        (
+            "cargo behind a redirection",
+            "RUN echo >&2 cargo install x\nRUN cargo build -p a\n",
+            Err("echo"),
+        ),
+        (
+            "exec-form cargo",
+            "RUN [\"cargo\", \"install\", \"x\"]\nRUN cargo build -p a\n",
+            Err("exec-form"),
+        ),
+        (
+            "exec-form absolute cargo",
+            "RUN [\"/usr/bin/cargo\", \"build\", \"-p\", \"a\"]\n",
+            Err("exec-form"),
+        ),
+        (
+            "exec-form rustc",
+            "RUN [\"rustc\", \"x.rs\"]\nRUN cargo build -p a\n",
+            Err("exec-form"),
+        ),
+        (
+            "variable as the command",
+            "RUN $CARGO install b\nRUN cargo build -p a\n",
+            Err("command word"),
+        ),
+        (
+            "quoted variable as the command",
+            "RUN \"$CARGO\" install b\nRUN cargo build -p a\n",
+            Err("command word"),
+        ),
+        (
+            "braced variable as the command",
+            "RUN ${CARGO} install b\nRUN cargo build -p a\n",
+            Err("command word"),
+        ),
+        (
+            "backticks",
+            "RUN `which cargo` install b\nRUN cargo build -p a\n",
+            Err("which"),
+        ),
+        (
+            "quotes inside the command word",
+            "RUN c\"arg\"o install b\nRUN cargo build -p a\n",
+            Err("command word"),
+        ),
+        (
+            "backslash inside the command word",
+            "RUN car\\go install b\nRUN cargo build -p a\n",
+            Err("command word"),
+        ),
+        (
+            "glob as the command",
+            "RUN /usr/bin/car?o install b\nRUN cargo build -p a\n",
+            Err("command word"),
+        ),
+        (
+            "brace expansion as the command",
+            "RUN {cargo,} install b\nRUN cargo build -p a\n",
+            Err("command word"),
+        ),
+        (
+            "bracket glob as the command",
+            "RUN [c]argo install b\nRUN cargo build -p a\n",
+            Err("command word"),
+        ),
+        (
+            "ENV sets a cargo variable",
+            "ENV CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu\nRUN cargo build -p a\n",
+            Err("CARGO_BUILD_TARGET"),
+        ),
+        (
+            "legacy ENV form",
+            "ENV CARGO_PROFILE_RELEASE_LTO fat\nRUN cargo build -p a\n",
+            Err("CARGO_PROFILE_RELEASE_LTO"),
+        ),
+        (
+            "ENV after a quoted value",
+            "ENV A=\"x y\" CARGO_BUILD_TARGET=z\nRUN cargo build -p a\n",
+            Err("CARGO_BUILD_TARGET"),
+        ),
+        (
+            "ARG names a cargo variable",
+            "ARG CARGO_BUILD_TARGET\nRUN cargo build -p a\n",
+            Err("CARGO_BUILD_TARGET"),
+        ),
+        (
+            "ENV RUSTFLAGS with --cfg",
+            "ENV RUSTFLAGS=\"-C opt-level=3 --cfg foo\"\nRUN cargo build -p a\n",
+            Err("RUSTFLAGS"),
+        ),
+        (
+            "export of a cargo variable",
+            "RUN export CARGO_BUILD_TARGET=x && cargo build -p a\n",
+            Err("CARGO_BUILD_TARGET"),
+        ),
+        (
+            "declare of a cargo variable",
+            "RUN declare -x CARGO_BUILD_TARGET=x; cargo build -p a\n",
+            Err("CARGO_BUILD_TARGET"),
+        ),
+        (
+            "export of RUSTFLAGS with --cfg",
+            "RUN export RUSTFLAGS='--cfg foo'; cargo build -p a\n",
+            Err("RUSTFLAGS"),
+        ),
+        (
+            "an assignment on a line of its own",
+            "RUN <<'EOF'\nCARGO_BUILD_TARGET=x\ncargo build -p a\nEOF\n",
+            Err("CARGO_BUILD_TARGET"),
+        ),
+        (
+            "a quote left open before cargo",
+            "RUN echo 'x; cargo install y\nRUN cargo build -p a\n",
+            Err("ends inside a quote"),
         ),
     ]
 }
