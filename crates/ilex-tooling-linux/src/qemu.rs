@@ -426,6 +426,10 @@ pub struct VmConfig {
     /// Use an xHCI USB keyboard for firmware input. Some OVMF builds lose
     /// navigation/modifier keys from virtio-keyboard before the OS boots.
     pub usb_keyboard: bool,
+    /// Attach `cdrom` as a USB mass-storage disk (a stick the ISO was written
+    /// to: `/dev/sdX` with its partitions, removable) instead of an optical
+    /// drive (`/dev/sr0`).
+    pub usb_medium: bool,
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
@@ -460,6 +464,7 @@ impl VmConfig {
             cdrom: None,
             secondary_serial: false,
             usb_keyboard: false,
+            usb_medium: false,
             extra_disks: Vec::new(),
             ssh_credential: true,
             smbios: Vec::new(),
@@ -665,10 +670,28 @@ impl Vm {
                 ]);
         }
         if let Some(iso) = &config.cdrom {
-            qemu.arg("-drive").arg(format!(
-                "media=cdrom,readonly=on,file={}",
-                std::path::absolute(iso)?.display()
-            ));
+            if config.usb_medium {
+                // A stick: the whole ISO as a removable USB disk, first in
+                // the boot order, on a controller of its own. The guest can
+                // write to it, as to a real stick (a read-only disk is not
+                // offered as a target at all); its writes go to a temporary
+                // overlay, never to the ISO.
+                qemu.args(["-device", "qemu-xhci,id=ilexusb"])
+                    .arg("-drive")
+                    .arg(format!(
+                        "if=none,id=medium,media=disk,format=raw,snapshot=on,file={}",
+                        std::path::absolute(iso)?.display()
+                    ))
+                    .args([
+                        "-device",
+                        "usb-storage,bus=ilexusb.0,drive=medium,removable=on,bootindex=1",
+                    ]);
+            } else {
+                qemu.arg("-drive").arg(format!(
+                    "media=cdrom,readonly=on,file={}",
+                    std::path::absolute(iso)?.display()
+                ));
+            }
         }
         for extra in &config.extra_disks {
             qemu.arg("-drive").arg(format!(
@@ -684,7 +707,9 @@ impl Vm {
                 config.width, config.height
             ))
             .args(["-device", "virtio-tablet-pci"]);
-        if config.usb_keyboard {
+        if config.usb_keyboard && config.usb_medium {
+            qemu.args(["-device", "usb-kbd,bus=ilexusb.0"]);
+        } else if config.usb_keyboard {
             qemu.args(["-device", "qemu-xhci", "-device", "usb-kbd"]);
         } else {
             qemu.args(["-device", "virtio-keyboard-pci"]);

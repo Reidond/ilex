@@ -37,6 +37,12 @@
 //!   comes up promptly, each failed write is reported on the second UART within
 //!   a second, and no SSH server runs without the key.
 //!
+//! * `iso::next_helper_usb` / `iso::next_helper_cdrom`: the root helper on the
+//!   real ISO, written to a USB stick or attached as an optical drive, beside
+//!   three blank disks (see `iso_next/helper.rs`): the boot medium is
+//!   `live_medium`, the blank disks are offered, `Plan` on one succeeds and
+//!   writes nothing, and the dracut layout the tracer follows is recorded.
+//!
 //! The boot trials use `SecurityLaunch::QualificationFixture`: provisioning
 //! (KVM with SMM, a Secure Boot firmware pair) is required, a passing
 //! qualification of the host is not. They measure whatever the host gives them
@@ -60,6 +66,8 @@ use libtest_mimic::{Failed, Trial};
 
 use crate::common;
 use crate::iso::grub_key;
+
+mod helper;
 
 /// From power-on to the page being mapped. Boot is a few tens of seconds; the
 /// margin is for a contended runner.
@@ -88,6 +96,10 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_serial_unavailable", || serial("unavailable")),
         trial("iso::next_serial_stall", || serial("stall")),
         trial("iso::next_ssh_tmpfiles", ssh_tmpfiles),
+        trial("iso::next_helper_usb", || helper::run(helper::Medium::Usb)),
+        trial("iso::next_helper_cdrom", || {
+            helper::run(helper::Medium::Cdrom)
+        }),
     ]
 }
 
@@ -142,13 +154,19 @@ fn iso_path() -> Result<PathBuf> {
 }
 
 fn blank_disk(path: &Path) -> Result<()> {
+    blank_disk_of(path, "1G")
+}
+
+/// A blank qcow2 disk of `size` (`qemu-img`'s notation); it takes no space
+/// until the guest writes.
+fn blank_disk_of(path: &Path, size: &str) -> Result<()> {
     cmd::require("qemu-img")?;
     let _ = fs::remove_file(path);
     cmd::run(
         Command::new("qemu-img")
             .args(["create", "-q", "-f", "qcow2"])
             .arg(path)
-            .arg("1G"),
+            .arg(size),
     )
 }
 
