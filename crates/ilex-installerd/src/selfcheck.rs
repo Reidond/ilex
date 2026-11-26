@@ -3152,7 +3152,11 @@ fn check_secrets() -> Result<()> {
 
 /// The runner of long jobs: merged output in order, a secret on standard
 /// input, a deadline that ends the whole process group, an early stop.
-fn check_jobs(parent: &Path) -> Result<()> {
+fn check_jobs(scratch: &Path) -> Result<()> {
+    // Everything this writes is in a directory of its own, removed with it: the
+    // helper's scratch directory must be empty when the check ends.
+    let work = TestDir::new(scratch, "jobs")?;
+    let parent = work.0.as_path();
     let run = |script: &str,
                stdin: Option<&[u8]>,
                timeout: Duration|
