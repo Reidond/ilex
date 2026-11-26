@@ -280,17 +280,44 @@ pub struct System {
     pub unreadable: Vec<String>,
 }
 
-fn read_table(path: &Path) -> Result<Vec<Mount>> {
-    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+/// What reading a process's files goes through: `/proc`'s own tree in
+/// production, a tree with injected failures in the self-check (a task that is
+/// exiting answers `ESRCH` or `EINVAL`, which no ordinary file does).
+pub struct ProcFs<'a> {
+    pub read_link: &'a dyn Fn(&Path) -> io::Result<PathBuf>,
+    pub read: &'a dyn Fn(&Path) -> io::Result<Vec<u8>>,
+}
+
+fn real_read_link(path: &Path) -> io::Result<PathBuf> {
+    fs::read_link(path)
+}
+
+fn real_read(path: &Path) -> io::Result<Vec<u8>> {
+    fs::read(path)
+}
+
+const REAL: ProcFs<'static> = ProcFs {
+    read_link: &real_read_link,
+    read: &real_read,
+};
+
+fn read_table(proc_fs: &ProcFs, path: &Path) -> Result<Vec<Mount>> {
+    let bytes = (proc_fs.read)(path).with_context(|| format!("reading {}", path.display()))?;
     parse_mountinfo(&String::from_utf8_lossy(&bytes))
         .with_context(|| format!("in {}", path.display()))
 }
 
-/// A process that is gone (or going) is not a table that cannot be read.
-fn vanished(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<io::Error>().is_some_and(|e| {
-        e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(3 /* ESRCH */)
-    })
+/// The operating system's error number inside an error from [`read_table`].
+fn os_error(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<io::Error>()
+        .and_then(io::Error::raw_os_error)
+}
+
+/// A process that is gone (or going): `/proc/<pid>` answers `ENOENT`, or
+/// `ESRCH` for a task whose entry is already being torn down.
+fn gone(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
 }
 
 /// The mount tables of this system: this process's, the host's (process 1's) and
@@ -299,24 +326,49 @@ fn vanished(error: &anyhow::Error) -> bool {
 /// read or the probe fails; another namespace that cannot be read is reported,
 /// and counts as a use that cannot be traced.
 pub fn read_mounts(proc: &Path) -> Result<(Vec<Mount>, Vec<Mount>, Vec<String>)> {
-    let local = read_table(&proc.join("self/mountinfo"))?;
+    read_mounts_with(proc, &REAL)
+}
+
+/// [`read_mounts`] through `proc_fs`.
+///
+/// A namespace counts as read only once one of its processes' tables has been
+/// read: a process that exits first must not hide the other processes of its
+/// namespace. A task that is exiting answers `EINVAL` for `mountinfo` (it has
+/// no namespace proxy left) and `ESRCH`, `ENOENT` or `EACCES` for its `ns/mnt`
+/// link; that is a process that is gone, not a table that cannot be read.
+pub fn read_mounts_with(
+    proc: &Path,
+    proc_fs: &ProcFs,
+) -> Result<(Vec<Mount>, Vec<Mount>, Vec<String>)> {
+    let local = read_table(proc_fs, &proc.join("self/mountinfo"))?;
     let mut all: BTreeSet<Mount> = local.iter().cloned().collect();
-    all.extend(read_table(&proc.join("1/mountinfo"))?);
+    all.extend(read_table(proc_fs, &proc.join("1/mountinfo"))?);
     let mut seen: BTreeSet<PathBuf> = ["self", "1"]
         .iter()
-        .filter_map(|p| fs::read_link(proc.join(p).join("ns/mnt")).ok())
+        .filter_map(|p| (proc_fs.read_link)(&proc.join(p).join("ns/mnt")).ok())
         .collect();
+    // What stopped each namespace's table being read, until some process of it
+    // is read.
+    let mut failed: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut unreadable = Vec::new();
-    let entries = fs::read_dir(proc).with_context(|| format!("listing {}", proc.display()))?;
-    for entry in entries {
+    let mut processes: Vec<(u64, String)> = Vec::new();
+    for entry in fs::read_dir(proc).with_context(|| format!("listing {}", proc.display()))? {
         let entry = entry.with_context(|| format!("listing {}", proc.display()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let namespace = match fs::read_link(entry.path().join("ns/mnt")) {
+        if let Ok(pid) = name.parse() {
+            processes.push((pid, name));
+        }
+    }
+    // Oldest process first: its namespace is the one it was started in.
+    processes.sort_unstable();
+    for (_, name) in processes {
+        let base = proc.join(&name);
+        let namespace = match (proc_fs.read_link)(&base.join("ns/mnt")) {
             Ok(link) => link,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) if gone(&e) => continue,
             Err(e) => {
                 unreadable.push(format!(
                     "the mount namespace of process {name} cannot be identified: {e}"
@@ -324,17 +376,35 @@ pub fn read_mounts(proc: &Path) -> Result<(Vec<Mount>, Vec<Mount>, Vec<String>)>
                 continue;
             }
         };
-        if !seen.insert(namespace) {
+        if seen.contains(&namespace) {
             continue;
         }
-        match read_table(&entry.path().join("mountinfo")) {
-            Ok(table) => all.extend(table),
-            Err(e) if vanished(&e) => {}
-            Err(e) => unreadable.push(format!(
-                "the mounts of process {name} cannot be read: {e:#}"
-            )),
+        match read_table(proc_fs, &base.join("mountinfo")) {
+            Ok(mounts) => {
+                seen.insert(namespace);
+                all.extend(mounts);
+            }
+            Err(e) if os_error(&e).is_some_and(|n| gone(&io::Error::from_raw_os_error(n))) => {}
+            Err(e)
+                if os_error(&e) == Some(libc::EINVAL)
+                    && matches!(
+                        (proc_fs.read_link)(&base.join("ns/mnt")),
+                        Err(ref again) if gone(again)
+                            || again.raw_os_error() == Some(libc::EACCES)
+                    ) => {}
+            Err(e) => {
+                failed.entry(namespace).or_insert_with(|| {
+                    format!("the mounts of process {name} cannot be read: {e:#}")
+                });
+            }
         }
     }
+    unreadable.extend(
+        failed
+            .into_iter()
+            .filter(|(namespace, _)| !seen.contains(namespace))
+            .map(|(_, why)| why),
+    );
     Ok((all.into_iter().collect(), local, unreadable))
 }
 
