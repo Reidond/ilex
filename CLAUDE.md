@@ -865,8 +865,11 @@ user, stamp `~/.local/state/ilex/kde-flathub-remote`) runs
 `flatpak remote-add --user --if-not-exists flathub` from the committed trust file,
 offline, the remote `ilexctl profile apply --install-apps` creates too; a remote
 the user later removes is not added again. Discover then shows Flathub and installs
-"from Flathub (user)", reusing a runtime of the system installation. The system
-catalogue stays hidden, `plasma-discover-notifier` is not installed, and system
+"from Flathub (user)". Unlike GNOME Software it does not hand the system
+installation to Flatpak as a dependency source, so a user-scope application brings
+its own copy of its runtime and extensions into the home (a GNOME application:
+about a gigabyte, which a 2 GiB test home cannot hold; the KDE apps test creates an
+8 GiB one). The system catalogue stays hidden, `plasma-discover-notifier` is not installed, and system
 applications are updated by `ilexctl apps`. Limits (Discover's code takes the
 first, system, installation for these): its "Add Flathub" button when the user has
 removed the remote, opening a `.flatpakref` or `.flatpakrepo`, and removing or

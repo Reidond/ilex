@@ -118,9 +118,12 @@ fn create_user(vm: &Vm, password: &str) -> Result<()> {
 /// The same account as an encrypted systemd-homed home, created through the
 /// lifecycle's guest driver and left locked.
 fn create_homed_user(vm: &Vm, password: &str) -> Result<()> {
+    // Large enough for what the application tests install in the user's own
+    // Flatpak installation: Discover's user-scope install brings its own copy of
+    // the runtime (about a gigabyte), which the default 2 GiB home cannot hold.
     crate::homed::guest(
         vm,
-        serde_json::json!({"action":"create", "name":USER, "admin":true, "secrets":[password]}),
+        serde_json::json!({"action":"create", "name":USER, "admin":true, "secrets":[password], "disk_size":8}),
     )?;
     crate::homed::guest(
         vm,
@@ -808,14 +811,23 @@ mod apps {
                 }
             },
         );
-        report.check("the runtime of the system installation was reused", {
-            let runtimes = user(vm, "flatpak list --user --runtime --columns=application")?;
-            if runtimes.trim().is_empty() {
-                Ok(())
-            } else {
-                Err(anyhow!("the user installation holds runtimes:\n{runtimes}"))
-            }
-        });
+        report.check(
+            "Discover brought the application's runtime along (it does not reuse the system's)",
+            {
+                let runtimes = user(vm, "flatpak list --user --runtime --columns=application")?;
+                println!(
+                    "     the user installation now holds: {}",
+                    runtimes.replace('\n', ", ")
+                );
+                if runtimes.contains("org.gnome.Platform") {
+                    Ok(())
+                } else {
+                    Err(anyhow!(
+                        "no GNOME runtime in the user installation:\n{runtimes}"
+                    ))
+                }
+            },
+        );
         report.check("no system catalogue was fetched for Discover", {
             let catalogue = vm.ssh("test -e /var/lib/flatpak/appstream/flathub")?;
             if catalogue.status.success() {
