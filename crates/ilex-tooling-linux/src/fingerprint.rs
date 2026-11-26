@@ -1,9 +1,10 @@
 //! Shared fingerprint/cache key inputs. Preserve phase 0's publication rules.
+use crate::image_crates_guard::{self, CargoBuild, Scratch, image_builds};
 use crate::{Workspace, cmd, config::Selection, git};
 use anyhow::{Context, Result, bail, ensure};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,231 +35,6 @@ const INPUTS: &[&str] = &[
     "build",
     "machines/generic",
 ];
-
-/// The declaration of what the root image builds, and the script that builds it
-/// from that declaration. The Containerfile runs the script and nothing else of
-/// the Rust toolchain, the fingerprint reads the same declaration, and the
-/// guard ([`check_containerfile`], [`check_build_script`]) fails when the
-/// Containerfile or the script names the toolchain anywhere else: one list, no
-/// parsing of shell.
-const DECLARATION: &str = "build/image-crates.toml";
-const BUILD_SCRIPT: &str = "build/build-image-crates.py";
-
-/// What one `cargo build` of the root image asks for: one `[[build]]` of the
-/// declaration.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-struct CargoBuild {
-    packages: Vec<String>,
-    #[serde(default)]
-    no_default_features: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Declaration {
-    build: Vec<CargoBuild>,
-}
-
-/// The same rule `build-image-crates.py` applies: a plain package name, never
-/// a flag, a path or a word with a space, quote or separator.
-fn plain_package_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-/// The `[[build]]` entries of the declaration, in file order.
-fn parse_declaration(text: &str) -> Result<Vec<CargoBuild>> {
-    let declaration: Declaration = toml::from_str(text).context("parsing the declaration")?;
-    ensure!(
-        !declaration.build.is_empty(),
-        "the declaration has no [[build]]"
-    );
-    for build in &declaration.build {
-        ensure!(
-            !build.packages.is_empty(),
-            "a [[build]] names no package; its `packages` must be a non-empty list"
-        );
-        for package in &build.packages {
-            ensure!(
-                plain_package_name(package),
-                "`{package}` is not a plain package name"
-            );
-        }
-    }
-    Ok(declaration.build)
-}
-
-/// Logical lines of a Containerfile with their first physical line: `\`
-/// continuations are joined (comment lines inside one are dropped, as the
-/// builders do) and full-line comments are removed.
-fn logical_lines(text: &str) -> Vec<(usize, String)> {
-    let mut lines = Vec::new();
-    let mut current: Option<(usize, String)> = None;
-    for (index, raw) in text.lines().enumerate() {
-        let trimmed = raw.trim();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        let (body, continued) = match trimmed.strip_suffix('\\') {
-            Some(body) => (body.trim_end(), true),
-            None => (trimmed, false),
-        };
-        match current.as_mut() {
-            Some((_, line)) => {
-                line.push(' ');
-                line.push_str(body);
-            }
-            None => current = Some((index + 1, body.to_owned())),
-        }
-        if !continued && let Some(done) = current.take() {
-            lines.push(done);
-        }
-    }
-    lines.extend(current);
-    lines
-}
-
-/// The words that start the Rust toolchain or name its environment
-/// (`CARGO_*`, `RUSTC_WRAPPER`, `RUSTUP_TOOLCHAIN`, `RUSTDOCFLAGS`), matched
-/// as case-insensitive substrings. A spelling that never writes one of them
-/// is not detected: this finds drift, not an adversary.
-const TOOLCHAIN_WORDS: [&str; 4] = ["cargo", "rustc", "rustup", "rustdoc"];
-
-fn mentions_toolchain(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    TOOLCHAIN_WORDS.iter().any(|word| lower.contains(word))
-}
-
-/// A word that cannot start or hide anything: no quote, `$`, backtick, `;`,
-/// `&`, `|`, `<`, `>`, bracket, brace, parenthesis or backslash.
-fn plain_word(word: &str) -> bool {
-    !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_./:=+@,*-".contains(c))
-}
-
-/// The one line of the Containerfile that runs the declared builds, apart from
-/// its `--mount=…` flags.
-const BUILD_COMMAND: [&str; 5] = ["python3", "-I", "-S", BUILD_SCRIPT, DECLARATION];
-
-#[derive(Debug, PartialEq, Eq)]
-enum Mention {
-    /// `COPY`/`ADD` of plain words: a file name, nothing runs.
-    Copy,
-    /// `RUN dnf -y install` of plain words: the package is installed, not run.
-    Install,
-    /// The single invocation of [`BUILD_SCRIPT`] on [`DECLARATION`].
-    Build,
-}
-
-/// What a logical line of the Containerfile is, when it is one of the three
-/// shapes that may name the toolchain. Every shape is plain words only, so it
-/// is as inert inside a heredoc body or any other context as in a `RUN`.
-fn classify(line: &str) -> Option<Mention> {
-    let words: Vec<&str> = line.split_whitespace().collect();
-    let (instruction, rest) = words.split_first()?;
-    if instruction.eq_ignore_ascii_case("COPY") || instruction.eq_ignore_ascii_case("ADD") {
-        return rest
-            .iter()
-            .all(|word| plain_word(word))
-            .then_some(Mention::Copy);
-    }
-    if !instruction.eq_ignore_ascii_case("RUN") {
-        return None;
-    }
-    let flags = rest
-        .iter()
-        .take_while(|word| word.starts_with("--mount="))
-        .count();
-    let (flags, command) = rest.split_at(flags);
-    if !flags.iter().all(|word| plain_word(word)) {
-        return None;
-    }
-    if command == BUILD_COMMAND {
-        return Some(Mention::Build);
-    }
-    (command.starts_with(&["dnf", "-y", "install"]) && command.iter().all(|word| plain_word(word)))
-        .then_some(Mention::Install)
-}
-
-/// Fails unless the Containerfile runs the Rust toolchain only through
-/// [`BUILD_SCRIPT`]: every logical line (`\` continuations joined, full-line
-/// comments dropped, every stage) that names `cargo`, `rustc`, `rustup` or
-/// `rustdoc` must be a `COPY`/`ADD` of plain words, a `dnf -y install` of
-/// plain words (the toolchain's own package) or the one invocation of the
-/// script; any line that names the script must be exactly that invocation, and
-/// there must be exactly one. A heredoc body, an exec-form `RUN`, `ENV`/`ARG`,
-/// a substitution, a redirection, a chain: none of them is one of the shapes,
-/// so each is refused without being understood.
-fn check_containerfile(text: &str) -> Result<()> {
-    let mut invocations = 0;
-    for (number, line) in logical_lines(text) {
-        let mention = classify(&line);
-        if mention == Some(Mention::Build) {
-            invocations += 1;
-        }
-        ensure!(
-            mention.is_some()
-                || !(mentions_toolchain(&line) || line.contains("build-image-crates")),
-            "Containerfile line {number}: `{line}` names cargo, rustc, rustup, rustdoc or {BUILD_SCRIPT} outside the toolchain's `dnf -y install`, a COPY and the one `RUN [--mount=…] {}`; declare the package in {DECLARATION} and let the script build it",
-            BUILD_COMMAND.join(" ")
-        );
-    }
-    ensure!(
-        invocations == 1,
-        "the Containerfile must run `RUN [--mount=…] {}` exactly once, found {invocations}",
-        BUILD_COMMAND.join(" ")
-    );
-    Ok(())
-}
-
-/// The only lines of the build script that name the toolchain, besides
-/// comments: the wrapper every compile goes through and the one build command.
-const SCRIPT_TOOLCHAIN_LINES: [&str; 2] = [
-    r#"env = dict(os.environ, RUSTC_WRAPPER="kache")"#,
-    r#"command = ["cargo", "build", "--release", "--locked"]"#,
-];
-
-/// Fails unless the script names the toolchain on those two lines only (each
-/// exactly once), so a second build hidden in it cannot escape the
-/// declaration.
-fn check_build_script(text: &str) -> Result<()> {
-    let mut seen = [0usize; SCRIPT_TOOLCHAIN_LINES.len()];
-    for (index, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.starts_with('#') || !mentions_toolchain(line) {
-            continue;
-        }
-        match SCRIPT_TOOLCHAIN_LINES.iter().position(|want| *want == line) {
-            Some(position) => seen[position] += 1,
-            None => bail!(
-                "{BUILD_SCRIPT} line {}: `{line}` names cargo, rustc, rustup or rustdoc; only the wrapper line and the one build command may, so that it builds exactly what {DECLARATION} declares",
-                index + 1
-            ),
-        }
-    }
-    ensure!(
-        seen.iter().all(|count| *count == 1),
-        "{BUILD_SCRIPT} must contain each of {SCRIPT_TOOLCHAIN_LINES:?} exactly once (found {seen:?})"
-    );
-    Ok(())
-}
-
-/// The packages the root image builds: the declaration, after the guard has
-/// checked that the Containerfile and the script build nothing else.
-fn image_builds(root: &Path) -> Result<Vec<CargoBuild>> {
-    let read = |path: &str| {
-        std::fs::read_to_string(root.join(path)).with_context(|| format!("reading {path}"))
-    };
-    check_containerfile(&read("Containerfile")?).context("the root Containerfile")?;
-    check_build_script(&read(BUILD_SCRIPT)?).with_context(|| BUILD_SCRIPT.to_owned())?;
-    parse_declaration(&read(DECLARATION)?).with_context(|| DECLARATION.to_owned())
-}
 
 /// Directories (repo-relative) of the packages in the dependency closure of one
 /// build that are not fetched from a registry or git: the workspace members it
@@ -366,6 +142,43 @@ fn closure_of(
 /// Set by the signing process: from then on nothing in it may start cargo.
 static CARGO_FORBIDDEN: AtomicBool = AtomicBool::new(false);
 
+/// The variables of the caller's environment that change the cfgs or the
+/// target cargo resolves dependencies for, and so the closure
+/// (`RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` with a `--cfg` enable `cfg(...)`
+/// path dependencies). The image build never sees them (its script starts
+/// cargo with a scrubbed environment), so the derivation must not either, or
+/// a developer's shell would hash another closure than CI's.
+fn changes_resolution(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.ends_with("RUSTFLAGS") || upper.ends_with("RUSTDOCFLAGS") || upper == "CARGO_BUILD_TARGET"
+}
+
+/// A cargo command in `root` with every variable of `names` that
+/// [`changes_resolution`] removed from its environment.
+fn scrubbed_cargo(root: &Path, names: impl IntoIterator<Item = OsString>) -> Command {
+    let mut command = Command::new("cargo");
+    command.current_dir(root);
+    for name in names {
+        if name.to_str().is_some_and(changes_resolution) {
+            command.env_remove(name);
+        }
+    }
+    command
+}
+
+/// The only place that creates a cargo command, so the signing process's ban
+/// holds for every caller, now and later.
+fn cargo(root: &Path) -> Result<Command> {
+    ensure!(
+        !CARGO_FORBIDDEN.load(Ordering::SeqCst),
+        "internal error: this process holds signing credentials and must not run cargo"
+    );
+    Ok(scrubbed_cargo(
+        root,
+        std::env::vars_os().map(|(name, _)| name),
+    ))
+}
+
 /// The closure of one build, from `cargo metadata`. Only this function and
 /// [`fetch_dependencies`] start cargo, and both refuse once
 /// [`use_recorded_image_crates`] has run.
@@ -374,18 +187,16 @@ fn closure(ws: &Workspace, build: &CargoBuild) -> Result<BTreeSet<String>> {
         !CARGO_FORBIDDEN.load(Ordering::SeqCst),
         "internal error: this process holds signing credentials and must not run cargo; the root image's crates come from the recorded closure"
     );
-    let mut metadata = Command::new("cargo");
-    metadata
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--locked",
-            "--offline",
-            "--filter-platform",
-            "x86_64-unknown-linux-gnu",
-        ])
-        .current_dir(&ws.root);
+    let mut metadata = cargo(&ws.root)?;
+    metadata.args([
+        "metadata",
+        "--format-version",
+        "1",
+        "--locked",
+        "--offline",
+        "--filter-platform",
+        "x86_64-unknown-linux-gnu",
+    ]);
     if build.no_default_features {
         metadata.arg("--no-default-features");
     }
@@ -404,12 +215,8 @@ fn fetch_dependencies(ws: &Workspace) -> Result<()> {
         !CARGO_FORBIDDEN.load(Ordering::SeqCst),
         "internal error: this process holds signing credentials and must not run cargo"
     );
-    cmd::run(
-        Command::new("cargo")
-            .args(["fetch", "--locked", "--target", "x86_64-unknown-linux-gnu"])
-            .current_dir(&ws.root),
-    )
-    .context("fetching crates with `cargo fetch --locked`")
+    cmd::run(cargo(&ws.root)?.args(["fetch", "--locked", "--target", "x86_64-unknown-linux-gnu"]))
+        .context("fetching crates with `cargo fetch --locked`")
 }
 
 type Cache = Mutex<BTreeMap<PathBuf, Vec<String>>>;
@@ -422,8 +229,8 @@ fn cache() -> &'static Cache {
 /// The crates whose source can change a binary of the root image: the
 /// dependency closure, derived from `cargo metadata`, of every package
 /// `build/image-crates.toml` declares (the file the Containerfile's build
-/// script builds from; the Containerfile and the script are checked to build
-/// nothing else). An edit to any other crate (the installer, the e2e harness,
+/// script builds from; the Containerfile, the script and `build/` are checked
+/// by [`crate::image_crates_guard`] to build nothing else). An edit to any other crate (the installer, the e2e harness,
 /// the development tooling) cannot reach the image and no longer changes its
 /// fingerprint.
 ///
@@ -547,382 +354,38 @@ fn build(packages: &[&str], no_default_features: bool) -> CargoBuild {
     }
 }
 
-/// A Containerfile in the shape of the real one: the toolchain's `dnf` install,
-/// a `COPY` of the manifests and the one `RUN` of the build script, in a stage
-/// of its own, with comments that name the toolchain.
-const GOOD_CONTAINERFILE: &str = r#"
-# Build with `cargo ilexctl build`; rustup configures the host, not this stage.
-FROM quay.io/fedora/fedora:45 AS build
-RUN --mount=type=cache,id=x-dnf,target=/var/cache/libdnf5,sharing=locked \
-    dnf -y install --setopt=keepcache=1 cargo gcc
-WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY crates/ crates/
-COPY build/build-image-crates.py build/image-crates.toml build/
-RUN --mount=type=cache,id=x-cargo,target=/root/.cargo/registry \
-    --mount=type=cache,id=x-kache,target=/root/.cache/kache,sharing=locked \
-    python3 -I -S build/build-image-crates.py build/image-crates.toml
-
-FROM quay.io/fedora/fedora-bootc:45
-COPY --from=build /out/ /
-RUN echo "${SUM}  x" | sha256sum -c -
-"#;
-
-/// `(name, Containerfile, None to accept or Some(text) the refusal must
-/// contain)`. Every bypass the reviews found in the old shell parser, and the
-/// plain ways to run the toolchain, are refused by the one rule.
-type GuardFixture = (&'static str, String, Option<&'static str>);
-
-fn containerfile_fixtures() -> Vec<GuardFixture> {
-    const OUTSIDE: Option<&str> = Some("outside the toolchain's `dnf -y install`");
-    let with = |extra: &str| format!("{GOOD_CONTAINERFILE}{extra}");
-    let replacing = |from: &str, to: &str| GOOD_CONTAINERFILE.replacen(from, to, 1);
-    const INVOCATION: &str = "python3 -I -S build/build-image-crates.py build/image-crates.toml";
-    vec![
-        ("the shape of the real Containerfile", with(""), None),
-        (
-            "more toolchain installs, copies of the binary and no mention at all",
-            with(
-                "RUN dnf -y install rustup\nCOPY --from=build /usr/bin/cargo /usr/local/bin/cargo\nRUN echo \"$(python3 -c 'print(1)')\" && true\n",
-            ),
-            None,
-        ),
-        (
-            "a second `cargo build`",
-            with("RUN cargo build --release --locked -p evil\n"),
-            OUTSIDE,
-        ),
-        (
-            "another stage runs it",
-            with("FROM quay.io/fedora/fedora:45 AS other\nRUN cargo install --locked evil\n"),
-            OUTSIDE,
-        ),
-        (
-            "process substitution in a redirection",
-            with("RUN cargo build -p ilexctl 2> >(tee build.log) --workspace\n"),
-            OUTSIDE,
-        ),
-        (
-            "here-string",
-            with("RUN sh <<< 'cargo build -p evil'\n"),
-            OUTSIDE,
-        ),
-        (
-            "heredoc body",
-            with("RUN <<EOF\ncargo build -p evil\nEOF\n"),
-            OUTSIDE,
-        ),
-        (
-            "heredoc body that starts like an instruction",
-            with("RUN <<EOF\nCOPY x; cargo build -p evil\nEOF\n"),
-            OUTSIDE,
-        ),
-        (
-            "heredoc body that starts like the toolchain install",
-            with("RUN <<EOF\nRUN dnf -y install x; cargo build -p evil\nEOF\n"),
-            OUTSIDE,
-        ),
-        (
-            "substitution nested in a parameter expansion",
-            with("RUN echo \"${x:-$(echo $((1 + 2)); cargo build -p evil)}\"\n"),
-            OUTSIDE,
-        ),
-        (
-            "substitution with a closing parenthesis inside (arithmetic)",
-            with("RUN echo \"$(( (1 + 2) ))$(cargo build -p evil)\"\n"),
-            OUTSIDE,
-        ),
-        (
-            "substitution with a closing parenthesis inside (subshell)",
-            with("RUN echo \"$( (cargo build -p evil) )\"\n"),
-            OUTSIDE,
-        ),
-        (
-            "substitution with a closing parenthesis inside (case)",
-            with("RUN echo \"$(case x in x) cargo build -p evil;; esac)\"\n"),
-            OUTSIDE,
-        ),
-        (
-            "an appended environment variable",
-            with("RUN CARGO_BUILD_TARGET+=-musl true\n"),
-            OUTSIDE,
-        ),
-        (
-            "a quoted export",
-            with("RUN export \"CARGO_BUILD_TARGET=x86_64-unknown-linux-musl\"\n"),
-            OUTSIDE,
-        ),
-        (
-            "ENV",
-            with("ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-musl\n"),
-            OUTSIDE,
-        ),
-        ("ARG", with("ARG CARGO_BUILD_JOBS=1\n"), OUTSIDE),
-        (
-            "the wrapper variable",
-            with("ENV RUSTC_WRAPPER=/evil\n"),
-            OUTSIDE,
-        ),
-        (
-            "a toolchain selector",
-            with("ENV RUSTUP_TOOLCHAIN=nightly\n"),
-            OUTSIDE,
-        ),
-        (
-            "exec form",
-            with("RUN [\"/usr/bin/cargo\", \"build\", \"-p\", \"evil\"]\n"),
-            OUTSIDE,
-        ),
-        (
-            "a lower-case instruction",
-            with("run cargo build -p evil\n"),
-            OUTSIDE,
-        ),
-        (
-            "ONBUILD",
-            with("ONBUILD RUN cargo build -p evil\n"),
-            OUTSIDE,
-        ),
-        (
-            "a continuation",
-            with("RUN true \\\n    && cargo build -p evil\n"),
-            OUTSIDE,
-        ),
-        (
-            "a trailing comment",
-            with("RUN true # cargo build -p evil\n"),
-            OUTSIDE,
-        ),
-        ("rustup", with("RUN rustup run nightly true\n"), OUTSIDE),
-        (
-            "the toolchain install chained with a build",
-            with("RUN dnf -y install cargo && cargo build -p evil\n"),
-            OUTSIDE,
-        ),
-        (
-            "the toolchain install, then a command",
-            with("RUN dnf -y install cargo; true\n"),
-            OUTSIDE,
-        ),
-        (
-            "the toolchain install with a substitution",
-            with("RUN dnf -y install $(cargo build -p evil)\n"),
-            OUTSIDE,
-        ),
-        (
-            "a COPY with a command after it",
-            with("COPY x /y; cargo build -p evil\n"),
-            OUTSIDE,
-        ),
-        (
-            "the script's own invocation, chained",
-            replacing(INVOCATION, &format!("{INVOCATION} && cargo build -p evil")),
-            OUTSIDE,
-        ),
-        (
-            "the script on another declaration",
-            replacing("build/image-crates.toml\n", "build/other.toml\n"),
-            OUTSIDE,
-        ),
-        (
-            "the script with another interpreter",
-            replacing("python3 -I -S", "python3 -S"),
-            OUTSIDE,
-        ),
-        (
-            "the script run twice",
-            with(&format!("RUN {INVOCATION}\n")),
-            Some("exactly once, found 2"),
-        ),
-        (
-            "the script not run at all",
-            {
-                let start = GOOD_CONTAINERFILE
-                    .find("RUN --mount=type=cache,id=x-cargo")
-                    .expect("the fixture's build step");
-                let end = start
-                    + GOOD_CONTAINERFILE[start..]
-                        .find(INVOCATION)
-                        .expect("the fixture's invocation")
-                    + INVOCATION.len();
-                format!(
-                    "{}RUN true{}",
-                    &GOOD_CONTAINERFILE[..start],
-                    &GOOD_CONTAINERFILE[end..]
-                )
-            },
-            Some("exactly once, found 0"),
-        ),
-    ]
-}
-
-/// `(name, build script, None to accept or Some(text) the refusal must
-/// contain)`, derived from the real script so that it stays the one accepted.
-fn script_fixtures(script: &str) -> Vec<(&'static str, String, Option<&'static str>)> {
-    let wrapper = SCRIPT_TOOLCHAIN_LINES[0];
-    let command = SCRIPT_TOOLCHAIN_LINES[1];
-    vec![
-        ("the real script", script.to_owned(), None),
-        (
-            "a comment that names the toolchain",
-            format!("{script}# cargo build -p evil\n"),
-            None,
-        ),
-        (
-            "a second build",
-            format!(
-                "{script}subprocess.run([\"cargo\", \"build\", \"-p\", \"evil\"], check=True)\n"
-            ),
-            Some("names cargo, rustc, rustup or rustdoc"),
-        ),
-        (
-            "a build with a trailing comment",
-            script.replace(command, &format!("{command}  # -p evil")),
-            Some("names cargo, rustc, rustup or rustdoc"),
-        ),
-        (
-            "another wrapper",
-            script.replace(wrapper, "env = dict(os.environ, RUSTC_WRAPPER=\"sccache\")"),
-            Some("names cargo, rustc, rustup or rustdoc"),
-        ),
-        (
-            "no wrapper",
-            script.replace(wrapper, "env = dict(os.environ)"),
-            Some("exactly once"),
-        ),
-        (
-            "the build twice",
-            script.replace(command, &format!("{command}\n        {command}")),
-            Some("exactly once"),
-        ),
-        (
-            "an environment variable",
-            format!("{script}os.environ[\"CARGO_BUILD_TARGET\"] = \"x\"\n"),
-            Some("names cargo, rustc, rustup or rustdoc"),
-        ),
-    ]
-}
-
-/// `(name, declaration, None to accept or Some(text) the refusal must
-/// contain)`.
-fn declaration_fixtures() -> Vec<(&'static str, &'static str, Option<&'static str>)> {
-    vec![
-        (
-            "one build and flags",
-            "[[build]]\npackages = [\"a\", \"b-c_d\"]\nno-default-features = true\n[[build]]\npackages = [\"e\"]\n",
-            None,
-        ),
-        ("an empty file", "", Some("missing field")),
-        ("no builds", "build = []\n", Some("no [[build]]")),
-        (
-            "no packages",
-            "[[build]]\npackages = []\n",
-            Some("no package"),
-        ),
-        (
-            "packages missing",
-            "[[build]]\nno-default-features = true\n",
-            Some("packages"),
-        ),
-        (
-            "an unknown key",
-            "[[build]]\npackages = [\"a\"]\nfeatures = [\"x\"]\n",
-            Some("unknown field"),
-        ),
-        (
-            "an unknown table",
-            "[[build]]\npackages = [\"a\"]\n[other]\nx = 1\n",
-            Some("unknown field"),
-        ),
-        (
-            "a flag as a package",
-            "[[build]]\npackages = [\"--workspace\"]\n",
-            Some("not a plain package name"),
-        ),
-        (
-            "a package with a space",
-            "[[build]]\npackages = [\"a --workspace\"]\n",
-            Some("not a plain package name"),
-        ),
-        (
-            "a package with a separator",
-            "[[build]]\npackages = [\"a;b\"]\n",
-            Some("not a plain package name"),
-        ),
-        (
-            "a package that is a version spec",
-            "[[build]]\npackages = [\"a@1\"]\n",
-            Some("not a plain package name"),
-        ),
-        (
-            "packages as a string",
-            "[[build]]\npackages = \"a\"\n",
-            Some("parsing the declaration"),
-        ),
-        (
-            "a flag as a string",
-            "[[build]]\npackages = [\"a\"]\nno-default-features = \"yes\"\n",
-            Some("parsing the declaration"),
-        ),
-    ]
-}
-
-/// The script and the fingerprint read the declaration independently; they
-/// must agree on it.
-fn script_agrees_with_declaration(root: &Path, builds: &[CargoBuild]) -> Result<()> {
-    let output = cmd::output(
-        Command::new("python3")
-            .args(["-I", "-S"])
-            .arg(root.join(BUILD_SCRIPT))
-            .arg("--list")
-            .arg(root.join(DECLARATION)),
-    )
-    .context("running the build script with --list (python3 is required)")?;
-    let listed: serde_json::Value =
-        serde_json::from_str(&output).context("reading the build script's --list output")?;
-    let want = serde_json::Value::Array(
-        builds
-            .iter()
-            .map(|build| {
-                serde_json::json!({
-                    "packages": build.packages,
-                    "no-default-features": build.no_default_features,
-                })
-            })
-            .collect(),
-    );
+/// The variables `scrubbed_cargo` removes for a typical environment: the
+/// closure derivation must resolve for the default cfgs and target, as the
+/// image build does.
+fn check_scrubbed_cargo(root: &Path) -> Result<usize> {
+    let names = [
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_BUILD_RUSTFLAGS",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+        "CARGO_BUILD_TARGET",
+        "rustflags",
+        // Left alone: cargo needs them, and they do not change resolution.
+        "PATH",
+        "HOME",
+        "CARGO_HOME",
+        "CARGO_NET_OFFLINE",
+        "RUSTC_WRAPPER",
+        "RUSTUP_TOOLCHAIN",
+    ];
+    let command = scrubbed_cargo(root, names.iter().map(|name| OsString::from(*name)));
+    let removed: BTreeSet<String> = command
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    let want: BTreeSet<String> = names[..7].iter().map(|name| (*name).to_owned()).collect();
     ensure!(
-        listed == want,
-        "{BUILD_SCRIPT} reads {DECLARATION} as {listed}, the fingerprint as {want}"
+        removed == want,
+        "the closure derivation scrubs {removed:?} from cargo's environment; it must scrub exactly {want:?}"
     );
-    Ok(())
-}
-
-/// Runs `check` over fixtures that must be accepted (`None`) or refused with
-/// the given text, and counts both.
-fn run_guard_fixtures<'a>(
-    kind: &str,
-    fixtures: impl IntoIterator<Item = (&'a str, Result<()>, Option<&'a str>)>,
-) -> Result<(usize, usize)> {
-    let (mut accepted, mut refused) = (0, 0);
-    for (name, outcome, expect) in fixtures {
-        match (outcome, expect) {
-            (Ok(()), None) => accepted += 1,
-            (Err(error), Some(want)) => {
-                let error = format!("{error:#}");
-                ensure!(
-                    error.contains(want),
-                    "{kind} fixture `{name}` failed with `{error}`, which does not contain `{want}`"
-                );
-                refused += 1;
-            }
-            (Ok(()), Some(want)) => {
-                bail!("{kind} fixture `{name}` was accepted; it must be refused (`{want}`)")
-            }
-            (Err(error), None) => bail!("{kind} fixture `{name}` was refused: {error:#}"),
-        }
-    }
-    Ok((accepted, refused))
+    Ok(removed.len())
 }
 
 const SELF_CHECK_SOURCE: &str = "sha256:selfcheck";
@@ -983,44 +446,12 @@ fn fixture_metadata(tmp: &Path, extra_member: Option<&str>) -> serde_json::Value
     })
 }
 
-struct Scratch(PathBuf);
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Negative and positive fixtures for the Containerfile and build-script guard,
-/// the declaration, the closure walk (local path packages, registry/git
-/// packages, dev edges) and the record the signing process reads. Run by
-/// `ilexctl doctor --self-check`; no unit tests, as everywhere in this
-/// repository.
+/// Negative and positive fixtures for the root image's Rust build guards
+/// ([`crate::image_crates_guard`]), the closure walk (local path packages,
+/// registry/git packages, dev edges), the derivation's environment scrub and
+/// the record the signing process reads. Run by `ilexctl doctor --self-check`;
+/// no unit tests, as everywhere in this repository.
 pub fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
-    let (containerfile_accepted, containerfile_refused) = run_guard_fixtures(
-        "Containerfile",
-        containerfile_fixtures()
-            .iter()
-            .map(|(name, text, expect)| (*name, check_containerfile(text), *expect)),
-    )?;
-    let script = std::fs::read_to_string(ws.root.join(BUILD_SCRIPT))
-        .with_context(|| format!("reading {BUILD_SCRIPT}"))?;
-    let (script_accepted, script_refused) = run_guard_fixtures(
-        "build script",
-        script_fixtures(&script)
-            .iter()
-            .map(|(name, text, expect)| (*name, check_build_script(text), *expect)),
-    )?;
-    let (declaration_accepted, declaration_refused) = run_guard_fixtures(
-        "declaration",
-        declaration_fixtures()
-            .iter()
-            .map(|(name, text, expect)| (*name, parse_declaration(text).map(|_| ()), *expect)),
-    )?;
-    // The checkout's own files pass the guard, and the script reads its
-    // declaration the way the fingerprint does.
-    let real = image_builds(&ws.root)?;
-    script_agrees_with_declaration(&ws.root, &real)?;
-
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -1029,6 +460,10 @@ pub fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
         "ilex-fingerprint-selfcheck-{}-{unique}",
         std::process::id()
     )));
+    std::fs::create_dir_all(&tmp.0)?;
+    let base = std::fs::canonicalize(&tmp.0)?;
+    let (_, mut report) = image_crates_guard::self_check(&ws.root, &base)?;
+    let scrubbed = check_scrubbed_cargo(&ws.root)?;
     for dir in [
         "root/crates/app",
         "root/crates/lib",
@@ -1042,7 +477,6 @@ pub fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
         std::fs::write(tmp.0.join(dir).join("Cargo.toml"), "")?;
     }
     std::fs::write(tmp.0.join("root/Cargo.toml"), "")?;
-    let base = std::fs::canonicalize(&tmp.0)?;
     let root = base.join("root");
     let wanted = build(&["app"], false);
     let ok = closure_of(&root, &fixture_metadata(&base, None), &wanted)?;
@@ -1108,18 +542,10 @@ pub fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
         );
         records += 1;
     }
-    Ok(serde_json::json!({
-        "containerfile_fixtures_accepted": containerfile_accepted,
-        "containerfile_fixtures_refused": containerfile_refused,
-        "build_script_fixtures_accepted": script_accepted,
-        "build_script_fixtures_refused": script_refused,
-        "declaration_fixtures_accepted": declaration_accepted,
-        "declaration_fixtures_refused": declaration_refused,
-        "declared_builds": real.len(),
-        "script_reads_the_declaration_as_the_fingerprint_does": true,
-        "closure_fixtures": 4,
-        "record_fixtures_refused": records,
-    }))
+    report["derivation_scrubs_variables"] = scrubbed.into();
+    report["closure_fixtures"] = 4.into();
+    report["record_fixtures_refused"] = records.into();
+    Ok(report)
 }
 
 /// Early root cache key: selected source trees plus both freshly pulled build

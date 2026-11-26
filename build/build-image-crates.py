@@ -5,15 +5,27 @@
 #   python3 -I -S build/build-image-crates.py build/image-crates.toml
 #
 # Run from /src. The declaration is the only place that names a package; the
-# image fingerprint reads the same file for its crate closure, and
-# `ilexctl doctor --self-check` refuses a Containerfile that runs the Rust
-# toolchain anywhere else, and this script if it names the toolchain on any
-# line but the two below (the wrapper and the one build command).
+# image fingerprint reads the same file for its crate closure.
 #
-# `--list DECLARATION` prints the declaration as JSON and builds nothing; the
-# self-check compares it with the fingerprint's own reading of the file.
-#
-# Standard library only, as every build helper here: -I -S runs no site hooks.
+# Why the build is the build the fingerprint hashes (drift detection, not a
+# sandbox; `ilexctl doctor --self-check` checks every point):
+#   - every cargo argv comes from cargo_commands() and nowhere else, and main()
+#     runs that function's output at one place. `--commands DECLARATION` prints
+#     it, and the self-check compares it with the argv the declaration implies:
+#     --release --locked, -p for each declared package, --no-default-features
+#     when declared, nothing else;
+#   - cargo starts with cargo_environment(): nothing the caller set in CARGO*,
+#     RUST* or KACHE*, only RUSTC_WRAPPER and the read-only host store set
+#     there (`--environment` prints it), so RUSTFLAGS and CARGO_BUILD_TARGET
+#     cannot turn on a cfg or a target the closure does not cover;
+#   - the build refuses to start while any cargo configuration file is visible
+#     (cargo_configs(), `--configs`): [build] target and rustflags, [env] and
+#     [patch] there change what is built and nothing the fingerprint hashes;
+#   - from `def cargo_commands` to the end this file is pinned verbatim by the
+#     guard (crates/ilex-tooling-linux/src/build-image-crates.pinned.py, which
+#     must be edited with it); before that line the guard allows six imports
+#     and no way to run a program or load code, and the toolchain's name
+#     nowhere but in comments.
 import json
 import os
 import re
@@ -67,26 +79,76 @@ def declared(path):
     return builds
 
 
-def main(argv):
-    if len(argv) == 3 and argv[1] == "--list":
-        print(json.dumps(declared(argv[2]), sort_keys=True))
-        return
-    if len(argv) != 2:
-        fail("usage: build-image-crates.py DECLARATION")
-    builds = declared(argv[1])
-
-    # Every compile goes through kache, whose store is a cache mount shared by
-    # all worktrees; the host's own store, when `ilexctl build` mounts it, is
-    # read-only.
-    env = dict(os.environ, RUSTC_WRAPPER="kache")
-    if os.path.isfile("/kache-host/index.db"):
-        env["KACHE_READONLY_STORE"] = "/kache-host"
+def cargo_commands(builds):
+    """Every cargo command line of the build; no other code makes one."""
+    commands = []
     for build in builds:
         command = ["cargo", "build", "--release", "--locked"]
         for package in build["packages"]:
             command += ["-p", package]
         if build["no-default-features"]:
             command.append("--no-default-features")
+        commands.append(command)
+    return commands
+
+
+def cargo_environment():
+    """What cargo and kache start with: the caller's environment without
+    anything that configures cargo, rustc or kache, plus the settings made here."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.upper().startswith(("CARGO", "RUST", "KACHE"))
+    }
+    # Every compile goes through kache, whose store is a cache mount shared by
+    # all worktrees; the host's own store, when `ilexctl build` mounts it, is
+    # read-only.
+    env["RUSTC_WRAPPER"] = "kache"
+    if os.path.isfile("/kache-host/index.db"):
+        env["KACHE_READONLY_STORE"] = "/kache-host"
+    return env
+
+
+def cargo_configs():
+    """The cargo configuration files cargo would read from here: `.cargo/config`
+    and `.cargo/config.toml` of the working directory and of each parent, and of
+    cargo's home."""
+    directories = [os.path.join(os.path.expanduser("~"), ".cargo")]
+    here = os.getcwd()
+    while True:
+        directories.append(os.path.join(here, ".cargo"))
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    names = ("config", "config.toml")
+    found = [os.path.join(directory, name) for directory in directories for name in names]
+    return sorted({path for path in found if os.path.lexists(path)})
+
+
+def planned(path):
+    """The cargo commands main() runs for a declaration, and `--commands` prints."""
+    return cargo_commands(declared(path))
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1] == "--commands":
+        print(json.dumps(planned(argv[2])))
+        return
+    if argv[1:] == ["--environment"]:
+        print(json.dumps(cargo_environment(), sort_keys=True))
+        return
+    if argv[1:] == ["--configs"]:
+        print(json.dumps(cargo_configs()))
+        return
+    if len(argv) != 2 or argv[1].startswith("-"):
+        fail("usage: build-image-crates.py DECLARATION | --commands DECLARATION | --environment | --configs")
+    commands = planned(argv[1])
+    configs = cargo_configs()
+    if configs:
+        fail(f"cargo configuration is visible ({', '.join(configs)}); it would change what is built without changing the crates the fingerprint hashes")
+    env = cargo_environment()
+    for command in commands:
         subprocess.run(command, check=True, env=env)
     # Stop the daemon so it flushes what it queued, then report restored vs
     # compiled crates.

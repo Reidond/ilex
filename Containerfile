@@ -80,6 +80,13 @@ COPY crates/ crates/
 # fingerprint derives its crate closure from the same declaration, so a build
 # step added here would ship crates it does not hash: `ilexctl doctor
 # --self-check` refuses a Containerfile that names the toolchain anywhere else.
+# This stage may hold only the lines it has now (its FROM, ARG KACHE_*, the
+# toolchain's dnf install, the pinned kache download, WORKDIR, these three
+# COPYs and the one RUN of the script): a new RUN, ENV, COPY or mount here, or
+# a mention of the toolchain in another stage, is refused, so that a build
+# step, RUSTFLAGS or a cargo configuration cannot slip in beside the
+# declaration. The script itself starts cargo with a scrubbed environment and
+# refuses to build while any cargo configuration file is visible.
 COPY build/build-image-crates.py build/image-crates.toml build/
 # Every compile goes through kache, whose store is a podman cache mount shared
 # by all worktrees. There is no shared target directory any more: each build

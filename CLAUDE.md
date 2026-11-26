@@ -1231,7 +1231,8 @@ compiler cache keyed by the content of each rustc invocation's inputs. The
 Containerfile's builder stage installs a pinned release tarball (v2.0.0,
 sha256-checked; v2 needs both `kache` and `kache-engine`) and builds the
 declared Rust packages (`build/image-crates.toml`, through
-`build/build-image-crates.py`) with `RUSTC_WRAPPER=kache`. The store is the podman cache mount
+`build/build-image-crates.py`) with `RUSTC_WRAPPER=kache` and a scrubbed
+environment (no `CARGO*`, `RUST*` or `KACHE*` variable of the caller). The store is the podman cache mount
 `ilex-kache`, shared by every worktree; the target directory is fresh per
 build, so nothing trusts mtimes and one worktree's binaries can't leak into
 another's image. The step ends with `kache stats --last-build`: crates
@@ -2671,8 +2672,8 @@ the Windows paths of this change: no Windows host was available.
   name is an error). The Containerfile's builder stage builds them by running
   one script, `python3 -I -S build/build-image-crates.py
   build/image-crates.toml`, which reads that file, runs exactly those `cargo
-  build --release --locked` commands with `RUSTC_WRAPPER=kache` and stages the
-  binaries and completions under `/out`. `image_crates` reads the same
+  build --release --locked` commands with `RUSTC_WRAPPER=kache` (in a scrubbed
+  environment, see below) and stages the binaries and completions under `/out`. `image_crates` reads the same
   declaration (no Containerfile parsing) and walks `cargo metadata --offline
   --locked --filter-platform x86_64-unknown-linux-gnu` from the named packages
   over normal and build dependencies (`cargo fetch --locked` runs first: the
@@ -2698,43 +2699,88 @@ the Windows paths of this change: no Windows host was available.
   make that ISO due the same way; `installer/next` and the new crate do not.
   The first main run after this change rebuilds every root and the ISO once
   (the input set itself changed).
-  **The guard is a word check, not a parser.** The fingerprint cannot know what
-  a shell line builds, so the Containerfile is not allowed to run the Rust
-  toolchain at all, and no shell is read. Before deriving the closure,
-  `check_containerfile` joins `\` continuations, drops full-line comments and
-  requires every logical line, in every stage, that contains `cargo`, `rustc`,
-  `rustup` or `rustdoc` (case-insensitively, anywhere in the line, so also
-  `CARGO_BUILD_TARGET`, `RUSTC_WRAPPER`, `RUSTUP_TOOLCHAIN`, `RUSTDOCFLAGS`) to
-  be one of three shapes made of plain words only (letters, digits and
-  `_./:=+@,*-`, no quote, `$`, backtick, `;`, `&`, `|`, `<`, `>`, bracket,
-  brace, parenthesis or backslash): a `COPY`/`ADD` (a file name such as
-  `Cargo.toml`), `RUN [--mount=…] dnf -y install …` (the toolchain's own
-  package) or the one `RUN [--mount=…] python3 -I -S build/build-image-crates.py
-  build/image-crates.toml`. Any other line that names the toolchain or the
-  script is an error naming it, and the invocation must occur exactly once.
-  Everything else a `RUN` could spell (an extra `cargo build`, a build in
-  another stage, `ENV`/`ARG`/`export`/`+=` of a `CARGO_*` variable, an
-  exec-form `RUN`, a heredoc body, `sh <<<`, `2> >(…)`, a `$(…)` in any
-  position) is refused without being understood. `check_build_script` applies
-  the same idea to the script: apart from comments, only its wrapper line
-  (`env = dict(os.environ, RUSTC_WRAPPER="kache")`) and its one build command
-  line (`command = ["cargo", "build", "--release", "--locked"]`) may name the
-  toolchain, each exactly once, so a second build hidden in it cannot escape
-  the declaration. **Out of scope** (this finds drift, not an adversary): a
-  spelling that never writes one of the four words (`c""argo`, a variable that
-  holds the name, a script generated at build time), and another script the
-  Containerfile runs that builds crates itself. Review any script a
-  `RUN` adds.
-  `ilexctl doctor --self-check` runs the guard's fixtures (2 accepted, 32
-  refused: each bypass the shell parser's reviews found, an extra `RUN cargo`,
-  the toolchain in another stage, a chained or substituted `dnf` line, the
-  script run twice or never or with another declaration), the script's (2
-  accepted, 6 refused) and the declaration's (1 accepted, 12 refused), checks
-  that the checkout's own Containerfile, script and declaration pass, and runs
-  the script with `--list` to compare its reading of the declaration with the
-  fingerprint's. It also runs the closure fixtures (a path dependency in the
-  checkout, one outside, one at the root, registry and git packages, a dev
-  edge) and the recorded-closure fixtures; a regression is a failed check.
+  **What keeps the build and the closure the same.** Nothing parses shell: the
+  root image's Rust build is kept so narrow that a text check sees all of it,
+  and what a text check cannot see is checked by running the script. Before
+  deriving the closure, `image_builds` runs three guards and the declaration's
+  parser; each refusal names the line (drift detection, not adversary-proofing).
+  - `check_containerfile` splits the Containerfile into stages (`\`
+    continuations joined, full-line comments dropped). A stage **builds the
+    Rust packages** when any logical line names `cargo`, `rustc`, `rustup`,
+    `rustdoc`, a word that starts with `rust` (`RUSTFLAGS`,
+    `rust-toolchain.toml`; not `ca-trust`) or `image-crates`. Such a stage may
+    contain only: its `FROM quay.io/fedora/fedora:45` (the builder image the
+    root key hashes), `ARG KACHE_*`, `WORKDIR /src`, three pinned `COPY`s
+    (`Cargo.toml Cargo.lock`, `crates/`, the script with its declaration),
+    `RUN [--mount=type=cache…] dnf -y install …` of plain words, the pinned
+    kache download, and the one `RUN [--mount=type=cache…] python3 -I -S
+    build/build-image-crates.py build/image-crates.toml`, exactly once. The
+    mounts are cache mounts at the dnf, cargo registry and kache store targets
+    only. Anything else is refused without being understood: a second `cargo
+    build`, `RUN sh build/x.sh`, `ENV`/`ARG RUSTFLAGS` (or any `CARGO_*`), a
+    `RUN … >> build/image-crates.toml`, a heredoc `COPY`, `COPY .cargo/`, `COPY
+    rust-toolchain.toml`, a `config.toml` copied into cargo's home, a bind
+    mount, `WORKDIR`, `USER`, `SHELL`, `ONBUILD`, another builder image, a
+    second stage that installs cargo, an exec-form or heredoc `RUN`.
+  - `check_build_script` pins the script. From `def cargo_commands` to the end
+    it equals `crates/ilex-tooling-linux/src/build-image-crates.pinned.py`
+    (code lines; comments and blank lines are free; edit both files together).
+    That part makes every cargo argv in one function (`cargo_commands`:
+    `--release --locked`, `-p` for each declared package,
+    `--no-default-features` when declared, nothing else), runs its output at
+    one place, starts cargo with `cargo_environment()`, refuses to build while
+    `cargo_configs()` lists any file, and holds every other program the script
+    runs (kache, `install`, the completions). Before it the script has six
+    imports and nothing that runs a program (`subprocess`, `os.system`,
+    `os.exec*`, `os.spawn*`, `os.popen`), loads or evaluates code (`runpy`,
+    `importlib`, `exec`, `eval`, `__import__`, `compile`, `ctypes`), changes the
+    environment or the directory (`environ`, `putenv`, `chdir`) or names the
+    toolchain outside comments.
+  - `check_build_files` scans every file under `build/` (the declaration and
+    the script have their own checks) and refuses the toolchain's name outside
+    comments, except the one message in `build/image_tree.py` that tells a
+    developer to run `cargo ilexctl build`.
+  - What no line can show is checked by running the script. `--commands
+    DECLARATION` prints the argv lists `main` will run (from the same function);
+    the self-check compares them with what the declaration implies. `--environment`
+    prints what cargo and kache start with: the script drops every `CARGO*`,
+    `RUST*` and `KACHE*` variable of the caller (so `RUSTFLAGS`,
+    `CARGO_BUILD_TARGET`, `RUSTUP_TOOLCHAIN` cannot turn on a cfg, a target or
+    a toolchain the closure does not cover) and sets only `RUSTC_WRAPPER=kache`
+    and the read-only host store. `--configs` prints every `.cargo/config` and
+    `.cargo/config.toml` cargo would read (the working directory, each parent,
+    cargo's home), and the build stops when it lists any: `[build]`
+    target/rustflags, `[env]` and `[patch]` there would change what is built
+    and nothing the fingerprint hashes. The tracked `.cargo/config.toml` (the
+    `ilexctl` alias) is not copied into the builder stage.
+  - The closure derivation (`cargo fetch` and `cargo metadata`) runs with the
+    `*RUSTFLAGS`, `*RUSTDOCFLAGS` and `CARGO_BUILD_TARGET` variables removed,
+    as the build does, so a developer's shell resolves the closure CI does.
+  **Out of scope** (this finds drift, not an adversary): a spelling that never
+  writes `cargo`, `rustc`, `rustup`, `rustdoc` or a word starting with `rust`
+  (`c""argo`, a variable that holds the name, a script generated at build time),
+  a base image that already has cargo configuration or another toolchain, and
+  `build.rs` scripts of the crates. Review any script a `RUN` adds.
+  `ilexctl doctor --self-check` runs the fixtures, each refused for the exact
+  line it changes: the Containerfile's (4 accepted, 62 refused: every shell
+  bypass the earlier parser's reviews found, a `RUN sh build/x.sh`, `RUSTFLAGS`
+  and its relatives in `ENV`/`ARG`, edits of the declaration, copies of
+  `.cargo`/`rust-toolchain`/`config.toml`, mounts, another base image, the
+  script run twice or never or on another declaration), the script's (2
+  accepted, 40 refused: an extra `-p`, `--workspace`, `--features`, `--target`,
+  `--config`, a second `subprocess.run`, another helper, `os.system`/`exec*`/
+  `spawn*`, `runpy`/`importlib`/`exec`/`eval`, an unscrubbed or wrongly
+  scrubbed environment, a build appended while reading the declaration, a
+  configuration check that misses a parent or cargo's home), the `build/`
+  scan's (3 accepted, 6 refused) and the declaration's (1 accepted, 12
+  refused). It checks that the checkout's own Containerfile, script and
+  `build/` pass, runs the real script's `--commands`, `--environment` (with
+  `RUSTFLAGS`, `CARGO_BUILD_TARGET` and 14 other variables planted) and
+  `--configs` (a configuration planted in the working directory, a parent and
+  cargo's home), and checks the derivation's scrub. It also runs the closure
+  fixtures (a path dependency in the checkout, one outside, one at the root,
+  registry and git packages, a dev edge) and the recorded-closure fixtures; a
+  regression is a failed check.
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
   GNOME edition). After the review fixes (2026-11-26) the ISO is 1,494,851,584
   bytes (1.39 GiB): 438 MiB under the Anaconda network ISO's 1.82 GiB and 0.61
