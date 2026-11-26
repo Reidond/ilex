@@ -72,11 +72,11 @@ const GRUB_COUNTDOWN: &str = "The highlighted entry will be executed automatical
 /// What a failed mirror write may take the interface: the worker's budget is
 /// 200 ms, with margin for a loaded guest.
 const SERIAL_BUDGET_SECONDS: f64 = 1.0;
-/// The polkit actions the installer's session may do without a password. None
-/// today: the placeholder page asks for nothing, and each later page that does
-/// (a restart button, the network page) adds its action here with the rule that
-/// allows it.
-const POLKIT_ALLOWED: &[&str] = &[];
+/// The polkit actions the installer's session may do without a password:
+/// changing VT, so Ctrl+Alt+F2 reaches tty2's root shell from the page. Each
+/// later page that needs another (a restart button, the network page) adds its
+/// action here with the rule that allows it.
+const POLKIT_ALLOWED: &[&str] = &["org.freedesktop.login1.chvt"];
 
 pub fn trials() -> Vec<Trial> {
     vec![
@@ -331,18 +331,10 @@ fn observe(
     if entry == Entry::Normal {
         vm.wait_ssh(Duration::from_secs(180))
             .context("the harness's SSH key did not give a login to the live ISO")?;
-        // From the page the chord does nothing: the compositor asks logind to
-        // change VT and polkit denies `org.freedesktop.login1.chvt` to the
-        // installer's user (the allowlist is empty). Whoever allows it later
-        // changes this with POLKIT_ALLOWED.
-        if !POLKIT_ALLOWED.contains(&"org.freedesktop.login1.chvt") {
-            ctl.key("ctrl+alt+F2")?;
-            std::thread::sleep(Duration::from_secs(4));
-            ensure!(
-                active_vt(vm)? == "tty1",
-                "Ctrl+Alt+F2 left the installer's page although polkit denies login1.chvt"
-            );
-        }
+        // What a person does: Ctrl+Alt+F2 from the page reaches tty2's root
+        // shell and Ctrl+Alt+F1 returns. The compositor asks logind to change
+        // VT, which the polkit rule allows this session (and nothing else).
+        keyboard_round_trip(vm, &ctl, artifacts)?;
         // The session still owns tty1 after root looks at the other VT: the
         // compositor gives the VT up and takes it back, with no getty between.
         vt_round_trip(vm, &Switch::Chvt)?;
@@ -741,9 +733,10 @@ fn wait_vt(vm: &Vm, wanted: &str) -> Result<()> {
 }
 
 /// How the trial changes VT: the key chord a person presses, or root's
-/// `chvt` over SSH. The chord reaches the kernel only while no compositor holds
-/// the keyboard (the fallback screen); a live session's compositor asks logind
-/// (`org.freedesktop.login1.chvt`), which the installer's polkit rule denies.
+/// `chvt` over SSH. On the fallback screen the chord reaches the kernel; on the
+/// page the compositor holds the keyboard and asks logind
+/// (`org.freedesktop.login1.chvt`), which the installer's polkit rule allows
+/// for the session itself.
 enum Switch<'a> {
     Keys(&'a Vmctl),
     Chvt,
@@ -776,6 +769,61 @@ fn vt_round_trip(vm: &Vm, how: &Switch) -> Result<()> {
     ensure!(
         states.lines().all(|state| state == "inactive"),
         "a getty took tty1 over after the VT round trip (getty@tty1, autovt@tty1): {states:?}"
+    );
+    Ok(())
+}
+
+/// A person at the page presses Ctrl+Alt+F2 and gets tty2's root shell, types
+/// into it and presses Ctrl+Alt+F1 to return to the page. The switch is read
+/// from the kernel's active VT and the shell's answer from tty2's own text
+/// (`/dev/vcs2`), so neither a dead chord nor a blank VT can pass.
+fn keyboard_round_trip(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
+    ensure!(
+        active_vt(vm)? == "tty1",
+        "tty1 is not in front before Ctrl+Alt+F2"
+    );
+    ctl.key("ctrl+alt+F2")?;
+    wait_vt(vm, "tty2").context(
+        "Ctrl+Alt+F2 did not leave the installer's page: the compositor's login1.chvt request needs the polkit rule",
+    )?;
+    // The shell is agetty's autologin on tty2: root, started when the VT was
+    // first visited. Ask it a question only it can answer.
+    let answer = "ILEX-TTY2-ANSWER-42-root";
+    let started = Instant::now();
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.type_text("echo ILEX-TTY2-ANSWER-$((6*7))-$(id -un)\n")?;
+    let text = loop {
+        let text = vm.ssh_ok("cat /dev/vcs2")?;
+        if text.lines().any(|line| line.trim() == answer) {
+            break text;
+        }
+        ensure!(
+            started.elapsed() < Duration::from_secs(45),
+            "tty2's root shell did not answer; /dev/vcs2 reads: {text:?}"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    fs::write(artifacts.join("next-normal-tty2-vcs2.txt"), &text)?;
+    let frame = ctl.save_screenshot(&artifacts.join("next-normal-tty2.png"))?;
+    ensure!(
+        text_drawn(&frame),
+        "tty2 shows no light text on a dark screen (next-normal-tty2.png)"
+    );
+    ctl.key("ctrl+alt+F1")?;
+    wait_vt(vm, "tty1").context("Ctrl+Alt+F1 did not return from tty2")?;
+    wait_page(vm, ctl, artifacts, "after-keys-vt-switch")?;
+    ctl.save_screenshot(&artifacts.join("next-normal-after-keys-vt-switch.png"))?;
+    // Past the time logind needs to start autovt@tty1, were it to.
+    std::thread::sleep(Duration::from_secs(4));
+    let states = vm.ssh_ok("systemctl is-active getty@tty1.service autovt@tty1.service || true")?;
+    ensure!(
+        states.lines().all(|state| state == "inactive"),
+        "a getty took tty1 over after the keyboard round trip: {states:?}"
+    );
+    let session = vm.ssh_ok("systemctl is-active ilex-installer-session.service")?;
+    ensure!(
+        session == "active",
+        "the session is {session} after the keyboard round trip"
     );
     Ok(())
 }
