@@ -165,7 +165,10 @@ mod linux {
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
         let path = match fault {
-            Some("unavailable") => Path::new("/run/ilex-installer/no-such-console").to_owned(),
+            // Under /dev, which every user can search: a path below the
+            // helper's 0700 runtime directory would fail with EACCES (an
+            // "error"), not with ENOENT.
+            Some("unavailable") => Path::new("/dev/ilex-installer-no-such-console").to_owned(),
             Some("backpressure") => match stopped_pty(&mut held) {
                 Some(slave) => slave,
                 None => return Status::Error,
