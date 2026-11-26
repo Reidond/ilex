@@ -1808,7 +1808,9 @@ record is in use, so `rechunk::fingerprint` cannot reach it. The log line is
 are not run by this process`. `publish-root.sh` and `publish-machines.sh` also
 start the publisher with `.github/no-cargo.sh`'s shims first on `PATH`
 (`cargo`, `rustc`, `rustup`, `rustdoc`, `kache` exit 97 with an error), so a
-regression is a red step before a signature exists. `ilexctl doctor
+regression is a red step before a signature exists. Their `signing()` helper
+also unsets `CARGO`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER` and
+`RUSTDOC`, which could point a toolchain somewhere other than the shims. `ilexctl doctor
 --self-check-recorded-crates <image>` runs the same call with `ILEX_IMAGE_CRATES`
 set and prints the fingerprint it gets without cargo; it must equal
 `doctor --self-check-fingerprint <image>`'s `rechunk_fingerprint`.
@@ -1958,7 +1960,11 @@ main-only because its network install exercises the published target, not the
 branch candidate. PR/fork events cannot reach signing.
 
 The sole local publishing override is an explicitly allowed loopback registry,
-never ghcr, even with `CI=true`. Run a checkout-specific `registry:2` container
+never ghcr. `--allow-local-registry` is refused whenever `CI` or
+`GITHUB_ACTIONS` is set (to any non-empty value): a throwaway-registry run
+derives the crate closure with cargo and must not share an environment with
+signing secrets. A registry counts as loopback only for `localhost`,
+`127.0.0.1` or `[::1]`, with or without a port. Run a checkout-specific `registry:2` container
 on a free local port, generate a throwaway cosign v2 key pair in a scratch
 directory, then use `--allow-local-registry --repository localhost:<port>/ilex`
 and `--verification-key <scratch>/cosign.pub` with `publish --as`. Set only that
@@ -2450,10 +2456,11 @@ the Windows paths of this change: no Windows host was available.
   survived the round trip with the mask removed, and with the watcher stopped
   too, and no getty started (VT 1 is always allocated, which logind reads as
   busy; only the reserved VT 2 is started regardless). While the session runs,
-  logind finds it on tty1 and starts nothing; the tty2 shell is unaffected. (Ctrl+Alt+F2 reaches it from the
-  fallback screen only: while the page is up the compositor would ask logind to
-  change VT, and the polkit rule below denies `org.freedesktop.login1.chvt`;
-  SSH with a key, or root's `chvt 2`, reaches it.) Blanking, locking and sleep are off (dconf defaults, a
+  logind finds it on tty1 and starts nothing; the tty2 shell is unaffected.
+  (Ctrl+Alt+F2 reaches it from the fallback screen, and from the page too: the
+  compositor asks logind to change VT, and the polkit rule below allows
+  `org.freedesktop.login1.chvt` to the installer's own active local session.)
+  Blanking, locking and sleep are off (dconf defaults, a
   logind drop-in and masked sleep targets): an installation must not stop when
   the screen would lock.
 - **SSH.** The live image keeps fedora-bootc's `sshd`, but a drop-in condition,
@@ -2483,15 +2490,17 @@ the Windows paths of this change: no Windows host was available.
   metrics timer), `systemd-homed`, `sssd` and `geoclue` (activatable for
   gnome-settings-daemon; nothing in the live image uses location). `systemd-resolved` answers no
   LLMNR or multicast DNS (it listened on 5355 on every address). A polkit rule,
-  `00-ilex-installer.rules`, denies every action to the `ilex-installer` user;
-  a page that needs one (a restart button, the network page) adds it to that
-  file in its own change and to `POLKIT_ALLOWED` in the trial. `iso::next_boot`
+  `00-ilex-installer.rules`, denies every action to the `ilex-installer` user
+  except `org.freedesktop.login1.chvt`, which it allows for `subject.local &&
+  subject.active` (Ctrl+Alt+F2 reaches the tty2 root shell from the page); a
+  page that needs another action (a restart button, the network page) adds it
+  to that file in its own change and to `POLKIT_ALLOWED` in the trial. `iso::next_boot`
   checks all of this on the running guest and writes `next-surface.txt` beside
   the other artifacts (for the installer's session on seat0, not the user
   manager's own `manager-early` session; its seat, VT, class and state are
   asserted, and so is that `geoclue.service` and `autovt@tty1.service` are
   masked): `pkcheck` against the session's own process for every
-  action (none is authorized), a control that moves the rule away and back
+  action (only `login1.chvt` is authorized), a control that moves the rule away and back
   (two actions the defaults allow are then authorized, and denied again once it
   is restored), the system bus names, the listening sockets (nothing beyond
   loopback but the harness's sshd) and the running services. **What remains,
@@ -2560,13 +2569,14 @@ the Windows paths of this change: no Windows host was available.
     The basic graphics entry is chosen in GRUB with real key input over a USB
     keyboard (`LinuxProvider::with_usb_keyboard`). The default entry also
     writes `next-surface.txt` (below) and fails on any polkit action beyond
-    the allowlist in `iso_next.rs` (empty). After the page it presses
-    Ctrl+Alt+F2 and requires that nothing happens (polkit denies
-    `org.freedesktop.login1.chvt` to the installer's user, which is how the
-    compositor would change VT: the live page cannot be left from the keyboard,
-    while the fallback screen, with no compositor, can), then has root run
-    `chvt 2` and `chvt 1` over SSH and requires the page again, the session
-    unit still `active` and no getty on tty1.
+    the allowlist in `iso_next.rs` (`login1.chvt` only). After the page it
+    presses Ctrl+Alt+F2 (the kernel's active VT, read from the guest, must be
+    `tty2`), types a command into tty2's root shell that only a live root shell
+    can answer (`echo ILEX-TTY2-ANSWER-$((6*7))-$(id -un)`), reads the answer
+    back from `/dev/vcs2` over SSH and checks a QMP screenshot of light text on
+    a dark screen, then presses Ctrl+Alt+F1 and requires the page again, the
+    session unit `active` and no getty on tty1. It then has root run `chvt 2`
+    and `chvt 1` over SSH with the same requirements.
   - `iso::next_fallback` makes the session fail (fixed credential), requires
     exactly three failures, then exactly one `ILEX-INSTALLER-FALLBACK` (it
     waits eight seconds for a second), and reads the message back from the
@@ -2644,9 +2654,17 @@ the Windows paths of this change: no Windows host was available.
   (the input set itself changed).
   **The Containerfile parser fails closed.** It joins `\` continuations, drops
   comments, splits shell lines into simple commands and understands
-  `RUN --mount=…`, `&&`/`;`/`|` chains, `if`/`then`/`do` words, `NAME=value`
-  prefixes (a `CARGO_*` one other than `CARGO_HOME`, `CARGO_TARGET_DIR`,
-  `CARGO_INCREMENTAL`, `CARGO_TERM_COLOR` is refused), `cargo +toolchain`,
+  `RUN --mount=…`, `&&`/`;`/`|` chains, `if`/`then`/`do` words, quoting,
+  `$(…)`, backtick and `${…}` substitutions (a quoted string is not split at the
+  separators inside it; each substitution is a command of its own),
+  redirections (`2>&1`, `>&2`, `&>`, `>|`, `> file`: the redirection and its
+  target are skipped and the words around them stay arguments, so
+  `cargo build -p a 2>log -p b` builds `a` and `b`), `NAME=value`
+  prefixes, `export`/`declare`/`typeset`/`readonly`/`local` and `ENV`/`ARG`
+  instructions (all refuse a `CARGO_*` variable other than `CARGO_HOME`,
+  `CARGO_TARGET_DIR`, `CARGO_INCREMENTAL`, `CARGO_TERM_COLOR`, and a
+  `RUSTFLAGS`/`RUSTDOCFLAGS` containing `--cfg`; so does a line that only
+  assigns such a variable), `cargo +toolchain`,
   `cargo build`/`b` with `-p X`, `-p=X`, `-pX`, `--package X|=X`, `-F`/
   `--features`/`-Ffeat` (widening), `--all-features`, `--no-default-features`
   and a short list of flags that cannot change the package set. Anything else
@@ -2654,10 +2672,15 @@ the Windows paths of this change: no Windows host was available.
   than a package manager installing the `cargo` package) is an error naming the
   line: `cargo install|rustc|test|run|…`, an unknown flag, a positional
   argument, `--target`, `--manifest-path`, `--workspace`, a variable, quote or
-  glob in the arguments, `sh -c '…'`, `xargs cargo …`, `nice cargo …`. A `RUN`
+  glob in the arguments, `sh -c '…'`, `xargs cargo …`, `nice cargo …`, an
+  exec-form `RUN ["cargo", …]` (any exec-form `RUN` that mentions the
+  toolchain), a command word with a `$`, backtick, quote, bracket, brace,
+  backslash or glob (`$CARGO install`, `"cargo"`, `[c]argo`, `{cargo,}`; only
+  `[` and `[[` as the test command pass), and a line that ends inside a quote
+  or substitution while mentioning the toolchain. A `RUN`
   that hands the build to a script is invisible to it (scripts under `build/`
-  are hashed whole, not parsed). `ilexctl doctor --self-check` runs 35 parser
-  fixtures (4 accepted, 31 refused), the closure fixtures (a path dependency
+  are hashed whole, not parsed). `ilexctl doctor --self-check` runs 65 parser
+  fixtures (8 accepted, 57 refused), the closure fixtures (a path dependency
   in the checkout, one outside, one at the root, registry and git packages, a
   dev edge) and the recorded-closure fixtures; a regression is a failed check.
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
