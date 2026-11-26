@@ -498,9 +498,15 @@ fn diagnostics(vm: &mut Vm, artifacts: &Path, name: &str) {
     let _ = Vmctl::from_info(vm.info.clone())
         .save_screenshot(&artifacts.join(format!("next-{name}-failure.png")));
     // A deadline of its own: a guest without sshd must not hang the failure path.
+    // The units that decide what the session may do come first: the last 400
+    // lines of everything are mostly the harness's own SSH logins.
     let script = "systemctl --no-pager --failed; \
          systemctl --no-pager status ilex-installer-session ilex-installer-fallback sshd; \
          loginctl list-sessions --no-pager; getenforce; \
+         pid=$(systemctl show ilex-installer-session.service -p MainPID --value); \
+         pkcheck --action-id org.freedesktop.login1.chvt --process $pid; echo pkcheck-chvt=$?; \
+         journalctl -b --no-pager -o short-monotonic -n 200 \
+             -u polkit.service -u systemd-logind.service -u ilex-installer-session.service; \
          journalctl -b --no-pager -o short-monotonic -n 400";
     let report = Command::new("timeout")
         .args(["90", "sh", "-c"])
