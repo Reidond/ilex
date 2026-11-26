@@ -12,7 +12,12 @@ use anyhow::{Context, Result};
 use ilex_installer_model::probe::{Disk, Extent, OtherSystem, Partition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, fs, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs, io,
+    path::Path,
+    time::Duration,
+};
 
 const MIB: u64 = 1024 * 1024;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -99,16 +104,16 @@ pub fn nvme_transport(sys: &Path, name: &str) -> Option<String> {
     let mut found: Vec<String> = Vec::new();
     match fs::read_to_string(subsystem.join("transport")) {
         Ok(text) => found.push(text.trim().to_owned()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return None,
     }
-    for entry in directory_names(&subsystem) {
+    for entry in directory_names(&subsystem).ok()? {
         if is_nvme_controller(&entry) {
             let text = fs::read_to_string(subsystem.join(&entry).join("transport")).ok()?;
             found.push(text.trim().to_owned());
         }
     }
-    for path in directory_names(&block.join("multipath")) {
+    for path in directory_names(&block.join("multipath")).ok()? {
         let text =
             fs::read_to_string(block.join("multipath").join(path).join("device/transport")).ok()?;
         found.push(text.trim().to_owned());
@@ -123,15 +128,21 @@ pub fn nvme_transport(sys: &Path, name: &str) -> Option<String> {
         .cloned()
 }
 
-fn directory_names(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
+/// The names in a directory: none if it is not there, an error for any other
+/// failure of the directory or one of its entries (a directory that cannot be
+/// read is not an empty one).
+fn directory_names(dir: &Path) -> io::Result<Vec<String>> {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    let mut names = Vec::new();
+    for entry in read {
+        names.push(entry?.file_name().to_string_lossy().into_owned());
+    }
     names.sort();
-    names
+    Ok(names)
 }
 
 /// How a disk is attached, from lsblk's transport and the device's name.
@@ -241,6 +252,46 @@ pub fn parse_lsblk(
 
 fn number_of(value: &Value) -> u64 {
     number(value, "size")
+}
+
+/// The file system signature of every block device lsblk lists (disks,
+/// partitions, loop and stacked devices), by kernel name: what the topology
+/// asks when a file system was detached and no mount says what it was.
+pub fn device_types(json: &str) -> Result<BTreeMap<String, String>> {
+    fn walk(devices: &[Value], types: &mut BTreeMap<String, String>) {
+        for device in devices {
+            let kname = kernel_name(&text(device, "kname"));
+            let fstype = text(device, "fstype");
+            if !kname.is_empty() && !fstype.is_empty() {
+                types.insert(kname, fstype);
+            }
+            if let Some(children) = device["children"].as_array() {
+                walk(children, types);
+            }
+        }
+    }
+    let root: Value = serde_json::from_str(json).context("reading lsblk")?;
+    let mut types = BTreeMap::new();
+    walk(
+        root["blockdevices"]
+            .as_array()
+            .context("lsblk has no blockdevices")?,
+        &mut types,
+    );
+    Ok(types)
+}
+
+/// The signature `blkid` finds on a device by reading it (a low-level probe,
+/// not udev's database), for a device lsblk does not name a file system of.
+pub fn probe_type(path: &str) -> Option<String> {
+    let out = exec::run(
+        "blkid",
+        &["--probe", "--output", "value", "--match-tag", "TYPE", path],
+        Duration::from_secs(10),
+    )
+    .ok()?;
+    let text = out.stdout_text().trim().to_owned();
+    (out.success() && !text.is_empty()).then_some(text)
 }
 
 /// `sfdisk --json` of a disk: its usable range in bytes, `[first, end)`.
@@ -565,23 +616,36 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
         &["--json", "--bytes", "--paths", "--output", LSBLK_COLUMNS],
         TOOL_TIMEOUT,
     )?;
-    let mut raws = parse_lsblk(&output.stdout_text(), &sysfs_start, &|name| {
+    let lsblk = output.stdout_text();
+    let mut raws = parse_lsblk(&lsblk, &sysfs_start, &|name| {
         nvme_transport(&roots.sys, name)
     })?;
-    // What the system is using is read or the probe fails: the mount table,
-    // the swap areas and the loop devices (the kernel's own record of each
-    // one's file), none of which may look empty for being unreadable.
-    let (mounts, swaps) =
-        topology::read_tables(Path::new("/proc/self/mountinfo"), Path::new("/proc/swaps"))?;
+    let types = device_types(&lsblk)?;
+    // What the system is using is read or the probe fails: the mount tables of
+    // every namespace, the swap areas and the loop devices (the kernel's own
+    // record of each one's file), none of which may look empty for being
+    // unreadable.
+    let (mounts, local, unreadable) = topology::read_mounts(&roots.proc)?;
+    let swaps = topology::read_swaps(&roots.proc.join("swaps"))?;
     let loops = topology::parse_losetup(
         &exec::run_ok("losetup", &topology::LOSETUP_ARGS, TOOL_TIMEOUT)?.stdout_text(),
     )?;
     let system = System {
         mounts,
+        local,
         swaps,
         loops,
+        unreadable,
     };
-    let tracer = Tracer::new(roots, &system);
+    // The signature of a device that was detached from its mounts: what lsblk
+    // read from udev's database, else what blkid finds on the device itself.
+    let device_type = |name: &str| {
+        types
+            .get(name)
+            .cloned()
+            .or_else(|| probe_type(&format!("/dev/{name}")))
+    };
+    let tracer = Tracer::new(roots, &system).with_device_types(&device_type);
     let usage = tracer.usage();
     let mut taken = BTreeSet::new();
     let mut esp_count = 0;
@@ -606,12 +670,17 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
         for name in std::iter::once(raw.kname.clone())
             .chain(disk.partitions.iter().map(|p| kernel_name(&p.path)))
         {
-            let holders = tracer.holders(&name);
-            if !holders.is_empty() {
-                reasons.insert(format!(
-                    "/dev/{name} is used by {} (an LVM, MD or dm-crypt device)",
-                    holders.join(", ")
-                ));
+            match tracer.holders(&name) {
+                Ok(holders) if holders.is_empty() => {}
+                Ok(holders) => {
+                    reasons.insert(format!(
+                        "/dev/{name} is used by {} (an LVM, MD or dm-crypt device)",
+                        holders.join(", ")
+                    ));
+                }
+                Err(why) => {
+                    reasons.insert(unlocated(&why));
+                }
             }
         }
         if let Some(why) = usage.unresolved.first() {

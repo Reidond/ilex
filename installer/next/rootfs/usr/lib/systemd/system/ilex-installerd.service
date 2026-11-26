@@ -18,8 +18,10 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 LimitCORE=0
 # The helper's mounts (an ESP mounted read-only to name its loaders, and
-# anything a later stage mounts) stay out of the host's mount namespace; the
-# host's mounts still reach the helper, which needs them to see what is in use.
+# anything a later stage mounts) stay out of the host's mount namespace. The
+# host's mounts reach the helper only as far as they propagate: one made under
+# a private subtree does not, so the helper reads the host's own table
+# (/proc/1/mountinfo) and every other mount namespace's to see what is in use.
 PrivateMounts=yes
 # Probe, Plan and State read; they hold nothing an installation needs, so a
 # restart loses only the latest plans. Apply (a later PR) records its stage

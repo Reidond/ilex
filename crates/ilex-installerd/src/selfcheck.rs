@@ -11,7 +11,8 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use ilex_installer_model::probe::{Extent, Partition};
 use std::{
-    collections::BTreeSet,
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
     fs,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
@@ -639,7 +640,19 @@ fn check_nvme(parent: &Path) -> Result<()> {
     attach(&s12, "nvme13", &controller("pci13/nvme/nvme13", "pcie\n")?)?;
     fs::create_dir(s12.join("transport"))?;
     namespace(&s12, "nvme12n1")?;
-    let transports: Vec<Option<String>> = (0..13)
+    // A directory that cannot be listed, as opposed to one that is not there:
+    // `multipath` that is a file, and a namespace whose `device` is a file.
+    let s13 = subsystem(13)?;
+    attach(&s13, "nvme14", &controller("pci14/nvme/nvme14", "pcie\n")?)?;
+    let ns13 = namespace(&s13, "nvme13n1")?;
+    write(&ns13.join("multipath"), "")?;
+    let file_device = make("virtual/nvme-subsystem/nvme-subsys14")?;
+    write(&file_device.join("not-a-directory"), "")?;
+    let ns14 = file_device.join("nvme14n1");
+    fs::create_dir_all(&ns14)?;
+    symlink("../not-a-directory", ns14.join("device"))?;
+    symlink(&ns14, sys.join("class/block").join("nvme14n1"))?;
+    let transports: Vec<Option<String>> = (0..15)
         .map(|n| disks::nvme_transport(&sys, &format!("nvme{n}n1")))
         .collect();
     let some = |t: &str| Some(t.to_owned());
@@ -659,17 +672,19 @@ fn check_nvme(parent: &Path) -> Result<()> {
                 some("pcie"),
                 None,
                 None,
+                None,
+                None,
             ],
         "NVMe transports: {transports:?}"
     );
     ensure!(
-        disks::nvme_transport(&sys, "nvme9n1").is_none(),
+        disks::nvme_transport(&sys, "nvme99n1").is_none(),
         "a namespace sysfs does not list"
     );
     // Only the local ones survive lsblk's list, though lsblk says `nvme` of all.
     let lsblk = format!(
         r#"{{"blockdevices":[{}]}}"#,
-        (0..13)
+        (0..15)
             .map(|n| format!(
                 r#"{{"name":"/dev/nvme{n}n1","kname":"/dev/nvme{n}n1","type":"disk","size":16000000000,"tran":"nvme","rm":false,"ro":false,"log-sec":512}}"#
             ))
@@ -687,12 +702,16 @@ fn check_nvme(parent: &Path) -> Result<()> {
 
 // --- the live medium and what is in use -------------------------------------
 
-/// A sysfs and `/dev` tree of the shape the kernel makes, in a directory: block
+/// A sysfs and procfs tree of the shape the kernel makes, in a directory: block
 /// devices below `sys/devices/virtual/block`, `class/block` and `dev/block`
 /// links to them, `slaves/` and `holders/` links, loop devices' backing files,
-/// btrfs file systems' `devices/`.
+/// zram's `backing_dev`, btrfs file systems' `devices/`, ext4's journals in
+/// `proc/fs/jbd2/`; and the device nodes `stat` would show under `/dev` (nodes
+/// cannot be made in a fixture: `stat` is a closure of the case).
 struct Tree {
     root: PathBuf,
+    /// `/dev/<path>` to the device it stands for.
+    nodes: RefCell<BTreeMap<String, topology::DevNum>>,
 }
 
 impl Tree {
@@ -701,16 +720,17 @@ impl Tree {
         fs::create_dir_all(root.join("sys/dev/block"))?;
         fs::create_dir_all(root.join("sys/devices/virtual/block"))?;
         fs::create_dir_all(root.join("sys/fs/btrfs"))?;
-        fs::create_dir_all(root.join("dev/mapper"))?;
-        fs::create_dir_all(root.join("dev/disk/by-label"))?;
-        fs::create_dir_all(root.join("dev/disk/by-uuid"))?;
-        Ok(Self { root })
+        fs::create_dir_all(root.join("proc"))?;
+        Ok(Self {
+            root,
+            nodes: RefCell::default(),
+        })
     }
 
     fn roots(&self) -> Roots {
         Roots {
             sys: self.root.join("sys"),
-            dev: self.root.join("dev"),
+            proc: self.root.join("proc"),
         }
     }
 
@@ -727,7 +747,10 @@ impl Tree {
                 .join("sys/dev/block")
                 .join(format!("{major}:{minor}")),
         )?;
-        fs::write(self.root.join("dev").join(name), b"")?;
+        write(&dir.join("dev"), &format!("{major}:{minor}\n"))?;
+        self.nodes
+            .borrow_mut()
+            .insert(format!("/dev/{name}"), (major, minor));
         Ok(dir)
     }
 
@@ -772,6 +795,24 @@ impl Tree {
         )
     }
 
+    /// A zram device; `backing` is what its `backing_dev` prints (`none`, or the
+    /// writeback device), and `None` a kernel without writeback (no such file).
+    fn zram(&self, name: &str, minor: u32, backing: Option<&str>) -> Result<()> {
+        let dir = self.device(name, 252, minor, None)?;
+        if let Some(backing) = backing {
+            write(&dir.join("backing_dev"), &format!("{backing}\n"))?;
+        }
+        Ok(())
+    }
+
+    /// The journals ext4 lists in `/proc/fs/jbd2/`.
+    fn journals(&self, entries: &[&str]) -> Result<()> {
+        for entry in entries {
+            fs::create_dir_all(self.root.join("proc/fs/jbd2").join(entry))?;
+        }
+        Ok(())
+    }
+
     /// A btrfs file system and the devices it is made of.
     fn btrfs(&self, uuid: &str, members: &[&str]) -> Result<()> {
         for member in members {
@@ -788,10 +829,31 @@ impl Tree {
         Ok(())
     }
 
-    /// A device node link under `dev`, `target` relative to its directory.
+    /// A device node link under `/dev`: `target` names the device it leads to
+    /// (its last component).
     fn node_link(&self, path: &str, target: &str) -> Result<()> {
-        symlink(target, self.root.join("dev").join(path))?;
+        let device = target.rsplit('/').next().unwrap_or(target);
+        let number = *self
+            .nodes
+            .borrow()
+            .get(&format!("/dev/{device}"))
+            .with_context(|| format!("no device {device} for the link {path}"))?;
+        self.nodes
+            .borrow_mut()
+            .insert(format!("/dev/{path}"), number);
         Ok(())
+    }
+
+    /// What `stat` says of a device node of the tree.
+    fn stat(&self, path: &str) -> Option<FileId> {
+        let nodes = self.nodes.borrow();
+        let number = nodes.get(path)?;
+        Some(FileId {
+            // devtmpfs, and a number of its own for the node's inode.
+            dev: (0, 6),
+            ino: 100_000 + u64::from(number.0) * 1000 + u64::from(number.1),
+            block_device: Some(*number),
+        })
     }
 }
 
@@ -833,33 +895,40 @@ fn file_id(dev: topology::DevNum, ino: u64, block_device: Option<topology::DevNu
 }
 
 // The mounts every running system has, as one has them: the root, `/dev` as
-// devtmpfs, `/run` as tmpfs, the kernel's interfaces and a desktop session's
-// FUSE services.
+// devtmpfs, `/run` and `/tmp` as tmpfs (with the options systemd mounts them
+// with), the kernel's interfaces and a desktop session's FUSE services.
 const KERNEL_MOUNTS: &str = "\
-11 1 0:22 / /proc rw - proc proc rw\n\
-12 1 0:23 / /sys rw - sysfs sysfs rw\n\
-13 1 0:6 / /dev rw - devtmpfs devtmpfs rw,size=4096k,nr_inodes=1048576\n\
-14 13 0:24 / /dev/pts rw - devpts devpts rw\n\
-15 13 0:25 / /dev/shm rw - tmpfs tmpfs rw\n\
-16 1 0:31 / /run rw - tmpfs tmpfs rw,mode=755\n\
-17 12 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n\
-18 12 0:27 / /sys/kernel/security rw - securityfs securityfs rw\n\
-19 12 0:29 / /sys/fs/fuse/connections rw - fusectl fusectl rw\n\
-20 1 0:32 / /run/user/1000/doc rw - fuse.portal portal rw,user_id=1000\n\
-21 1 0:33 / /run/user/1000/gvfs rw - fuse.gvfsd-fuse gvfsd-fuse rw,user_id=1000\n\
-22 1 0:34 / /proc/sys/fs/binfmt_misc rw - autofs systemd-1 rw\n\
-23 1 0:35 / /sys/kernel/debug rw - debugfs debugfs rw\n\
-24 1 0:36 / /dev/mqueue rw - mqueue mqueue rw\n";
+11 1 0:22 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n\
+12 1 0:23 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw\n\
+13 1 0:6 / /dev rw,nosuid shared:2 - devtmpfs devtmpfs rw,size=4096k,nr_inodes=1048576,mode=755\n\
+14 13 0:24 / /dev/pts rw,nosuid,noexec,relatime shared:3 - devpts devpts rw,gid=5,mode=620,ptmxmode=000\n\
+15 13 0:25 / /dev/shm rw,nosuid,nodev shared:4 - tmpfs tmpfs rw\n\
+16 1 0:31 / /run rw,nosuid,nodev shared:5 - tmpfs tmpfs rw,mode=755\n\
+17 12 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw\n\
+18 12 0:27 / /sys/kernel/security rw,nosuid,nodev,noexec,relatime - securityfs securityfs rw\n\
+19 12 0:29 / /sys/fs/fuse/connections rw,nosuid,nodev,noexec,relatime - fusectl fusectl rw\n\
+20 1 0:32 / /run/user/1000/doc rw,nosuid,nodev,relatime - fuse.portal portal rw,user_id=1000\n\
+21 1 0:33 / /run/user/1000/gvfs rw,nosuid,nodev,relatime - fuse.gvfsd-fuse gvfsd-fuse rw,user_id=1000\n\
+22 1 0:34 / /proc/sys/fs/binfmt_misc rw,relatime - autofs systemd-1 rw\n\
+23 1 0:35 / /sys/kernel/debug rw,nosuid,nodev,noexec,relatime - debugfs debugfs rw\n\
+24 13 0:36 / /dev/mqueue rw,nosuid,nodev,noexec,relatime - mqueue mqueue rw\n\
+25 1 0:37 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw\n";
 
 /// dracut's dmsquash-live layout with the root image on device-mapper: the ISO
 /// at `/run/initramfs/live` (on `sda1`), its squashfs on `loop0` at
 /// `/run/rootfsbase`, the root `ext4` on `/dev/mapper/live-rw` (a snapshot of
 /// `live-base`, which is the loop device `loop1` over `rootfs.img` inside the
 /// squashfs, with its copy-on-write file `loop2` in RAM).
-const ROOT_LIVE_RW: &str = "1 0 253:0 / / rw - ext4 /dev/mapper/live-rw rw\n";
-const ROOT_OVERLAY: &str = "1 0 0:30 / / rw - overlay overlay rw,lowerdir=/run/rootfsbase\n";
-const LIVE_MEDIUM: &str = "40 16 8:1 / /run/initramfs/live ro - iso9660 /dev/sda1 ro\n";
-const ROOTFSBASE: &str = "41 16 7:0 / /run/rootfsbase ro - squashfs /dev/loop0 ro\n";
+const ROOT_LIVE_RW: &str = "1 0 253:0 / / rw,relatime - ext4 /dev/mapper/live-rw rw\n";
+const ROOT_OVERLAY: &str =
+    "1 0 0:30 / / rw,relatime - overlay overlay rw,lowerdir=/run/rootfsbase\n";
+const LIVE_MEDIUM: &str = "40 16 8:1 / /run/initramfs/live ro,relatime - iso9660 /dev/sda1 ro\n";
+const ROOTFSBASE: &str = "41 16 7:0 / /run/rootfsbase ro,relatime - squashfs /dev/loop0 ro\n";
+/// zram-generator's swap, as every live boot has it (writeback unset).
+const ZRAM_SWAP: &str = "/dev/zram0 partition 8388604 0 100\n";
+
+/// A change to a case's sysfs and procfs tree.
+type TreeEdit<'a> = Box<dyn Fn(&Tree) -> Result<()> + 'a>;
 
 /// What a case traces: the base layout plus its own mounts, swap entries,
 /// loop devices and files.
@@ -868,13 +937,20 @@ struct Case<'a> {
     /// The mounts before the case's own: the root, the kernel's, the medium's.
     base: String,
     mounts: &'a str,
+    /// Swap rows after zram's.
     swaps: &'a str,
     /// Loop devices after the live image's three (`loop0` to `loop2`).
     loops: Vec<Loop>,
     /// The three live-image loops' rows, replaced by these when given.
     live_rows: Option<Vec<Option<LoopRow>>>,
-    /// What `stat` says of a path.
+    /// What `stat` says of a path (device nodes of the tree are known besides).
     files: Vec<(&'static str, FileId)>,
+    /// A path with its links resolved, when it is not its own.
+    canonical: Vec<(&'static str, &'static str)>,
+    /// The file system signature of a device (what lsblk would print).
+    types: Vec<(&'static str, &'static str)>,
+    /// Anything else the case adds to its sysfs and procfs.
+    extra: Vec<TreeEdit<'a>>,
     /// The root is an overlay over the squashfs (only `loop0` is attached),
     /// not a device-mapper snapshot of `rootfs.img`.
     overlay_root: bool,
@@ -890,6 +966,10 @@ impl<'a> Case<'a> {
             loops: vec![],
             live_rows: None,
             files: vec![],
+            canonical: vec![],
+            // The live medium is an ISO; lsblk knows it by its signature.
+            types: vec![("sda1", "iso9660"), ("loop0", "squashfs")],
+            extra: vec![],
             overlay_root: false,
         }
     }
@@ -915,6 +995,7 @@ impl<'a> Case<'a> {
         self
     }
 
+    /// Swap rows (`/dev/sde2 partition 1024 0 -2\n`), after zram's.
     fn swaps(mut self, swaps: &'a str) -> Self {
         self.swaps = swaps;
         self
@@ -932,6 +1013,27 @@ impl<'a> Case<'a> {
 
     fn file(mut self, path: &'static str, id: FileId) -> Self {
         self.files.push((path, id));
+        self
+    }
+
+    fn canonical(mut self, path: &'static str, to: &'static str) -> Self {
+        self.canonical.push((path, to));
+        self
+    }
+
+    /// What lsblk knows of a device's signature, instead of the defaults.
+    fn types(mut self, types: &[(&'static str, &'static str)]) -> Self {
+        self.types = types.to_vec();
+        self
+    }
+
+    fn device_type(mut self, name: &'static str, fstype: &'static str) -> Self {
+        self.types.push((name, fstype));
+        self
+    }
+
+    fn tree(mut self, extra: impl Fn(&Tree) -> Result<()> + 'a) -> Self {
+        self.extra.push(Box::new(extra));
         self
     }
 
@@ -953,6 +1055,8 @@ impl<'a> Case<'a> {
             tree.node_link("mapper/live-base", "../dm-1")?;
             tree.node_link("mapper/live-rw", "../dm-0")?;
         }
+        // zram-generator's device: swap in RAM, no writeback.
+        tree.zram("zram0", 0, Some("none"))?;
         // sdb: Ventoy's stick; its second partition carries the dm device.
         tree.disk("sdb", 8, 16)?;
         tree.partition("sdb", "sdb1", 8, 17)?;
@@ -997,6 +1101,9 @@ impl<'a> Case<'a> {
         tree.partition("sdn", "sdn1", 8, 209)?;
         tree.btrfs(UUID_POOL, &["sdh1", "sdi1"])?;
         tree.btrfs(UUID_DATA, &["sdj1"])?;
+        for extra in &self.extra {
+            extra(&tree)?;
+        }
         let mut rows: Vec<Option<LoopRow>> = self.live_rows.clone().unwrap_or_else(|| {
             let mut rows = vec![loop_row(
                 "loop0",
@@ -1024,10 +1131,16 @@ impl<'a> Case<'a> {
             tree.loop_device(device.name, device.major, device.minor, device.sysfs)?;
             rows.push(device.row.clone());
         }
+        let mounts = topology::parse_mountinfo(&format!("{}{}", self.base, self.mounts))?;
         let system = System {
-            mounts: topology::parse_mountinfo(&format!("{}{}", self.base, self.mounts)),
-            swaps: topology::parse_swaps(self.swaps),
+            local: mounts.clone(),
+            mounts,
+            swaps: topology::parse_swaps(&format!(
+                "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n{ZRAM_SWAP}{}",
+                self.swaps
+            ))?,
             loops: rows.into_iter().flatten().collect(),
+            unreadable: vec![],
         };
         let roots = tree.roots();
         let stat = |path: &str| {
@@ -1035,8 +1148,28 @@ impl<'a> Case<'a> {
                 .iter()
                 .find(|(p, _)| *p == path)
                 .map(|(_, id)| *id)
+                .or_else(|| tree.stat(path))
         };
-        Ok(Tracer::new(&roots, &system).with_stat(&stat).usage())
+        let canonical = |path: &str| {
+            Some(
+                self.canonical
+                    .iter()
+                    .find(|(p, _)| *p == path)
+                    .map_or(path, |(_, to)| *to)
+                    .to_owned(),
+            )
+        };
+        let device_type = |name: &str| {
+            self.types
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, t)| (*t).to_owned())
+        };
+        Ok(Tracer::new(&roots, &system)
+            .with_stat(&stat)
+            .with_canonical(&canonical)
+            .with_device_types(&device_type)
+            .usage())
     }
 }
 
@@ -1053,24 +1186,69 @@ fn loop_of(name: &'static str, minor: u32, sysfs: &'static str, row: Option<Loop
     }
 }
 
+/// The disks and devices in use, without the swap on RAM every live boot has
+/// (a use of `zram0` and of nothing on a disk).
 fn in_use_names(usage: &topology::Usage) -> Vec<&str> {
-    usage.in_use.keys().map(String::as_str).collect()
+    usage
+        .in_use
+        .keys()
+        .map(String::as_str)
+        .filter(|n| !n.starts_with("zram"))
+        .collect()
+}
+
+/// A device node as `stat` shows it: a block special file of devtmpfs standing
+/// for `number`.
+fn node_of(ino: u64, number: topology::DevNum) -> FileId {
+    file_id((0, 6), ino, Some(number))
+}
+
+/// What a loop device of `/live.iso` on the disk iso-scan found says about a
+/// name that was reused: the case's mounts and signatures decide what the
+/// unconfirmed file might be.
+fn iso_by_name(
+    parent: &Path,
+    label: &str,
+    mounts: &str,
+    sdc1: Option<&'static str>,
+    file: &'static str,
+    id: Option<FileId>,
+) -> Result<topology::Usage> {
+    let mut case = Case::new(label).mounts(mounts).loop_device(loop_of(
+        "loop4",
+        4,
+        file,
+        loop_row("loop4", file, 9, Some((8, 33))),
+    ));
+    if let Some(sdc1) = sdc1 {
+        case = case.device_type("sdc1", sdc1);
+    }
+    if let Some(id) = id {
+        case = case.file(file, id);
+    }
+    case.trace(parent)
 }
 
 /// The live medium and the disks in use, found by following every use of block
 /// storage through the kernel's tree and never through the text of a name or a
 /// path's prefix. Each case runs beside the mounts a live system has (the root,
-/// `/dev` as devtmpfs, `/run` as tmpfs, the kernel's interfaces, dracut's live
-/// layout): `/` contains every path and the detached or colliding name of a
-/// file is a trap, so a case that works only without them proves nothing.
+/// `/dev` as devtmpfs, `/run` and `/tmp` as tmpfs, the kernel's interfaces, a
+/// desktop session's FUSE services, zram's swap, dracut's live layout): `/`
+/// contains every path and the detached or colliding name of a file is a trap,
+/// so a case that works only without them proves nothing.
 fn check_topology(parent: &Path) -> Result<()> {
     // The live layout alone: everything resolves, to the stick and nothing else.
     let live = Case::new("live").trace(parent)?;
     ensure!(
         names(&live.live) == ["dm-0", "dm-1", "loop0", "loop1", "loop2", "sda", "sda1"]
-            && live.in_use.is_empty()
+            && in_use_names(&live).is_empty()
             && live.unresolved.is_empty(),
         "the dmsquash-live layout: {live:?}"
+    );
+    // ... and the swap on RAM is a use of RAM.
+    ensure!(
+        live.in_use.keys().all(|n| n.starts_with("zram")),
+        "zram's swap reaches a disk: {live:?}"
     );
     // The other layout: an overlay root over the squashfs (no device-mapper).
     let overlay = Case::new("overlay")
@@ -1078,7 +1256,7 @@ fn check_topology(parent: &Path) -> Result<()> {
         .trace(parent)?;
     ensure!(
         names(&overlay.live) == ["loop0", "sda", "sda1"]
-            && overlay.in_use.is_empty()
+            && in_use_names(&overlay).is_empty()
             && overlay.unresolved.is_empty(),
         "an overlay root: {overlay:?}"
     );
@@ -1087,7 +1265,8 @@ fn check_topology(parent: &Path) -> Result<()> {
     // dracut unmounts `/run/initramfs/squashfs` lazily, and so may anyone with
     // `umount -l /run/initramfs/live`: the kernel then prints `/LiveOS/…` for
     // the file, a name `/` contains. The stick is found by the device number
-    // the kernel recorded, not by any name.
+    // the kernel recorded, not by any name; the file's name no longer confirms
+    // it, so it is accepted because the device is an ISO (lsblk's signature).
     let detached_medium = Case::new("lazy-live")
         .base(format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{ROOTFSBASE}"))
         .trace(parent)?;
@@ -1095,9 +1274,24 @@ fn check_topology(parent: &Path) -> Result<()> {
         detached_medium.live.contains("sda")
             && detached_medium.live.contains("sda1")
             && detached_medium.unresolved.is_empty()
-            && detached_medium.in_use.is_empty(),
+            && in_use_names(&detached_medium).is_empty(),
         "a lazily unmounted /run/initramfs/live: {detached_medium:?}"
     );
+    // ... but not when nothing says what the detached file system was, or says
+    // it was one that can hold a device node.
+    for (what, types) in [
+        ("unknown", &[("loop0", "squashfs")][..]),
+        ("ext4", &[("sda1", "ext4"), ("loop0", "squashfs")][..]),
+    ] {
+        let case = Case::new("lazy-live-type")
+            .base(format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{ROOTFSBASE}"))
+            .types(types)
+            .trace(parent)?;
+        ensure!(
+            !case.unresolved.is_empty(),
+            "a detached file system of {what} type was taken for an image: {case:?}"
+        );
+    }
     // ... and with every mount of the live medium gone but the root's chain.
     let only_root = Case::new("root-chain")
         .base(format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}"))
@@ -1164,7 +1358,7 @@ fn check_topology(parent: &Path) -> Result<()> {
     // --- B: a loop device attached to a block device node (`losetup /dev/sdg1`).
     // `lo_device` is `st_dev`, so the kernel reports the device of `/dev` (the
     // devtmpfs mount 0:6) and the inode of the node; the disk is `st_rdev`.
-    let node = file_id((0, 6), 700, Some((8, 97)));
+    let node = node_of(700, (8, 97));
     let on_node = Case::new("node")
         .loop_device(loop_of(
             "loop3",
@@ -1190,25 +1384,28 @@ fn check_topology(parent: &Path) -> Result<()> {
     );
     // The node is not what the kernel recorded (replaced, renamed, deleted), or
     // is a plain file on devtmpfs: devtmpfs is never proof of "no disk".
-    for (what, id) in [
-        ("another inode", Some(file_id((0, 6), 701, Some((8, 97))))),
-        ("a regular file", Some(file_id((0, 6), 700, None))),
-        ("gone", None),
+    for (what, path, id) in [
+        ("another inode", "/dev/sdg1", Some(node_of(701, (8, 97)))),
+        (
+            "a regular file",
+            "/dev/sdg1",
+            Some(file_id((0, 6), 700, None)),
+        ),
+        ("gone", "/dev/gone", None),
     ] {
-        let mut case = Case::new("node-lost");
-        case = case.loop_device(loop_of(
+        let mut case = Case::new("node-lost").loop_device(loop_of(
             "loop3",
             3,
-            "/dev/sdg1",
-            loop_row("loop3", "/dev/sdg1", 700, Some((0, 6))),
+            path,
+            loop_row("loop3", path, 700, Some((0, 6))),
         ));
         if let Some(id) = id {
-            case = case.file("/dev/sdg1", id);
+            case = case.file(path, id);
         }
         let lost = case.trace(parent)?;
         ensure!(
             !lost.unresolved.is_empty(),
-            "a loop on /dev/sdg1 that is {what} was taken for resolved: {lost:?}"
+            "a loop on {path} that is {what} was taken for resolved: {lost:?}"
         );
     }
     // A device node made on another file system (here sdc1's): both disks.
@@ -1282,6 +1479,27 @@ fn check_topology(parent: &Path) -> Result<()> {
             "a device number sysfs does not list",
             "50 16 8:250 / /mnt/x ro - ext4 none ro\n",
         ),
+        // --- the session's FUSE services, but only where the session mounts them
+        (
+            "the document portal anywhere else",
+            "50 1 0:81 / /mnt/doc rw,nosuid,nodev - fuse.portal portal rw,user_id=1000\n",
+        ),
+        (
+            "the document portal under a name that is no uid",
+            "50 1 0:82 / /run/user/abc/doc rw,nosuid,nodev - fuse.portal portal rw\n",
+        ),
+        (
+            "the document portal below its directory",
+            "50 1 0:83 / /run/user/1000/doc/x rw,nosuid,nodev - fuse.portal portal rw\n",
+        ),
+        (
+            "gvfs at the portal's place",
+            "50 1 0:84 / /run/user/1000/doc rw,nosuid,nodev - fuse.gvfsd-fuse gvfsd-fuse rw\n",
+        ),
+        (
+            "gvfs in a user's home",
+            "50 1 0:85 / /home/u/gvfs rw,nosuid,nodev - fuse.gvfsd-fuse gvfsd-fuse rw\n",
+        ),
     ] {
         let case = Case::new("untraced").mounts(line).trace(parent)?;
         ensure!(
@@ -1305,41 +1523,176 @@ fn check_topology(parent: &Path) -> Result<()> {
         "an external journal given by number: {journal:?}"
     );
 
-    // --- D: a loop device's file is told by the kernel's device and inode,
-    // not by the name. A name that now means another file does not matter when
-    // the device number names a disk ...
-    let collide = Case::new("collide")
-        .loop_device(loop_of(
-            "loop4",
-            4,
-            "/live.iso",
-            loop_row("loop4", "/live.iso", 9, Some((8, 33))),
-        ))
-        // `/live.iso` is, today, another file on the root's file system.
-        .file("/live.iso", file_id((253, 0), 1234, None))
+    // --- 7: a device node is the device its `st_rdev` says, not the one its
+    // name suggests. A node named for sdf is sdn's, a swap area on a node named
+    // for sdf is sde's, a mount source named for sdf is sdm's.
+    let lying_log = Case::new("lying-logdev")
+        .mounts("50 1 8:177 / /xfs rw - xfs /dev/sdl1 rw,logdev=/dev/sdf1\n")
+        .file("/dev/sdf1", node_of(7, (8, 209)))
         .trace(parent)?;
     ensure!(
-        in_use_names(&collide).contains(&"sdc") && collide.unresolved.is_empty(),
-        "a colliding name: {collide:?}"
+        in_use_names(&lying_log).contains(&"sdn")
+            && !in_use_names(&lying_log).contains(&"sdf")
+            && lying_log.unresolved.is_empty(),
+        "a log device named for another: {lying_log:?}"
     );
-    // ... and a file that was deleted is still on its device.
-    let deleted = Case::new("deleted")
-        .loop_device(loop_of(
-            "loop4",
-            4,
-            "/mnt/host/live.iso (deleted)",
-            loop_row("loop4", "/mnt/host/live.iso (deleted)", 9, Some((8, 33))),
-        ))
+    let lying_source = Case::new("lying-source")
+        .mounts("50 1 0:72 / /ntfs rw - fuseblk /dev/sdf1 rw\n")
+        .file("/dev/sdf1", node_of(8, (8, 193)))
         .trace(parent)?;
     ensure!(
-        in_use_names(&deleted).contains(&"sdc") && deleted.unresolved.is_empty(),
-        "a deleted file: {deleted:?}"
+        in_use_names(&lying_source) == ["sdm", "sdm1"],
+        "a mount source named for another: {lying_source:?}"
+    );
+    let lying_swap = Case::new("lying-swap")
+        .swaps("/dev/sdf partition 1024 0 -2\n")
+        .file("/dev/sdf", node_of(9, (8, 66)))
+        .trace(parent)?;
+    ensure!(
+        in_use_names(&lying_swap).contains(&"sde")
+            && in_use_names(&lying_swap).contains(&"sde2")
+            && !in_use_names(&lying_swap).contains(&"sdf")
+            && lying_swap.unresolved.is_empty(),
+        "a swap area on a node named for another: {lying_swap:?}"
+    );
+    ensure!(
+        lying_swap.in_use["sde"]
+            .iter()
+            .any(|r| r == "/dev/sdf is in use as swap"),
+        "its reason: {:?}",
+        lying_swap.in_use["sde"]
+    );
+    // A swap area is "partition" or "file" in `/proc/swaps`' Type column: a
+    // partition must be a block device node; a file is on an unknown file
+    // system; any other kind is not known.
+    for (what, swaps, id) in [
+        (
+            "a swap file",
+            "/mnt/data/swap\\040file file 1024 0 -3\n",
+            None,
+        ),
+        (
+            "a swap device that is not there",
+            "/dev/nowhere partition 1024 0 -2\n",
+            None,
+        ),
+        (
+            "a swap partition that is a regular file",
+            "/mnt/swapfile partition 1024 0 -2\n",
+            Some(("/mnt/swapfile", file_id((253, 0), 5, None))),
+        ),
+        (
+            "a swap area of a kind nobody knows",
+            "/dev/sde2 frobnicated 1024 0 -2\n",
+            None,
+        ),
+    ] {
+        let mut case = Case::new("swap").swaps(swaps);
+        if let Some((path, id)) = id {
+            case = case.file(path, id);
+        }
+        let case = case.trace(parent)?;
+        ensure!(
+            !case.unresolved.is_empty(),
+            "{what} is taken for no disk at all: {case:?}"
+        );
+    }
+
+    // --- D, 1: a loop device's file is told by the kernel's device and inode,
+    // not by the name. A file the name no longer confirms (reused for another
+    // file, deleted, renamed, under a mount) can still be a block device node
+    // of any disk, which no device number says: the use is unresolved unless a
+    // node could not have been opened there (a `nodev` mount) or cannot be
+    // there (an image). The disk the file system is on is in use all the same.
+    let iso = "/live.iso";
+    let reused = iso_by_name(
+        parent,
+        "collide",
+        "",
+        None,
+        iso,
+        // `/live.iso` is, today, another file on the root's file system.
+        Some(file_id((253, 0), 1234, None)),
+    )?;
+    ensure!(
+        in_use_names(&reused).contains(&"sdc") && !reused.unresolved.is_empty(),
+        "a colliding name on a disk file system: {reused:?}"
+    );
+    let deleted = iso_by_name(
+        parent,
+        "deleted",
+        "",
+        None,
+        "/mnt/host/live.iso (deleted)",
+        None,
+    )?;
+    ensure!(
+        in_use_names(&deleted).contains(&"sdc") && !deleted.unresolved.is_empty(),
+        "a deleted file on a file system that can hold a node: {deleted:?}"
+    );
+    for (what, mounts, type_of_sdc1) in [
+        (
+            "an ext4 mounted nodev",
+            "51 1 8:33 / /mnt/host rw,nosuid,nodev,relatime - ext4 /dev/sdc1 rw\n",
+            None,
+        ),
+        ("an ISO that is not mounted", "", Some("iso9660")),
+        (
+            "an ISO that is mounted",
+            "51 1 8:33 / /mnt/iso ro,relatime - iso9660 /dev/sdc1 ro\n",
+            None,
+        ),
+        (
+            "a squashfs that is mounted",
+            "51 1 8:33 / /mnt/sq ro,relatime - squashfs /dev/sdc1 ro\n",
+            None,
+        ),
+    ] {
+        for (state, file, id) in [
+            ("renamed", iso, Some(file_id((253, 0), 1234, None))),
+            ("deleted", "/mnt/host/live.iso (deleted)", None),
+        ] {
+            let case = iso_by_name(parent, "no-nodes", mounts, type_of_sdc1, file, id)?;
+            // (a mounted ISO is the live medium, not a disk in use)
+            ensure!(
+                (in_use_names(&case).contains(&"sdc") || case.live.contains("sdc"))
+                    && case.unresolved.is_empty(),
+                "a {state} file on {what}: {case:?}"
+            );
+        }
+    }
+    let on_ext4 = iso_by_name(
+        parent,
+        "ext4",
+        "51 1 8:33 / /mnt/host rw,relatime - ext4 /dev/sdc1 rw\n",
+        None,
+        "/mnt/host/live.iso (deleted)",
+        None,
+    )?;
+    ensure!(
+        !on_ext4.unresolved.is_empty(),
+        "a deleted file on a mounted ext4: {on_ext4:?}"
+    );
+    // The same file named by a path that is confirmed is not in doubt.
+    let kept = iso_by_name(
+        parent,
+        "kept",
+        "51 1 8:33 / /mnt/host rw,relatime - ext4 /dev/sdc1 rw\n",
+        None,
+        "/mnt/host/live.iso",
+        Some(file_id((8, 33), 9, None)),
+    )?;
+    ensure!(
+        in_use_names(&kept).contains(&"sdc") && kept.unresolved.is_empty(),
+        "a file that is where the kernel says: {kept:?}"
     );
     // An anonymous number that no mount carries is a btrfs subvolume only if
-    // the name is confirmed to be the file; a colliding name is not.
-    let subvolume = |label: &str, id: Option<FileId>| -> Result<topology::Usage> {
+    // the name is confirmed to be the file, by a name with no link in it; a
+    // colliding name is not, and neither is a name whose text sends the lookup
+    // to other mounts.
+    let subvolume = |label: &str, id: Option<FileId>, canonical: Option<&'static str>| {
         let mut case = Case::new(label)
-            .mounts("50 1 0:70 / /mnt rw - btrfs /dev/sdj1 rw\n")
+            .mounts("50 1 0:70 / /mnt rw,relatime - btrfs /dev/sdj1 rw\n")
             .loop_device(loop_of(
                 "loop4",
                 4,
@@ -1349,37 +1702,79 @@ fn check_topology(parent: &Path) -> Result<()> {
         if let Some(id) = id {
             case = case.file("/mnt/sub/live.iso", id);
         }
+        if let Some(canonical) = canonical {
+            case = case.canonical("/mnt/sub/live.iso", canonical);
+        }
         case.trace(parent)
     };
-    let confirmed = subvolume("subvolume", Some(file_id((0, 99), 9, None)))?;
+    let confirmed = subvolume("subvolume", Some(file_id((0, 99), 9, None)), None)?;
     ensure!(
         in_use_names(&confirmed).contains(&"sdj") && confirmed.unresolved.is_empty(),
         "a btrfs subvolume's file: {confirmed:?}"
     );
-    for (what, id) in [
-        ("another inode", Some(file_id((0, 99), 8, None))),
-        ("another device", Some(file_id((0, 98), 9, None))),
-        ("gone", None),
+    for (what, id, canonical) in [
+        ("another inode", Some(file_id((0, 99), 8, None)), None),
+        ("another device", Some(file_id((0, 98), 9, None)), None),
+        ("gone", None, None),
+        // The name leads through a link: `/mnt/sub/...` is not where the file
+        // is, and the mounts that contain the text are not its mounts.
+        (
+            "reached through a link",
+            Some(file_id((0, 99), 9, None)),
+            Some("/srv/elsewhere/live.iso"),
+        ),
     ] {
-        let lost = subvolume("subvolume-lost", id)?;
+        let lost = subvolume("subvolume-lost", id, canonical)?;
         ensure!(
             !lost.unresolved.is_empty(),
             "a subvolume file that is {what} was taken for resolved: {lost:?}"
         );
     }
     // A file in RAM holds no disk; a file on a remote file system neither; one
-    // on an overlay has its layers' mounts, not a place of its own.
-    for (what, device, mounts, resolved) in [
-        ("tmpfs", (0, 31), "", true),
+    // on an overlay has its layers' mounts, not a place of its own. Where the
+    // name confirms the file it is a regular file; where it does not, a block
+    // device node may be there unless the mount is nodev.
+    for (what, device, mounts, confirmed, resolved) in [
+        ("tmpfs (nodev), unconfirmed", (0, 31), "", false, true),
+        ("tmpfs (nodev), confirmed", (0, 31), "", true, true),
         (
-            "nfs",
-            (0, 90),
-            "50 1 0:90 / /nfs rw - nfs4 server:/share rw\n",
+            "tmpfs, unconfirmed",
+            (0, 80),
+            "50 1 0:80 / /mnt/t rw,relatime - tmpfs none rw\n",
+            false,
+            false,
+        ),
+        (
+            "tmpfs, confirmed",
+            (0, 80),
+            "50 1 0:80 / /mnt/t rw,relatime - tmpfs none rw\n",
+            true,
             true,
         ),
-        ("overlay", (0, 30), "", false),
+        (
+            "nfs, unconfirmed",
+            (0, 90),
+            "50 1 0:90 / /nfs rw,relatime - nfs4 server:/share rw\n",
+            false,
+            false,
+        ),
+        (
+            "nfs (nodev), unconfirmed",
+            (0, 90),
+            "50 1 0:90 / /nfs rw,nodev,relatime - nfs4 server:/share rw\n",
+            false,
+            true,
+        ),
+        (
+            "nfs, confirmed",
+            (0, 90),
+            "50 1 0:90 / /nfs rw,relatime - nfs4 server:/share rw\n",
+            true,
+            true,
+        ),
+        ("overlay, confirmed", (0, 30), "", true, false),
     ] {
-        let case = Case::new("ram")
+        let mut case = Case::new("ram")
             .overlay_root(true, true)
             .mounts(mounts)
             .loop_device(loop_of(
@@ -1387,14 +1782,34 @@ fn check_topology(parent: &Path) -> Result<()> {
                 4,
                 "/x/live.iso",
                 loop_row("loop4", "/x/live.iso", 9, Some(device)),
-            ))
-            .trace(parent)?;
+            ));
+        if confirmed {
+            case = case.file("/x/live.iso", file_id(device, 9, None));
+        }
+        let case = case.trace(parent)?;
         ensure!(
             case.unresolved.is_empty() == resolved
                 && in_use_names(&case).iter().all(|n| n.starts_with("loop")),
             "an ISO file on {what}: {case:?}"
         );
     }
+    // The attack the numbers cannot show: a node of a disk made on a tmpfs that
+    // is not `nodev`, attached to a loop device and deleted
+    // (`mknod /tmp/n b 8 97; losetup -f /tmp/n; rm /tmp/n`), leaves a file the
+    // kernel records as an inode on tmpfs. It is not "a file in RAM".
+    let hidden_node = Case::new("deleted-node")
+        .mounts("50 1 0:80 / /mnt/t rw,relatime - tmpfs none rw\n")
+        .loop_device(loop_of(
+            "loop4",
+            4,
+            "/mnt/t/n (deleted)",
+            loop_row("loop4", "/mnt/t/n (deleted)", 5, Some((0, 80))),
+        ))
+        .trace(parent)?;
+    ensure!(
+        !hidden_node.unresolved.is_empty(),
+        "a deleted block node on a tmpfs was taken for a file in RAM: {hidden_node:?}"
+    );
 
     // --- E: a loop device nothing mounts is a use of its file's disk.
     let unmounted = Case::new("unmounted")
@@ -1404,6 +1819,7 @@ fn check_topology(parent: &Path) -> Result<()> {
             "/mnt/x/live.iso",
             loop_row("loop5", "/mnt/x/live.iso", 11, Some((8, 161))),
         ))
+        .file("/mnt/x/live.iso", file_id((8, 161), 11, None))
         .trace(parent)?;
     ensure!(
         in_use_names(&unmounted) == ["loop5", "sdk", "sdk1"] && unmounted.unresolved.is_empty(),
@@ -1465,7 +1881,7 @@ fn check_topology(parent: &Path) -> Result<()> {
     );
     // A loop on a loop on a disk, mounted: followed to the disk.
     let nested = Case::new("nested")
-        .mounts("50 1 7:6 / /mnt/inner ro - squashfs /dev/loop6 ro\n")
+        .mounts("50 1 7:6 / /mnt/inner ro,relatime - squashfs /dev/loop6 ro\n")
         .loop_device(loop_of(
             "loop5",
             5,
@@ -1478,6 +1894,8 @@ fn check_topology(parent: &Path) -> Result<()> {
             "/outer/inner.img",
             loop_row("loop6", "/outer/inner.img", 12, Some((7, 5))),
         ))
+        .file("/mnt/x/outer.img", file_id((8, 161), 11, None))
+        .file("/outer/inner.img", file_id((7, 5), 12, None))
         .trace(parent)?;
     ensure!(
         in_use_names(&nested).contains(&"sdk") && nested.unresolved.is_empty(),
@@ -1516,6 +1934,197 @@ fn check_topology(parent: &Path) -> Result<()> {
         "a two-device btrfs by UUID: {pool_by_uuid:?}"
     );
 
+    // --- 2: zram writes back to a block device it holds exclusively and that
+    // shows no link in sysfs. Every zram device is read, whether or not it is a
+    // swap area or mounted; none, empty and an absent file (a kernel without
+    // writeback) are not a use.
+    let writeback = Case::new("zram-writeback")
+        .tree(|t| t.zram("zram1", 1, Some("/dev/sdk1")))
+        .trace(parent)?;
+    ensure!(
+        in_use_names(&writeback) == ["sdk", "sdk1"] && writeback.unresolved.is_empty(),
+        "zram writeback to sdk1: {writeback:?}"
+    );
+    ensure!(
+        writeback.in_use["sdk"]
+            .iter()
+            .any(|r| r == "/dev/zram1 writes back to /dev/sdk1"),
+        "its reason: {:?}",
+        writeback.in_use["sdk"]
+    );
+    let no_writeback = Case::new("zram-none")
+        .tree(|t| {
+            t.zram("zram1", 1, Some("none"))?;
+            t.zram("zram2", 2, Some(""))?;
+            t.zram("zram3", 3, None)
+        })
+        .trace(parent)?;
+    ensure!(
+        in_use_names(&no_writeback).is_empty() && no_writeback.unresolved.is_empty(),
+        "zram without writeback: {no_writeback:?}"
+    );
+    for (what, setup) in [
+        (
+            "a device that is not there",
+            Box::new(|t: &Tree| t.zram("zram1", 1, Some("/dev/nowhere")))
+                as Box<dyn Fn(&Tree) -> Result<()>>,
+        ),
+        (
+            "a file that is not a block device",
+            Box::new(|t: &Tree| t.zram("zram1", 1, Some("/dev/regular"))),
+        ),
+        (
+            "a backing_dev that cannot be read",
+            Box::new(|t: &Tree| {
+                let dir = t.device("zram1", 252, 1, None)?;
+                fs::create_dir(dir.join("backing_dev"))?;
+                Ok(())
+            }),
+        ),
+    ] {
+        let case = Case::new("zram-unresolved")
+            .file("/dev/regular", file_id((0, 6), 3, None))
+            .tree(setup)
+            .trace(parent)?;
+        ensure!(
+            !case.unresolved.is_empty(),
+            "zram writing back to {what} was taken for none: {case:?}"
+        );
+    }
+
+    // --- 4: an ext4 external journal never shows in the mount options. Its
+    // device is in `/proc/fs/jbd2/` under its own name; a journal inside a file
+    // system is `<device>-<inode>`. A name that is both a device and looks like
+    // one with an inode (`dm-5`) is the device.
+    let journals = Case::new("jbd2")
+        .tree(|t| t.journals(&["sdl1-8", "dm-5-8", "sdn1"]))
+        .trace(parent)?;
+    ensure!(
+        in_use_names(&journals) == ["sdn", "sdn1"] && journals.unresolved.is_empty(),
+        "an external journal on sdn1: {journals:?}"
+    );
+    ensure!(
+        journals.in_use["sdn"]
+            .iter()
+            .any(|r| r == "/dev/sdn1 holds the journal of a mounted file system"),
+        "its reason: {:?}",
+        journals.in_use["sdn"]
+    );
+    let stacked_journal = Case::new("jbd2-dm")
+        .tree(|t| t.journals(&["dm-5"]))
+        .trace(parent)?;
+    ensure!(
+        in_use_names(&stacked_journal) == ["dm-5", "sde", "sde3"]
+            && stacked_journal.unresolved.is_empty(),
+        "an external journal on a device-mapper device: {stacked_journal:?}"
+    );
+    let internal_only = Case::new("jbd2-internal")
+        .tree(|t| t.journals(&["sdl1-8", "dm-5-8", "loop3-8"]))
+        .loop_device(loop_of("loop3", 3, "", None))
+        .trace(parent)?;
+    ensure!(
+        in_use_names(&internal_only).is_empty() && internal_only.unresolved.is_empty(),
+        "journals inside their file systems: {internal_only:?}"
+    );
+    let unplaced = Case::new("jbd2-unplaced")
+        .tree(|t| t.journals(&["mystery", "nodev-8"]))
+        .trace(parent)?;
+    ensure!(
+        unplaced.unresolved.len() == 2,
+        "journals that name no device: {unplaced:?}"
+    );
+    let unreadable_journals = Case::new("jbd2-file")
+        .tree(|t| write(&t.root.join("proc/fs/jbd2"), ""))
+        .trace(parent)?;
+    ensure!(
+        !unreadable_journals.unresolved.is_empty(),
+        "a journal list that cannot be read: {unreadable_journals:?}"
+    );
+
+    // --- 3: a directory that is not there lists nothing (the cases above have
+    // no `proc/fs/jbd2`, most devices no `slaves/`); any other failure to read
+    // one is a failure to trace.
+    for (what, setup) in [
+        (
+            "slaves",
+            Box::new(|t: &Tree| {
+                let dir = t.root.join("sys/devices/virtual/block/dm-4/slaves");
+                fs::remove_dir_all(&dir)?;
+                write(&dir, "")
+            }) as Box<dyn Fn(&Tree) -> Result<()>>,
+        ),
+        (
+            "a btrfs file system's devices",
+            Box::new(|t: &Tree| {
+                let dir = t.root.join("sys/fs/btrfs").join(UUID_POOL).join("devices");
+                fs::remove_dir_all(&dir)?;
+                write(&dir, "")
+            }),
+        ),
+        (
+            "the btrfs file systems",
+            Box::new(|t: &Tree| {
+                let dir = t.root.join("sys/fs/btrfs");
+                fs::remove_dir_all(&dir)?;
+                write(&dir, "")
+            }),
+        ),
+    ] {
+        let case = Case::new("unreadable-dir")
+            .mounts(&format!(
+                "50 16 253:4 / /run/initramfs/live ro,relatime - iso9660 /dev/mapper/ventoy ro\n\
+                 51 1 0:51 / /pool rw - btrfs UUID={UUID_POOL} rw\n"
+            ))
+            .tree(setup)
+            .trace(parent)?;
+        ensure!(
+            case.unresolved
+                .iter()
+                .any(|u| u.contains("cannot be listed")),
+            "{what} that cannot be listed was taken for empty: {case:?}"
+        );
+    }
+    {
+        let dir = TestDir::new(parent, "topology-holders")?;
+        let tree = Tree::new(dir.0.join("tree"))?;
+        tree.disk("sde", 8, 64)?;
+        tree.partition("sde", "sde1", 8, 65)?;
+        tree.partition("sde", "sde3", 8, 67)?;
+        tree.stacked("dm-5", 253, 5, &["sde/sde3"])?;
+        let roots = tree.roots();
+        let system = System::default();
+        let tracer = Tracer::new(&roots, &system);
+        ensure!(
+            tracer.holders("sde3") == Ok(vec!["dm-5".to_owned()])
+                && tracer.holders("sde1") == Ok(vec![]),
+            "holders"
+        );
+        ensure!(
+            tracer.holders("nosuch").is_err(),
+            "the holders of a device sysfs does not list"
+        );
+        let unreadable = tree.root.join("sys/devices/virtual/block/sde/sde3/holders");
+        fs::remove_dir_all(&unreadable)?;
+        write(&unreadable, "")?;
+        ensure!(
+            tracer.holders("sde3").is_err(),
+            "holders that cannot be listed were taken for none"
+        );
+        // The list of block devices itself.
+        let class = tree.root.join("sys/class/block");
+        fs::remove_dir_all(&class)?;
+        write(&class, "")?;
+        let usage = tracer.usage();
+        ensure!(
+            usage.unresolved.len() == 2
+                && usage
+                    .unresolved
+                    .iter()
+                    .all(|u| u.contains("cannot be listed")),
+            "loop and zram devices that cannot be listed: {usage:?}"
+        );
+    }
+
     // --- the rest: what the earlier checks established stays established.
     // Ventoy: a device-mapper device on a partition, mounted where dracut mounts
     // the medium, named by /dev/mapper/ventoy; or with the kernel's number wrong.
@@ -1550,13 +2159,33 @@ fn check_topology(parent: &Path) -> Result<()> {
                 Some((8, 33)),
             ),
         ))
+        .file(
+            "/run/initramfs/isoscan/live.iso",
+            file_id((8, 33), 31, None),
+        )
         .trace(parent)?;
     ensure!(
         isoscan.live.contains("sdc")
             && isoscan.live.contains("loop3")
-            && isoscan.in_use.is_empty()
+            && in_use_names(&isoscan).is_empty()
             && isoscan.unresolved.is_empty(),
         "iso-scan: {isoscan:?}"
+    );
+    // ... with the host disk's mount unmounted lazily the file is not at that
+    // name: an ext4 can hold a node, so the use is unresolved (the disk is still
+    // the medium's).
+    let isoscan_detached = Case::new("isoscan-detached")
+        .mounts("50 16 7:3 / /run/initramfs/live ro - iso9660 /dev/loop3 ro\n")
+        .loop_device(loop_of(
+            "loop3",
+            3,
+            "/live.iso",
+            loop_row("loop3", "/live.iso", 31, Some((8, 33))),
+        ))
+        .trace(parent)?;
+    ensure!(
+        isoscan_detached.live.contains("sdc") && !isoscan_detached.unresolved.is_empty(),
+        "iso-scan with its host disk detached: {isoscan_detached:?}"
     );
     // A /dev/disk/by-label source (no usable device number), and a source that
     // is no path at all with the right number.
@@ -1578,7 +2207,7 @@ fn check_topology(parent: &Path) -> Result<()> {
             "50 1 8:65 / /mnt/data rw - ext4 /dev/sde1 rw\n\
              51 16 0:38 / /run/initramfs rw - tmpfs tmpfs rw\n",
         )
-        .swaps("Filename\tType\tSize\tUsed\tPriority\n/dev/sde2 partition 1024 0 -2\n")
+        .swaps("/dev/sde2 partition 1024 0 -2\n")
         .trace(parent)?;
     ensure!(
         busy.unresolved.is_empty() && !busy.live.contains("sde"),
@@ -1597,40 +2226,12 @@ fn check_topology(parent: &Path) -> Result<()> {
         !busy.in_use.contains_key("sdf") && !busy.in_use.contains_key("sdb"),
         "an unrelated disk is in use: {busy:?}"
     );
-    let dir = TestDir::new(parent, "topology-holders")?;
-    let tree = Tree::new(dir.0.join("tree"))?;
-    tree.disk("sde", 8, 64)?;
-    tree.partition("sde", "sde1", 8, 65)?;
-    tree.partition("sde", "sde3", 8, 67)?;
-    tree.stacked("dm-5", 253, 5, &["sde/sde3"])?;
-    let roots = tree.roots();
-    let system = System::default();
-    let tracer = Tracer::new(&roots, &system);
-    ensure!(
-        tracer.holders("sde3") == ["dm-5"] && tracer.holders("sde1").is_empty(),
-        "holders"
-    );
-    // A swap file cannot be placed from what the kernel lists: no disk can be
-    // shown not to hold it. Nor can a swap device that is not there.
-    for (what, swaps) in [
-        (
-            "a swap file",
-            "Filename\tType\tSize\tUsed\tPriority\n/mnt/data/swap\\040file file 1024 0 -3\n",
-        ),
-        (
-            "a swap device that is not there",
-            "Filename\tType\tSize\tUsed\tPriority\n/dev/nowhere partition 1024 0 -2\n",
-        ),
-    ] {
-        let case = Case::new("swap").swaps(swaps).trace(parent)?;
-        ensure!(
-            !case.unresolved.is_empty(),
-            "{what} is taken for no disk at all: {case:?}"
-        );
-    }
-    // The tables are read or the probe fails: no mount table, or a swap list
-    // that is not a file, is an error, never an empty system; no swap list at
-    // all is a system with no swap.
+    Ok(())
+}
+
+/// The parsers of what the kernel prints: a line they cannot read fails the
+/// probe, because dropping it would hide a use.
+fn check_tables(parent: &Path) -> Result<()> {
     let tables = TestDir::new(parent, "tables")?;
     write(
         &tables.0.join("mountinfo"),
@@ -1641,28 +2242,100 @@ fn check_topology(parent: &Path) -> Result<()> {
         "Filename\tType\tSize\tUsed\tPriority\n/dev/sde2 partition 1024 0 -2\n",
     )?;
     fs::create_dir(tables.0.join("swapdir"))?;
-    let (mounts, swaps) =
-        topology::read_tables(&tables.0.join("mountinfo"), &tables.0.join("swaps"))?;
+    let swaps = topology::read_swaps(&tables.0.join("swaps"))?;
     ensure!(
-        mounts.len() == 1 && swaps == ["/dev/sde2"],
-        "tables: {mounts:?} {swaps:?}"
+        swaps
+            == [topology::Swap {
+                path: "/dev/sde2".into(),
+                kind: "partition".into()
+            }],
+        "swaps: {swaps:?}"
     );
-    let (_, no_swaps) =
-        topology::read_tables(&tables.0.join("mountinfo"), &tables.0.join("no-such-swaps"))?;
-    ensure!(no_swaps.is_empty(), "swaps of a kernel without swap");
     ensure!(
-        topology::read_tables(&tables.0.join("no-such-mountinfo"), &tables.0.join("swaps"))
-            .is_err()
-            && topology::read_tables(&tables.0.join("mountinfo"), &tables.0.join("swapdir"))
-                .is_err(),
-        "an unreadable table was taken for an empty one"
+        topology::read_swaps(&tables.0.join("no-such-swaps"))?.is_empty(),
+        "swaps of a kernel without swap"
     );
-    // mountinfo's escapes.
-    let escaped =
-        topology::parse_mountinfo("50 1 8:65 / /mnt/with\\040space rw - ext4 /dev/sde1 rw\n");
     ensure!(
-        escaped.len() == 1 && escaped[0].mount_point == "/mnt/with space",
+        topology::read_swaps(&tables.0.join("swapdir")).is_err(),
+        "an unreadable swap list was taken for an empty one"
+    );
+    // mountinfo's escapes, and the options of the mount itself.
+    let escaped = topology::parse_mountinfo(
+        "50 1 8:65 / /mnt/with\\040space rw,nosuid,nodev - ext4 /dev/sde1 rw\n",
+    )?;
+    ensure!(
+        escaped.len() == 1
+            && escaped[0].mount_point == "/mnt/with space"
+            && escaped[0].nodev()
+            && escaped[0].vfs_options == "rw,nosuid,nodev",
         "escapes: {escaped:?}"
+    );
+    ensure!(
+        !topology::parse_mountinfo("50 1 8:65 / /x rw,nodevice - ext4 /dev/sde1 rw\n")?[0].nodev(),
+        "an option that only starts like nodev"
+    );
+    // A line that cannot be read fails the table (it is never skipped), and so
+    // does a table with nothing in it.
+    let good = "50 1 8:65 / /mnt/data rw - ext4 /dev/sde1 rw\n";
+    for (what, text) in [
+        ("nothing", String::new()),
+        ("text that is no table", "not a mount table\n".to_owned()),
+        (
+            "no separator",
+            "50 1 8:65 / /mnt rw ext4 /dev/sde1 rw\n".to_owned(),
+        ),
+        (
+            "too few fields",
+            "50 1 8:65 / - ext4 /dev/sde1\n".to_owned(),
+        ),
+        (
+            "a device number that is none",
+            "50 1 8-65 / /mnt rw - ext4 /dev/sde1 rw\n".to_owned(),
+        ),
+        (
+            "a major that is no number",
+            "50 1 x:65 / /mnt rw - ext4 /dev/sde1 rw\n".to_owned(),
+        ),
+        ("no source", "50 1 8:65 / /mnt rw - ext4\n".to_owned()),
+        (
+            "a bad line after good ones",
+            format!("{good}{good}garbage\n"),
+        ),
+        ("a blank line", format!("{good}\n{good}")),
+    ] {
+        ensure!(
+            topology::parse_mountinfo(&text).is_err(),
+            "{what} was taken for a mount table"
+        );
+    }
+    ensure!(
+        topology::parse_mountinfo(&format!("{good}{good}"))?.len() == 2,
+        "two good lines"
+    );
+    write(&tables.0.join("bad-mountinfo"), &format!("{good}garbage\n"))?;
+    ensure!(
+        topology::read_swaps(&tables.0.join("bad-mountinfo")).is_err(),
+        "a mount table read as a swap list"
+    );
+    for (what, text) in [
+        (
+            "a swap row with no type",
+            "Filename Type Size\n/dev/sde2\n".to_owned(),
+        ),
+        (
+            "a blank row",
+            "Filename Type\n\n/dev/sde2 partition\n".to_owned(),
+        ),
+    ] {
+        ensure!(
+            topology::parse_swaps(&text).is_err(),
+            "{what} was taken for a swap list"
+        );
+    }
+    ensure!(
+        topology::parse_swaps("Filename Type Size Used Priority\n")?.is_empty()
+            && topology::parse_swaps("")?.is_empty(),
+        "no swap areas"
     );
     // losetup's table: the kernel's numbers; an empty column is unknown; anything
     // that is not its document is an error, never "no loop devices".
@@ -1700,6 +2373,152 @@ fn check_topology(parent: &Path) -> Result<()> {
             .iter()
             .all(|text| topology::parse_losetup(text).is_err()),
         "an unreadable losetup was taken for no loop devices"
+    );
+    // blkid's own probe of a device (here image files: it reads regular files too).
+    let image = tables.0.join("fs.img");
+    fs::File::create(&image)?.set_len(16 << 20)?;
+    ensure!(
+        disks::probe_type(&image.to_string_lossy()).is_none(),
+        "a blank image has a signature"
+    );
+    exec::run_ok(
+        "mkfs.ext4",
+        &["-q", "-F", &image.to_string_lossy()],
+        Duration::from_secs(60),
+    )?;
+    ensure!(
+        disks::probe_type(&image.to_string_lossy()).as_deref() == Some("ext4"),
+        "blkid does not find the ext4 of an image"
+    );
+    ensure!(
+        disks::probe_type("/no/such/device").is_none(),
+        "a device that is not there has a signature"
+    );
+    // lsblk's signatures, by kernel name, of everything it lists.
+    let types = disks::device_types(LSBLK)?;
+    ensure!(
+        types.get("vda1").map(String::as_str) == Some("vfat")
+            && types.get("sdb1").map(String::as_str) == Some("iso9660")
+            && !types.contains_key("vda")
+            && disks::device_types("{}").is_err(),
+        "device types: {types:?}"
+    );
+    Ok(())
+}
+
+/// The mount tables of every mount namespace: the host's (process 1's) and the
+/// service namespaces' show mounts the helper's own (`PrivateMounts=yes`: it
+/// sees what propagates to it, and nothing made under a private subtree) does
+/// not.
+fn check_namespaces(parent: &Path) -> Result<()> {
+    let dir = TestDir::new(parent, "namespaces")?;
+    let proc = dir.0.join("proc");
+    let table = |extra: &str| format!("{ROOT_LIVE_RW}{KERNEL_MOUNTS}{extra}");
+    let process = |pid: &str, namespace: Option<&str>, mounts: Option<&str>| -> Result<()> {
+        let base = proc.join(pid);
+        fs::create_dir_all(base.join("ns"))?;
+        if let Some(id) = namespace {
+            symlink(format!("mnt:[{id}]"), base.join("ns/mnt"))?;
+        }
+        if let Some(text) = mounts {
+            write(&base.join("mountinfo"), text)?;
+        }
+        Ok(())
+    };
+    let private = "60 1 8:97 / /mnt/private/data rw,relatime - ext4 /dev/sdg1 rw\n";
+    // The helper's own namespace: what propagated to it.
+    process("self", Some("4026532001"), Some(&table("")))?;
+    // The host's: the mount under a private subtree is here only.
+    process("1", Some("4026531841"), Some(&table(private)))?;
+    // A service's, shared by two processes: one table of the two is read (which
+    // one is up to the order /proc lists them in).
+    process(
+        "212",
+        Some("4026532100"),
+        Some(&table("70 1 8:177 / /srv/data rw - xfs /dev/sdl1 rw\n")),
+    )?;
+    process(
+        "213",
+        Some("4026532100"),
+        Some(&table("71 1 8:177 / /srv/same rw - xfs /dev/sdl1 rw\n")),
+    )?;
+    // A process that is gone before its table is read: not a failure.
+    process("400", Some("4026532400"), None)?;
+    // One whose namespace cannot be told, one whose table cannot be read.
+    process("300", None, None)?;
+    write(&proc.join("300/ns/mnt"), "")?;
+    process("500", Some("4026532500"), None)?;
+    fs::create_dir(proc.join("500/mountinfo"))?;
+    // Entries of /proc that are not processes.
+    write(&proc.join("cpuinfo"), "")?;
+    fs::create_dir_all(proc.join("thread-self"))?;
+    let (all, local, unreadable) = topology::read_mounts(&proc)?;
+    ensure!(
+        all.iter().any(|m| m.mount_point == "/mnt/private/data")
+            && all.iter().any(|m| m.mount_point == "/srv/data")
+                != all.iter().any(|m| m.mount_point == "/srv/same")
+            && !local.iter().any(|m| m.mount_point == "/mnt/private/data")
+            && all.iter().filter(|m| m.mount_point == "/proc").count() == 1,
+        "the tables of the namespaces: {all:?}"
+    );
+    ensure!(
+        unreadable.len() == 2
+            && unreadable.iter().any(|u| u.contains("process 300"))
+            && unreadable.iter().any(|u| u.contains("process 500")),
+        "tables that cannot be read: {unreadable:?}"
+    );
+    // The trace: the private mount is a use of its disk, and a table that could
+    // not be read is a use that was not seen.
+    let tree = Tree::new(dir.0.join("tree"))?;
+    tree.disk("sdg", 8, 96)?;
+    tree.partition("sdg", "sdg1", 8, 97)?;
+    tree.disk("sdl", 8, 176)?;
+    tree.partition("sdl", "sdl1", 8, 177)?;
+    tree.disk("sda", 8, 0)?;
+    tree.partition("sda", "sda1", 8, 1)?;
+    tree.loop_device("loop0", 7, 0, "")?;
+    tree.stacked("dm-0", 253, 0, &["loop0"])?;
+    tree.node_link("mapper/live-rw", "dm-0")?;
+    let roots = tree.roots();
+    let stat = |path: &str| tree.stat(path);
+    let system = System {
+        mounts: all,
+        local,
+        swaps: vec![],
+        loops: vec![],
+        unreadable,
+    };
+    let usage = Tracer::new(&roots, &system).with_stat(&stat).usage();
+    ensure!(
+        in_use_names(&usage).contains(&"sdg")
+            && in_use_names(&usage).contains(&"sdl")
+            && usage.unresolved.len() == 2,
+        "the private mounts: {usage:?}"
+    );
+    ensure!(
+        usage.in_use["sdg"]
+            .iter()
+            .any(|r| r == "/dev/sdg1 is mounted at /mnt/private/data"),
+        "its reason: {:?}",
+        usage.in_use["sdg"]
+    );
+    // The host's table and this process's must be read.
+    for (what, remove) in [
+        ("process 1's", "1/mountinfo"),
+        ("this process's", "self/mountinfo"),
+    ] {
+        let kept = fs::read(proc.join(remove))?;
+        fs::remove_file(proc.join(remove))?;
+        ensure!(
+            topology::read_mounts(&proc).is_err(),
+            "{what} table is missing and the probe went on"
+        );
+        fs::write(proc.join(remove), kept)?;
+    }
+    write(&proc.join("1/mountinfo"), "garbage\n")?;
+    ensure!(
+        topology::read_mounts(&proc).is_err(),
+        "the host's table could not be read and the probe went on"
     );
     Ok(())
 }
@@ -2015,7 +2834,9 @@ pub fn run(config: &helper::Config) -> Result<String> {
     let parent = Scratch::new(&config.run_dir, "selfcheck")?;
     check_exec_and_scratch(parent.path()).context("subprocess output and scratch directories")?;
     check_nvme(parent.path()).context("NVMe transports")?;
+    check_tables(parent.path()).context("the tables of the running system")?;
     check_topology(parent.path()).context("the live medium and disks in use")?;
+    check_namespaces(parent.path()).context("the mount namespaces")?;
     check_files(parent.path()).context("files")?;
     let repart = check_repart(config, parent.path()).context("repart")?;
     let system = check_system(config).context("system")?;
