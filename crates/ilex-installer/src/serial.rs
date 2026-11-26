@@ -12,10 +12,11 @@
 //!
 //! A fixed public test credential, `ilex.installer.serial-test`, makes the
 //! mirror fail on purpose (`unavailable`: no such device; `backpressure`: a
-//! pseudo terminal whose output is stopped). The outcome of each faulted
-//! write is reported on the second UART, `/dev/ttyS1`, so the harness can
-//! observe it independently of the sink being exercised. The credential can
-//! only damage the serial mirror.
+//! pseudo terminal whose output is stopped; `stall`: the worker hangs for
+//! three seconds, as a UART that never drains would hang it in `close()`). The
+//! outcome of each faulted write is reported on the second UART, `/dev/ttyS1`,
+//! so the harness can observe it independently of the sink being exercised.
+//! The credential can only damage the serial mirror.
 
 use std::io::Write;
 
@@ -60,8 +61,9 @@ mod linux {
 
     use super::{AUDIT_CONSOLE, BUDGET, CONSOLE, CREDENTIAL, line_payload};
 
-    /// The worker that holds the port is still alive: skip, never queue.
-    static BUSY: AtomicBool = AtomicBool::new(false);
+    /// A worker that holds a console is still alive: skip, never queue. One
+    /// flag per console, so a stuck mirror cannot silence the audit UART.
+    static BUSY: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
     #[derive(Clone, Copy, PartialEq, Debug)]
     pub enum Status {
@@ -90,8 +92,8 @@ mod linux {
         }
     }
 
-    /// The test fault named by the credential, if any (`unavailable` or
-    /// `backpressure`; anything else is no fault).
+    /// The test fault named by the credential, if any (`unavailable`,
+    /// `backpressure` or `stall`; anything else is no fault).
     fn fault() -> Option<&'static str> {
         static FAULT: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
         *FAULT.get_or_init(|| {
@@ -100,6 +102,7 @@ mod linux {
             match text.trim() {
                 "unavailable" => Some("unavailable"),
                 "backpressure" => Some("backpressure"),
+                "stall" => Some("stall"),
                 _ => None,
             }
         })
@@ -108,7 +111,7 @@ mod linux {
     pub fn mirror(line: &str) {
         let fault = fault();
         let started = Instant::now();
-        let status = attempt_with_deadline(Path::new(CONSOLE), fault, line_payload(line));
+        let status = attempt_with_deadline(0, Path::new(CONSOLE), fault, line_payload(line));
         if let Some(mode) = fault {
             // Observed through the other UART, never through the faulted sink.
             let first = line.split_whitespace().next().unwrap_or("");
@@ -117,13 +120,19 @@ mod linux {
                 status.name(),
                 started.elapsed().as_secs_f64()
             );
-            attempt_with_deadline(Path::new(AUDIT_CONSOLE), None, line_payload(&audit));
+            attempt_with_deadline(1, Path::new(AUDIT_CONSOLE), None, line_payload(&audit));
         }
     }
 
     /// One write on a disposable worker, awaited for at most [`BUDGET`].
-    pub fn attempt_with_deadline(path: &Path, fault: Option<&str>, payload: Vec<u8>) -> Status {
-        if BUSY.swap(true, Ordering::AcqRel) {
+    /// `console` selects the busy flag (0: the mirror, 1: the audit UART).
+    pub fn attempt_with_deadline(
+        console: usize,
+        path: &Path,
+        fault: Option<&str>,
+        payload: Vec<u8>,
+    ) -> Status {
+        if BUSY[console].swap(true, Ordering::AcqRel) {
             return Status::Busy;
         }
         let (done, result) = mpsc::channel();
@@ -135,11 +144,11 @@ mod linux {
                 // `attempt` has closed the port by now: the port is free again
                 // before the caller hears of it (or has stopped waiting).
                 let status = attempt(&path, fault.as_deref(), &payload);
-                BUSY.store(false, Ordering::Release);
+                BUSY[console].store(false, Ordering::Release);
                 let _ = done.send(status);
             });
         if spawned.is_err() {
-            BUSY.store(false, Ordering::Release);
+            BUSY[console].store(false, Ordering::Release);
             return Status::Error;
         }
         result.recv_timeout(BUDGET).unwrap_or(Status::Budget)
@@ -150,6 +159,11 @@ mod linux {
     fn attempt(path: &Path, fault: Option<&str>, payload: &[u8]) -> Status {
         // Held for the duration of the write when the fault is a stopped pty.
         let mut held: Vec<OwnedFd> = Vec::new();
+        if fault == Some("stall") {
+            // A UART that never drains: the worker is stuck for good, as far
+            // as the caller can tell.
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
         let path = match fault {
             Some("unavailable") => Path::new("/run/ilex-installer/no-such-console").to_owned(),
             Some("backpressure") => match stopped_pty(&mut held) {

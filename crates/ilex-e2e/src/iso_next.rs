@@ -28,10 +28,11 @@
 //! * `iso::next_restart`: a window close request does not end the session; a
 //!   compositor that is killed leaves its socket behind and the next attempt
 //!   still comes up; so does a killed client.
-//! * `iso::next_serial_backpressure` / `iso::next_serial_unavailable`: the
-//!   serial mirror of the markers fails on purpose (a fixed test credential);
-//!   the page still comes up promptly, each failed write is reported on the
-//!   second UART within a second, and no SSH server runs without the key.
+//! * `iso::next_serial_backpressure` / `_unavailable` / `_stall`: the serial
+//!   mirror of the markers fails on purpose (a fixed test credential: a stopped
+//!   pty, no device, a worker that hangs for three seconds); the page still
+//!   comes up promptly, each failed write is reported on the second UART within
+//!   a second, and no SSH server runs without the key.
 //!
 //! The boot trials use `SecurityLaunch::QualificationFixture`: provisioning
 //! (KVM with SMM, a Secure Boot firmware pair) is required, a passing
@@ -82,6 +83,7 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_restart", restart),
         trial("iso::next_serial_backpressure", || serial("backpressure")),
         trial("iso::next_serial_unavailable", || serial("unavailable")),
+        trial("iso::next_serial_stall", || serial("stall")),
     ]
 }
 
@@ -335,6 +337,7 @@ fn observe(
 fn surface(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     const SCRIPT: &str = r#"set -u
 pid=$(systemctl show ilex-installer-session.service -p MainPID --value)
+rule=/usr/share/polkit-1/rules.d/00-ilex-installer.rules
 echo "=== session (main pid $pid)"
 loginctl list-sessions --no-pager --no-legend
 loginctl show-session "$(loginctl --no-legend list-sessions | awk '$3 == "ilex-installer" {print $1; exit}')" -p Active -p Remote -p Class -p Type -p State
@@ -343,10 +346,20 @@ for action in $(pkaction); do
     pkcheck --action-id "$action" --process "$pid" >/dev/null 2>&1 && echo "AUTHORIZED $action"
 done
 echo "=== polkit: end"
-echo "=== system bus: names in use"
-busctl --system list --no-legend --no-pager | awk '{print $1}'
-echo "=== system bus: activatable"
-busctl --system list --activatable --no-legend --no-pager | awk '{print $1}'
+# Controls: the empty list above must be the rule's doing, not a broken check.
+# Two actions the polkit defaults allow to any active local session.
+control() {
+    for action in org.freedesktop.login1.set-self-linger org.freedesktop.login1.inhibit-delay-sleep; do
+        if pkcheck --action-id "$action" --process "$pid" >/dev/null 2>&1; then echo "CONTROL $1 AUTHORIZED $action"; else echo "CONTROL $1 DENIED $action"; fi
+    done
+}
+control with-rule
+mv "$rule" /run/00-ilex-installer.rules.off; sleep 4
+control without-rule
+mv /run/00-ilex-installer.rules.off "$rule"; sleep 4
+control rule-restored
+echo "=== system bus: names (running and activatable)"
+busctl --system list --no-legend --no-pager | awk '{print $1, $NF}'
 echo "=== listening sockets"
 ss -tulnH
 echo "=== units running"
@@ -366,6 +379,51 @@ systemctl list-units --type=service --state=running --no-legend --no-pager | awk
     ensure!(
         authorized == allowed,
         "polkit authorizes {authorized:?} for the installer's session without a password, expected {allowed:?} (full report: next-surface.txt)"
+    );
+    // The rule is what denies: without it the defaults authorize the controls.
+    let controls = |phase: &str| -> Vec<&str> {
+        report
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("CONTROL ")?
+                    .strip_prefix(phase)?
+                    .strip_prefix(' ')
+            })
+            .map(|rest| rest.split_whitespace().next().unwrap_or(""))
+            .collect()
+    };
+    for (phase, expected) in [
+        ("with-rule", "DENIED"),
+        ("without-rule", "AUTHORIZED"),
+        ("rule-restored", "DENIED"),
+    ] {
+        let seen = controls(phase);
+        ensure!(
+            seen.len() == 2 && seen.iter().all(|result| *result == expected),
+            "polkit control {phase}: expected both actions {expected}, saw {seen:?} (full report: next-surface.txt)"
+        );
+    }
+    // Nothing but the harness's own SSH server listens beyond loopback.
+    let sockets = report
+        .split("=== listening sockets\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n=== ").next())
+        .context("the surface report has no listening sockets section")?;
+    let exposed: Vec<&str> = sockets
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(4))
+        .filter(|local| {
+            let address = local
+                .rsplit_once(':')
+                .map_or(*local, |(address, _)| address);
+            let address = address.split('%').next().unwrap_or(address);
+            !(address.starts_with("127.") || address == "[::1]" || address == "::1")
+                && !local.ends_with(":22")
+        })
+        .collect();
+    ensure!(
+        exposed.is_empty(),
+        "the live image listens beyond loopback on {exposed:?} (full report: next-surface.txt)"
     );
     Ok(())
 }
@@ -780,6 +838,10 @@ fn serial(mode: &'static str) -> Result<()> {
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
     let purpose = format!("iso-next-ser-{}", &mode[..2]);
+    ensure!(
+        ["backpressure", "unavailable", "stall"].contains(&mode),
+        "unknown serial fault {mode}"
+    );
     let (mut vm, _) = plain_vm(&ws, &purpose, |config| {
         config.memory = "3G".into();
         config.secondary_serial = true;
@@ -795,7 +857,8 @@ fn serial(mode: &'static str) -> Result<()> {
     outcome
 }
 
-/// `mode` is both the injected fault and the status the failed write reports.
+/// `mode` is the injected fault; `backpressure` and `unavailable` are also the
+/// status their failed writes report.
 fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
     let primary = vm.info.dir.join("serial.log");
     let secondary = vm.info.dir.join("serial-secondary.log");
@@ -813,10 +876,19 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
             .skip(1)
             .filter_map(|w| w.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
             .collect();
+        let status = field(&words, "status")?;
+        // `stall` hangs its worker: the write that meets the deadline reports
+        // `budget`, and the ones that come while it is still stuck `busy`.
+        let expected: &[&str] = if mode == "stall" {
+            &["budget", "busy"]
+        } else {
+            &[mode]
+        };
         ensure!(
-            field(&words, "mode")? == mode && field(&words, "status")? == mode,
-            "a marker write did not fail as {mode}: {line}"
+            field(&words, "mode")? == mode && expected.contains(&status),
+            "a marker write did not fail as {mode} ({expected:?}): {line}"
         );
+        budgets += usize::from(status == "budget");
         let seconds: f64 = field(&words, "seconds")?
             .parse()
             .with_context(|| format!("unparsable duration in {line}"))?;
@@ -831,10 +903,19 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
         "expected an audit line for the session's and the page's markers, saw {audited}: {console}"
     );
     ensure!(
-        has_marker(&console, "ILEX-INSTALLER-SERIAL", Some("message"))
-            && !has_marker(&self::console(&primary)?, "ILEX-INSTALLER", Some("page")),
-        "the page marker reached the faulted console"
+        has_marker(&console, "ILEX-INSTALLER-SERIAL", Some("message")),
+        "no audit line for the page marker: {console}"
     );
+    if mode == "stall" {
+        // The first write hit the deadline (200 ms), and the page was shown
+        // while its worker was still stuck for seconds.
+        ensure!(budgets >= 1, "no write met the 200 ms deadline: {console}");
+    } else {
+        ensure!(
+            !has_marker(&self::console(&primary)?, "ILEX-INSTALLER", Some("page")),
+            "the page marker reached the faulted console"
+        );
+    }
     // No key, no SSH server.
     let banner = ssh_banner(vm.info.ssh_port)?;
     ensure!(
