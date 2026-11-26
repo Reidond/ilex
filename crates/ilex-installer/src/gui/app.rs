@@ -1036,11 +1036,28 @@ impl Widgets {
     fn sync_account(&mut self, flow: &Flow) {
         let a = &self.account;
         sync_banner(&a.banner, flow);
-        // The choices cannot change while the helper checks them.
+        // The choices cannot change while the helper checks them. A field that
+        // has the focus gives it up first (GTK warns when a focused text
+        // becomes insensitive), and the name has it again when the page is
+        // editable once more.
         let editable = !flow.is_checking();
-        a.name.set_sensitive(editable);
-        a.password.set_sensitive(editable);
-        a.confirmation.set_sensitive(editable);
+        if a.name.is_sensitive() != editable {
+            if editable {
+                a.name.set_sensitive(true);
+                a.password.set_sensitive(true);
+                a.confirmation.set_sensitive(true);
+                if flow.page() == PageId::Account {
+                    a.name.grab_focus();
+                }
+            } else {
+                if let Some(root) = a.page.root() {
+                    root.set_focus(None::<&gtk::Widget>);
+                }
+                a.name.set_sensitive(false);
+                a.password.set_sensitive(false);
+                a.confirmation.set_sensitive(false);
+            }
+        }
         // The name is not private and may come from the flow (the renderer
         // sends it as a message). The passwords never do: the fields are
         // where they are typed, and the flow takes a copy as they change;
