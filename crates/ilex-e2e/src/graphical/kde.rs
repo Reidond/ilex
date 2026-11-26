@@ -336,7 +336,10 @@ pub(super) fn gtk3_window(
         "printf %s {script} | base64 -d > /tmp/ilex-gtk3-probe.py && chmod 644 /tmp/ilex-gtk3-probe.py"
     ))?;
     // A previous window is closed first; the unit is not a Plasma child.
-    let _ = user(vm, &format!("systemctl --user stop '{PROBE_UNIT}-*.service'"));
+    let _ = user(
+        vm,
+        &format!("systemctl --user stop '{PROBE_UNIT}-*.service'"),
+    );
     let unit = format!("{PROBE_UNIT}-{name}");
     user(
         vm,
