@@ -1548,10 +1548,10 @@ pub(super) fn run_repeat() -> Result<()> {
             PAGE_TIMEOUT,
         )
         .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-{tag}")))?;
-        ensure!(
-            console.contains("handover=interface"),
-            "{tag}: the refusal did not hand over to the interface: {console}"
-        );
+        // The console as it was when the refusal was seen has not got the
+        // hand-over's line yet (the program prints it a moment after `result=`).
+        let console = wait_for_text(&serial, "handover=interface", Duration::from_secs(60))
+            .with_context(|| format!("{tag}: the refusal did not hand over to the interface"))?;
         Ok((guest, console))
     };
     let (mut guest, _) = again(&volume, "again", "already installed")?;
