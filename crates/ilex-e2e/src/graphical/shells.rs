@@ -12,7 +12,12 @@
 //!    Plasma left nothing in the home or the manager that GNOME reads;
 //! 3. GNOME made dark, with Adwaita-dark and a purple accent;
 //! 4. Plasma again, which must be Breeze Dark with Plasma's accent, not
-//!    GNOME's choices, while GNOME's own settings stay as GNOME left them.
+//!    GNOME's choices, while GNOME's own settings stay as GNOME left them;
+//! 5. a crash of that Plasma session (compositor and session leader killed with
+//!    SIGKILL, so no shutdown script runs), then GNOME again in the same
+//!    lingering user manager: no GTK settings portal that reads the KDE
+//!    database may be left running, and GNOME's GTK 3, GTK 4 and libadwaita
+//!    applications must look as GNOME chose.
 //!
 //! Select it explicitly (`ilexctl test graphical::shells --shell gnome --shell kde`).
 
@@ -124,10 +129,6 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         kde::nothing_shared(vm),
     );
     report.finish()?;
-    // A crash skips Plasma's shutdown script and leaves its environment in a
-    // user manager that outlives the session: GNOME must look like GNOME
-    // anyway, with GTK applications asking GNOME's own portal.
-    user(vm, "systemctl --user set-environment GTK_USE_PORTAL=1")?;
     choose_session(vm, "gnome")?;
     settle(ctl)?;
     login(vm, ctl, &password)?;
@@ -174,7 +175,176 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         None,
     )?
     .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
+
+    // 5. The same Plasma session crashes; GNOME follows in the same manager.
+    crash_plasma(vm)?;
+    choose_session(vm, "gnome")?;
+    settle(ctl)?;
+    login(vm, ctl, &password)?;
+    vm.wait_for(
+        "gnome-shell in the user session",
+        &format!("pgrep -u {USER} -x gnome-shell"),
+        SESSION_TIMEOUT,
+    )?;
+    settle(ctl)?;
+    ctl.key("Escape")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.key("Escape")?;
+    settle(ctl)?;
+    shot(ctl, artifacts, "16-gnome-after-crash")?;
+    gnome_after_crash(vm)?;
+    show(
+        vm,
+        ctl,
+        artifacts,
+        "17-gnome-libadwaita-after-crash",
+        "adw",
+        None,
+    )?;
     Ok(())
+}
+
+/// Processes of the test user whose environment selects the KDE database: only
+/// the GTK settings portal of a Plasma session may ever have it.
+fn kde_profile_holders(vm: &Vm) -> Result<Vec<String>> {
+    let out = vm.ssh_ok(&format!(
+        "for pid in $(pgrep -u {USER}); do \
+           if tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep -qx 'DCONF_PROFILE=ilex-kde'; then \
+             printf '%s %s\\n' \"$pid\" \"$(tr '\\0' ' ' < /proc/$pid/cmdline)\"; \
+           fi; \
+         done; true"
+    ))?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
+/// SIGKILL the Plasma session's compositor and session leader, as a crash would:
+/// no logout, no shutdown script. The lingering user manager is left to unwind
+/// Plasma's units by its own dependencies; nothing that reads the KDE database
+/// may outlive that.
+fn crash_plasma(vm: &mut Vm) -> Result<()> {
+    let before = kde_profile_holders(vm)?;
+    println!("     before the crash, processes selecting the KDE database: {before:?}");
+    if before.is_empty() {
+        bail!("no process selects the KDE database in a running Plasma session: nothing to leak");
+    }
+    // `-f` with a bracket keeps the pattern from matching this very command line.
+    vm.ssh_ok(&format!(
+        "pkill -KILL -u {USER} -x kwin_wayland; pkill -KILL -u {USER} -f '^[/a-z]*startplasma-wayland'; true"
+    ))?;
+    vm.wait_for(
+        "the crashed Plasma session to end",
+        &format!("! loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep -q ."),
+        SESSION_TIMEOUT,
+    )
+    .map(drop)?;
+    wait_greeter(vm)?;
+    // What the manager made of it, before anything else runs.
+    let state = |unit: &str| {
+        user(
+            vm,
+            &format!("systemctl --user is-active {unit} || true"),
+        )
+    };
+    let manager = format!(
+        "plasma-workspace.target {}, graphical-session.target {}, xdg-desktop-portal-gtk.service {}, \
+         xdg-desktop-portal.service {}",
+        state("plasma-workspace.target")?,
+        state("graphical-session.target")?,
+        state("xdg-desktop-portal-gtk.service")?,
+        state("xdg-desktop-portal.service")?,
+    );
+    println!("     after the crash, in the user manager: {manager}");
+    let failed = user(vm, "systemctl --user --failed --no-legend --plain || true")?;
+    println!("     failed user units: {}", failed.replace('\n', "; "));
+    let env = user(vm, "systemctl --user show-environment")?;
+    println!(
+        "     user manager environment keeps: {:?}",
+        env.lines()
+            .filter(|l| l.starts_with("GTK_USE_PORTAL=") || l.starts_with("XDG_CURRENT_DESKTOP="))
+            .collect::<Vec<_>>()
+    );
+    let mut report = vmtest::Report::default();
+    report.check("Plasma's target is down after the crash", {
+        let plasma = state("plasma-workspace.target")?;
+        if plasma == "active" || plasma == "activating" {
+            Err(anyhow!("plasma-workspace.target is {plasma}"))
+        } else {
+            Ok(())
+        }
+    });
+    report.check(
+        "no portal or other process selects the KDE database after the crash",
+        {
+            let holders = kde_profile_holders(vm)?;
+            if holders.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!("still running: {holders:?}"))
+            }
+        },
+    );
+    report.finish()
+}
+
+/// GNOME after a crashed Plasma session, in the same lingering manager: GNOME's
+/// GTK 3, GTK 4 and libadwaita applications look as GNOME chose, and no portal
+/// answers from the KDE database.
+fn gnome_after_crash(vm: &Vm) -> Result<()> {
+    let mut report = vmtest::Report::default();
+    report.check("the session is GNOME and carries no profile or theme", {
+        let env = user(vm, "systemctl --user show-environment")?;
+        if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME")
+            && !env.lines().any(|l| {
+                ["DCONF_PROFILE=", "GTK_THEME="]
+                    .iter()
+                    .any(|p| l.starts_with(p))
+            })
+        {
+            Ok(())
+        } else {
+            Err(anyhow!("session environment:\n{env}"))
+        }
+    });
+    report.check("no process selects the KDE database", {
+        let holders = kde_profile_holders(vm)?;
+        if holders.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("still running: {holders:?}"))
+        }
+    });
+    report.check("GNOME's database is as GNOME left it", {
+        let keys = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
+        if keys.contains("gtk-theme='Adwaita-dark'") && keys.contains("accent-color='purple'") {
+            Ok(())
+        } else {
+            Err(anyhow!("GNOME's keys:\n{keys}"))
+        }
+    });
+    report.check("the portal reports GNOME's dark scheme", {
+        let scheme = kde::appearance(vm, "color-scheme")?;
+        if scheme == "v v u 1" {
+            Ok(())
+        } else {
+            Err(anyhow!("color-scheme is `{scheme}`"))
+        }
+    });
+    report.finish()?;
+    // The look GNOME chose in step 3, whatever Plasma's crash left behind.
+    toolkits(vm, ToolkitLook::GnomeDark)?;
+    // Plasma's units that the crash killed are the only failures expected.
+    let failed = user(vm, "systemctl --user --failed --no-legend --plain || true")?;
+    let unexpected: Vec<_> = failed
+        .lines()
+        .filter(|l| {
+            !l.trim_start().starts_with("plasma-") && !l.trim_start().starts_with("app-")
+        })
+        .collect();
+    if unexpected.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("failed user units that are not Plasma's: {unexpected:?}"))
+    }
 }
 
 /// GDM picks the user's session from AccountsService.
@@ -322,7 +492,6 @@ fn toolkits(vm: &Vm, look: ToolkitLook) -> Result<()> {
 /// What Plasma left in the home does not restyle GNOME.
 fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     let mut report = vmtest::Report::default();
-    // (GTK_USE_PORTAL is left behind on purpose, as a crash would: harmless.)
     report.check(
         "the session is GNOME and carries no profile or theme of Plasma's",
         {

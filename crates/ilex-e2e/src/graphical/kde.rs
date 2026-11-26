@@ -653,6 +653,7 @@ mod apps {
         // In the session, still Breeze Dark from `theming`: what each toolkit
         // resolves inside its sandbox.
         sandboxes(vm, true)?;
+        breeze_alone(vm)?;
         // The two applications, for the picture.
         for (unit, app) in [
             ("ilex-flatpak-calculator", "org.gnome.Calculator"),
@@ -682,6 +683,38 @@ mod apps {
 
         dconf_flatpak(vm)?;
         discover(vm, ctl, artifacts)
+    }
+
+    /// `org.gtk.Gtk3theme.Breeze-Dark` is end of life on Flathub, which names
+    /// `org.gtk.Gtk3theme.Breeze` as its replacement. The replacement's dark
+    /// colours are a variant GTK 3 loads only for `gtk-application-prefer-dark-theme`,
+    /// which the settings portal does not carry (and a `settings.ini` for it would
+    /// be read by every desktop of the home), so with the replacement alone a
+    /// GTK 3 Flatpak stays light in a dark Plasma. The old extension stays in the
+    /// shell's list for as long as this holds; if it stops holding, drop it.
+    fn breeze_alone(vm: &mut Vm) -> Result<()> {
+        vm.ssh_ok(
+            "flatpak uninstall --system -y --noninteractive org.gtk.Gtk3theme.Breeze-Dark//3.22",
+        )?;
+        let alone = probe(vm, "gtk3", Some("org.gnome.gedit"));
+        // Put it back before judging, so a failure leaves the guest as it was.
+        vm.ssh_ok(
+            "flatpak install --system -y --noninteractive flathub org.gtk.Gtk3theme.Breeze-Dark//3.22",
+        )?;
+        let alone = alone?;
+        println!(
+            "     Plasma dark, org.gtk.Gtk3theme.Breeze alone: {}",
+            alone.describe()
+        );
+        if alone.expect(None, None, true).is_ok() {
+            bail!(
+                "a GTK 3 Flatpak resolves a dark look with org.gtk.Gtk3theme.Breeze alone ({}): \
+                 drop org.gtk.Gtk3theme.Breeze-Dark from shells/kde/shell.toml",
+                alone.describe()
+            );
+        }
+        println!("ok   with Breeze alone a GTK 3 Flatpak stays light in a dark Plasma: Breeze-Dark stays preinstalled");
+        Ok(())
     }
 
     /// GTK 3, GTK 4 and libadwaita as sandboxed applications: the theme and the
