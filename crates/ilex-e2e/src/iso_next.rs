@@ -10,10 +10,12 @@
 //! Markers are matched as complete lines (one still being written is not a
 //! line yet) by their first word and a key, never as substrings.
 //!
-//! The live image's SSH server starts only when the harness supplies its key
-//! (the `ssh.authorized_keys.root` SMBIOS credential every VM here gets); the
-//! guest's own diagnostics and the polkit report use it. The serial trials
-//! boot without the key and check that nothing answers on the forwarded port.
+//! The live image's SSH server starts only once root's `authorized_keys` has
+//! been provisioned (here by the harness's `ssh.authorized_keys.root` SMBIOS
+//! credential, which every VM gets; bcvk's `tmpfiles.extra` credential does the
+//! same for its own VMs); the guest's own diagnostics and the polkit report use
+//! it. The serial trials boot without the key and check that nothing answers
+//! on the forwarded port.
 //!
 //! * `iso::next_boot`: UEFI with Secure Boot required on KVM, default boot
 //!   entry; also reports what polkit lets the installer's session do.

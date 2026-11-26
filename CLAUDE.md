@@ -2425,14 +2425,18 @@ the Windows paths of this change: no Windows host was available.
   the compositor can. Blanking, locking and sleep are off (dconf defaults, a
   logind drop-in and masked sleep targets): an installation must not stop when
   the screen would lock.
-- **SSH.** The live image keeps fedora-bootc's `sshd`, but only a drop-in
-  condition `ConditionCredential=ssh.authorized_keys.root` lets it start (also
-  on `sshd@.service`, the socket-activated template): a real boot has no key on
-  it and an open port is no use, while the harness's SMBIOS credential of that
-  name (every VM it boots has one, and systemd provisions root's
-  `authorized_keys` from it) switches it on for diagnostics and the polkit
-  report. `iso::next_serial_*` boot without the credential and check that
-  nothing answers on the forwarded port.
+- **SSH.** The live image keeps fedora-bootc's `sshd`, but a drop-in condition,
+  `ConditionFileNotEmpty=/root/.ssh/authorized_keys` (also on `sshd@.service`,
+  the socket-activated template), lets it start only once something has
+  provisioned root's key before it: a real boot has no key on it and an open
+  port is no use. Two harnesses provision one. The `iso::next` harness passes
+  the SMBIOS credential `ssh.authorized_keys.root` (systemd-tmpfiles writes
+  the file from it) for diagnostics and the polkit report; bcvk, which does not
+  use that credential, passes its key as a `tmpfiles.extra` credential
+  (`f+~ /root/.ssh/authorized_keys`), so bcvk VMs of this image accept SSH too.
+  Testing the file rather than either credential admits both and nothing else.
+  `iso::next_serial_*` boot without the credential and check that nothing
+  answers on the forwarded port.
 - **Boot entries.** "Install ilex" and "Install ilex (basic graphics)"
   (`nomodeset`); the second makes the session set `GSK_RENDERER=cairo` and
   `LIBGL_ALWAYS_SOFTWARE=1`. The ISO's volume label is
