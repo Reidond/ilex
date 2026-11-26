@@ -19,7 +19,11 @@
 #   runs the upgrade tier;
 # * other-roots: one publish-root.yml call per remaining root (`base`, a second
 #   desktop...), in parallel, never failing fast: that root's build, changed,
-#   rechunk, stage, ephemeral tier, then its own signing and its own layers;
+#   rechunk, stage, ephemeral tier, then its own signing and its own layers.
+#   Its signing and layers (only those) also wait for this file's `build` job
+#   (the security tier) and `upgrade` job to have succeeded: they exercise the
+#   boot chain and the update path every root shares. Nothing here waits for
+#   any other root;
 # * installer-due → iso: see below.
 #
 # Then publish signs the installer root's staged digest, the one both tiers
@@ -197,9 +201,6 @@ jobs:
           exit 1
       - uses: actions/checkout@v7
 
-      - name: Check configured Flathub apps (metadata only)
-        run: cargo ilexctl doctor apps
-
       - name: Registry names and installer composition
         id: composition
         env:
@@ -236,7 +237,16 @@ jobs:
           reference=-
           if [ "$snapshot" != - ]; then reference="$IMAGE_REPO@$snapshot"; fi
           cargo ilexctl changed "$reference" --root "$tag" --inputs-only
+          # The apps check below covers only what this root ships: its shells
+          # (ILEX_SHELLS above) and the machines of its layers.
+          machines=$(awk -F '\t' -v tag="$tag" '$2 == "layer" && $3 == tag {print $4}' "$RUNNER_TEMP/publications" | paste -s -d, -)
+          echo "ILEX_APPS_MACHINES=${machines:-none}" >> "$GITHUB_ENV"
 
+      # This root's own shells and layer machines, as every other root checks
+      # its own (publish-root.yml): another root's broken ID cannot block it.
+      - name: Check this root's configured Flathub apps (metadata only)
+        timeout-minutes: 10
+        run: cargo ilexctl doctor apps
 
       # The runner's root disk is 145 GB with about 110 GB free: container
       # storage for the build, the rechunk and the test VM fits without
@@ -244,7 +254,10 @@ jobs:
       - name: Disk
         run: df -h / /mnt
 
+      # Nothing below starts when this root's inputs are unchanged and no
+      # forced/qualification run selects it: every later step is skipped then.
       - uses: kunobi-ninja/kache-action@v1
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install
         with:
           github-cache: "true"
 
@@ -256,6 +269,7 @@ jobs:
       # never waits for either; the end of the job stops them.
       - name: apt's packages from the cache
         id: debs
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/apt-debs
@@ -263,6 +277,7 @@ jobs:
           restore-keys: ${{ env.APT_DEBS }}
 
       - name: VM stack and :generic.gnome (background)
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install
         run: nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
 
       - name: Build the candidate image
@@ -592,11 +607,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          jobs="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs"
+          # 100 per page and every page: with many roots the run lists far more
+          # than the default 30 jobs, and `build` can fall on a later page.
+          jobs="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
           query='.jobs[] | select(.name == "build" or .name == "pipeline / build")
                  | "\(.status) \(([.steps[] | select(.name == "Stage the candidate") | .conclusion][0]) // "pending")"'
           while :; do
-            state=$(gh api "$jobs" --jq "$query" 2>/dev/null) || state=""
+            state=$(gh api --paginate "$jobs" --jq "$query" 2>/dev/null) || state=""
             case "$state" in
               *" success") break ;;
               "completed "*)
@@ -735,6 +752,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # The call's qualification job reads this run's jobs.
+      actions: read
     uses: ./.github/workflows/publish-root.yml
     with:
       tag: ${{ matrix.tag }}
@@ -753,17 +772,19 @@ jobs:
       COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
   # One table of every root's outcome in the run summary, and an error
-  # annotation for each failed root. It gates nothing: a red root already turns
-  # the run red through its own jobs, and no job needs this one.
+  # annotation for each root with a failed, timed-out or cancelled job. It gates
+  # nothing: a red root already turns the run red through its own jobs, and no
+  # job needs this one. Not for the encrypted qualification, where the roots'
+  # jobs (and the upgrade tier) do not run.
   roots-report:
     needs: [snapshot, build, upgrade, publish, machines, other-roots]
-    if: ${{ !cancelled() && !inputs.v1_disk && needs.snapshot.result == 'success' }}
+    if: ${{ !cancelled() && !inputs.v1_disk && !inputs.encrypted_install && needs.snapshot.result == 'success' }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 5
     permissions:
       actions: read
     steps:
-      - name: Every root's build, publication and layers
+      - name: Every root's build, qualification, publication and layers
         env:
           GH_TOKEN: ${{ github.token }}
           INSTALLER_TAG: ${{ needs.snapshot.outputs.installer }}
@@ -771,31 +792,60 @@ jobs:
         run: |
           jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
             --jq '.jobs[] | {name, result: (.conclusion // .status)}' | jq -s -c .)
-          # The caller job is named `pipeline` in publish.yml; the matrix jobs
-          # are `pipeline / other-roots (<tag>) / <job>`. Missing names show `-`.
-          rows=$(jq -r --arg installer "$INSTALLER_TAG" --argjson others "$OTHERS" '
+          # The caller job is named `pipeline` in publish.yml; the installer
+          # root's jobs are `pipeline / <job>` and every other root's are
+          # `pipeline / other-roots (<tag>) / <job>`. Missing names show `-`.
+          # Qualification: the installer's own upgrade job, and for every other
+          # root whether the installer's build and upgrade jobs both succeeded
+          # (the verdict of its `qualification` job, which polls the same jobs).
+          report=$(jq -c --arg installer "$INSTALLER_TAG" --argjson others "$OTHERS" '
             def result($name): ([.[] | select(.name == $name) | .result] | first) // "-";
+            def bad: . == "failure" or . == "timed_out" or . == "cancelled";
             . as $jobs
-            | ([{tag: $installer, prefix: "pipeline / "}] +
-               [$others[] | {tag: ., prefix: "pipeline / other-roots (\(.)) / "}])[]
-            | . as $root
-            | [$root.tag] + ["build", "publish", "machines"]
-              | map(. as $part | if $part == $root.tag then $part else ($jobs | result($root.prefix + $part)) end)
-              | "| " + join(" | ") + " |"' <<<"$jobs")
+            | (result("pipeline / build")) as $ib
+            | (result("pipeline / upgrade")) as $iu
+            | ($ib == "success" and $iu == "success") as $met
+            | [{tag: $installer, prefix: "pipeline / ", installer: true}] +
+              [$others[] | {tag: ., prefix: "pipeline / other-roots (\(.)) / ", installer: false}]
+            | map(. as $r
+                | ($r.prefix) as $p
+                | ($jobs | result($p + "build")) as $build
+                | (if $r.installer then ($jobs | result($p + "upgrade"))
+                   else ($jobs | result($p + "qualification")) as $gate
+                        | if $gate == "success" then (if $met then "met" else "NOT met" end) else $gate end
+                   end) as $qual
+                | ($jobs | result($p + "publish")) as $publish
+                | ($jobs | result($p + "machines")) as $machines
+                | {tag: $r.tag, installer: $r.installer, build: $build, qual: $qual,
+                   publish: (if $publish == "skipped" and $qual == "NOT met" then "skipped (not qualified)" else $publish end),
+                   machines: (if $machines == "skipped" and $qual == "NOT met" then "skipped (not qualified)" else $machines end),
+                   failed: [(if $r.installer then ["build", "upgrade", "publish", "machines"]
+                             else ["build", "qualification", "publish", "machines"] end)[]
+                            | . as $part | select($jobs | result($p + $part) | bad)]})
+            | {met: $met, roots: .}' <<<"$jobs")
           {
             echo '### Roots'
             echo
-            echo '| Root | Build and tests | Publication | Layers |'
-            echo '| --- | --- | --- | --- |'
-            echo "$rows"
+            echo '| Root | Build and tests | Qualification | Publication | Layers |'
+            echo '| --- | --- | --- | --- | --- |'
+            jq -r '.roots[] | "| \(.tag) | \(.build) | \(.qual) | \(.publish) | \(.machines) |"' <<<"$report"
+            echo
+            echo 'Qualification: the installer root'"'"'s `upgrade` job; for every other root, whether the installer root'"'"'s `build` (security tier) and `upgrade` jobs both succeeded, which its signing and its layers wait for.'
           } >> "$GITHUB_STEP_SUMMARY"
-          failed=$(jq -r '
-            [.[] | select(.name == "pipeline / build" or (.name | test("^pipeline / other-roots \\(.*\\) / build$")))
-              | select(.result == "failure") | .name] | join(", ")' <<<"$jobs")
-          if [ -n "$failed" ]; then
-            echo "::error title=Failed root build/test jobs::$failed; every other root and the installer root carried on"
-          fi
-          echo "$rows"
+          jq -r '.roots[] | select(.failed | length > 0) | "\(.tag)\t\(.installer)\t\(.failed | join(", "))"' <<<"$report" |
+            while IFS=$'\t' read -r tag installer failed; do
+              if [ "$installer" = true ]; then
+                case ", $failed, " in
+                  *", build, "* | *", upgrade, "*)
+                    echo "::error title=Installer root $tag failed::failed jobs: $failed. The other roots built and tested independently, but without the installer root's qualification none of them is signed in this run" ;;
+                  *)
+                    echo "::error title=Installer root $tag failed::failed jobs: $failed. The other roots carried on" ;;
+                esac
+              else
+                echo "::error title=Root $tag failed::failed jobs: $failed. The installer root and the other roots carried on"
+              fi
+            done
+          jq -r '.roots[] | "\(.tag): build \(.build), qualification \(.qual), publication \(.publish), layers \(.machines)"' <<<"$report"
 
   # The exact tested/published generic base plus one squashed machine layer.
   # No rechunk and no machine candidate tag. A branch only builds and tests.
@@ -804,12 +854,14 @@ jobs:
   machines:
     needs: [snapshot, build, upgrade, publish]
     # !cancelled() permits the intentionally skipped publish job, but never a
-    # failed base/test job. On main a changed base MUST have been published.
+    # failed base/test job or a failed publish. On main a changed base MUST have
+    # been published.
     # No PR/fork event can reach code with registry or signing credentials.
     if: >-
       !cancelled() && !inputs.v1_disk && github.repository == 'Reidond/ilex' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
-      needs.build.result == 'success' && needs.upgrade.result == 'success'
+      needs.build.result == 'success' && needs.upgrade.result == 'success' &&
+      needs.publish.result != 'failure'
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     permissions:

@@ -973,7 +973,12 @@ keeps the remote hidden throughout and does not permanently pin old runtimes.
 
 `ilexctl doctor apps` checks configured IDs against Flathub's API without
 installing apps, warns about EOL, trust-file changes and imminent key expiry,
-and explicitly reports unreachable checks as unverified. GPG inspection uses
+and explicitly reports unreachable checks as unverified. Locally it checks every
+shell and machine; `ILEX_SHELLS` (`none` for no shell) and
+`ILEX_APPS_MACHINES` (comma-separated, `none` for no machine) narrow it to a
+selection. CI sets both for each root's own build: that root's shells and the
+machines of its layers, skipped for a shell-free root without layers, so another
+root's broken ID blocks only that root. GPG inspection uses
 a temporary home inside the checkout, never the host root's GPG state.
 The checked-in key expires 2027-06-14; review refreshed upstream trust data
 before that date. Do not assume remote metadata refresh alone renews the key.
@@ -1644,7 +1649,9 @@ parent, machine and ordered shells of every publication. Every root, including
 `base`, builds, rechunks, stages and boots in jobs of its own on its own runner,
 all in parallel: the installer root in `publish-pipeline.yml`, every other root
 in its own call of `publish-root.yml`. One root's failure never blocks another
-root's signing, the installer root's machines or the installer release.
+root's build and tests, the installer root's signing, machines or the installer
+release; a non-installer root's signing alone also waits for the installer
+root's shared qualification (below).
 The existing legacy tags (`latest`, `candidate`, bare date and `sha-` tags)
 stay in the registry: CI neither moves nor deletes them.
 
@@ -1660,7 +1667,10 @@ snapshot ─┬─► build ───┬─► publish ─┬─► machines    
           ├─► upgrade ─┘   (publish needs build and upgrade; upgrade polls build's staging)
           │
           ├─► other-roots[base], other-roots[<next root>] …  one call each, parallel,
-          │     fail-fast off; each is publish-root.yml:  build ─► publish ─► machines
+          │     fail-fast off; each is publish-root.yml:
+          │       build ─┬─► publish ─► machines
+          │              └─► qualification ─┘  (polls the installer's build + upgrade jobs;
+          │                                     gates only publish and machines)
           │
           └─► roots-report   (summary table; nothing needs it)
 
@@ -1693,12 +1703,43 @@ Paths on separate runners:
   stage → capability check → `ephemeral::` → evidence row; no `upgrade::`,
   security, apps or encrypted tiers, and no wait for another job) and ends with
   the same `root-evidence.sh`. A failing root marks only its own call red, with
-  an error annotation and a summary section naming it.
-  Its `publish` job (below) and its `machines` job (the layers of that
+  an error annotation and a summary section naming it (each of the call's
+  `build`, `qualification`, `publish` and `machines` jobs reports its own
+  failure; the run's `roots-report` also names failed, timed-out or cancelled
+  jobs of every root, the installer's included).
+  Its `qualification`, `publish` and `machines` jobs (the layers of that
   parent) belong to that call. Every root runs `ephemeral::` and capability
-  checks; only the installer runs `upgrade::`. The base shares its update
-  implementation, has no installed v1 yet, and gets no legacy-desktop upgrade.
-  `tool::` remains a local tier.
+  checks; only the installer root runs `security::firmware` (and the opt-in
+  tiers) and `upgrade::`. The base shares its update implementation, has no
+  installed v1 yet, and gets no legacy-desktop upgrade. `tool::` remains a
+  local tier.
+- **Shared qualification (the exact boundary).** The installer root's `build`
+  job (the only one that runs `security::firmware`: Secure Boot, shim/GRUB,
+  TPM) and its `upgrade` job (`upgrade::`: bootc update, signature policy,
+  rollback) exercise the boot chain and the update path that every root
+  shares, which another root's own `ephemeral::` does not. So a non-installer
+  root's signing waits for both: its call's `qualification` job runs
+  `.github/installer-qualification.sh`, which polls this run's jobs API
+  (`per_page=100`, every page, 15 s) for the jobs named `pipeline / build` and
+  `pipeline / upgrade`. The root is **qualified** when both concluded `success`,
+  which includes an unchanged installer root (its tiers are skipped steps of a
+  green job; nothing of it could have changed) and no existing v1 (`upgrade`
+  has nothing to test). One job ending in `failure`, `timed_out` or
+  `cancelled` decides at once: the root is not qualified, its `publish` and
+  `machines` jobs are skipped (a green call; `roots-report` shows `NOT met`
+  and an error annotation names the failed installer job). No verdict within
+  125 minutes (the installer jobs' caps are 120) fails the `qualification` job
+  and so the root, closed. Only signing waits: the root's `build`, tests and
+  staging run at once and never wait for the installer. The gate is one-way:
+  no installer job needs any call of `publish-root.yml`, so a failing or slow
+  non-installer root never blocks the installer's build, upgrade, publish,
+  machines or release. The `qualification` job runs when its root's build
+  succeeded and the root changed, has layers, or `test`/`apps` forces tests, so
+  a forced branch run logs the decision although branches sign nothing. A
+  layer of an unchanged non-installer root is gated the same way. Not covered:
+  a non-installer root whose boot chain or update path differs from the
+  installer root's is exercised there only by `ephemeral::`; give it its own
+  tier before relying on the shared one.
 - `upgrade`: `.github/upgrade-from.sh` selects the installer's snapshot as v1;
   only explicit absence permits legacy `latest` as the first-run fallback.
   Registry/authentication errors are fatal. It records `own` (the installer
@@ -1706,8 +1747,10 @@ Paths on separate runners:
   `v1-disk-boot-mask-<bcvk>-<v1 digest>`, with plain image install options.
   The earlier kernel-argument profile is not restored. It installs
   v1 itself on a cache miss, in the background with the VM stack. It waits for
-  the installer `build` job's "Stage the candidate" (found by its job name, so
-  no other job may be named `build` or `pipeline / build`), resolves this ref's
+  the installer `build` job's "Stage the candidate" (found by its job name in
+  the paginated jobs listing, 100 per page, so no other job may be named
+  `build` or `pipeline / build` and many roots cannot push it off the first
+  page), resolves this ref's
   staging tag, pulls by digest, and runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`
   and no upgrade tier is the explicit first-publish case.
 - `installer-due` → `iso`: described below. Automatic due builds run on main;
@@ -1756,17 +1799,22 @@ start neither. Forced tests do not republish an unchanged fingerprint.
 
 `publish-roots.sh` publishes the one root its job built (`ROOT_SCOPE` is
 `installer` in the pipeline's `publish` job and `other` in a `publish-root.yml`
-call, so neither can sign the other's row). Every root's `publish` job needs only
-its own `build` job, plus `upgrade` for the installer; `base` and any further
-desktop use their own ephemeral evidence without borrowing upgrade outputs and
-publish as soon as their own build passes, whatever another root does. Results
+call, so neither can sign the other's row). The installer's `publish` job needs
+its own `build` and `upgrade` jobs. A non-installer root's `publish` job needs
+its own call's `build` job and the call's `qualification` verdict (the
+installer root's `build` and `upgrade` jobs, see "Shared qualification" above);
+`base` and any further desktop use their own ephemeral evidence without
+borrowing upgrade outputs, and no other root's result is consulted. Results
 record `published=true|false` per root; v1-disk dispatch depends only on the
 installer's result. The release job depends only on the installer root's
 build, upgrade and publish jobs and `iso`: a failed, red or slow other root
 cannot block it. A failed root's build/test failure blocks only that root's
-signing and layers; a hard publication failure stops only that call red, and
+signing and layers; a failed installer build or upgrade job (the shared
+qualification) also keeps the other roots from signing in that run, and a
+hard publication failure stops only that call red, and
 every independent successful publication stays signed. Machines use only their
-own parent's positive publication result. Missing results from a failed parent
+own parent's positive publication result and, for a non-installer root, the
+same qualification. Missing results from a failed parent
 publisher skip that parent's layers. A fresh run catches up. Different revisions
 on `base` and `generic.gnome` are
 not an inconsistent dependency pair: both are independent root builds, and
@@ -1776,8 +1824,8 @@ per-parent result and parent-current guards forbid that.
 
 Machine layers run per parent root: the installer root's in the pipeline's
 `machines` job (`needs` build, upgrade, publish), every other root's in the
-`machines` job of its own `publish-root.yml` call (`needs` its build and
-publish). Each reads the five-column publications table, plans only the layers
+`machines` job of its own `publish-root.yml` call (`needs` its build,
+`qualification` and publish). Neither runs after a failed `publish`. Each reads the five-column publications table, plans only the layers
 whose parent is its own root (`ROOT_TAG`), and takes that parent's row of its
 own one-row tested-root inventory. Each row
 retains its composition tag, parent tag, machine and shell list. The parent is
@@ -1946,8 +1994,10 @@ measured on 2026-11-26 (branch dispatch with `test=true`): the shell-free
 steps (5.0, 2.4, 0.2, 2.5) and 14.7 for the security tier. A KDE desktop root
 measured 6 / 12 / 7–9 minutes (build / rechunk / `ephemeral::`) on a 16-vCPU
 host. A root's `build` job is capped at 75 minutes, with step caps of 30
-(build), 30 (rechunk), 20 (stage) and 25 (`ephemeral::`); its `publish` job at
-30, its `machines` job at 60. The installer's `build` job keeps its 120 minutes
+(build), 30 (rechunk), 20 (stage) and 25 (`ephemeral::`); its `qualification`
+job (a read-only poll of the installer jobs) at 130, its `publish` job at
+30, its `machines` job at 60. A root whose inputs are unchanged and that no
+forced test selects starts neither kache, the apt cache nor the VM stack. The installer's `build` job keeps its 120 minutes
 (360 for the encrypted qualification): without the other roots its measured
 time is 27 minutes plus the opt-in tiers. Each published root records
 `ilex.root-inputs`: selected source trees/selection plus both Fedora build
@@ -1961,8 +2011,11 @@ affects neither root inputs nor content fingerprints. Base packages,
 base-only input change cannot leave the desktop unchanged when that input is
 shared; independent RPM/content outcomes and snapshots can still let either
 root skip while the other publishes. Neither changing `[[publish]]` alone nor
-an unrelated shell changes an existing root's inputs. Fedora images are pulled
-once before these checks, so nightly upstream changes invalidate both keys.
+an unrelated shell changes an existing root's inputs. Each root's job pulls
+both Fedora build images itself before its own check, and builds with them
+(`--no-pull`), so a root's key always names the images it was built from; a
+nightly upstream change invalidates every root's key, and a push between two
+roots' pulls can leave them on different digests for that run.
 
 ```sh
 ilexctl info --publications

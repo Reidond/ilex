@@ -5,6 +5,7 @@ import configparser
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import subprocess
@@ -14,10 +15,32 @@ import urllib.error
 import urllib.request
 
 root = Path(sys.argv[1])
+
+
+def selected(variable, directory, filename):
+    """The manifests to check: every one when `variable` is unset or empty (a
+    local run), none for `none`, otherwise the comma-separated names (CI checks
+    only what one root ships, so another root's broken ID cannot block it)."""
+    available = sorted(path.parent.name for path in (root / directory).glob(f"*/{filename}"))
+    names = [name.strip() for name in os.environ.get(variable, "").split(",") if name.strip()]
+    if not names:
+        return available
+    if names == ["none"]:
+        return []
+    unknown = [name for name in names if name not in available]
+    if unknown or "none" in names:
+        sys.exit(f"error: {variable}={','.join(names)}: not {directory}/<name>/{filename} entries: {', '.join(unknown) or 'none'}")
+    return names
+
+
+shells = selected("ILEX_SHELLS", "shells", "shell.toml")
+machines = selected("ILEX_APPS_MACHINES", "machines", "machine.toml")
+print(f"checking the apps of shells [{', '.join(shells)}] and machines [{', '.join(machines)}]")
 ids = set()
-for directory, filename in (("shells", "shell.toml"), ("machines", "machine.toml")):
-    for path in (root / directory).glob(f"*/{filename}"):
-        ids.update(tomllib.loads(path.read_text())["apps"].get("flatpak", []) if "apps" in tomllib.loads(path.read_text()) else [])
+for directory, filename, names in (("shells", "shell.toml", shells), ("machines", "machine.toml", machines)):
+    for name in names:
+        manifest = tomllib.loads((root / directory / name / filename).read_text())
+        ids.update(manifest.get("apps", {}).get("flatpak", []))
 
 
 def get(url):

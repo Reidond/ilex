@@ -13,6 +13,14 @@
 # The installer root keeps its jobs in publish-pipeline.yml because its
 # publication also needs the upgrade tier and its job feeds that tier.
 #
+# Signing alone also waits for the installer root's shared qualification: its
+# build job (with the security::firmware tier) and its upgrade job exercise the
+# boot chain and the update path every root shares, so the `qualification` job
+# polls them through the jobs API (installer-qualification.sh) and `publish`
+# and `machines` need its verdict. Nothing else waits for it: this root's own
+# build and tests run at once, and nothing of the installer root needs this
+# call, so a failure here never blocks the installer root.
+#
 # Runner: `vars.ILEX_RUNNER` (repository variable) or ubuntu-26.04, as everywhere.
 name: publish root
 
@@ -66,6 +74,8 @@ on:
 permissions:
   contents: read
   packages: write
+  # The qualification job reads the installer root's jobs from the jobs API.
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -125,6 +135,13 @@ jobs:
             layers=true
           fi
           echo "layers=$layers" >> "$GITHUB_OUTPUT"
+          # The apps check covers only what this root ships: its shells and the
+          # machines of its layers (a broken ID elsewhere cannot block it).
+          machines=$(awk -F '\t' -v tag="$tag" '$2 == "layer" && $3 == tag {print $4}' "$RUNNER_TEMP/publications" | paste -s -d, -)
+          echo "ILEX_APPS_MACHINES=${machines:-none}" >> "$GITHUB_ENV"
+          if [ "$selection" != none ] || [ -n "$machines" ]; then
+            echo "apps_check=true" >> "$GITHUB_OUTPUT"
+          fi
           # `changed` needs skopeo before the VM stack is installed.
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
           podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
@@ -144,10 +161,20 @@ jobs:
           if [ "$snapshot" != - ]; then reference="$IMAGE_REPO@$snapshot"; fi
           cargo ilexctl changed "$reference" --root "$tag" --inputs-only
 
+      # This root's own shells and layer machines only (ILEX_SHELLS and
+      # ILEX_APPS_MACHINES above); skipped for a shell-free root without layers.
+      - name: Check this root's configured Flathub apps (metadata only)
+        if: steps.composition.outputs.apps_check == 'true'
+        timeout-minutes: 10
+        run: cargo ilexctl doctor apps
+
       - name: Disk
         run: df -h / /mnt
 
+      # Nothing below starts for a root whose inputs are unchanged (and that no
+      # forced test selects): every later step is skipped then.
       - uses: kunobi-ninja/kache-action@v1
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps
         with:
           github-cache: "true"
 
@@ -157,6 +184,7 @@ jobs:
       # never waits for either; the end of the job stops them.
       - name: apt's packages from the cache
         id: debs
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/apt-debs
@@ -164,6 +192,7 @@ jobs:
           restore-keys: ${{ env.APT_DEBS }}
 
       - name: VM stack and this root's published image (background)
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps
         run: nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
 
       - name: Build the candidate image
@@ -262,15 +291,62 @@ jobs:
           echo "::error title=Root $ROOT_TAG failed::build or test failure; nothing of $ROOT_TAG is signed or published, other roots are unaffected"
           printf '### Root %s FAILED\n\nNothing of this root is signed or published in this run. Its layers are skipped; the installer root and the other roots are unaffected. Failed step: see this job.\n' "$ROOT_TAG" >> "$GITHUB_STEP_SUMMARY"
 
+  # The shared qualification: waits (alongside this root's own build, never
+  # holding it up) for the installer root's `build` job, which runs the
+  # security::firmware tier, and its `upgrade` job, which runs `upgrade::`: both
+  # exercise the boot chain and the update path every root shares. Its verdict
+  # gates only signing (publish and machines below). A conclusion of `success`
+  # qualifies, including when the installer root was unchanged (its tiers are
+  # skipped steps of a green job) or no v1 exists; a failed, timed-out or
+  # cancelled installer job does not. No credentials but a read-only jobs API
+  # token, and no dependency of the installer root on this job.
+  qualification:
+    needs: build
+    # Runs when this root could sign something: a changed root, a root with
+    # layers, or a forced test (which signs nothing, but shows the decision).
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      (needs.build.outputs.changed == 'true' || needs.build.outputs.layers == 'true' ||
+       inputs.test || inputs.apps)
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    # The installer jobs are capped at 120 minutes each; the script's deadline
+    # is 125.
+    timeout-minutes: 130
+    outputs:
+      qualified: ${{ steps.gate.outputs.qualified }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Wait for the installer root's build and upgrade jobs
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/installer-qualification.sh
+
+      - name: Report this root's failure
+        if: failure()
+        env:
+          ROOT_TAG: ${{ inputs.tag }}
+        run: |
+          echo "::error title=Root $ROOT_TAG: no qualification verdict::the installer root's jobs gave no verdict; nothing of $ROOT_TAG is signed in this run"
+          printf '### Root %s: qualification FAILED\n\nNo verdict on the installer root, so nothing of this root is signed in this run (its own build and tests are unaffected).\n' "$ROOT_TAG" >> "$GITHUB_STEP_SUMMARY"
+
   # Main only: a manual run dispatched from another branch builds, stages and
   # tests, but never moves a published tag. Signs this root's staged digest, the
-  # one its ephemeral tier tested. No upgrade tier: the installer root alone
-  # feeds it. It has no signing credentials until the last step, and a
-  # failure of any other root cannot reach it.
+  # one its ephemeral tier tested. No upgrade tier of its own: the installer
+  # root's build (security tier) and upgrade jobs qualify it (the
+  # `qualification` job). It has no signing credentials until the last step, and
+  # a failure of any other root cannot reach it.
   publish:
-    needs: build
+    needs: [build, qualification]
     if: >-
       needs.build.result == 'success' && needs.build.outputs.changed == 'true' &&
+      needs.qualification.result == 'success' && needs.qualification.outputs.qualified == 'true' &&
       github.repository == 'Reidond/ilex' && inputs.main &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
@@ -316,19 +392,31 @@ jobs:
           export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           bash .github/publish-roots.sh
 
+      - name: Report this root's failure
+        if: failure()
+        env:
+          ROOT_TAG: ${{ inputs.tag }}
+        run: |
+          echo "::error title=Root $ROOT_TAG publication failed::signing or a publication guard failed; the installer root and the other roots are unaffected, a fresh run catches up"
+          printf '### Root %s: publication FAILED\n\nSee this job. Tags signed earlier stay signed; the installer root and the other roots are unaffected.\n' "$ROOT_TAG" >> "$GITHUB_STEP_SUMMARY"
+
   # The machine layers that sit on this root: its exact tested/published
   # digest plus one squashed layer each. No rechunk and no machine candidate
   # tag. A branch only builds and tests. Each layer needs only this root's
   # own build and publication, never another root's.
   machines:
-    needs: [build, publish]
+    needs: [build, qualification, publish]
     # !cancelled() permits the intentionally skipped publish job, but never a
-    # failed build/test job. On main a changed root MUST have been published.
-    # No PR/fork event can reach code with registry or signing credentials.
+    # failed build/test job, a failed publish or a root the installer root's
+    # qualification did not clear. On main a changed root MUST have been
+    # published. No PR/fork event can reach code with registry or signing
+    # credentials.
     if: >-
       !cancelled() && github.repository == 'Reidond/ilex' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
-      needs.build.result == 'success' && needs.build.outputs.layers == 'true'
+      needs.build.result == 'success' && needs.build.outputs.layers == 'true' &&
+      needs.qualification.result == 'success' && needs.qualification.outputs.qualified == 'true' &&
+      needs.publish.result != 'failure'
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60
     permissions:
@@ -407,3 +495,11 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: bash .github/publish-machines.sh
+
+      - name: Report this root's failure
+        if: failure()
+        env:
+          ROOT_TAG: ${{ inputs.tag }}
+        run: |
+          echo "::error title=Layers of root $ROOT_TAG failed::a layer's build, test or signing failed; the root itself, the installer root and the other roots are unaffected"
+          printf '### Layers of root %s FAILED\n\nSee this job. The root is signed independently of its layers; a fresh run catches up.\n' "$ROOT_TAG" >> "$GITHUB_STEP_SUMMARY"
