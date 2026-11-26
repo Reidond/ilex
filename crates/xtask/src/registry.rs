@@ -28,6 +28,14 @@ pub fn is_ci() -> bool {
         .any(|n| matches!(std::env::var(n).as_deref(), Ok("true" | "1")))
 }
 
+/// True when `CI` or `GITHUB_ACTIONS` is set at all, whatever its value:
+/// signing secrets can exist there, so no throwaway-registry run may.
+fn ci_variable_set() -> bool {
+    ["CI", "GITHUB_ACTIONS"]
+        .iter()
+        .any(|name| env_nonempty(name).is_some())
+}
+
 /// Registry owner, lowercased: `$GITHUB_REPOSITORY_OWNER`.
 fn owner() -> Option<String> {
     env_nonempty("GITHUB_REPOSITORY_OWNER").map(|o| o.to_ascii_lowercase())
@@ -59,12 +67,21 @@ pub fn is_local_registry(repository: &str) -> bool {
         || host.starts_with("localhost:")
         || host == "127.0.0.1"
         || host.starts_with("127.0.0.1:")
-        || host.starts_with("[::1]")
+        || host == "[::1]"
+        || host.starts_with("[::1]:")
 }
 
 /// Publishing is CI-only. The one escape hatch is `--allow-local-registry`
-/// together with a registry on this machine, so it can never reach ghcr.
+/// together with a registry on this machine, so it can never reach ghcr; it is
+/// refused outright whenever `CI` or `GITHUB_ACTIONS` is set.
 pub fn require_ci(what: &str, repository: &str, allow_local_registry: bool) -> Result<()> {
+    if allow_local_registry && ci_variable_set() {
+        bail!(
+            "--allow-local-registry is forbidden when CI or GITHUB_ACTIONS is set: CI publishes \
+             to ghcr only, and a throwaway-registry run (which derives the crate closure with \
+             cargo) must not share an environment with signing secrets"
+        );
+    }
     if is_ci() {
         return Ok(());
     }

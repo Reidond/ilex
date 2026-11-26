@@ -6,7 +6,12 @@ without_key() { env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD "$@"; }
 # its PATH; it reads the root image's crates from the file recorded without the
 # key (ILEX_IMAGE_CRATES, build-publisher.sh) and says so in its log.
 no_cargo=$(without_key bash .github/no-cargo.sh)
-signing() { PATH="$no_cargo:$PATH" "$@"; }
+# CARGO, RUSTC and the wrapper variables could also point a toolchain somewhere
+# other than the shims, so the signing process does not inherit them.
+signing() {
+    PATH="$no_cargo:$PATH" env -u CARGO -u RUSTC -u RUSTC_WRAPPER \
+        -u RUSTC_WORKSPACE_WRAPPER -u RUSTDOC "$@"
+}
 without_key bash .github/publication-tag.sh "$TAG"
 : "${ILEX_IMAGE_CRATES:?the recorded image crates (build-publisher.sh) are required}"
 without_key bash .github/publication-tag.sh "$INSTALLER_TAG"
