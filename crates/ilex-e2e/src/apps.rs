@@ -1,7 +1,7 @@
 //! Opt-in installed-system qualification; never registered by default CI.
 use crate::common::{self, Group, trial};
 use crate::disk::vmtest;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use ilex_devkit::{cmd, qemu::{self, Vm, VmConfig}};
 use ilex_vmctl::qmp::Qmp;
 use libtest_mimic::Trial;
@@ -56,10 +56,21 @@ fn boot() -> Result<Mutex<Vm>> {
 
 fn boot_named(purpose: &str) -> Result<Mutex<Vm>> {
     let ws = common::workspace()?;
+    let selection = common::selection()?;
     ensure!(
-        !common::selection()?.shells.is_empty(),
+        !selection.shells.is_empty(),
         "apps:: requires a desktop image with app lists"
     );
+    // These trials pin GNOME's own list: they remove Decibels from it, uninstall
+    // Calculator, add Chess and update Text Editor and Extensions. The KDE
+    // shell's apps are qualified by `graphical::apps --shell kde`.
+    ensure!(
+        selection.default_shell.as_deref() == Some("gnome"),
+        "apps:: qualifies the GNOME shell's app lists (its default shell here is {}); \
+         use `graphical::apps --shell kde` for the KDE shell's apps",
+        selection.default_shell.as_deref().unwrap_or("none")
+    );
+    let greeter = common::greeter()?.context("apps:: needs a greeter")?;
     let mut config = VmConfig::new(purpose, vmtest::disk(&ws)?);
     config.apps = true;
     config.isolated_ssh = true;
@@ -77,7 +88,7 @@ nmcli connection modify "$connection" ipv4.never-default yes ipv6.never-default 
 nmcli device reapply "$device"
 "#)?;
     vm.wait_for("offline apps retry", "test \"$(systemctl show ilex-apps.service -p SubState --value)\" = auto-restart && test \"$(systemctl show ilex-apps.service -p ExecMainStatus --value)\" = 75", Duration::from_secs(180))?;
-    vm.ssh_ok("test \"$(systemctl is-system-running --wait)\" = running && test -z \"$(systemctl --failed --no-legend)\" && systemctl is-active gdm && test \"$(getenforce)\" = Enforcing")?;
+    vm.ssh_ok(&format!("test \"$(systemctl is-system-running --wait)\" = running && test -z \"$(systemctl --failed --no-legend)\" && systemctl is-active {greeter} && test \"$(getenforce)\" = Enforcing"))?;
     let state: Value = serde_json::from_str(&vm.ssh_ok("cat /var/lib/ilex/apps/state.json")?)?;
     ensure!(state["result"] == "offline", "offline state: {state}");
     ensure!(
@@ -114,7 +125,7 @@ PY"#)?;
     vm.wait_for("automatic recovery completes below 8 GiB free", "python3 -c 'import json; s=json.load(open(\"/var/lib/ilex/apps/state.json\")); assert s[\"result\"] == \"complete\" and s[\"initial_install_complete\"]'", INSTALL)?;
     let restarts = vm.ssh_ok("systemctl show ilex-apps.service -p NRestarts --value")?;
     ensure!(restarts.parse::<u32>()? > invocation.parse::<u32>()?, "no subsequent automatic invocation");
-    vm.ssh_ok("test \"$(systemctl show ilex-apps.service -p ExecMainStatus --value)\" = 0 && test \"$(systemctl is-system-running --wait)\" = running && test -z \"$(systemctl --failed --no-legend)\" && systemctl is-active gdm && systemctl is-active ilex-apps.timer && test \"$(getenforce)\" = Enforcing && rm /var/tmp/ilex-apps-space")?;
+    vm.ssh_ok(&format!("test \"$(systemctl show ilex-apps.service -p ExecMainStatus --value)\" = 0 && test \"$(systemctl is-system-running --wait)\" = running && test -z \"$(systemctl --failed --no-legend)\" && systemctl is-active {greeter} && systemctl is-active ilex-apps.timer && test \"$(getenforce)\" = Enforcing && rm /var/tmp/ilex-apps-space"))?;
     println!("ok   timer retries automatically after offline boot and interrupted low-space pull; boot and GDM stay healthy");
     Ok(Mutex::new(vm))
 }
