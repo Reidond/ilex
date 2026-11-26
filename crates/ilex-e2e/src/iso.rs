@@ -1059,6 +1059,11 @@ fn installed_system(
     report.check("installer logs are saved", installer_logs(&vm, artifacts));
 
     report.check(
+        "the installed layout is recorded",
+        vm.ssh_ok(common::LAYOUT_RECORD)
+            .and_then(|text| qemu::write_artifact(artifacts, "installed-layout.txt", &text)),
+    );
+    report.check(
         "bootc tracks the target image",
         bootc_status(&vm, artifacts, target, digest),
     );

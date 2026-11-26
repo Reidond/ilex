@@ -37,6 +37,9 @@
 //!   comes up promptly, each failed write is reported on the second UART within
 //!   a second, and no SSH server runs without the key.
 //!
+//! * `iso::next_unattended`: an installation with no interface from an
+//!   `ILEX-ANSWERS` volume, then the installed disk booted and checked (see
+//!   `iso_next/unattended.rs`).
 //! * `iso::next_helper_usb` / `iso::next_helper_cdrom`: the root helper on the
 //!   real ISO, written to a USB stick or attached as an optical drive, beside
 //!   three blank disks (see `iso_next/helper.rs`): the boot medium is
@@ -73,6 +76,7 @@ use crate::iso::grub_key;
 
 mod helper;
 mod loop_file;
+mod unattended;
 mod vm_state;
 
 /// From power-on to the page being mapped. Boot is a few tens of seconds; the
@@ -111,6 +115,7 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_helper_cdrom", || {
             helper::run(helper::Medium::Cdrom)
         }),
+        trial("iso::next_unattended", unattended::run),
     ]
 }
 
@@ -564,6 +569,9 @@ fn diagnostics(vm: &mut Vm, artifacts: &Path, name: &str) {
     // lines of everything are mostly the harness's own SSH logins.
     let script = "systemctl --no-pager --failed; \
          systemctl --no-pager status ilex-installer-session ilex-installer-fallback sshd; \
+         systemctl --no-pager status ilex-installer-answers.service; \
+         journalctl -b --no-pager -o short-monotonic -u ilex-installer-answers.service -u ilex-installerd.service; \
+         ls -l /dev/disk/by-label; udevadm info --query=property --name=/dev/disk/by-label/ILEX-ANSWERS; \
          loginctl list-sessions --no-pager; getenforce; \
          pid=$(systemctl show ilex-installer-session.service -p MainPID --value); \
          pkcheck --action-id org.freedesktop.login1.chvt --process $pid; echo pkcheck-chvt=$?; \

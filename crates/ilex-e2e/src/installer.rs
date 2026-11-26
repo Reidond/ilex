@@ -13,7 +13,9 @@
 //! `ilex-installer` user, exactly as the interface will, and assert the JSON;
 //! another user must be refused by the bus policy. The tests share one VM and
 //! one helper, which some of them restart: the group runs them one at a time.
-//! Nothing here installs: no test writes to the helper's disks.
+//! Nothing in this group installs: no test of it writes to the helper's disks.
+//! (`installer::policy`, `installer::install` and `installer::interrupted`,
+//! in `installer/apply.rs`, do, in UEFI VMs of their own.)
 //!
 //! * `installer::probe`: the helper's self-check; what it reports about this
 //!   VM and its disks, the live medium and the disks in use among them, and
@@ -46,6 +48,8 @@ use serde_json::{Value, json};
 
 use crate::common::{self, Group, trial};
 
+pub(crate) mod apply;
+
 const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
 /// A change to a JSON document, for a variant of a fixture or a request.
@@ -73,6 +77,8 @@ const MEMORY: &str = "4G";
 /// installer::` does not need `--test-threads 1`).
 static GROUP: Group<Mutex<EphemeralVm>> = Group::new("installer", boot);
 
+/// How many of the `installer::` trials run in the group's VM: the ones that
+/// write a disk boot their own and are counted out by the caller.
 pub fn expect(tests: usize) {
     GROUP.expect(tests);
 }
@@ -82,14 +88,18 @@ pub fn shutdown() {
 }
 
 pub fn trials() -> Vec<Trial> {
-    vec![
+    let mut trials = vec![
         trial("installer::probe", || {
             GROUP.run(|vm| probe(&vm.lock().unwrap_or_else(PoisonError::into_inner)))
         }),
         trial("installer::plan", || {
             GROUP.run(|vm| plan(&vm.lock().unwrap_or_else(PoisonError::into_inner)))
         }),
-    ]
+    ];
+    // The trials that write a disk boot VMs of their own (UEFI), not this
+    // group's.
+    trials.extend(apply::trials());
+    trials
 }
 
 // --- the VM ---------------------------------------------------------------
@@ -112,6 +122,10 @@ fn live_image() -> Result<String> {
 /// checkout's: its tag carries the checkout's slug, the image it extends and the
 /// layer's own recipe (a changed recipe is a different tag), and the image is
 /// labelled with the checkout's owner like every other image the tooling builds.
+///
+/// The live image is only ever booted as a live ISO, so it has no bootc install
+/// configuration either; the trials that write it to a disk (`bcvk to-disk`,
+/// for a UEFI boot) need one, and the layer adds it.
 fn with_ssh(ws: &Workspace, live: &str) -> Result<String> {
     let id =
         cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", live]))
@@ -120,7 +134,8 @@ fn with_ssh(ws: &Workspace, live: &str) -> Result<String> {
         "FROM {live}\n\
          RUN dnf -y install --setopt=install_weak_deps=0 openssh-server && \\\n\
              systemctl enable sshd.service && \\\n\
-             systemctl mask ilex-installer-session.service ilex-installer-fallback.service\n\
+             systemctl mask ilex-installer-session.service ilex-installer-fallback.service && \\\n\
+             mkdir -p /usr/lib/bootc/install && printf '[install.filesystem.root]\\ntype = \"xfs\"\\n' > /usr/lib/bootc/install/10-installer-test.toml\n\
          LABEL ilex.installer-test=\"ssh\"\n"
     );
     let tag = format!(
