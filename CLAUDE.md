@@ -3354,8 +3354,8 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     the disk marked. **The disk is addressed by its `/dev/disk/by-id/<id>` name
     from the moment the claim ends** (`wipefs` and `systemd-repart` get that
     path, never the kernel's name), and `Apply` refuses a disk that has no such
-    name (a virtio disk with no serial number has only a bus path, and some
-    eMMC or SD disks have none: `unknown-disk`). The link is checked to lead to
+    name (a virtio disk with no serial number has only a bus path:
+    `unknown-disk`). The link is checked to lead to
     the very device the claim is on, in `Apply` and again just before the claim
     is released; a disk swapped out in the instant after, whatever kernel name
     its replacement takes, has another id, so the name leads nowhere and the
