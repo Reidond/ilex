@@ -5,6 +5,13 @@
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# This script runs in the tier's one VM next to the other tests, and it is heavy
+# (every stand-in is an exec on the guest's virtiofs root): let the guest finish
+# booting first (tuned-ppd starts late, and a start slowed past its timeout fails
+# the tier's `system_running` and `no_failed_units`), and stay out of the others' way.
+timeout 300 systemctl is-system-running --wait >/dev/null 2>&1 || true
+renice -n 19 $$ >/dev/null 2>&1 || true
+
 # kde-gtk-config is what writes settings.ini, gtk-4.0, gtkrc-2.0 and GSettings
 # into the home; the shell leaves it out, so nothing can.
 for path in /usr/lib64/qt6/plugins/kf6/kded/gtkconfig.so \
