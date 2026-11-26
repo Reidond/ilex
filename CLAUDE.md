@@ -858,22 +858,76 @@ checks that the overlay holds nothing else):
   (upstream it is only `PartOf=graphical-session.target`), so it stops whenever
   Plasma's target does.
 - `ilex-kde-session.service` (Plasma only, `PartOf=plasma-workspace.target`) runs
-  `/usr/libexec/ilex/kde-session-watch`: every 3 seconds it asks logind whether the
-  login session that started Plasma (`XDG_SESSION_ID` of the manager's
-  environment) is gone or `closing`, and then stops `graphical-session.target`, as a
-  GNOME logout does (compositor, shell, portals and `plasma-workspace.target` go
-  with it), only while `plasma-workspace.target` is still up. A normal logout needs
-  none of this: Plasma stops its own target and the watch with it. Measured with
-  SIGKILL of `startplasma-wayland` and `kwin_wayland` in a lingering manager:
-  logind ends the session, but upstream leaves `plasma-workspace.target`,
-  `graphical-session.target`, the compositor (`kwin_wayland_wrapper` even respawns
-  it), the shell, `xdg-desktop-portal` and the GTK portal reading the KDE database
-  running, and the next Plasma login layers over them. A closed session can stay
-  listed as `closing` for a long time (the `oo7-daemon-login` helper of GDM's
-  password login holds its scope), so `closing` counts as over. The Wayland
-  clients that lost the compositor fail (for example `xdg-desktop-portal-gtk`);
-  they are stopped, not running. `GTK_USE_PORTAL=1` stays in the manager (no
-  shutdown script runs after a crash) and is benign: GNOME's own portal answers.
+  `/usr/libexec/ilex/kde-session-watch` (bash): every 3 seconds it asks logind
+  whether the login session that started Plasma (`XDG_SESSION_ID` of the manager's
+  environment) is gone or `closing`. A normal logout needs none of this: Plasma
+  stops its own target and the watch with it. Measured with SIGKILL of
+  `startplasma-wayland` and `kwin_wayland` in a lingering manager: logind ends the
+  session, but upstream leaves `plasma-workspace.target`, `graphical-session.target`,
+  the compositor (`kwin_wayland_wrapper` even respawns it), the shell,
+  `xdg-desktop-portal` and the GTK portal reading the KDE database running. A closed
+  session can stay listed as `closing` for a long time (the `oo7-daemon-login` helper
+  of GDM's password login holds its scope; one run took 69 s to be removed), so
+  `closing` counts as over. The Wayland clients that lost the compositor fail (for
+  example `xdg-desktop-portal-gtk`); they are stopped, not running.
+  `GTK_USE_PORTAL=1` stays in the manager (no shutdown script runs after a crash)
+  and is benign: GNOME's own portal answers.
+  **The end of the tracked session never justifies a stop by itself**: the user can
+  log in again before the watch looks (Plasma's or GNOME's session in the same
+  lingering manager, a login manager's auto-relogin, a slow `loginctl`). Whatever the
+  watch does is decided from what the manager and logind say *at that moment*, in
+  this order, and a doubt means no stop (a `loginctl` that fails or is slow leaves a
+  session alive; a session or a user it cannot query counts as live; an unreadable
+  manager environment is waited out):
+  1. the manager's `XDG_SESSION_ID` is another session that is live: if the manager's
+     `XDG_CURRENT_DESKTOP` is KDE the watch follows that session from now on, any
+     other desktop owns the manager and only Plasma's units go (step 2);
+  2. `XDG_CURRENT_DESKTOP` is not KDE, or gnome-session's targets
+     (`gnome-session*.target`) are active, activating or deactivating:
+     `graphical-session.target` is not Plasma's to stop, so only Plasma's own units
+     are (`plasma-workspace*.target`, `plasma-*.service` and `xdg-desktop-portal.service`,
+     whose frontend keeps the desktop it started under and starts again, on demand,
+     for the one that is there; the GTK portal and the look sync are `PartOf`
+     `plasma-workspace.target`). `graphical-session.target` has `StopWhenUnneeded`,
+     so it ends with the last Plasma target unless a GNOME session wants it;
+  3. logind lists another graphical (`wayland`, `x11`, `mir`) session of this user
+     that is not closing: the watch waits and looks again (the session's environment
+     will say what it is);
+  4. only then `graphical-session.target` is stopped, as a GNOME logout does. The
+     logind listing is the last check before the stop: logind creates a login's
+     session well before anything of it reaches the manager. What remains is the
+     few milliseconds between that listing and the stop job; a login that lands
+     there finds its own start queued behind the stop, nothing of it torn down.
+  The watch polls: logind announces `SessionNew`, `SessionRemoved` and a session's
+  `Active` property on its bus (measured with `gdbus monitor --system --dest
+  org.freedesktop.login1`; one crashed session went `Active=false` 0.4 s after the
+  crash and was removed 69 s later), but no signal says that a session turned
+  `closing`, the end this watch most needs, so events could only add a wake-up to
+  the poll, not replace it. Two simultaneous graphical sessions of one user in one
+  manager share one `XDG_CURRENT_DESKTOP`; that shape is not supported.
+  `ephemeral::shell_themes` runs the script against stand-ins for `systemctl`,
+  `loginctl`, `sleep` and the session files in 19 scenarios plus the two refusals to
+  watch (each of the four steps, a login with Plasma or GNOME or one the environment
+  does not name yet arriving before the watch acts, a closing, tty, X11, unqueryable
+  or unlistable session, an unreadable environment), and the login-time script
+  below in 8.
+- `/etc/xdg/plasma-workspace/env/10-ilex-kde-stale.sh` is sourced by `startplasma`
+  before it starts anything, quietly (the environment is read back from that shell).
+  A login that comes while the previous session's Plasma is still up (a crash, the
+  watch not yet awake) would start over a compositor that has no seat: measured,
+  `startplasma-wayland` finds `plasma-workspace.target` active, starts nothing, and
+  the greeter stays on screen next to a session logind calls active. The script
+  stops that stack and waits until the manager has no stop job left (starting
+  Plasma's target over one is refused: `TransactionIsDestructive`,
+  "Could not start systemd managed Plasma session"), so the session starts its own.
+  It acts only when `plasma-workspace.target` is active or activating, the manager's
+  `XDG_SESSION_ID` is neither this session's nor empty, and logind has dropped that
+  session or calls it closing: a live one is a second session of the same user,
+  not its to touch. `graphical-session.target` stays active under a GNOME session,
+  and GNOME's `gnome-session-init-worker` refuses to start over it ("A graphical
+  session is already running!", GDM then drops the login), so no live GNOME session
+  can ever sit next to leftovers of Plasma's stack: Plasma's target is bound to
+  graphical-session.target.
 - Plasma's env script exports only `GTK_USE_PORTAL=1`, so GTK applications of the
   session ask the portal (and Plasma's file dialogs). Left behind by a crash it is
   benign: GNOME's own portal answers from GNOME's own settings. A shutdown script
@@ -968,11 +1022,19 @@ user manager, then GNOME made dark with the dark scheme, Adwaita-dark as GTK 3's
 theme name (Fedora's GTK 3 has no such theme directory and does not read
 `color-scheme`, so the name is checked, not the colours) and a purple accent, a
 normal logout, and Plasma again, Breeze Dark with Plasma's blue accent and GNOME's
-database as GNOME left it. It ends with a real crash: SIGKILL of that Plasma
-session's compositor and session leader, the session watch stopping Plasma's
-targets (waited for, up to a minute), no process left that selects the KDE
-database, and a GNOME login in the same manager whose GTK 3, GTK 4 and libadwaita
-applications are GNOME's dark choice. Screenshots land in `<state dir>/artifacts/graphical*/`.
+database as GNOME left it. It then crashes that Plasma session for real: SIGKILL of
+its compositor and session leader, the session watch stopping Plasma's targets
+(waited for, up to a minute), no process left that selects the KDE database, and a
+GNOME login in the same manager whose GTK 3, GTK 4 and libadwaita applications are
+GNOME's dark choice. Two more crashes follow with the session watch stopped
+(SIGSTOP) beforehand, so that it wakes as late as an auto-relogin or a slow
+`loginctl` could make it: a GNOME login (which fails by itself,
+`gnome-session-init-worker` refusing to start over a graphical session that is still
+up; the late watch must then clear the leftovers, leave `graphical-session.target`
+inactive, and the next GNOME login must work and look as GNOME chose) and a Plasma
+login (which must stop the leftovers itself, get its own compositor and shell, show
+the desktop rather than the greeter, and not be touched by the watch). Screenshots
+land in `<state dir>/artifacts/graphical*/`.
 The Anaconda installer's catalogue offers only the installer composition's shell
 list (GNOME), so KDE compositions are not offered there and its release does not
 wait for their tags; KDE installs arrive with the KDE installer edition.

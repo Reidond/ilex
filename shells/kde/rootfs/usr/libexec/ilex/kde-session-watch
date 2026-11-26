@@ -1,5 +1,6 @@
-#!/bin/sh
-# Stop Plasma's units when the login session that started them is gone.
+#!/bin/bash
+# Stop Plasma's units when the login session that started them is gone, and
+# never anything a later login owns.
 #
 # Plasma's own logout stops plasma-workspace.target. If startplasma dies instead
 # (a crash, a SIGKILL), logind ends the session, but a user manager that outlives
@@ -10,30 +11,152 @@
 # the shell, the portals and plasma-workspace.target (which is bound to it) all
 # stop with it. Stopping plasma-workspace.target alone would leave the compositor
 # and the portal frontend running.
-id=$(systemctl --user show-environment | sed -n 's/^XDG_SESSION_ID=//p')
-case $id in
-'' | *[!0-9A-Za-z]*)
-    echo "kde-session-watch: no login session in the environment, not watching" >&2
-    exit 1
-    ;;
-esac
-session=/run/systemd/sessions/$id
-if [ ! -e "$session" ]; then
-    echo "kde-session-watch: logind does not know session $id, not watching" >&2
+#
+# The user can log in again at any moment, so the end of the tracked session
+# alone never justifies a stop: a new session of this user, Plasma's or GNOME's,
+# or the login manager's auto-relogin, can arrive between the poll that saw the
+# end and the stop. Everything below is decided from what the manager and logind
+# say *now*, in this order, and a doubt means no stop:
+#
+# 1. another live session has taken over the manager (its XDG_SESSION_ID): a
+#    Plasma one is watched from now on, any other desktop's owns the manager,
+# 2. the manager's desktop is not Plasma's, or gnome-session's targets are up:
+#    graphical-session.target is not Plasma's to stop,
+# 3. logind lists another graphical session of this user that is not closing:
+#    wait for its environment to say what it is (a doubt is a reason to wait),
+# 4. only then graphical-session.target goes, as a GNOME logout does.
+#
+# Where graphical-session.target is not Plasma's, only Plasma's own units go.
+# A Plasma login that arrives before this acts would start over the leftovers
+# and show nothing: its own env script (plasma-workspace/env/10-ilex-kde-stale.sh)
+# stops them first, and that stops this watch with them.
+# `loginctl`, `systemctl` and the logind files are read by name, so a test can
+# stand in for them.
+
+log() { echo "kde-session-watch: $*" >&2; }
+
+valid_id() {
+    case $1 in
+    '' | *[!0-9A-Za-z]*) return 1 ;;
+    esac
+}
+
+# A session logind still lists and has not closed. Only positive evidence ends
+# one: a `loginctl` that fails or is slow leaves a listed session alive. A
+# closed session can stay listed as "closing" for a long time, when a straggler
+# of its scope (a keyring helper) keeps running.
+live() {
+    valid_id "$1" && [ -e "/run/systemd/sessions/$1" ] &&
+        [ "$(timeout 10 loginctl show-session "$1" --property=State --value 2>/dev/null)" != closing ]
+}
+
+# $env is what the manager exports now: the last session to log in imported its
+# own XDG_SESSION_ID and XDG_CURRENT_DESKTOP over it.
+env_of() { printf '%s\n' "$env" | sed -n "s/^$1=//p" | head -n 1; }
+
+# This user's graphical sessions other than $1 that logind has not closed, by
+# id. A session that cannot be queried counts, as does a user that cannot be.
+others() {
+    local ids s props
+    ids=$(timeout 10 loginctl show-user "$uid" --property=Sessions --value 2>/dev/null) || {
+        echo '?'
+        return
+    }
+    for s in $ids; do
+        [ "$s" = "$1" ] && continue
+        valid_id "$s" && [ -e "/run/systemd/sessions/$s" ] || continue
+        props=$(timeout 10 loginctl show-session "$s" --property=Type --property=State 2>/dev/null) || {
+            echo "$s"
+            continue
+        }
+        case $props in
+        *State=closing*) continue ;;
+        *Type=wayland* | *Type=x11* | *Type=mir*) echo "$s" ;;
+        esac
+    done
+}
+
+# gnome-session's targets are up (or coming up, or going down): a GNOME session
+# owns graphical-session.target now.
+gnome_up() {
+    [ -n "$(systemctl --user list-units --plain --no-legend --state=active,activating,deactivating \
+        'gnome-session*.target' 2>/dev/null)" ]
+}
+
+# Plasma's own units, which graphical-session.target's stop would take with it
+# and a GNOME session's must not: the target, its Wayland companion and every
+# plasma-*.service (the compositor, the shell, the portal backend). The GTK
+# portal and the look sync are PartOf plasma-workspace.target. The portal
+# frontend keeps the desktop it started under, so one that was started for
+# Plasma is stopped as well and starts again, on demand, for the desktop that is
+# there now.
+stop_plasma_only() {
+    exec systemctl --user --no-block stop 'plasma-workspace*.target' 'plasma-*.service' \
+        xdg-desktop-portal.service
+}
+
+# Polled: logind announces sessions coming and going (SessionNew, SessionRemoved)
+# but not that one turned "closing", which is the end this watch most needs.
+nap() { sleep 3; }
+
+uid=$(id -u)
+env=$(systemctl --user show-environment)
+id=$(env_of XDG_SESSION_ID)
+if ! valid_id "$id"; then
+    log "no login session in the environment, not watching"
     exit 1
 fi
-# The session is over once logind has dropped it, or while it is "closing": its
-# leader is gone but a straggler of its scope (a keyring helper, say) can keep
-# it listed for a long time.
-ended() {
-    [ ! -e "$session" ] || [ "$(loginctl show-session "$id" --property=State --value 2>/dev/null)" = closing ]
-}
-until ended; do
-    sleep 3
+if [ ! -e "/run/systemd/sessions/$id" ]; then
+    log "logind does not know session $id, not watching"
+    exit 1
+fi
+
+while :; do
+    while live "$id"; do nap; done
+    # The tracked session is over: decide, from the state of the moment, what
+    # that means. This repeats while another session's state is unclear.
+    blocked=
+    while :; do
+        env=$(systemctl --user show-environment 2>/dev/null)
+        if [ -z "$env" ]; then
+            nap
+            continue
+        fi
+        now=$(env_of XDG_SESSION_ID)
+        desktop=$(env_of XDG_CURRENT_DESKTOP)
+        case ":$desktop:" in
+        *:KDE:*) kde=1 ;;
+        *) kde= ;;
+        esac
+        if [ "$now" != "$id" ] && live "$now"; then
+            if [ -n "$kde" ]; then
+                log "session $now has taken over from $id, watching it"
+                id=$now
+                continue 2
+            fi
+            log "session $id ended, session $now (${desktop:-no desktop}) owns the manager: stopping only Plasma's units"
+            stop_plasma_only
+        fi
+        if [ -z "$kde" ] || gnome_up; then
+            log "session $id ended, the manager belongs to ${desktop:-no desktop} now: stopping only Plasma's units"
+            stop_plasma_only
+        fi
+        # A later session's own units may already have stopped Plasma's.
+        systemctl --user is-active --quiet plasma-workspace.target || exit 0
+        # The last check before the stop, closest to it: logind creates a login's
+        # session well before anything of it reaches the manager.
+        other=$(others "$id" | tr '\n' ' ')
+        other=${other% }
+        if [ -n "$other" ]; then
+            if [ "$other" != "$blocked" ]; then
+                log "session $id ended, but session(s) $other of this user are live: waiting"
+                blocked=$other
+            fi
+            nap
+            continue
+        fi
+        log "session $id ended without a logout, stopping Plasma"
+        # Not waiting for the stop job: it stops this service too.
+        exec systemctl --user --no-block stop graphical-session.target
+    done
 done
-# A later session may already own graphical-session.target: only a Plasma that is
-# still up is left over from this one.
-systemctl --user is-active --quiet plasma-workspace.target || exit 0
-echo "kde-session-watch: session $id ended without a logout, stopping Plasma" >&2
-# Not waiting for the stop job: it stops this service too.
-exec systemctl --user --no-block stop graphical-session.target
