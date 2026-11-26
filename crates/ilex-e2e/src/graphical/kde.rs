@@ -484,7 +484,8 @@ pub(super) fn colours(vm: &mut Vm, dark: bool) -> Result<()> {
     } else {
         ("BreezeLight", "Breeze", 2)
     };
-    user(vm, &format!("plasma-apply-colorscheme {scheme}"))?;
+    // A Qt tool: it needs the session's display, so it runs as an application.
+    app(vm, &format!("plasma-apply-colorscheme {scheme}"))?;
     let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
     vm.wait_for(
         &format!("the portal to report scheme {portal}"),
