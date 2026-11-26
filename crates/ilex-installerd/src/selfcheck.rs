@@ -3133,6 +3133,55 @@ fn check_secrets() -> Result<()> {
         secret::Secret::from_memfd(secret::sealed_memfd(&[b'x'; 33])?, 32).is_err(),
         "an oversized secret was accepted"
     );
+    // Each secret has pages of its own: dropping one unlocks nothing of
+    // another's, and a secret's length is not read after it was wiped.
+    let first = reads(secret::sealed_memfd(b"first secret")?)?;
+    let second = reads(secret::sealed_memfd(b"second secret")?)?;
+    let page = |s: &secret::Secret| s.address() / 4096;
+    ensure!(
+        page(&first) != page(&second)
+            && first.address() % 4096 == 0
+            && second.address() % 4096 == 0
+            && first.mapped_len() >= 4096,
+        "two secrets share a page"
+    );
+    let address = second.address();
+    let locked = second.is_locked();
+    drop(first);
+    ensure!(
+        second.expose() == b"second secret",
+        "dropping a secret changed another"
+    );
+    if locked {
+        // /proc/self/smaps: the mapping that holds the second secret is still
+        // locked after the first was unlocked.
+        let smaps = fs::read_to_string("/proc/self/smaps")?;
+        let mut inside = false;
+        let mut kilobytes = None;
+        for line in smaps.lines() {
+            if let Some((range, _)) = line.split_once(' ')
+                && let Some((from, to)) = range.split_once('-')
+                && let (Ok(from), Ok(to)) = (
+                    usize::from_str_radix(from, 16),
+                    usize::from_str_radix(to, 16),
+                )
+            {
+                inside = from <= address && address < to;
+            } else if inside && let Some(rest) = line.strip_prefix("Locked:") {
+                kilobytes = rest
+                    .trim()
+                    .trim_end_matches("kB")
+                    .trim()
+                    .parse::<u64>()
+                    .ok();
+            }
+        }
+        ensure!(
+            kilobytes.is_some_and(|k| k >= 4),
+            "a live secret's page was unlocked by dropping another: {kilobytes:?}"
+        );
+    }
+    drop(second);
     // The password goes to chpasswd as one line.
     for bad in [&b"a\nb"[..], b"a\rb", b"a\0b", b"\xff\xfe"] {
         let secret = reads(secret::sealed_memfd(bad)?)?;
@@ -3303,6 +3352,57 @@ fn check_jobs(scratch: &Path) -> Result<()> {
             "unreachable",
         ),
         (&[][..], false, "unreachable"),
+        // Progress without the line that says the policy engine has let the
+        // image through is no acceptance, nor is any progress after an error.
+        (&["Copying blob sha256:aa"][..], false, "unreachable"),
+        (&["Copying blob sha256:aa"][..], true, "unreachable"),
+        (&[][..], true, "unreachable"),
+        (
+            &[
+                "Getting image source signatures",
+                "Error: initializing source docker://ghcr.io/x: reading manifest: connection reset",
+                "Copying blob sha256:aa",
+            ][..],
+            false,
+            "unreachable",
+        ),
+        (
+            &[
+                "Getting image source signatures",
+                "time=\"2026-11-26T10:00:00Z\" level=fatal msg=\"copying: i/o timeout\"",
+                "Copying blob sha256:aa",
+            ][..],
+            true,
+            "unreachable",
+        ),
+        (
+            &[
+                "Error: something broke early",
+                "Getting image source signatures",
+                "Copying blob sha256:aa",
+            ][..],
+            false,
+            "unreachable",
+        ),
+        // The whole image copied: the policy allowed it.
+        (
+            &[
+                "Getting image source signatures",
+                "Copying blob sha256:aa",
+                "Writing manifest to image destination",
+            ][..],
+            true,
+            "accepted",
+        ),
+        // A rejection after an earlier error line is still a rejection.
+        (
+            &[
+                "Error: retrying: i/o timeout",
+                "Error: Source image rejected: A signature was required, but no signature exists",
+            ][..],
+            false,
+            "rejected",
+        ),
     ] {
         let mut judge = policy::Judge::new();
         lines.iter().for_each(|l| judge.line(l));
@@ -3723,25 +3823,217 @@ fn check_apply_rules() -> Result<()> {
     Ok(())
 }
 
-/// Answers mode: finding the volume and reading its file.
+/// Answers mode: finding the volume, the file's rules and the checks that come
+/// before the plan.
 fn check_answers(parent: &Path) -> Result<()> {
+    use ilex_installer_model::probe::{Disk, OtherSystem, Partition};
     let tree = TestDir::new(parent, "answers")?;
     let root = &tree.0;
-    // The volume is whatever udev links; it must be a block device.
-    fs::create_dir_all(root.join("by-label"))?;
+
+    // Which volumes carry an answers label, from lsblk's listing.
+    let listing = |rows: &str| format!(r#"{{"blockdevices": [{rows}]}}"#);
+    let row = |path: &str, label: &str, fstype: &str, kind: &str, number: &str| {
+        format!(
+            r#"{{"path":"{path}","label":{label},"fstype":{fstype},"type":"{kind}","maj:min":"{number}"}}"#
+        )
+    };
+    let text = |value: &str| format!("\"{value}\"");
+    let found = |rows: &[String]| answers::parse_volumes(&listing(&rows.join(",")));
     ensure!(
-        answers::find_volume(&root.join("by-label")).is_err(),
-        "no volume was found"
+        found(&[
+            row("/dev/vda", "null", "null", "disk", "252:0"),
+            row("/dev/vda1", &text("ESP"), &text("vfat"), "part", "252:1"),
+        ])?
+        .is_empty(),
+        "a volume with another label was taken for the answers"
     );
-    symlink(
-        "/dev/null",
-        root.join("by-label").join(answers::VOLUME_LABEL),
-    )?;
+    let ext4 = found(&[row(
+        "/dev/vdb",
+        &text("ILEX-ANSWERS"),
+        &text("ext4"),
+        "disk",
+        "252:16",
+    )])?;
     ensure!(
-        answers::find_volume(&root.join("by-label")).is_err(),
-        "a character device was taken for the volume"
+        ext4 == [answers::Volume {
+            path: "/dev/vdb".into(),
+            fs: "ext4".into(),
+            number: (252, 16)
+        }],
+        "the answers volume: {ext4:?}"
     );
-    // The file: regular, not a link, bounded.
+    // The FAT name, on a partition (children are walked), in either case on a
+    // file system that keeps no case, and nowhere else.
+    for (label, fs, kind, wanted) in [
+        ("ILEXANSWERS", "vfat", "part", true),
+        ("ilexanswers", "vfat", "part", true),
+        ("ILEX-ANSWERS", "ext4", "part", true),
+        ("ilex-answers", "ext4", "part", false),
+        ("ILEXANSWERS", "ext4", "part", true),
+        ("ILEXANSWERS", "vfat", "loop", false),
+        ("ILEXANSWERS", "vfat", "lvm", false),
+        ("ILEXANSWERS", "", "part", false),
+        ("ILEX-ANSWERS-2", "ext4", "part", false),
+    ] {
+        let rows = [format!(
+            r#"{{"path":"/dev/sdb","label":null,"fstype":null,"type":"disk","maj:min":"8:16","children":[{}]}}"#,
+            row(
+                "/dev/sdb1",
+                &text(label),
+                &if fs.is_empty() {
+                    "null".into()
+                } else {
+                    text(fs)
+                },
+                kind,
+                "8:17"
+            )
+        )];
+        let volumes = found(&rows)?;
+        ensure!(
+            volumes.len() == usize::from(wanted),
+            "a {fs} {kind} labelled {label:?}: {volumes:?}"
+        );
+    }
+    // Two answers volumes are not a choice anyone made.
+    let two = found(&[
+        row(
+            "/dev/sdb1",
+            &text("ILEX-ANSWERS"),
+            &text("ext4"),
+            "part",
+            "8:17",
+        ),
+        row(
+            "/dev/sdc1",
+            &text("ILEXANSWERS"),
+            &text("vfat"),
+            "part",
+            "8:33",
+        ),
+    ])?;
+    ensure!(
+        two.len() == 2 && answers::find_volume(&two).is_err(),
+        "two answers volumes were not refused"
+    );
+    ensure!(
+        answers::find_volume(&[]).is_err() && answers::find_volume(&ext4).is_ok(),
+        "finding the one volume"
+    );
+    ensure!(
+        answers::parse_volumes("{}").is_err()
+            && answers::parse_volumes(&listing(&row(
+                "/dev/x",
+                &text("ILEXANSWERS"),
+                &text("vfat"),
+                "part",
+                "no"
+            )))
+            .is_err(),
+        "a listing without numbers was accepted"
+    );
+    // The file systems an answers volume may hold include FAT, whose labels
+    // are 11 characters, and not NTFS.
+    ensure!(
+        answers::FILE_SYSTEMS.contains(&"vfat")
+            && answers::FILE_SYSTEMS.contains(&"ext4")
+            && !answers::FILE_SYSTEMS.contains(&"ntfs")
+            && answers::VOLUME_LABELS.iter().any(|l| l.len() == 11),
+        "the volume rules: a label a FAT volume can carry"
+    );
+
+    // What is mounted is the device that was chosen.
+    let table = "36 35 252:17 / /run/ilex-installer/answers-x/volume ro,nosuid,nodev,noexec - vfat /dev/vdb1 ro\n\
+                 37 35 0:44 / /run/other rw - tmpfs tmpfs rw\n";
+    ensure!(
+        answers::mounted_number(table, "/run/ilex-installer/answers-x/volume") == Some((252, 17))
+            && answers::mounted_number(table, "/run/other") == Some((0, 44))
+            && answers::mounted_number(table, "/run/nothing").is_none(),
+        "the device a mount is made of"
+    );
+
+    // The volume must not be on the disk the answers would erase: by number.
+    ensure!(
+        answers::volume_on_disk((8, 1), Some((8, 0)), (8, 0), &[(8, 1), (8, 2)])
+            && answers::volume_on_disk((8, 0), None, (8, 0), &[])
+            && answers::volume_on_disk((8, 2), None, (8, 0), &[(8, 1), (8, 2)])
+            && answers::volume_on_disk((8, 9), Some((8, 0)), (8, 0), &[])
+            && !answers::volume_on_disk((8, 17), Some((8, 16)), (8, 0), &[(8, 1), (8, 2)])
+            && !answers::volume_on_disk((9, 0), None, (8, 0), &[(8, 1)]),
+        "which disk an answers volume is on"
+    );
+
+    // A disk that already holds a system is not erased by default.
+    let partition = |label: &str, fs: &str| Partition {
+        number: 1,
+        path: "/dev/vdc1".into(),
+        start_bytes: 1 << 20,
+        size_bytes: 1 << 30,
+        type_id: "0fc63daf-8483-4772-8e79-3d69d8477de4".into(),
+        label: label.into(),
+        filesystem: fs.into(),
+        filesystem_label: String::new(),
+    };
+    let disk = |partitions: Vec<Partition>, systems: Vec<OtherSystem>| Disk {
+        id: "virtio-x".into(),
+        path: "/dev/vdc".into(),
+        model: String::new(),
+        serial: "x".into(),
+        size_bytes: 40 << 30,
+        sector_size: 512,
+        bus: "virtio".into(),
+        removable: false,
+        live_medium: false,
+        in_use: vec![],
+        notes: vec![],
+        partition_table: (!partitions.is_empty()).then(|| "gpt".to_owned()),
+        partitions,
+        free_extents: vec![],
+        other_systems: systems,
+    };
+    ensure!(
+        answers::existing_systems(&disk(vec![], vec![])).is_empty(),
+        "a blank disk holds a system"
+    );
+    ensure!(
+        answers::existing_systems(&disk(vec![partition("data", "")], vec![])).is_empty(),
+        "an unlabelled partition of no system was taken for one"
+    );
+    ensure!(
+        answers::existing_systems(&disk(vec![partition("ilex-root", "btrfs")], vec![]))
+            .iter()
+            .any(|f| f.contains("ilex-root")),
+        "an ilex partition was not noticed"
+    );
+    let windows = OtherSystem {
+        kind: "windows".into(),
+        partition: Some("/dev/vdc1".into()),
+        description: "NTFS filesystem \"Windows\"".into(),
+    };
+    let loader = OtherSystem {
+        kind: "efi-loader".into(),
+        partition: Some("/dev/vdc1".into()),
+        description: "EFI loader directory EFI/ubuntu".into(),
+    };
+    ensure!(
+        answers::existing_systems(&disk(vec![partition("", "ntfs")], vec![windows, loader])).len()
+            == 2,
+        "another system and a loader were not both noticed"
+    );
+
+    // The by-id name: a plain name of /dev/disk/by-id, never a path.
+    for bad in ["", ".", "..", "../sda", "a/b", "/dev/sda", "bad\nname"] {
+        ensure!(
+            disks::by_id_node(bad).is_err(),
+            "{bad:?} was taken for a name in /dev/disk/by-id"
+        );
+    }
+    ensure!(
+        disks::by_id_node("this-disk-does-not-exist-0000").is_err(),
+        "a name that is not there was resolved"
+    );
+
+    // The file: regular, not a link, bounded, and opened without waiting.
     write(&root.join("answers.toml"), "schema = 1\n")?;
     ensure!(
         answers::read_file(root)?.as_slice() == b"schema = 1\n",
@@ -3762,6 +4054,19 @@ fn check_answers(parent: &Path) -> Result<()> {
     ensure!(
         answers::read_file(root).is_err(),
         "a directory was read as the answers file"
+    );
+    fs::remove_dir(root.join("answers.toml"))?;
+    // A FIFO with no writer would block an ordinary open for ever.
+    let fifo = std::ffi::CString::new(root.join("answers.toml").to_string_lossy().as_bytes())?;
+    ensure!(
+        unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) } == 0,
+        "mkfifo: {}",
+        std::io::Error::last_os_error()
+    );
+    let started = std::time::Instant::now();
+    ensure!(
+        answers::read_file(root).is_err() && started.elapsed() < Duration::from_secs(5),
+        "a FIFO was read, or waited for"
     );
     Ok(())
 }

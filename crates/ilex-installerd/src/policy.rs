@@ -32,11 +32,18 @@ pub enum Verdict {
 }
 
 /// Read `skopeo copy`'s output as it comes and decide as early as the words
-/// allow. The first line that starts a layer or the config is acceptance
-/// (containers-image checks the policy before it fetches either); a
-/// "rejected" error is a refusal; any other failure is not a verdict.
+/// allow. containers-image checks the policy and the signatures before it
+/// prints anything, and then says `Getting image source signatures`; only a
+/// layer or the config fetched after that line, with no error before it, is
+/// acceptance. A "rejected" error is a refusal; any other failure is not a
+/// verdict. Output is merged (standard output and error): an error line ends
+/// every chance of acceptance, however many `Copying blob` lines follow it.
 pub struct Judge {
     verdict: Option<Verdict>,
+    /// The policy engine has let the image through and the copy has begun.
+    signatures: bool,
+    /// An error line was printed.
+    errored: bool,
     last_error: String,
 }
 
@@ -44,6 +51,8 @@ impl Judge {
     pub fn new() -> Self {
         Self {
             verdict: None,
+            signatures: false,
+            errored: false,
             last_error: String::new(),
         }
     }
@@ -53,12 +62,21 @@ impl Judge {
             return;
         }
         let lower = text.to_ascii_lowercase();
-        if lower.starts_with("copying blob") || lower.starts_with("copying config") {
-            self.verdict = Some(Verdict::Accepted);
-        } else if lower.contains("rejected") || lower.contains("no signature exists") {
+        if lower.contains("rejected") || lower.contains("no signature exists") {
             self.verdict = Some(Verdict::Rejected(text.to_owned()));
-        } else if lower.starts_with("error") || lower.contains("fatal") {
+        } else if lower.starts_with("error")
+            || lower.contains("fatal")
+            || lower.contains("level=error")
+        {
+            self.errored = true;
             self.last_error = text.to_owned();
+        } else if lower.starts_with("getting image source signatures") {
+            self.signatures = true;
+        } else if (lower.starts_with("copying blob") || lower.starts_with("copying config"))
+            && self.signatures
+            && !self.errored
+        {
+            self.verdict = Some(Verdict::Accepted);
         }
     }
 
@@ -66,13 +84,19 @@ impl Judge {
         self.verdict.is_some()
     }
 
-    /// The verdict once the tool has ended: a decision already made stands,
-    /// else a failure is the registry's (or the network's) and success means
-    /// the whole image was copied, which the policy allowed.
+    /// The verdict once the tool has ended: a decision already made stands;
+    /// else a failure is the registry's (or the network's), and a success
+    /// accepts the image only if the tool said the copy had begun and printed
+    /// no error. Anything else is no verdict, which never lets an image in.
     pub fn finish(self, success: bool) -> Verdict {
         match self.verdict {
             Some(verdict) => verdict,
-            None if success => Verdict::Accepted,
+            None if success && self.signatures && !self.errored => Verdict::Accepted,
+            None if success => Verdict::Unreachable(if self.last_error.is_empty() {
+                "skopeo finished without saying that the policy accepted the image".into()
+            } else {
+                self.last_error
+            }),
             None => Verdict::Unreachable(if self.last_error.is_empty() {
                 "skopeo failed without saying why".into()
             } else {

@@ -152,3 +152,17 @@ pub fn dry_run(layout: &Layout, device: &str, seed: &str) -> Result<Vec<PlannedP
     }
     parse(&output.stdout_text(), layout)
 }
+
+/// Whether two lists describe the same partitions. The device node is left
+/// out: repart names a partition after the path of the disk it was given, and
+/// the plan was made on the kernel's name for the disk while the installation
+/// writes it by its stable name. Everything that decides what is on the disk
+/// (number, type, label, UUID, offset, size, format) must be equal.
+pub fn same_partitions(made: &[PlannedPartition], planned: &[PlannedPartition]) -> bool {
+    made.len() == planned.len()
+        && made.iter().zip(planned).all(|(a, b)| {
+            let mut a = a.clone();
+            a.path.clone_from(&b.path);
+            a == *b
+        })
+}

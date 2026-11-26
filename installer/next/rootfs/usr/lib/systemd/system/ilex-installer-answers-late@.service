@@ -1,0 +1,14 @@
+[Unit]
+Description=ilex installer: answers volume %I appeared after the boot
+Documentation=https://github.com/Reidond/ilex
+# A volume labelled like an answers volume that was not there at boot is not
+# read: it prints one line saying so. Nothing is stopped or started. (Ordered
+# after the gate, so that the volume that was there at boot is known.)
+After=ilex-installer-answers-gate.service
+
+[Service]
+Type=oneshot
+LimitCORE=0
+ExecStart=/usr/libexec/ilex-installer/ilex-installerd --answers-late /dev/%I
+StandardOutput=journal+console
+StandardError=journal+console

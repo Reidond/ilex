@@ -376,6 +376,9 @@ fn open_exclusive_file(path: &str, expect: DevNum) -> io::Result<fs::File> {
 pub struct Hold {
     file: fs::File,
     pub kname: String,
+    /// The device number the claim is on: what the disk is, whatever it is
+    /// called.
+    pub rdev: DevNum,
 }
 
 impl Hold {
@@ -383,6 +386,54 @@ impl Hold {
     pub fn release(self) {
         drop(self.file);
     }
+}
+
+/// A disk's stable name, `/dev/disk/by-id/<id>`, as the node of a block device
+/// and its device number. `id` is one plain name of that directory (never a
+/// path), and the link must lead to a block device.
+pub fn by_id_node(id: &str) -> Result<(String, DevNum), String> {
+    if id.is_empty() || id.starts_with('.') || id.contains('/') || id.chars().any(char::is_control)
+    {
+        return Err(format!("{id:?} is not a name in /dev/disk/by-id"));
+    }
+    let path = format!("/dev/disk/by-id/{id}");
+    let link = fs::symlink_metadata(&path)
+        .map_err(|e| format!("there is no {path}, so the disk has no stable name ({e})"))?;
+    if !link.file_type().is_symlink() {
+        return Err(format!("{path} is not a link udev made"));
+    }
+    let node = fs::metadata(&path).map_err(|e| format!("{path} leads nowhere ({e})"))?;
+    if !node.file_type().is_block_device() {
+        return Err(format!("{path} is not a block device"));
+    }
+    Ok((path, topology::split_dev(node.rdev())))
+}
+
+/// The disk's number as its own node says it (the node is opened by neither
+/// name nor path again: this is a `stat`).
+pub fn node_number(path: &str) -> Result<DevNum, String> {
+    let node = fs::metadata(path).map_err(|e| format!("{path} is gone ({e})"))?;
+    if !node.file_type().is_block_device() {
+        return Err(format!("{path} is not a block device"));
+    }
+    Ok(topology::split_dev(node.rdev()))
+}
+
+/// The stable path the installation addresses the disk by once the exclusive
+/// claim has been let go (`wipefs` and `systemd-repart` cannot run under it):
+/// `/dev/disk/by-id/<id>`, which must lead to the very device the claim is on.
+/// A disk that was swapped for another that takes the kernel's name in that
+/// moment has another id, so its link leads elsewhere or nowhere, and the
+/// tools find nothing to write to: the failure is closed.
+pub fn by_id_address(id: &str, hold: &Hold) -> Result<String, String> {
+    let (path, number) = by_id_node(id)?;
+    if number != hold.rdev {
+        return Err(format!(
+            "{path} does not lead to the disk the helper holds ({}:{} against {}:{})",
+            number.0, number.1, hold.rdev.0, hold.rdev.1
+        ));
+    }
+    Ok(path)
 }
 
 /// Run `open` until it succeeds, fails for another reason or has been refused
@@ -421,6 +472,7 @@ pub fn hold_disk(sys: &Path, kname: &str, path: &str) -> Result<Hold, Claim> {
     Ok(Hold {
         file,
         kname: kname.to_owned(),
+        rdev: expect,
     })
 }
 

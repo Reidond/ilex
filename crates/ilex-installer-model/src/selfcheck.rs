@@ -566,6 +566,19 @@ password = "hunter2"
             && !format!("{answers:?}").contains("correct horse"),
         "answers print their secrets"
     );
+    // A disk that already holds a system is erased only when the answers say
+    // so, explicitly.
+    ensure!(
+        !answers.install.reinstall
+            && Answers::parse(&text.replace("[install]", "[install]\nreinstall = true"))?
+                .install
+                .reinstall,
+        "reinstall is off unless the answers turn it on"
+    );
+    ensure!(
+        Answers::parse(&text.replace("[install]", "[install]\nreinstall = \"yes\"")).is_err(),
+        "a reinstall that is not a boolean was accepted"
+    );
     // Parse errors say where, never what: the file holds passwords.
     let error = Answers::parse(&text.replace("mode = \"whole-disk\"", "mode = hunter2 wrongly"))
         .err()

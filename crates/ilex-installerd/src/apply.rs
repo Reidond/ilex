@@ -15,14 +15,15 @@
 //!    only grants when nothing holds the disk or one of its partitions;
 //! 5. with the claim held, the disk is looked at once more (the trace, the
 //!    partitions) and `systemd-repart`'s dry run is compared with the plan;
-//! 6. the stage is recorded, and only then does the installation thread start,
-//!    holding the claim until the moment before `systemd-repart` runs.
+//! 6. the plan is forgotten, the stage is recorded, and only then does the
+//!    installation thread start, holding the claim until the moment before the
+//!    disk is wiped. From then on the disk is addressed by its
+//!    `/dev/disk/by-id` name, which was checked to lead to the held device.
 
 use crate::{
     disks::{self, Hold},
     install, policy, repart,
     secret::{self, Secret},
-    sys,
 };
 use anyhow::Context;
 use ilex_installer_model::{
@@ -97,6 +98,16 @@ impl Helper {
                 "the kind is admin-password or disk-passphrase",
             )
         })?;
+        // Not while a probe, a plan or an apply works, and not once an
+        // installation has begun: the secrets it took are the ones it uses.
+        let _busy = locked(&self.work);
+        if self.tracker.active() {
+            return Err(PlanError::new(
+                ErrorCode::InstallationActive,
+                None,
+                "an installation is running; it keeps the secrets it began with",
+            ));
+        }
         let plans = locked(&self.plans);
         let recorded = plans.iter().find(|r| r.plan.id == plan_id).ok_or_else(|| {
             PlanError::new(
@@ -144,7 +155,11 @@ impl Helper {
             ));
         }
         // 1. The plan.
-        let Recorded { plan, disk: planned } = locked(&self.plans)
+        let Recorded {
+            plan,
+            disk: planned,
+            made,
+        } = locked(&self.plans)
             .iter()
             .find(|r| r.plan.id == plan_id)
             .cloned()
@@ -155,7 +170,9 @@ impl Helper {
                     "the helper has no such plan (it keeps the latest eight and forgets them when it restarts): plan again",
                 )
             })?;
-        let age = sys::unix_time().saturating_sub(plan.created);
+        // The plan's age is the helper's own, on the monotonic clock (the wall
+        // clock the plan document carries can be set backwards or stepped).
+        let age = made.elapsed().as_secs();
         if age > plan.valid_seconds {
             return Err(PlanError::new(
                 ErrorCode::PlanExpired,
@@ -214,8 +231,14 @@ impl Helper {
         }
         let now = self.disk_for_apply(&probe.disks, &plan, &planned)?;
 
+        // The `installer::` tier's fault (never set in production): a mount
+        // or an exclusive open that comes after the probe and before the claim.
+        if let Some(file) = &self.config.pause_before_hold {
+            crate::fault::pause(file);
+        }
+
         // 4. The kernel's claim on the whole disk, held from here until the
-        //    moment before the partition table is written.
+        //    moment before the disk is wiped.
         let hold = disks::hold(now).map_err(|why| {
             PlanError::new(
                 ErrorCode::InUse,
@@ -226,6 +249,20 @@ impl Helper {
 
         // 5. With the claim held: the disk and the layout once more.
         self.look_again(&hold, &plan, &planned)?;
+        // The claim cannot be kept through `wipefs` and `systemd-repart`, so
+        // the disk is then addressed by its stable name. That name must lead to
+        // the device held now (checked again as the claim is let go): a disk
+        // with no such name is not one to write to.
+        let address = disks::by_id_address(&plan.disk.id, &hold).map_err(|why| {
+            PlanError::new(
+                ErrorCode::UnknownDisk,
+                Some("disk"),
+                format!(
+                    "{} cannot be written to by a name that stays its own: {why}",
+                    plan.disk.id
+                ),
+            )
+        })?;
 
         // 6. Start. The secrets move into the installation; what is left over
         //    is wiped.
@@ -242,12 +279,15 @@ impl Helper {
         self.tracker
             .begin(&plan.id, &install::stages())
             .map_err(internal)?;
+        // The plan is spent: it is the installation's now, and whatever
+        // happens to it a new attempt is a new plan.
+        locked(&self.plans).retain(|r| r.plan.id != plan.id);
         let helper = Arc::clone(self);
         let started = thread::Builder::new()
             .name("ilex-apply".into())
             .spawn({
                 let plan = plan.clone();
-                move || install::run(helper, plan, hold, admin)
+                move || install::run(helper, plan, hold, address, admin)
             })
             .context("starting the installation thread")
             .map_err(internal);

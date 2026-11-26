@@ -11,6 +11,8 @@ mod disks;
 #[cfg(target_os = "linux")]
 mod exec;
 #[cfg(target_os = "linux")]
+mod fault;
+#[cfg(target_os = "linux")]
 mod helper;
 #[cfg(target_os = "linux")]
 mod install;
@@ -94,6 +96,10 @@ fn run() -> anyhow::Result<()> {
         /// /sys/firmware/efi (the `installer::` tier's fixtures)
         #[arg(long, hide = true)]
         efi_dir: Option<PathBuf>,
+        /// While this file exists, Apply stops after its probe and before it
+        /// claims the disk (the `installer::` tier's race fixture)
+        #[arg(long, hide = true)]
+        pause_before_hold: Option<PathBuf>,
         /// Install without an interface, from the answers on the volume
         /// labelled ILEX-ANSWERS, by calling this helper's own methods as an
         /// interface would
@@ -102,6 +108,15 @@ fn run() -> anyhow::Result<()> {
         /// With `--answers`: what to do when the installation succeeded
         #[arg(long, value_enum, default_value = "nothing", requires = "answers")]
         then: ThenArg,
+        /// At boot, once udev has settled: leave a marker if a volume
+        /// labelled ILEX-ANSWERS (or ILEXANSWERS) is here, which keeps the
+        /// interface's session from starting
+        #[arg(long, conflicts_with_all = ["answers", "self_check"])]
+        answers_gate: bool,
+        /// A volume with an answers label appeared (the device node): say that
+        /// it is ignored unless it was here at boot
+        #[arg(long, value_name = "DEVICE", conflicts_with_all = ["answers", "self_check"])]
+        answers_late: Option<PathBuf>,
         /// With `--answers`: read the answers from this file instead of the
         /// volume (the `installer::` tier's fixtures)
         #[arg(long, hide = true, requires = "answers")]
@@ -118,7 +133,16 @@ fn run() -> anyhow::Result<()> {
         Poweroff,
     }
     let args = Args::parse();
+    if args.answers_gate {
+        return answers::gate();
+    }
+    if let Some(device) = &args.answers_late {
+        return answers::late(device);
+    }
     if args.answers {
+        // The answers file may hold a password: this process never dumps core
+        // and cannot be traced, as the helper that receives the password.
+        ilex_enroll::harden()?;
         let options = answers::Options {
             run_dir: args
                 .run_dir
@@ -163,6 +187,7 @@ fn run() -> anyhow::Result<()> {
     if let Some(seconds) = args.plan_valid_seconds {
         config.plan_valid_seconds = seconds;
     }
+    config.pause_before_hold = args.pause_before_hold;
     if args.self_check {
         println!("ILEX-INSTALLERD-CHECK OK: {}", selfcheck::run(&config)?);
         return Ok(());

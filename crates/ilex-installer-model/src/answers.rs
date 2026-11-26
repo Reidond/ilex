@@ -1,5 +1,5 @@
 //! `answers.toml`: an unattended installation's questions, answered. It lives on
-//! a volume labelled `ILEX-ANSWERS`, may hold plaintext secrets (the
+//! a volume labelled `ILEX-ANSWERS` (`ILEXANSWERS` on a FAT volume), may hold plaintext secrets (the
 //! documentation says so) and is read once by the helper. This module is the
 //! schema and its syntax checks; reading the volume and applying the answers
 //! belong to the installation itself.
@@ -8,10 +8,12 @@ use crate::plan::{ErrorCode, Mode, PlanError, PlanRequest, TpmMode};
 use anyhow::Result;
 use serde::Deserialize;
 use std::fmt;
+use zeroize::Zeroize;
 
 pub const ANSWERS_SCHEMA: u32 = 1;
 
-/// A secret read from a file. It never prints.
+/// A secret read from a file. It never prints, and its text is zeroed when it
+/// is dropped (each clone's own).
 #[derive(Clone, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);
@@ -19,6 +21,12 @@ pub struct Secret(String);
 impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -51,6 +59,12 @@ pub struct InstallAnswers {
     pub mode: Mode,
     /// Whole-disk mode: the disk id again, as the destructive confirmation.
     pub confirm_erase: Option<String>,
+    /// Allow the installation to erase a disk that already holds an ilex
+    /// installation or another operating system (a Windows or Linux
+    /// partition, an EFI loader). Without it an unattended installation
+    /// refuses such a disk, whatever `confirm-erase` says.
+    #[serde(default)]
+    pub reinstall: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

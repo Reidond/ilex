@@ -22,6 +22,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::Instant,
 };
 
 /// Where the helper reads its inputs. Production uses the defaults; the
@@ -46,6 +47,12 @@ pub struct Config {
     pub sysusers: Vec<PathBuf>,
     /// How long a plan is valid (the `installer::` tier shortens it).
     pub plan_valid_seconds: u64,
+    /// The `installer::` tier's fault: while this file exists, `Apply` stops
+    /// after it has probed the disk and before it claims it, says so by
+    /// creating `<file>.reached`, and goes on when the file is removed. A
+    /// mount or an exclusive open made in that moment is the race the claim
+    /// itself must catch.
+    pub pause_before_hold: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -69,6 +76,7 @@ impl Default for Config {
                 "/run/sysusers.d".into(),
             ],
             plan_valid_seconds: PLAN_VALID_SECONDS,
+            pause_before_hold: None,
         }
     }
 }
@@ -82,6 +90,9 @@ const PLANS_KEPT: usize = 8;
 pub struct Recorded {
     pub plan: Plan,
     pub disk: Disk,
+    /// When the helper made it, on the monotonic clock: a plan's age is not
+    /// the wall clock's (which a clock set backwards, or an NTP step, moves).
+    pub made: Instant,
 }
 
 pub struct Helper {
@@ -334,6 +345,7 @@ impl Helper {
             plans.push_back(Recorded {
                 plan: plan.clone(),
                 disk: checked.disk.clone(),
+                made: Instant::now(),
             });
             let mut secrets = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
             while plans.len() > PLANS_KEPT {

@@ -10,7 +10,7 @@
 //! next attempt starts again from a fresh plan.
 
 use crate::{
-    disks::Hold,
+    disks::{self, Hold},
     exec::{self, Exit, Flow, Job},
     helper::Helper,
     repart,
@@ -59,6 +59,9 @@ pub struct Install {
     pub plan: Plan,
     pub logs: Logs,
     pub target: PathBuf,
+    /// The stable name the disk is written by once the exclusive claim has
+    /// been let go: `/dev/disk/by-id/<id>`, checked against the held device.
+    address: String,
     /// The device nodes of the partitions this installation made.
     nodes: BTreeSet<String>,
     admin: Secret,
@@ -98,7 +101,7 @@ pub fn json_array(lines: &[String]) -> Result<String> {
 }
 
 /// Run the installation and record how it ended. This is the thread's body.
-pub fn run(helper: Arc<Helper>, plan: Plan, hold: Hold, admin: Secret) {
+pub fn run(helper: Arc<Helper>, plan: Plan, hold: Hold, address: String, admin: Secret) {
     let logs = match Logs::new(&helper.config.run_dir, &plan.id) {
         Ok(logs) => logs,
         Err(e) => {
@@ -115,6 +118,7 @@ pub fn run(helper: Arc<Helper>, plan: Plan, hold: Hold, admin: Secret) {
         plan,
         logs,
         target,
+        address,
         nodes: BTreeSet::new(),
         admin,
         stage: Stage::Partition,
@@ -216,7 +220,14 @@ impl Install {
         let layout = repart::layout(&self.helper.config.definitions, self.plan.request.encrypt)?;
         let definitions = format!("--definitions={}", layout.dir.display());
         let seed = format!("--seed={}", self.plan.seed);
-        let disk = self.plan.disk.path.clone();
+        let kernel_name = self.plan.disk.path.clone();
+        // The disk is addressed by its stable name from here, so that a disk
+        // that is swapped for another taking the kernel's name cannot be the
+        // one wiped: the name leads to the device held, verified as late as it
+        // can be, and a replacement has a name of its own.
+        let disk = self.address.clone();
+        disks::by_id_address(&self.plan.disk.id, &hold)
+            .map_err(|why| anyhow!("{} no longer names the held disk: {why}", self.address))?;
         // The disk is as good as written from here: recorded first, so that a
         // helper that dies before it returns leaves a record that says so.
         self.helper.tracker.disk_changed()?;
@@ -224,7 +235,9 @@ impl Install {
         // nodes, which the kernel refuses while this process holds the whole
         // disk exclusively (EBUSY from mkfs.vfat, measured): the claim ends
         // here, as late as it can.
-        log.line(&format!("releasing the exclusive claim on {disk}"));
+        log.line(&format!(
+            "releasing the exclusive claim on {kernel_name}; the disk is {disk} from now on"
+        ));
         hold.release();
         // A disk that has partitions must lose them first. `systemd-repart
         // --empty=force` wipes the table but not the kernel's partitions, and
@@ -235,7 +248,11 @@ impl Install {
         // partitions, which is what a person expects whole-disk mode to do to
         // a disk that was used.
         self.checked(&mut log, "wipefs", &["--all", &disk], TOOL)?;
-        let kname = disk.rsplit('/').next().unwrap_or(&disk).to_owned();
+        let kname = kernel_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&kernel_name)
+            .to_owned();
         target::wait_for_no_partitions(Path::new("/sys"), &kname, Duration::from_secs(20))?;
         let lines = self.checked(
             &mut log,
@@ -255,7 +272,7 @@ impl Install {
         let made = repart::parse(&json_array(&lines)?, &layout)
             .context("reading what systemd-repart made")?;
         ensure!(
-            made == self.plan.partitions,
+            repart::same_partitions(&made, &self.plan.partitions),
             "the partitions systemd-repart made are not the planned ones; the disk was erased, install again from a new plan"
         );
         self.end(Stage::Partition, &mut log);
