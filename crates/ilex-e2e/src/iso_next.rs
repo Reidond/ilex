@@ -81,10 +81,16 @@ use crate::iso::grub_key;
 mod helper;
 mod loop_file;
 mod ui;
+mod vm_state;
 
 /// From power-on to the page being mapped. Boot is a few tens of seconds; the
 /// margin is for a contended runner.
 const PAGE_TIMEOUT: Duration = Duration::from_secs(420);
+/// From power-on to the firmware's first line on the serial console. OVMF
+/// prints within about five seconds (measured 3-5 s, also under load); a guest
+/// that has written nothing after this long never started, and waiting out
+/// [`PAGE_TIMEOUT`] for a marker would only say so slowly.
+const FIRMWARE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The page's memory sample comes this long after the page.
 const STATS_TIMEOUT: Duration = Duration::from_secs(90);
 /// What the installer VM gets unless `ILEX_ISO_NEXT_MEMORY` says otherwise.
@@ -129,7 +135,14 @@ pub fn loop_trial() -> Trial {
 
 fn trial(name: &'static str, run: fn() -> Result<()>) -> Trial {
     Trial::test(name, move || {
-        run().map_err(|error| Failed::from(format!("{error:#}")))
+        let started = Instant::now();
+        let outcome = run();
+        println!(
+            "{name}: {} after {:.0}s",
+            if outcome.is_ok() { "ok" } else { "FAILED" },
+            started.elapsed().as_secs_f64()
+        );
+        outcome.map_err(|error| Failed::from(format!("{error:#}")))
     })
 }
 
@@ -251,8 +264,9 @@ fn boot(entry: Entry) -> Result<()> {
     let vm = provider.create(spec)?;
     let mut guest = Guest { provider, vm, root };
 
-    let started = Instant::now();
+    // `start` waits for a free VM slot first, so the clock starts after it.
     guest.provider.start(&mut guest.vm)?;
+    let started = Instant::now();
     let vm = guest.vm.running_mut()?;
     ensure!(
         vm.info.secure_boot,
@@ -552,6 +566,9 @@ fn diagnostics(vm: &mut Vm, artifacts: &Path, name: &str) {
     }
     let _ = Vmctl::from_info(vm.info.clone())
         .save_screenshot(&artifacts.join(format!("next-{name}-failure.png")));
+    let state = vm_state::report(vm);
+    vm_state::write(artifacts, name, &state);
+    eprintln!("iso::next {name} failed; the VM was:\n{state}");
     // A deadline of its own: a guest without sshd must not hang the failure path.
     // The units that decide what the session may do come first: the last 400
     // lines of everything are mostly the harness's own SSH logins.
@@ -652,6 +669,44 @@ fn field<'a>(fields: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str>
         .with_context(|| format!("the serial marker has no {key}=: {fields:?}"))
 }
 
+/// Fail when the guest has written nothing on its primary serial console
+/// within [`FIRMWARE_TIMEOUT`] of QEMU creating the file: the firmware never
+/// ran, which no marker deadline would explain. An empty file's modification
+/// time is the moment QEMU opened it.
+fn ensure_firmware_output(vm: &Vm) -> Result<()> {
+    let serial = vm.info.dir.join("serial.log");
+    let Ok(meta) = fs::metadata(&serial) else {
+        return Ok(());
+    };
+    let silent = meta
+        .modified()
+        .ok()
+        .and_then(|written| written.elapsed().ok())
+        .filter(|_| meta.len() == 0);
+    if let Some(silent) = silent
+        && silent > FIRMWARE_TIMEOUT
+    {
+        bail!(
+            "the guest wrote nothing on the serial console in {}s (limit {FIRMWARE_TIMEOUT:?}): it never started, although QEMU pid {} is alive (next-<trial>-qemu-state.txt says where QEMU waits)",
+            silent.as_secs(),
+            vm.info.pid
+        );
+    }
+    Ok(())
+}
+
+/// Wait for the guest's first byte on the serial console, so that a guest
+/// that never starts is reported as that, not as an SSH server that never
+/// answers.
+fn wait_firmware_output(vm: &Vm) -> Result<()> {
+    let serial = vm.info.dir.join("serial.log");
+    while fs::metadata(&serial).map_or(0, |meta| meta.len()) == 0 {
+        ensure_firmware_output(vm)?;
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    Ok(())
+}
+
 /// Wait until the serial log holds `count` complete `name … key=…` lines;
 /// fails fast when the guest exited or the installer gave up. Returns the whole
 /// log.
@@ -678,6 +733,7 @@ fn wait_for_marker(
         if let Some(status) = vm.exited()? {
             bail!("the VM exited with {status} while waiting for {wanted:?}; serial: {console}");
         }
+        ensure_firmware_output(vm)?;
         if started.elapsed() > timeout {
             bail!("no {wanted:?} within {timeout:?}; serial: {console}");
         }
@@ -697,6 +753,7 @@ fn wait_for_text(vm: &mut Vm, serial: &Path, wanted: &str, timeout: Duration) ->
         if let Some(status) = vm.exited()? {
             bail!("the VM exited with {status} while waiting for {wanted:?}; serial: {console}");
         }
+        ensure_firmware_output(vm)?;
         if started.elapsed() > timeout {
             bail!("no {wanted:?} within {timeout:?}; serial: {console}");
         }
@@ -1332,9 +1389,11 @@ fn ssh_tmpfiles() -> Result<()> {
             base64(tmpfiles.as_bytes())
         ));
     })?;
-    let outcome = vm
-        .wait_ssh(Duration::from_secs(300))
-        .context("sshd did not start from a key delivered as tmpfiles.extra")
+    let outcome = wait_firmware_output(&vm)
+        .and_then(|()| {
+            vm.wait_ssh(Duration::from_secs(300))
+                .context("sshd did not start from a key delivered as tmpfiles.extra")
+        })
         .and_then(|()| {
             let state = vm.ssh_ok("systemctl is-active sshd")?;
             ensure!(state == "active", "sshd is {state}");

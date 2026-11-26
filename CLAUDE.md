@@ -2798,6 +2798,35 @@ the Windows paths of this change: no Windows host was available.
   fixtures (9 accepted, 58 refused), the closure fixtures (a path dependency
   in the checkout, one outside, one at the root, registry and git packages, a
   dev edge) and the recorded-closure fixtures; a regression is a failed check.
+- **A VM that never starts.** Every VM the harness boots (`ilex_devkit::qemu`)
+  gets `-audiodev none,id=ilex-noaudio`. Without it, QEMU 11's VNC server asks
+  for a default audio backend and QEMU probes its list in order, PipeWire first
+  (26 connection attempts to `/run/pipewire/pipewire-0` and the PulseAudio
+  sockets per start). On a host with no PipeWire daemon each probe fails and
+  tears its thread loop down with `pw_thread_loop_stop`, which in libpipewire
+  intermittently never returns: the main thread waits in `pthread_join`, the
+  loop thread idles in `epoll_wait` (gdb on a hung QEMU: `main → qemu_init →
+  vnc_init_func → vnc_display_new → audio_get_default_audio_be → audio_pw_realize
+  → pw_thread_loop_stop`), the QMP socket exists but nothing answers on it,
+  and the guest never runs, so its serial log stays empty for the whole
+  deadline. On the Boat hosts about one boot in a hundred did this
+  (2 of 208 trial boots on 13 runs of the whole `iso::next` set, in different
+  trials each time); it is not specific to Secure Boot or to this ISO, and a
+  rerun passes. Nothing in a test wants sound. Three checks say so if a QEMU
+  ever hangs for another reason: `Vm::boot` waits 30 s for the QMP greeting and
+  fails with `qemu.log`; the `iso::next` waits fail after 60 s of a silent
+  serial console ("the guest wrote nothing on the serial console … it never
+  started"; OVMF prints its first line within about five seconds); and any failed
+  `iso::next` trial writes `next-<trial>-qemu-state.txt` beside its screenshot:
+  QMP status, each CPU's instruction pointer, per-thread CPU time over two
+  seconds and kernel wait points (plus a gdb backtrace when gdb is installed),
+  the size and age of the serial files, `qemu.log`, and the host's load,
+  pressure and steal time. `ILEX_VM_FIRMWARE_LOG=1` makes every VM also write
+  OVMF's debug console to `firmware.log` beside `serial.log` (it ends at the
+  last thing the firmware did; the state report prints its tail). The
+  `seconds_power_on_to_page` in `next-<entry>.json` starts when QEMU has
+  started, not before the wait for a VM slot (it used to include that wait:
+  40 to 220 s for a boot that takes 30).
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
   GNOME edition). After the review fixes (2026-11-26) the ISO is 1,494,851,584
   bytes (1.39 GiB): 438 MiB under the Anaconda network ISO's 1.82 GiB and 0.61
