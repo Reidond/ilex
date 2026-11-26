@@ -692,8 +692,13 @@ impl Vm {
                     drive_file.display()
                 )
             });
+        // The devices of disks that have serial numbers: created after every
+        // other device (below), as QEMU creates a legacy `if=virtio` drive's
+        // device, so that they keep the PCI slots (and the names, and what
+        // firmware sees of them) a disk without a serial number has.
+        let mut serial_devices: Vec<String> = Vec::new();
         if config.disk_serials {
-            qemu.args(["-device", "virtio-blk-pci,drive=ilexd0,serial=ilex-disk-0"]);
+            serial_devices.push("virtio-blk-pci,drive=ilexd0,serial=ilex-disk-0".into());
         }
         if security.is_some() {
             qemu.args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
@@ -742,15 +747,13 @@ impl Vm {
         for (index, extra) in config.extra_disks.iter().enumerate() {
             if config.disk_serials && index < serialed {
                 let n = index + 1;
-                qemu.arg("-drive")
-                    .arg(format!(
-                        "if=none,id=ilexd{n},format=raw,file={}",
-                        std::path::absolute(extra)?.display()
-                    ))
-                    .args([
-                        "-device",
-                        &format!("virtio-blk-pci,drive=ilexd{n},serial=ilex-disk-{n}"),
-                    ]);
+                qemu.arg("-drive").arg(format!(
+                    "if=none,id=ilexd{n},format=raw,file={}",
+                    std::path::absolute(extra)?.display()
+                ));
+                serial_devices.push(format!(
+                    "virtio-blk-pci,drive=ilexd{n},serial=ilex-disk-{n}"
+                ));
             } else {
                 qemu.arg("-drive").arg(format!(
                     "if=virtio,format=raw,file={}",
@@ -847,6 +850,9 @@ impl Vm {
         // then loads and probes none (strace: no audio module, no connect to a
         // PipeWire or PulseAudio socket).
         qemu.args(["-audiodev", "none,id=ilex-noaudio"]);
+        for device in &serial_devices {
+            qemu.args(["-device", device]);
+        }
         // QEMU refuses a VNC server next to a GL display ("Display vnc is
         // incompatible with the GL context").
         if !gl {

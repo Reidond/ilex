@@ -855,10 +855,7 @@ fn policy() -> Result<()> {
         field(&leaks, "leaked_files")? == "0" && field(&leaks, "journal_hits")? == "0",
         "the password is in the helper's files or journal: {leaks}"
     );
-    println!(
-        "     {} refusals; the disks and the helper were untouched",
-        22
-    );
+    println!("     every refusal left the disks and the helper untouched");
     Ok(())
 }
 
