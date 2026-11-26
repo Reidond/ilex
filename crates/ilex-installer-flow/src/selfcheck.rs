@@ -5,7 +5,9 @@
 
 use crate::account::{self, Check};
 use crate::backend::Backend;
-use crate::flow::{Flow, KeyboardStatus, PageId, PlanCheck, ProbeState, Step, usable_disks};
+use crate::flow::{
+    Flow, KeyboardStatus, MarkerConfig, PageId, PlanCheck, ProbeState, Step, usable_disks,
+};
 use crate::keyboard::{self, Layouts, Sources};
 use crate::language;
 use crate::machine::{MachineView, Origin};
@@ -200,6 +202,7 @@ pub fn run() -> Result<String> {
     // The flow end to end on the generic scenario.
     walk()?;
     generations()?;
+    probe_answers()?;
     keyboard_switches()?;
     retries()?;
     gates()?;
@@ -460,6 +463,121 @@ fn generations() -> Result<()> {
     ensure!(
         !format!("{:?}", flow.password()).contains("horse"),
         "the password prints"
+    );
+    Ok(())
+}
+
+/// A probe's answer is taken only for the request in flight: not before any
+/// was asked, not twice, not while the plan is checked; only one probe is asked
+/// at a time; and the account page does not continue on a look that is still
+/// pending.
+fn probe_answers() -> Result<()> {
+    let sim = Simulated::load("generic")?;
+    let mut flow = Flow::new(sample_layouts()?);
+    // Before the first request nothing is waiting for an answer.
+    ensure!(
+        flow.probe_finished(0, sim.probe()) == Step::Stay
+            && matches!(flow.probe_state(), ProbeState::Pending)
+            && flow.machine_view().is_none()
+            && flow.machine_tag().is_none()
+            && !flow.probe_is_current(0),
+        "an answer to a probe nobody asked for was taken"
+    );
+    let Step::RunProbe { generation } = flow.start_probe() else {
+        bail!("a new flow does not ask for the probe");
+    };
+    ensure!(
+        flow.start_probe() == Step::Stay && flow.probe_is_current(generation),
+        "a second probe starts while the first is outstanding"
+    );
+    ensure!(
+        flow.probe_finished(generation + 1, sim.probe()) == Step::Stay
+            && matches!(flow.probe_state(), ProbeState::Pending)
+            && flow.probe_is_current(generation),
+        "the answer to another probe was taken"
+    );
+    ensure!(
+        flow.probe_finished(generation, sim.probe()) == Step::Stay
+            && flow.probe().is_some()
+            && !flow.probe_is_current(generation),
+        "the answer to the probe in flight was not taken"
+    );
+    // The same answer again, even a failure, changes nothing.
+    ensure!(
+        flow.probe_finished(
+            generation,
+            Err(ClientError::HelperUnavailable("late".into()))
+        ) == Step::Stay
+            && flow.probe().is_some()
+            && flow.blocking_problem().is_none()
+            && flow.probe_finished(generation, sim.probe()) == Step::Stay,
+        "a repeated answer changed the probe"
+    );
+
+    // While the plan is checked, no answer is taken: the person's machine, the
+    // view and the probe stay what the check was asked for. (Probes number
+    // from 1; every number is tried.)
+    let (mut flow, sim) = at_account("ms-7c35")?;
+    let (generation, request) = run_plan(&mut flow)?;
+    let other = Simulated::load("no-composition")?;
+    for number in 0..=3 {
+        ensure!(
+            flow.probe_finished(number, other.probe()) == Step::Stay
+                && flow.is_checking()
+                && flow.machine_tag() == Some("ms-7c35.gnome")
+                && flow.machine_view().map(|v| v.origin.word()) == Some("detected"),
+            "an unsolicited probe answer ({number}) changed the choices while the plan is checked"
+        );
+    }
+    ensure!(
+        flow.plan_finished(generation, sim.plan(&request)) == Step::Goto(PageId::Ready),
+        "the check does not end after the unsolicited answers"
+    );
+
+    // A retry's own look is part of the check: no competing probe starts.
+    let Step::RunProbe { generation: look } = flow.retry() else {
+        bail!("Try again does not look at the computer again");
+    };
+    ensure!(
+        flow.start_probe() == Step::Stay && flow.probe_is_current(look),
+        "a probe competes with the retry's look"
+    );
+    ensure!(
+        matches!(flow.probe_finished(look, sim.probe()), Step::RunPlan { .. }),
+        "the retry's look was disturbed"
+    );
+
+    // After Back and a new look, Continue waits for the answer instead of
+    // asking for a plan the flow has no probe for.
+    let (mut flow, sim) = at_account("generic")?;
+    let (generation, request) = run_plan(&mut flow)?;
+    ensure!(
+        flow.plan_finished(generation, sim.plan(&request)) == Step::Goto(PageId::Ready),
+        "plan result"
+    );
+    let Step::RunProbe { generation: look } = flow.retry() else {
+        bail!("no retry from a checked plan");
+    };
+    flow.probe_finished(look, Simulated::load("helper-down")?.probe());
+    ensure!(
+        flow.back() == Some(PageId::Account) && flow.can_retry_probe(),
+        "back to the account page after a look that failed"
+    );
+    let Step::RunProbe { generation: again } = flow.start_probe() else {
+        bail!("the account page's banner cannot ask again");
+    };
+    ensure!(
+        flow.account_checks().all_valid()
+            && !flow.can_continue()
+            && flow.advance() == Step::Stay
+            && flow.page() == PageId::Account,
+        "Continue runs while the look is pending"
+    );
+    ensure!(
+        flow.probe_finished(again, sim.probe()) == Step::Stay
+            && flow.can_continue()
+            && matches!(flow.advance(), Step::RunPlan { .. }),
+        "Continue does not follow the new look"
     );
     Ok(())
 }
@@ -730,6 +848,33 @@ fn gates() -> Result<()> {
             && matches!(flow.plan_check(), PlanCheck::NoDisk(reasons) if reasons.len() == 3),
         "no usable disk"
     );
+    // Try again is offered on the closing page when asking again can mend the
+    // result, never while the helper is asked, and not when only a restart
+    // helps: a look that finds a BIOS boot ends there.
+    let (mut flow, sim) = at_account("generic")?;
+    ensure!(!flow.can_retry(), "Try again on the account page");
+    let (generation, request) = run_plan(&mut flow)?;
+    ensure!(!flow.can_retry(), "Try again while the plan is checked");
+    ensure!(
+        flow.plan_finished(generation, sim.plan(&request)) == Step::Goto(PageId::Ready)
+            && flow.can_retry(),
+        "no Try again after a checked plan"
+    );
+    let Step::RunProbe { generation: look } = flow.retry() else {
+        bail!("no retry");
+    };
+    ensure!(!flow.can_retry(), "Try again while the look is pending");
+    ensure!(
+        flow.probe_finished(look, Simulated::load("bios")?.probe()) == Step::Stay
+            && flow.page() == PageId::Ready
+            && flow
+                .check_problem()
+                .is_some_and(|m| m.title.contains("BIOS"))
+            && !flow.can_retry()
+            && flow.retry() == Step::Stay
+            && !flow.is_checking(),
+        "a BIOS boot found by the look is offered Try again"
+    );
     // A registry that does not answer is reported on the ready page.
     let (mut flow, sim) = at_account("registry-down")?;
     let (generation, request) = run_plan(&mut flow)?;
@@ -751,8 +896,9 @@ fn gates() -> Result<()> {
     Ok(())
 }
 
-/// The marker formats the trials read, and the one rule about what they may
-/// carry: nothing typed in a field, but for the layout test field in a test.
+/// The marker formats the trials read, which line the flow queues when, and the
+/// one rule about what they may carry: nothing typed in a field, but for the
+/// layout test field in a test.
 fn marker_formats() -> Result<()> {
     let typed = Secret::new("hunter2 try");
     ensure!(
@@ -764,42 +910,222 @@ fn marker_formats() -> Result<()> {
             == Some("ILEX-INSTALLER event=try layout=de-nodeadkeys text=z_y"),
         "the echoed layout test"
     );
-    let (mut flow, sim) = flow_on("generic")?;
+
+    // Without markers the flow queues nothing and the field is not read.
+    let mut quiet = Flow::new(sample_layouts()?);
+    quiet.window_shown("renderer=none");
+    quiet.try_text(&typed);
     ensure!(
-        flow.page_marker("gnome")
-            == "ILEX-INSTALLER page=welcome edition=gnome language=en_US.UTF-8 keyboard=us",
-        "the welcome marker: {}",
-        flow.page_marker("gnome")
+        !quiet.echo_try() && quiet.drain_markers().is_empty(),
+        "a flow without markers queued some"
     );
-    flow.advance();
-    ensure!(
-        flow.page_marker("gnome").starts_with(
-            "ILEX-INSTALLER page=machine edition=gnome selected=generic.gnome origin=not-recognised detected=generic.gnome offered=2 choices=generic.gnome,ms-7c35.gnome"
-        ),
-        "the machine marker: {}",
-        flow.page_marker("gnome")
-    );
-    let probe = crate::markers::probe(&sim.probe());
-    ensure!(
-        probe.starts_with("ILEX-INSTALLER event=probe result=ok disks="),
-        "{probe}"
-    );
-    let notice = crate::markers::notice(&flow.machine_view().context("no machine view")?.notice());
-    ensure!(
-        notice.starts_with(
-            "ILEX-INSTALLER event=notice severity=info text=No_configuration_is_specific"
-        ),
-        "{notice}"
-    );
-    // Nothing a person typed is in any marker of the walk.
-    for line in [
-        flow.page_marker("gnome"),
-        crate::markers::plan(&Err(ClientError::Other("x".into()))),
-        crate::markers::layout("us", true),
+    // The test field: closed on a normal boot, open for the credential or a
+    // simulated session.
+    for (simulated, credential, open) in [
+        (false, false, false),
+        (false, true, true),
+        (true, false, true),
     ] {
-        ensure!(!line.contains("hunter2"), "{line}");
+        let mut flow = Flow::new(sample_layouts()?).with_markers(config(simulated, credential));
+        flow.window_shown("renderer=none");
+        flow.drain_markers();
+        flow.try_text(&Secret::new("z y"));
+        let lines = flow.drain_markers();
+        ensure!(
+            flow.echo_try() == open
+                && lines
+                    == if open {
+                        vec!["ILEX-INSTALLER event=try layout=us text=z_y".to_owned()]
+                    } else {
+                        Vec::new()
+                    },
+            "the test field with simulated={simulated} credential={credential}: {lines:?}"
+        );
     }
+
+    // The walk, line by line.
+    let sim = Simulated::load("generic")?;
+    let mut flow = Flow::new(sample_layouts()?).with_markers(config(false, false));
+    let Step::RunProbe { generation } = flow.start_probe() else {
+        bail!("no probe");
+    };
+    ensure!(
+        flow.drain_markers().is_empty(),
+        "a probe request is printed"
+    );
+    // An answer nobody waits for says so, and changes nothing.
+    flow.probe_finished(generation + 1, sim.probe());
+    ensure!(
+        flow.drain_markers() == ["ILEX-INSTALLER event=probe result=stale"],
+        "a stale probe answer"
+    );
+    flow.probe_finished(generation, sim.probe());
+    let lines = flow.drain_markers();
+    ensure!(
+        lines.len() == 1 && lines[0].starts_with("ILEX-INSTALLER event=probe result=ok disks="),
+        "the probe answer: {lines:?}"
+    );
+    // The first page is printed when the window is on screen, with the
+    // toolkit's words and the uptime; never again.
+    flow.window_shown("renderer=gsk scale=2");
+    let lines = flow.drain_markers();
+    ensure!(
+        lines.len() == 1
+            && lines[0].starts_with(
+                "ILEX-INSTALLER page=welcome edition=gnome language=en_US.UTF-8 keyboard=us renderer=gsk scale=2 uptime="
+            ),
+        "the welcome marker: {lines:?}"
+    );
+    flow.window_shown("renderer=gsk scale=2");
+    ensure!(flow.drain_markers().is_empty(), "the first page twice");
+    // The language is printed when it changes, once.
+    ensure!(
+        flow.set_language("de_DE.UTF-8")
+            && flow.set_language("de_DE.UTF-8")
+            && !flow.set_language("xx_XX.UTF-8"),
+        "languages"
+    );
+    ensure!(
+        flow.drain_markers() == ["ILEX-INSTALLER event=language language=de_DE.UTF-8"],
+        "the language event"
+    );
+    // The layout is printed with the compositor's answer, for the switch it
+    // answers; another answer says it is stale.
+    let Step::SwitchKeyboard { generation, .. } = flow.set_keyboard("de-nodeadkeys") else {
+        bail!("no switch");
+    };
+    ensure!(
+        flow.drain_markers().is_empty(),
+        "the layout request is printed"
+    );
+    flow.keyboard_switched(generation + 5, Ok(()));
+    flow.keyboard_switched(generation, Ok(()));
+    flow.keyboard_switched(generation, Ok(()));
+    ensure!(
+        flow.drain_markers()
+            == [
+                "ILEX-INSTALLER event=layout result=stale",
+                "ILEX-INSTALLER event=layout layout=de-nodeadkeys applied=true",
+                "ILEX-INSTALLER event=layout result=stale",
+            ],
+        "the layout answers"
+    );
+    // The machine page: its marker, the composition line and the notice.
+    flow.try_text(&typed);
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Machine),
+        "welcome does not continue"
+    );
+    let lines = flow.drain_markers();
+    ensure!(
+        lines.len() == 3
+            && lines[0].starts_with(
+                "ILEX-INSTALLER page=machine edition=gnome selected=generic.gnome origin=not-recognised detected=generic.gnome offered=2 choices=generic.gnome,ms-7c35.gnome"
+            )
+            && lines[1]
+                == "ILEX-COMPOSITION generic.gnome (no machine configuration matches this computer) installs ghcr.io/reidond/ilex:generic.gnome"
+            && lines[2].starts_with(
+                "ILEX-INSTALLER event=notice severity=info text=No_configuration_is_specific"
+            ),
+        "the machine page: {lines:?}"
+    );
+    // Choosing prints the composition line of an accepted, changed choice.
+    ensure!(
+        flow.select_machine("ms-7c35.gnome")
+            && flow.select_machine("ms-7c35.gnome")
+            && !flow.select_machine("ms-7c35.kde"),
+        "machine choice"
+    );
+    ensure!(
+        flow.drain_markers()
+            == [
+                "ILEX-COMPOSITION ms-7c35.gnome (chosen in the installer) installs ghcr.io/reidond/ilex:ms-7c35.gnome"
+            ],
+        "the choice's line"
+    );
+    // A new look answers on the machine page: the page is announced again,
+    // with the person's choice kept.
+    let Step::RunProbe { generation } = flow.start_probe() else {
+        bail!("no new look");
+    };
+    flow.probe_finished(generation, sim.probe());
+    let lines = flow.drain_markers();
+    ensure!(
+        lines.len() == 4
+            && lines[0].starts_with("ILEX-INSTALLER event=probe result=ok")
+            && lines[1]
+                .starts_with("ILEX-INSTALLER page=machine edition=gnome selected=ms-7c35.gnome")
+            && lines[2].starts_with("ILEX-COMPOSITION ms-7c35.gnome (chosen in the installer)")
+            && lines[3].starts_with("ILEX-INSTALLER event=notice"),
+        "the machine page after a new look: {lines:?}"
+    );
+    // The administrator's name is one word in the marker whatever was typed.
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Account)
+            && flow.set_administrator("two words\nhere")
+            && flow.back() == Some(PageId::Machine)
+            && flow.advance() == Step::Goto(PageId::Account),
+        "account page"
+    );
+    let lines = flow.drain_markers();
+    ensure!(
+        lines
+            .iter()
+            .any(|l| l.ends_with(" administrator=two_words_here"))
+            && !lines.iter().any(|l| l.contains("two words")),
+        "the account marker: {lines:?}"
+    );
+    flow.set_administrator("ilexmaint");
+    flow.set_password(Secret::new("hunter2 correct"));
+    flow.set_confirmation(Secret::new("hunter2 correct"));
+    let (generation, request) = run_plan(&mut flow)?;
+    ensure!(
+        flow.drain_markers().is_empty(),
+        "the check's request is printed"
+    );
+    flow.plan_finished(generation + 3, sim.plan(&request));
+    ensure!(
+        flow.drain_markers() == ["ILEX-INSTALLER event=plan result=stale"],
+        "a stale plan answer"
+    );
+    flow.plan_finished(generation, sim.plan(&request));
+    let lines = flow.drain_markers();
+    ensure!(
+        lines.len() == 2
+            && lines[0] == "ILEX-INSTALLER event=plan result=ok"
+            && lines[1] == "ILEX-INSTALLER page=ready edition=gnome check=ok",
+        "the checked plan: {lines:?}"
+    );
+    // A look that no longer offers the person's configuration resets it, and
+    // says so off the machine page too (the machine page announces itself).
+    let Step::RunProbe { generation } = flow.retry() else {
+        bail!("no retry");
+    };
+    ensure!(
+        flow.drain_markers().is_empty(),
+        "the retry's look is printed"
+    );
+    flow.probe_finished(generation, Simulated::load("no-composition")?.probe());
+    let lines = flow.drain_markers();
+    ensure!(
+        lines.len() == 2
+            && lines[0].starts_with("ILEX-INSTALLER event=probe result=ok")
+            && lines[1].starts_with("ILEX-COMPOSITION generic.gnome ("),
+        "the retry's look: {lines:?}"
+    );
+    ensure!(
+        lines.iter().all(|l| !l.contains("hunter2")),
+        "a password is in a marker"
+    );
     Ok(())
+}
+
+fn config(simulated: bool, echo_credential: bool) -> MarkerConfig {
+    MarkerConfig {
+        edition: "gnome".to_owned(),
+        simulated,
+        echo_credential,
+    }
 }
 
 /// What each kind of D-Bus error becomes: errors that say the helper or the

@@ -6,7 +6,7 @@
 //! ```text
 //! interface                       Flow                          helper / compositor
 //! ---------                       ----                          -------------------
-//! starts                    -->   Flow::new(layouts), flow.start_probe()
+//! starts                    -->   Flow::new(layouts)[.with_markers(..)], flow.start_probe()
 //! every method that can ask       returns a Step the interface carries out:
 //!   for work returns a Step:
 //!   Step::RunProbe{generation}    -> Backend::probe on a worker, then
@@ -23,6 +23,7 @@
 //! Continue pressed          -->   flow.advance()
 //! Back pressed              -->   flow.back()
 //! Try again (closing page)  -->   flow.retry()
+//! after every call          -->   flow.drain_markers(): the lines to print
 //! ```
 //!
 //! The same sequence drives GTK (relm4 messages and commands) and Kirigami
@@ -30,14 +31,25 @@
 //! never blocks.
 //!
 //! **Answers carry the generation of the request they answer.** A request is
-//! numbered when the flow issues it, and an answer for any other number than
-//! the latest is ignored (it returns `Step::Stay` and changes nothing): two
-//! checks, two probes or two layout switches can never leave the flow with the
-//! answer to the older one. While the helper is asked for the plan the
-//! choices that go into it cannot be changed (the setters refuse), so what the
-//! answer describes is what the flow still holds. A later change that applies
-//! a plan by its id relies on this: the id it erases with is the latest
-//! answer's.
+//! numbered when the flow issues it, and the flow remembers the one request of
+//! each kind that is in flight: an answer for any other number (an earlier
+//! request's, a repeat, one that nothing asked for) is ignored (it returns
+//! `Step::Stay` and changes nothing). Two checks, two probes or two layout
+//! switches can never leave the flow with the answer to the older one, and a
+//! probe is never asked while a plan is checked or another probe is
+//! outstanding. While the helper is asked for the plan the choices that go into
+//! it cannot be changed (the setters refuse), so what the answer describes is
+//! what the flow still holds. A later change that applies a plan by its id
+//! relies on this: the id it erases with is the latest answer's.
+//!
+//! **The flow also decides what is printed and when.** Every serial-console
+//! line ([`crate::markers`]) is queued by the flow at the moment its cause is
+//! accepted (a page shown, the machine page again when a probe answers, an
+//! accepted language, layout or configuration, a request's answer or the
+//! reason it was ignored) and handed over by [`Flow::drain_markers`]: an
+//! interface prints what it is given and decides nothing. The test field's
+//! text is queued only when the flow's own gate is open
+//! ([`Flow::echo_try`]).
 //!
 //! Pages of this version: `welcome` (language and keyboard layout), `machine`
 //! (which configuration), `account` (the maintenance administrator) and
@@ -49,6 +61,7 @@ use crate::account::{self, AccountChecks};
 use crate::keyboard::{self, Layout, Layouts};
 use crate::language::{self, Language};
 use crate::machine::{MachineChoice, MachineView};
+use crate::markers;
 use crate::messages::{self, ClientError, Message};
 use crate::secret::Secret;
 use ilex_installer_model::plan::{ErrorCode, MIN_DISK_BYTES, Plan, PlanRequest};
@@ -172,11 +185,48 @@ struct KeyboardSwitch {
     failure: Option<Message>,
 }
 
+/// How the interface wants the flow's marker lines (see [`Flow::with_markers`]).
+#[derive(Clone, Debug)]
+pub struct MarkerConfig {
+    /// The edition identifier every page marker carries (`gnome`).
+    pub edition: String,
+    /// The helper is simulated: no person types, so the layout test field's
+    /// text may be printed.
+    pub simulated: bool,
+    /// The fixed public test credential is present (see
+    /// [`markers::echo_allowed`]).
+    pub echo_credential: bool,
+}
+
+impl MarkerConfig {
+    /// The real session's: the test credential is read from the environment.
+    pub fn session(edition: impl Into<String>, simulated: bool) -> Self {
+        Self {
+            edition: edition.into(),
+            simulated,
+            echo_credential: markers::echo_allowed(),
+        }
+    }
+}
+
+/// The queue of marker lines, and what decides which are queued.
+struct Markers {
+    edition: String,
+    /// The layout test field's text may be printed.
+    echo: bool,
+    /// The window is on screen: page markers are queued from now on.
+    shown: bool,
+    outbox: Vec<String>,
+}
+
 pub struct Flow {
     layouts: Layouts,
     page: PageId,
     probe: ProbeState,
     probe_generation: u64,
+    /// The probe request whose answer is awaited: the only one accepted.
+    probe_in_flight: Option<u64>,
+    markers: Option<Markers>,
     /// A check of the choices waits for the probe in flight (a retry looks at
     /// the computer again before it asks for the plan).
     resume_check: bool,
@@ -210,6 +260,8 @@ impl Flow {
             page: PageId::Welcome,
             probe: ProbeState::Pending,
             probe_generation: 0,
+            probe_in_flight: None,
+            markers: None,
             resume_check: false,
             stale_probe: false,
             view: None,
@@ -232,12 +284,110 @@ impl Flow {
         }
     }
 
+    // --- markers ---------------------------------------------------------------
+
+    /// Have the flow queue the serial-console lines of [`crate::markers`] for
+    /// the interface to print (see [`Flow::drain_markers`]). Without this the
+    /// flow queues nothing (the renderer and the self-check).
+    pub fn with_markers(mut self, config: MarkerConfig) -> Self {
+        self.markers = Some(Markers {
+            edition: config.edition,
+            echo: config.simulated || config.echo_credential,
+            shown: false,
+            outbox: Vec::new(),
+        });
+        self
+    }
+
+    /// The lines queued since the last call, in the order their causes were
+    /// accepted. Call it after every flow method and print each line.
+    pub fn drain_markers(&mut self) -> Vec<String> {
+        self.markers
+            .as_mut()
+            .map(|m| std::mem::take(&mut m.outbox))
+            .unwrap_or_default()
+    }
+
+    /// The window is on screen: queue the first page's marker, with the
+    /// toolkit's own words (`renderer=… scale=…`) and the uptime after them.
+    /// Page markers are queued from now on; calling it again does nothing.
+    pub fn window_shown(&mut self, toolkit: &str) {
+        let Some(queue) = self.markers.as_mut() else {
+            return;
+        };
+        if queue.shown {
+            return;
+        }
+        queue.shown = true;
+        let extra = format!("{toolkit} uptime={}", markers::uptime());
+        self.announce_page(Some(&extra));
+    }
+
+    /// May the interface read the layout test field at all? Only when the text
+    /// may be printed: people type their intended passwords there, so on a
+    /// normal boot the field is not read and nothing of it is queued.
+    pub fn echo_try(&self) -> bool {
+        self.markers.as_ref().is_some_and(|m| m.echo)
+    }
+
+    /// The layout test field's text changed. It is queued (as `event=try`)
+    /// only when [`Flow::echo_try`] is true; otherwise it is dropped.
+    pub fn try_text(&mut self, text: &Secret) {
+        let line = self
+            .markers
+            .as_ref()
+            .and_then(|m| markers::tried(&self.keyboard.requested, text, m.echo));
+        if let Some(line) = line {
+            self.say(line);
+        }
+    }
+
+    /// The session has settled: queue the memory and uptime report.
+    pub fn report_stats(&mut self) {
+        if self.markers.is_some() {
+            self.say(markers::stats());
+        }
+    }
+
+    fn say(&mut self, line: String) {
+        if let Some(queue) = self.markers.as_mut() {
+            queue.outbox.push(line);
+        }
+    }
+
+    /// The page's marker (with `extra` words after it), and on the machine
+    /// page the composition line and the notice that follow it. Nothing before
+    /// the window is shown.
+    fn announce_page(&mut self, extra: Option<&str>) {
+        let Some(queue) = self.markers.as_ref().filter(|m| m.shown) else {
+            return;
+        };
+        let mut line = markers::page(&queue.edition, self.page, &self.marker_fields());
+        if let Some(extra) = extra {
+            line.push(' ');
+            line.push_str(extra);
+        }
+        let mut lines = vec![line];
+        if self.page == PageId::Machine {
+            lines.extend(self.composition_line());
+            if let Some(view) = &self.view {
+                lines.push(markers::notice(&view.notice()));
+            }
+        }
+        for line in lines {
+            self.say(line);
+        }
+    }
+
     // --- the helper's answers ------------------------------------------------
 
     /// Ask the helper about this computer: at the start, and again after a
-    /// failure (the page's Try again). Ignored while a plan is being checked.
+    /// failure (the page's Try again). Refused while a plan is being checked
+    /// (a retry's own look is part of the check and is already outstanding) and
+    /// while another probe is: one request at a time, so an answer can only
+    /// ever be for the one in flight.
     pub fn start_probe(&mut self) -> Step {
-        if self.is_checking() && !self.resume_check {
+        if self.is_checking() || self.probe_in_flight.is_some() {
             return Step::Stay;
         }
         self.begin_probe()
@@ -245,20 +395,36 @@ impl Flow {
 
     fn begin_probe(&mut self) -> Step {
         self.probe_generation += 1;
+        self.probe_in_flight = Some(self.probe_generation);
         self.probe = ProbeState::Pending;
         Step::RunProbe {
             generation: self.probe_generation,
         }
     }
 
-    /// The helper's answer (or its failure) to the latest [`Step::RunProbe`].
-    /// The machine page's choice starts on what the probe preselected; a later
-    /// look keeps the person's own choice while it is still offered. When the
-    /// look was the first half of a retry, the check of the choices follows.
+    /// The helper's answer (or its failure) to the [`Step::RunProbe`] in
+    /// flight; an answer to any other number, or when none was asked for,
+    /// changes nothing. The machine page's choice starts on what the probe
+    /// preselected; a later look keeps the person's own choice while it is
+    /// still offered (and a choice that is reset invalidates the earlier
+    /// check). When the look was the first half of a retry, the check of the
+    /// choices follows. The machine page is announced again when it is the one
+    /// shown: what it says depends on this answer.
     pub fn probe_finished(&mut self, generation: u64, result: Result<Probe, ClientError>) -> Step {
-        if generation != self.probe_generation {
+        if self.probe_in_flight != Some(generation) {
+            self.say(markers::stale("probe"));
             return Step::Stay;
         }
+        self.probe_in_flight = None;
+        self.say(markers::probe(&result));
+        let step = self.take_probe(result);
+        if self.page == PageId::Machine {
+            self.announce_page(None);
+        }
+        step
+    }
+
+    fn take_probe(&mut self, result: Result<Probe, ClientError>) -> Step {
         match result {
             Ok(probe) => {
                 let view = MachineView::from_probe(&probe);
@@ -267,12 +433,25 @@ impl Flow {
                         .machine
                         .as_deref()
                         .is_some_and(|tag| view.choice(tag).is_some());
+                let before = self.machine.clone();
                 if !keep {
                     self.machine = Some(view.preselected.clone());
                     self.machine_chosen = false;
                 }
+                let reset = self.machine != before;
                 self.view = Some(view);
                 self.probe = ProbeState::Ready(Box::new(probe));
+                if reset {
+                    // What an earlier check was made of has changed.
+                    self.invalidate_check();
+                    if before.is_some()
+                        && self.page != PageId::Machine
+                        && let Some(line) = self.composition_line()
+                    {
+                        // The machine page says it itself when it is shown.
+                        self.say(line);
+                    }
+                }
                 self.stale_probe = false;
                 if self.resume_check {
                     self.resume_check = false;
@@ -292,9 +471,9 @@ impl Flow {
         }
     }
 
-    /// Is this the answer to the latest probe request?
+    /// Is this the answer to the probe request in flight?
     pub fn probe_is_current(&self, generation: u64) -> bool {
-        generation == self.probe_generation
+        self.probe_in_flight == Some(generation)
     }
 
     pub fn probe_state(&self) -> &ProbeState {
@@ -353,6 +532,7 @@ impl Flow {
             Step::Stay
         } else {
             self.page = page;
+            self.announce_page(None);
             Step::Goto(page)
         }
     }
@@ -369,6 +549,7 @@ impl Flow {
         }
         let previous = self.page.previous()?;
         self.page = previous;
+        self.announce_page(None);
         Some(previous)
     }
 
@@ -390,7 +571,12 @@ impl Flow {
                         .zip(self.view.as_ref())
                         .is_some_and(|(tag, view)| view.choice(tag).is_some())
             }
-            PageId::Account => self.account_checks().all_valid() && !self.is_checking(),
+            // The check needs the computer's own answer: names are judged
+            // against its profiles and the plan is asked for its disks. After
+            // Back and a new look, Continue waits for it.
+            PageId::Account => {
+                self.probe().is_some() && self.account_checks().all_valid() && !self.is_checking()
+            }
             PageId::Ready => false,
         }
     }
@@ -430,10 +616,18 @@ impl Flow {
     /// longer there" was about, so repeating the check alone could never mend
     /// it.
     pub fn retry(&mut self) -> Step {
-        if self.page != PageId::Ready || self.is_checking() {
+        if !self.can_retry() {
             return Step::Stay;
         }
         self.look_again_then_check()
+    }
+
+    /// May the closing page offer Try again? Not while the helper is asked, and
+    /// not when only a restart can help (a BIOS boot stays a BIOS boot).
+    pub fn can_retry(&self) -> bool {
+        self.page == PageId::Ready
+            && !self.is_checking()
+            && !matches!(&self.probe, ProbeState::Ready(probe) if !probe.firmware.uefi)
     }
 
     fn look_again_then_check(&mut self) -> Step {
@@ -483,8 +677,10 @@ impl Flow {
     /// nothing. The step is `Goto` whenever the page changed.
     pub fn plan_finished(&mut self, generation: u64, result: Result<Plan, ClientError>) -> Step {
         if !self.plan_is_current(generation) {
+            self.say(markers::stale("plan"));
             return Step::Stay;
         }
+        self.say(markers::plan(&result));
         match result {
             Ok(plan) => {
                 self.stale_probe = false;
@@ -594,6 +790,7 @@ impl Flow {
         if self.language != locale {
             self.language = locale.to_owned();
             self.invalidate_check();
+            self.say(markers::language(locale));
         }
         true
     }
@@ -651,12 +848,15 @@ impl Flow {
     /// carries the reason, for the page.
     pub fn keyboard_switched(&mut self, generation: u64, result: Result<(), String>) -> Step {
         let Some((current, layout)) = self.keyboard.in_flight.clone() else {
+            self.say(markers::stale("layout"));
             return Step::Stay;
         };
         if current != generation {
+            self.say(markers::stale("layout"));
             return Step::Stay;
         }
         self.keyboard.in_flight = None;
+        self.say(markers::layout(&layout, result.is_ok()));
         match result {
             Ok(()) => self.keyboard.applied = Some(layout),
             Err(why) => {
@@ -717,16 +917,21 @@ impl Flow {
     }
 
     /// `false` for a tag this edition does not offer, and while the helper is
-    /// being asked.
+    /// being asked. Choosing what is chosen already changes nothing (a toolkit
+    /// that echoes the selection back is not choosing). A change queues the
+    /// `ILEX-COMPOSITION` line of the new choice.
     pub fn select_machine(&mut self, tag: &str) -> bool {
         if self.is_checking() || !self.view.as_ref().is_some_and(|v| v.choice(tag).is_some()) {
             return false;
         }
         if self.machine.as_deref() != Some(tag) {
             self.invalidate_check();
+            self.machine = Some(tag.to_owned());
+            self.machine_chosen = true;
+            if let Some(line) = self.composition_line() {
+                self.say(line);
+            }
         }
-        self.machine = Some(tag.to_owned());
-        self.machine_chosen = true;
         true
     }
 
@@ -864,14 +1069,9 @@ impl Flow {
                 ),
                 _ => "selected=none origin=pending".to_owned(),
             },
-            PageId::Account => format!("administrator={}", self.administrator),
+            PageId::Account => format!("administrator={}", markers::one_word(&self.administrator)),
             PageId::Ready => format!("check={}", self.check_word()),
         }
-    }
-
-    /// The whole line printed when the page is shown.
-    pub fn page_marker(&self, edition: &str) -> String {
-        crate::markers::page(edition, self.page, &self.marker_fields())
     }
 
     pub fn default_keyboard_id() -> &'static str {

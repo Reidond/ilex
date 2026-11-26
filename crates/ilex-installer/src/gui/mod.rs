@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use ilex_installer_flow::backend::{Backend, DbusBackend};
+use ilex_installer_flow::flow::{Flow, MarkerConfig};
 use ilex_installer_flow::keyboard::{Layouts, SessionKeyboard, Sources};
-use ilex_installer_flow::markers;
 use ilex_installer_flow::simulate::Simulated;
 use relm4::prelude::*;
 
@@ -32,17 +32,19 @@ pub fn run(launch: Launch) -> Result<()> {
     };
     let layouts = Layouts::load(&Sources::default()).context("the keyboard layouts")?;
     let keyboard: Arc<dyn SessionKeyboard + Send + Sync> = Arc::new(kiosk::Kiosk);
+    // The flow decides what the session prints and when, and whether the
+    // layout test field's text may be (only for a test: the fixed credential,
+    // or a simulated session where no real person types).
+    let flow = Flow::new(layouts).with_markers(MarkerConfig::session(
+        launch.edition.unwrap_or_else(|| "gnome".to_owned()),
+        launch.simulate.is_some(),
+    ));
     let init = app::Init {
         backend,
         keyboard,
-        layouts,
+        flow,
         fullscreen: launch.fullscreen,
-        edition: launch.edition.unwrap_or_else(|| "gnome".to_owned()),
-        markers: true,
         stats: true,
-        // The layout test field's text may be printed only for a test: the
-        // fixed credential, or a simulated session (no real person types).
-        echo_try: launch.simulate.is_some() || markers::echo_allowed(),
         observer: None,
     };
     // The command line is ours, not GTK's.

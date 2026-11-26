@@ -1,14 +1,16 @@
 //! The lines the installer prints for the test harness and for whoever watches
 //! a serial console, in one place: the trials assert on these formats, so
-//! every interface (GTK today, Kirigami later) must print the same ones. The
-//! flow only formats; each interface decides how a line is written (the GTK
-//! application's journal-and-serial worker, `serial.rs`).
+//! every interface (GTK today, Kirigami later) must print the same ones. This
+//! module formats; [`crate::flow::Flow`] decides when each line exists and
+//! queues it (`Flow::drain_markers`), and an interface decides only how a line
+//! is written (the GTK application's journal-and-serial worker, `serial.rs`).
 //!
 //! ```text
 //! ILEX-INSTALLER page=<id> edition=<e> <the page's words> [renderer=… scale=… uptime=…]
+//! ILEX-COMPOSITION <tag> (<reason>) installs <image>      (machine page, and a choice)
 //! ILEX-INSTALLER event=probe result=ok disks=<n> | result=failed <title> | result=stale
 //! ILEX-INSTALLER event=plan result=ok | refused code=<code> | failed | stale
-//! ILEX-INSTALLER event=layout layout=<id> applied=true|false
+//! ILEX-INSTALLER event=layout layout=<id> applied=true|false | result=stale
 //! ILEX-INSTALLER event=language language=<locale>
 //! ILEX-INSTALLER event=notice severity=info|warning|error text=<the machine page's notice>
 //! ILEX-INSTALLER event=try layout=<id> text=<what was typed>      (test boots only)
@@ -54,7 +56,7 @@ pub fn echo_allowed() -> bool {
 }
 
 /// Words in a marker are separated by spaces: a sentence becomes one word.
-fn one_word(text: &str) -> String {
+pub(crate) fn one_word(text: &str) -> String {
     text.chars()
         .take(400)
         .map(|c| {
