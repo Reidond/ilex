@@ -648,13 +648,9 @@ pub fn check() -> Result<()> {
         }
         if let Some(extensions) = entry["apps"]["flatpak-extension"].as_array() {
             for extension in extensions {
-                expected.insert(
-                    extension["id"].as_str().ok_or("invalid extension ID")?.to_string(),
-                    (
-                        extension["branch"].as_str().ok_or("invalid extension branch")?.to_string(),
-                        true,
-                    ),
-                );
+                let id = extension["id"].as_str().ok_or("invalid extension ID")?;
+                let branch = extension["branch"].as_str().ok_or("invalid extension branch")?;
+                expected.insert(id.to_string(), (branch.to_string(), true));
             }
         }
     }

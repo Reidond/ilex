@@ -107,13 +107,22 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     toolkits(vm, ToolkitLook::Plasma { dark: true })?;
     show(vm, ctl, artifacts, "10-plasma-libadwaita-dark", "adw", None)?;
     let leftovers = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
-    println!("     Plasma ends dark; the user's own database holds: {}", leftovers.trim());
+    println!(
+        "     Plasma ends dark; the user's own database holds: {}",
+        leftovers.trim()
+    );
 
     // 2. A normal logout, then the same home in GNOME.
     kde::logout(vm)?;
     let mut report = vmtest::Report::default();
-    report.check("a Plasma logout leaves nothing in the user manager", manager_clean(vm));
-    report.check("and nothing in the home that GNOME reads", kde::nothing_shared(vm));
+    report.check(
+        "a Plasma logout leaves nothing in the user manager",
+        manager_clean(vm),
+    );
+    report.check(
+        "and nothing in the home that GNOME reads",
+        kde::nothing_shared(vm),
+    );
     report.finish()?;
     choose_session(vm, "gnome")?;
     settle(ctl)?;
@@ -152,8 +161,15 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     shot(ctl, artifacts, "14-plasma-after-gnome")?;
     plasma_unchanged(vm)?;
     toolkits(vm, ToolkitLook::Plasma { dark: true })?;
-    show(vm, ctl, artifacts, "15-plasma-gtk3-after-gnome", "gtk3", None)?
-        .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
+    show(
+        vm,
+        ctl,
+        artifacts,
+        "15-plasma-gtk3-after-gnome",
+        "gtk3",
+        None,
+    )?
+    .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
     Ok(())
 }
 
@@ -233,40 +249,58 @@ fn toolkits(vm: &Vm, look: ToolkitLook) -> Result<()> {
     match look {
         ToolkitLook::Plasma { dark } => {
             let theme = if dark { "Breeze-Dark" } else { "Breeze" };
-            report.check("GTK 3 is Breeze", probe(vm, "gtk3", None).and_then(|p| {
-                println!("     {}", p.describe());
-                p.expect(Some(theme), Some("breeze"), dark)
-            }));
-            report.check("GTK 4 follows the scheme", probe(vm, "gtk4", None).and_then(|p| {
-                println!("     {}", p.describe());
-                p.expect(None, None, dark)
-            }));
-            report.check("libadwaita follows the scheme with Plasma's accent", probe(vm, "adw", None).and_then(|p| {
-                println!("     {}", p.describe());
-                p.expect(None, None, dark)?;
-                if p.field("accent") != Some("blue") {
-                    bail!("libadwaita's accent is not Plasma's blue: {}", p.describe());
-                }
-                Ok(())
-            }));
+            report.check(
+                "GTK 3 is Breeze",
+                probe(vm, "gtk3", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(Some(theme), Some("breeze"), dark)
+                }),
+            );
+            report.check(
+                "GTK 4 follows the scheme",
+                probe(vm, "gtk4", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(None, None, dark)
+                }),
+            );
+            report.check(
+                "libadwaita follows the scheme with Plasma's accent",
+                probe(vm, "adw", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(None, None, dark)?;
+                    if p.field("accent") != Some("blue") {
+                        bail!("libadwaita's accent is not Plasma's blue: {}", p.describe());
+                    }
+                    Ok(())
+                }),
+            );
         }
         ToolkitLook::GnomeDark => {
-            report.check("GTK 3 is Adwaita-dark", probe(vm, "gtk3", None).and_then(|p| {
-                println!("     {}", p.describe());
-                p.expect(Some("Adwaita-dark"), Some("Adwaita"), true)
-            }));
-            report.check("GTK 4 is dark", probe(vm, "gtk4", None).and_then(|p| {
-                println!("     {}", p.describe());
-                p.expect(None, None, true)
-            }));
-            report.check("libadwaita is dark with GNOME's purple accent", probe(vm, "adw", None).and_then(|p| {
-                println!("     {}", p.describe());
-                p.expect(None, None, true)?;
-                if p.field("accent") != Some("purple") {
-                    bail!("libadwaita's accent is not purple: {}", p.describe());
-                }
-                Ok(())
-            }));
+            report.check(
+                "GTK 3 is Adwaita-dark",
+                probe(vm, "gtk3", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(Some("Adwaita-dark"), Some("Adwaita"), true)
+                }),
+            );
+            report.check(
+                "GTK 4 is dark",
+                probe(vm, "gtk4", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(None, None, true)
+                }),
+            );
+            report.check(
+                "libadwaita is dark with GNOME's purple accent",
+                probe(vm, "adw", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(None, None, true)?;
+                    if p.field("accent") != Some("purple") {
+                        bail!("libadwaita's accent is not purple: {}", p.describe());
+                    }
+                    Ok(())
+                }),
+            );
         }
     }
     report.finish()
@@ -279,7 +313,9 @@ fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         let env = user(vm, "systemctl --user show-environment")?;
         if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME")
             && !env.lines().any(|l| {
-                ["DCONF_PROFILE=", "GTK_USE_PORTAL=", "GTK_THEME="].iter().any(|p| l.starts_with(p))
+                ["DCONF_PROFILE=", "GTK_USE_PORTAL=", "GTK_THEME="]
+                    .iter()
+                    .any(|p| l.starts_with(p))
             })
         {
             Ok(())
@@ -326,25 +362,37 @@ fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     // GNOME's GTK 3, GTK 4 and libadwaita applications: light and Adwaita,
     // after a Plasma session that ended in Breeze Dark.
     let mut report = vmtest::Report::default();
-    report.check("GTK 3 is Adwaita and light", probe(vm, "gtk3", None).and_then(|p| {
-        println!("     {}", p.describe());
-        p.expect(Some("Adwaita"), Some("Adwaita"), false)
-    }));
-    report.check("GTK 4 is light", probe(vm, "gtk4", None).and_then(|p| {
-        println!("     {}", p.describe());
-        p.expect(None, None, false)
-    }));
-    report.check("libadwaita is light with GNOME's blue accent", probe(vm, "adw", None).and_then(|p| {
-        println!("     {}", p.describe());
-        p.expect(None, None, false)?;
-        if p.field("accent") != Some("blue") || p.field("adw_dark") != Some("False") {
-            bail!("libadwaita is not GNOME's light blue: {}", p.describe());
-        }
-        Ok(())
-    }));
+    report.check(
+        "GTK 3 is Adwaita and light",
+        probe(vm, "gtk3", None).and_then(|p| {
+            println!("     {}", p.describe());
+            p.expect(Some("Adwaita"), Some("Adwaita"), false)
+        }),
+    );
+    report.check(
+        "GTK 4 is light",
+        probe(vm, "gtk4", None).and_then(|p| {
+            println!("     {}", p.describe());
+            p.expect(None, None, false)
+        }),
+    );
+    report.check(
+        "libadwaita is light with GNOME's blue accent",
+        probe(vm, "adw", None).and_then(|p| {
+            println!("     {}", p.describe());
+            p.expect(None, None, false)?;
+            if p.field("accent") != Some("blue") || p.field("adw_dark") != Some("False") {
+                bail!("libadwaita is not GNOME's light blue: {}", p.describe());
+            }
+            Ok(())
+        }),
+    );
     report.finish()?;
-    show(vm, ctl, artifacts, "12-gtk3-in-gnome", "gtk3", None)?
-        .expect(Some("Adwaita"), Some("Adwaita"), false)
+    show(vm, ctl, artifacts, "12-gtk3-in-gnome", "gtk3", None)?.expect(
+        Some("Adwaita"),
+        Some("Adwaita"),
+        false,
+    )
 }
 
 /// GNOME's choices: the dark scheme, Adwaita-dark for GTK 3 applications and a
@@ -355,7 +403,10 @@ fn gnome_dark(vm: &Vm) -> Result<()> {
         ("gtk-theme", "Adwaita-dark"),
         ("accent-color", "purple"),
     ] {
-        user(vm, &format!("gsettings set org.gnome.desktop.interface {key} {value}"))?;
+        user(
+            vm,
+            &format!("gsettings set org.gnome.desktop.interface {key} {value}"),
+        )?;
     }
     // GNOME's portal answers from the new values.
     std::thread::sleep(Duration::from_secs(3));
@@ -365,21 +416,27 @@ fn gnome_dark(vm: &Vm) -> Result<()> {
 /// Plasma, after GNOME's dark session, is Plasma's.
 fn plasma_unchanged(vm: &mut Vm) -> Result<()> {
     let mut report = vmtest::Report::default();
-    report.check("Plasma's session carries GTK_USE_PORTAL and no profile or theme", {
-        let env = user(vm, "systemctl --user show-environment")?;
-        let has = |p: &str| env.lines().any(|l| l.starts_with(p));
-        if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=KDE")
-            && has("GTK_USE_PORTAL=1")
-            && !has("DCONF_PROFILE=")
-            && !has("GTK_THEME=")
+    report.check(
+        "Plasma's session carries GTK_USE_PORTAL and no profile or theme",
         {
-            Ok(())
-        } else {
-            Err(anyhow!("session environment:\n{env}"))
-        }
-    });
+            let env = user(vm, "systemctl --user show-environment")?;
+            let has = |p: &str| env.lines().any(|l| l.starts_with(p));
+            if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=KDE")
+                && has("GTK_USE_PORTAL=1")
+                && !has("DCONF_PROFILE=")
+                && !has("GTK_THEME=")
+            {
+                Ok(())
+            } else {
+                Err(anyhow!("session environment:\n{env}"))
+            }
+        },
+    );
     report.check("the KDE database still holds Breeze Dark", {
-        let keys = user(vm, "env DCONF_PROFILE=ilex-kde dconf dump /org/gnome/desktop/interface/")?;
+        let keys = user(
+            vm,
+            "env DCONF_PROFILE=ilex-kde dconf dump /org/gnome/desktop/interface/",
+        )?;
         if keys.contains("gtk-theme='Breeze-Dark'") && keys.contains("icon-theme='breeze'") {
             Ok(())
         } else {
@@ -399,7 +456,11 @@ fn plasma_unchanged(vm: &mut Vm) -> Result<()> {
             "for pid in $(pgrep -u {USER} -f '^/usr/libexec/xdg-desktop-portal-gtk'); do \
                tr '\\0' '\\n' < /proc/$pid/environ | grep '^DCONF_PROFILE='; done"
         ))?;
-        if profile.trim() == "DCONF_PROFILE=ilex-kde" { Ok(()) } else { Err(anyhow!("`{profile}`")) }
+        if profile.trim() == "DCONF_PROFILE=ilex-kde" {
+            Ok(())
+        } else {
+            Err(anyhow!("`{profile}`"))
+        }
     });
     report.finish()
 }

@@ -192,7 +192,10 @@ pub(super) fn user(vm: &Vm, cmd: &str) -> Result<String> {
 /// user manager, so with exactly the manager's environment (what Plasma or
 /// GNOME exported into it), its output captured.
 pub(super) fn app(vm: &Vm, cmd: &str) -> Result<String> {
-    user(vm, &format!("systemd-run --user --pipe --wait --quiet {cmd}"))
+    user(
+        vm,
+        &format!("systemd-run --user --pipe --wait --quiet {cmd}"),
+    )
 }
 
 /// The portal's `org.freedesktop.appearance` value, as `busctl` prints it.
@@ -250,7 +253,9 @@ impl Probe {
         output
             .lines()
             .find(|l| l.starts_with("gtkprobe "))
-            .map(|l| Probe { line: l.trim().to_string() })
+            .map(|l| Probe {
+                line: l.trim().to_string(),
+            })
             .with_context(|| format!("the probe printed no result:\n{output}"))
     }
 
@@ -277,7 +282,12 @@ impl Probe {
     /// background, and the `icons` (when given). The theme name alone proves
     /// little: a theme that is not found leaves the name set and the colours
     /// at the toolkit's own default.
-    pub(super) fn expect(&self, theme: Option<&str>, icons: Option<&str>, dark: bool) -> Result<()> {
+    pub(super) fn expect(
+        &self,
+        theme: Option<&str>,
+        icons: Option<&str>,
+        dark: bool,
+    ) -> Result<()> {
         for (key, want) in [("theme", theme), ("icons", icons)] {
             if let Some(want) = want
                 && self.field(key) != Some(want)
@@ -331,7 +341,10 @@ pub(super) fn show(
 ) -> Result<Probe> {
     push_probe(vm)?;
     // A previous window is closed first; the unit is not a Plasma child.
-    let _ = user(vm, &format!("systemctl --user stop '{PROBE_UNIT}-*.service'"));
+    let _ = user(
+        vm,
+        &format!("systemctl --user stop '{PROBE_UNIT}-*.service'"),
+    );
     let unit = format!("{PROBE_UNIT}-{name}");
     let inner = match sandbox {
         None => format!("python3 -I /tmp/gtk-probe.py {toolkit} 280 window"),
@@ -393,7 +406,17 @@ pub(super) fn nothing_shared(vm: &Vm) -> Result<()> {
         bail!("the user's own database holds Plasma's keys:\n{shared}");
     }
     let home = home(vm)?;
-    for path in [".config/gtk-3.0", ".config/gtk-4.0", ".gtkrc-2.0", ".config/xsettingsd"] {
+    // The settings files GTK reads from the home (an application may create the
+    // directories for its own bookmarks).
+    for path in [
+        ".config/gtk-3.0/settings.ini",
+        ".config/gtk-3.0/gtk.css",
+        ".config/gtk-3.0/colors.css",
+        ".config/gtk-4.0/settings.ini",
+        ".config/gtk-4.0/gtk.css",
+        ".gtkrc-2.0",
+        ".config/xsettingsd/xsettingsd.conf",
+    ] {
         if vm.ssh(&format!("test -e {home}/{path}"))?.status.success() {
             bail!("{home}/{path} exists: Plasma wrote a shared GTK file");
         }
@@ -408,7 +431,10 @@ fn manager_environment(vm: &Vm) -> Result<()> {
     if !env.lines().any(|l| l == "GTK_USE_PORTAL=1") {
         bail!("GTK_USE_PORTAL=1 is not in the session environment:\n{env}");
     }
-    if env.lines().any(|l| l.starts_with("DCONF_PROFILE=") || l.starts_with("GTK_THEME=")) {
+    if env
+        .lines()
+        .any(|l| l.starts_with("DCONF_PROFILE=") || l.starts_with("GTK_THEME="))
+    {
         bail!("the session environment carries a profile or theme:\n{env}");
     }
     Ok(())
@@ -499,7 +525,11 @@ pub(super) fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> 
     );
     report.check("the Plasma-only sync is running", {
         let state = user(vm, "systemctl --user is-active ilex-kde-gtk.service")?;
-        if state == "active" { Ok(()) } else { Err(anyhow!("ilex-kde-gtk.service is {state}")) }
+        if state == "active" {
+            Ok(())
+        } else {
+            Err(anyhow!("ilex-kde-gtk.service is {state}"))
+        }
     });
     report.check("the KDE database holds Plasma's Breeze look", {
         wait_gtk_theme(vm, "Breeze")?;
@@ -510,9 +540,18 @@ pub(super) fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> 
             Err(anyhow!("KDE keys:\n{keys}"))
         }
     });
-    report.check("Plasma wrote no shared GTK file and no key of the user's own database", nothing_shared(vm));
-    report.check("the GTK settings portal reads the KDE database", portal_reads_kde_database(vm));
-    report.check("the user has a Flathub remote of their own (Discover's)", flathub_remote(vm));
+    report.check(
+        "Plasma wrote no shared GTK file and no key of the user's own database",
+        nothing_shared(vm),
+    );
+    report.check(
+        "the GTK settings portal reads the KDE database",
+        portal_reads_kde_database(vm),
+    );
+    report.check(
+        "the user has a Flathub remote of their own (Discover's)",
+        flathub_remote(vm),
+    );
     report.check(
         "the portal gives GTK 4 and libadwaita Plasma's light scheme and accent",
         portal_follows(vm, 2),
@@ -525,18 +564,27 @@ pub(super) fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> 
     );
 
     probe(vm, "gtk3", None)?.expect(Some("Breeze"), Some("breeze"), false)?;
-    show(vm, ctl, artifacts, "05-gtk3-breeze-light", "gtk3", None)?
-        .expect(Some("Breeze"), Some("breeze"), false)?;
+    show(vm, ctl, artifacts, "05-gtk3-breeze-light", "gtk3", None)?.expect(
+        Some("Breeze"),
+        Some("breeze"),
+        false,
+    )?;
 
     // The user picks Breeze Dark in Plasma; GTK follows without help.
     colours(vm, true)?;
     let mut report = vmtest::Report::default();
-    report.check("the portal follows Plasma's dark scheme", portal_follows(vm, 1));
+    report.check(
+        "the portal follows Plasma's dark scheme",
+        portal_follows(vm, 1),
+    );
     report.check("still nothing shared", nothing_shared(vm));
     report.finish()?;
     probe(vm, "gtk3", None)?.expect(Some("Breeze-Dark"), Some("breeze"), true)?;
-    show(vm, ctl, artifacts, "06-gtk3-breeze-dark", "gtk3", None)?
-        .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
+    show(vm, ctl, artifacts, "06-gtk3-breeze-dark", "gtk3", None)?.expect(
+        Some("Breeze-Dark"),
+        Some("breeze"),
+        true,
+    )?;
     println!(
         "     dark: portal {} accent {}",
         appearance(vm, "color-scheme")?,
@@ -568,8 +616,12 @@ mod apps {
             .map(|e| {
                 Ok(format!(
                     "{}//{}",
-                    e.get("id").and_then(|v| v.as_str()).context("extension id")?,
-                    e.get("branch").and_then(|v| v.as_str()).context("extension branch")?
+                    e.get("id")
+                        .and_then(|v| v.as_str())
+                        .context("extension id")?,
+                    e.get("branch")
+                        .and_then(|v| v.as_str())
+                        .context("extension branch")?
                 ))
             })
             .collect()
@@ -632,16 +684,24 @@ mod apps {
     /// colours the toolkit resolved, not the names the portal handed it.
     fn sandboxes(vm: &mut Vm, dark: bool) -> Result<()> {
         let mut report = vmtest::Report::default();
-        let (gtk3_theme, label) = if dark { ("Breeze-Dark", "dark") } else { ("Breeze", "light") };
+        let (gtk3_theme, label) = if dark {
+            ("Breeze-Dark", "dark")
+        } else {
+            ("Breeze", "light")
+        };
         report.check(
             &format!("a GTK 3 Flatpak resolves {gtk3_theme} ({label}) from the theme extension"),
-            probe(vm, "gtk3", Some("org.gnome.gedit"))
-                .and_then(|p| p.expect(Some(gtk3_theme), Some("breeze"), dark).map(|()| println!("     {}", p.describe()))),
+            probe(vm, "gtk3", Some("org.gnome.gedit")).and_then(|p| {
+                p.expect(Some(gtk3_theme), Some("breeze"), dark)
+                    .map(|()| println!("     {}", p.describe()))
+            }),
         );
         report.check(
             &format!("a GTK 4 Flatpak is {label}"),
-            probe(vm, "gtk4", Some("org.gnome.Calculator"))
-                .and_then(|p| p.expect(None, None, dark).map(|()| println!("     {}", p.describe()))),
+            probe(vm, "gtk4", Some("org.gnome.Calculator")).and_then(|p| {
+                p.expect(None, None, dark)
+                    .map(|()| println!("     {}", p.describe()))
+            }),
         );
         report.check(
             &format!("a libadwaita Flatpak is {label}, with Plasma's accent"),
@@ -667,16 +727,31 @@ mod apps {
         // Started as a session application: the manager's environment, as a
         // launch from Plasma's menu has.
         let set = "flatpak run --command=gsettings ca.desrt.dconf-editor";
-        let before = app(vm, &format!("{set} get ca.desrt.dconf-editor.Settings show-warning"))?;
-        let want = if before.trim() == "true" { "false" } else { "true" };
-        app(vm, &format!("{set} set ca.desrt.dconf-editor.Settings show-warning {want}"))?;
-        let read = app(vm, &format!("{set} get ca.desrt.dconf-editor.Settings show-warning"))?;
+        let before = app(
+            vm,
+            &format!("{set} get ca.desrt.dconf-editor.Settings show-warning"),
+        )?;
+        let want = if before.trim() == "true" {
+            "false"
+        } else {
+            "true"
+        };
+        app(
+            vm,
+            &format!("{set} set ca.desrt.dconf-editor.Settings show-warning {want}"),
+        )?;
+        let read = app(
+            vm,
+            &format!("{set} get ca.desrt.dconf-editor.Settings show-warning"),
+        )?;
         let host = user(vm, "dconf read /ca/desrt/dconf-editor/show-warning")?;
         let sandbox_env = app(
             vm,
             "flatpak run --command=sh ca.desrt.dconf-editor -c 'printf \"%s\" \"${DCONF_PROFILE:-none}\"'",
         )?;
-        println!("     dconf-editor: wrote {want}, sandbox reads {read}, the user's database holds {host}, DCONF_PROFILE in the sandbox: {sandbox_env}");
+        println!(
+            "     dconf-editor: wrote {want}, sandbox reads {read}, the user's database holds {host}, DCONF_PROFILE in the sandbox: {sandbox_env}"
+        );
         if read.trim() != want || host.trim() != want || sandbox_env.trim() != "none" {
             bail!("a dconf-backed Flatpak lost its setting under Plasma");
         }
@@ -712,17 +787,32 @@ mod apps {
         settle(ctl)?;
         shot(ctl, artifacts, "10-discover-installed")?;
         let mut report = vmtest::Report::default();
-        report.check("the application went to the user installation, not the system's", {
-            let system = vm.ssh("flatpak info --system org.gnome.Chess")?;
-            if system.status.success() { Err(anyhow!("Chess is also installed system-wide")) } else { Ok(()) }
-        });
+        report.check(
+            "the application went to the user installation, not the system's",
+            {
+                let system = vm.ssh("flatpak info --system org.gnome.Chess")?;
+                if system.status.success() {
+                    Err(anyhow!("Chess is also installed system-wide"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
         report.check("the GNOME runtime of the system installation was reused", {
             let user_runtime = user(vm, "flatpak info --user org.gnome.Platform//51");
-            if user_runtime.is_ok() { Err(anyhow!("the runtime was installed again for the user")) } else { Ok(()) }
+            if user_runtime.is_ok() {
+                Err(anyhow!("the runtime was installed again for the user"))
+            } else {
+                Ok(())
+            }
         });
         report.check("no system catalogue was fetched for Discover", {
             let catalogue = vm.ssh("test -e /var/lib/flatpak/appstream/flathub")?;
-            if catalogue.status.success() { Err(anyhow!("the system Flathub catalogue exists")) } else { Ok(()) }
+            if catalogue.status.success() {
+                Err(anyhow!("the system Flathub catalogue exists"))
+            } else {
+                Ok(())
+            }
         });
         report.finish()?;
         user(vm, "systemctl --user stop ilex-discover.service")?;

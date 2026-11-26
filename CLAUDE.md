@@ -770,95 +770,149 @@ KCharSelect, Filelight, KFind, Haruna, Elisa, KRDC, Skanpage, KJournald
 Browser, KWalletManager, KTorrent, NeoChat, KolourPaint, Firefox), installed by
 the same preinstall machinery as GNOME's and checked by `ilexctl doctor apps`.
 Games, education and PIM suites, Kate, Krita and KDE Connect are not
-preinstalled; install them from Discover. Discover's PackageKit, rpm-ostree and
-offline-update backends, Plasma Welcome and online-account web logins are
-excluded (bootc owns OS updates). `plasma-discover` still requires
-`qt6-qtwebview`, so Qt WebEngine (277 MiB) is on the host.
+preinstalled; install them from Discover (below). Discover's PackageKit,
+rpm-ostree, offline-update and notifier packages, Plasma Welcome and
+online-account web logins are excluded (bootc owns OS updates, and its notifier
+would announce system Flatpak updates only root may apply). `plasma-discover`
+still requires `qt6-qtwebview`, so Qt WebEngine (277 MiB) is on the host.
 
 With several shells each package enables its own greeter, and the first to
 install wins. The composer writes the default shell's greeter first into
-`greeters`, and the Containerfile disables the others and enables that one with
-`--force`: `display-manager.service` always belongs to the default shell. In
-`--shell gnome --shell kde` GDM is the greeter and lists Plasma as a session;
-in `--shell kde --shell gnome` Plasma Login Manager lists GNOME.
+`greeters` (a unit shared by two shells once), and the Containerfile disables the
+others and enables that one with `--force`: `display-manager.service` always
+belongs to the default shell. In `--shell gnome --shell kde` GDM is the greeter
+and lists Plasma as a session (`graphical::shells`). `--shell kde --shell gnome`
+is built and its greeter configuration is checked by `ephemeral::configuration`,
+but a Plasma Login Manager login into GNOME is not tested.
 
-**GTK 3, GTK 4 and libadwaita in Plasma (measured on Plasma 6.8.3, GTK 3.24.52,
-libadwaita 1.10.0).** The host has GTK 3 (`kde-gtk-config` requires it) and no
-GTK 4 or libadwaita: those applications are Flatpaks with the GNOME runtime.
+**Each desktop keeps its own look.** GNOME stays Adwaita and Plasma stays Breeze
+in one shared home, across a normal logout, a crash, a user manager that
+outlives its sessions (lingering, SSH, TTY) and a `bootc switch` between a KDE
+and a GNOME composition. The design is that Plasma writes nothing a GNOME
+session reads, and puts nothing in the session that GNOME inherits as a choice.
 
-- Left alone, `kde-gtk-config` writes `~/.config/gtk-3.0` and `gtk-4.0`
-  `settings.ini` (icon and cursor theme, fonts, dark preference, no theme name)
-  and GSettings keys, but selects **no GTK theme**: GTK 3 applications are
-  Adwaita. The shell therefore chooses Breeze once, through
-  `org.kde.GtkConfig.setGtkTheme`, from a KDE-only autostart
-  (`/etc/xdg/autostart/ilex-kde-gtk-theme.desktop`, `OnlyShowIn=KDE;`, runs
-  `/usr/libexec/ilex/kde-gtk-theme`) when `gtkTheme` is empty. A theme the user
-  picks later in System Settings is kept.
-- GTK 4 and libadwaita applications need no theme: libadwaita 1.10 reads
-  `org.freedesktop.appearance` from the settings portal, and
-  `xdg-desktop-portal-kde` answers `color-scheme` (2 light, 1 dark) and
-  `accent-color` (Plasma's selection colour, Breeze blue 61,174,233). Observed:
-  a libadwaita Flatpak (GNOME Calculator) follows Breeze Light/Dark live; it
-  maps the accent to its nearest of nine, here Blue. `kde-portals.conf`
-  (`plasma-workspace`) puts the GTK portal second for `Settings`, which gives
-  sandboxed GTK 3 applications `org.gnome.desktop.interface` keys. The
-  portal does not signal a change of accent alone (an accent set with
-  `plasma-apply-colorscheme --accent-color` reached it after the portal
-  restarted, not live).
-- Flatpak GTK 3 applications need the Flathub extension
-  `org.gtk.Gtk3theme.Breeze` (branch `3.22`) next to the Breeze choice above;
-  with it GNOME gedit renders in Breeze and Breeze Dark, without it in Adwaita.
-  It is not preinstalled: the preinstall lists carry `Branch=stable` only
-  (`ilexctl apps --self-check` requires it), and this extension is a runtime on
-  `3.22`. Install it with
-  `flatpak install flathub org.gtk.Gtk3theme.Breeze`.
-  The extension does not affect libadwaita applications.
+*Measured on Plasma 6.8.3, GTK 3.24.52, libadwaita 1.10 and the GNOME 51 runtime:*
 
-*Nothing changes GNOME.* GNOME keeps Adwaita because the shell ships only
-Plasma-scoped files (`ephemeral::shell_themes` checks that the overlay holds
-nothing else, and that no global GTK, portal or GSettings default exists):
-`/etc/xdg/plasma-workspace/env/50-ilex-kde.sh` (sourced by `startplasma` only),
-the `OnlyShowIn=KDE;` autostart and its helper, and the dconf profile
-`/usr/share/dconf/profile/ilex-kde`. The env script exports
-`DCONF_PROFILE=ilex-kde`, which keeps what `kde-gtk-config` and a Plasma
-session's GTK applications write to GSettings (GTK theme, icon theme `breeze`,
-cursor, fonts, scale, colour scheme, button layout) in `~/.config/dconf/kde`;
-without it they land in the shared `~/.config/dconf/user` and restyle a GNOME
-session of the same user (measured). The variable reaches the user manager,
-`dconf-service` and the GTK portal. `graphical::shells` runs one account in
-Plasma and then in GNOME from one image: GNOME's database holds no interface
-key and GNOME's GTK, icon, cursor and colour keys stay at their defaults. **Not
-isolated:** `settings.ini`, `gtk.css` and `colors.css` are shared files. Their
-`@define-color *_breeze` names, theme name, icons and fonts are inert in GNOME
-(GSettings override them), but the dark preference is not: after a Plasma
-session ended in Breeze Dark, GNOME's non-libadwaita GTK 3 windows are dark
-(GNOME Shell and libadwaita applications are unaffected). `graphical::shells`
-leaves Plasma light. A later change could neutralise those keys when the Plasma
-session ends, or give each shell its own home. KDE with systemd-homed accounts
-is not qualified (the homed tier uses GDM and GNOME's settings; the profile
-writer sets GNOME keys only for the default shell `gnome`).
+- `xdg-desktop-portal-kde` answers only `org.freedesktop.appearance`
+  (`color-scheme`, `accent-color`, `contrast`, `reduced-motion`), live; libadwaita
+  reads exactly that, so libadwaita applications follow Plasma's light/dark
+  scheme and accent (Breeze blue 61,174,233, mapped to libadwaita's nearest of
+  nine, Blue) with no help. GTK 4 applications follow the scheme too.
+- GTK 3 does not read `color-scheme`: dark needs a dark theme name or
+  `gtk-application-prefer-dark-theme` (a `settings.ini` entry). The GTK 3 theme
+  name, icons, cursor and fonts of a sandboxed application come from the portal's
+  `org.gnome.desktop.interface`, which `xdg-desktop-portal-gtk` answers from
+  GSettings (`kde-portals.conf` puts it second for `Settings`). A GTK 3 host
+  application reads the same keys from GSettings directly, or from the portal
+  when `GTK_USE_PORTAL=1`.
+- `settings.ini` loses to GSettings for the theme, icons and fonts but not for
+  `gtk-application-prefer-dark-theme` and `gtk-modules`, so what
+  `kde-gtk-config` writes into `~/.config/gtk-3.0|gtk-4.0` restyles a GNOME
+  session (the dark preference, a loaded module), as does a GSettings key it
+  writes into the user's own database. A session-wide `DCONF_PROFILE` is no
+  fix: Flatpak passes the caller's environment into its sandbox, a runtime has
+  no `ilex-kde` profile ("unable to open named profile … The key is not
+  writable"), and a dconf-backed Flatpak such as dconf-editor loses its writes.
+- Flathub's `org.gtk.Gtk3theme.Breeze` (branch `3.22`) is one theme with a
+  `gtk.css` and a `gtk-dark.css`; its dark variant again needs
+  `gtk-application-prefer-dark-theme`. `org.gtk.Gtk3theme.Breeze-Dark` is a theme
+  of its own, so a theme name carries the dark choice. It is end of life on
+  Flathub ("replaced by org.gtk.Gtk3theme.Breeze"; the replacement's workaround
+  is `flatpak override --user --filesystem=xdg-config/gtk-3.0:ro`, i.e. a shared
+  file) and is Plasma 5's palette (window background `#31363b`, Plasma 6's own
+  Breeze Dark is `#202326`).
+
+*What the shell does* (every path below is Plasma-scoped, and `ephemeral::shell_themes`
+checks that the overlay holds nothing else):
+
+- `kde-gtk-config` is not installed (nothing requires it), so nothing writes
+  `settings.ini`, `gtk-4.0`, `.gtkrc-2.0`, `gtk-modules` or GSettings keys.
+- `ilex-kde-gtk.service` is wanted by `plasma-workspace.target` only. It runs
+  `/usr/libexec/ilex/kde-gtk-sync watch`: at start and after every change Plasma
+  announces (`org.kde.KGlobalSettings.notifyChange`, the portal's
+  `SettingChanged`) it maps the Colors:Window background to `gtk-theme` Breeze
+  or Breeze-Dark and `color-scheme`, and copies the icon theme, cursor theme and
+  size and the UI and fixed-width fonts from `kdeglobals` and `kcminputrc` into
+  `org.gnome.desktop.interface` of the **KDE-only dconf database** (profile
+  `/usr/share/dconf/profile/ilex-kde`, file `~/.config/dconf/kde`). The unit sets
+  `DCONF_PROFILE` for itself; values that are not names are never written into a
+  GVariant.
+- `xdg-desktop-portal-gtk.service` has a drop-in that starts
+  `/usr/libexec/ilex/portal-gtk`. The wrapper selects the KDE database only when
+  `XDG_CURRENT_DESKTOP` is KDE **and** `plasma-workspace.target` is active or
+  activating, decided each time the portal starts: nothing persists for a later
+  GNOME login to inherit.
+- Plasma's env script exports only `GTK_USE_PORTAL=1`, so GTK applications of the
+  session ask the portal (and Plasma's file dialogs). Left behind by a crash it is
+  benign: GNOME's own portal answers from GNOME's own settings. A shutdown script
+  (`/etc/xdg/plasma-workspace/shutdown/`) removes it on a normal logout.
+- The shell preinstalls `org.gtk.Gtk3theme.Breeze` and `org.gtk.Gtk3theme.Breeze-Dark`
+  (`[[apps.flatpak-extension]]`, see Apps); without them a Flatpak GTK 3 application
+  is Adwaita. Custom Plasma colour schemes reach GTK 3 as Breeze or Breeze Dark by
+  their window background, not colour by colour (that was `kde-gtk-config`'s
+  `colors.css`).
+- Host GTK 3 applications that do not set `GTK_USE_PORTAL` (a Flatpak-less
+  launch from a terminal, say) read GSettings directly and are Adwaita; the shell
+  ships none (a KDE image has no host GTK 3 application besides the portal).
+- `profile.py` checks `~/.config/dconf/kde` for symlinks like `user`.
+
+**Discover** lists and installs from a remote of an installation and installs into
+the installation that remote belongs to. The system installation is root's
+(`ilexctl apps`; polkit refuses everyone else, its Flathub remote is not
+enumerated), so a user with no remote of their own saw "no Flatpak sources" and an
+"Add Flathub" that was refused. `ilex-kde-flathub.service` (Plasma only, once per
+user, stamp `~/.local/state/ilex/kde-flathub-remote`) runs
+`flatpak remote-add --user --if-not-exists flathub` from the committed trust file,
+offline, the remote `ilexctl profile apply --install-apps` creates too; a remote
+the user later removes is not added again. Discover then shows Flathub and installs
+"from Flathub (user)", reusing a runtime of the system installation. The system
+catalogue stays hidden, `plasma-discover-notifier` is not installed, and system
+applications are updated by `ilexctl apps`. Limits (Discover's code takes the
+first, system, installation for these): its "Add Flathub" button when the user has
+removed the remote, opening a `.flatpakref` or `.flatpakrepo`, and removing or
+updating a system application from the Installed and Updates pages are refused by
+polkit; use `flatpak install --user …`.
+
+**KDE with systemd-homed.** Plasma Login Manager lists a homed account (the
+AccountsService backport below makes it visible, it shows the real name) and
+unlocks its LUKS home through `pam_systemd_home` (authselect's `with-systemd-homed`
+reaches its PAM stack). `graphical::apps` on a KDE image creates the account with
+the lifecycle driver and logs in through the greeter. The confined dconf writer
+creates `~/.config/dconf/kde` beside `user`.
 
 Measured: `generic.kde` is 5,185,668,697 bytes (4,945 MiB, 1,378 RPMs) against
 `generic.gnome`'s 4,250,881,635 (4,054 MiB, 1,075): +891 MiB, from a shells
 transaction of 776 packages (712 MiB downloaded) against 473 (458 MiB). The base
 is unchanged. Both shells together are 6,061,869,164 bytes (1,602 RPMs).
+`ilexctl apps sync` of the 22 KDE Flatpaks plus runtimes on a fresh KDE
+VM: 3 min 16 s, 2 GB of RAM at peak, from Flathub.
 
 Plasma picks its own display scale (KScreen): 2.7 on the VM's virtual 4K
 panel; nothing is measured for the AOC panel of `ms-7c35`.
 
-Tests: `ephemeral::` runs on a KDE root like any other (`shell_themes` is
-the GTK inertness check; `configuration` also requires a non-default shell's
-greeter not to be enabled). `graphical::login` with a KDE default shell logs
-into Plasma through the greeter and checks the GTK look offline: the KDE dconf
-database, Breeze for GTK 3 (a GTK 3 window from the host's `python3-gobject`,
-screenshotted in light and dark) and the portal values libadwaita reads.
-`graphical::apps` on KDE installs GNOME Calculator (libadwaita), gedit (GTK 3)
-and the Breeze extension from Flathub (**network**, about a gigabyte) and
-screenshots them in dark and light; it does not install the KDE list.
-`graphical::shells` is explicit-only and needs `--shell gnome --shell kde`.
-Screenshots land in `<state dir>/artifacts/graphical*/`. The installer's
-catalogue now offers the KDE compositions, but `iso::install` still installs
-only the published `generic.gnome`; a KDE install is not covered.
+Tests: `ephemeral::` runs on a KDE root like any other (`shell_themes` runs the
+sync and the portal's choice against fixtures, in a real user session, and checks
+that nothing is written into a shared place; `configuration` also requires a
+non-default shell's greeter not to be enabled unless it shares the default's).
+`graphical::login` with a KDE default shell logs into Plasma through the greeter
+and checks the GTK look offline: the KDE database and no shared GTK file, the
+portal reading it, a GTK 3 window that resolves Breeze and Breeze Dark (the
+colours of its window, not a theme name), and the portal values libadwaita reads.
+`graphical::apps` on KDE (**network**, a homed account, about two gigabytes)
+installs GNOME Calculator (libadwaita), gedit (GTK 3), dconf-editor and the two
+theme extensions, probes what GTK 3, GTK 4 and libadwaita resolve inside their
+sandboxes in dark and light, writes a setting with the dconf-backed
+dconf-editor, and installs GNOME Chess through Discover's own page and Install
+button with real input, into the user installation; it does not install the KDE
+list. `graphical::shells` is explicit-only and needs `--shell gnome --shell kde`:
+Plasma ending in Breeze Dark, a normal logout, GNOME's GTK 3, GTK 4 and libadwaita
+applications light and Adwaita from the same home and the same lingering user
+manager, then GNOME made dark with Adwaita-dark and a purple accent, a normal
+logout, and Plasma again, Breeze Dark with Plasma's blue accent and GNOME's
+database as GNOME left it. Screenshots land in `<state dir>/artifacts/graphical*/`.
+The Anaconda installer's catalogue offers only the installer composition's shell
+list (GNOME), so KDE compositions are not offered there and its release does not
+wait for their tags; KDE installs arrive with the KDE installer edition.
 
 ### This PC: `ms-7c35`
 
@@ -1047,6 +1101,26 @@ and branch `stable` are fixed. App RPMs join the shell transaction. The composer
 generates lists under `/usr/share/ilex/apps`, copied before overlays into
 `/usr/share/flatpak/preinstall.d/50-ilex-*.preinstall`. No app payload ships in
 the OS image. `/etc/flatpak/preinstall.d` can override groups (`Install=false`).
+
+A runtime extension, which is not an application and lives on a branch of its
+own, is an explicit entry with that branch (the KDE shell's GTK 3 themes):
+
+```toml
+[[apps.flatpak-extension]]
+id = "org.gtk.Gtk3theme.Breeze"
+branch = "3.22"
+```
+
+`compose.py` validates the table (only `id` and `branch`; the ID and the branch
+name must be well formed; no ID repeated among applications and extensions) and
+writes `Branch=<branch>` with `IsRuntime=true` into the shell's or machine's list.
+Flathub, the system installation and the absence of a `CollectionID` stay fixed.
+`ilexctl apps --self-check` requires applications on `stable` and exactly the
+declared extensions with their branch and `IsRuntime=true`; `ephemeral::configuration`
+compares the manifest with `image.json`; `ilexctl doctor apps` checks that Flathub
+has each extension on that branch for x86_64 (its API reports no end of life for an
+extension without an AppStream entry, so a replaced extension is noted in the
+manifest, as for `org.gtk.Gtk3theme.Breeze-Dark`).
 
 `ilexctl apps sync [--update] [--dry-run]` wraps upstream `flatpak preinstall`.
 Flatpak preserves administrator removals and manual installs, and removes old
@@ -2004,10 +2078,9 @@ shells layer is 776 packages (712 MiB downloaded, 2.85 GB) against GNOME's 473
 (1,075); rebuilding from the shells layer takes 366 s against
 254 s, rechunk 716 s against 430 s, `ephemeral::` 405 to 561 s against
 353 s; the machine layer takes 290 s to build and 451 s to test. The Anaconda
-catalogue offers both KDE compositions, so `ilexctl iso --check-registry` also
-requires their tags and signature tags: on the first publication the installer
-release defers until they exist, as for `ms-7c35.gnome`. `iso::install` still
-installs only `generic.gnome`.
+catalogue does not offer the KDE compositions (it offers the installer
+composition's shell list only), so `ilexctl iso --check-registry` and the
+installer release neither require nor wait for their tags.
 
 The second full run resolves v1 from `generic.gnome`, with no legacy read. It
 snapshots that root and each layer independently. Unchanged content skips
@@ -2174,11 +2247,14 @@ only the intentionally skipped publisher with `changed=false`. Branches stop
 at the artifact: no `iso::` tier and no release, since the tier installs the
 published image rather than the branch image.
 
-The installer generates `compositions.json` from every published composition
-with at least one shell, their descriptions and the machines' match rules.
-The default is `image.toml`'s `installer` (`generic.gnome`); its ordered shells
-also determine the detected machine's composition. `base` and shell-free
-machines are excluded. The boot menu has one entry, **Install ilex**.
+The installer generates `compositions.json` from the published compositions
+whose ordered shell list equals the installer composition's (every machine of the
+GNOME list today), their descriptions and the machines' match rules. This
+Anaconda ISO is the GNOME edition: compositions of another shell list (KDE) are
+not offered, and do not make the installer release wait for their tags. They
+arrive with that shell's own installer edition. The default is `image.toml`'s
+`installer` (`generic.gnome`); its ordered shells also determine the detected
+machine's composition. `base` and shell-free machines are excluded. The boot menu has one entry, **Install ilex**.
 Selection precedence: the last `ilex.composition=<tag>` kernel argument, then
 `/run/ilex-installer/choice` (a kickstart can write it before including the
 defaults), then DMI detection. An unknown override fails with the offered tags;
