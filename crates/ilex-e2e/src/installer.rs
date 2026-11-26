@@ -2509,7 +2509,7 @@ gnome-kiosk --headless --virtual-monitor 1920x1200 --wayland --no-x11 > /run/ile
 kiosk=$!
 for _ in $(seq 150); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done
 sleep 2
-WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland timeout 900 ilex-installer --self-check --render /run/ilex-ui-shots $RENDER_FLAG 2>&1 | grep -E '^ILEX-INSTALLER-RENDER|rror|panicked|CRITICAL'
+WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland timeout 900 ilex-installer --self-check --render /run/ilex-ui-shots $RENDER_FLAG 2>&1 | grep -E '^ILEX-INSTALLER-RENDER|^ilex-installer:|rror|panicked|CRITICAL'
 echo "render status ${PIPESTATUS[0]}"
 kill "$kiosk" 2>/dev/null
 INNER
@@ -2594,7 +2594,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
             .lines()
             .find(|l| l.starts_with(want) && l.contains(&format!("scheme={scheme} scale={scale} ")))
             .with_context(|| format!("no render report for {scheme} at {scale}x:\n{log}"))?;
-        ensure!(line.contains("shots=25 "), "{line}");
+        ensure!(line.contains("shots=27 "), "{line}");
     }
     ensure!(
         !log.contains("render status 1") && log.matches("render status 0").count() == 3,
@@ -2628,12 +2628,12 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         }
     }
     ensure!(
-        seen.len() == 75,
-        "{} images came back, expected 75 (25 states in three configurations)",
+        seen.len() == 81,
+        "{} images came back, expected 81 (27 states in three configurations)",
         seen.len()
     );
     ensure!(
-        distinct.len() >= 60,
+        distinct.len() >= 70,
         "only {} of {} images differ: pages are not drawing their own states",
         distinct.len(),
         seen.len()

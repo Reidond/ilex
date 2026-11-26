@@ -8,8 +8,10 @@
 //! * `iso::next_welcome`: the welcome page draws; the keyboard layout list is
 //!   opened, searched and chosen with the keyboard; GNOME Kiosk switches the
 //!   session's layout at run time (typing `yz` into the page's test field
-//!   gives `zy` in the German layout); Enter in that field continues to the
-//!   machine page.
+//!   gives `zy` in the German layout; the field's text is printed only
+//!   because this trial passes the fixed echo credential, the other trials do
+//!   not and check that nothing typed there is printed); Enter in that field
+//!   continues to the machine page.
 //! * `iso::next_detect_board`: a VM that reports the MSI MEG X570 UNIFY's
 //!   baseboard identity (only the board's pair of SMBIOS strings) has its own
 //!   configuration, `ms-7c35.gnome`, preselected.
@@ -19,12 +21,14 @@
 //!   (twice: the last wins) is honoured as the model decides, and printed on
 //!   the serial console in the format the selection trials have always read.
 //! * `iso::next_kernel_argument_unknown`: a tag the edition does not offer is
-//!   reported with the model's list of offers and the page stays usable on the
-//!   detected configuration.
+//!   reported with the model's list of offers (the notice's text names both
+//!   offered tags and the page's rows are those two) and the page stays usable
+//!   on the detected configuration.
 //! * `iso::next_account`: the administrator page typed with the keyboard on a
 //!   VM with a disk the installer could use; Enter in the last field asks the
 //!   real helper to `Plan` the choices (it resolves the image at the
-//!   registry), and the closing page reports the plan checked.
+//!   registry), and the closing page reports the plan checked. The password
+//!   is on neither the serial console nor in the guest's journal.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -46,10 +50,18 @@ use super::{
 use crate::common;
 use crate::iso;
 
+/// The fixed public test credential (SMBIOS) that lets the interface print the
+/// text of the layout test field (`ilex_installer_flow::markers`).
+const ECHO_CREDENTIAL: &str = "ilex.installer.echo-test";
+/// What a person might type in the layout test field: their intended
+/// password. No trial without the echo credential may see it printed.
+const TRY_SECRET: &str = "hunter2tryfield";
 /// The tag the kernel argument names in `iso::next_kernel_argument`.
 const OVERRIDE_TAG: &str = "ms-7c35.gnome";
 /// A tag no edition offers.
 const UNKNOWN_TAG: &str = "ms-7c35.kde";
+/// The administrator's password the account trial types.
+const PASSWORD: &str = "correct horse battery";
 /// How long the interface is given to answer one key press.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -57,10 +69,22 @@ pub(super) fn trials() -> Vec<Trial> {
     vec![
         trial("iso::next_welcome", welcome),
         trial("iso::next_detect_board", || {
-            detect("iso-next-board", true, "ms-7c35.gnome", "detected")
+            detect(
+                "iso-next-board",
+                true,
+                "ms-7c35.gnome",
+                "detected",
+                ("info", "Recognised_this_computer_as_MSI"),
+            )
         }),
         trial("iso::next_detect_generic", || {
-            detect("iso-next-generic", false, "generic.gnome", "not-recognised")
+            detect(
+                "iso-next-generic",
+                false,
+                "generic.gnome",
+                "not-recognised",
+                ("info", "No_configuration_is_specific_to_this_computer"),
+            )
         }),
         trial("iso::next_kernel_argument", || {
             kernel_argument("iso-next-karg", OVERRIDE_TAG)
@@ -218,7 +242,13 @@ fn welcome_up(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &
 }
 
 fn welcome() -> Result<()> {
-    let mut booted = boot("iso-next-welcome", false, vec![], "1G")?;
+    // The fixed test credential that lets the interface print what is typed in
+    // the layout test field: without it nothing of that field is printed.
+    let echo = vec![format!(
+        "type=11,value=io.systemd.credential:{}=1",
+        ECHO_CREDENTIAL
+    )];
+    let mut booted = boot("iso-next-welcome", false, echo, "1G")?;
     let artifacts = booted.artifacts.clone();
     let vm = booted.guest.vm.running_mut()?;
     let outcome = observe_welcome(vm, &artifacts);
@@ -288,15 +318,37 @@ fn observe_welcome(vm: &mut Vm, artifacts: &Path) -> Result<()> {
 }
 
 /// Tab through the welcome page's three controls to Continue and press it:
-/// the keyboard alone moves on.
+/// the keyboard alone moves on. On the way the layout test field gets what a
+/// person might type there, their password: it must never be printed.
 fn continue_to_machine(ctl: &Vmctl) -> Result<()> {
-    for _ in 0..3 {
-        ctl.key("Tab")?;
-    }
+    ctl.key("Tab")?;
+    ctl.key("Tab")?;
+    ctl.type_text(TRY_SECRET)?;
+    ctl.key("Tab")?;
     ctl.key("Return")
 }
 
-fn detect(purpose: &'static str, board: bool, expected: &str, origin: &str) -> Result<()> {
+/// Nothing typed in the layout test field reached the serial console, and no
+/// `event=try` line was printed: without the test credential the field is not
+/// even read.
+fn no_try_text(serial: &Path) -> Result<()> {
+    let text = console(serial)?;
+    ensure!(
+        !text.contains(TRY_SECRET)
+            && !complete_lines(&text).any(|l| is_marker(l, "ILEX-INSTALLER", Some("event"))
+                && words(l).get("event").is_some_and(|e| e == "try")),
+        "the layout test field's text was printed on a boot without the test credential: {text}"
+    );
+    Ok(())
+}
+
+fn detect(
+    purpose: &'static str,
+    board: bool,
+    expected: &str,
+    origin: &str,
+    notice: (&str, &str),
+) -> Result<()> {
     let smbios = if board {
         // The MSI MEG X570 UNIFY, with only the baseboard's pair of strings
         // (the system's are what a prebuilt or a firmware fault would lose).
@@ -309,7 +361,7 @@ fn detect(purpose: &'static str, board: bool, expected: &str, origin: &str) -> R
     let mut booted = boot(purpose, false, smbios, "1G")?;
     let artifacts = booted.artifacts.clone();
     let vm = booted.guest.vm.running_mut()?;
-    let outcome = observe_machine(vm, &artifacts, purpose, expected, origin);
+    let outcome = observe_machine(vm, &artifacts, purpose, expected, origin, notice);
     if outcome.is_err() {
         diagnostics(vm, &artifacts, purpose);
     }
@@ -322,6 +374,7 @@ fn observe_machine(
     name: &str,
     expected: &str,
     origin: &str,
+    notice: (&str, &str),
 ) -> Result<()> {
     let serial = vm.info.dir.join("serial.log");
     let ctl = Vmctl::from_info(vm.info.clone());
@@ -329,8 +382,21 @@ fn observe_machine(
     continue_to_machine(&ctl)?;
     let machine = wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
     check_machine(vm, &serial, &machine, expected, origin)?;
+    check_notice(vm, &serial, notice)?;
+    no_try_text(&serial)?;
     wait_page(vm, &ctl, artifacts, name)?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}.png")))?;
+    Ok(())
+}
+
+/// The notice the machine page shows (`event=notice`), with the severity and
+/// the text (spaces are underscores in a marker) it must have.
+fn check_notice(vm: &mut Vm, serial: &Path, (severity, text): (&str, &str)) -> Result<()> {
+    let notice = wait_event(vm, serial, "notice", EVENT_TIMEOUT, |_| true)?;
+    ensure!(
+        field(&notice, "severity")? == severity && field(&notice, "text")?.contains(text),
+        "the machine page's notice is {notice:?}, expected {severity} with `{text}`"
+    );
     Ok(())
 }
 
@@ -347,7 +413,8 @@ fn check_machine(
         "the machine page preselected {machine:?}, expected {expected} ({origin})"
     );
     ensure!(
-        field(machine, "offered")? == "2",
+        field(machine, "offered")? == "2"
+            && field(machine, "choices")? == "generic.gnome,ms-7c35.gnome",
         "the edition offers {machine:?}, expected generic and ms-7c35 (no desktop choice)"
     );
     // The line starts with the tag and a reason in parentheses; the target is
@@ -414,6 +481,11 @@ fn observe_kernel_argument(
         // The last argument wins; the edition offers it; the page says it
         // came from the boot options.
         check_machine(vm, &serial, &machine, tag, "chosen")?;
+        check_notice(
+            vm,
+            &serial,
+            ("info", "The_boot_options_chose_this_configuration"),
+        )?;
         let text = console(&serial)?;
         ensure!(
             complete_lines(&text).any(|l| l
@@ -430,7 +502,22 @@ fn observe_kernel_argument(
                 && field(&machine, "selected")? == "generic.gnome",
             "an unknown tag on the page: {machine:?}"
         );
+        // The rows shown are the edition's offers, and the notice carries the
+        // model's list of them: both tags the edition offers, in its order.
+        ensure!(
+            field(&machine, "choices")? == "generic.gnome,ms-7c35.gnome",
+            "the rows shown are not the edition's offers: {machine:?}"
+        );
+        check_notice(
+            vm,
+            &serial,
+            (
+                "error",
+                &format!("unknown_composition_'{tag}';_offered:_generic.gnome,_ms-7c35.gnome"),
+            ),
+        )?;
     }
+    no_try_text(&serial)?;
     wait_page(vm, &ctl, artifacts, name)?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}.png")))?;
     Ok(())
@@ -467,10 +554,10 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     // two stops: its text and the button that shows what was typed.
     ctl.type_text("ilexmaint")?;
     ctl.key("Tab")?;
-    ctl.type_text("correct horse battery")?;
+    ctl.type_text(PASSWORD)?;
     ctl.key("Tab")?;
     ctl.key("Tab")?;
-    ctl.type_text("correct horse battery")?;
+    ctl.type_text(PASSWORD)?;
     std::thread::sleep(Duration::from_secs(1));
     ctl.save_screenshot(&artifacts.join("next-account-filled.png"))?;
     // Enter in the last field continues: the helper plans.
@@ -487,11 +574,30 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     );
     wait_page(vm, &ctl, artifacts, "account-ready")?;
     ctl.save_screenshot(&artifacts.join("next-account-ready.png"))?;
-    // The password is nowhere on the serial console.
+    // The password is nowhere on the serial console...
     let text = console(&serial)?;
     ensure!(
-        !text.contains("correct horse battery"),
+        !text.contains(PASSWORD),
         "the password reached the serial console"
+    );
+    no_try_text(&serial)?;
+    // ...and nowhere in the guest's journal, where the interface's stdout (the
+    // same marker lines) and everything else the boot logged is. The patterns
+    // are written so that the command line that searches does not match
+    // itself. The journal must hold the interface's own lines, or the count
+    // would prove nothing.
+    vm.wait_ssh(Duration::from_secs(180))
+        .context("sshd did not start to read the journal")?;
+    let count = vm.ssh_ok(
+        "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
+         echo markers=$(grep -c -e '^ILEX-INSTALLER page=ready check=ok' /tmp/journal.txt); \
+         echo password=$(grep -c -e '[c]orrect horse battery' -e '[h]orse batt' /tmp/journal.txt); \
+         echo tried=$(grep -c -e '[h]unter2tryfield' /tmp/journal.txt); \
+         rm -f /tmp/journal.txt",
+    )?;
+    ensure!(
+        !count.contains("markers=0") && count.contains("password=0") && count.contains("tried=0"),
+        "the journal holds the closing page's marker and no password or test-field text: {count}"
     );
     Ok(())
 }
