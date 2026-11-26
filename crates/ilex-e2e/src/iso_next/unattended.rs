@@ -1941,6 +1941,21 @@ fn handover_restart(root: &Path, layout: &Layout, artifacts: &Path, target: &str
         before.active && before.disk_changed,
         "the installation is not running before the unit is restarted: {before:?}"
     );
+    // (A line can reach the serial port twice, once as the console's and once
+    // as the program's own write: what is compared is the count before and
+    // after, not one.)
+    let lines_of = |text: &str, word: &str| text.matches(word).count();
+    let first_run = fs::read(&serial)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let (planned, applied) = (
+        lines_of(&first_run, "plan=ready"),
+        lines_of(&first_run, "apply=started"),
+    );
+    ensure!(
+        planned >= 1 && applied >= 1,
+        "the first run's console has no plan or apply: {first_run}"
+    );
     // The first run ends as a crash would (the flag stays, systemd's
     // hand-over is skipped by its condition), and the installation goes on.
     vm.ssh_ok("systemctl kill --signal=SIGKILL --kill-whom=main ilex-installer-answers.service")?;
@@ -1984,8 +1999,8 @@ fn handover_restart(root: &Path, layout: &Layout, artifacts: &Path, target: &str
     ensure!(
         !console.contains("handover=")
             && console.contains("result=failed")
-            && console.matches("plan=ready").count() == 1
-            && console.matches("apply=started").count() == 1,
+            && lines_of(&console, "plan=ready") == planned
+            && lines_of(&console, "apply=started") == applied,
         "the second run handed over, or planned, or applied again: {console}"
     );
     ensure!(
