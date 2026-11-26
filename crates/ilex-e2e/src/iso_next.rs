@@ -42,6 +42,10 @@
 //!   three blank disks (see `iso_next/helper.rs`): the boot medium is
 //!   `live_medium`, the blank disks are offered, `Plan` on one succeeds and
 //!   writes nothing, and the dracut layout the tracer follows is recorded.
+//! * `iso::next_helper_loop` (only when a filter names it): the same ISO as a
+//!   file on another disk, booted through GRUB's loopback with dracut's
+//!   `iso-scan/filename=` (`iso_next/loop_file.rs`): the disk holding the file
+//!   is `live_medium` and is no target, and the blank disks are offered.
 //!
 //! The boot trials use `SecurityLaunch::QualificationFixture`: provisioning
 //! (KVM with SMM, a Secure Boot firmware pair) is required, a passing
@@ -68,6 +72,7 @@ use crate::common;
 use crate::iso::grub_key;
 
 mod helper;
+mod loop_file;
 
 /// From power-on to the page being mapped. Boot is a few tens of seconds; the
 /// margin is for a contended runner.
@@ -101,6 +106,15 @@ pub fn trials() -> Vec<Trial> {
             helper::run(helper::Medium::Cdrom)
         }),
     ]
+}
+
+/// `iso::next_helper_loop`: the ISO as a file on another disk. It needs host
+/// tools the others do not (`mke2fs -d`, `sfdisk`) and a second copy of the
+/// ISO, so it is registered only when a filter names it.
+pub fn loop_trial() -> Trial {
+    trial("iso::next_helper_loop", || {
+        helper::run(helper::Medium::Loop)
+    })
 }
 
 fn trial(name: &'static str, run: fn() -> Result<()>) -> Trial {

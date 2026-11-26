@@ -101,6 +101,11 @@ fn main() {
     if filters.iter().any(|f| f.contains("iso::next")) {
         trials.extend(iso_next::trials());
     }
+    // The ISO as a file on another disk needs a host tool or two more and a
+    // second copy of the ISO: only a filter that names it asks for it.
+    if filters.iter().any(|f| f.contains("next_helper_loop")) {
+        trials.push(iso_next::loop_trial());
+    }
     // The next installer's root helper: a VM of its live image, no ISO.
     if filters.iter().any(|f| f.contains("installer::")) {
         trials.extend(installer::trials());

@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use ilex_tooling_core::*;
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -221,6 +221,7 @@ pub struct LinuxProvider {
     identity: CheckoutIdentity,
     usb_keyboard: bool,
     usb_medium: bool,
+    esp_dir: Option<PathBuf>,
 }
 pub struct LinuxVm {
     spec: VmSpec,
@@ -244,6 +245,7 @@ impl LinuxProvider {
             identity,
             usb_keyboard: false,
             usb_medium: false,
+            esp_dir: None,
         })
     }
     /// Give the guest an xHCI USB keyboard instead of a virtio one, for
@@ -259,6 +261,14 @@ impl LinuxProvider {
     #[must_use]
     pub fn with_usb_medium(mut self, enabled: bool) -> Self {
         self.usb_medium = enabled;
+        self
+    }
+    /// Serve a directory as a small FAT disk, first in the boot order (see
+    /// [`qemu::VmConfig::esp_dir`]): the boot loader of a medium that is a
+    /// file on another disk. Off by default: it changes no existing launch.
+    #[must_use]
+    pub fn with_esp_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.esp_dir = Some(dir.into());
         self
     }
 }
@@ -400,6 +410,7 @@ impl VmProvider for LinuxProvider {
         config.cdrom = vm.spec.iso.clone();
         config.usb_keyboard = self.usb_keyboard;
         config.usb_medium = self.usb_medium;
+        config.esp_dir = self.esp_dir.clone();
         config.efi_vars = vm.spec.firmware_state.clone();
         config.extra_disks = vm
             .spec
