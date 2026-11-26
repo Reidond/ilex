@@ -2797,6 +2797,31 @@ the Windows paths of this change: no Windows host was available.
   fixtures (a path dependency in the checkout, one outside, one at the root,
   registry and git packages, a dev edge) and the recorded-closure fixtures; a
   regression is a failed check.
+- **A VM that never starts.** About one boot in a hundred on the Boat hosts
+  (2 of 208 trial boots over 13 runs of the whole `iso::next` set, in a
+  different trial each time) never ran the guest: the serial log stayed empty
+  for the whole deadline and a rerun passed. The cause was QEMU, not the ISO:
+  its VNC server asks for a default audio backend, QEMU 11 probes PipeWire
+  first, and libpipewire's `pw_thread_loop_stop` intermittently never returns
+  when no daemon is there (main thread in `pthread_join` inside `qemu_init`,
+  QMP socket present but silent, vCPU threads at 0 s CPU). The `-audiodev none`
+  that removes the probe belongs to the VM harness (`ilex_devkit::qemu`) and is
+  described with it, not here. The trials only report such a hang quickly and
+  say what QEMU was doing:
+  a guest whose serial console stays empty for 60 s after QEMU created it fails
+  with "the guest wrote nothing on the serial console … it never started"
+  (OVMF prints within about five seconds), instead of waiting out the 420 s
+  marker deadline; `iso::next_ssh_tmpfiles` waits for that first byte before
+  its 300 s SSH wait; and any failed `iso::next` trial writes
+  `next-<trial>-qemu-state.txt` beside its screenshot: QMP status, each CPU's
+  instruction pointer, per-thread CPU time over two seconds and kernel wait
+  points (plus a gdb backtrace when gdb is installed), the size and age of the
+  serial files (and the tail of `firmware.log`, which exists when the VM was
+  started with `ILEX_VM_FIRMWARE_LOG=1`), `qemu.log`, and the host's load,
+  pressure and steal time. Each trial prints its duration. The
+  `seconds_power_on_to_page` in `next-<entry>.json` starts when QEMU has
+  started, not before the wait for a VM slot (it used to include that wait:
+  40 to 220 s for a boot that takes 30).
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
   GNOME edition). After the review fixes (2026-11-26) the ISO is 1,494,851,584
   bytes (1.39 GiB): 438 MiB under the Anaconda network ISO's 1.82 GiB and 0.61
