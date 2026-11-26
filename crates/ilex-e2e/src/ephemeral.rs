@@ -4,6 +4,8 @@
 //! machine-wide VM slot while it lives, and is removed when the last
 //! `ephemeral::` test finishes (or, on a panic, when its guard drops).
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use ilex_devkit::bcvk::{self, EphemeralOpts, EphemeralVm};
 use libtest_mimic::Trial;
@@ -162,12 +164,20 @@ done
     }
     // The KDE shell's GTK look: its pieces, the portal's choice per start, the
     // sync in a real user session, and nothing left in a shared place.
+    // The script runs the session watch and the login-time script through dozens
+    // of stand-in scenarios (each stand-in is an exec on the guest's virtiofs
+    // root): well over the default 180 seconds of one SSH command.
     let script = ilex_devkit::qemu::base64(include_bytes!("shell-themes-guest.sh"));
+    let started = Instant::now();
     let out = vm
-        .ssh(&format!(
-            "printf %s {script} | base64 -d > /run/shell-themes-check.sh && bash /run/shell-themes-check.sh"
-        ))?
+        .ssh_timeout(
+            &format!(
+                "printf %s {script} | base64 -d > /run/shell-themes-check.sh && bash /run/shell-themes-check.sh"
+            ),
+            Duration::from_secs(600),
+        )?
         .ok("KDE shell GTK look")?;
+    println!("     the guest script took {:?}", started.elapsed());
     for line in out.stdout.lines().filter(|l| l.starts_with("ok:")) {
         println!("     {line}");
     }
