@@ -838,6 +838,11 @@ session ends, or give each shell its own home. KDE with systemd-homed accounts
 is not qualified (the homed tier uses GDM and GNOME's settings; the profile
 writer sets GNOME keys only for the default shell `gnome`).
 
+Measured: `generic.kde` is 5,185,668,697 bytes (4,945 MiB, 1,378 RPMs) against
+`generic.gnome`'s 4,250,881,635 (4,054 MiB, 1,075): +891 MiB, from a shells
+transaction of 776 packages (712 MiB downloaded) against 473 (458 MiB). The base
+is unchanged. Both shells together are 6,061,869,164 bytes (1,602 RPMs).
+
 Plasma picks its own display scale (KScreen): 2.7 on the VM's virtual 4K
 panel; nothing is measured for the AOC panel of `ms-7c35`.
 
@@ -1988,6 +1993,21 @@ boot permit `base_sha-…`, signature/verification, then `base` and
 `root build duration: base … seconds`, `publish ancestry guard: …:base
 published=- … first-publish … allow`, `publish digest swap: …:base expected=-
 current=-; allow` and `root publication result: base published=true`.
+
+`generic.kde` and `ms-7c35.kde` (the KDE shell) are one more root and one more
+layer, published, tested and signed like the others: the root builds in the
+same sequential loop as `base`, runs `ephemeral::` and the capability checks,
+and has no `upgrade::` and no v1-disk run; the layer is planned, built and tested
+by `machines`. Measured on a 16-vCPU sandbox with warm caches: the KDE root's
+shells layer is 776 packages (712 MiB downloaded, 2.85 GB) against GNOME's 473
+(458 MiB, 1.91 GB); the root is 4,945 MiB (1,378 RPMs) against 4,054 MiB
+(1,075); rebuilding from the shells layer takes 366 s against
+254 s, rechunk 716 s against 430 s, `ephemeral::` 405 to 561 s against
+353 s; the machine layer takes 290 s to build and 451 s to test. The Anaconda
+catalogue offers both KDE compositions, so `ilexctl iso --check-registry` also
+requires their tags and signature tags: on the first publication the installer
+release defers until they exist, as for `ms-7c35.gnome`. `iso::install` still
+installs only `generic.gnome`.
 
 The second full run resolves v1 from `generic.gnome`, with no legacy read. It
 snapshots that root and each layer independently. Unchanged content skips
