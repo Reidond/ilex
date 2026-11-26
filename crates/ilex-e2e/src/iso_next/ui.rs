@@ -590,14 +590,19 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         .context("sshd did not start to read the journal")?;
     let count = vm.ssh_ok(
         "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
-         echo markers=$(grep -c -e '^ILEX-INSTALLER page=ready check=ok' /tmp/journal.txt); \
+         echo markers=$(grep -c -e '^ILEX-INSTALLER page=ready edition=gnome check=ok' /tmp/journal.txt); \
          echo password=$(grep -c -e '[c]orrect horse battery' -e '[h]orse batt' /tmp/journal.txt); \
          echo tried=$(grep -c -e '[h]unter2tryfield' /tmp/journal.txt); \
+         echo focus=$(grep -c -e 'GtkText - [d]id not receive a focus-out' /tmp/journal.txt); \
          rm -f /tmp/journal.txt",
     )?;
     ensure!(
-        !count.contains("markers=0") && count.contains("password=0") && count.contains("tried=0"),
-        "the journal holds the closing page's marker and no password or test-field text: {count}"
+        !count.contains("markers=0")
+            && count.contains("password=0")
+            && count.contains("tried=0")
+            && count.contains("focus=0"),
+        "the journal holds the closing page's marker, no password or test-field text and no \
+         GTK focus warning (a focused field made insensitive): {count}"
     );
     Ok(())
 }
