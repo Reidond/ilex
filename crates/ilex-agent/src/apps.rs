@@ -626,6 +626,28 @@ fn status(json_output: bool) -> Result<()> {
     Ok(())
 }
 
+/// Several shells and the machine may list the same Flatpak, but only with the
+/// same branch and kind: one preinstall group carries one of each, so a second
+/// declaration that differs would silently replace the first.
+fn declare(
+    expected: &mut BTreeMap<String, (String, bool)>,
+    id: &str,
+    branch: &str,
+    runtime: bool,
+) -> Result<()> {
+    let kind = |runtime: bool| if runtime { "runtime extension" } else { "application" };
+    match expected.insert(id.to_string(), (branch.to_string(), runtime)) {
+        Some((other_branch, other_runtime)) if (other_branch.as_str(), other_runtime) != (branch, runtime) => {
+            Err(format!(
+                "{id} is declared as {} ({other_branch}) and as {} ({branch})",
+                kind(other_runtime),
+                kind(runtime)
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn check() -> Result<()> {
     let image = read("/usr/share/ilex/image.json")?;
     let machine = read("/usr/share/ilex/machine.json")?;
@@ -640,17 +662,19 @@ pub fn check() -> Result<()> {
     {
         if let Some(ids) = entry["apps"]["flatpak"].as_array() {
             for id in ids {
-                expected.insert(
-                    id.as_str().ok_or("invalid app ID")?.to_string(),
-                    ("stable".to_string(), false),
-                );
+                declare(
+                    &mut expected,
+                    id.as_str().ok_or("invalid app ID")?,
+                    "stable",
+                    false,
+                )?;
             }
         }
         if let Some(extensions) = entry["apps"]["flatpak-extension"].as_array() {
             for extension in extensions {
                 let id = extension["id"].as_str().ok_or("invalid extension ID")?;
                 let branch = extension["branch"].as_str().ok_or("invalid extension branch")?;
-                expected.insert(id.to_string(), (branch.to_string(), true));
+                declare(&mut expected, id, branch, true)?;
             }
         }
     }

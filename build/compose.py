@@ -439,6 +439,19 @@ def image(args):
         shell_sets.append(manifest["packages"])
         shell_sets.append({"install": manifest["apps"]["rpm"]})
     machine = generic(ctx / "machines/generic/machine.toml")
+    # Shells may list the same Flatpak (both desktops ship Firefox), but one
+    # preinstall group carries one branch and one kind: a second declaration
+    # that differs would silently replace the first. A machine layer's lists are
+    # compared with the shells' by `ilexctl apps --self-check` in the booted image.
+    declared = {}
+    for manifest in manifests:
+        extensions = manifest["apps"]["flatpak-extension"]
+        for app_id, kind, branch in ([(i, "application", "stable") for i in manifest["apps"]["flatpak"]] +
+                                     [(e["id"], "runtime extension", e["branch"]) for e in extensions]):
+            owner, previous = declared.setdefault(app_id, (manifest["name"], (kind, branch)))
+            if previous != (kind, branch):
+                fail(ctx / "shells" / manifest["name"] / "shell.toml", "apps",
+                     f"{app_id} is declared as {kind} ({branch}) here but as {previous[0]} ({previous[1]}) by shell {owner}")
 
     # Stage each overlay separately. The final-stage installer can see package
     # and common-rootfs paths and rejects every collision, including symlinks.
