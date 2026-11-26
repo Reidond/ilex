@@ -12,8 +12,10 @@
 //
 // Changing VT: Ctrl+Alt+F2 reaches the root shell on tty2 (the one place a
 // person can look at a stuck installer without a network). The compositor
-// holds the keyboard and asks logind to switch, so logind needs this action:
-// only for the person at the machine's own active session, never remote.
+// holds the keyboard and, started with --enable-vt-switch (GNOME Kiosk's
+// default is no VT switching), asks logind to switch, so logind needs this
+// action: only for the person at the machine's own active session, never
+// remote.
 polkit.addRule(function(action, subject) {
     if (subject.user == "ilex-installer") {
         if (action.id == "org.freedesktop.login1.chvt" &&

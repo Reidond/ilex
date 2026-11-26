@@ -788,9 +788,33 @@ fn keyboard_round_trip(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()>
         active_vt(vm)? == "tty1",
         "tty1 is not in front before Ctrl+Alt+F2"
     );
+    // Control: with the rule the image had before (everything denied) the
+    // compositor's login1.chvt request is refused and the chord does nothing,
+    // so it is the rule that lets the chord through, not a dead key path.
+    let rule = "/usr/share/polkit-1/rules.d/00-ilex-installer.rules";
+    vm.ssh_ok(&format!(
+        "set -e; cp {rule} /run/00-ilex-installer.rules.allow; \
+         cat > {rule} <<'EOF'\n\
+         polkit.addRule(function(action, subject) {{\n\
+             if (subject.user == \"ilex-installer\") {{ return polkit.Result.NO; }}\n\
+         }});\n\
+         EOF\n\
+         systemctl restart polkit.service"
+    ))?;
+    ctl.key("ctrl+alt+F2")?;
+    std::thread::sleep(Duration::from_secs(4));
+    let denied = active_vt(vm)?;
+    vm.ssh_ok(&format!(
+        "set -e; cp /run/00-ilex-installer.rules.allow {rule}; \
+         rm -f /run/00-ilex-installer.rules.allow; systemctl restart polkit.service"
+    ))?;
+    ensure!(
+        denied == "tty1",
+        "Ctrl+Alt+F2 left the installer's page although the rule denied login1.chvt (active VT {denied})"
+    );
     ctl.key("ctrl+alt+F2")?;
     wait_vt(vm, "tty2").context(
-        "Ctrl+Alt+F2 did not leave the installer's page: the compositor's login1.chvt request needs the polkit rule",
+        "Ctrl+Alt+F2 did not leave the installer's page: gnome-kiosk needs --enable-vt-switch and polkit the login1.chvt rule",
     )?;
     // The shell is agetty's autologin on tty2: root, started when the VT was
     // first visited. Ask it a question only it can answer.

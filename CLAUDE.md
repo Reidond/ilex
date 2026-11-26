@@ -2457,9 +2457,12 @@ the Windows paths of this change: no Windows host was available.
   too, and no getty started (VT 1 is always allocated, which logind reads as
   busy; only the reserved VT 2 is started regardless). While the session runs,
   logind finds it on tty1 and starts nothing; the tty2 shell is unaffected.
-  (Ctrl+Alt+F2 reaches it from the fallback screen, and from the page too: the
-  compositor asks logind to change VT, and the polkit rule below allows
-  `org.freedesktop.login1.chvt` to the installer's own active local session.)
+  (Ctrl+Alt+F2 reaches it from the fallback screen, and from the page too.
+  GNOME Kiosk turns VT switching off unless started with `--enable-vt-switch`
+  (without it the chord never reaches logind), which the session script
+  passes; the compositor then asks logind to change VT, and the polkit rule
+  below allows `org.freedesktop.login1.chvt` to the installer's own active
+  local session. Both are needed.)
   Blanking, locking and sleep are off (dconf defaults, a
   logind drop-in and masked sleep targets): an installation must not stop when
   the screen would lock.
@@ -2570,8 +2573,10 @@ the Windows paths of this change: no Windows host was available.
     keyboard (`LinuxProvider::with_usb_keyboard`). The default entry also
     writes `next-surface.txt` (below) and fails on any polkit action beyond
     the allowlist in `iso_next.rs` (`login1.chvt` only). After the page it
-    presses Ctrl+Alt+F2 (the kernel's active VT, read from the guest, must be
-    `tty2`), types a command into tty2's root shell that only a live root shell
+    replaces the rule with the deny-everything one the image had before and
+    presses Ctrl+Alt+F2 (the kernel's active VT must stay `tty1`: polkit
+    refuses logind's `chvt`), restores the rule and presses it again (the
+    active VT, read from the guest, must be `tty2`), types a command into tty2's root shell that only a live root shell
     can answer (`echo ILEX-TTY2-ANSWER-$((6*7))-$(id -un)`), reads the answer
     back from `/dev/vcs2` over SSH and checks a QMP screenshot of light text on
     a dark screen, then presses Ctrl+Alt+F1 and requires the page again, the

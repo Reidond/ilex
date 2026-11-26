@@ -67,7 +67,10 @@ socket_listening() {
 
 marker "ILEX-INSTALLER-SESSION compositor=gnome-kiosk graphics=$graphics secure-boot=$secure_boot"
 
-gnome-kiosk --wayland --no-x11 &
+# GNOME Kiosk turns VT switching off unless asked: with it off, Ctrl+Alt+F2
+# never reaches logind and the root shell on tty2 is out of reach from the page.
+# The polkit rule lets logind accept the compositor's request (and only that).
+gnome-kiosk --wayland --no-x11 --enable-vt-switch &
 compositor=$!
 installer=
 # Whatever is left is stopped with the script (and, failing that, by the unit's
