@@ -774,15 +774,15 @@ mod apps {
             vm,
             "systemd-run --user --collect --quiet --unit=ilex-discover plasma-discover",
         )?;
+        // Discover animates (a spinner while it loads, a carousel after): the
+        // screen never settles, so these are timed pictures, not settled ones.
         std::thread::sleep(Duration::from_secs(45));
-        settle(ctl)?;
         shot(ctl, artifacts, "09-discover-home")?;
         user(
             vm,
             "systemd-run --user --collect --quiet --unit=ilex-discover-open plasma-discover appstream://org.gnome.baobab.desktop",
         )?;
         std::thread::sleep(Duration::from_secs(8));
-        settle(ctl)?;
         shot(ctl, artifacts, "10-discover-page")?;
         // "Install from Flathub (user)": the button of the application's page
         // in Discover's default window.
@@ -795,7 +795,6 @@ mod apps {
             Duration::from_secs(600),
         )?;
         std::thread::sleep(Duration::from_secs(5));
-        settle(ctl)?;
         shot(ctl, artifacts, "11-discover-installed")?;
         let mut report = vmtest::Report::default();
         report.check(
