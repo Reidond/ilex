@@ -2589,12 +2589,12 @@ the Windows paths of this change: no Windows host was available.
   missing device or at a pty with stopped output (`tcflow(TCOOFF)`), reporting
   each faulted write (`ILEX-INSTALLER-SERIAL mode=… status=… seconds=…`) on the
   second UART, `/dev/ttyS1`. They can only stop the installer from starting or
-  silence its mirror.
+  silence its mirror. A third, `ilex.installer.echo-test=1`, lets the
+  interface print what is typed in its keyboard layout's test field (see "The
+  next installer's interface"); the session unit also has `LimitCORE=0`.
 - **Tests.** `iso::next_boot`, `iso::next_basic_graphics`, `iso::next_fallback`,
   `iso::next_restart`, `iso::next_serial_backpressure`,
   `iso::next_serial_unavailable`, `iso::next_serial_stall`,
-  `iso::next_ssh_tmpfiles`, `iso::next_helper_usb`,
-  `iso::next_helper_cdrom`, `iso::next_welcome`, `iso::next_detect_board`,
   `iso::next_ssh_tmpfiles`, `iso::next_helper_usb`,
   `iso::next_helper_cdrom`, `iso::next_welcome`, `iso::next_detect_board`,
   `iso::next_detect_generic`, `iso::next_kernel_argument`,
@@ -3266,27 +3266,62 @@ welcome, machine and administrator pages and a closing page; nothing is
 installed, and no page writes to a disk.
 
 - **The flow crate.** No GTK or Qt types, no `async`.
-  - `flow::Flow` is a state machine with no I/O: the pages in order
-    (`PageId`: `welcome`, `machine`, `account`, `ready`), what each needs before
-    Continue works (`can_continue`), and what Continue does (`advance` returns
-    a `Step`: `Goto(page)`, `RunPlan(request)` or `Stay`). An interface calls
-    `set_probe`, the setters of the page it shows (`set_language`,
-    `set_keyboard`, `select_machine`, `set_administrator`, `set_password`,
-    `set_confirmation`), `can_continue`, `advance`, `back`, and gives the
-    helper's answer to a `RunPlan` back with `plan_finished`. It never calls
-    the helper itself, so GTK drives it from relm4 messages and commands and
-    Kirigami will from cxx-qt signals and a worker thread.
+  - `flow::Flow` is a state machine with no I/O, and **every rule lives
+    there**, so that GTK and Kirigami cannot disagree about one: the pages in
+    order (`PageId`: `welcome`, `machine`, `account`, `ready`), what each needs
+    before Continue works (`can_continue`), what Continue does. Every method
+    that can need the helper or the compositor returns a `Step` the interface
+    carries out on a worker: `RunProbe { generation }`, `RunPlan { generation,
+    request }`, `SwitchKeyboard { generation, layout }`, `Goto(page)` (returned
+    whenever the page changed) or `Stay`. The interface calls `start_probe`
+    once, the setters of the page it shows (`set_language`, `set_keyboard`,
+    `select_machine`, `set_administrator`, `set_password(Secret)`,
+    `set_confirmation(Secret)`), `can_continue`, `advance`, `back`, `retry`, and
+    gives each answer back with its generation (`probe_finished`,
+    `plan_finished`, `keyboard_switched`). It never calls the helper itself,
+    so GTK drives it from relm4 messages and commands and Kirigami will from
+    cxx-qt signals and a worker thread.
+    - *Answers are numbered.* The flow numbers every request; an answer to any
+      but the latest (late, repeated, out of order, or arriving when nothing is
+      waiting) returns `Stay` and changes nothing. While the helper is asked
+      for the plan (`is_checking`) the setters refuse, so the answer describes
+      what the flow still holds, Back is off and a second request cannot be
+      started: the plan the flow ends up with, and the id a later change
+      applies it by, is always the latest answer's.
+    - *The session's layout.* `set_keyboard` records what was asked for and
+      returns `SwitchKeyboard` unless the compositor is on it already or a
+      switch is under way; that one finishes first and the latest request is
+      asked for next (so the compositor ends on the last layout chosen whatever
+      order answers come in). `keyboard_status` is `Applied`, `Switching` or
+      `Failed(message)`; Continue on the welcome page is off until it is
+      `Applied`, and a failure is shown with a Try again (`retry_keyboard`). The
+      `keyboard` in the plan request is the requested layout, which by then
+      is the applied one.
+    - *Looking again.* A refusal that a new look at the computer could mend (a
+      disk gone or in use, a helper that restarted) marks the look stale: the
+      closing page's Try again (`retry`) and Continue after such a result both
+      return `RunProbe` first, then the check follows by itself from
+      `probe_finished`, with the person's configuration kept while the new look
+      still offers it. A BIOS boot or a failed probe that is found after the
+      person left the welcome page is `blocking_problem()` on every page
+      (`can_retry_probe` says whether Try again can mend it).
   - `backend::Backend` is the root helper as a trait with blocking calls (make
     them from a worker thread): `probe`, `plan` and `state` over
     `org.ilex.Installer1` (`DbusBackend`: zbus, the system bus,
     `zbus::block_on`, connecting on first use and again after a failure, so the
     interface starts before the bus or the helper is up and shows the problem;
     a helper refusal arrives as `ClientError::Refused(PlanError)`, the bus's own
-    errors as `HelperUnavailable` or `AccessDenied`). `set_secret`, `apply`
+    errors as `HelperUnavailable` or `AccessDenied`; everything that says the
+    helper or the bus is gone, `Disconnected`, `TimedOut`, `Spawn.*` and
+    `org.freedesktop.systemd1.*` included, is `HelperUnavailable` and makes the
+    next call connect afresh). `set_secret`, `apply`
     and `next_report` (the `Progress` and `Finished` signals) are typed stubs
     answering `ClientError::NotYet`: the helper's installation (a later change)
     fills them, and the pages that need them are written against these
-    signatures. `Secret` holds a password wiped on drop and never in a request.
+    signatures. `Secret` holds a password wiped on drop and never in a request,
+    a marker or a log, with a redacted `Debug`: the interface reads a field once
+    into a `Secret` and carries it as one in its message enums (derived `Debug`
+    prints nothing of it) up to the flow's setters.
   - `simulate::Simulated` is the same trait over JSON fixtures
     (`crates/ilex-installer-flow/fixtures/*.json`, compiled in: `generic`,
     `ms-7c35`, `ms-7c35-board`, `conflict`, `no-composition`, `boot-override`,
@@ -3302,7 +3337,9 @@ installed, and no page writes to a disk.
     development and self-check containers): a released ISO cannot be talked
     into pretending by anyone who cannot already edit its boot line.
   - `messages` is every sentence a refusal or failure becomes, in one place
-    (`Message { title, detail }`, `plan_error`, `ClientError::message`);
+    (`Message { title, detail }`, `plan_error`, `ClientError::message`, the
+    "No disk can be installed to" text, the Continue and "Checking…" labels);
+    `markers` the serial-console lines the trials assert on (below);
     `machine::MachineView` is the machine page's content made from the probe;
     `account` the administrator page's rules; `progress::Progress` the stages
     of an installation as rows (`for_plan`, `apply(&State)`, `overall`) for the
@@ -3315,8 +3352,11 @@ installed, and no page writes to a disk.
     rules, each scenario's machine page, the walk from the welcome page to the
     checked plan, the helper's refusal of a name, BIOS, a missing helper, no
     usable disk, a registry that does not answer, an unknown boot argument, the
-    progress rows of an installation) and `selfcheck::system` reads the live
-    image's keyboard catalogue.
+    progress rows of an installation; stale and repeated answers, the frozen
+    choices while the plan is checked, serialised layout switches and their
+    failures, Try again looking first and keeping the configuration, a BIOS
+    answer after the first page, and how each D-Bus error name is classified)
+    and `selfcheck::system` reads the live image's keyboard catalogue.
 - **The pages.** `AdwNavigationView`, a header bar with the automatic Back
   button (and Escape), Continue at the bottom right of every page. Every control
   is reachable with Tab and has a visible label; the error style of a refused
@@ -3340,12 +3380,17 @@ installed, and no page writes to a disk.
     GNOME Kiosk's own interface, `org.gnome.Kiosk.InputSources.SetInputSources`
     on the session bus (`[("xkb", "de+nodeadkeys")]`), and reads
     `SelectedInputSource` back before reporting it applied (Kiosk applies the
-    sources a moment after the call returns). It is the compositor's interface,
+    sources a moment after the call returns). The flow serialises the switches
+    and keeps Continue off until the compositor has confirmed the requested
+    layout; if it never does, the page says so, with Try again. It is the compositor's interface,
     not localed's, so it needs no polkit action: the session's polkit rule is
     unchanged. The `keyboard` request field is the console keymap name, so the
     session's layout and the installed system's agree. A BIOS boot or a helper
-    that does not answer stops the installer on this page, with a sentence (and
-    Try again for the helper).
+    that does not answer stops the installer with a sentence (and Try again for
+    the helper) on this page, and on every later page the answer can still
+    arrive on: each page's banner shows `blocking_problem()`. The field to try
+    the layout is not read, logged or printed on a normal boot: people type their
+    intended passwords there.
   - *This computer.* From the probe: this computer's SMBIOS strings, the
     edition's catalogue as one radio row per machine (the description before its
     first `: ` is the title), and what the model decided: the detected machine
@@ -3353,7 +3398,9 @@ installed, and no page writes to a disk.
     composition in this edition fall back to the default and say so; an
     `ilex.composition=` boot argument is preselected and said to come from the
     boot options; an unknown tag shows the model's error (with its list of
-    offers) and keeps the detection's choice. There is no desktop choice. The
+    offers) and keeps the detection's choice. A configuration named before the
+    installer started is said to come from where it did (the boot options'
+    `ilex.composition=`, or a choice file). There is no desktop choice. The
     page prints `ILEX-COMPOSITION <tag> (<reason>) installs <image>` when it is
     shown and when the person picks another configuration, in the format the
     selection trials have always read.
@@ -3362,36 +3409,62 @@ installed, and no page writes to a disk.
     the helper's own refusal of a name the live image defines shown beside the
     field) and a password twice: no policy beyond what `chpasswd` can take (no
     control characters, at most 255 bytes), and a hint under eight characters.
-    The password never enters a request, a marker or a log. Computer name and
-    time zone are not asked yet (the model's defaults apply).
+    The password never enters a request, a marker or a log. The fields are
+    frozen while the helper checks the choices, and a refusal that is corrected
+    clears the fields' error style, invalid state and error-message relation.
+    The text of a password field is read only when it changes, once, straight
+    from the toolkit's secure buffer into a `Secret`; nothing reads it again to
+    compare. The interface process sets `RLIMIT_CORE` to 0 and
+    `PR_SET_DUMPABLE` to 0 before its window exists, and the session unit has
+    `LimitCORE=0` (the compositor sees the keystrokes too): no core file of
+    either, and no other process of the same user can attach to the interface.
+    Computer name and time zone are not asked yet (the model's defaults apply).
   - *Ready.* Continue on the administrator page calls `Plan` with the choices
     so far on the first disk the installer could use (not the medium it started
     from, not in use, at least the helper's minimum size): the disk page of a
     later change replaces that provisional choice. The page shows the answer,
     the checked image's version, download size and digest, or why nothing can
     be installed (every disk's reason, a registry that does not answer, the
-    helper's refusal) with Try again. Nothing is written.
-- **Markers.** Every page prints `ILEX-INSTALLER page=<id> edition=…` plus its
-  own words when it is shown (`language=` and `keyboard=` on the welcome page;
-  `selected=`, `origin=` (`detected`, `not-recognised`, `conflict`,
-  `no-composition`, `chosen`, `bad-override`), `detected=` and `offered=` on the
-  machine page; `check=` on the last), and `ILEX-INSTALLER event=…` lines:
-  `probe result=ok|failed`, `language`, `layout layout=<id> applied=true|false`,
-  `try layout=<id> text=<what was typed in the test field>` (the field holds
-  nothing private; no other field's content is ever printed) and `plan
-  result=…`. The session serial mirror and its faults are unchanged.
+    helper's refusal) with Try again, which looks at the computer again before
+    it checks (a disk that was unplugged, a medium that was ejected) and keeps
+    the person's configuration while it is still offered. Nothing is written.
+- **Markers.** The formats are `ilex_installer_flow::markers`'s, so every
+  interface prints the ones the trials read. Every page prints
+  `ILEX-INSTALLER page=<id> edition=…` plus its own words when it is shown
+  (`language=` and `keyboard=` on the welcome page; `selected=`, `origin=`
+  (`detected`, `not-recognised`, `conflict`, `no-composition`, `chosen`,
+  `bad-override`), `detected=`, `offered=` and `choices=<the rows shown, in
+  order>` on the machine page; `check=` on the last), and `ILEX-INSTALLER
+  event=…` lines: `probe result=ok|failed|stale`, `language`, `layout
+  layout=<id> applied=true|false`, `notice severity=… text=<the machine page's
+  notice>` and `plan result=ok|refused|failed|stale` (`stale`: the answer to a
+  request that was replaced, which changed nothing). **No field's content is
+  ever printed.** The one exception is only for a test: `try layout=<id>
+  text=<what was typed in the layout test field>` is printed, and the field is
+  read at all, only when the fixed public test credential
+  `ilex.installer.echo-test=1` (SMBIOS, `io.systemd.credential:`, imported by the
+  session unit) is present or the session is simulated; on a normal boot nothing
+  of that field reaches the journal or the serial console. The session serial
+  mirror and its faults are unchanged.
 - **`--self-check --render DIR [--dark]`** draws every page and error state to
   PNG files with GTK's renderer from the window's widget tree at the surface's
-  own scale (`<state>-<light|dark>-<scale>x.png`, 25 states): the welcome page
-  in German, BIOS and without a helper; the machine page for every kind of
-  detection result; the administrator page empty, with each refusal and valid;
+  own scale (`<state>-<light|dark>-<scale>x.png`, 27 states): the welcome page
+  in German, BIOS, without a helper and with a layout the compositor did not
+  take; the machine page for every kind of detection result and for a BIOS
+  boot found there; the administrator page empty, with each refusal and valid;
   the last page checked, without a disk, without a registry and after Back. It
   runs the application's own pages with the same messages the person's input
-  sends, against the fixtures, and needs only a display: GNOME Kiosk's
+  sends (the passwords are typed into the fields themselves), against the
+  fixtures. Each shot is taken only when the application reports the page and
+  the state the shot names (no probe, check or layout switch under way) and
+  the navigation view shows that page; a shot that never gets there fails with
+  what was seen. A machine without the system's keyboard catalogue draws with
+  the self-check's sample (as `--self-check --render` already says it may). It
+  needs only a display: GNOME Kiosk's
   `--headless --virtual-monitor 1920x1200` is enough, with the scale from a
   `monitors.xml` for the virtual monitor (`MetaVendor` / `MetaVirtualMonitor`,
   connector `Meta-0`, serial `0x00`). `installer::ui` does that in the live
-  image's VM: the flow's rules, `--simulate` refused on a real boot, and 75
+  image's VM: the flow's rules, `--simulate` refused on a real boot, and 81
   images (light and dark at 1x, light at 1.5x, 1280x800 and 1920x1200) that
   must all be PNGs of their size, drawn and mostly different, kept under
   `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
@@ -3401,8 +3474,10 @@ installed, and no page writes to a disk.
   QMP, the real helper): `iso::next_welcome` opens the layout list with the
   keyboard, searches it, chooses German (no dead keys), waits for GNOME Kiosk to
   apply it, types `yz` into the test field and requires `zy` (the two keys swap
-  between the US and German layouts: the switch is real and at run time), then
-  continues with Enter. `iso::next_detect_board` gives the VM only the
+  between the US and German layouts: the switch is real and at run time; the
+  trial passes the echo credential, the others do not), then continues with
+  Enter. The other trials type a password-like text into that field and
+  require that it is never printed. `iso::next_detect_board` gives the VM only the
   MSI MEG X570 UNIFY's baseboard SMBIOS strings and requires `ms-7c35.gnome`
   preselected as `detected`; `iso::next_detect_generic` a VM nothing matches and
   requires `generic.gnome` as `not-recognised`; both require the edition to
@@ -3410,12 +3485,14 @@ installed, and no page writes to a disk.
   `ilex.composition=invalid-first-choice ilex.composition=ms-7c35.gnome` into
   GRUB's editor and requires the last to win, `chosen`, and the model's own
   serial line; `iso::next_kernel_argument_unknown` an unoffered tag: `bad-override`
-  with the detection's choice kept. `iso::next_account` types the administrator
+  with the detection's choice kept, the two rows of the edition's offers shown
+  and the notice naming both offered tags. `iso::next_account` types the administrator
   page with the keyboard on a VM with a 40 GiB disk, presses Enter in the last
   field and requires the real helper's `Plan` (the image's manifest is read from
   the registry, so the guest needs `ghcr.io`) to succeed, the closing page to
-  report `check=ok`, and the password to be nowhere on the serial console.
-  Screenshots of each are kept in the artifacts.
+  report `check=ok`, and the password to be nowhere on the serial console or in
+  the guest's journal (read over SSH, with patterns that do not match their own
+  command line). Screenshots of each are kept in the artifacts.
 - **Not done here.** Strings are English constants (no gettext catalogue); the
   installed system's computer name and time zone, the display's scale and the
   network, disk, encryption, review, progress, done and problem pages, the
