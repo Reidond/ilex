@@ -719,7 +719,9 @@ mod apps {
                 alone.describe()
             );
         }
-        println!("ok   with Breeze alone a GTK 3 Flatpak stays light in a dark Plasma: Breeze-Dark stays preinstalled");
+        println!(
+            "ok   with Breeze alone a GTK 3 Flatpak stays light in a dark Plasma: Breeze-Dark stays preinstalled"
+        );
         Ok(())
     }
 

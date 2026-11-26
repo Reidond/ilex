@@ -251,12 +251,7 @@ fn crash_plasma(vm: &mut Vm) -> Result<()> {
         Duration::from_secs(60),
     );
     // What the manager made of it, before anything else runs.
-    let state = |unit: &str| {
-        user(
-            vm,
-            &format!("systemctl --user is-active {unit} || true"),
-        )
-    };
+    let state = |unit: &str| user(vm, &format!("systemctl --user is-active {unit} || true"));
     let manager = format!(
         "plasma-workspace.target {}, graphical-session.target {}, xdg-desktop-portal-gtk.service {}, \
          xdg-desktop-portal.service {}",
@@ -344,7 +339,10 @@ fn gnome_after_crash(vm: &Vm) -> Result<()> {
     // lost their compositor) is Plasma's own business, printed; GNOME's units
     // must be healthy.
     let failed = user(vm, "systemctl --user --failed --no-legend --plain || true")?;
-    println!("     failed user units in GNOME: {}", failed.replace('\n', "; "));
+    println!(
+        "     failed user units in GNOME: {}",
+        failed.replace('\n', "; ")
+    );
     let gnome_side: Vec<_> = failed
         .lines()
         .map(str::trim_start)
@@ -353,7 +351,9 @@ fn gnome_after_crash(vm: &Vm) -> Result<()> {
     if gnome_side.is_empty() {
         Ok(())
     } else {
-        Err(anyhow!("failed GNOME user units after the crash: {gnome_side:?}"))
+        Err(anyhow!(
+            "failed GNOME user units after the crash: {gnome_side:?}"
+        ))
     }
 }
 

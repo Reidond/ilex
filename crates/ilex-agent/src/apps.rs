@@ -635,9 +635,17 @@ fn declare(
     branch: &str,
     runtime: bool,
 ) -> Result<()> {
-    let kind = |runtime: bool| if runtime { "runtime extension" } else { "application" };
+    let kind = |runtime: bool| {
+        if runtime {
+            "runtime extension"
+        } else {
+            "application"
+        }
+    };
     match expected.insert(id.to_string(), (branch.to_string(), runtime)) {
-        Some((other_branch, other_runtime)) if (other_branch.as_str(), other_runtime) != (branch, runtime) => {
+        Some((other_branch, other_runtime))
+            if (other_branch.as_str(), other_runtime) != (branch, runtime) =>
+        {
             Err(format!(
                 "{id} is declared as {} ({other_branch}) and as {} ({branch})",
                 kind(other_runtime),
