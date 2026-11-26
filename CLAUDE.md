@@ -910,9 +910,11 @@ button with real input, into the user installation; it does not install the KDE
 list. `graphical::shells` is explicit-only and needs `--shell gnome --shell kde`:
 Plasma ending in Breeze Dark, a normal logout, GNOME's GTK 3, GTK 4 and libadwaita
 applications light and Adwaita from the same home and the same lingering user
-manager, then GNOME made dark with Adwaita-dark and a purple accent, a normal
-logout, and Plasma again, Breeze Dark with Plasma's blue accent and GNOME's
-database as GNOME left it. Screenshots land in `<state dir>/artifacts/graphical*/`.
+manager (a crash's leftover `GTK_USE_PORTAL` included), then GNOME made dark with
+the dark scheme, Adwaita-dark as GTK 3's theme name (Fedora's GTK 3 has no such
+theme directory and does not read `color-scheme`, so the name is checked, not the
+colours) and a purple accent, a normal logout, and Plasma again, Breeze Dark with
+Plasma's blue accent and GNOME's database as GNOME left it. Screenshots land in `<state dir>/artifacts/graphical*/`.
 The Anaconda installer's catalogue offers only the installer composition's shell
 list (GNOME), so KDE compositions are not offered there and its release does not
 wait for their tags; KDE installs arrive with the KDE installer edition.
