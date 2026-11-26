@@ -224,6 +224,7 @@ pub struct LinuxProvider {
     esp_dir: Option<PathBuf>,
     disk_serials: bool,
     hotplug_port: bool,
+    smbios: Vec<String>,
 }
 pub struct LinuxVm {
     spec: VmSpec,
@@ -250,6 +251,7 @@ impl LinuxProvider {
             esp_dir: None,
             disk_serials: false,
             hotplug_port: false,
+            smbios: Vec::new(),
         })
     }
     /// Give the guest an xHCI USB keyboard instead of a virtio one, for
@@ -288,6 +290,15 @@ impl LinuxProvider {
     #[must_use]
     pub fn with_hotplug_port(mut self, enabled: bool) -> Self {
         self.hotplug_port = enabled;
+        self
+    }
+    /// Extra SMBIOS structures (`-smbios` values, such as a systemd credential:
+    /// `type=11,value=io.systemd.credential:name=value`) added to the guest (see
+    /// [`qemu::VmConfig::smbios`]); a boot from a spec does not read the
+    /// `VmConfig` the spec was made from. None by default.
+    #[must_use]
+    pub fn with_smbios(mut self, structures: Vec<String>) -> Self {
+        self.smbios = structures;
         self
     }
 }
@@ -432,6 +443,7 @@ impl VmProvider for LinuxProvider {
         config.esp_dir = self.esp_dir.clone();
         config.disk_serials = self.disk_serials;
         config.hotplug_port = self.hotplug_port;
+        config.smbios.clone_from(&self.smbios);
         config.efi_vars = vm.spec.firmware_state.clone();
         config.extra_disks = vm
             .spec

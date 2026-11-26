@@ -792,8 +792,10 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     // A disk that already holds a system is erased only when the answers say so.
     let found = existing_systems(disk);
     if !found.is_empty() && !answers.install.reinstall {
+        // What a person must do comes first: the console line is cut at 300
+        // characters, and what a disk holds can be a long list.
         bail!(
-            "{} already holds {}; an unattended installation erases such a disk only when answers.toml says reinstall = true under [install]",
+            "{} already holds a system: an unattended installation erases such a disk only when answers.toml says reinstall = true under [install]; it holds {}",
             disk.id,
             found.join(", ")
         );

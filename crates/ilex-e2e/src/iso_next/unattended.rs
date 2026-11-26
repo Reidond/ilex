@@ -362,9 +362,18 @@ fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
         )?;
         ensure!(child.wait()?.success(), "sfdisk could not write the table");
     }
+    // A fixed test credential the helper's and the answers' units import: it
+    // can only make the installer fail. (A boot from a spec does not read the
+    // `VmConfig::smbios` it was made from: the provider carries it.)
+    let smbios: Vec<String> = setup
+        .fault
+        .map(|fault| format!("type=11,value=io.systemd.credential:ilex.installer.fault={fault}"))
+        .into_iter()
+        .collect();
     let mut provider = LinuxProvider::new(ws.clone())?
         .with_disk_serials(setup.serials)
-        .with_hotplug_port(setup.hotplug);
+        .with_hotplug_port(setup.hotplug)
+        .with_smbios(smbios);
     let mut config = match &layout.fixture {
         None => {
             let mut config = VmConfig::new(layout.purpose(), &target);
@@ -383,13 +392,6 @@ fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
     };
     config.snapshot = false;
     config.memory = memory;
-    if let Some(fault) = setup.fault {
-        // A fixed test credential the helper's and the answers' units import:
-        // it can only make the installer fail.
-        config.smbios.push(format!(
-            "type=11,value=io.systemd.credential:ilex.installer.fault={fault}"
-        ));
-    }
     let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
     spec.security_launch = SecurityLaunch::QualificationFixture;
     spec.secure_boot = Requirement::Required;
@@ -1429,6 +1431,7 @@ pub(super) fn run_repeat() -> Result<()> {
     );
     ensure!(
         console.contains("result=failed")
+            && console.contains("already holds a system")
             && console.contains("reinstall = true")
             && !console.contains("already installed")
             && !console.contains("apply=started"),
