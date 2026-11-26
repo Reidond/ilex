@@ -5,7 +5,10 @@
 # is not enumerated), so a user without a remote of their own sees "no Flatpak
 # sources" and an "Add Flathub" that is refused. Give the user the remote GNOME
 # Software and `ilexctl profile apply --install-apps` use too, from the committed
-# trust file: offline, no catalogue is fetched until Discover is opened.
+# trust file (no key is downloaded). `flatpak remote-add` still fetches the
+# remote's summary after adding it, so this needs the network: when it fails the
+# stamp below is not written and the next Plasma session runs it again. The
+# AppStream catalogue is fetched when Discover refreshes it, not here.
 set -eu
 flatpak remote-add --user --if-not-exists flathub /usr/share/flatpak/remotes.d/flathub.flatpakrepo
 state=${XDG_STATE_HOME:-$HOME/.local/state}/ilex
