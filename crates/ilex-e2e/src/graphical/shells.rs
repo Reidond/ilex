@@ -148,7 +148,7 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     // 3. GNOME's own choices: dark, Adwaita-dark, a purple accent.
     gnome_dark(vm)?;
     toolkits(vm, ToolkitLook::GnomeDark)?;
-    show(vm, ctl, artifacts, "13-gnome-gtk3-dark", "gtk3", None)?;
+    show(vm, ctl, artifacts, "13-gnome-libadwaita-dark", "adw", None)?;
     gnome_logout(vm)?;
 
     // 4. Plasma again: still Breeze Dark with Plasma's accent, GNOME's
@@ -280,11 +280,20 @@ fn toolkits(vm: &Vm, look: ToolkitLook) -> Result<()> {
             );
         }
         ToolkitLook::GnomeDark => {
+            // Fedora's GTK 3 has no Adwaita-dark theme directory (gnome-themes-extra
+            // is not installed) and does not read `color-scheme`, so GNOME's
+            // choice is the name GTK 3 resolved, not its colours.
             report.check(
-                "GTK 3 is Adwaita-dark",
+                "GTK 3 resolves GNOME's choice, Adwaita-dark",
                 probe(vm, "gtk3", None).and_then(|p| {
                     println!("     {}", p.describe());
-                    p.expect(Some("Adwaita-dark"), Some("Adwaita"), true)
+                    if p.field("theme") == Some("Adwaita-dark")
+                        && p.field("icons") == Some("Adwaita")
+                    {
+                        Ok(())
+                    } else {
+                        bail!("GTK 3 did not resolve Adwaita-dark: {}", p.describe())
+                    }
                 }),
             );
             report.check(
