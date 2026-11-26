@@ -868,6 +868,7 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
     wait_page(vm, &ctl, artifacts, &format!("serial-{mode}"))?;
 
     let mut audited = 0;
+    let mut budgets = 0;
     for line in
         complete_lines(&console).filter(|l| is_marker(l, "ILEX-INSTALLER-SERIAL", Some("mode")))
     {
