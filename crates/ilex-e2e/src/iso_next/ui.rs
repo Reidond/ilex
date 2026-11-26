@@ -182,6 +182,7 @@ fn wait_line(
         if let Some(status) = vm.exited()? {
             bail!("the VM exited with {status} while waiting for {what}; serial: {text}");
         }
+        super::ensure_firmware_output(vm)?;
         if started.elapsed() > timeout {
             bail!("no {what} within {timeout:?}; serial: {text}");
         }
