@@ -1068,10 +1068,9 @@ a normal logout that leaves no Plasma target, `DCONF_PROFILE` or theme in the ma
 Two more steps test the login-time script against the real manager, logind and
 Plasma. Step 8: next to a live Plasma session, with the manager's `XDG_SESSION_ID`
 naming a session logind does not have (what a failed login leaves), the script is
-sourced by hand as a login of its own (GDM attaches a second Plasma login of the
-user to the live session instead of starting one), also with a `loginctl` that
-always fails: it must stop nothing (the same compositor and shell, targets up,
-the screen still the desktop). Step 9: a Plasma login while the watch's stop is
+sourced by hand as a login of its own (a second login through the greeter is not
+tried), also with a `loginctl` that always fails: it must stop nothing (the same
+compositor and shell, targets up, the screen still the desktop). Step 9: a Plasma login while the watch's stop is
 still running, made long enough by a runtime drop-in that holds the stop of
 `plasma-polkit-agent.service` until the test releases it: with the targets down and
 that stop job queued, the login's script must log that it waits (in the journal), and

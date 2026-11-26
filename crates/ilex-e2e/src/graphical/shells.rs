@@ -30,8 +30,8 @@
 //!    desktop rather than the greeter, and keep it when the watch wakes;
 //! 8. a live Plasma session while the manager's `XDG_SESSION_ID` names a session
 //!    that is over (what a login that failed after exporting its id leaves): a
-//!    second login's hook, sourced by hand as GDM attaches a second Plasma login
-//!    of the user to the live session, must leave the running Plasma alone; and
+//!    second login's hook, sourced by hand (a second login through the greeter is
+//!    not tried), must leave the running Plasma alone; and
 //! 9. a Plasma login while the watch's own stop is still running: the targets
 //!    are down at once and a unit's stop job is held up (a drop-in, released by
 //!    the test), which Plasma's target cannot be started over. The login's hook
@@ -1131,11 +1131,12 @@ fn unused_session_id(vm: &Vm, offset: u32) -> Result<String> {
 /// environment last: a login that failed (GNOME's, refusing to start next to a
 /// live Plasma, exports its id and closes) leaves the id of a session that is
 /// gone beside a Plasma that is alive, and the next Plasma login's hook must not
-/// take that for a crashed session's leftovers. GDM attaches a second Plasma
-/// login of the same user to the live session instead of starting one, so the hook
-/// is sourced by hand, as a login with an id of its own (a session id logind has
-/// never had, as nothing of the hook looks at more than the listing), against the
-/// real manager, logind and Plasma. Also with a `loginctl` that always fails.
+/// take that for a crashed session's leftovers. A second login of the user through
+/// the greeter is not tried (GDM is expected to switch to a compatible live session
+/// instead of starting one): the hook is sourced by hand, as a login with an id of
+/// its own (one logind has never had; the hook looks no further than the listing),
+/// against the real manager, logind and Plasma. Also with a `loginctl` that always
+/// fails.
 fn second_login(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
     plasma_login(vm, ctl, password)?;
     let live = user_sessions(vm)?;
