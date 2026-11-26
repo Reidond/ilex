@@ -3292,13 +3292,13 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     the plan is one this helper made and is under 15 minutes old (`unknown-plan`,
     `plan-expired`); whole-disk mode needs `erase_disk` to repeat the disk's id
     (`invalid-field`); the administrator's password was set (`missing-secret`);
-    **the image's signature is accepted by the installer's policy**
-    (`signature`: `systemd-repart` and the registry come later, the pull and its
-    verification happen after the disk is erased, so the pinned
-    `repository@sha256:...` goes first through `skopeo copy` into a scratch
-    directory, which checks the policy and the signatures before it fetches a
-    layer and is stopped at the first one; a rejection says so, a network failure
-    is `registry` and not a verdict); a fresh probe still shows the same disk (id,
+    **the image's signature is accepted by the installer's policy** (`signature`):
+    `bootc` verifies when it pulls, which is after the disk has been erased, so the
+    pinned `repository@sha256:...` goes first through `skopeo copy` (containers-image,
+    the code `bootc` calls) into a scratch directory, which checks the policy and the
+    signatures before it fetches a layer and is stopped at the first one, and what it
+    fetched is thrown away. A rejection says so; a network failure is `registry`,
+    not a verdict. Then a fresh probe still shows the same disk (id,
     path, model, serial, size, bus, partition table, partitions: `disk-changed`),
     not the live medium and not in use; **the helper claims the whole disk
     exclusively** (`O_EXCL`; `in-use` otherwise); with the claim held, the disk
@@ -3384,10 +3384,12 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     renamed) **before it writes anything**, and a stage whose record cannot be
     written does not begin. `State()` carries `active`, `stages` (each with its
     status and times: the progress page's list), `stage`, `progress` (0 to 1
-    within the stage), `message`, the last 40 lines of what the tools printed,
-    `disk_changed`, `applied` (the plan) and `outcome`; documents from before
-    `Apply` still parse. The pull's bar is the bytes in use on the target against
-    2.4 times the download size, never above 0.97 until `bootc` ends. `Progress`
+    within the stage, never going back), `message`, the last 40 lines of what
+    the current stage's tools printed, `disk_changed`, `applied` (the plan) and
+    `outcome`; documents from before `Apply` still parse. The pull's bar is the
+    bytes in use on the target against 2.6 times the download size (measured:
+    4,150 MiB in use for 1,688 MiB of layers, 2.46), never above 0.97 until
+    `bootc` ends. `Progress`
     is sent at most every half second and at each stage's start; `Finished`
     once. Every tool's output goes to `/run/ilex-installer/log/<plan>/NN-<stage>.log`
     (0700/0600, command lines and exit codes included).
@@ -3523,7 +3525,7 @@ any other failure is not); the live ISO's own boot is `iso::next_helper_usb`,
 Three more `installer::` trials write disks, so each boots **UEFI VMs of its own**
 (not the group's bcvk ephemeral VM, which boots a kernel directly: `bootupctl
 --auto` there chooses BIOS, see **Apply**): the live image is written to a disk
-with `bcvk to-disk` (one-time per image, about 20 minutes on a Boat sandbox; the
+with `bcvk to-disk` (one-time per image: 6.5 minutes on a 16-vCPU Boat sandbox; the
 harness's layer adds sshd and a bootc install configuration, and the live
 image's own `/etc/containers/policy.json` must leave the local transports open
 for bcvk's inner install), booted under OVMF beside a sparse 41 GiB target and a
@@ -3563,6 +3565,11 @@ same) and a screenshot of GDM. `installer::interrupted` kills the helper
 old plan is gone, that a new plan lists what the dead installation left among
 what it erases, and that a new `Apply` on the same disk installs a system that
 boots with the administrator able to log in.
+Measured on a 16-vCPU Boat sandbox (2026-11-26): `installer::policy` 54 s,
+`installer::install` 5 minutes after the live disk exists (the pull and
+deployment 3 to 4.3 minutes, every other stage together under 10 seconds),
+`installer::interrupted` 4 minutes, `iso::next_unattended` 6 minutes (installed
+and powered off in 256 s), and the Anaconda ISO's own `iso::install` 11 minutes.
 `iso::next_unattended` (opt-in with the other `iso::next` trials) boots the real
 ISO under UEFI with Secure Boot beside a blank disk and an ext4 volume labelled
 `ILEX-ANSWERS`, follows `ILEX-INSTALLER-ANSWERS` lines on the serial console to
