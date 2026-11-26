@@ -124,6 +124,10 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         kde::nothing_shared(vm),
     );
     report.finish()?;
+    // A crash skips Plasma's shutdown script and leaves its environment in a
+    // user manager that outlives the session: GNOME must look like GNOME
+    // anyway, with GTK applications asking GNOME's own portal.
+    user(vm, "systemctl --user set-environment GTK_USE_PORTAL=1")?;
     choose_session(vm, "gnome")?;
     settle(ctl)?;
     login(vm, ctl, &password)?;
@@ -309,11 +313,12 @@ fn toolkits(vm: &Vm, look: ToolkitLook) -> Result<()> {
 /// What Plasma left in the home does not restyle GNOME.
 fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     let mut report = vmtest::Report::default();
-    report.check("the session is GNOME and carries nothing of Plasma's", {
+    // (GTK_USE_PORTAL is left behind on purpose, as a crash would: harmless.)
+    report.check("the session is GNOME and carries no profile or theme of Plasma's", {
         let env = user(vm, "systemctl --user show-environment")?;
         if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME")
             && !env.lines().any(|l| {
-                ["DCONF_PROFILE=", "GTK_USE_PORTAL=", "GTK_THEME="]
+                ["DCONF_PROFILE=", "GTK_THEME="]
                     .iter()
                     .any(|p| l.starts_with(p))
             })

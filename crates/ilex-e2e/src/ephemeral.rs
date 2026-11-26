@@ -467,13 +467,10 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         let packages = toml::Table::from_iter([("packages".into(), toml::Value::try_from(&expected)?)]);
         check_packages(vm, &packages)?;
         if key == "shell-packages" && selected {
-            for package in expected["exclude"].as_array().context("shell excludes missing")? {
-                let name = package.as_str().context("shell exclude must be a string")?;
-                if !name.contains(['*', '?', '[', ']']) {
-                    vm.ssh(&format!("rpm -q -- {}; result=$?; test \"$result\" -eq 1", common::quote(name)))?
-                        .ok(&format!("literal shell exclude {name} must not be installed"))?;
-                    println!("     literal shell exclude {name} absent");
-                }
+            let names = literal_names(&expected["exclude"], "shell exclude")?;
+            check_absent(vm, &names)?;
+            for name in &names {
+                println!("     literal shell exclude {name} absent");
             }
         }
     }
@@ -536,13 +533,8 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
             })?;
             println!("     shell {name}: greeter {unit} is {}", state.out());
         }
-        if let Some(excludes) = manifest.get("packages").and_then(|a| a.get("exclude")).and_then(|a| a.as_array()) {
-            for package in excludes {
-                let name = package.as_str().context("exclude must be a string")?;
-                if !name.contains(['*', '?', '[', ']']) {
-                    vm.ssh(&format!("rpm -q -- {}; test $? -eq 1", common::quote(name)))?.ok("excluded shell RPM absent")?;
-                }
-            }
+        if let Some(excludes) = manifest.get("packages").and_then(|a| a.get("exclude")) {
+            check_absent(vm, &literal_names(&serde_json::to_value(excludes)?, "exclude")?)?;
         }
         let overlay = common::workspace()?
             .root
@@ -698,80 +690,98 @@ fn app_manifest(manifest: &toml::Table) -> Result<Value> {
     Ok(value)
 }
 
-fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {
-    if let Some(packages) = manifest
-        .get("apps")
-        .and_then(|a| a.get("rpm"))
-        .and_then(|a| a.as_array())
-    {
-        for package in packages {
-            let name = package.as_str().context("app RPM must be a string")?;
-            if !name.starts_with('@') {
-                vm.ssh(&format!("rpm -q -- {}", common::quote(name)))?
-                    .ok("app RPM installed")?;
-            }
-        }
+/// The literal (glob-free) package names of a manifest list.
+fn literal_names(list: &Value, what: &str) -> Result<Vec<String>> {
+    list.as_array()
+        .with_context(|| format!("{what} list missing"))?
+        .iter()
+        .map(|v| v.as_str().map(str::to_owned).with_context(|| format!("{what} must be a string")))
+        .filter(|name| name.as_ref().map_or(true, |n| !n.contains(['*', '?', '[', ']'])))
+        .collect()
+}
+
+/// Every named package is installed. One SSH session for the lot: every
+/// `bcvk ephemeral ssh` holds an inotify instance, of which a host has 128.
+fn check_installed(vm: &EphemeralVm, names: &[String], what: &str) -> Result<()> {
+    let names: Vec<_> = names.iter().filter(|n| !n.starts_with('@')).map(|n| common::quote(n)).collect();
+    if names.is_empty() {
+        return Ok(());
     }
-    if let Some(packages) = manifest
-        .get("packages")
-        .and_then(|p| p.get("install"))
-        .and_then(|v| v.as_array())
-    {
-        for package in packages {
-            let name = package.as_str().context("package must be a string")?;
-            if !name.starts_with('@') {
-                vm.ssh(&format!("rpm -q -- {}", common::quote(name)))?
-                    .ok("manifest package installed")?;
-            }
-        }
+    vm.ssh(&format!("rpm -q -- {}", names.join(" ")))?.ok(what)?;
+    Ok(())
+}
+
+/// None of the named packages is installed.
+fn check_absent(vm: &EphemeralVm, names: &[String]) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<_> = names.iter().map(|n| common::quote(n)).collect();
+    vm.ssh(&format!(
+        "for package in {}; do ! rpm -q -- \"$package\" >/dev/null 2>&1 || {{ echo \"$package is installed\"; exit 1; }}; done",
+        list.join(" ")
+    ))?
+    .ok("excluded packages must not be installed")?;
+    Ok(())
+}
+
+fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {
+    if let Some(packages) = manifest.get("apps").and_then(|a| a.get("rpm")) {
+        let packages = serde_json::to_value(packages)?;
+        check_installed(vm, &literal_names(&packages, "app RPM")?, "app RPMs installed")?;
+    }
+    if let Some(packages) = manifest.get("packages").and_then(|p| p.get("install")) {
+        let packages = serde_json::to_value(packages)?;
+        check_installed(vm, &literal_names(&packages, "package")?, "manifest packages installed")?;
     }
     Ok(())
 }
 
 /// Every overlay file must survive unchanged: the installer rejects collisions.
+/// One SSH session for the whole overlay.
 fn check_overlay(
     vm: &EphemeralVm,
     root: &std::path::Path,
     directory: &std::path::Path,
 ) -> Result<()> {
+    let mut script = String::from("status=0\n");
+    overlay_checks(root, directory, &mut script)?;
+    script.push_str("exit $status\n");
+    vm.ssh(&script)?.ok("overlay files and links survive unchanged")?;
+    Ok(())
+}
+
+fn overlay_checks(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    script: &mut String,
+) -> Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();
-        let destination = format!(
+        let destination = common::quote(&format!(
             "/{}",
             path.strip_prefix(root)?
                 .to_string_lossy()
                 .replace('\\', "/")
-        );
+        ));
         if path.is_dir() && !path.is_symlink() {
-            check_overlay(vm, root, &path)?;
+            overlay_checks(root, &path, script)?;
         } else if path.is_symlink() {
-            let target = std::fs::read_link(&path)?.to_string_lossy().into_owned();
-            let guest = vm
-                .ssh(&format!("readlink -- {}", common::quote(&destination)))?
-                .ok("overlay symlink")?;
-            ensure(guest.out() == target, || {
-                format!("overlay symlink {destination} differs")
-            })?;
+            let target = common::quote(&std::fs::read_link(&path)?.to_string_lossy());
+            script.push_str(&format!(
+                "[ \"$(readlink -- {destination})\" = {target} ] || {{ echo \"symlink differs: \"{destination}; status=1; }}\n"
+            ));
         } else {
-            check_file(vm, &path, &destination)?;
+            let host = ilex_devkit::cmd::output(
+                std::process::Command::new("sha256sum").arg("--").arg(&path),
+            )?;
+            let hash = host.split_whitespace().next().context("sha256sum printed nothing")?;
+            script.push_str(&format!(
+                "[ \"$(sha256sum -- {destination} | cut -d' ' -f1)\" = {hash} ] || {{ echo \"sha256 differs: \"{destination}; status=1; }}\n"
+            ));
         }
     }
     Ok(())
-}
-
-fn check_file(vm: &EphemeralVm, source: &std::path::Path, destination: &str) -> Result<()> {
-    let host = ilex_devkit::cmd::output(
-        std::process::Command::new("sha256sum")
-            .arg("--")
-            .arg(source),
-    )?;
-    let guest = vm
-        .ssh(&format!("sha256sum -- {}", common::quote(destination)))?
-        .ok("configuration file sha256")?;
-    ensure(
-        host.split_whitespace().next() == guest.out().split_whitespace().next(),
-        || format!("{destination} sha256 differs from {}", source.display()),
-    )
 }
 
 /// Compare image references, ignoring a leading `localhost/`.

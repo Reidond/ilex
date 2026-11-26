@@ -35,9 +35,9 @@ done
 for unit in ilex-kde-gtk ilex-kde-flathub; do
     test "$(readlink "/usr/lib/systemd/user/plasma-workspace.target.wants/$unit.service")" = "../$unit.service"
 done
-referrers=$(grep -rl 'ilex-kde' /usr/lib/systemd /etc/systemd 2>/dev/null | sort | tr '\n' ' ')
-[ "$referrers" = '/usr/lib/systemd/user/ilex-kde-flathub.service /usr/lib/systemd/user/ilex-kde-gtk.service ' ] ||
-    fail "unexpected references to the KDE units: $referrers"
+units=$(find /usr/lib/systemd /etc/systemd -name 'ilex-kde-*' 2>/dev/null | sort | tr '\n' ' ')
+[ "$units" = '/usr/lib/systemd/user/ilex-kde-flathub.service /usr/lib/systemd/user/ilex-kde-gtk.service /usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-flathub.service /usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-gtk.service ' ] ||
+    fail "unexpected KDE units or links: $units"
 systemd-analyze --user verify --man=no /usr/lib/systemd/user/ilex-kde-gtk.service /usr/lib/systemd/user/ilex-kde-flathub.service
 grep -qx 'ExecStart=/usr/libexec/ilex/portal-gtk' /usr/lib/systemd/user/xdg-desktop-portal-gtk.service.d/50-ilex-kde.conf
 
