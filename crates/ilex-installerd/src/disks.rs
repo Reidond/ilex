@@ -6,7 +6,7 @@
 use crate::{
     exec,
     scratch::Scratch,
-    topology::{self, Roots, System, Tracer},
+    topology::{self, DevNum, Roots, System, Tracer},
 };
 use anyhow::{Context, Result};
 use ilex_installer_model::probe::{Disk, Extent, OtherSystem, Partition};
@@ -15,7 +15,9 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     path::Path,
+    thread,
     time::Duration,
 };
 
@@ -292,6 +294,108 @@ pub fn probe_type(path: &str) -> Option<String> {
     .ok()?;
     let text = out.stdout_text().trim().to_owned();
     (out.success() && !text.is_empty()).then_some(text)
+}
+
+/// What opening a whole disk exclusively says about it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// Nothing holds the disk or any of its partitions.
+    Free,
+    /// The kernel refuses (EBUSY): something holds the disk or a partition.
+    Busy,
+    /// The check itself failed.
+    Unknown(String),
+}
+
+/// How often and how far apart a busy disk is tried: a claim that is only
+/// passing (another probe's scan of an EFI system partition, udev's own use)
+/// must not make a disk flicker in and out of the list.
+const CLAIM_ATTEMPTS: u32 = 10;
+const CLAIM_PAUSE: Duration = Duration::from_millis(50);
+
+/// Run `open` until it succeeds, fails for another reason or has been refused
+/// `attempts` times for `EBUSY`.
+pub fn claim_with(
+    open: &mut dyn FnMut() -> io::Result<()>,
+    attempts: u32,
+    pause: Duration,
+) -> Claim {
+    for attempt in 0..attempts {
+        match open() {
+            Ok(()) => return Claim::Free,
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+                if attempt + 1 < attempts {
+                    thread::sleep(pause);
+                }
+            }
+            Err(e) => return Claim::Unknown(e.to_string()),
+        }
+    }
+    Claim::Busy
+}
+
+/// Open the block device at `path` read-only and exclusive, then close it. On a
+/// block device `O_EXCL` claims it the way a mounted file system or a swap area
+/// does, and the kernel refuses with `EBUSY` while anything holds it or one of
+/// its partitions (a mount, even one unmounted lazily that a process still
+/// holds; swap; an external journal; a zram backing device; a device-mapper,
+/// MD or btrfs member). The opened file must be the device with `expect`'s
+/// number.
+fn open_exclusive(path: &str, expect: DevNum) -> io::Result<()> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_EXCL)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_block_device() || topology::split_dev(meta.rdev()) != expect {
+        return Err(io::Error::other(format!(
+            "{path} is not the block device {}:{}",
+            expect.0, expect.1
+        )));
+    }
+    Ok(())
+}
+
+/// The device number sysfs gives a block device.
+fn device_number(sys: &Path, kname: &str) -> Option<DevNum> {
+    let text = fs::read_to_string(sys.join("class/block").join(kname).join("dev")).ok()?;
+    let (major, minor) = text.trim().split_once(':')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Claim a whole disk exclusively and release it at once. Everything but a free
+/// disk is a reason it is not offered.
+pub fn claim_disk(sys: &Path, kname: &str, path: &str) -> Claim {
+    let Some(expect) = device_number(sys, kname) else {
+        return Claim::Unknown(format!("sysfs does not give the number of {kname}"));
+    };
+    claim_with(
+        &mut || open_exclusive(path, expect),
+        CLAIM_ATTEMPTS,
+        CLAIM_PAUSE,
+    )
+}
+
+/// Why a disk is not free, when [`claim_disk`] says it is not.
+pub fn claim_reason(path: &str, claim: &Claim) -> Option<String> {
+    match claim {
+        Claim::Free => None,
+        Claim::Busy => Some(format!(
+            "{path} is held open exclusively by the running system (a mounted partition, even one unmounted lazily that a process still holds, swap, a file system journal, a zram backing device or a device stacked on it), though none of what the installer traced says what"
+        )),
+        Claim::Unknown(why) => Some(format!(
+            "{path} could not be opened to check whether it is in use ({why})"
+        )),
+    }
+}
+
+/// The last look at a disk a plan is about to name: claimed again, now.
+pub fn recheck(disk: &Disk) -> Option<String> {
+    let kname = kernel_name(&disk.path);
+    claim_reason(
+        &disk.path,
+        &claim_disk(&Roots::real().sys, &kname, &disk.path),
+    )
 }
 
 /// `sfdisk --json` of a disk: its usable range in bytes, `[first, end)`.
@@ -685,6 +789,13 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
         }
         if let Some(why) = usage.unresolved.first() {
             reasons.insert(unlocated(why));
+        }
+        // The kernel's own claim on the disk is the authority on everything it
+        // shows: what the trace did not find, an exclusive open does. A disk
+        // that is the live medium or is already in use needs no second answer.
+        if reasons.is_empty() && !disk.live_medium {
+            let claim = claim_disk(&roots.sys, &raw.kname, &disk.path);
+            reasons.extend(claim_reason(&disk.path, &claim));
         }
         disk.in_use = reasons.into_iter().collect();
         let usable = if disk.partition_table.is_some() {

@@ -214,6 +214,17 @@ impl Helper {
         let partitions = repart::dry_run(&layout, &checked.disk.path, &seed)
             .map_err(|e| PlanError::new(ErrorCode::Repart, None, format!("{e:#}")))?;
 
+        // The kernel's claim on the chosen disk, once more and as late as it
+        // can be: a use that began since the probe, or one the trace does not
+        // show, is a use all the same.
+        if let Some(why) = disks::recheck(checked.disk) {
+            return Err(PlanError::new(
+                ErrorCode::InUse,
+                Some("disk"),
+                format!("{} is in use by the running system: {why}", checked.disk.id),
+            ));
+        }
+
         let mut warnings = Vec::new();
         let enrollment_reason = probe.enrollment["reason"]
             .as_str()
