@@ -1178,7 +1178,7 @@ echo "partitions=$(lsblk -n -o PARTLABEL,FSTYPE,SIZE -r /dev/disk/by-partlabel/i
 # failed or finished installation (installer::interrupted) is the other proof.
 helper=$(systemctl show -p MainPID --value ilex-installerd)
 echo "mounted_after=$(cat /proc/1/mountinfo /proc/$helper/mountinfo | grep -c ilex-installer/target || true)"
-echo "helper_namespace_read=$(test -s /proc/$helper/mountinfo && echo yes || echo no)"
+echo "helper_namespace_read=$(grep -q . /proc/$helper/mountinfo 2>/dev/null && echo yes || echo no)"
 "#;
 
 fn field<'a>(text: &'a str, key: &str) -> Result<&'a str> {
