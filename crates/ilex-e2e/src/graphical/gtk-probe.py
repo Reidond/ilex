@@ -94,11 +94,13 @@ else:
     context = win.get_style_context()
     bg = lookup(context, "window_bg_color", "theme_bg_color")
     fg = lookup(context, "window_fg_color", "theme_fg_color")
-    line = "gtkprobe %s theme=%s icons=%s cursor=%s dark=%s bg=%s fg=%s" % (
+    # Spaces become underscores so that a font name stays one field.
+    line = "gtkprobe %s theme=%s icons=%s cursor=%s font=%s dark=%s bg=%s fg=%s" % (
         toolkit,
         settings.props.gtk_theme_name,
         settings.props.gtk_icon_theme_name,
         settings.props.gtk_cursor_theme_name,
+        settings.props.gtk_font_name.replace(" ", "_"),
         settings.props.gtk_application_prefer_dark_theme,
         bg,
         fg,

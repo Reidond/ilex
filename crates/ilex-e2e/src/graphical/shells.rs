@@ -441,31 +441,37 @@ fn toolkits(vm: &Vm, look: ToolkitLook) -> Result<()> {
                 }),
             );
             // Applications launched from Plasma inherit GTK_USE_PORTAL=1, so
-            // their icons and cursor come through the portal from the KDE
+            // their icons, cursor and font come through the portal from the KDE
             // database, not from the user's own (GNOME's) database.
+            let font = user(
+                vm,
+                "env DCONF_PROFILE=ilex-kde dconf read /org/gnome/desktop/interface/font-name",
+            )?
+            .trim_matches('\'')
+            .replace(' ', "_");
+            let from_plasma = move |p: &kde::Probe| -> Result<()> {
+                if p.field("cursor") != Some("breeze_cursors") || p.field("font") != Some(&font) {
+                    bail!("cursor or font is not Plasma's ({font}): {}", p.describe());
+                }
+                Ok(())
+            };
             report.check(
-                "GTK 4 follows the scheme, with Plasma's icons and cursor",
+                "GTK 4 follows the scheme, with Plasma's icons, cursor and font",
                 probe(vm, "gtk4", None).and_then(|p| {
                     println!("     {}", p.describe());
                     p.expect(None, Some("breeze"), dark)?;
-                    if p.field("cursor") != Some("breeze_cursors") {
-                        bail!("GTK 4's cursor is not Plasma's: {}", p.describe());
-                    }
-                    Ok(())
+                    from_plasma(&p)
                 }),
             );
             report.check(
-                "libadwaita follows the scheme with Plasma's accent, icons and cursor",
+                "libadwaita follows the scheme with Plasma's accent, icons, cursor and font",
                 probe(vm, "adw", None).and_then(|p| {
                     println!("     {}", p.describe());
                     p.expect(None, Some("breeze"), dark)?;
                     if p.field("accent") != Some("blue") {
                         bail!("libadwaita's accent is not Plasma's blue: {}", p.describe());
                     }
-                    if p.field("cursor") != Some("breeze_cursors") {
-                        bail!("libadwaita's cursor is not Plasma's: {}", p.describe());
-                    }
-                    Ok(())
+                    from_plasma(&p)
                 }),
             );
         }
