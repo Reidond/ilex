@@ -232,11 +232,14 @@ async fn shoot(job: &Job) -> Result<Summary> {
             settle().await;
         }
         settle().await;
-        let path = job.directory.join(format!("{}-{scheme}-pending.png", shot.name));
+        let path = job
+            .directory
+            .join(format!("{}-{scheme}-pending.png", shot.name));
         scale = capture(&window, &path)?;
-        let named = job.directory.join(format!("{}-{scheme}-{scale}x.png", shot.name));
-        std::fs::rename(&path, &named)
-            .with_context(|| format!("naming {}", named.display()))?;
+        let named = job
+            .directory
+            .join(format!("{}-{scheme}-{scale}x.png", shot.name));
+        std::fs::rename(&path, &named).with_context(|| format!("naming {}", named.display()))?;
         files += 1;
         window.destroy();
         settle().await;
@@ -280,7 +283,12 @@ fn capture(window: &adw::ApplicationWindow, path: &Path) -> Result<f64> {
     let paintable = gtk::WidgetPaintable::new(Some(window));
     let snapshot = gtk::Snapshot::new();
     snapshot.scale(scale as f32, scale as f32);
-    gdk::prelude::PaintableExt::snapshot(&paintable, &snapshot, f64::from(width), f64::from(height));
+    gdk::prelude::PaintableExt::snapshot(
+        &paintable,
+        &snapshot,
+        f64::from(width),
+        f64::from(height),
+    );
     let node = snapshot.to_node().context("the window drew nothing")?;
     let viewport = graphene::Rect::new(
         0.0,

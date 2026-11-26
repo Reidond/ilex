@@ -26,15 +26,30 @@ use std::fs;
 const FIXTURES: &[(&str, &str)] = &[
     ("generic", include_str!("../fixtures/generic.json")),
     ("ms-7c35", include_str!("../fixtures/ms-7c35.json")),
-    ("ms-7c35-board", include_str!("../fixtures/ms-7c35-board.json")),
+    (
+        "ms-7c35-board",
+        include_str!("../fixtures/ms-7c35-board.json"),
+    ),
     ("conflict", include_str!("../fixtures/conflict.json")),
-    ("no-composition", include_str!("../fixtures/no-composition.json")),
-    ("boot-override", include_str!("../fixtures/boot-override.json")),
-    ("bad-override", include_str!("../fixtures/bad-override.json")),
+    (
+        "no-composition",
+        include_str!("../fixtures/no-composition.json"),
+    ),
+    (
+        "boot-override",
+        include_str!("../fixtures/boot-override.json"),
+    ),
+    (
+        "bad-override",
+        include_str!("../fixtures/bad-override.json"),
+    ),
     ("bios", include_str!("../fixtures/bios.json")),
     ("no-disk", include_str!("../fixtures/no-disk.json")),
     ("helper-down", include_str!("../fixtures/helper-down.json")),
-    ("registry-down", include_str!("../fixtures/registry-down.json")),
+    (
+        "registry-down",
+        include_str!("../fixtures/registry-down.json"),
+    ),
     ("installing", include_str!("../fixtures/installing.json")),
 ];
 
@@ -164,8 +179,12 @@ impl Backend for Simulated {
         let eligible = probe.enrollment["verdict"] == "eligible";
         plan.request = checked.request.clone();
         plan.composition.tag.clone_from(&tag);
-        plan.composition.machine.clone_from(&checked.composition.machine);
-        plan.composition.shells.clone_from(&checked.composition.shells);
+        plan.composition
+            .machine
+            .clone_from(&checked.composition.machine);
+        plan.composition
+            .shells
+            .clone_from(&checked.composition.shells);
         plan.composition.reason = probe
             .selection
             .as_ref()
@@ -181,7 +200,12 @@ impl Backend for Simulated {
         };
         plan.erases = Erase {
             disk: checked.disk.id.clone(),
-            partitions: checked.disk.partitions.iter().map(|p| p.path.clone()).collect(),
+            partitions: checked
+                .disk
+                .partitions
+                .iter()
+                .map(|p| p.path.clone())
+                .collect(),
             systems: checked.disk.other_systems.clone(),
         };
         plan.encryption = PlannedEncryption {
@@ -208,9 +232,6 @@ impl Backend for Simulated {
     }
 
     fn state(&self) -> Result<State, ClientError> {
-        Ok(self
-            .state
-            .clone()
-            .unwrap_or_else(|| State::idle(0)))
+        Ok(self.state.clone().unwrap_or_else(|| State::idle(0)))
     }
 }

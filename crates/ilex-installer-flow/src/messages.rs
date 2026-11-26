@@ -64,7 +64,9 @@ pub enum ClientError {
 impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HelperUnavailable(why) => write!(f, "the installer's helper is not available: {why}"),
+            Self::HelperUnavailable(why) => {
+                write!(f, "the installer's helper is not available: {why}")
+            }
             Self::AccessDenied(why) => write!(f, "the bus refused the installer: {why}"),
             Self::Refused(error) => write!(f, "the helper refused the request: {}", error.message),
             Self::BadAnswer(why) => write!(f, "the helper's answer is not understood: {why}"),
@@ -118,18 +120,18 @@ pub fn plan_error(error: &PlanError) -> Message {
             "This computer started in legacy BIOS mode",
             "ilex installs on computers that start in UEFI mode. Restart this computer in UEFI mode (the firmware settings have the switch) and start the installer again.",
         ),
-        ErrorCode::UnknownComposition => Message::new(
-            "That configuration is not offered by this installer",
-            cause,
-        ),
+        ErrorCode::UnknownComposition => {
+            Message::new("That configuration is not offered by this installer", cause)
+        }
         ErrorCode::UnknownDisk => Message::new("That disk is no longer there", cause),
-        ErrorCode::LiveMedium => Message::new(
-            "That disk is the one the installer started from",
-            cause,
-        ),
+        ErrorCode::LiveMedium => {
+            Message::new("That disk is the one the installer started from", cause)
+        }
         ErrorCode::InUse => Message::new("That disk is in use", cause),
         ErrorCode::DiskTooSmall => Message::new("That disk is too small", cause),
-        ErrorCode::UnsupportedMode => Message::new("That way of installing is not available yet", cause),
+        ErrorCode::UnsupportedMode => {
+            Message::new("That way of installing is not available yet", cause)
+        }
         ErrorCode::TpmNeedsEncryption => Message::new(
             "Automatic unlock needs an encrypted disk",
             "Turn encryption on, or turn automatic unlock off.",
@@ -146,10 +148,7 @@ pub fn plan_error(error: &PlanError) -> Message {
             "That image is not published",
             "The registry has no image for this configuration yet.",
         ),
-        ErrorCode::Repart => Message::new(
-            "The disk layout could not be prepared",
-            cause,
-        ),
+        ErrorCode::Repart => Message::new("The disk layout could not be prepared", cause),
         ErrorCode::Internal => Message::new("The installer's helper failed", cause),
     }
 }

@@ -2538,10 +2538,14 @@ fn unbase64(text: &str) -> Result<Vec<u8>> {
 
 /// A PNG's width and height from its header.
 fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    (bytes.len() > 24 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).then(|| {
-        let word = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
-        (word(16), word(20))
-    })
+    (bytes.len() > 24 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).then(
+        || {
+            let word = |at: usize| {
+                u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+            };
+            (word(16), word(20))
+        },
+    )
 }
 
 fn ui(vm: &EphemeralVm) -> Result<()> {
@@ -2554,7 +2558,9 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         std::time::Duration::from_secs(1800),
     )?;
     let text = printed(&out);
-    let (log, files) = text.split_once("== files\n").context("the script did not reach its files")?;
+    let (log, files) = text
+        .split_once("== files\n")
+        .context("the script did not reach its files")?;
     let artifacts = ilex_devkit::qemu::artifact_dir(&ws, "installer-ui")?;
     fs::write(artifacts.join("ui-script.log"), log)?;
     println!("     {}", log.trim_end().replace('\n', "\n     "));
@@ -2571,9 +2577,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         let want = "ILEX-INSTALLER-RENDER ok shots=";
         let line = log
             .lines()
-            .find(|l| {
-                l.starts_with(want) && l.contains(&format!("scheme={scheme} scale={scale} "))
-            })
+            .find(|l| l.starts_with(want) && l.contains(&format!("scheme={scheme} scale={scale} ")))
             .with_context(|| format!("no render report for {scheme} at {scale}x:\n{log}"))?;
         ensure!(line.contains("shots=25 "), "{line}");
     }
@@ -2593,7 +2597,11 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
             let bytes = unbase64(line.trim()).with_context(|| format!("decoding {file}"))?;
             let (width, height) =
                 png_size(&bytes).with_context(|| format!("{file} is not a PNG"))?;
-            let expected = if file.ends_with("-1.5x.png") { (1920, 1200) } else { (1280, 800) };
+            let expected = if file.ends_with("-1.5x.png") {
+                (1920, 1200)
+            } else {
+                (1280, 800)
+            };
             ensure!(
                 (width, height) == expected && bytes.len() > 8 * 1024,
                 "{file} is {width}x{height}, {} bytes: expected {expected:?} with something drawn",
@@ -2604,7 +2612,11 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
             seen.insert(file);
         }
     }
-    ensure!(seen.len() == 75, "{} images came back, expected 75 (25 states in three configurations)", seen.len());
+    ensure!(
+        seen.len() == 75,
+        "{} images came back, expected 75 (25 states in three configurations)",
+        seen.len()
+    );
     ensure!(
         distinct.len() >= 60,
         "only {} of {} images differ: pages are not drawing their own states",

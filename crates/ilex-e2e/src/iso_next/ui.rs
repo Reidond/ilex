@@ -286,12 +286,7 @@ fn continue_to_machine(ctl: &Vmctl) -> Result<()> {
     ctl.key("Return")
 }
 
-fn detect(
-    purpose: &'static str,
-    board: bool,
-    expected: &str,
-    origin: &str,
-) -> Result<()> {
+fn detect(purpose: &'static str, board: bool, expected: &str, origin: &str) -> Result<()> {
     let smbios = if board {
         // The MSI MEG X570 UNIFY, with only the baseboard's pair of strings
         // (the system's are what a prebuilt or a firmware fault would lose).
@@ -421,7 +416,8 @@ fn observe_kernel_argument(
         // A tag this edition does not offer is the model's error, with its
         // list of offers; the detection's choice stays selected.
         ensure!(
-            field(&machine, "origin")? == "bad-override" && field(&machine, "selected")? == "generic.gnome",
+            field(&machine, "origin")? == "bad-override"
+                && field(&machine, "selected")? == "generic.gnome",
             "an unknown tag on the page: {machine:?}"
         );
     }

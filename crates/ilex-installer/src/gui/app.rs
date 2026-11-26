@@ -8,13 +8,13 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ilex_installer_flow::Message;
 use ilex_installer_flow::backend::Backend;
 use ilex_installer_flow::flow::{Flow, PageId, PlanCheck, ProbeState, Step, human_bytes};
 use ilex_installer_flow::keyboard::{Layouts, SessionKeyboard};
 use ilex_installer_flow::language::{self, LANGUAGES};
 use ilex_installer_flow::machine::{MachineView, Severity};
 use ilex_installer_flow::messages::ClientError;
-use ilex_installer_flow::Message;
 use ilex_installer_model::plan::Plan;
 use ilex_installer_model::probe::Probe;
 use relm4::adw::{self, prelude::*};
@@ -80,7 +80,10 @@ pub enum Msg {
 pub enum Cmd {
     Probed(Result<Probe, ClientError>),
     Planned(Result<Plan, ClientError>),
-    Switched { layout: String, result: Result<(), String> },
+    Switched {
+        layout: String,
+        result: Result<(), String>,
+    },
 }
 
 impl App {
@@ -147,11 +150,7 @@ impl Component for App {
             .build()
     }
 
-    fn init(
-        init: Init,
-        root: Self::Root,
-        sender: ComponentSender<Self>,
-    ) -> ComponentParts<Self> {
+    fn init(init: Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let flow = Flow::new(init.layouts);
         let widgets = Widgets::build(&root, &flow, &sender);
         root.set_fullscreened(init.fullscreen);
@@ -211,7 +210,12 @@ impl Component for App {
                 }
             }
             Msg::Layout(index) => {
-                let id = self.flow.layouts().all().get(index as usize).map(|l| l.id.clone());
+                let id = self
+                    .flow
+                    .layouts()
+                    .all()
+                    .get(index as usize)
+                    .map(|l| l.id.clone());
                 if let Some(id) = id
                     && self.flow.keyboard() != id
                     && self.flow.set_keyboard(&id)
@@ -234,7 +238,13 @@ impl Component for App {
                     let shown: String = text
                         .chars()
                         .take(32)
-                        .map(|c| if c.is_whitespace() || c.is_control() { '_' } else { c })
+                        .map(|c| {
+                            if c.is_whitespace() || c.is_control() {
+                                '_'
+                            } else {
+                                c
+                            }
+                        })
                         .collect();
                     self.marker(&format!(
                         "ILEX-INSTALLER event=try layout={} text={shown}",
@@ -243,7 +253,8 @@ impl Component for App {
                 }
             }
             Msg::Machine(tag) => {
-                if self.flow.machine_tag() != Some(tag.as_str()) && self.flow.select_machine(&tag)
+                if self.flow.machine_tag() != Some(tag.as_str())
+                    && self.flow.select_machine(&tag)
                     && let Some(line) = self.flow.composition_line()
                 {
                     self.marker(&line);
@@ -731,8 +742,16 @@ impl Widgets {
         });
         // Enter continues where it can, and the first control has the focus.
         for (page, button, focus) in [
-            (&welcome_page, &welcome_button, language.clone().upcast::<gtk::Widget>()),
-            (&machine_page, &machine_button, machine_button.clone().upcast()),
+            (
+                &welcome_page,
+                &welcome_button,
+                language.clone().upcast::<gtk::Widget>(),
+            ),
+            (
+                &machine_page,
+                &machine_button,
+                machine_button.clone().upcast(),
+            ),
             (&account_page, &account_button, name.clone().upcast()),
         ] {
             let window = root.clone();
@@ -891,7 +910,8 @@ impl Widgets {
         let rows: [&adw::PasswordEntryRow; 2] = [&a.password, &a.confirmation];
         // Only a refusal is an error; a hint is dimmed text.
         if wording.iter().all(Option::is_none) {
-            a.password_message.set_css_classes(&["caption", "dim-label"]);
+            a.password_message
+                .set_css_classes(&["caption", "dim-label"]);
             match &advice {
                 Some(advice) => {
                     a.password_message.set_label(&sentence(advice));
@@ -912,7 +932,8 @@ impl Widgets {
             );
         }
         let busy = matches!(flow.plan_check(), PlanCheck::Running);
-        a.button.set_label(if busy { "Checking…" } else { "Continue" });
+        a.button
+            .set_label(if busy { "Checking…" } else { "Continue" });
         a.button
             .set_sensitive(flow.page() != PageId::Account || flow.can_continue());
     }
@@ -955,18 +976,24 @@ impl Widgets {
         set("edition", flow.edition_name());
         set(
             "configuration",
-            flow.machine_choice().map_or(plan.composition.tag.as_str(), |c| c.title.as_str()),
+            flow.machine_choice()
+                .map_or(plan.composition.tag.as_str(), |c| c.title.as_str()),
         );
         set(
             "language",
-            &language::find(flow.language()).map_or_else(|| flow.language().to_owned(), |l| l.label()),
+            &language::find(flow.language())
+                .map_or_else(|| flow.language().to_owned(), |l| l.label()),
         );
         set(
             "keyboard",
-            flow.keyboard_layout().map_or(flow.keyboard(), |l| l.name.as_str()),
+            flow.keyboard_layout()
+                .map_or(flow.keyboard(), |l| l.name.as_str()),
         );
         set("administrator", flow.administrator());
-        set("version", plan.image.version.as_deref().unwrap_or("not reported"));
+        set(
+            "version",
+            plan.image.version.as_deref().unwrap_or("not reported"),
+        );
         set("download", &human_bytes(plan.image.download_bytes));
         set("digest", &plan.image.digest);
     }
@@ -997,7 +1024,8 @@ fn show_message(
                 gtk::AccessibleInvalidState::True,
             )]);
             row.update_relation(&[gtk::accessible::Relation::ErrorMessage(&[label
-                .upcast_ref::<gtk::Accessible>()])]);
+                .upcast_ref::<gtk::Accessible>(
+            )])]);
         } else {
             row.remove_css_class("error");
             row.update_state(&[gtk::accessible::State::Invalid(
@@ -1011,7 +1039,12 @@ fn show_message(
 /// One radio row per configuration, rebuilt only when the list changes.
 fn rebuild_choices(m: &mut Machine, view: &MachineView, sender: &ComponentSender<App>) {
     let tags: Vec<&str> = view.choices.iter().map(|c| c.tag.as_str()).collect();
-    if m.rows.iter().map(|(t, _, _)| t.as_str()).collect::<Vec<_>>() == tags {
+    if m.rows
+        .iter()
+        .map(|(t, _, _)| t.as_str())
+        .collect::<Vec<_>>()
+        == tags
+    {
         return;
     }
     for (_, _, row) in m.rows.drain(..) {

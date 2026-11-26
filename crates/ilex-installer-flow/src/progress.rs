@@ -119,7 +119,8 @@ impl Progress {
             Some(Outcome::Failed { stage, .. }) => Some(*stage),
             _ => None,
         };
-        let succeeded = matches!(state.outcome, Some(Outcome::Success)) || state.stage == Stage::Done;
+        let succeeded =
+            matches!(state.outcome, Some(Outcome::Success)) || state.stage == Stage::Done;
         for row in &mut self.rows {
             let at = ORDER.iter().position(|s| *s == row.stage);
             (row.status, row.fraction) = if succeeded {
@@ -145,11 +146,7 @@ impl Progress {
         if total == 0.0 {
             return 0.0;
         }
-        let done: f64 = self
-            .rows
-            .iter()
-            .map(|r| weight(r.stage) * r.fraction)
-            .sum();
+        let done: f64 = self.rows.iter().map(|r| weight(r.stage) * r.fraction).sum();
         (done / total).clamp(0.0, 1.0)
     }
 
