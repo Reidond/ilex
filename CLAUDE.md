@@ -3005,11 +3005,20 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   and edition, firmware (UEFI, Secure Boot, setup mode), `ilex-enroll`'s probe
   verbatim, the DMI identity and detection, the boot-argument selection (or its
   error), this edition's catalogue, the disks and memory. A disk has a stable id
-  (`/dev/disk/by-id`: `nvme-eui.*`, `wwn-*`, any other, then the bus path, then
-  the kernel name), model, serial, size, bus, `removable`, the partition table,
+  (`/dev/disk/by-id`: `nvme-eui.*`, `wwn-*`, then any other name that starts with
+  a hardware prefix (`nvme-`, `ata-`, `scsi-`, `usb-`, `mmc-`, `virtio-`, `ccw-`,
+  `ieee1394-`), then the bus path, then the kernel name; **never a link that
+  describes what is on the disk** (`lvm-pv-uuid-*`, `dm-name-*`, `dm-uuid-*`,
+  `md-uuid-*`, `md-name-*`), which sorts ahead of `virtio-`, `usb-` and `scsi-`
+  and disappears when `wipefs` erases the signature, so that `systemd-repart`
+  then found no disk to write), model, serial, size, bus, `removable`, the partition table,
   partitions, free extents (whole MiB between partitions, inside GPT's usable
   range) and other systems found: EFI loader directories, Windows, BitLocker,
-  Linux, LUKS and Apple filesystems. Zram, loop, optical, read-only and
+  Linux, LUKS and Apple filesystems; **a signature on the whole disk itself**
+  (a file system, LUKS, an LVM physical volume, a swap area or any other
+  signature with no partition table: `partition` is empty and the description
+  says `on the whole disk`), and **an EFI system partition that could not be
+  read** (`unreadable-esp`: it may hold any loader). Zram, loop, optical, read-only and
   network-attached devices (nbd, iSCSI, Fibre Channel, SRP, NVMe over fabrics)
   are not disks. An NVMe disk is local only when sysfs shows every controller
   behind it on PCIe: with native multipath (Fedora's default) `device` is the
@@ -3307,7 +3316,9 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   - **Before the first write**, in this order, each refusal naming its code
     (`ErrorCode`) and field and leaving every disk byte for byte as it was:
     the plan is one this helper made and is under 15 minutes old by the helper's
-    own monotonic clock, not the wall clock a step could move (`unknown-plan`,
+    own `CLOCK_BOOTTIME` (which counts the time a machine is suspended and which
+    neither a wall clock set back nor an NTP step moves; not the wall clock the
+    plan document carries) (`unknown-plan`,
     `plan-expired`); whole-disk mode needs `erase_disk` to repeat the disk's id
     (`invalid-field`); the administrator's password was set (`missing-secret`);
     **the image's signature is accepted by the installer's policy** (`signature`):
@@ -3344,7 +3355,11 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     in a VM with `O_EXCL` held from another process). It uses no loop device. Nor
     can a later stage hold it: `mount`, `mkfs` and `bootc` open the partitions
     exclusively. So the stage is recorded and `disk_changed` set first, the claim
-    ends, and the stage runs `wipefs --all` and `systemd-repart`, whose JSON must
+    ends, and the stage runs `wipefs --all`, waits until sysfs lists no partition,
+    **settles udev** (`udevadm settle`: the links of what was on the disk go only
+    now) and checks that the disk's `/dev/disk/by-id` name still leads to the disk
+    that was wiped (otherwise it stops before `systemd-repart` with a sentence, not
+    an `ENOENT`), and runs `systemd-repart`, whose JSON must
     equal the plan's partitions (their device nodes aside: repart names a
     partition after the path of the disk it is given); the new partitions are
     then found by their UUIDs
@@ -3450,7 +3465,8 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   volume labelled `ILEX-ANSWERS` (12 characters, so not a FAT or exFAT label) or
   `ILEXANSWERS` (11, the FAT-sized alias; FAT labels match in either case) with a
   file system makes it write `/run/ilex-answers-volume` (the volumes' device
-  numbers) and print `gate=present`. The interface's session is ordered after
+  numbers, one `major:minor` per line, written whole or not at all) and print
+  `gate=present`. The interface's session is ordered after
   the gate (`After=`, `Wants=`) and skipped by `ConditionPathExists=!` that
   file; the answers unit has the opposite condition. So it is the boot's
   decision and not the volume's label that skips the session: a restart of the
@@ -3464,8 +3480,29 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   nothing. If answers mode fails **before `Apply`** (a refusal; nothing was
   written), it removes the marker and starts the session, so the screen is not
   left empty and `handover=interface` is printed; after `Apply` has started it
-  leaves the machine as it is with the reason on the console.
-  It then mounts the volume read-only (`ro,nodev,nosuid,noexec`, in the
+  leaves the machine as it is with the reason on the console. **tty1 is never left
+  empty by a failure that wrote nothing, whatever the failure was**: the answers
+  unit `Wants=` (not `Requires=`) the helper and the gate, since a dependency
+  that failed would make systemd cancel the unit's start job and the program
+  would never run to hand over; the process is hardened (`PR_SET_DUMPABLE=0`, no
+  core files) inside `answers::run`, so that failing to is a failure before
+  `Apply` like any other; and the unit has `OnFailure=` the hand-over unit
+  `ilex-installer-answers-handover.service`, which removes the marker and starts
+  the session with `rm` and `systemctl` (nothing of the answers program) however
+  the unit ended (killed, crashed, never got to its first call), unless
+  `/run/ilex-answers-applying` exists: the program writes that flag just before
+  it calls `Apply` and removes it again if `Apply` refused. A helper that cannot
+  start, and a process killed before it asks anything, therefore both end in
+  the interface (`iso::next_unattended_handover` makes each with the fixed
+  credential `ilex.installer.fault=helper|answers`, which the helper's and the
+  answers units import and which can only make the installer fail).
+  It then reads **the volume the boot recorded and no other**: the marker must
+  name exactly one device, and the listing taken now (this unit waits for the
+  network, so it is some time after the gate) must be exactly that device (a stick
+  swapped for another, one removed or a second one plugged in meanwhile is a
+  refusal, handed over like any other); its node's number, `mountinfo` and the
+  mounted file system's own device number must all be the recorded one. It mounts
+  the volume read-only (`ro,nodev,nosuid,noexec`, in the
   unit's private mount namespace; ext4, ext3, ext2, XFS, **FAT (`vfat`)**,
   ISO 9660 or UDF by the type blkid reports: an exFAT volume is found and
   refused by name, because nobody has exercised the exFAT driver here), checks
@@ -3480,11 +3517,13 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   an answers file that is not valid (by line and column, never its text), a
   whole-disk request whose `confirm-erase` is not the disk, **a disk that has no
   `/dev/disk/by-id` name** (an id that is a bus path or a kernel name: whatever
-  disk is in that slot), **a disk that already holds an ilex installation (a
-  partition labelled `ilex-...`) or another system (the probe's
-  `other_systems`: Windows, Linux, LUKS, an EFI loader) unless `[install]
-  reinstall = true`** (the message names what is there, and the console says
-  `reinstall=true erases: ...` when it is allowed), a volume that is on the disk
+  disk is in that slot, or a by-id link that describes the disk's contents),
+  **answers that already installed the disk** (see below), **a disk that already
+  holds an ilex installation (a partition labelled `ilex-...`) or another system
+  (the probe's `other_systems`: Windows, Linux, LUKS, an EFI loader, a signature
+  on the whole disk, an EFI system partition that could not be read) unless
+  `[install] reinstall = true`** (the message names what is there, and the
+  console says `reinstall=true erases: ...` when it is allowed), a volume that is on the disk
   it would erase (the device resolved when the answers were read, compared by
   device number with the disk, its partitions and the volume's own disk in sysfs;
   a node that has gone is a refusal), and `[encryption] enabled = true` until
@@ -3497,6 +3536,29 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   the machine off, so that it does not boot its medium again. One attempt per
   boot (`StartLimitBurst=1`). The password is read into memory that is wiped and
   never printed, and the process is hardened like the helper.
+  **The machine that boots the installer again.** After `reinstall = true` the
+  machine powers off, and if both sticks stay in and the firmware later tries USB
+  first, the same answers would erase the fresh installation, every boot. So the
+  installation stamps what it made: the finalise stage writes the digest of the
+  plan's request (`target::request_digest`: SHA-256 of the request as the plan
+  records it, defaults resolved) to `/boot/ilex-install-request.sha256` (the
+  partition labelled `ilex-boot`; root's, mode 600, labelled by the target's own
+  policy), once the image and the account are in place, so an installation that
+  did not get that far has no stamp and may be run again. Answers mode mounts that
+  partition read-only without journal replay (`ro,noload`: nothing is written),
+  in its private namespace, before `Plan`, reads the stamp, unmounts, and
+  **refuses when it is the digest of the request now being made** (`these answers
+  already installed <disk> ...: remove the stick, or edit the answers`), whatever
+  `reinstall` says, handing over to the interface. A partition labelled `ilex-boot`
+  with an ext4 file system that cannot be mounted, or a stamp that is not a
+  digest, is a refusal too (what cannot be read is not "no stamp"); no such
+  partition, or none with a stamp, is no stamp. **The digest is of the request,
+  not of the answers file**: the file holds the administrator's password in
+  plaintext, `/boot` can be read by anyone with the disk, and a fast hash of a
+  file whose only unknown is a short password would let them guess it. The
+  consequence is that answers differing only in the password are the same
+  request; any other change (host name, user name, composition, disk...) is new
+  answers.
 - **The live image** gains the helper and `ilex-enroll` (built in the same
   builder stage), `compositions.json` generated like the Anaconda ISO's, the
   bus policy, the unit and the repart definitions under
@@ -3644,6 +3706,7 @@ digest in the commit's metadata, `hostname`, `locale.conf`, `vconsole.conf` with
 administrator's SSH login **with the password** and `sudo`, a wrong password
 refused, no AVC and `restorecon -n -v -r /etc /var/home /var/log/ilex-installer`
 (and `/boot`, `/boot/efi`) with exit status 0 and nothing to relabel,
+`/boot/ilex-install-request.sha256` (root's, mode 600, one 64-digit line),
 `bootc upgrade --check`, and keeps
 `installed-layout.txt` (`lsblk -f`, the kernel command line, `fstab`, `crypttab`,
 mounts, swap, `bootc status`, the partition table; the Anaconda trial records the
@@ -3666,7 +3729,12 @@ Anaconda ISO's own `iso::install` 11 minutes. A guest of the `iso::next_unattend
 trials that prints nothing at all on its serial console for 150 seconds (QEMU's
 vCPU threads idle at 0 s: a flake of the sandbox, seen in two of three first boots
 of the loop trial and never with output) is destroyed and started again, up to
-twice, and the retry is printed.
+twice, and the retry is printed. **This is a temporary workaround**: it is removed
+when this stack is rebased onto the change that fixes QEMU's audio-probe hang
+(PR #90), which the silent guests are suspected to be. Each failed attempt's
+`qemu.log` and `serial.log` are copied into the artifacts
+(`next-<trial>-<dir>-silent-attemptN-<time>-qemu.log`, `...-serial.log`), so that
+a later attempt, which reuses the VM's directory, does not overwrite them.
 `iso::next_unattended` (opt-in with the other `iso::next` trials) boots the real
 ISO under UEFI with Secure Boot beside a target disk and an ext4 volume labelled
 `ILEX-ANSWERS`, follows `ILEX-INSTALLER-ANSWERS` lines on the serial console to
@@ -3683,8 +3751,30 @@ by its bus path; answers that name that bus path (`result=failed ... by-id`); on
 whose `confirm-erase` is not the disk; and a target that already holds an ilex
 installation (a GPT with a partition labelled `ilex-root`, made with `sfdisk`)
 under answers without `reinstall = true` (refused, naming it, with the partition
-table as it was). The installation then runs **over that disk with `reinstall =
-true`** and the console must say `reinstall=true erases: ...`.
+table as it was); and a target that is, whole, **an LVM physical volume** (a
+label written into the second sector by the harness, which `blkid` is asked to
+take for one: no partition table), likewise refused without `reinstall = true`,
+with its signature still on it, the `lvm-pv-uuid-*` link present beside
+`virtio-ilex-disk-N` and the probe naming the disk by the latter. The installation
+then runs **over that LVM physical volume with `reinstall = true`** (it is what
+the disk's by-id link wiping used to break) and the console must say
+`reinstall=true erases: ... LVM2_member ...`; the installed system's
+`/boot/ilex-install-request.sha256` is a 64-digit stamp (root, mode 600).
+`iso::next_unattended_repeat` installs onto a blank disk with `reinstall = true`,
+then boots the ISO **again with the same sticks** and requires that the console
+refuse (`already installed`, no `plan=ready`, no `apply=started`), that the
+interface start, that the stamp read in the guest (read-only) be a digest, and
+that the whole 41 GiB target be byte for byte what the installation left (its
+SHA-256 from the host before and after); a third boot with the host name changed
+and `reinstall` off is not refused for the stamp but at the reinstall rule, and
+writes nothing either. `iso::next_unattended_handover` boots with the fixed
+credential `ilex.installer.fault=helper` (the helper exits before it takes its bus
+name) and then `=answers` (the unattended process kills itself with `SIGKILL`
+after reading the answers and before it asks the helper anything): in both the
+session unit must become active, the gate's marker be gone, Apply's flag never
+raised, the disk untouched and the answers volume unchanged; for `answers` the
+unit must end `failed` by `signal` with no `result=` line, and the console say
+`handover=interface by=systemd`.
 `iso::next_unattended_fat` boots with a **FAT** stick labelled `ILEXANSWERS` (made
 with `mkfs.fat` and `mcopy`; the host needs `dosfstools` and `mtools`) whose answers
 name the right disk with a wrong confirmation: the console must say `volume=...
