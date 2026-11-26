@@ -218,9 +218,10 @@ fn kde_profile_holders(vm: &Vm) -> Result<Vec<String>> {
 }
 
 /// SIGKILL the Plasma session's compositor and session leader, as a crash would:
-/// no logout, no shutdown script. The lingering user manager is left to unwind
-/// Plasma's units by its own dependencies; nothing that reads the KDE database
-/// may outlive that.
+/// no logout, no shutdown script. logind ends the session, but the lingering
+/// user manager keeps Plasma's units (upstream stops `plasma-workspace.target`
+/// only on a logout), so the shell's session watch must stop them; nothing that
+/// reads the KDE database may outlive it.
 fn crash_plasma(vm: &mut Vm) -> Result<()> {
     let before = kde_profile_holders(vm)?;
     println!("     before the crash, processes selecting the KDE database: {before:?}");
@@ -238,6 +239,17 @@ fn crash_plasma(vm: &mut Vm) -> Result<()> {
     )
     .map(drop)?;
     wait_greeter(vm)?;
+    // The watch stops Plasma's stack once logind calls the session closing.
+    let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
+    let down = vm.wait_for(
+        "Plasma's targets to stop after the crash",
+        &kde::user_cmd(
+            &uid,
+            "sh -c '! systemctl --user is-active --quiet plasma-workspace.target && \
+             ! systemctl --user is-active --quiet graphical-session.target'",
+        ),
+        Duration::from_secs(60),
+    );
     // What the manager made of it, before anything else runs.
     let state = |unit: &str| {
         user(
@@ -264,14 +276,10 @@ fn crash_plasma(vm: &mut Vm) -> Result<()> {
             .collect::<Vec<_>>()
     );
     let mut report = vmtest::Report::default();
-    report.check("Plasma's target is down after the crash", {
-        let plasma = state("plasma-workspace.target")?;
-        if plasma == "active" || plasma == "activating" {
-            Err(anyhow!("plasma-workspace.target is {plasma}"))
-        } else {
-            Ok(())
-        }
-    });
+    report.check(
+        "the session watch stopped Plasma's targets after the crash",
+        down.map(drop),
+    );
     report.check(
         "no portal or other process selects the KDE database after the crash",
         {
@@ -332,18 +340,15 @@ fn gnome_after_crash(vm: &Vm) -> Result<()> {
     report.finish()?;
     // The look GNOME chose in step 3, whatever Plasma's crash left behind.
     toolkits(vm, ToolkitLook::GnomeDark)?;
-    // What Plasma's crash left failed in the manager is Plasma's own business
-    // (printed); GNOME's units and the portals GNOME uses must be healthy.
+    // What Plasma's crash left failed in the manager (its Wayland clients, which
+    // lost their compositor) is Plasma's own business, printed; GNOME's units
+    // must be healthy.
     let failed = user(vm, "systemctl --user --failed --no-legend --plain || true")?;
     println!("     failed user units in GNOME: {}", failed.replace('\n', "; "));
     let gnome_side: Vec<_> = failed
         .lines()
         .map(str::trim_start)
-        .filter(|u| {
-            u.starts_with("gnome-")
-                || u.starts_with("org.gnome")
-                || (u.starts_with("xdg-desktop-portal") && !u.contains("kde"))
-        })
+        .filter(|u| u.starts_with("gnome-") || u.starts_with("org.gnome"))
         .collect();
     if gnome_side.is_empty() {
         Ok(())

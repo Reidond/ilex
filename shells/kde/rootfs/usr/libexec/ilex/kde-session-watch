@@ -1,0 +1,39 @@
+#!/bin/sh
+# Stop Plasma's units when the login session that started them is gone.
+#
+# Plasma's own logout stops plasma-workspace.target. If startplasma dies instead
+# (a crash, a SIGKILL), logind ends the session, but a user manager that outlives
+# it (lingering, an SSH login) keeps Plasma's compositor, shell and portals
+# running with nobody logged in, for the next login (GNOME's, say) to meet:
+# a portal reading the KDE-only database, xdg-desktop-portal answering as KDE.
+# Stopping graphical-session.target is what a GNOME logout does: the compositor,
+# the shell, the portals and plasma-workspace.target (which is bound to it) all
+# stop with it. Stopping plasma-workspace.target alone would leave the compositor
+# and the portal frontend running.
+id=$(systemctl --user show-environment | sed -n 's/^XDG_SESSION_ID=//p')
+case $id in
+'' | *[!0-9A-Za-z]*)
+    echo "kde-session-watch: no login session in the environment, not watching" >&2
+    exit 1
+    ;;
+esac
+session=/run/systemd/sessions/$id
+if [ ! -e "$session" ]; then
+    echo "kde-session-watch: logind does not know session $id, not watching" >&2
+    exit 1
+fi
+# The session is over once logind has dropped it, or while it is "closing": its
+# leader is gone but a straggler of its scope (a keyring helper, say) can keep
+# it listed for a long time.
+ended() {
+    [ ! -e "$session" ] || [ "$(loginctl show-session "$id" --property=State --value 2>/dev/null)" = closing ]
+}
+until ended; do
+    sleep 3
+done
+# A later session may already own graphical-session.target: only a Plasma that is
+# still up is left over from this one.
+systemctl --user is-active --quiet plasma-workspace.target || exit 0
+echo "kde-session-watch: session $id ended without a logout, stopping Plasma" >&2
+# Not waiting for the stop job: it stops this service too.
+exec systemctl --user --no-block stop graphical-session.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Stop Plasma's units when its login session ends without a logout
+# Started with the Plasma session only (plasma-workspace.target.wants); a normal
+# logout stops plasma-workspace.target and this with it.
+PartOf=plasma-workspace.target
+After=plasma-kwin_wayland.service
+
+[Service]
+ExecStart=/usr/libexec/ilex/kde-session-watch

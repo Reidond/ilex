@@ -183,9 +183,11 @@ done
             || [
                 "usr/lib/systemd/user/ilex-kde-gtk.service",
                 "usr/lib/systemd/user/ilex-kde-flathub.service",
+                "usr/lib/systemd/user/ilex-kde-session.service",
                 "usr/lib/systemd/user/xdg-desktop-portal-gtk.service.d/50-ilex-kde.conf",
                 "usr/libexec/ilex/kde-gtk-sync",
                 "usr/libexec/ilex/kde-flathub",
+                "usr/libexec/ilex/kde-session-watch",
                 "usr/libexec/ilex/portal-gtk",
                 "usr/share/dconf/profile/ilex-kde",
             ]

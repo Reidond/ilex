@@ -27,18 +27,20 @@ grep -qx 'org.freedesktop.impl.portal.Settings=kde;gtk;' /usr/share/xdg-desktop-
 grep -qx 'systemctl --user unset-environment GTK_USE_PORTAL' /etc/xdg/plasma-workspace/shutdown/50-ilex-kde.sh
 test -x /etc/xdg/plasma-workspace/shutdown/50-ilex-kde.sh
 [ "$(cat /usr/share/dconf/profile/ilex-kde)" = user-db:kde ]
-for script in /usr/libexec/ilex/kde-gtk-sync /usr/libexec/ilex/kde-flathub /usr/libexec/ilex/portal-gtk; do
+for script in /usr/libexec/ilex/kde-gtk-sync /usr/libexec/ilex/kde-flathub /usr/libexec/ilex/portal-gtk \
+    /usr/libexec/ilex/kde-session-watch; do
     test -x "$script"
     bash -n "$script"
 done
-# Only the Plasma session starts the sync and the Flathub remote.
-for unit in ilex-kde-gtk ilex-kde-flathub; do
+# Only the Plasma session starts the sync, the Flathub remote and the session watch.
+for unit in ilex-kde-gtk ilex-kde-flathub ilex-kde-session; do
     test "$(readlink "/usr/lib/systemd/user/plasma-workspace.target.wants/$unit.service")" = "../$unit.service"
 done
 units=$(find /usr/lib/systemd /etc/systemd -name 'ilex-kde-*' 2>/dev/null | sort | tr '\n' ' ')
-[ "$units" = '/usr/lib/systemd/user/ilex-kde-flathub.service /usr/lib/systemd/user/ilex-kde-gtk.service /usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-flathub.service /usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-gtk.service ' ] ||
+[ "$units" = '/usr/lib/systemd/user/ilex-kde-flathub.service /usr/lib/systemd/user/ilex-kde-gtk.service /usr/lib/systemd/user/ilex-kde-session.service /usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-flathub.service /usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-gtk.service /usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-session.service ' ] ||
     fail "unexpected KDE units or links: $units"
-systemd-analyze --user verify --man=no /usr/lib/systemd/user/ilex-kde-gtk.service /usr/lib/systemd/user/ilex-kde-flathub.service
+systemd-analyze --user verify --man=no /usr/lib/systemd/user/ilex-kde-gtk.service /usr/lib/systemd/user/ilex-kde-flathub.service \
+    /usr/lib/systemd/user/ilex-kde-session.service
 grep -qx 'ExecStart=/usr/libexec/ilex/portal-gtk' /usr/lib/systemd/user/xdg-desktop-portal-gtk.service.d/50-ilex-kde.conf
 # The portal stops whenever Plasma's target does, so none that reads the KDE
 # database outlives the session in a user manager that stays (linger, SSH, a crash).

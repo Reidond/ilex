@@ -527,12 +527,18 @@ pub(super) fn theming(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> 
         "the session environment has GTK_USE_PORTAL and no profile or theme",
         manager_environment(vm),
     );
-    report.check("the Plasma-only sync is running", {
-        let state = user(vm, "systemctl --user is-active ilex-kde-gtk.service")?;
-        if state == "active" {
+    report.check("the Plasma-only sync and session watch are running", {
+        let mut inactive = Vec::new();
+        for unit in ["ilex-kde-gtk.service", "ilex-kde-session.service"] {
+            let state = user(vm, &format!("systemctl --user is-active {unit} || true"))?;
+            if state != "active" {
+                inactive.push(format!("{unit} is {state}"));
+            }
+        }
+        if inactive.is_empty() {
             Ok(())
         } else {
-            Err(anyhow!("ilex-kde-gtk.service is {state}"))
+            Err(anyhow!("{}", inactive.join(", ")))
         }
     });
     report.check("the KDE database holds Plasma's Breeze look", {
