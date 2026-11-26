@@ -4021,6 +4021,29 @@ fn check_answers(parent: &Path) -> Result<()> {
         "another system and a loader were not both noticed"
     );
 
+    // Which composition an unattended installation is for: the answers' own, the
+    // installer's selection, and nothing guessed when the boot's choice failed.
+    ensure!(
+        answers::choose_composition(Some("ms-7c35.gnome"), None, Some("unknown"))?.is_empty()
+            && answers::choose_composition(None, Some("generic.gnome"), None)? == "generic.gnome"
+            && answers::choose_composition(None, Some("generic.gnome"), Some("stale"))?
+                == "generic.gnome",
+        "the composition that is chosen"
+    );
+    let failed =
+        answers::choose_composition(None, None, Some("ilex.composition=nonsense is not offered"))
+            .err()
+            .context("a failed boot choice was replaced by detection")?
+            .to_string();
+    ensure!(
+        failed.contains("not valid") && failed.contains("nonsense"),
+        "the refusal for a failed boot choice: {failed}"
+    );
+    ensure!(
+        answers::choose_composition(None, None, None).is_err(),
+        "no selection at all was accepted"
+    );
+
     // The by-id name: a plain name of /dev/disk/by-id, never a path.
     for bad in ["", ".", "..", "../sda", "a/b", "/dev/sda", "bad\nname"] {
         ensure!(

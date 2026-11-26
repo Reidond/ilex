@@ -50,6 +50,9 @@ const GIB: u64 = 1 << 30;
 const TARGET_BYTES: u64 = 41 * GIB;
 /// A disk that must come out of every trial exactly as it went in.
 const SENTINEL_BYTES: u64 = 3 * GIB;
+/// A disk with no serial number, so no `/dev/disk/by-id` name (the policy
+/// trial's only), large enough to be planned for.
+const BARE_BYTES: u64 = 36 * GIB;
 /// The live VM: a pull streams into the target, and the helper, bootc and the
 /// page cache share the memory (the ISO's trials use as much).
 const MEMORY: &str = "6G";
@@ -91,6 +94,7 @@ struct Bench {
     live: PathBuf,
     target: PathBuf,
     sentinel: PathBuf,
+    bare: PathBuf,
     artifacts: PathBuf,
     name: &'static str,
 }
@@ -109,12 +113,15 @@ impl Bench {
         let sentinel = dir.join("sentinel.img");
         raw_disk(&target, TARGET_BYTES)?;
         raw_disk(&sentinel, SENTINEL_BYTES)?;
+        let bare = dir.join("bare.img");
+        raw_disk(&bare, BARE_BYTES)?;
         let artifacts = qemu::artifact_dir(&ws, "installer-apply")?;
         Ok(Self {
             ws,
             live,
             target,
             sentinel,
+            bare,
             artifacts,
             name,
         })
@@ -125,10 +132,16 @@ impl Bench {
     fn boot_live(&self) -> Result<Vm> {
         let mut config = VmConfig::new(format!("inst-{}", self.name), &self.live);
         config.memory = MEMORY.into();
-        config.extra_disks = vec![self.target.clone(), self.sentinel.clone()];
-        // By-id names for both: an installation writes its disk by the stable
-        // name once it has let go of its exclusive claim.
+        config.extra_disks = vec![
+            self.target.clone(),
+            self.sentinel.clone(),
+            self.bare.clone(),
+        ];
+        // By-id names for the first two: an installation writes its disk by the
+        // stable name once it has let go of its exclusive claim. The third has
+        // none.
         config.disk_serials = true;
+        config.bare_disks = 1;
         let mut vm = Vm::boot(&self.ws, &config)?;
         vm.wait_ssh(Duration::from_secs(420))
             .context("the live image did not accept the harness's SSH key")?;
@@ -791,6 +804,43 @@ fn policy() -> Result<()> {
         &vm,
         "rm -rf /run/systemd/system/ilex-installerd.service.d; systemctl daemon-reload; systemctl reset-failed ilex-installerd 2>/dev/null; systemctl restart ilex-installerd",
     )?;
+
+    // A disk with no /dev/disk/by-id name is not written to: once the helper has
+    // let go of its claim it addresses the disk by that name. This one (no
+    // serial number: a bus path is all it has) can be probed and planned, and
+    // `Apply` refuses it before anything is written.
+    let bare = probe
+        .disks
+        .iter()
+        .find(|d| d.size_bytes == BARE_BYTES)
+        .cloned()
+        .context("the disk without a serial number is not in the probe")?;
+    ensure!(
+        ssh(&vm, &format!("test -e /dev/disk/by-id/{}", shell(&bare.id)))?.code != Some(0),
+        "the bare disk {} has a by-id name",
+        bare.id
+    );
+    let all = [&target, &sentinel, &bare];
+    let bare_plan = plan(&vm, &request(&bare.id, |_| {}))?;
+    let ran = set_secret(
+        &vm,
+        "ilex-installer",
+        &bare_plan.id,
+        "admin-password",
+        PASSWORD,
+        true,
+    )?;
+    ensure!(ran.code == Some(0), "SetSecret: {}", ran.text);
+    let bare_before = fingerprint(&vm, &all)?;
+    let ran = apply(&vm, "ilex-installer", &bare_plan.id, &bare.id)?;
+    let error = refused(&ran, ErrorCode::UnknownDisk, Some("disk"))?;
+    ensure!(
+        error.message.contains("by-id"),
+        "the refusal of a disk with no stable name does not say why: {}",
+        error.message
+    );
+    println!("     refused (no by-id name): {}", error.message);
+    nothing_happened(&vm, &bare_before, &all, &bare_plan.id)?;
 
     // Nothing of the secrets is anywhere: the helper's files and the journal,
     // counted exactly (no hit is not "the output ends in a 0").

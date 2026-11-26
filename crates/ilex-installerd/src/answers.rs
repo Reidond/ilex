@@ -445,6 +445,29 @@ pub fn existing_systems(disk: &Disk) -> Vec<String> {
     found
 }
 
+/// The tag the plan is for. Named by the answers, it is theirs. Left out, it is
+/// the installer's own selection (the boot's choice, else detection); when that
+/// selection failed, the boot asked for something the installer does not offer,
+/// and an unattended installation does not guess what was meant: the answers must
+/// name a composition.
+pub fn choose_composition(
+    named: Option<&str>,
+    selection: Option<&str>,
+    selection_error: Option<&str>,
+) -> Result<String> {
+    match (named, selection, selection_error) {
+        (Some(_), _, _) => Ok(String::new()),
+        (None, Some(tag), _) => Ok(tag.to_owned()),
+        (None, None, Some(error)) => bail!(
+            "the answers name no composition and the boot's choice is not valid ({}): name one in [install] composition",
+            exec::clean_line(error.as_bytes())
+        ),
+        (None, None, None) => {
+            bail!("the answers name no composition and the installer has made no selection")
+        }
+    }
+}
+
 /// What a refused call says: the helper's JSON refusal when the error carries
 /// one, else the error itself.
 fn describe(error: &zbus::Error) -> String {
@@ -546,21 +569,11 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     // The composition: the answers' own, else the installer's selection. A
     // selection that failed (an `ilex.composition=` that names nothing the
     // installer offers) is not replaced by what detection would have chosen.
-    let selected = match (
-        &answers.install.composition,
-        &probe.selection,
-        &probe.selection_error,
-    ) {
-        (Some(_), _, _) => String::new(),
-        (None, Some(selection), _) => selection.tag.clone(),
-        (None, None, Some(error)) => bail!(
-            "the answers name no composition and the boot's choice is not valid ({}): name one in [install] composition",
-            exec::clean_line(error.as_bytes())
-        ),
-        (None, None, None) => {
-            bail!("the answers name no composition and the installer has made no selection")
-        }
-    };
+    let selected = choose_composition(
+        answers.install.composition.as_deref(),
+        probe.selection.as_ref().map(|s| s.tag.as_str()),
+        probe.selection_error.as_deref(),
+    )?;
     let request = answers
         .to_request(&selected)
         .map_err(|e| anyhow::anyhow!("answers.toml: {}", e.message))?;

@@ -397,8 +397,13 @@ pub fn by_id_node(id: &str) -> Result<(String, DevNum), String> {
         return Err(format!("{id:?} is not a name in /dev/disk/by-id"));
     }
     let path = format!("/dev/disk/by-id/{id}");
-    let link = fs::symlink_metadata(&path)
-        .map_err(|e| format!("there is no {path}, so the disk has no stable name ({e})"))?;
+    let link = fs::symlink_metadata(&path).map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            format!("there is no {path}, so the disk has no stable name")
+        } else {
+            format!("{path} cannot be looked at ({e})")
+        }
+    })?;
     if !link.file_type().is_symlink() {
         return Err(format!("{path} is not a link udev made"));
     }

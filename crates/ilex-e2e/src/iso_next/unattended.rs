@@ -953,12 +953,18 @@ pub(super) fn run_late() -> Result<()> {
         console.contains("ignored=late"),
         "the late stick was not announced as ignored: {console}"
     );
-    for key in ["plan", "apply", "result", "stage", "volume"] {
-        ensure!(
-            count_markers(&console_after, MARKER, Some(key)) == 0,
-            "unattended mode did something ({key}=) because of a stick plugged in later: {console_after}"
-        );
-    }
+    // Nothing but that one line: no gate, volume, plan, apply, stage, result or
+    // hand-over line of unattended mode.
+    let others: Vec<&str> = console_after
+        .lines()
+        .filter(|line| {
+            line.split_whitespace().next() == Some(MARKER) && !line.contains("ignored=late")
+        })
+        .collect();
+    ensure!(
+        others.is_empty(),
+        "unattended mode did something because of a stick plugged in later: {others:?}"
+    );
     // The stick is there (the test is not vacuous), no unattended unit ran, and
     // the helper is idle.
     let facts = vm.ssh_ok(

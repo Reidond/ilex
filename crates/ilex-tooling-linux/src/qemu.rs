@@ -444,6 +444,10 @@ pub struct VmConfig {
     /// no by-id name at all (its id is its PCI slot), and an installation that
     /// writes a disk by that name has no name to write it by.
     pub disk_serials: bool,
+    /// With [`disk_serials`](Self::disk_serials): the last this many extra disks
+    /// get none, so that they have no `/dev/disk/by-id` name (a disk whose only
+    /// stable name is its bus path).
+    pub bare_disks: usize,
     /// A PCIe root port with nothing in it (`ilexhp`), which a disk can be
     /// added to while the guest runs (QMP `device_add ... bus=ilexhp`): the
     /// stick someone plugs in after the boot.
@@ -488,6 +492,7 @@ impl VmConfig {
             usb_medium: false,
             extra_disks: Vec::new(),
             disk_serials: false,
+            bare_disks: 0,
             hotplug_port: false,
             esp_dir: None,
             ssh_credential: true,
@@ -733,8 +738,9 @@ impl Vm {
                 ));
             }
         }
+        let serialed = config.extra_disks.len().saturating_sub(config.bare_disks);
         for (index, extra) in config.extra_disks.iter().enumerate() {
-            if config.disk_serials {
+            if config.disk_serials && index < serialed {
                 let n = index + 1;
                 qemu.arg("-drive")
                     .arg(format!(
