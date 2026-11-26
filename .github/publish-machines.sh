@@ -3,7 +3,13 @@
 # its planned registry snapshot alongside the immutable tested image ID.
 set -euo pipefail
 without_key() { env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD "$@"; }
+# The publisher holds the key, so cargo, rustc and kache are shims that fail on
+# its PATH; it recomputes each layer's fingerprint from the crates recorded
+# without the key (ILEX_IMAGE_CRATES, build-publisher.sh) and says so in its log.
+no_cargo=$(without_key bash .github/no-cargo.sh)
+signing() { PATH="$no_cargo:$PATH" "$@"; }
 : "${XTASK_PUBLISHER:?prebuilt publisher required}"
+: "${ILEX_IMAGE_CRATES:?the recorded image crates (build-publisher.sh) are required}"
 : "${IMAGE_REPO:?repository required}" "${RUNNER_TEMP:?runner directory required}"
 : > "$RUNNER_TEMP/machine-publications"
 published_count=0; skipped_count=0
@@ -41,7 +47,7 @@ while IFS=$'\t' read -r tag parent base image image_id expected changed; do
         echo "::error::${tag} tested parent $base differs from current :$parent $IMAGE_REPO@$current" >&2
         exit 2
     fi
-    "$XTASK_PUBLISHER" --ilexctl-in-checkout publish "$image" --as "$tag" --tested-image-id "$image_id" \
+    signing "$XTASK_PUBLISHER" --ilexctl-in-checkout publish "$image" --as "$tag" --tested-image-id "$image_id" \
         --tested-parent-digest "${base##*@}"
     record published 'ancestry, registry snapshot and base match'
     published_count=$((published_count + 1))

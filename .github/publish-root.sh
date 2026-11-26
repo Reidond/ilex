@@ -2,7 +2,13 @@
 # The build snapshot belongs to this tag, even when upgrade used legacy latest.
 set -euo pipefail
 without_key() { env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD "$@"; }
+# The publisher holds the key, so cargo, rustc and kache are shims that fail on
+# its PATH; it reads the root image's crates from the file recorded without the
+# key (ILEX_IMAGE_CRATES, build-publisher.sh) and says so in its log.
+no_cargo=$(without_key bash .github/no-cargo.sh)
+signing() { PATH="$no_cargo:$PATH" "$@"; }
 without_key bash .github/publication-tag.sh "$TAG"
+: "${ILEX_IMAGE_CRATES:?the recorded image crates (build-publisher.sh) are required}"
 without_key bash .github/publication-tag.sh "$INSTALLER_TAG"
 [[ "$STAGED" =~ ^sha256:[0-9a-f]{64}$ && "$FINGERPRINT" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
 [[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
@@ -32,7 +38,7 @@ config=$(without_key skopeo inspect --raw "docker://$IMAGE_REPO@$STAGED" |
 }
 if without_key bash .github/publish-head.sh image "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$IMAGE_REPO:$TAG" "$SNAPSHOT" &&
    without_key bash .github/publish-head.sh swap "$IMAGE_REPO:$TAG" "$SNAPSHOT"; then
-    "$XTASK_PUBLISHER" --ilexctl-in-checkout publish --digest "$STAGED" --as "$TAG" --tested-fingerprint "$FINGERPRINT"
+    signing "$XTASK_PUBLISHER" --ilexctl-in-checkout publish --digest "$STAGED" --as "$TAG" --tested-fingerprint "$FINGERPRINT"
     echo 'published=true' >> "$GITHUB_OUTPUT"
     echo "root publication result: $TAG published=true"
 else

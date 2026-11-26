@@ -3,11 +3,12 @@ use crate::{Workspace, cmd, config::Selection, git};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// Repo paths whose content ends up in the image, besides the workspace crates
+/// Repo paths whose content ends up in the image, besides the crates
 /// ([`image_crates`] adds the ones that are built).
 ///
 /// `Cargo.toml` and `Cargo.lock` pin the dependencies of the shipped binaries.
@@ -29,69 +30,314 @@ const INPUTS: &[&str] = &[
     "machines/generic",
 ];
 
-/// What `cargo build` lines of the root `Containerfile` ask for.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+/// What one `cargo build` of the root `Containerfile` asks for.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Default)]
 struct CargoBuild {
     packages: Vec<String>,
     no_default_features: bool,
-    /// `--features` or `--all-features`: widened to all features, which can
-    /// only add crates to the closure, never drop one.
+    /// `--features`/`-F` or `--all-features`: widened to all features, which
+    /// can only add crates to the closure, never drop one.
     all_features: bool,
 }
 
-/// The `cargo build -p …` commands of a Containerfile, one per line starting
-/// with `cargo build`. Fails when there is none, rather than hash nothing, and
-/// on a flag that would make the package set depend on something this does not
-/// model.
-fn cargo_builds(containerfile: &str) -> Result<Vec<CargoBuild>> {
-    let mut builds = Vec::new();
-    for line in containerfile.lines() {
-        let words: Vec<&str> = line.split_whitespace().collect();
-        if !words.starts_with(&["cargo", "build"]) {
+/// Dockerfile instructions whose words are paths, names or run-time commands,
+/// never a build-time shell command. Everything else (a `RUN`, or a line of its
+/// heredoc) is shell.
+const NON_SHELL_INSTRUCTIONS: &[&str] = &[
+    "FROM",
+    "COPY",
+    "ADD",
+    "ENV",
+    "ARG",
+    "LABEL",
+    "WORKDIR",
+    "USER",
+    "EXPOSE",
+    "VOLUME",
+    "ENTRYPOINT",
+    "CMD",
+    "SHELL",
+    "STOPSIGNAL",
+    "HEALTHCHECK",
+    "MAINTAINER",
+];
+
+/// Commands that take a package name where `cargo` or `rustc` can appear
+/// without anything running.
+const PACKAGE_MANAGERS: &[&str] = &[
+    "dnf", "dnf5", "yum", "microdnf", "rpm", "apt", "apt-get", "zypper", "apk",
+];
+
+/// Words that can precede a command in a shell line without changing what runs.
+const SHELL_PREFIXES: &[&str] = &[
+    "if", "then", "else", "elif", "do", "while", "until", "!", "time", "exec", "command", "env",
+];
+
+/// `CARGO_*` variables that cannot change which packages are built.
+const HARMLESS_CARGO_ENV: &[&str] = &[
+    "CARGO_HOME",
+    "CARGO_TARGET_DIR",
+    "CARGO_INCREMENTAL",
+    "CARGO_TERM_COLOR",
+];
+
+/// Logical lines of a Containerfile with their first physical line: `\`
+/// continuations are joined (comment lines inside one are dropped, as the
+/// builders do) and full-line comments are removed.
+fn logical_lines(text: &str) -> Vec<(usize, String)> {
+    let mut lines = Vec::new();
+    let mut current: Option<(usize, String)> = None;
+    for (index, raw) in text.lines().enumerate() {
+        let trimmed = raw.trim();
+        if trimmed.starts_with('#') {
             continue;
         }
-        let mut build = CargoBuild {
-            packages: Vec::new(),
-            no_default_features: false,
-            all_features: false,
+        let (body, continued) = match trimmed.strip_suffix('\\') {
+            Some(body) => (body.trim_end(), true),
+            None => (trimmed, false),
         };
-        let mut words = words.into_iter().skip(2);
-        while let Some(word) = words.next() {
-            match word {
-                "-p" | "--package" => {
-                    build.packages.push(
-                        words
-                            .next()
-                            .with_context(|| format!("`{line}` ends after {word}"))?
-                            .to_owned(),
-                    );
-                }
-                "--no-default-features" => build.no_default_features = true,
-                "--all-features" | "-F" | "--features" => {
+        match current.as_mut() {
+            Some((_, line)) => {
+                line.push(' ');
+                line.push_str(body);
+            }
+            None => current = Some((index + 1, body.to_owned())),
+        }
+        if !continued && let Some(done) = current.take() {
+            lines.push(done);
+        }
+    }
+    lines.extend(current);
+    lines
+}
+
+/// Simple commands of a shell line: split at the command separators, ignoring
+/// quoting. A quoted separator therefore splits a command in two, and what is
+/// left of it fails to parse as cargo; quoting can only make this stricter.
+fn simple_commands(line: &str) -> Vec<Vec<&str>> {
+    line.split(['&', '|', ';', '(', ')', '{', '}', '`'])
+        .map(|command| {
+            command
+                .split_whitespace()
+                // A trailing shell comment ends the command.
+                .take_while(|word| !word.starts_with('#'))
+                .collect::<Vec<_>>()
+        })
+        .filter(|words| !words.is_empty())
+        .collect()
+}
+
+fn basename(word: &str) -> &str {
+    let word = word.trim_matches(|c| matches!(c, '"' | '\'' | '$'));
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// A word that names the Rust toolchain, whatever its quoting or path.
+fn names_toolchain(word: &str) -> bool {
+    let name = basename(word);
+    matches!(name, "cargo" | "rustc" | "rustup" | "rustdoc") || name.starts_with("cargo-")
+}
+
+fn is_assignment(word: &str) -> Option<&str> {
+    let (name, _) = word.split_once('=')?;
+    (!name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    .then_some(name)
+}
+
+/// A word of a shell line that is a redirection: the rest of the command is
+/// not an argument.
+fn is_redirection(word: &str) -> bool {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.starts_with(['<', '>'])
+}
+
+/// A cargo package spec this model accepts: a plain package name.
+fn package_name(line: &str, spec: &str) -> Result<String> {
+    ensure!(
+        !spec.is_empty()
+            && spec
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "`{line}`: `-p {spec}` is not a plain package name (a version, glob, quote or variable); teach `cargo_builds` first"
+    );
+    Ok(spec.to_owned())
+}
+
+/// `--flag=value` and `-jN` forms of flags that cannot change which packages
+/// are built.
+fn ignored_flag_with_value(word: &str) -> bool {
+    ["--timings=", "--profile=", "--target-dir=", "--jobs="]
+        .iter()
+        .any(|prefix| word.starts_with(prefix))
+        || word
+            .strip_prefix("-j")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Parse the words after `cargo build`. Every word must be understood: an
+/// unknown flag, a positional argument or any shell expansion is an error,
+/// since either could change which packages the build compiles.
+fn parse_cargo_build(line: &str, words: &[&str]) -> Result<CargoBuild> {
+    let mut build = CargoBuild::default();
+    // Redirections end the arguments; everything before them must be literal.
+    let words: Vec<&str> = words
+        .iter()
+        .copied()
+        .take_while(|word| !is_redirection(word))
+        .collect();
+    if let Some(word) = words
+        .iter()
+        .find(|word| word.contains(['$', '`', '"', '\'', '\\', '*', '?', '[', '~']))
+    {
+        bail!(
+            "`{line}`: `{word}` uses shell expansion or quoting the fingerprint's crate closure does not model"
+        );
+    }
+    let mut words = words.into_iter();
+    while let Some(word) = words.next() {
+        let mut value = |flag: &str| {
+            words
+                .next()
+                .map(str::to_owned)
+                .with_context(|| format!("`{line}` ends after {flag}"))
+        };
+        match word {
+            "-p" | "--package" => build.packages.push(package_name(line, &value(word)?)?),
+            "--no-default-features" => build.no_default_features = true,
+            "--all-features" => build.all_features = true,
+            "-F" | "--features" => {
+                value(word)?;
+                build.all_features = true;
+            }
+            "--release" | "-r" | "--locked" | "--frozen" | "--offline" | "-q" | "--quiet"
+            | "-v" | "-vv" | "--verbose" | "--keep-going" | "--timings"
+            | "--future-incompat-report" => {}
+            "--profile" | "--target-dir" | "-j" | "--jobs" => {
+                value(word)?;
+            }
+            "--workspace" | "--all" | "--exclude" | "--bins" | "--bin" | "--lib" => {
+                bail!(
+                    "`{line}` selects targets the fingerprint's crate closure does not model; teach `cargo_builds` first"
+                )
+            }
+            other => {
+                if let Some(spec) = other.strip_prefix("--package=") {
+                    build.packages.push(package_name(line, spec)?);
+                } else if other.starts_with("--features=") {
                     build.all_features = true;
-                    if word != "--all-features" {
-                        words.next();
-                    }
-                }
-                "--workspace" | "--all" | "--exclude" | "--bins" | "--bin" | "--lib" => {
+                } else if let Some(spec) = other.strip_prefix("-p")
+                    && !other.starts_with("--")
+                {
+                    // `-pfoo` and `-p=foo`.
+                    build
+                        .packages
+                        .push(package_name(line, spec.strip_prefix('=').unwrap_or(spec))?);
+                } else if other.starts_with("-F") && !other.starts_with("--") {
+                    // `-Ffeat`, `-F=feat`.
+                    build.all_features = true;
+                } else if !ignored_flag_with_value(other) {
                     bail!(
-                        "the Containerfile's `{line}` selects targets the fingerprint's crate closure does not model; teach `cargo_builds` first"
-                    )
-                }
-                other => {
-                    if let Some(package) = other.strip_prefix("--package=") {
-                        build.packages.push(package.to_owned());
-                    } else if other.starts_with("--features=") {
-                        build.all_features = true;
-                    }
+                        "`{line}`: `{other}` is a flag or argument of `cargo build` the fingerprint's crate closure does not model; teach `cargo_builds` first"
+                    );
                 }
             }
         }
+    }
+    ensure!(
+        !build.packages.is_empty(),
+        "`{line}` names no package with -p; the root image's crates cannot be derived"
+    );
+    Ok(build)
+}
+
+/// One simple shell command: `Ok(Some(build))` for a `cargo build` that is
+/// fully understood, `Ok(None)` for one that cannot compile anything the image
+/// ships (a package manager naming the `cargo` package, a non-building cargo
+/// subcommand, or no cargo at all), an error for any other way of running
+/// cargo or rustc.
+fn parse_command(line: &str, words: &[&str]) -> Result<Option<CargoBuild>> {
+    let mut rest = words;
+    let mut env = Vec::new();
+    // Leading environment assignments and words that only wrap a command.
+    while let Some((first, tail)) = rest.split_first() {
+        if let Some(name) = is_assignment(first) {
+            env.push(name);
+        } else if !SHELL_PREFIXES.contains(first) {
+            break;
+        }
+        rest = tail;
+    }
+    let Some((command, args)) = rest.split_first() else {
+        return Ok(None);
+    };
+    if PACKAGE_MANAGERS.contains(&basename(command)) {
+        return Ok(None);
+    }
+    if !words.iter().any(|word| names_toolchain(word)) {
+        return Ok(None);
+    }
+    ensure!(
+        basename(command) == "cargo",
+        "`{line}` runs `{command}` with cargo or rustc among its words; only a plain `cargo build -p …` is modeled, teach `cargo_builds` first"
+    );
+    for name in env {
         ensure!(
-            !build.packages.is_empty(),
-            "the Containerfile's `{line}` names no package with -p; the root image's crates cannot be derived"
+            !name.starts_with("CARGO_") || HARMLESS_CARGO_ENV.contains(&name),
+            "`{line}` sets {name} before cargo; it can change what is built, teach `cargo_builds` first"
         );
-        builds.push(build);
+    }
+    let mut args = args;
+    // `cargo +toolchain build`.
+    if let Some((toolchain, tail)) = args.split_first()
+        && toolchain.starts_with('+')
+    {
+        args = tail;
+    }
+    let Some((subcommand, args)) = args.split_first() else {
+        bail!("`{line}` runs cargo without a subcommand");
+    };
+    match *subcommand {
+        "build" | "b" => parse_cargo_build(line, args).map(Some),
+        // They compile nothing into the image.
+        "fetch" | "vendor" | "clean" | "metadata" | "tree" | "version" | "--version" | "-V" => {
+            Ok(None)
+        }
+        other => bail!(
+            "`{line}` runs `cargo {other}`, which can build what the image ships in a way the fingerprint's crate closure does not model; teach `cargo_builds` first"
+        ),
+    }
+}
+
+/// The `cargo build -p …` commands of a Containerfile. Fails when there is
+/// none, rather than hash nothing, and on any other way of running cargo or
+/// rustc: a build line this does not fully parse could ship crates the
+/// fingerprint would then not hash. (A `RUN` that hands the build to a script
+/// is invisible here; scripts under `build/` are hashed whole, not parsed.)
+fn cargo_builds(containerfile: &str) -> Result<Vec<CargoBuild>> {
+    let mut builds = Vec::new();
+    for (number, line) in logical_lines(containerfile) {
+        let (instruction, rest) = line.split_once(char::is_whitespace).unwrap_or((&line, ""));
+        // Case-sensitive on purpose: a lowercase `env cargo build …` in a
+        // heredoc is shell, not an `ENV` instruction.
+        if NON_SHELL_INSTRUCTIONS.contains(&instruction) {
+            continue;
+        }
+        let mut shell = if instruction == "RUN" { rest } else { &line };
+        if instruction == "RUN" {
+            // `RUN --mount=… --network=… command`.
+            while let Some(stripped) = shell.trim_start().strip_prefix("--") {
+                shell = stripped.split_once(char::is_whitespace).map_or("", |(_, r)| r);
+            }
+        }
+        for words in simple_commands(shell) {
+            if let Some(build) = parse_command(&line, &words)
+                .with_context(|| format!("Containerfile line {number}"))?
+            {
+                builds.push(build);
+            }
+        }
     }
     ensure!(
         !builds.is_empty(),
@@ -102,35 +348,21 @@ fn cargo_builds(containerfile: &str) -> Result<Vec<CargoBuild>> {
     Ok(builds)
 }
 
-/// Workspace crates of the dependency closure of one build: the packages it
-/// names and every workspace package they depend on (normal and build
-/// dependencies for Linux x86_64 with the build's features; dev dependencies
-/// are not built), as repo-relative directories.
-fn closure(ws: &Workspace, build: &CargoBuild) -> Result<BTreeSet<String>> {
-    let mut metadata = Command::new("cargo");
-    metadata
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--locked",
-            "--filter-platform",
-            "x86_64-unknown-linux-gnu",
-        ])
-        .current_dir(&ws.root);
-    if build.all_features {
-        metadata.arg("--all-features");
-    } else if build.no_default_features {
-        metadata.arg("--no-default-features");
-    }
-    let output = cmd::output(&mut metadata)
-        .context("deriving the root image's crates with `cargo metadata`")?;
-    let metadata: serde_json::Value =
-        serde_json::from_str(&output).context("parsing `cargo metadata`")?;
-
-    let root = std::fs::canonicalize(&ws.root)?;
+/// Directories (repo-relative) of the packages in the dependency closure of one
+/// build that are not fetched from a registry or git: the workspace members it
+/// names and depends on, and every other path package they pull in. Normal and
+/// build dependencies for Linux x86_64 with the build's features count; dev
+/// dependencies are not built. A local package outside the checkout cannot be
+/// hashed from it and is an error. Registry and git packages are pinned by
+/// `Cargo.lock`, which is hashed whole.
+fn closure_of(
+    root: &Path,
+    metadata: &serde_json::Value,
+    build: &CargoBuild,
+) -> Result<BTreeSet<String>> {
     let mut directory = BTreeMap::new();
     let mut name = BTreeMap::new();
+    let mut local = BTreeSet::new();
     for package in metadata["packages"].as_array().into_iter().flatten() {
         let (Some(id), Some(package_name), Some(manifest)) = (
             package["id"].as_str(),
@@ -140,8 +372,13 @@ fn closure(ws: &Workspace, build: &CargoBuild) -> Result<BTreeSet<String>> {
             continue;
         };
         name.insert(id, package_name);
+        // A package with no source is a path package (a workspace member or a
+        // `path =` dependency); registry and git packages name theirs.
+        if package["source"].is_null() {
+            local.insert(id);
+        }
         if let Ok(manifest) = std::fs::canonicalize(manifest)
-            && let Some(dir) = manifest.parent().and_then(|d| d.strip_prefix(&root).ok())
+            && let Some(dir) = manifest.parent().and_then(|d| d.strip_prefix(root).ok())
         {
             directory.insert(id, dir.to_string_lossy().replace('\\', "/"));
         }
@@ -197,17 +434,77 @@ fn closure(ws: &Workspace, build: &CargoBuild) -> Result<BTreeSet<String>> {
         if !seen.insert(id) {
             continue;
         }
-        if members.contains(id) {
-            crates.insert(
-                directory
-                    .get(id)
-                    .cloned()
-                    .with_context(|| format!("workspace package {id} is outside the checkout"))?,
+        if local.contains(id) || members.contains(id) {
+            let dir = directory.get(id).cloned().with_context(|| {
+                format!("local package {id} is outside the checkout; its source cannot be fingerprinted")
+            })?;
+            ensure!(
+                !dir.is_empty(),
+                "local package {id} is the checkout root itself; hashing it would hash everything"
             );
+            crates.insert(dir);
         }
         pending.extend(dependencies.get(id).into_iter().flatten().copied());
     }
     Ok(crates)
+}
+
+/// Set by the signing process: from then on nothing in it may start cargo.
+static CARGO_FORBIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// The closure of one build, from `cargo metadata`. Only this function and
+/// [`fetch_dependencies`] start cargo, and both refuse once
+/// [`use_recorded_image_crates`] has run.
+fn closure(ws: &Workspace, build: &CargoBuild) -> Result<BTreeSet<String>> {
+    ensure!(
+        !CARGO_FORBIDDEN.load(Ordering::SeqCst),
+        "internal error: this process holds signing credentials and must not run cargo; the root image's crates come from the recorded closure"
+    );
+    let mut metadata = Command::new("cargo");
+    metadata
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--locked",
+            "--offline",
+            "--filter-platform",
+            "x86_64-unknown-linux-gnu",
+        ])
+        .current_dir(&ws.root);
+    if build.all_features {
+        metadata.arg("--all-features");
+    } else if build.no_default_features {
+        metadata.arg("--no-default-features");
+    }
+    let output = cmd::output(&mut metadata).context(
+        "deriving the root image's crates with `cargo metadata --offline --locked` (run `cargo fetch --locked` first)",
+    )?;
+    let metadata: serde_json::Value =
+        serde_json::from_str(&output).context("parsing `cargo metadata`")?;
+    closure_of(&std::fs::canonicalize(&ws.root)?, &metadata, build)
+}
+
+/// The one step that may reach the network: download what `cargo metadata
+/// --offline` needs, before it runs.
+fn fetch_dependencies(ws: &Workspace) -> Result<()> {
+    ensure!(
+        !CARGO_FORBIDDEN.load(Ordering::SeqCst),
+        "internal error: this process holds signing credentials and must not run cargo"
+    );
+    cmd::run(
+        Command::new("cargo")
+            .args(["fetch", "--locked", "--target", "x86_64-unknown-linux-gnu"])
+            .current_dir(&ws.root),
+    )
+    .context("fetching crates with `cargo fetch --locked`")
+}
+
+type Cache = Mutex<BTreeMap<PathBuf, Vec<String>>>;
+
+fn cache() -> &'static Cache {
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
 }
 
 /// The crates whose source can change a binary of the root image: the
@@ -215,29 +512,509 @@ fn closure(ws: &Workspace, build: &CargoBuild) -> Result<BTreeSet<String>> {
 /// `Containerfile` builds (not a list kept by hand, which would rot). An edit
 /// to any other crate (the installer, the e2e harness, the development
 /// tooling) cannot reach the image and no longer changes its fingerprint.
+///
+/// Runs cargo, so it is for keyless processes. The signing process reads the
+/// closure a keyless step recorded ([`image_crates_record`],
+/// [`use_recorded_image_crates`]).
 pub fn image_crates(ws: &Workspace) -> Result<Vec<String>> {
-    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, Vec<String>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some(crates) = cache
+    let cached = cache()
         .lock()
         .map_err(|_| anyhow::anyhow!("crate closure cache poisoned"))?
         .get(&ws.root)
-    {
-        return Ok(crates.clone());
+        .cloned();
+    if let Some(crates) = cached {
+        return Ok(crates);
     }
-    let containerfile = std::fs::read_to_string(ws.root.join("Containerfile"))
-        .context("reading the root Containerfile")?;
-    let mut crates = BTreeSet::new();
-    for build in cargo_builds(&containerfile)? {
-        crates.extend(closure(ws, &build)?);
-    }
-    let crates: Vec<String> = crates.into_iter().collect();
+    let crates = derive_image_crates(ws)?;
     eprintln!("  root image crates: {}", crates.join(" "));
-    cache
+    cache()
         .lock()
         .map_err(|_| anyhow::anyhow!("crate closure cache poisoned"))?
         .insert(ws.root.clone(), crates.clone());
     Ok(crates)
+}
+
+fn derive_image_crates(ws: &Workspace) -> Result<Vec<String>> {
+    let containerfile = std::fs::read_to_string(ws.root.join("Containerfile"))
+        .context("reading the root Containerfile")?;
+    let builds = cargo_builds(&containerfile)?;
+    fetch_dependencies(ws)?;
+    let mut crates = BTreeSet::new();
+    for build in builds {
+        crates.extend(closure(ws, &build)?);
+    }
+    Ok(crates.into_iter().collect())
+}
+
+const RECORD_HEADER: &str = "ilex-image-crates v1";
+
+/// The root image's crate closure as a file for a process that must not run
+/// cargo, bound to the checkout's source digest: derived by a keyless step
+/// (`ilexctl info --image-crates`), read by the signing publisher.
+pub fn image_crates_record(ws: &Workspace) -> Result<String> {
+    let crates = derive_image_crates(ws)?;
+    let mut record = format!(
+        "{RECORD_HEADER}\nsource {}\n",
+        crate::source::manifest(ws)?.digest
+    );
+    for path in &crates {
+        record.push_str(&format!("crate {path}\n"));
+    }
+    Ok(record)
+}
+
+fn parse_record(root: &Path, current_source: &str, record: &str) -> Result<Vec<String>> {
+    let mut lines = record.lines();
+    ensure!(
+        lines.next() == Some(RECORD_HEADER),
+        "not an {RECORD_HEADER} record"
+    );
+    let source = lines
+        .next()
+        .and_then(|line| line.strip_prefix("source "))
+        .context("record names no source digest")?;
+    ensure!(
+        source == current_source,
+        "the recorded closure was derived from source {source}, but this checkout is {current_source}; derive it again in the keyless step"
+    );
+    let mut crates = Vec::new();
+    for line in lines {
+        let path = line
+            .strip_prefix("crate ")
+            .with_context(|| format!("unexpected record line {line:?}"))?;
+        let safe = !path.is_empty()
+            && !path.starts_with('/')
+            && !path.contains(['\\', '\0'])
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        ensure!(safe, "recorded crate path {path:?} is not a checkout-relative path");
+        ensure!(
+            root.join(path).is_dir(),
+            "recorded crate {path} is not a directory of this checkout"
+        );
+        crates.push(path.to_owned());
+    }
+    ensure!(!crates.is_empty(), "the recorded closure names no crate");
+    ensure!(
+        crates.windows(2).all(|pair| pair[0] < pair[1]),
+        "the recorded closure is not sorted and unique"
+    );
+    Ok(crates)
+}
+
+/// The signing process's way to the closure: read what the keyless step
+/// recorded at `path`, check it belongs to this exact checkout, seed
+/// [`image_crates`] with it and forbid every later cargo invocation in this
+/// process. Prints the line CI logs as evidence.
+pub fn use_recorded_image_crates(ws: &Workspace, path: &Path) -> Result<()> {
+    let record = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the recorded image crates {}", path.display()))?;
+    let source = crate::source::manifest(ws)?.digest;
+    let crates = parse_record(&std::fs::canonicalize(&ws.root)?, &source, &record)?;
+    CARGO_FORBIDDEN.store(true, Ordering::SeqCst);
+    eprintln!(
+        "image crates (signing process): {} crates read from {} for source {source}; cargo, rustc and kache are not run by this process",
+        crates.len(),
+        path.display()
+    );
+    cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("crate closure cache poisoned"))?
+        .insert(ws.root.clone(), crates);
+    Ok(())
+}
+
+fn build(packages: &[&str], no_default_features: bool, all_features: bool) -> CargoBuild {
+    CargoBuild {
+        packages: packages.iter().map(|p| (*p).to_owned()).collect(),
+        no_default_features,
+        all_features,
+    }
+}
+
+type ParserFixture = (
+    &'static str,
+    &'static str,
+    Result<Vec<CargoBuild>, &'static str>,
+);
+
+/// Containerfile fixtures: `Ok(builds)` must parse to exactly those builds,
+/// `Err(text)` must be refused with an error containing `text`.
+fn parser_fixtures() -> Vec<ParserFixture> {
+    vec![
+        (
+            "heredoc with mount flags and a wrapper export",
+            r#"
+# cargo is mentioned in a comment
+FROM fedora AS builder
+RUN dnf -y install --setopt=keepcache=1 cargo gcc
+COPY --from=builder /usr/bin/cargo /usr/local/bin/cargo
+RUN --mount=type=cache,id=x-cargo,target=/root/.cargo/registry \
+    --mount=type=cache,id=x-kache,target=/root/.cache/kache <<'EOF'
+set -e
+export RUSTC_WRAPPER=kache
+cargo build --release --locked -p ilexctl --no-default-features
+cargo build --release --locked -p drupe -p ilex-enroll   # trailing comment
+kache stats --last-build
+EOF
+"#,
+            Ok(vec![
+                build(&["drupe", "ilex-enroll"], false, false),
+                build(&["ilexctl"], true, false),
+            ]),
+        ),
+        (
+            "continuations, a comment inside one, RUN prefix, chain and toolchain",
+            r#"
+RUN set -e && CARGO_INCREMENTAL=0 /root/.cargo/bin/cargo +stable build \
+      # a comment inside a continuation
+      --release -j 4 \
+      -p a -p=b -pc --package d --package=e && echo done
+"#,
+            Ok(vec![build(&["a", "b", "c", "d", "e"], false, false)]),
+        ),
+        (
+            "attached and spaced feature flags widen",
+            "RUN cargo build -p a -Ffoo\nRUN cargo build -p b -F foo\nRUN cargo build -p c --features=foo\nRUN cargo build -p d --all-features\n",
+            Ok(vec![
+                build(&["a"], false, true),
+                build(&["b"], false, true),
+                build(&["c"], false, true),
+                build(&["d"], false, true),
+            ]),
+        ),
+        (
+            "env prefix, shell keyword and a non-building subcommand",
+            "RUN if RUSTC_WRAPPER=kache cargo build -p a; then cargo fetch --locked; fi\n",
+            Ok(vec![build(&["a"], false, false)]),
+        ),
+        (
+            "cargo install",
+            "RUN cargo install --path crates/x\nRUN cargo build -p a\n",
+            Err("cargo install"),
+        ),
+        (
+            "cargo rustc",
+            "RUN cargo rustc -p a -- -C lto\n",
+            Err("cargo rustc"),
+        ),
+        (
+            "cargo test",
+            "RUN cargo build -p a && cargo test -p a\n",
+            Err("cargo test"),
+        ),
+        (
+            "bare rustc",
+            "RUN cargo build -p a && rustc x.rs\n",
+            Err("rustc"),
+        ),
+        (
+            "absolute rustc",
+            "RUN /usr/bin/rustc x.rs\nRUN cargo build -p a\n",
+            Err("rustc"),
+        ),
+        (
+            "no package",
+            "RUN cargo build --release\n",
+            Err("names no package"),
+        ),
+        (
+            "workspace",
+            "RUN cargo build -p a --workspace\n",
+            Err("--workspace"),
+        ),
+        (
+            "exclude",
+            "RUN cargo build -p a --exclude b\n",
+            Err("--exclude"),
+        ),
+        ("bin", "RUN cargo build -p a --bin x\n", Err("--bin")),
+        (
+            "unknown flag",
+            "RUN cargo build -p a --frobnicate\n",
+            Err("--frobnicate"),
+        ),
+        (
+            "manifest path",
+            "RUN cargo build -p a --manifest-path other/Cargo.toml\n",
+            Err("--manifest-path"),
+        ),
+        (
+            "target",
+            "RUN cargo build -p a --target aarch64-unknown-linux-gnu\n",
+            Err("--target"),
+        ),
+        ("positional", "RUN cargo build -p a extra\n", Err("extra")),
+        (
+            "passthrough",
+            "RUN cargo build -p a -- -x\n",
+            Err("`--`"),
+        ),
+        ("-p at the end", "RUN cargo build -p\n", Err("ends after -p")),
+        (
+            "-F at the end",
+            "RUN cargo build -p a -F\n",
+            Err("ends after -F"),
+        ),
+        (
+            "variable package",
+            "RUN cargo build -p $PKG\n",
+            Err("shell expansion"),
+        ),
+        (
+            "quoted package",
+            "RUN cargo build -p 'a'\n",
+            Err("shell expansion"),
+        ),
+        (
+            "glob package",
+            "RUN cargo build -p 'a*'\n",
+            Err("shell expansion"),
+        ),
+        (
+            "versioned package",
+            "RUN cargo build -p a@1.0\n",
+            Err("plain package name"),
+        ),
+        (
+            "command substitution",
+            "RUN $(echo cargo) build -p a\nRUN cargo build -p b\n",
+            Err("echo"),
+        ),
+        ("sh -c", "RUN sh -c 'cargo build -p a'\n", Err("sh")),
+        (
+            "xargs",
+            "RUN echo a | xargs cargo build -p\n",
+            Err("xargs"),
+        ),
+        ("wrapper", "RUN nice cargo build -p a\n", Err("nice")),
+        (
+            "env wrapper flag",
+            "RUN env -i cargo build -p a\n",
+            Err("-i"),
+        ),
+        (
+            "toolchain flag",
+            "RUN cargo +nightly -Z build-std build -p a\n",
+            Err("-Z"),
+        ),
+        (
+            "cargo env",
+            "RUN CARGO_BUILD_TARGET=x cargo build -p a\n",
+            Err("CARGO_BUILD_TARGET"),
+        ),
+        (
+            "joined by a continuation",
+            "RUN cargo \\\n    build -p a \\\n    --workspace\n",
+            Err("--workspace"),
+        ),
+        (
+            "lowercase env in a heredoc",
+            "RUN <<'EOF'\nenv cargo install foo\nEOF\nRUN cargo build -p a\n",
+            Err("cargo install"),
+        ),
+        ("subcommand missing", "RUN cargo\n", Err("without a subcommand")),
+        (
+            "no cargo build at all",
+            "RUN dnf -y install cargo\n",
+            Err("no `cargo build"),
+        ),
+    ]
+}
+
+const SELF_CHECK_SOURCE: &str = "sha256:selfcheck";
+
+fn fixture_metadata(tmp: &Path, extra_member: Option<&str>) -> serde_json::Value {
+    use serde_json::json;
+    let manifest = |dir: &str| {
+        tmp.join(dir)
+            .join("Cargo.toml")
+            .to_string_lossy()
+            .into_owned()
+    };
+    let package = |name: &str, dir: &str, source: Option<&str>| {
+        json!({"id": name, "name": name, "manifest_path": manifest(dir), "source": source})
+    };
+    let dep = |pkg: &str, kind: Option<&str>| json!({"pkg": pkg, "dep_kinds": [{"kind": kind}]});
+    let mut packages = vec![
+        package("app", "root/crates/app", None),
+        package("lib", "root/crates/lib", None),
+        package("devonly", "root/crates/devonly", None),
+        package("shim", "root/vendor/shim", None),
+        package(
+            "reg",
+            "registry/reg",
+            Some("registry+https://example.invalid/index"),
+        ),
+        package(
+            "gitdep",
+            "registry/gitdep",
+            Some("git+https://example.invalid/x#abc"),
+        ),
+    ];
+    let mut app_deps = vec![
+        dep("lib", None),
+        dep("shim", Some("build")),
+        dep("devonly", Some("dev")),
+        dep("reg", None),
+        dep("gitdep", None),
+    ];
+    let mut members = vec!["app", "lib", "devonly"];
+    if let Some(extra) = extra_member {
+        packages.push(package(
+            "extra",
+            // A path package outside the checkout, or one that is the
+            // checkout's own manifest.
+            if extra == "outside" {
+                "outside/ext"
+            } else {
+                "root"
+            },
+            None,
+        ));
+        app_deps.push(dep("extra", None));
+        members.push("extra");
+    }
+    json!({
+        "packages": packages,
+        "workspace_members": members,
+        "resolve": {"nodes": [{"id": "app", "deps": app_deps}]},
+    })
+}
+
+struct Scratch(PathBuf);
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Negative and positive fixtures for the Containerfile parser, the closure
+/// walk (local path packages, registry/git packages, dev edges) and the record
+/// the signing process reads. Run by `ilexctl doctor --self-check`; no unit
+/// tests, as everywhere in this repository.
+pub fn self_check() -> Result<serde_json::Value> {
+    let mut accepted = 0;
+    let mut refused = 0;
+    for (name, text, expect) in parser_fixtures() {
+        match (cargo_builds(text), expect) {
+            (Ok(mut got), Ok(mut want)) => {
+                got.sort();
+                want.sort();
+                ensure!(
+                    got == want,
+                    "parser fixture `{name}`: got {got:?}, want {want:?}"
+                );
+                accepted += 1;
+            }
+            (Err(error), Err(want)) => {
+                let error = format!("{error:#}");
+                ensure!(
+                    error.contains(want),
+                    "parser fixture `{name}` failed with `{error}`, which does not contain `{want}`"
+                );
+                refused += 1;
+            }
+            (Ok(got), Err(want)) => {
+                bail!("parser fixture `{name}` parsed to {got:?}; it must fail closed (`{want}`)")
+            }
+            (Err(error), Ok(_)) => bail!("parser fixture `{name}` was refused: {error:#}"),
+        }
+    }
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    std::fs::create_dir_all(std::env::temp_dir())?;
+    let tmp = Scratch(std::env::temp_dir().join(format!(
+        "ilex-fingerprint-selfcheck-{}-{unique}",
+        std::process::id()
+    )));
+    for dir in [
+        "root/crates/app",
+        "root/crates/lib",
+        "root/crates/devonly",
+        "root/vendor/shim",
+        "registry/reg",
+        "registry/gitdep",
+        "outside/ext",
+    ] {
+        std::fs::create_dir_all(tmp.0.join(dir))?;
+        std::fs::write(tmp.0.join(dir).join("Cargo.toml"), "")?;
+    }
+    std::fs::write(tmp.0.join("root/Cargo.toml"), "")?;
+    let base = std::fs::canonicalize(&tmp.0)?;
+    let root = base.join("root");
+    let wanted = build(&["app"], false, false);
+    let ok = closure_of(&root, &fixture_metadata(&base, None), &wanted)?;
+    ensure!(
+        ok.iter().map(String::as_str).collect::<Vec<_>>()
+            == ["crates/app", "crates/lib", "vendor/shim"],
+        "closure fixture: got {ok:?}; want the member, its member dependency and the path package, without the dev dependency, registry or git packages"
+    );
+    for (extra, want) in [
+        ("outside", "outside the checkout"),
+        ("root", "checkout root itself"),
+    ] {
+        match closure_of(&root, &fixture_metadata(&base, Some(extra)), &wanted) {
+            Err(error) if format!("{error:#}").contains(want) => {}
+            other => {
+                bail!("closure fixture `{extra}`: want an error containing `{want}`, got {other:?}")
+            }
+        }
+    }
+    ensure!(
+        closure_of(
+            &root,
+            &fixture_metadata(&base, None),
+            &build(&["nothere"], false, false)
+        )
+        .is_err(),
+        "closure fixture: a package that is not a workspace member must be refused"
+    );
+
+    let good =
+        format!("{RECORD_HEADER}\nsource {SELF_CHECK_SOURCE}\ncrate crates/app\ncrate crates/lib\n");
+    ensure!(
+        parse_record(&root, SELF_CHECK_SOURCE, &good)? == ["crates/app", "crates/lib"],
+        "record fixture: a valid record must read back"
+    );
+    let mut records = 0;
+    for (name, record) in [
+        ("other header", good.replace("v1", "v2")),
+        ("other source", good.replace("selfcheck", "other")),
+        ("no source", format!("{RECORD_HEADER}\ncrate crates/app\n")),
+        ("parent directory", good.replace("crates/lib", "../x")),
+        ("absolute", good.replace("crates/lib", "/etc")),
+        ("backslash", good.replace("crates/lib", "crates\\lib")),
+        (
+            "not a directory",
+            good.replace("crates/lib", "crates/missing"),
+        ),
+        (
+            "unsorted",
+            "ilex-image-crates v1\nsource sha256:selfcheck\ncrate crates/lib\ncrate crates/app\n"
+                .to_owned(),
+        ),
+        (
+            "empty",
+            format!("{RECORD_HEADER}\nsource {SELF_CHECK_SOURCE}\n"),
+        ),
+        ("junk line", format!("{good}cargo metadata\n")),
+    ] {
+        ensure!(
+            parse_record(&root, SELF_CHECK_SOURCE, &record).is_err(),
+            "record fixture `{name}` must be refused"
+        );
+        records += 1;
+    }
+    Ok(serde_json::json!({
+        "containerfile_fixtures_parsed": accepted,
+        "containerfile_fixtures_refused": refused,
+        "closure_fixtures": 4,
+        "record_fixtures_refused": records,
+    }))
 }
 
 /// Early root cache key: selected source trees plus both freshly pulled build
