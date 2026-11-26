@@ -2458,7 +2458,9 @@ the Windows paths of this change: no Windows host was available.
   action; the system bus still offers `systemd1`, `login1`, `hostname1`,
   `locale1`, `timedate1`, `resolve1`, `timesync1`, `oom1`, `sysupdate1`,
   `home1` and `nm_dispatcher`/`nm_priv_helper` (all gated by polkit, and so
-  denied for this user, or inert), NetworkManager and `wpa_supplicant` (the
+  denied for this user, or inert), and the names `home1` and
+  `org.projectatomic.rpmostree1`, which are only activatable and whose units
+  are masked, NetworkManager and `wpa_supplicant` (the
   Wi-Fi support later pages use; their polkit actions are denied until the
   network page adds its own), `PolicyKit1`, `RealtimeKit1`, `ColorManager`
   (colord, started by the compositor) and `GeoClue2` (activatable only, a
@@ -2579,9 +2581,11 @@ the Windows paths of this change: no Windows host was available.
   The first main run after this change rebuilds every root and the ISO once
   (the input set itself changed).
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
-  GNOME edition). The ISO is 1,494,847,488 bytes (1.39 GiB): 437 MiB under the
-  Anaconda network ISO's 1.82 GiB and 0.61 GiB under the 2 GiB limit. The image
-  has 706 packages, 1,850 MiB installed (largest: llvm-libs 146 MiB,
+  GNOME edition). After the review fixes (2026-11-26) the ISO is 1,494,781,952
+  bytes (1.39 GiB): 438 MiB under the Anaconda network ISO's 1.82 GiB and 0.61
+  GiB under the 2 GiB limit, and the image has 698 packages, 1,826 MiB
+  installed (the first build: 1,494,847,488 bytes, 706 packages, 1,850 MiB;
+  largest: llvm-libs 146 MiB,
   python3-botocore 121, kernel-core 102, kernel-modules 80, mesa-dri-drivers 53,
   podman 53; `largest-packages.txt` lists ten). `iso --next` took 14 minutes
   with the base images and RPMs already local, mostly image-builder; the
