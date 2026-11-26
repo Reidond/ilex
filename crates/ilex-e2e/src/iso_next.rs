@@ -895,8 +895,22 @@ fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     );
     fs::write(artifacts.join("next-fallback-serial.txt"), console)?;
 
-    // Control: the mask is what keeps the message. Without it the same round
-    // trip lets logind start a getty on tty1, whose login prompt replaces it.
+    // The watcher holds tty1 open, and logind starts no getty on a busy VT, so
+    // the round trip above would pass without the mask. The mask is what keeps
+    // the message once nothing holds the VT (the watcher between a death and
+    // its restart): stop the watcher and go round again, then remove the mask
+    // as a control and go round once more, when a getty must take tty1.
+    vm.ssh_ok("systemctl stop ilex-installer-fallback.service")?;
+    vt_round_trip(vm, &Switch::Keys(&ctl))?;
+    let free = vm.ssh_ok("cat /dev/vcs1")?;
+    fs::write(artifacts.join("next-fallback-vcs1-free-vt.txt"), &free)?;
+    ensure!(
+        free.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("could not start its graphical session"),
+        "tty1 lost the fallback message after a VT round trip with nothing holding it: {free:?}"
+    );
     vm.ssh_ok("rm /etc/systemd/system/autovt@tty1.service && systemctl daemon-reload")?;
     ctl.key("ctrl+alt+F2")?;
     wait_vt(vm, "tty2")?;
@@ -904,11 +918,12 @@ fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     ctl.key("ctrl+alt+F1")?;
     wait_vt(vm, "tty1")?;
     std::thread::sleep(Duration::from_secs(6));
-    let control = vm.ssh_ok("cat /dev/vcs1")?;
-    fs::write(artifacts.join("next-fallback-vcs1-control.txt"), &control)?;
+    let control = vm.ssh_ok("systemctl is-active getty@tty1.service || true")?;
+    let screen = vm.ssh_ok("cat /dev/vcs1")?;
+    fs::write(artifacts.join("next-fallback-vcs1-control.txt"), &screen)?;
     ensure!(
-        control.contains("login:") && !control.contains("could not start its graphical session"),
-        "control: without the autovt@tty1 mask the VT round trip should have replaced the message with a login prompt, tty1 shows {control:?}"
+        control == "active" && screen.contains("login:"),
+        "control: without the autovt@tty1 mask and with tty1 free, logind should have started a getty (getty@tty1 is {control:?}); tty1 shows {screen:?}"
     );
     println!(
         "iso::next fallback: three failures, then the message on tty1, once, kept across a VT round trip"

@@ -2445,8 +2445,11 @@ the Windows paths of this change: no Windows host was available.
   virtual terminals get agetty: kmscon is a DRM client of seat0 and takes the
   GPU on tty1 before the compositor can. `autovt@tty1.service` is masked too:
   when the person presses Ctrl+Alt+F2 and back to a tty1 that has no session
-  (the fallback's), logind starts `autovt@tty1`, whose agetty clears the screen
-  and the message with it. While the session runs, logind finds it on tty1 and
+  (the fallback's), logind starts `autovt@tty1` unless something holds the VT
+  open, and the getty's login prompt replaces the message. The fallback unit
+  does hold tty1 (its output is the VT and it sleeps there), so logind skips
+  it; the mask covers the moments when nothing does (the watcher between a
+  death and its restart). While the session runs, logind finds it on tty1 and
   starts nothing; the tty2 shell is unaffected. (Ctrl+Alt+F2 reaches it from the
   fallback screen only: while the page is up the compositor would ask logind to
   change VT, and the polkit rule below denies `org.freedesktop.login1.chvt`;
@@ -2571,9 +2574,11 @@ the Windows paths of this change: no Windows host was available.
     must be light text on a dark screen, not a drawn page and not black. It then
     sends Ctrl+Alt+F2 and Ctrl+Alt+F1 (the kernel's active VT, read from the
     guest, must be `tty2` then `tty1`) and requires the same message, no login
-    prompt, no getty on tty1 and no second `ILEX-INSTALLER-FALLBACK`. A control
-    removes the `autovt@tty1` mask at runtime and repeats the round trip: the
-    message must now be replaced by a login prompt, so the check can fail.
+    prompt, no getty on tty1 and no second `ILEX-INSTALLER-FALLBACK`. The watcher
+    holds tty1, which alone keeps logind from starting a getty, so it then
+    stops the watcher and goes round again (the mask is what keeps the message),
+    and, as a control, removes the mask and goes round once more: `getty@tty1`
+    must now be active with its login prompt on screen, so the check can fail.
   - `iso::next_restart` sends Alt+F4 (the page stays, no restart), kills the
     compositor with SIGKILL (its socket stays behind; the next attempt must
     report no stale socket and bring the page up, `NRestarts=1`), then kills
