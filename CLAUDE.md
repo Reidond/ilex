@@ -2360,8 +2360,17 @@ Anaconda network installer above is unchanged and stays the released one:
 
 ```sh
 ilexctl iso --next [--edition gnome] [--output-dir D]  # <state dir>/iso-next/ilex-installer-gnome.iso
-ilexctl test iso::next                                  # boots it: Secure Boot, both boot entries, fallback
+ilexctl test iso::next                                  # boots it: Secure Boot, both boot entries, fallback, restarts, serial faults
 ```
+
+**Linux only for now.** From native Windows, `ilexctl iso --next` and
+`ilexctl test iso::next` are refused with a message before anything is sent:
+the builder returns only `<state dir>/iso` (the Anaconda ISO) and stages only
+`ILEX_ISO`, while this ISO is written to `<state dir>/iso-next` and read from
+`ILEX_ISO_NEXT`, so it would never reach the machine. The worker refuses them
+too, and an `iso::next` filter no longer makes the client stage the Anaconda
+ISO. Run these two on a Linux host (or in the builder's shell). Nobody has run
+the Windows paths of this change: no Windows host was available.
 
 - **Editions.** One ISO per edition, as Fedora ships Silverblue (GNOME) and
   Kinoite (KDE). The identifier (`gnome`) names the image stage, the files
@@ -2393,51 +2402,137 @@ ilexctl test iso::next                                  # boots it: Secure Boot,
   and fails when the live image is incomplete; the session unit runs it first.
 - **Session.** `ilex-installer-session.service` opens a logind session for the
   unprivileged `ilex-installer` user (sysusers.d, PAM service `ilex-installer`
-  with `pam_systemd`) on tty1, so GNOME Kiosk (mutter) gets seat0's DRM and
-  input devices without root. The edition's `session` script runs
-  `ilex-installer --self-check`, starts `gnome-kiosk` and then `ilex-installer`
-  as its only window; if either ends, the other is stopped and the unit
-  restarts (`Restart=on-failure`). Every failure starts
-  `ilex-installer-fallback.service` (`OnFailure=`), which acts only once the
-  start limit is hit (three failures in five minutes): it prints on tty1 what
-  failed and where to look (Ctrl+Alt+F2 has a root shell, an agetty autologin).
-  Fedora 45's `kmscon` is masked and the virtual terminals get agetty: kmscon
-  is a DRM client of seat0 and takes the GPU on tty1 before the compositor can.
-  Blanking, locking and sleep are off (dconf defaults, a logind drop-in and
-  masked sleep targets): an installation must not stop when the screen would
-  lock.
+  on tty1), so GNOME Kiosk (mutter) gets seat0's DRM and input devices without
+  root. The PAM service admits only that user and requires `pam_systemd`: a
+  session without logind would half-work, so its start must fail. The edition's
+  `session` script runs `ilex-installer --self-check`, removes any Wayland
+  socket left by an earlier attempt (logind keeps the runtime directory for a
+  few seconds, so a compositor that died leaves `wayland-0` behind), starts
+  `gnome-kiosk`, waits until the socket has a listener (`ss -xl`, not merely a
+  file; up to a minute), then starts `ilex-installer` as its only window.
+  Nothing may end the session: whichever process ends, with any status (a window
+  closed by the compositor exits 0), the script stops the other and exits
+  non-zero, and the window refuses a close request (`--windowed`, for
+  development, still closes). The unit is `Restart=always`, three starts in five
+  minutes. There is no `OnFailure=` (it fires after every failed attempt, not
+  only the last): `ilex-installer-fallback.service`, enabled at boot, watches
+  the session unit and, once, when it is `failed` for good (its start limit),
+  prints on tty1 what failed and where to look (Ctrl+Alt+F2 has a root shell, an
+  agetty autologin) and the `ILEX-INSTALLER-FALLBACK` marker. It polls every two
+  seconds and is not subject to a start limit, so a slow boot cannot make it
+  miss the end state. Fedora 45's `kmscon` is masked and the virtual terminals
+  get agetty: kmscon is a DRM client of seat0 and takes the GPU on tty1 before
+  the compositor can. Blanking, locking and sleep are off (dconf defaults, a
+  logind drop-in and masked sleep targets): an installation must not stop when
+  the screen would lock.
+- **SSH.** The live image keeps fedora-bootc's `sshd`, but only a drop-in
+  condition `ConditionCredential=ssh.authorized_keys.root` lets it start (also
+  on `sshd@.service`, the socket-activated template): a real boot has no key on
+  it and an open port is no use, while the harness's SMBIOS credential of that
+  name (every VM it boots has one, and systemd provisions root's
+  `authorized_keys` from it) switches it on for diagnostics and the polkit
+  report. `iso::next_serial_*` boot without the credential and check that
+  nothing answers on the forwarded port.
 - **Boot entries.** "Install ilex" and "Install ilex (basic graphics)"
   (`nomodeset`); the second makes the session set `GSK_RENDERER=cairo` and
   `LIBGL_ALWAYS_SOFTWARE=1`. The ISO's volume label is
   `ilex-installer-<edition>`.
 - **Serial markers.** The session script and the interface print marker lines
-  to `/dev/ttyS0` (best effort, never blocking; the user is in `dialout`):
+  to the journal and to `/dev/ttyS0` (the user is in `dialout`):
   `ILEX-INSTALLER-SESSION compositor=… graphics=default|basic secure-boot=0|1`,
   `ILEX-INSTALLER page=placeholder edition=… renderer=… uptime=…` once the
-  window is mapped, and `ILEX-INSTALLER-STATS mem_total_kib=…` fifteen seconds
-  later. `ILEX-INSTALLER-FALLBACK` marks the give-up. The fixed credential
-  `ilex.installer.fault=session` (SMBIOS, `io.systemd.credential:`) makes the
-  session script fail; it can only stop the installer from starting.
-- **Tests.** `iso::next_boot`, `iso::next_basic_graphics` and
-  `iso::next_fallback` are registered only when a filter names `iso::next`
-  (so `iso::`, the Anaconda release gate, never boots this ISO). `cargo
-  ilexctl test iso::next` builds the ISO (or uses `ILEX_ISO_NEXT=<path>`) and
-  needs no OS image. The two boot trials start the ISO under QEMU/KVM with
-  Secure Boot required (the secure fixture path with
-  `security_launch=qualification_fixture`, so an unqualified host fails; a
-  disposable 1 GiB disk, no TPM, `ILEX_ISO_NEXT_MEMORY` defaults to 4G), assert
-  the markers (including `secure-boot=1` read by the guest and cairo for the
-  basic entry), wait for a settled QMP screenshot that is libadwaita's light
-  window with content, and record timing, memory and ISO size in
-  `<state dir>/artifacts/iso-next/next-<entry>.json` beside the screenshots.
-  The basic graphics entry is chosen in GRUB with real key input over a USB
-  keyboard (`LinuxProvider::with_usb_keyboard`).
+  window is mapped, `ILEX-INSTALLER-STATS mem_total_kib=…` fifteen seconds
+  later, `ILEX-INSTALLER-SESSION ended child=compositor|installer status=…`
+  when the session ends and `ILEX-INSTALLER-FALLBACK session=failed result=…`
+  at the give-up. The session script prints them through `ilex-installer
+  --marker LINE`, so one implementation owns the serial write. It never delays
+  the interface: the port is touched only by a disposable worker thread, which
+  the caller waits for 200 ms and then abandons (even a non-blocking open and
+  write can end in a `close()` that waits for the UART's `closing_wait`), and
+  markers are skipped, not queued, while an abandoned worker lives, as
+  `installer/chooser/diagnostics.py` does for the Anaconda chooser. Two fixed
+  credentials (SMBIOS, `io.systemd.credential:`) are test-only:
+  `ilex.installer.fault=session` makes the session script fail, and
+  `ilex.installer.serial-test=unavailable|backpressure` points the mirror at a
+  missing device or at a pty with stopped output (`tcflow(TCOOFF)`), reporting
+  each faulted write (`ILEX-INSTALLER-SERIAL mode=… status=… seconds=…`) on the
+  second UART, `/dev/ttyS1`. They can only stop the installer from starting or
+  silence its mirror.
+- **Tests.** `iso::next_boot`, `iso::next_basic_graphics`, `iso::next_fallback`,
+  `iso::next_restart`, `iso::next_serial_backpressure` and
+  `iso::next_serial_unavailable` are registered only when a filter names
+  `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO).
+  `cargo ilexctl test iso::next` builds the ISO (or uses
+  `ILEX_ISO_NEXT=<path>`) and needs no OS image. Markers are matched as
+  complete lines by their first word and a key, never as substrings, and a
+  missing field is an error with the console in it, not a panic.
+  - The two boot trials start the ISO under QEMU/KVM with Secure Boot required
+    (the secure fixture path with `security_launch=qualification_fixture`: it
+    requires provisioning, that is KVM with SMM and a Secure Boot firmware
+    pair, and fails without it, but does not require the host to be
+    *qualified* by the `security::` tier and never promotes it; a disposable
+    1 GiB disk, no TPM, `ILEX_ISO_NEXT_MEMORY` defaults to 4G). They assert the
+    markers (including `secure-boot=1` read by the guest and cairo for the basic
+    entry), wait for a settled QMP screenshot that is libadwaita's light window
+    with content, and record timing, memory and ISO size in
+    `<state dir>/artifacts/iso-next/next-<entry>.json` beside the screenshots.
+    The basic graphics entry is chosen in GRUB with real key input over a USB
+    keyboard (`LinuxProvider::with_usb_keyboard`). The default entry also
+    writes `next-surface.txt` (below) and fails on any polkit action beyond
+    the allowlist in `iso_next.rs` (empty).
+  - `iso::next_fallback` makes the session fail (fixed credential), requires
+    exactly three failures, then exactly one `ILEX-INSTALLER-FALLBACK` (it
+    waits eight seconds for a second), and reads the message back from the
+    VT's own text, `/dev/vcs1`, over the harness's SSH key; a QMP screenshot
+    must be light text on a dark screen, not a drawn page and not black.
+  - `iso::next_restart` sends Alt+F4 (the page stays, no restart), kills the
+    compositor with SIGKILL (its socket stays behind; the next attempt must
+    report no stale socket and bring the page up, `NRestarts=1`), then kills
+    the client (`NRestarts=2`), and requires that the fallback never fires:
+    three starts in five minutes are the unit's limit.
+  - `iso::next_serial_backpressure` and `iso::next_serial_unavailable` boot
+    with `ilex.installer.serial-test` and without the SSH credential. The page
+    comes up (readiness is read from `/dev/ttyS1`), every faulted marker write
+    is reported there as the injected failure in under a second, none of them
+    reaches the faulted console, and the forwarded SSH port sends no banner.
 - **CI.** `publish.yml`'s `iso_next` input starts only the `installer-next` job
-  and skips the image pipeline and the Anaconda ISO jobs. It builds the ISO in
-  the same privileged Fedora 45 container as the `iso` job, keeps it as the
-  `installer-next-iso` artifact, boots both entries with Secure Boot and keeps
-  `installer-next-evidence`. Nothing releases or publishes it. Runs without
-  `iso_next` are unchanged.
+  and skips the image pipeline and the Anaconda ISO jobs. The run has a
+  concurrency group of its own (`iso-next-<hash of the ref>`, also on main: it
+  neither waits for nor replaces a real publish), is passed `main=false`, and
+  receives no signing secrets: the route job's `sign` output is true only for
+  runs that can sign (push and nightly on main, or a manual run of main that is
+  neither `iso_next` nor `v1_disk`). The workflow has no `pull_request` trigger,
+  and the job additionally requires `workflow_dispatch`, has `contents: read`
+  and reads no secret, so PRs and forks reach neither it nor the key. It builds
+  the ISO in the same privileged Fedora 45 container as the `iso` job, keeps it
+  as the `installer-next-iso` artifact, boots it with Secure Boot (the six
+  `iso::next` trials, with the same provisioning-only requirement as locally:
+  a runner without KVM SMM fails them) and keeps `installer-next-evidence`.
+  Nothing releases or publishes it. Runs without `iso_next` are unchanged.
+- **Fingerprints.** The root image's fingerprint (the early `ilex.root-inputs`
+  key and the content fingerprint, `ilex_tooling_linux::fingerprint`) hashes
+  the workspace crates in the dependency closure of what the root
+  `Containerfile` builds, not all of `crates/`: `image_crates` reads the
+  `cargo build -p …` lines of the Containerfile (their `-p` packages and
+  `--no-default-features`; any named feature widens to all features) and
+  walks `cargo metadata --locked --filter-platform x86_64-unknown-linux-gnu`
+  from them over normal and build dependencies. Today that is `ilexctl` (built
+  with `--no-default-features`), `ilex-agent`, `ilex-enroll` and `drupe`; the
+  installer, the e2e harness, `xtask`, the devkit, the vmctl and the tooling
+  crates are not inputs, so editing them no longer rebuilds, re-signs and
+  republishes every root. Nothing is listed by hand: a new dependency of a
+  built package enters the set by itself, and a Containerfile without a
+  parsable `cargo build -p` line fails the fingerprint rather than hashing
+  nothing. A crate added in a dirty working tree (not at HEAD yet) is covered
+  by the dirty entries. **`Cargo.toml` and `Cargo.lock` stay hashed whole**:
+  any dependency change in any workspace crate (adding `ilex-installer` added
+  708 lines, a GTK bump would again) edits `Cargo.lock` and therefore changes
+  every root's fingerprint once, although the shipped binaries are unchanged.
+  The Anaconda ISO fingerprint (`INSTALLER_INPUTS` in `xtask/src/iso.rs`) also
+  hashes `Cargo.lock`, `Cargo.toml` and `crates/xtask/src/iso.rs`, so those
+  make that ISO due the same way; `installer/next` and the new crate do not.
+  The first main run after this change rebuilds every root and the ISO once
+  (the input set itself changed).
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
   GNOME edition). The ISO is 1,494,847,488 bytes (1.39 GiB): 437 MiB under the
   Anaconda network ISO's 1.82 GiB and 0.61 GiB under the 2 GiB limit. The image

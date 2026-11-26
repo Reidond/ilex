@@ -1164,15 +1164,17 @@ jobs:
           compression-level: 0
           retention-days: 3
 
-      # Secure Boot needs KVM with SMM on this runner; an unqualified runner
-      # fails here, as it does in every security tier.
+      # Secure Boot needs KVM with SMM and a Secure Boot firmware pair on this
+      # runner: the trials use the security fixture's provisioning check
+      # (SecurityLaunch::QualificationFixture), so a runner without them fails
+      # here, but a runner that the security tier has not qualified does not.
       - name: Prepare the VM stack
         run: |
           test -c /dev/kvm
           bash .github/vm-prep.sh ephemeral
           bash .github/vm-prep.sh wait vm-stack
 
-      - name: Boot the ISO with Secure Boot (both boot entries) and the session fallback
+      - name: Boot the ISO with Secure Boot (both boot entries), the fallback, restarts and serial faults
         env:
           ILEX_ISO_NEXT: /mnt/ilex/state/iso-next/ilex-installer-gnome.iso
         run: |
