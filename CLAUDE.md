@@ -1547,8 +1547,12 @@ claude mcp add -s local --transport stdio ilex-vm -- ilexctl mcp
   QMP socket exists but nothing answers on it, and the guest never runs, so its
   serial log stays empty until a test's deadline (about one boot in a hundred
   on the Boat hosts; a rerun passes). No tier wants sound. If a QEMU ever hangs
-  at start-up for another reason, `Vm::boot` fails after 30 s without a QMP
-  greeting and prints `qemu.log`. `ILEX_VM_FIRMWARE_LOG=1` makes every VM also
+  at start-up for another reason, `Vm::boot` gives it 30 s in all for its QMP
+  socket to appear, accept a connection (QEMU binds the path before it listens,
+  so `NotFound` and `ConnectionRefused` are retried) and send its greeting. A
+  QEMU that exits meanwhile is reported with its exit status and `qemu.log`; one
+  that does not answer is killed, reaped and reported with `qemu.log`.
+  `ILEX_VM_FIRMWARE_LOG=1` makes every VM also
   write OVMF's debug console to `firmware.log` beside `serial.log` (about
   750 KB per boot, so opt-in). The ephemeral VMs (`ephemeral::`) run
   bcvk's own QEMU, which has no `-vnc`; this is not applied to them.
