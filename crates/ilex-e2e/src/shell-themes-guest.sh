@@ -108,7 +108,10 @@ show-session)
 *) exit 1 ;;
 esac
 STUB
-# Each wait of the watch runs the next line of the scenario, then really waits a moment.
+# Each wait of the watch runs the next line of the scenario, then really waits a
+# moment. Once the scenario is over the watch is ended after 30 more waits
+# (SIGTERM, status 143): a watch that decides nothing is counted, not timed, so
+# a loaded host cannot cut a scenario short.
 cat >"$watch/bin/sleep" <<'STUB'
 #!/bin/bash
 . "$WATCH_LIB"
@@ -116,6 +119,10 @@ if [ -s "$S/events" ]; then
     line=$(head -n 1 "$S/events")
     sed -i 1d "$S/events"
     eval "$line"
+else
+    idle=$(($(cat "$S/idle" 2>/dev/null || echo 0) + 1))
+    echo "$idle" >"$S/idle"
+    [ "$idle" -lt 30 ] || kill -TERM "$PPID"
 fi
 exec /usr/bin/sleep 0.05
 STUB
@@ -123,7 +130,8 @@ chmod 755 "$watch"/bin/*
 
 # scenario NAME EVENTS: session 5 is live and Plasma up under it; every wait of
 # the watch then runs one line of EVENTS (an empty line is a wait in which
-# nothing happens). A watch that decides nothing is cut off (status 124).
+# nothing happens). A watch that decides nothing is ended by the stand-in
+# `sleep` (status 143); the timeout is only a safety net.
 scenario() {
     . "$watch/lib.sh"
     rm -rf "${sessions:?}"/* "${S:?}"/*
@@ -132,7 +140,7 @@ scenario() {
     : >"$S/plasma-up" >"$S/user-sessions" >"$S/gnome" >"$S/calls"
     printf '%s' "${2:-}" >"$S/events"
     wstatus=0
-    env PATH="$watch/bin:$PATH" WATCH_LIB="$watch/lib.sh" timeout 2 bash "$watch/script" 2>"$S/log" || wstatus=$?
+    { env PATH="$watch/bin:$PATH" WATCH_LIB="$watch/lib.sh" timeout 120 bash "$watch/script" 2>"$S/log" || wstatus=$?; } 2>/dev/null
     echo "     $1: status $wstatus; $(tr '\n' '|' <"$S/calls")"
 }
 # The calls record the sessions logind listed at the moment of the stop.
@@ -145,8 +153,8 @@ wanted: $1
 log:
 $(cat "$S/log")"
 }
-waits() { # the watch decided nothing: no stop, cut off by the timeout
-    [ "$wstatus" -eq 124 ] && [ ! -s "$S/calls" ] || fail "$name: status $wstatus, calls:
+waits() { # the watch decided nothing: no stop, ended by the stand-in sleep
+    [ "$wstatus" -eq 143 ] && [ ! -s "$S/calls" ] || fail "$name: status $wstatus, calls:
 $(cat "$S/calls")
 log:
 $(cat "$S/log")"
