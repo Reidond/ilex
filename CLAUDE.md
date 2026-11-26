@@ -2592,7 +2592,10 @@ the Windows paths of this change: no Windows host was available.
   `iso::next_serial_unavailable`, `iso::next_serial_stall`,
   `iso::next_ssh_tmpfiles`, `iso::next_helper_usb` and
   `iso::next_helper_cdrom` are registered only when a filter names
-  `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO).
+  `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO);
+  `iso::next_helper_loop` only when a filter names `next_helper_loop` (it needs
+  `mke2fs`, `sfdisk` and a second copy of the ISO on the host, which no other
+  trial does).
   `cargo ilexctl test iso::next` builds the ISO (or uses
   `ILEX_ISO_NEXT=<path>`) and needs no OS image. Markers are matched as
   complete lines by their first word and a key, never as substrings, and a
@@ -2667,9 +2670,14 @@ the Windows paths of this change: no Windows host was available.
     the registry (retried for 90 s while the guest's link comes up; it needs
     `ghcr.io`) with the manifest digest pinned; `Plan` on the stick is refused
     `live-medium` and on the 2 GiB disk `disk-too-small`; a second `Probe` must
-    answer the same, and no scan directory may be left in `/run/ilex-installer`;
-    `ilex-installerd --self-check` must pass on the ISO's own files; and no
-    SELinux denial may have been enforced. The live ISO boots permissive
+    answer the same; the three blank disks are looked at before the first plan
+    and after the last and must have no partition table, no signature and no
+    partition both times, and the same checksum of their first and last 4 MiB
+    (a plan writes nothing); the stick carries neither a reason nor a note (a
+    note would be a failed scan of its EFI partition);
+    `ilex-installerd --self-check` must pass on the ISO's own files; no scan
+    or self-check directory may be left in `/run/ilex-installer` after the plans
+    and the self-check; and no SELinux denial may have been enforced. The live ISO boots permissive
     (`enforcing=0`, from image-builder's kernel arguments) with `unlabeled_t`
     files, every process in `kernel_t`: denials are logged and nothing is
     stopped, and the ones that name the helper (its user-namespace setup, the
@@ -2677,6 +2685,37 @@ the Windows paths of this change: no Windows host was available.
     asserted. When the ISO enforces, each is a denial of the helper to resolve
     first. The mounts and the numbers the tracer follows are the ISO's real
     ones; the container-image tier cannot show them.
+  - `iso::next_helper_loop` boots the same ISO as a **file on another disk**,
+    the way GRUB's loopback with dracut's `iso-scan/filename=` does, and
+    nothing is attached as a medium. The VM's own disk is a GPT with one ext4
+    partition (`ISOHOST`, `/boot/isos/ilex.iso`), built without privileges
+    (`mke2fs -d -E offset=`, `sfdisk`; only the ext4 features GRUB's driver
+    reads); the boot loader is the ISO's own signed shim and GRUB, taken from
+    its `/EFI`, served as a small read-only FAT disk (`VmConfig::esp_dir`,
+    QEMU's `fat:`) with a `grub.cfg` of one entry that loops the file and boots
+    the kernel inside it with the ISO's own arguments plus the
+    `iso-scan/filename=` (`root=live:CDLABEL=…` stays: iso-scan makes the loop
+    device carry the ISO's label). Firmware connects only the disk it boots
+    from, so the config says `connectefi pciroot` first; a boot from the host
+    disk's own ESP, as on a stick or with Ventoy, needs no such line.
+    `ILEX_ISO_NEXT_LOOP_ARGS` adds kernel arguments (`console=ttyS0 rd.debug`
+    shows dracut's own account of a boot that stops early). The trial asserts
+    the same things as the others: the host disk is the one `live_medium`
+    disk, with no reason and no note, and a plan on it is refused
+    `live-medium`; the three blank disks, found by their sizes (virtio names
+    follow the firmware's order), are offered, planned and checked as above.
+    **What dracut leaves** (recorded in `next-helper-loop-layout.txt`): the
+    host disk's ext4 read-only at `/run/initramfs/isoscan` (`/dev/vdb1`), `loop0`
+    on the ISO file (`/boot/isos/ilex.iso`, device `253:17`) mounted at
+    `/run/initramfs/live`, `loop1` on `/LiveOS/squashfs.img` as from a stick,
+    the overlay root, no device-mapper device. The kernel prints **both** loop
+    devices' names relative to their file system's root, though the mounts that
+    carry them are in every table: `stat` of `/boot/isos/ilex.iso` fails, and
+    `stat` of `/run/initramfs/isoscan/boot/isos/ilex.iso` is `253:17` inode 14,
+    what losetup records. The helper refused every disk on this layout until it
+    looked for the recorded numbers below the visible mounts of the device (see
+    the trace below): a file system that can hold a device node and a name no
+    path confirms left the file unresolved.
 - **CI.** `publish.yml`'s `iso_next` input starts only the `installer-next` job
   and skips the image pipeline and the Anaconda ISO jobs. The run has a
   concurrency group of its own (`iso-next-<hash of the ref>`, also on main: it
@@ -2894,9 +2933,21 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     `(dev, ino)` and by a name with no link or `..` in it
     (`canonicalize(path) == path`; the text of any other name would send the
     lookup to other mounts), and the btrfs mounts that contain it are traced.
-    **A file the name does not confirm** (deleted, renamed, hidden by a mount)
-    may still be a block device node of any disk, which no number says
-    (`mknod /tmp/n b 8 1; losetup -f /tmp/n; rm /tmp/n`); it is resolved only
+    **Locating the file.** The kernel prints the name of a file dracut opened
+    in the initramfs relative to its file system's root (`/LiveOS/squashfs.img`,
+    `/boot/isos/ilex.iso`), so no path in the helper's namespace is the name.
+    The file is looked for by the name and then at the name below the mount
+    point of each visible mount of the device number the kernel recorded
+    (`/run/initramfs/isoscan` + `/boot/isos/ilex.iso`): only a path that
+    `stat`s to exactly the recorded `(dev, ino)` locates it (an inode a loop
+    device holds open is not reused, so the numbers are the file's, never a
+    namesake's), and its type is then known: a regular file resolves, a block
+    node is followed through its `st_rdev`. A path is a way to the file and
+    never changes what the numbers say, so locating can only turn an unresolved
+    use into a resolved one, and does so only with an exact match.
+    **A file no name locates** (deleted, hidden by a mount, its file system's
+    mounts all detached) may still be a block device node of any disk, which no
+    number says (`mknod /tmp/n b 8 1; losetup -f /tmp/n; rm /tmp/n`); it is resolved only
     where a node cannot have been opened as a device (every mount that carries
     the file system is `nodev`: the mount's own options, not the file system's)
     or cannot be there after the fact (an image: iso9660, udf, squashfs, erofs,
@@ -2953,10 +3004,12 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     directories in `/run`, which is tmpfs) over `/run/rootfsbase` (squashfs on
     `loop0`). The ISO's file system is at `/run/initramfs/live` (iso9660 on
     `/dev/sda1`, the stick's first partition, or `/dev/sr0`), and `loop0`'s file
-    is `/LiveOS/squashfs.img`, a name the kernel prints relative to the mount
-    that carries the file, so no name in the helper's namespace confirms it;
-    the iso9660 mount that carries its device number resolves it (or, once that
-    mount is gone, the signature lsblk reads from the device). There is **no
+    is `/LiveOS/squashfs.img`, a name the kernel prints relative to its file
+    system's root, so no name in the helper's namespace confirms it; it is
+    located below the iso9660 mount that carries its device number
+    (`/run/initramfs/live/LiveOS/squashfs.img` is `7:0` inode 4102, what losetup
+    records), or, once that mount is gone, resolved by the signature lsblk reads
+    from the device. There is **no
     device-mapper device and no other loop device**: the `live-rw` snapshot
     over `rootfs.img` (whose copy-on-write file is `/overlay (deleted)` on the
     initramfs' own file system, which no mount carries) is dracut's layout for
@@ -3179,8 +3232,10 @@ real BitLocker header for BitLocker: the `--self-check` covers conflicting
 machines, the BitLocker and NTFS classification, the parsers of what the kernel
 prints (a mount or swap line they cannot read fails), the trace of every mount,
 swap entry and loop device (a lazily unmounted medium, a loop on a block node,
-a file the name no longer confirms on a `nodev`, an image and an ordinary file
-system, an unmounted loop, btrfs by UUID and of two devices and through a link,
+a file no name locates on a `nodev`, an image and an ordinary file
+system, a file found below the host disk's mount by the recorded numbers (and
+not found: another inode, another device, nothing there, no mount of that
+device; found as a device node), an unmounted loop, btrfs by UUID and of two devices and through a link,
 an unknown file system type, swap by `st_rdev`, a swap file, zram writeback,
 ext4 journals, a directory that cannot be listed, FUSE services at and away from
 their paths, the tables of other mount namespaces, the exclusive open's retry,
@@ -3189,8 +3244,8 @@ options, zram swap, the real ISO's overlay layout, and dracut's other layout
 with its deleted copy-on-write file, which is refused) and a live ISO's own
 mount layout; exiting tasks (a vanished process hides nothing of its
 namespace, `EINVAL` from an exiting task's `mountinfo` is a task that is gone,
-any other failure is not); the live ISO's own boot is `iso::next_helper_usb`
-and `iso::next_helper_cdrom`.
+any other failure is not); the live ISO's own boot is `iso::next_helper_usb`,
+`iso::next_helper_cdrom` and, as a file on another disk, `iso::next_helper_loop`.
 
 ## Conventions
 

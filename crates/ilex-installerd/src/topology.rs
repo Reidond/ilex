@@ -14,11 +14,15 @@
 //!   `slaves/`;
 //! * a loop device to its backing file as the kernel records it (`lo_device`,
 //!   `lo_inode`, from `losetup --json --list`): the device number names the
-//!   device the file's file system is on. A file that cannot be found by its
-//!   name any more (deleted, renamed, hidden by a mount) might still be a block
-//!   device node, which no number says; it is accepted only where a node could
-//!   not have been opened (a `nodev` mount) or cannot exist (a read-only image
-//!   file system), and otherwise the use is unresolved;
+//!   device the file's file system is on. The file itself is looked for by its
+//!   name and, since the kernel prints a name relative to its file system for
+//!   the files dracut opened, below the mounts of that device: a path that
+//!   `stat`s to exactly the recorded numbers is the file, and says whether it
+//!   is a block device node. A file that no path reaches (deleted, hidden by a
+//!   mount, its file system's mounts detached) might still be a block device
+//!   node, which no number says; it is accepted only where a node could not
+//!   have been opened (a `nodev` mount) or cannot exist (a read-only image file
+//!   system), and otherwise the use is unresolved;
 //! * a multi-device btrfs to every member (`/sys/fs/btrfs/<uuid>/devices/`).
 //!
 //! A mount is *not* block-backed only if its file system type is on an explicit
@@ -777,15 +781,15 @@ impl<'a> Tracer<'a> {
     /// `(device, inode)` identify the file; a path only gets to it, and counts
     /// only when `stat` answers with exactly those two numbers (an inode that
     /// something holds open is not reused, so the numbers are the file's, not a
-    /// namesake's). The name the kernel prints is tried first. It is relative
-    /// to its file system's root when the mount the file was opened through is
-    /// not one this process can reach (dracut's `iso-scan` leaves the ISO's
-    /// loop device that way: `/boot/isos/ilex.iso`, though the disk is mounted
-    /// at `/run/initramfs/isoscan`); the same name below each visible mount of
-    /// the same device is tried next, which finds the file through the host
-    /// disk's own mounted file system. A deleted file has no path, and a file
-    /// no path reaches is not located: whatever it is, the caller decides what
-    /// it might be.
+    /// namesake's). The name the kernel prints is tried first. For the files
+    /// dracut opened in the initramfs it is relative to the file system's root
+    /// (`/LiveOS/squashfs.img` for the ISO's squashfs, `/boot/isos/ilex.iso`
+    /// for an ISO file that iso-scan found), though the mounts that carry them
+    /// (`/run/initramfs/live`, `/run/initramfs/isoscan`) are in every table;
+    /// the same name below each visible mount of the same device is tried next,
+    /// which finds the file through the host disk's own mounted file system. A
+    /// deleted file has no path, and a file no path reaches is not located:
+    /// whatever it is, the caller decides what it might be.
     fn locate(
         &self,
         file: &str,
