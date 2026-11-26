@@ -31,6 +31,12 @@
 //! * `installer::plan`: whole-disk plans (plain and encrypted) against
 //!   repart's own dry run, the registry's manifest, every refusal a request
 //!   can cause, and the proof that planning wrote nothing.
+//! * `installer::ui`: the interface's own checks on the live image, without a
+//!   display of its own: `ilex-installer --self-check` (the flow's rules on
+//!   the simulation's fixtures, the image's keyboard catalogue, the edition
+//!   record), `--simulate` refused on a real boot, and every page and error
+//!   state drawn to PNG files under GNOME Kiosk's headless mode: light, dark
+//!   and at 150% scale (`--self-check --render`).
 //!
 //! The ISO's own boot (the live medium, Secure Boot, the session) is `iso::next…`.
 
@@ -95,6 +101,9 @@ pub fn trials() -> Vec<Trial> {
         trial("installer::plan", || {
             GROUP.run(|vm| plan(&vm.lock().unwrap_or_else(PoisonError::into_inner)))
         }),
+        trial("installer::ui", || {
+            GROUP.run(|vm| ui(&vm.lock().unwrap_or_else(PoisonError::into_inner)))
+        }),
     ];
     // The trials that write a disk boot VMs of their own (UEFI), not this
     // group's.
@@ -132,7 +141,7 @@ fn with_ssh(ws: &Workspace, live: &str) -> Result<String> {
             .with_context(|| format!("the installer image {live} is not in local storage"))?;
     let recipe = format!(
         "FROM {live}\n\
-         RUN dnf -y install --setopt=install_weak_deps=0 openssh-server && \\\n\
+         RUN dnf -y install --setopt=install_weak_deps=0 openssh-server dbus-daemon && \\\n\
              systemctl enable sshd.service && \\\n\
              systemctl mask ilex-installer-session.service ilex-installer-fallback.service && \\\n\
              mkdir -p /usr/lib/bootc/install && printf '[install.filesystem.root]\\ntype = \"xfs\"\\n' > /usr/lib/bootc/install/10-installer-test.toml\n\
@@ -2470,6 +2479,158 @@ fn plan_body(vm: &EphemeralVm) -> Result<()> {
     ensure!(
         no_scratch_left(vm)?,
         "a probe, plan or self-check left its scratch directory behind"
+    );
+    Ok(())
+}
+
+// --- the interface ----------------------------------------------------------------
+
+/// The interface's checks, in the guest. `render` starts GNOME Kiosk in its
+/// headless mode with one virtual monitor (its scale from a `monitors.xml`:
+/// the virtual monitor's own identity is `MetaVendor` / `MetaVirtualMonitor`)
+/// and draws every page and state to `/run/ilex-ui-shots`.
+const UI_SCRIPT: &str = r#"set -u
+export HOME=/run/ilex-ui-home
+rm -rf /run/ilex-ui-shots; mkdir -p /run/ilex-ui-shots
+echo "== self-check"
+ilex-installer --self-check; echo "self-check status $?"
+echo "== simulate on a real boot"
+env -u ILEX_INSTALLER_SIMULATE_ALLOW ilex-installer --simulate generic 2>&1 | head -2; echo "simulate status ${PIPESTATUS[0]}"
+render() {
+    scheme=$1; scale=$2
+    export XDG_RUNTIME_DIR=/run/ilex-ui
+    rm -rf "$XDG_RUNTIME_DIR" "$HOME"; mkdir -m700 "$XDG_RUNTIME_DIR"; mkdir -p "$HOME/.config"
+    cat > "$HOME/.config/monitors.xml" <<XML
+<monitors version="2"><configuration><layoutmode>logical</layoutmode><logicalmonitor><x>0</x><y>0</y><scale>$scale</scale><primary>yes</primary><monitor><monitorspec><connector>Meta-0</connector><vendor>MetaVendor</vendor><product>MetaVirtualMonitor</product><serial>0x00</serial></monitorspec><mode><width>1920</width><height>1200</height><rate>60.000</rate></mode></monitor></logicalmonitor></configuration></monitors>
+XML
+    flag=; [ "$scheme" = dark ] && flag=--dark
+    cat > /run/ilex-ui-inner.sh <<'INNER'
+gnome-kiosk --headless --virtual-monitor 1920x1200 --wayland --no-x11 > /run/ilex-ui-kiosk.log 2>&1 &
+kiosk=$!
+for _ in $(seq 150); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done
+sleep 2
+WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland timeout 900 ilex-installer --self-check --render /run/ilex-ui-shots $RENDER_FLAG 2>&1 | grep -E '^ILEX-INSTALLER-RENDER|rror|panicked|CRITICAL'
+echo "render status ${PIPESTATUS[0]}"
+kill "$kiosk" 2>/dev/null
+INNER
+    echo "== render $scheme $scale"
+    RENDER_FLAG=$flag dbus-run-session -- bash /run/ilex-ui-inner.sh
+}
+render light 1
+render dark 1
+render light 1.5
+echo "== files"
+for f in /run/ilex-ui-shots/*.png; do echo "FILE $(basename "$f")"; base64 -w0 "$f"; echo; done
+echo "== done"
+"#;
+
+/// Decode standard base64 (what `base64 -w0` prints).
+fn unbase64(text: &str) -> Result<Vec<u8>> {
+    let value = |c: u8| -> Result<u32> {
+        Ok(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => bail!("not base64: {:?}", c as char),
+        } as u32)
+    };
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut bits = 0u32;
+    let mut count = 0;
+    for c in text.bytes().filter(|c| *c != b'=') {
+        bits = (bits << 6) | value(c)?;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+            bits &= (1 << count) - 1;
+        }
+    }
+    Ok(out)
+}
+
+/// A PNG's width and height from its header.
+fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    (bytes.len() > 24 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).then(|| {
+        let word = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        (word(16), word(20))
+    })
+}
+
+fn ui(vm: &EphemeralVm) -> Result<()> {
+    let ws = common::workspace()?;
+    let out = vm.ssh_timeout(
+        &format!(
+            "printf %s {} | base64 -d | bash -s",
+            base64(UI_SCRIPT.as_bytes())
+        ),
+        std::time::Duration::from_secs(1800),
+    )?;
+    let text = printed(&out);
+    let (log, files) = text.split_once("== files\n").context("the script did not reach its files")?;
+    let artifacts = ilex_devkit::qemu::artifact_dir(&ws, "installer-ui")?;
+    fs::write(artifacts.join("ui-script.log"), log)?;
+    println!("     {}", log.trim_end().replace('\n', "\n     "));
+
+    ensure!(
+        log.contains("self-check status 0") && log.contains("ILEX-INSTALLER-SELFCHECK ok"),
+        "`ilex-installer --self-check` failed on the live image:\n{log}"
+    );
+    ensure!(
+        log.contains("--simulate is refused") && log.contains("simulate status 1"),
+        "--simulate was not refused on a boot without ilex.installer.simulate:\n{log}"
+    );
+    for (scheme, scale) in [("light", "1"), ("dark", "1"), ("light", "1.5")] {
+        let want = "ILEX-INSTALLER-RENDER ok shots=";
+        let line = log
+            .lines()
+            .find(|l| {
+                l.starts_with(want) && l.contains(&format!("scheme={scheme} scale={scale} "))
+            })
+            .with_context(|| format!("no render report for {scheme} at {scale}x:\n{log}"))?;
+        ensure!(line.contains("shots=25 "), "{line}");
+    }
+    ensure!(
+        !log.contains("render status 1") && log.matches("render status 0").count() == 3,
+        "a render failed:\n{log}"
+    );
+
+    // The files: every page and state in each of the three configurations.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut distinct = std::collections::BTreeSet::new();
+    let mut name = None;
+    for line in files.lines() {
+        if let Some(file) = line.strip_prefix("FILE ") {
+            name = Some(file.trim().to_owned());
+        } else if let Some(file) = name.take() {
+            let bytes = unbase64(line.trim()).with_context(|| format!("decoding {file}"))?;
+            let (width, height) =
+                png_size(&bytes).with_context(|| format!("{file} is not a PNG"))?;
+            let expected = if file.ends_with("-1.5x.png") { (1920, 1200) } else { (1280, 800) };
+            ensure!(
+                (width, height) == expected && bytes.len() > 8 * 1024,
+                "{file} is {width}x{height}, {} bytes: expected {expected:?} with something drawn",
+                bytes.len()
+            );
+            distinct.insert(ilex_devkit::core::digest(&bytes));
+            fs::write(artifacts.join(&file), &bytes)?;
+            seen.insert(file);
+        }
+    }
+    ensure!(seen.len() == 75, "{} images came back, expected 75 (25 states in three configurations)", seen.len());
+    ensure!(
+        distinct.len() >= 60,
+        "only {} of {} images differ: pages are not drawing their own states",
+        distinct.len(),
+        seen.len()
+    );
+    println!(
+        "     {} images ({} distinct) in {}",
+        seen.len(),
+        distinct.len(),
+        artifacts.display()
     );
     Ok(())
 }
