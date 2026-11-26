@@ -1347,7 +1347,7 @@ fn install_by_hand(
     artifacts: &Path,
     name: &str,
 ) -> Result<State> {
-    by_hand(vm, disk, host, artifacts, name, true)
+    by_hand(vm, disk, host, artifacts, name, By::default())
 }
 
 /// [`install_by_hand`] when the helper is made to fail the image stage
@@ -1359,7 +1359,67 @@ fn install_by_hand_failing(
     artifacts: &Path,
     name: &str,
 ) -> Result<State> {
-    by_hand(vm, disk, host, artifacts, name, false)
+    by_hand(
+        vm,
+        disk,
+        host,
+        artifacts,
+        name,
+        By {
+            success: false,
+            ..By::default()
+        },
+    )
+}
+
+/// [`install_by_hand_failing`] with the request of the unattended answers of
+/// this fixture, field for field (the host name `ilextest`, German language,
+/// keyboard and time zone, the same administrator) and another password: the
+/// digest of a request holds no password, so the person's plan **is** the
+/// answers' request, digest and all.
+fn install_by_hand_failing_same_plan(
+    vm: &mut Vm,
+    disk: &str,
+    artifacts: &Path,
+    name: &str,
+) -> Result<State> {
+    by_hand(
+        vm,
+        disk,
+        "ilextest",
+        artifacts,
+        name,
+        By {
+            success: false,
+            same_plan_as_answers: true,
+            password: HAND_PASSWORD,
+        },
+    )
+}
+
+/// The password a person at the interface types when the plan is the answers'
+/// own: not the answers' (the digest does not hold it).
+const HAND_PASSWORD: &str = "another-hand-password-7";
+
+/// What an installation by hand does differently.
+#[derive(Clone, Copy)]
+struct By {
+    /// Whether it is made to succeed (else `fault=image` fails its image stage).
+    success: bool,
+    /// Whether its request names the answers' language, keyboard and time zone
+    /// (with the host name the caller gives): the same request as the answers.
+    same_plan_as_answers: bool,
+    password: &'static str,
+}
+
+impl Default for By {
+    fn default() -> Self {
+        Self {
+            success: true,
+            same_plan_as_answers: false,
+            password: PASSWORD,
+        }
+    }
 }
 
 fn by_hand(
@@ -1368,11 +1428,16 @@ fn by_hand(
     host: &str,
     artifacts: &Path,
     name: &str,
-    success: bool,
+    by: By,
 ) -> Result<State> {
+    let By {
+        success,
+        same_plan_as_answers,
+        password: typed,
+    } = by;
     let script = r#"import base64, fcntl, json, os, subprocess, sys, time
 BUS = "org.ilex.Installer1"
-disk, host, admin, password = sys.argv[1], sys.argv[2], sys.argv[3], base64.b64decode(sys.argv[4])
+disk, host, admin, password, same = sys.argv[1], sys.argv[2], sys.argv[3], base64.b64decode(sys.argv[4]), sys.argv[5] == "same"
 
 def call(*args, fds=()):
     return subprocess.run(
@@ -1386,6 +1451,9 @@ def document(ran, what):
 
 request = json.dumps({"composition": "generic.gnome", "disk": disk, "mode": "whole-disk", "encrypt": False,
                       "host_name": host, "administrator": admin})
+if same:
+    request = json.dumps({**json.loads(request), "keyboard": "de-latin1", "language": "de_DE.UTF-8",
+                          "time_zone": "Europe/Berlin"})
 deadline = time.time() + 120
 while True:
     ran = call("Plan", "s", request)
@@ -1416,11 +1484,12 @@ sys.exit(0 if state["outcome"]["result"] == "success" else 1)
         qemu::base64(script.as_bytes())
     ))?;
     vm.ssh_ok(&format!(
-        "nohup sh -c 'python3 /run/by-hand.py {} {} {} {} > /run/by-hand.log 2>&1; echo EXIT=$? >> /run/by-hand.log' > /dev/null 2>&1 &",
+        "nohup sh -c 'python3 /run/by-hand.py {} {} {} {} {} > /run/by-hand.log 2>&1; echo EXIT=$? >> /run/by-hand.log' > /dev/null 2>&1 &",
         crate::installer::apply::shell(disk),
         crate::installer::apply::shell(host),
         crate::installer::apply::shell(ADMIN),
-        qemu::base64(PASSWORD.as_bytes())
+        qemu::base64(typed.as_bytes()),
+        if same_plan_as_answers { "same" } else { "plain" }
     ))?;
     let waited = vm.wait_for(
         "the installation made by hand to end",
@@ -1431,7 +1500,7 @@ sys.exit(0 if state["outcome"]["result"] == "success" else 1)
     let _ = fs::write(artifacts.join(format!("next-{name}-by-hand.txt")), &log);
     waited?;
     ensure!(
-        !log.contains(PASSWORD),
+        !log.contains(typed),
         "the password was printed by the installation made by hand: {log}"
     );
     let state = log
@@ -1809,10 +1878,34 @@ fn stamp_or_none(vm: &Vm) -> Result<Option<Vec<String>>> {
 ///    and is still exactly A, and the 41 GiB disk is byte for byte what the
 ///    failed installation left (the partial installation is not wiped).
 pub(super) fn run_reboot() -> Result<()> {
+    reboot(false)
+}
+
+/// The same, with a person whose plan **equals** the answers' request (the
+/// digest holds no password, so the digest of the installation by hand is A):
+/// `iso::next_unattended_reboot_same_plan`.
+///
+/// The provisional stamp must still hold A: it is what the wiped stamp held, and
+/// "without this request's own" applies to what was only seen. A stamp that took
+/// A out because it is the request being installed leaves no stamp at all, and a
+/// reboot with the stick in wipes the partial installation (or a later installation
+/// carries nothing and the stick wipes that one). So the trial runs the same steps
+/// and the same assertions: the new `/boot` holds exactly A, the record holds A,
+/// and after the power cut the same sticks are refused and the disk is byte for
+/// byte what the failed installation left.
+pub(super) fn run_reboot_same_plan() -> Result<()> {
+    reboot(true)
+}
+
+fn reboot(same_plan: bool) -> Result<()> {
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
     let iso = iso_path()?;
-    let name = "unattended-reboot";
+    let name = if same_plan {
+        "unattended-reboot-same-plan"
+    } else {
+        "unattended-reboot"
+    };
     let root = fixtures(name)?;
     let layout = Layout::new(Source::Cdrom, &root, &iso)?;
     let target = "virtio-ilex-disk-0";
@@ -1841,8 +1934,12 @@ pub(super) fn run_reboot() -> Result<()> {
     );
     let a = stamp[0].clone();
     let started = Instant::now();
-    let state = install_by_hand_failing(vm, target, "ilextest-hand", &artifacts, name)
-        .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-by-hand")))?;
+    let state = if same_plan {
+        install_by_hand_failing_same_plan(vm, target, &artifacts, name)
+    } else {
+        install_by_hand_failing(vm, target, "ilextest-hand", &artifacts, name)
+    }
+    .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-by-hand")))?;
     println!(
         "iso::next {name}: the installation by hand failed in the {:?} stage after {:?}, the disk wiped",
         match &state.outcome {

@@ -132,6 +132,10 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_unattended_late", unattended::run_late),
         trial("iso::next_unattended_repeat", unattended::run_repeat),
         trial("iso::next_unattended_reboot", unattended::run_reboot),
+        trial(
+            "iso::next_unattended_reboot_same_plan",
+            unattended::run_reboot_same_plan,
+        ),
         trial("iso::next_unattended_retry", unattended::run_retry),
         trial("iso::next_unattended_handover", unattended::run_handover),
     ]

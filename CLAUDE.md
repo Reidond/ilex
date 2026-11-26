@@ -3597,22 +3597,45 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   wipe takes the disk's own stamp with it: **the stamp is therefore also written
   provisionally, as soon as the new `ilex-boot` exists and is mounted and before
   the image stage** (`stamp::provisional`, written at the end of the mount
-  stage): the same lists, **without this request's own digest**, so a reboot
+  stage): the same lists, **without this request's own digest where it is only
+  seen** (the answers' record in `/run/ilex-answers-seen`), so a reboot
   between the wipe and a later successful installation (the pull failed, the
   person powered off, the stick stayed in) still finds on the disk the digests
   the wipe took and the answers refused in favour of this installation, while the
   answers being installed, unattended ones alone included, are not "already
-  installed" and stay retryable. No digest to keep (the answers alone, nothing
-  carried) writes no file. It is a new file renamed into place (mode 600, root's)
-  and the file system is synced (`syncfs`), because answers mode reads with
-  `ro,noload` and a reset a moment later must find the file with nothing of the
-  journal to replay. A failure to write it ends the installation (the disk is
-  already wiped, and going on without the protection is worse); the finalise
-  stage overwrites the file with the finished stamp. `bootc install
+  installed" and stay retryable. A digest the disk's own stamp (or this boot's
+  record of wiped stamps) held is **kept whole, even when it is this request's
+  own**: the digest holds no password, so a person's installation through the
+  interface whose plan equals answers A's has A's digest, and A, refused for this
+  disk, must stay refused after the reboot (the stamp left empty, a stick with A
+  would wipe the partial installation, or a later installation, which would carry
+  nothing). Unattended answers whose digest the stamp holds never reach `Apply`,
+  so what the interface installs is never retryable answers. A full list of 256
+  carried digests loses none to this rule. No digest to keep (the answers alone,
+  nothing carried) writes no file. It is a new file renamed into place (mode 600,
+  root's) and the file system is synced (`syncfs`) **and its journal
+  checkpointed** (`EXT4_IOC_CHECKPOINT` with no flags on the mounted `/boot`,
+  Linux 5.17: `jbd2_journal_flush`, which writes the journal's blocks to their
+  places, flushes the device's cache and empties the journal), because answers
+  mode reads with `ro,noload`: `syncfs` commits the journal with a flush but then
+  writes the stamp's directory entry and inode to their places with no flush after
+  them and leaves the transaction in the journal, so a power cut on a device with a
+  volatile write cache could lose them and leave a disk that reads as "no stamp".
+  A failure to write it, or to checkpoint, ends the installation (the disk is
+  already wiped, and going on without the protection is worse; there is no
+  fallback to `syncfs` alone: where the ioctl is missing, mounting `/boot` again
+  would do the same). **A reset between `wipefs` and this write (seconds, the
+  partition and mount stages) loses the carried digests**: only
+  `/run/ilex-installer-earlier` covers that window, and it survives failures in
+  the same boot, not a reset. The finalise stage overwrites the file with the finished
+  stamp as a new file renamed over it (never truncated and written in place: a
+  reset leaves the provisional stamp or the finished one, not an empty file),
+  labelled by the target's policy and then checkpointed (the label is a journalled
+  change of the inode too). `bootc install
   to-filesystem` accepts the file: bootc 1.17's empty-root check
   (`require_empty_rootdir`) does not look inside a directory that is a mount point,
   and the image stage reads the file back after `bootc` and requires it to be what
-  was written (`installer::install` asserts the log line). The digests
+  was written (`installer::install` asserts the log line, and that the journal of `/boot` was checkpointed once after the provisional stamp and once after the finished one). The digests
   answers mode **recorded in this boot** in
   `/run/ilex-answers-seen` (root's file, mode 600, opened without following a
   link and checked on the descriptor; gone at the next boot); and this
@@ -3895,6 +3918,12 @@ person's own request is not in it), read as answers mode reads it, and
 sticks boot again with `/run` new: refused (`already installed`), the stamp read
 from the disk alone is still exactly A and the 41 GiB disk is byte for byte what
 the failed installation left (the partial installation is not wiped).
+`iso::next_unattended_reboot_same_plan` is the same with a person whose plan
+**equals** the answers' request (the host name, language, keyboard and time zone of
+the answers, another password: the digest holds no password, so their digest is
+A): the new `/boot` must still hold exactly A (a stamp that took A out because it
+is the request being installed leaves none), `/run/ilex-installer-earlier` holds
+A, and after the power cut the same sticks are refused and the disk is untouched.
 `iso::next_unattended_retry` boots `reinstall = true` answers over a blank disk
 with the same fault: the unattended installation wipes the disk, mounts the new
 `/boot` and fails in the image stage (`plan=ready`, `apply=started`,

@@ -877,12 +877,14 @@ impl Install {
 
     /// Leave the provisional stamp on the new `/boot` ([`stamp::provisional`]):
     /// the digests that must not erase whatever this boot installs, without this
-    /// request's own, written as soon as the partition is mounted and before the
-    /// image is pulled. It is what a reboot finds if the installation does not
-    /// finish: the disk's old digests and the refused answers stay refused, and
-    /// these answers, being the request being installed, stay retryable. No
-    /// digest to keep writes nothing. The finalise stage overwrites it
-    /// ([`Install::stamp`]).
+    /// request's own unless an earlier stamp held it, written as soon as the
+    /// partition is mounted and before the image is pulled, then checkpointed
+    /// ([`Install::checkpoint_boot`]). It is what a reboot finds if the
+    /// installation does not finish: the disk's old digests and the refused
+    /// answers stay refused, and these answers, being the request being
+    /// installed, stay retryable (unless the disk's stamp held their digest, as
+    /// when a person's plan equals answers refused for this disk). No digest to
+    /// keep writes nothing. The finalise stage overwrites it ([`Install::stamp`]).
     ///
     /// A failure to write it ends the installation: the disk is already wiped, and
     /// going on without the protection against erasing an installation is worse
@@ -899,9 +901,10 @@ impl Install {
             )
         })?;
         if written {
+            self.checkpoint_boot(log)?;
             self.provisional = Some(digests.clone());
             log.line(&format!(
-                "recorded {} digest{} in the provisional /boot/{} (the earlier stamps' and the answers seen in this boot, without this request's own), so that a reboot before the image is in does not lose them",
+                "recorded {} digest{} in the provisional /boot/{} (the earlier stamps' and the answers seen in this boot; this request's own only where an earlier stamp held it), so that a reboot before the image is in does not lose them",
                 digests.len(),
                 if digests.len() == 1 { "" } else { "s" },
                 target::REQUEST_STAMP
@@ -909,6 +912,28 @@ impl Install {
         } else {
             log.line("no digest to keep on the new /boot yet: no provisional stamp is written");
         }
+        Ok(())
+    }
+
+    /// Checkpoint the journal of the new `/boot` ([`stamp::checkpoint`]), as the
+    /// last thing after a stamp is written to it: answers mode reads the stamp with
+    /// `ro,noload`, and `syncfs` leaves the stamp's directory entry and inode in
+    /// the journal and, on a device with a volatile write cache, not necessarily in
+    /// their places. An error ends the installation, like a stamp that cannot be
+    /// written: going on would leave a wiped disk whose protection against
+    /// erasing an installation may not survive a power cut.
+    fn checkpoint_boot(&self, log: &mut StageLog) -> Result<()> {
+        let boot = self.target.join("boot");
+        stamp::checkpoint(&boot).with_context(|| {
+            format!(
+                "making the stamp ({}) on the new /boot readable without a journal replay",
+                target::REQUEST_STAMP
+            )
+        })?;
+        log.line(&format!(
+            "checkpointed the journal of the new /boot (EXT4_IOC_CHECKPOINT): /boot/{} is in its place on the device, where `ro,noload` finds it after a power cut",
+            target::REQUEST_STAMP
+        ));
         Ok(())
     }
 
@@ -941,9 +966,11 @@ impl Install {
     /// unattended mode finds them (read-only) on a later boot of the installer.
     /// They are what [`Install::carried_and_seen`] gathers, then this
     /// installation's own request. Written last-but-one, once the image and the
-    /// account are in place, over the provisional stamp ([`Install::provisional_stamp`])
-    /// the mount stage left: an installation that did not get this far has that
-    /// stamp, which does not hold its own digest, and may be run again.
+    /// account are in place, as a new file renamed over the provisional stamp
+    /// ([`Install::provisional_stamp`]) the mount stage left (a reset leaves one
+    /// or the other, never an empty file), labelled and checkpointed: an
+    /// installation that did not get this far has that stamp, which does not hold
+    /// its own digest unless an earlier stamp did, and may be run again.
     fn stamp(&self, log: &mut StageLog, deployment: &target::Deployment) -> Result<()> {
         let file = self.target.join("boot").join(target::REQUEST_STAMP);
         let own = target::request_digest(&self.plan.request);
@@ -956,8 +983,12 @@ impl Install {
         }
         let (carried, seen) = self.carried_and_seen(log);
         let digests = stamp::merge(&carried, &seen, &own);
-        write_file(&file, stamp::render(&digests).as_bytes(), 0o600)?;
+        // A new file renamed over the provisional one (never truncated in
+        // place: a reset would leave it empty), labelled, and only then
+        // checkpointed, since the label is a journalled change of the inode too.
+        stamp::write_finished(&file, &digests)?;
         self.relabel_mount_point(log, deployment, &file)?;
+        self.checkpoint_boot(log)?;
         log.line(&format!(
             "recorded {} digest{} in /boot/{} (this request's, {} carried from the disk's earlier stamps, {} of answers seen in this boot)",
             digests.len(),

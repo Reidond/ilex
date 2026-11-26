@@ -22,9 +22,16 @@
 //! live only in `/run`, and a reboot between the wipe and a later successful
 //! installation (the pull failed, the person powered off, the stick was left in)
 //! would lose them all. The provisional stamp holds those digests *without* this
-//! request's own: an unattended installation that failed stays retryable (its
-//! answers are not "already installed"), while what was refused in favour of this
-//! installation, and what the disk's stamp held, stays refused.
+//! request's own, as far as it is only *seen*: an unattended installation that
+//! failed stays retryable (its answers are not "already installed"), while what
+//! the disk's stamp held, and what was refused in favour of this installation,
+//! stays refused. A digest the disk's stamp already held stays whatever it is
+//! (a person's installation through the interface whose plan equals answers A's
+//! has A's digest, the password not being part of it, and A must stay refused).
+//!
+//! `/boot` is read with `ro,noload`, so what is written to it must be in its
+//! places on the device and not only in the journal, whatever the device's write
+//! cache does at a power cut: [`checkpoint`] after every write there.
 //!
 //! Every list here is ordered oldest first, each digest once, and a digest
 //! that comes again is *moved* to the newest place, never skipped: the newest
@@ -136,16 +143,21 @@ pub fn merge(carried: &[String], seen: &[String], own: &str) -> Vec<String> {
 
 /// The stamp an installation leaves as soon as its new `/boot` is mounted, before
 /// it has installed anything: what the disk's earlier stamps held and what answers
-/// mode saw in this boot ([`merge`] without the last step), **without `own`**: the
-/// request being installed is not "already installed" until it is, so answers that
-/// fail here stay retryable after a reboot, and a digest that is `own` anywhere in
-/// the lists is taken out (an identical request installed again is being erased,
-/// not protected). The finalise stage overwrites it with [`merge`]'s result.
-/// Empty when there is nothing to keep: no file is written then.
+/// mode saw in this boot ([`merge`] without the last step), without the request
+/// being installed *as far as it is only seen*: the request being installed is not
+/// "already installed" until it is, so answers that fail here stay retryable after
+/// a reboot. `own` is taken out of `seen` and out of nothing else. A digest that
+/// `carried` holds, the disk's own stamp (or this boot's record of the stamps
+/// wiped), is kept whole: unattended answers whose digest it holds are refused
+/// before `Apply`, so a request with `own` among them is an installation through
+/// the interface whose plan equals those answers' (the password is not part of
+/// the digest), and the answers stay refused; losing that digest, or an entry of
+/// a full list, would let them erase this installation after a reboot. The
+/// finalise stage overwrites it with [`merge`]'s result. Empty when there is
+/// nothing to keep: no file is written then.
 pub fn provisional(carried: &[String], seen: &[String], own: &str) -> Vec<String> {
-    let mut all = union(carried, seen);
-    all.retain(|d| d != own);
-    all
+    let seen: Vec<String> = seen.iter().filter(|d| *d != own).cloned().collect();
+    union(carried, &seen)
 }
 
 /// Whether the digest of the request now being made is one the stamp holds:
@@ -229,16 +241,71 @@ fn sync_file_system(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `EXT4_IOC_CHECKPOINT` (`_IOW('f', 43, __u32)`, `<linux/fs.h>`/ext4's ioctls,
+/// Linux 5.17): checkpoint the journal of the file system the descriptor is on.
+const EXT4_IOC_CHECKPOINT: libc::c_ulong = 0x4004_662b;
+
+/// Checkpoint the journal of the ext4 file system `dir` (its mount point) is on,
+/// and make it durable for a reader that does not replay it.
+///
+/// `syncfs` commits the journal (the commit block is written with a flush), then
+/// writes the metadata to its places in the file system, but sends no cache flush
+/// after that and leaves the journal holding the transaction: `ro,noload`
+/// ([`read_boot`]) reads the places, not the journal, so a power cut on a device
+/// with a volatile write cache could lose the new name of the stamp or its inode
+/// and leave a disk that looks as if it held no stamp. `EXT4_IOC_CHECKPOINT`
+/// with no flags is `jbd2_journal_flush`: everything in the journal is written
+/// to its place, the device's cache is flushed, and the journal is marked empty
+/// (the tail is moved, with a flush, once the places are on the device). A reader
+/// that does not replay the journal then finds exactly what a replaying one does.
+///
+/// An error is an error, not a fallback: the caller is not to go on as if the
+/// stamp were durable. (Where the kernel lacks the ioctl, unmounting and mounting
+/// `/boot` again does the same.)
+pub fn checkpoint(dir: &Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)
+        .with_context(|| format!("opening {}", dir.display()))?;
+    let flags: u32 = 0;
+    // SAFETY: a valid descriptor, which stays open for the call, and a pointer
+    // to the one `__u32` the request reads.
+    let done = unsafe {
+        libc::ioctl(
+            handle.as_raw_fd(),
+            EXT4_IOC_CHECKPOINT as _,
+            std::ptr::from_ref(&flags),
+        )
+    };
+    ensure!(
+        done == 0,
+        "EXT4_IOC_CHECKPOINT on {} (the journal's checkpoint, which makes what was written readable without replaying it): {}",
+        dir.display(),
+        std::io::Error::last_os_error()
+    );
+    Ok(())
+}
+
 /// The provisional stamp ([`provisional`]) at `path` (the new `/boot`'s
 /// [`target::REQUEST_STAMP`]): a new file renamed into place, mode 0600, its
 /// contents and its name synced. Nothing is written for no digest, and the
-/// answer says so (`false`).
+/// answer says so (`false`). The caller makes it durable with [`checkpoint`].
 pub fn write_provisional(path: &Path, digests: &[String]) -> Result<bool> {
     if digests.is_empty() {
         return Ok(false);
     }
     write_record(path, digests)?;
     Ok(true)
+}
+
+/// The finished stamp ([`merge`]) at `path`: written as a new file renamed over
+/// the provisional one, never truncated and written in place, so that a reset
+/// leaves the old stamp or the new one and not an empty file. The caller labels
+/// it and makes it durable with [`checkpoint`].
+pub fn write_finished(path: &Path, digests: &[String]) -> Result<()> {
+    write_record(path, digests)
 }
 
 /// Add `digest` to the record at `path` ([`SEEN`]) as its newest: written whole

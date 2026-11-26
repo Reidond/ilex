@@ -3935,6 +3935,130 @@ fn check_apply_rules() -> Result<()> {
 
 /// Answers mode: finding the volume, the file's rules and the checks that come
 /// before the plan.
+/// A file system mounted for the length of a check, unmounted when it ends
+/// however it ends (lazily when the ordinary unmount fails).
+struct Mounted(PathBuf);
+
+impl Mounted {
+    fn ext4(image: &Path, at: &Path, options: &str) -> Result<Self> {
+        fs::create_dir_all(at)?;
+        let (image, at_text) = (image.to_string_lossy(), at.to_string_lossy());
+        let mounted = exec::run(
+            "mount",
+            &["-t", "ext4", "-o", options, &image, &at_text],
+            Duration::from_secs(60),
+        )?;
+        ensure!(
+            mounted.success(),
+            "mounting {image} at {at_text} ({options}): {}",
+            mounted.stderr.trim()
+        );
+        Ok(Self(at.to_owned()))
+    }
+}
+
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        let at = self.0.to_string_lossy().into_owned();
+        let done = exec::run("umount", &[&at], Duration::from_secs(60)).is_ok_and(|o| o.success());
+        if !done {
+            let _ = exec::run("umount", &["-l", &at], Duration::from_secs(60));
+        }
+    }
+}
+
+/// `Journal start:` of an ext4 image (`dumpe2fs -h`): 0 is an empty journal,
+/// anything else is a journal holding transactions a replay would apply.
+fn journal_start(image: &Path) -> Result<u64> {
+    let out = exec::run_ok(
+        "dumpe2fs",
+        &["-h", &image.to_string_lossy()],
+        Duration::from_secs(60),
+    )?
+    .stdout_text();
+    out.lines()
+        .find_map(|line| line.strip_prefix("Journal start:"))
+        .and_then(|number| number.trim().parse().ok())
+        .context("dumpe2fs prints no `Journal start:` (is there a journal?)")
+}
+
+/// The stamp written to a real ext4 `/boot` the way the installer writes it:
+/// the provisional stamp, the checkpoint of its journal, and the finished stamp
+/// over it with its own checkpoint. After each checkpoint the journal is empty
+/// and a copy of the file system mounted `ro,noload` (as answers mode reads a
+/// disk: nothing is replayed) finds the stamp. A directory that is not on ext4
+/// has no checkpoint to make, and that is an error rather than a silent skip.
+/// (A copy of a backing file cannot show what a device's write cache loses at a
+/// power cut: the trial that does is described in the pull request.)
+fn check_checkpoint(root: &Path, digests: &[String], own: &str) -> Result<()> {
+    let image = root.join("boot.img");
+    let copy = root.join("boot-copy.img");
+    let at = root.join("boot-ext4");
+    let seen_at = root.join("boot-ext4-copy");
+    fs::File::create(&image)?.set_len(32 << 20)?;
+    exec::run_ok(
+        "mkfs.ext4",
+        &[
+            "-q",
+            "-F",
+            "-L",
+            target::BOOT_LABEL,
+            &image.to_string_lossy(),
+        ],
+        Duration::from_secs(60),
+    )?;
+    // Read a copy of the image the way answers mode reads the disk.
+    let read_copy = |want: &[String]| -> Result<()> {
+        fs::copy(&image, &copy)?;
+        let mounted = Mounted::ext4(&copy, &seen_at, "loop,ro,noload,nodev,nosuid,noexec")?;
+        let held = fs::read_to_string(seen_at.join(target::REQUEST_STAMP))
+            .context("the stamp is not on a read-only, no-replay mount of the copy")
+            .and_then(|text| stamp::parse(&text));
+        drop(mounted);
+        fs::remove_file(&copy)?;
+        ensure!(
+            held? == want,
+            "a no-replay mount of the copy holds another stamp"
+        );
+        Ok(())
+    };
+    let stamp_file = at.join(target::REQUEST_STAMP);
+    {
+        let _mounted = Mounted::ext4(&image, &at, "loop,nodev,nosuid,noexec")?;
+        // A directory that is not on ext4 cannot be checkpointed: an error.
+        ensure!(
+            stamp::checkpoint(Path::new("/proc")).is_err(),
+            "a directory of procfs was checkpointed"
+        );
+        ensure!(
+            stamp::write_provisional(&stamp_file, digests)?,
+            "no provisional stamp was written"
+        );
+        stamp::checkpoint(&at)?;
+        ensure!(
+            journal_start(&image)? == 0,
+            "the journal of /boot still holds transactions after its checkpoint"
+        );
+        read_copy(digests)?;
+        let finished = stamp::merge(digests, &[], own);
+        stamp::write_finished(&stamp_file, &finished)?;
+        stamp::checkpoint(&at)?;
+        ensure!(
+            journal_start(&image)? == 0,
+            "the journal of /boot still holds transactions after the finished stamp's checkpoint"
+        );
+        read_copy(&finished)?;
+        // A file that is not a directory of the file system is not a mount point
+        // to checkpoint: nothing is made durable on its behalf.
+        ensure!(
+            stamp::checkpoint(&stamp_file).is_err(),
+            "a file was checkpointed as a directory"
+        );
+    }
+    fs::remove_file(&image)?;
+    Ok(())
+}
+
 fn check_answers(parent: &Path) -> Result<()> {
     use ilex_installer_model::probe::{Disk, OtherSystem, Partition};
     let tree = TestDir::new(parent, "answers")?;
@@ -4402,19 +4526,53 @@ fn check_answers(parent: &Path) -> Result<()> {
         "the answers being installed were kept in the provisional stamp"
     );
     // Answers refused in favour of this installation stay; the installation's
-    // own digest is out wherever it is named, and the others keep their order.
+    // own digest is out of what was only *seen* and the others keep their order.
     ensure!(
         stamp::provisional(
-            &[first.clone(), second.clone()],
-            &[third.clone(), first.clone()],
-            &first
-        ) == [second.clone(), third.clone()]
+            std::slice::from_ref(&first),
+            &[second.clone(), third.clone(), second.clone()],
+            &third
+        ) == [first.clone(), second.clone()]
             && stamp::provisional(
                 std::slice::from_ref(&first),
                 std::slice::from_ref(&second),
                 &third
             ) == [first.clone(), second.clone()],
-        "the provisional stamp lost a refused digest, or kept this request's own"
+        "the provisional stamp lost a refused digest, or kept a seen request's own"
+    );
+    // A digest the disk's stamp held (or this boot's record of wiped stamps)
+    // stays, whatever the request being installed is: a person's installation
+    // whose plan equals answers A's (the password is not in the digest) has
+    // own == A, A is in what the wiped stamp held, and A must stay refused after
+    // a reboot, or a stick with A erases the person's installation.
+    ensure!(
+        stamp::provisional(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&first),
+            &first
+        ) == [first.clone()]
+            && stamp::provisional(std::slice::from_ref(&first), &[], &first) == [first.clone()]
+            && stamp::provisional(
+                &[first.clone(), second.clone()],
+                &[third.clone(), first.clone()],
+                &first
+            ) == [first.clone(), second.clone(), third.clone()]
+            && stamp::provisional(
+                &[first.clone(), second.clone()],
+                std::slice::from_ref(&third),
+                &second
+            ) == [first.clone(), second.clone(), third.clone()],
+        "a digest the earlier stamp held was dropped from the provisional stamp because it is this request's own"
+    );
+    // The finished stamp has the request's own digest last, once, wherever the
+    // provisional one held it.
+    ensure!(
+        stamp::merge(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&third),
+            &first
+        ) == [third.clone(), first.clone()],
+        "the finished stamp lost the request's own digest, or kept it twice"
     );
     // The finished stamp is the provisional one and the request's own, last.
     ensure!(
@@ -4436,18 +4594,31 @@ fn check_answers(parent: &Path) -> Result<()> {
         "the finished stamp is not the provisional one and the request's own"
     );
     // A digest of the oldest, named again among the seen, is kept (moved) and
-    // the cut is of the oldest unnamed, with the request's own out.
+    // the cut is of the oldest unnamed. The request's own digest is out of what
+    // was only seen, never out of the carried ones.
     let many: Vec<String> = (0..stamp::MAX_DIGESTS + 5)
         .map(|n| format!("{n:064x}"))
         .collect();
     let cut = stamp::provisional(&many, std::slice::from_ref(&many[0]), &many[10]);
     ensure!(
-        cut.len() == stamp::MAX_DIGESTS - 1
+        cut.len() == stamp::MAX_DIGESTS
             && cut.last() == Some(&many[0])
-            && !cut.contains(&many[10])
+            && cut.contains(&many[10])
             && !cut.contains(&many[1]),
         "an overfull provisional stamp is cut wrongly: {} digests",
         cut.len()
+    );
+    // A full list of carried digests loses none because the request's own is one
+    // of them (the old rule took it out and kept 255); one that is only seen is
+    // not added to it.
+    let full = &many[..stamp::MAX_DIGESTS];
+    ensure!(
+        stamp::provisional(full, &[], &full[10]) == full
+            && stamp::provisional(full, std::slice::from_ref(&full[10]), &full[10]) == full
+            && stamp::provisional(full, std::slice::from_ref(&many[255]), &many[255]) == full
+            && stamp::provisional(&full[1..], std::slice::from_ref(&full[0]), &full[0])
+                == full[1..],
+        "a full list of carried digests lost one because it is the request's own"
     );
     // Written on the new `/boot` the way finalise's file is (root's mode 600, a
     // new file renamed into place and made durable); nothing for no digest.
@@ -4475,15 +4646,17 @@ fn check_answers(parent: &Path) -> Result<()> {
         "answers mode cannot read the provisional stamp"
     );
     // The finished stamp is written over it, and the file is one file still.
-    install::write_file(
-        &provisional_file,
-        stamp::render(&[first.clone(), fourth.clone()]).as_bytes(),
-        0o600,
-    )?;
+    // A new file renamed over it, not the old one truncated and written in
+    // place: the old file's inode is not the new file's, and the mode is 600.
+    let provisional_inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&provisional_file)?);
+    stamp::write_finished(&provisional_file, &[first.clone(), fourth.clone()])?;
     ensure!(
         stamp::parse(&fs::read_to_string(&provisional_file)?)? == [first.clone(), fourth.clone()]
+            && std::os::unix::fs::MetadataExt::ino(&fs::metadata(&provisional_file)?)
+                != provisional_inode
+            && fs::metadata(&provisional_file)?.permissions().mode() & 0o777 == 0o600
             && fs::read_dir(&boot)?.count() == 1,
-        "the finished stamp did not replace the provisional one"
+        "the finished stamp did not replace the provisional one as a new file"
     );
     fs::remove_dir_all(&boot)?;
     // A link where the file goes is not followed: the stamp is a new file.
@@ -4498,6 +4671,11 @@ fn check_answers(parent: &Path) -> Result<()> {
         "a link where the provisional stamp goes was followed"
     );
     fs::remove_dir_all(&boot)?;
+    // On a real ext4 file system (a loop file; root only): the stamp is made
+    // durable for a reader that does not replay the journal.
+    if unsafe { libc::geteuid() } == 0 {
+        check_checkpoint(root, &[first.clone(), second.clone()], &third)?;
+    }
     // The record of the answers seen: root's own file in /run, written whole.
     let seen = root.join("seen");
     ensure!(

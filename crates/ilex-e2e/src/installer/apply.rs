@@ -1239,6 +1239,9 @@ echo "plan_in_logs=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))
 L=$t/ostree/deploy/default/var/log/ilex-installer
 echo "provisional_written=$(grep -h 'recorded .* in the provisional /boot/ilex-install-request.sha256' $L/*-mount.log | sed 's/^.*recorded \([0-9]*\) digest.*$/\1/')"
 echo "provisional_after_bootc=$(grep -h 'the provisional stamp on the new /boot is as it was written after bootc' $L/*-image.log | sed 's/^.*bootc (\([0-9]*\) digest.*$/\1/')"
+P=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' $L/plan.json)
+echo "checkpointed_provisional=$(grep -h 'checkpointed the journal of the new /boot' $L/*-mount.log | wc -l)"
+echo "checkpointed_finished=$(grep -h 'checkpointed the journal of the new /boot' /run/ilex-installer/log/$P/*-finalise.log | wc -l)"
 umount $t
 echo "partitions=$(lsblk -n -o PARTLABEL,FSTYPE,SIZE -r /dev/disk/by-partlabel/ilex-root /dev/disk/by-partlabel/ilex-boot /dev/disk/by-partlabel/ilex-esp | tr '\n' ';')"
 # Nothing of the installation is mounted: in the host's table and in the
@@ -1359,6 +1362,11 @@ fn inspected(text: &str, plan: &Plan) -> Result<()> {
     // before the pull, and `bootc` left it as it was.
     want("provisional_written", "2")?;
     want("provisional_after_bootc", "2")?;
+    // The journal of the new `/boot` was checkpointed after each stamp (the
+    // provisional one, and the finished one over it, labelled), so that a reader
+    // that does not replay the journal finds them after a power cut.
+    want("checkpointed_provisional", "1")?;
+    want("checkpointed_finished", "1")?;
     want("mounted_after", "0")?;
     want("helper_namespace_read", "yes")?;
     Ok(())
