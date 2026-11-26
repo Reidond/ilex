@@ -1689,6 +1689,69 @@ fn check_topology(parent: &Path) -> Result<()> {
         !on_ext4.unresolved.is_empty(),
         "a deleted file on a mounted ext4: {on_ext4:?}"
     );
+    // dracut's iso-scan: the kernel prints the loop device's file relative to
+    // its file system's root (`/live.iso`), a name this system's `/` does not
+    // have, and the disk is mounted where iso-scan mounts it. The file is
+    // found below that mount by the numbers the kernel recorded, not by the
+    // name; a file at that path that is not the recorded one, a path with
+    // nothing at it, and a mount of another device are not.
+    let iso_scan = |label: &str, mounts: &str, below: Option<FileId>| {
+        let mut case = Case::new(label).mounts(mounts).loop_device(loop_of(
+            "loop4",
+            4,
+            iso,
+            loop_row("loop4", iso, 9, Some((8, 33))),
+        ));
+        if let Some(id) = below {
+            case = case.file("/run/initramfs/isoscan/live.iso", id);
+        }
+        case.trace(parent)
+    };
+    let isoscan_mount =
+        "64 16 8:33 / /run/initramfs/isoscan ro,relatime shared:17 - ext4 /dev/sdc1 ro\n";
+    let found = iso_scan("iso-scan", isoscan_mount, Some(file_id((8, 33), 9, None)))?;
+    // (the disk iso-scan mounted is the live medium, as dracut's own mounts say)
+    ensure!(
+        found.live.contains("sdc") && found.live.contains("sdc1") && found.unresolved.is_empty(),
+        "a file found below the host disk's own mount: {found:?}"
+    );
+    // ... and it is a device node if that is what is there: the disk it
+    // stands for is in use too.
+    let node = iso_scan(
+        "iso-scan-node",
+        isoscan_mount,
+        Some(file_id((8, 33), 9, Some((8, 208)))),
+    )?;
+    ensure!(
+        node.live.contains("sdc")
+            && in_use_names(&node).contains(&"sdn")
+            && node.unresolved.is_empty(),
+        "a device node found below the host disk's mount: {node:?}"
+    );
+    for (what, mounts, below) in [
+        (
+            "another inode at that path",
+            isoscan_mount,
+            Some(file_id((8, 33), 8, None)),
+        ),
+        (
+            "another device at that path",
+            isoscan_mount,
+            Some(file_id((8, 49), 9, None)),
+        ),
+        ("nothing at that path", isoscan_mount, None),
+        (
+            "no mount of that device",
+            "64 16 8:49 / /run/initramfs/isoscan ro,relatime - ext4 /dev/sdd1 ro\n",
+            Some(file_id((8, 33), 9, None)),
+        ),
+    ] {
+        let lost = iso_scan("iso-scan-lost", mounts, below)?;
+        ensure!(
+            !lost.unresolved.is_empty(),
+            "a file with {what} was taken for resolved: {lost:?}"
+        );
+    }
     // The same file named by a path that is confirmed is not in doubt.
     let kept = iso_by_name(
         parent,

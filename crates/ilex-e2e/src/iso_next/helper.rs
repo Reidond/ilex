@@ -184,6 +184,15 @@ section lsblk;              lsblk --paths --output NAME,KNAME,MAJ:MIN,TYPE,SIZE,
 section "lsblk json";       lsblk --json --bytes --paths --output NAME,KNAME,TYPE,SIZE,TRAN,RM,RO,FSTYPE,LABEL,PKNAME
 section swaps;              cat /proc/swaps
 section "/run/initramfs";   ls -la /run/initramfs /run/initramfs/isoscan /run/rootfsbase /run/overlayfs /run/ovlwork 2>&1 | head -60
+section "the loop devices' files"
+for d in /sys/block/loop*; do
+    [ -r "$d/loop/backing_file" ] || continue
+    f=$(cat "$d/loop/backing_file"); printf '%s name=[%s] ' "${d##*/}" "$f"
+    for base in "" /run/initramfs/isoscan /run/initramfs/live; do
+        stat -L -c "stat($base$f)=%d:%i %F" "$base$f" 2>&1 | tr '\n' ' '
+    done
+    echo
+done
 section "loop sysfs"
 for d in /sys/block/loop*; do [ -r "$d/loop/backing_file" ] && printf '%s %s\n' "${d##*/}" "$(cat "$d/loop/backing_file")"; done
 section "dm sysfs"
