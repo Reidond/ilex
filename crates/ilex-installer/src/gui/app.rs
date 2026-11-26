@@ -527,7 +527,7 @@ impl Widgets {
         language_group.add(&language);
         let keyboard_group = group(
             "",
-            "The layout is used here at once, and for the disk passphrase and your password when the computer starts. Super+Space switches between the layouts of a session that has several.",
+            "The layout is used here at once, and for the disk passphrase when the computer starts.",
         );
         keyboard_group.add(&keyboard);
         keyboard_group.add(&test);
@@ -743,7 +743,10 @@ impl Widgets {
             });
         }
 
-        // `add` shows the first page of an empty view.
+        // `add` shows the first page of an empty view, before the handlers
+        // below exist: the first page's default widget and focus are set here.
+        root.set_default_widget(Some(&welcome_button));
+        GtkWindowExt::set_focus(root, Some(&language));
 
         Self {
             nav,
@@ -874,7 +877,12 @@ impl Widgets {
             a.password.set_text(flow.password().expose());
         }
         let checks = flow.account_checks();
-        show_message(&a.name_message, &[checks.name.message().cloned()], &[&a.name], None);
+        show_message(
+            &a.name_message,
+            &[checks.name.message().cloned()],
+            &[a.name.upcast_ref()],
+            None,
+        );
         let advice = flow.password_advice();
         let wording = [
             checks.password.message().cloned(),
@@ -899,7 +907,7 @@ impl Widgets {
             show_message(
                 &a.password_message,
                 &[refused],
-                &[&a.password, &a.confirmation],
+                &[a.password.upcast_ref(), a.confirmation.upcast_ref()],
                 None,
             );
         }
@@ -964,27 +972,38 @@ impl Widgets {
     }
 }
 
-/// Show the first refusal beside its field, and mark the rows.
+/// Show the first refusal beside its field, and mark the rows: the error
+/// style, and for assistive technology the rows' invalid state with the
+/// message as their error message.
 fn show_message(
     label: &gtk::Label,
     messages: &[Option<Message>],
-    rows: &[&impl IsA<gtk::Widget>],
+    rows: &[&gtk::Widget],
     _hint: Option<&Message>,
 ) {
-    match messages.iter().flatten().next() {
+    let refusal = messages.iter().flatten().next();
+    match refusal {
         Some(message) => {
             label.set_css_classes(&["caption", "error"]);
             label.set_label(&sentence(message));
             label.set_visible(true);
-            for row in rows {
-                row.add_css_class("error");
-            }
         }
-        None => {
-            label.set_visible(false);
-            for row in rows {
-                row.remove_css_class("error");
-            }
+        None => label.set_visible(false),
+    }
+    for row in rows {
+        if refusal.is_some() {
+            row.add_css_class("error");
+            row.update_state(&[gtk::accessible::State::Invalid(
+                gtk::AccessibleInvalidState::True,
+            )]);
+            row.update_relation(&[gtk::accessible::Relation::ErrorMessage(&[label
+                .upcast_ref::<gtk::Accessible>()])]);
+        } else {
+            row.remove_css_class("error");
+            row.update_state(&[gtk::accessible::State::Invalid(
+                gtk::AccessibleInvalidState::False,
+            )]);
+            row.reset_relation(gtk::AccessibleRelation::ErrorMessage);
         }
     }
 }
