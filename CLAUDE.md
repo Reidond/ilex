@@ -3281,13 +3281,20 @@ installed, and no page writes to a disk.
     `plan_finished`, `keyboard_switched`). It never calls the helper itself,
     so GTK drives it from relm4 messages and commands and Kirigami will from
     cxx-qt signals and a worker thread.
-    - *Answers are numbered.* The flow numbers every request; an answer to any
-      but the latest (late, repeated, out of order, or arriving when nothing is
-      waiting) returns `Stay` and changes nothing. While the helper is asked
-      for the plan (`is_checking`) the setters refuse, so the answer describes
-      what the flow still holds, Back is off and a second request cannot be
-      started: the plan the flow ends up with, and the id a later change
-      applies it by, is always the latest answer's.
+    - *Answers are numbered.* The flow numbers every request and remembers the
+      one probe, plan and layout switch in flight; an answer to any other
+      number (late, repeated, out of order, before any request, or while a plan
+      is checked) returns `Stay` and changes nothing: the probe, the view, the
+      person's configuration and the stale-look flag stay as they were.
+      `start_probe` is refused while the plan is checked (a retry's own look
+      included) and while another probe is outstanding, so there are never two
+      competing probes. While the helper is asked for the plan
+      (`is_checking`) the setters refuse, so the answer describes what the
+      flow still holds, Back is off and a second request cannot be started:
+      the plan the flow ends up with, and the id a later change applies it by,
+      is always the latest answer's. The administrator page does not continue
+      (`can_continue`) until the computer has been looked at: after Back and a
+      banner's Try again it waits for the new look.
     - *The session's layout.* `set_keyboard` records what was asked for and
       returns `SwitchKeyboard` unless the compositor is on it already or a
       switch is under way; that one finishes first and the latest request is
@@ -3302,9 +3309,26 @@ installed, and no page writes to a disk.
       closing page's Try again (`retry`) and Continue after such a result both
       return `RunProbe` first, then the check follows by itself from
       `probe_finished`, with the person's configuration kept while the new look
-      still offers it. A BIOS boot or a failed probe that is found after the
+      still offers it, and a look that resets the choice invalidates the
+      earlier check. A BIOS boot or a failed probe that is found after the
       person left the welcome page is `blocking_problem()` on every page
-      (`can_retry_probe` says whether Try again can mend it).
+      (`can_retry_probe` says whether the banner's Try again can mend it;
+      `can_retry` whether the closing page's can: not for a BIOS boot, which
+      only a restart mends).
+    - *The flow prints.* Every serial-console line is queued by the flow when
+      its cause is accepted, and the interface only prints what
+      `Flow::drain_markers()` hands it after each call: the page marker when
+      the page changes (the first one when the interface says the window is on
+      screen, `window_shown`, with its own `renderer=… scale=…` words and the
+      uptime), the machine page again (marker, composition line, notice) when a
+      probe answers while it is shown, `ILEX-COMPOSITION` only when
+      `select_machine` accepts a different configuration (or a look resets it),
+      the language event only when `set_language` changes it, `result=stale`
+      for an answer that was ignored, and the layout test field's text only
+      through `try_text` when the flow's own gate is open (`echo_try`: the test
+      credential or a simulated session; an interface reads the field only
+      then). `Flow::with_markers(MarkerConfig)` turns it on; a flow without it
+      (the renderer, the self-check) queues nothing.
   - `backend::Backend` is the root helper as a trait with blocking calls (make
     them from a worker thread): `probe`, `plan` and `state` over
     `org.ilex.Installer1` (`DbusBackend`: zbus, the system bus,
@@ -3352,10 +3376,14 @@ installed, and no page writes to a disk.
     rules, each scenario's machine page, the walk from the welcome page to the
     checked plan, the helper's refusal of a name, BIOS, a missing helper, no
     usable disk, a registry that does not answer, an unknown boot argument, the
-    progress rows of an installation; stale and repeated answers, the frozen
-    choices while the plan is checked, serialised layout switches and their
-    failures, Try again looking first and keeping the configuration, a BIOS
-    answer after the first page, and how each D-Bus error name is classified)
+    progress rows of an installation; stale, repeated and unsolicited answers
+    of every request kind, the frozen choices while the plan is checked, no
+    second probe during a check or a retry's look, the administrator page
+    waiting for a pending look, serialised layout switches and their failures,
+    Try again looking first and keeping the configuration, no Try again for a
+    BIOS boot, a BIOS answer after the first page, every marker line the flow
+    queues in order with the test field's gate, and how each D-Bus error name
+    is classified)
     and `selfcheck::system` reads the live image's keyboard catalogue.
 - **The pages.** `AdwNavigationView`, a header bar with the automatic Back
   button (and Escape), Continue at the bottom right of every page. Every control
@@ -3414,7 +3442,10 @@ installed, and no page writes to a disk.
     clears the fields' error style, invalid state and error-message relation.
     The text of a password field is read only when it changes, once, straight
     from the toolkit's secure buffer into a `Secret`; nothing reads it again to
-    compare. The interface process sets `RLIMIT_CORE` to 0 and
+    compare. None of the three text rows (the layout test field and both
+    password rows) keeps an undo history (`enable-undo` off): GtkText would
+    keep unwiped copies of what is typed, the visible text included when
+    "show" is on. The interface process sets `RLIMIT_CORE` to 0 and
     `PR_SET_DUMPABLE` to 0 before its window exists, and the session unit has
     `LimitCORE=0` (the compositor sees the keystrokes too): no core file of
     either, and no other process of the same user can attach to the interface.
@@ -3437,8 +3468,9 @@ installed, and no page writes to a disk.
   order>` on the machine page; `check=` on the last), and `ILEX-INSTALLER
   event=…` lines: `probe result=ok|failed|stale`, `language`, `layout
   layout=<id> applied=true|false`, `notice severity=… text=<the machine page's
-  notice>` and `plan result=ok|refused|failed|stale` (`stale`: the answer to a
-  request that was replaced, which changed nothing). **No field's content is
+  notice>` and `plan result=ok|refused|failed|stale` (`stale`, also on a layout
+  answer: the answer to a request that is not the one in flight, which changed
+  nothing). **No field's content is
   ever printed.** The one exception is only for a test: `try layout=<id>
   text=<what was typed in the layout test field>` is printed, and the field is
   read at all, only when the fixed public test credential
