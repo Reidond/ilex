@@ -2529,6 +2529,38 @@ the Windows paths of this change: no Windows host was available.
   (`nomodeset`); the second makes the session set `GSK_RENDERER=cairo` and
   `LIBGL_ALWAYS_SOFTWARE=1`. The ISO's volume label is
   `ilex-installer-<edition>`.
+- **SELinux: the live image boots permissive and unlabeled.** The kernel
+  command line is `root=live:CDLABEL=… rd.live.image quiet rhgb enforcing=0
+  quiet`: image-builder's `generic-iso` hard-codes `enforcing=0` in the
+  `org.osbuild.grub2.iso` stage's kernel options, and our two entries use its
+  `${root}`. It cannot simply be dropped, because the squashfs carries no
+  labels: the tree is the container image copied by `org.osbuild.container-deploy`
+  into `os-tree` and squashed with no `org.osbuild.selinux` stage (the only
+  one in the manifest labels the build root), so none of the 976 files sampled
+  in `/usr/bin`, `/etc` and `/usr/lib/systemd/system` has a `security.selinux`
+  xattr and the squashfs's xattr table is 69 bytes. Without labels nothing
+  transitions: PID 1 and every process run as `kernel_t`, and files are
+  `unlabeled_t`. The image cannot supply the labels either: `setfiles` run in a
+  `podman build` step (it needs `--cap-add=sys_admin` on a host without SELinux)
+  sets them, but the committed layer loses them (measured on this image:
+  `/usr/bin/true` has no xattrs in the next container), since containers/storage
+  does not keep `security.selinux` in layers. A fix needs a labeling step in the
+  ISO pipeline between `container-deploy` and `squashfs` (an
+  `org.osbuild.selinux` stage with the policy's `file_contexts`, which means
+  upstream image-builder or our own osbuild manifest for the live tree), then
+  `enforcing=1` appended after `${root}` (the last `enforcing=` wins) and a
+  policy module for the installer's own units and the root helper. Until then
+  SELinux confines nothing here: ordinary services already run as `kernel_t`.
+  Measured on the 2026-11-26 image: **154 `avc:  denied` events per boot in the
+  journal's audit transport** (19 of them printed again by the kernel, plus a
+  few from dbus-broker), all permissive, from `systemd-sysctl`, `systemd`,
+  `polkitd`, `systemd-oomd`, `systemd-journald`, `udev-worker`, `systemd-userdbd`,
+  `systemd-resolved`, `irqbalance`, `rtkit-daemon`, `colord`, `chronyd` and
+  `systemd-logind`, with source domain `kernel_t` (sysctl files, device nodes,
+  `mounton` of `/var`, executing `unlabeled_t`). `iso::next_boot` writes the
+  mode, command line, PID 1's and `/usr/bin/bash`'s labels, the event count and
+  the fifteen most frequent denials to `next-surface.txt` (recorded, not
+  asserted); a root helper added later will show up there too.
 - **Serial markers.** The session script and the interface print marker lines
   to the journal and to `/dev/ttyS0` (the user is in `dialout`):
   `ILEX-INSTALLER-SESSION compositor=… graphics=default|basic secure-boot=0|1`,

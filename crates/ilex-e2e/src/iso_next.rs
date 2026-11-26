@@ -392,6 +392,19 @@ echo "=== listening sockets"
 ss -tulnH
 echo "=== units running"
 systemctl list-units --type=service --state=running --no-legend --no-pager | awk '{print $1}'
+echo "=== selinux"
+# The live image boots permissive and unlabeled (image-builder's ${root} carries
+# enforcing=0 and the squashfs holds no security.selinux xattrs): PID 1 and
+# every process run as kernel_t. Recorded, not asserted; CLAUDE.md says why.
+echo "SELINUX-MODE $(getenforce)"
+echo "SELINUX-CMDLINE $(tr ' ' '\n' </proc/cmdline | grep -E '^(enforcing|selinux)=' | tr '\n' ' ')"
+echo "SELINUX-PID1 $(ps -o label= -p 1)"
+echo "SELINUX-BASH $(ls -Z /usr/bin/bash | awk '{print $1}')"
+avc=$(mktemp)
+journalctl -b _TRANSPORT=audit --no-pager -o cat | grep -a 'avc:  denied' > "$avc"
+echo "SELINUX-AVC-EVENTS $(wc -l < "$avc")"
+echo "SELINUX-AVC-TOP (count comm source-domain class target-type)"
+sed -E 's/.*comm="?([^" ]*)"?.*scontext=([^ ]*) tcontext=([^ ]*) tclass=([^ ]*).*/\1 \2 \4 \3/' "$avc" | awk '{split($4, t, ":"); print $1, $2, $3, t[3]}' | sort | uniq -c | sort -rn | head -15
 "#;
     vm.wait_ssh(Duration::from_secs(180))
         .context("the harness's SSH key did not give a login to the live ISO")?;
