@@ -44,9 +44,14 @@
 //!   plugs a stick in after the interface is up and requires that nothing
 //!   changes. `iso::next_unattended_repeat` boots the ISO again with the same
 //!   sticks after a `reinstall = true` installation and requires that the disk
-//!   is not erased again; `iso::next_unattended_handover` makes the helper
-//!   fail to start, and then the unattended process die, and requires that the
-//!   interface starts in both.
+//!   is not erased again; `iso::next_unattended_reboot` fails a person's
+//!   installation after its wipe, stops the machine without a shutdown and
+//!   requires that the disk's stamp still names the old digests and refuses the
+//!   same answers; `iso::next_unattended_retry` fails an unattended
+//!   installation of answers alone after its wipe and requires that those
+//!   answers install after a reboot; `iso::next_unattended_handover` makes the
+//!   helper fail to start, and then the unattended process die, and requires
+//!   that the interface starts in both.
 //! * `iso::next_helper_usb` / `iso::next_helper_cdrom`: the root helper on the
 //!   real ISO, written to a USB stick or attached as an optical drive, beside
 //!   three blank disks (see `iso_next/helper.rs`): the boot medium is
@@ -126,6 +131,8 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_unattended_fat", unattended::run_fat),
         trial("iso::next_unattended_late", unattended::run_late),
         trial("iso::next_unattended_repeat", unattended::run_repeat),
+        trial("iso::next_unattended_reboot", unattended::run_reboot),
+        trial("iso::next_unattended_retry", unattended::run_retry),
         trial("iso::next_unattended_handover", unattended::run_handover),
     ]
 }

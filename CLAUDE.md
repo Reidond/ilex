@@ -3522,7 +3522,10 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   makes each with the fixed credential
   `ilex.installer.fault=helper|answers|apply`, which the helper's and the
   answers units import and which can only make the installer fail; `apply` makes
-  the helper SIGKILL itself right after it has started the installation thread.
+  the helper SIGKILL itself right after it has started the installation thread;
+  `image` (not a hand-over case: `iso::next_unattended_reboot` and `_retry`) makes
+  the image stage fail before `bootc` is run, the disk wiped and the new `/boot`
+  mounted, the helper staying up.
   `ilex-installerd --self-check` runs `answers::settle` over a structured
   refusal, `installation-active`, a bus `NoReply`, a closed connection, a client
   failure, a bus error that carries a refusal's document and a helper-named error
@@ -3589,7 +3592,24 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   later erase the retried installation. (A failure to keep them ends the
   installation in the partition stage with the disk as it was; no digest to keep
   writes nothing, so a retry's empty read never blots out what the first attempt
-  kept.) The digests answers mode **recorded in this boot** in
+  kept.) That record lives in `/run`, so it does not survive a reboot, and the
+  wipe takes the disk's own stamp with it: **the stamp is therefore also written
+  provisionally, as soon as the new `ilex-boot` exists and is mounted and before
+  the image stage** (`stamp::provisional`, written at the end of the mount
+  stage): the same lists, **without this request's own digest**, so a reboot
+  between the wipe and a later successful installation (the pull failed, the
+  person powered off, the stick stayed in) still finds on the disk the digests
+  the wipe took and the answers refused in favour of this installation, while the
+  answers being installed, unattended ones alone included, are not "already
+  installed" and stay retryable. No digest to keep (the answers alone, nothing
+  carried) writes no file. It is a new file renamed into place (mode 600, root's)
+  and the file system is synced (`syncfs`), because answers mode reads with
+  `ro,noload` and a reset a moment later must find the file with nothing of the
+  journal to replay. A failure to write it ends the installation (the disk is
+  already wiped, and going on without the protection is worse); the finalise
+  stage overwrites the file with the finished stamp. `bootc install
+  to-filesystem` accepts the file in the mounted `/boot` (<BOOTC>). The digests
+  answers mode **recorded in this boot** in
   `/run/ilex-answers-seen` (root's file, mode 600, opened without following a
   link and checked on the descriptor; gone at the next boot); and this
   installation's own, last. Each digest is listed once **at the place of its last
@@ -3787,9 +3807,14 @@ old plan is gone, that a new plan lists what the dead installation left among
 what it erases, and that a new `Apply` on the same disk installs a system that
 boots with the administrator able to log in. In the middle of the pull the
 helper has kept the two digests in `/run/ilex-installer-earlier` (root, mode
-600); after the kill the disk's new `ilex-boot` holds no stamp while that record
-still lists them (it outlives the helper); and the retried installation's stamp
-on the booted disk is exactly the two old digests and its own.
+600); after the kill the disk's new `ilex-boot` holds the **provisional stamp**,
+exactly the two old digests (root's, mode 600: written before the pull, and not the
+request being installed), while that record still lists them (it outlives the
+helper); **the live system is then stopped without a shutdown and booted again**
+(`/run/ilex-installer-earlier` is gone, and the disk's stamp, read as answers mode
+reads it, still names both digests); and the retried installation, in that new
+boot, leaves a stamp on the booted disk that is exactly the two old digests and
+its own.
 Measured on a 16-vCPU Boat sandbox (2026-11-26): the five `installer::` trials
 together 1,251 s once the live image's disk exists (1,617 s with it rebuilt;
 `installer::install` alone 250 s: the pull and deployment 3 to 4.3 minutes, every
@@ -3853,6 +3878,29 @@ the **original sticks** (`reinstall = true`) then boot again and must be refused
 (`already installed`) and the disk be byte for byte what the installation by hand
 left; and the edited answers made `reinstall = true` are refused the same way
 (their digest was only seen, never installed), the disk again untouched.
+`iso::next_unattended_reboot` installs with `reinstall = true` (stamp A), boots
+the **same sticks with the fixed credential `ilex.installer.fault=image`** (the
+helper fails the image stage; the answers are refused, `already installed`, and
+the interface starts) and has a person install through the bus: the helper wipes
+the disk (the stamp goes with it), mounts the new `/boot` and fails in the image
+stage with `fault=image`. The new `/boot` must then hold the provisional stamp,
+**exactly A** (carried from the stamp the wipe took and seen in the boot; the
+person's own request is not in it), read as answers mode reads it, and
+`/run/ilex-installer-earlier` holds A. The machine is stopped without a shutdown
+(QEMU ends: the stamp must be readable with no journal replay) and the original
+sticks boot again with `/run` new: refused (`already installed`), the stamp read
+from the disk alone is still exactly A and the 41 GiB disk is byte for byte what
+the failed installation left (the partial installation is not wiped).
+`iso::next_unattended_retry` boots `reinstall = true` answers over a blank disk
+with the same fault: the unattended installation wipes the disk, mounts the new
+`/boot` and fails in the image stage (`plan=ready`, `apply=started`,
+`result=failed ... fault=image`, no hand-over to the interface); the new `/boot`
+has **no stamp** (these answers' own digest, the only one the boot's record
+holds, is not kept), the machine is stopped without a shutdown, and the same
+sticks boot again with no fault: they are not refused as already installed, erase
+the failed installation's partitions (`reinstall=true erases:`), install and
+power off; the installed disk boots on the planned digest and its stamp is one
+digest, its own.
 `iso::next_unattended_handover` boots with the fixed
 credential `ilex.installer.fault=helper` (the helper exits before it takes its bus
 name) and then `=answers` (the unattended process kills itself with `SIGKILL`

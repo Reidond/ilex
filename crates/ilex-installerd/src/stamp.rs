@@ -16,6 +16,16 @@
 //! A digest holds nothing secret and is not derived from a secret (see
 //! [`target::request_digest`]).
 //!
+//! The stamp is also written **provisionally**, as soon as the new `ilex-boot`
+//! exists and is mounted and before the image is pulled ([`provisional`]): the
+//! wipe takes the disk's old stamp with it, the digests of this boot's records
+//! live only in `/run`, and a reboot between the wipe and a later successful
+//! installation (the pull failed, the person powered off, the stick was left in)
+//! would lose them all. The provisional stamp holds those digests *without* this
+//! request's own: an unattended installation that failed stays retryable (its
+//! answers are not "already installed"), while what was refused in favour of this
+//! installation, and what the disk's stamp held, stays refused.
+//!
 //! Every list here is ordered oldest first, each digest once, and a digest
 //! that comes again is *moved* to the newest place, never skipped: the newest
 //! installation's own digest is always the last line, and what is dropped past
@@ -124,6 +134,20 @@ pub fn merge(carried: &[String], seen: &[String], own: &str) -> Vec<String> {
     newest_kept(carried.iter().chain(seen).map(String::as_str).chain([own]))
 }
 
+/// The stamp an installation leaves as soon as its new `/boot` is mounted, before
+/// it has installed anything: what the disk's earlier stamps held and what answers
+/// mode saw in this boot ([`merge`] without the last step), **without `own`**: the
+/// request being installed is not "already installed" until it is, so answers that
+/// fail here stay retryable after a reboot, and a digest that is `own` anywhere in
+/// the lists is taken out (an identical request installed again is being erased,
+/// not protected). The finalise stage overwrites it with [`merge`]'s result.
+/// Empty when there is nothing to keep: no file is written then.
+pub fn provisional(carried: &[String], seen: &[String], own: &str) -> Vec<String> {
+    let mut all = union(carried, seen);
+    all.retain(|d| d != own);
+    all
+}
+
 /// Whether the digest of the request now being made is one the stamp holds:
 /// these answers already installed this disk, or were refused and handed over
 /// while it was installed by hand.
@@ -182,8 +206,39 @@ fn write_record(path: &Path, digests: &[String]) -> Result<()> {
         .with_context(|| format!("writing {}", partial.display()))?;
     file.write_all(render(digests).as_bytes())?;
     file.sync_all()?;
+    drop(file);
     fs::rename(&partial, path).with_context(|| format!("writing {}", path.display()))?;
+    // The whole file system, not just this file: answers mode reads a stamp
+    // with `ro,noload` (nothing of the journal is replayed, so what is only in
+    // the journal is not seen), and a machine that is reset a moment after
+    // this must find the file there, name and contents, with nothing to replay.
+    if let Some(parent) = path.parent() {
+        sync_file_system(parent).with_context(|| format!("making {} durable", path.display()))?;
+    }
     Ok(())
+}
+
+/// `syncfs(2)` on the file system `dir` is on: its data and its metadata are in
+/// their places on the device when this returns.
+fn sync_file_system(dir: &Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let dir = fs::File::open(dir)?;
+    // SAFETY: a valid descriptor, which stays open for the call.
+    let done = unsafe { libc::syncfs(dir.as_raw_fd()) };
+    ensure!(done == 0, "syncfs: {}", std::io::Error::last_os_error());
+    Ok(())
+}
+
+/// The provisional stamp ([`provisional`]) at `path` (the new `/boot`'s
+/// [`target::REQUEST_STAMP`]): a new file renamed into place, mode 0600, its
+/// contents and its name synced. Nothing is written for no digest, and the
+/// answer says so (`false`).
+pub fn write_provisional(path: &Path, digests: &[String]) -> Result<bool> {
+    if digests.is_empty() {
+        return Ok(false);
+    }
+    write_record(path, digests)?;
+    Ok(true)
 }
 
 /// Add `digest` to the record at `path` ([`SEEN`]) as its newest: written whole

@@ -12,6 +12,7 @@
 use crate::{
     disks::{self, Hold},
     exec::{self, Exit, Flow, Job},
+    fault,
     helper::Helper,
     repart,
     secret::{self, Secret},
@@ -67,6 +68,9 @@ pub struct Install {
     admin: Secret,
     /// What the disk's stamp held before it was wiped.
     earlier: stamp::Earlier,
+    /// The digests of the provisional stamp the mount stage left on the new
+    /// `/boot`, when it left one.
+    provisional: Option<Vec<String>>,
     /// The stage that is running (or failed).
     stage: Stage,
 }
@@ -131,6 +135,7 @@ pub fn run(
         nodes: BTreeSet::new(),
         admin,
         earlier,
+        provisional: None,
         stage: Stage::Partition,
     };
     match install.stages(hold) {
@@ -423,6 +428,11 @@ impl Install {
             ],
             TOOL,
         )?;
+        // The disk's old stamp went with the wipe, and the record of what this
+        // boot saw and wiped lives in `/run`: a reboot before the image is in
+        // (the pull fails, the person powers off) would lose them all. They
+        // are on the new `/boot` from here.
+        self.provisional_stamp(&mut log)?;
         self.end(Stage::Mount, &mut log);
         Ok(())
     }
@@ -431,6 +441,14 @@ impl Install {
 
     fn image(&mut self) -> Result<()> {
         let mut log = self.begin(Stage::Image, "Downloading and installing ilex")?;
+        // The `installer::` and `iso::next_unattended_reboot` trials' fault
+        // (the fixed credential ilex.installer.fault=image; it can only make
+        // the installer fail): the stage fails as a pull that fails does, with
+        // the disk wiped, the new `/boot` mounted and nothing deployed.
+        if fault::requested("image") {
+            log.line("fault=image (a test credential): the image stage fails before bootc is run");
+            bail!("fault=image (a test credential): the image stage is made to fail");
+        }
         let source = format!("registry:{}", self.plan.image.source);
         let target = self.target.to_string_lossy().into_owned();
         let expected = (self.plan.image.download_bytes as f64 * WRITTEN_PER_DOWNLOADED) as u64;
@@ -475,6 +493,7 @@ impl Install {
         if !out.exit.success() {
             bail!("bootc {}: {}", out.exit.describe(), last_line(&out.lines));
         }
+        self.provisional_intact(&mut log)?;
         self.helper
             .tracker
             .progress(0.99, Some("Checking what was installed"));
@@ -824,28 +843,15 @@ impl Install {
         Ok(())
     }
 
-    /// Leave the digests of the requests that must not erase this installation
-    /// on the new `/boot` ([`target::REQUEST_STAMP`], one per line), where
-    /// unattended mode finds them (read-only) on a later boot of the installer.
-    /// They are: what the disk's stamp held before it was wiped, from this
-    /// attempt and from any earlier attempt of this boot that was wiped and
-    /// failed (the file [`stamp::EARLIER`], kept just before each wipe: the
-    /// disk of a retry holds nothing of it), what answers mode saw in this boot
-    /// and handed over (the file [`stamp::SEEN`]: answers that did not install
-    /// and must not become new answers because the person installed by hand),
-    /// and this installation's own request. Written last-but-one, once the
-    /// image and the account are in place: an installation that did not get
-    /// this far has no stamp and may be run again.
-    fn stamp(&self, log: &mut StageLog, deployment: &target::Deployment) -> Result<()> {
-        let file = self.target.join("boot").join(target::REQUEST_STAMP);
-        let own = target::request_digest(&self.plan.request);
-        if let Some(why) = &self.earlier.unreadable {
-            // The person confirmed the erase of this disk: what could not be
-            // read is not carried, and the log says so.
-            log.line(&format!(
-                "the disk's earlier stamp could not be read before it was wiped, so its digests are not carried: {why}"
-            ));
-        }
+    /// The digests this installation carries into its stamp, apart from its own:
+    /// what the disk's stamp held before it was wiped, from this attempt and from
+    /// any earlier attempt of this boot that was wiped and failed (the file
+    /// [`stamp::EARLIER`], kept just before each wipe: the disk of a retry holds
+    /// nothing of it), and what answers mode saw in this boot and handed over
+    /// (the file [`stamp::SEEN`]: answers that did not install and must not become
+    /// new answers because the person installed by hand). A record that cannot be
+    /// read is not carried, and the log says so.
+    fn carried_and_seen(&self, log: &mut StageLog) -> (Vec<String>, Vec<String>) {
         let kept = match stamp::read_record(&self.helper.config.earlier_file) {
             Ok(kept) => kept,
             Err(why) => {
@@ -866,6 +872,89 @@ impl Install {
                 Vec::new()
             }
         };
+        (carried, seen)
+    }
+
+    /// Leave the provisional stamp on the new `/boot` ([`stamp::provisional`]):
+    /// the digests that must not erase whatever this boot installs, without this
+    /// request's own, written as soon as the partition is mounted and before the
+    /// image is pulled. It is what a reboot finds if the installation does not
+    /// finish: the disk's old digests and the refused answers stay refused, and
+    /// these answers, being the request being installed, stay retryable. No
+    /// digest to keep writes nothing. The finalise stage overwrites it
+    /// ([`Install::stamp`]).
+    ///
+    /// A failure to write it ends the installation: the disk is already wiped, and
+    /// going on without the protection against erasing an installation is worse
+    /// than a message.
+    fn provisional_stamp(&mut self, log: &mut StageLog) -> Result<()> {
+        let (carried, seen) = self.carried_and_seen(log);
+        let own = target::request_digest(&self.plan.request);
+        let digests = stamp::provisional(&carried, &seen, &own);
+        let file = self.target.join("boot").join(target::REQUEST_STAMP);
+        let written = stamp::write_provisional(&file, &digests).with_context(|| {
+            format!(
+                "keeping the digests of the earlier stamps on the new /boot ({})",
+                target::REQUEST_STAMP
+            )
+        })?;
+        if written {
+            self.provisional = Some(digests.clone());
+            log.line(&format!(
+                "recorded {} digest{} in the provisional /boot/{} (the earlier stamps' and the answers seen in this boot, without this request's own), so that a reboot before the image is in does not lose them",
+                digests.len(),
+                if digests.len() == 1 { "" } else { "s" },
+                target::REQUEST_STAMP
+            ));
+        } else {
+            log.line("no digest to keep on the new /boot yet: no provisional stamp is written");
+        }
+        Ok(())
+    }
+
+    /// `bootc` has run over the `/boot` the provisional stamp is on: the file
+    /// must be what was written. A later stage that fails leaves whatever is
+    /// there, and no stamp would be no protection.
+    fn provisional_intact(&self, log: &mut StageLog) -> Result<()> {
+        let Some(digests) = &self.provisional else {
+            return Ok(());
+        };
+        let file = self.target.join("boot").join(target::REQUEST_STAMP);
+        let now = fs::read_to_string(&file)
+            .with_context(|| format!("bootc ran, and {} cannot be read", file.display()))?;
+        ensure!(
+            stamp::parse(&now).is_ok_and(|held| held == *digests),
+            "bootc changed the provisional stamp on the new /boot ({}): it holds {:?}",
+            target::REQUEST_STAMP,
+            now
+        );
+        log.line(&format!(
+            "the provisional stamp on the new /boot is as it was written after bootc ({} digest{})",
+            digests.len(),
+            if digests.len() == 1 { "" } else { "s" }
+        ));
+        Ok(())
+    }
+
+    /// Leave the digests of the requests that must not erase this installation
+    /// on the new `/boot` ([`target::REQUEST_STAMP`], one per line), where
+    /// unattended mode finds them (read-only) on a later boot of the installer.
+    /// They are what [`Install::carried_and_seen`] gathers, then this
+    /// installation's own request. Written last-but-one, once the image and the
+    /// account are in place, over the provisional stamp ([`Install::provisional_stamp`])
+    /// the mount stage left: an installation that did not get this far has that
+    /// stamp, which does not hold its own digest, and may be run again.
+    fn stamp(&self, log: &mut StageLog, deployment: &target::Deployment) -> Result<()> {
+        let file = self.target.join("boot").join(target::REQUEST_STAMP);
+        let own = target::request_digest(&self.plan.request);
+        if let Some(why) = &self.earlier.unreadable {
+            // The person confirmed the erase of this disk: what could not be
+            // read is not carried, and the log says so.
+            log.line(&format!(
+                "the disk's earlier stamp could not be read before it was wiped, so its digests are not carried: {why}"
+            ));
+        }
+        let (carried, seen) = self.carried_and_seen(log);
         let digests = stamp::merge(&carried, &seen, &own);
         write_file(&file, stamp::render(&digests).as_bytes(), 0o600)?;
         self.relabel_mount_point(log, deployment, &file)?;
@@ -994,7 +1083,7 @@ fn make_dir_mode(path: &Path, mode: u32) -> Result<()> {
     }
 }
 
-fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+pub(crate) fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
     let mut file = fs::OpenOptions::new()
         .write(true)

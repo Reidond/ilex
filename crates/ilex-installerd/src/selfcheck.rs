@@ -4381,6 +4381,123 @@ fn check_answers(parent: &Path) -> Result<()> {
             && merged.last() == Some(&second),
         "a full stamp lost the digest of answers seen again"
     );
+    // The provisional stamp, left on the new `/boot` as soon as it is mounted:
+    // what the earlier stamps held and what answers mode saw, without the
+    // request being installed, so that a reboot before the image is in neither
+    // loses them nor makes the answers that failed "already installed".
+    let fourth = target::request_digest(&request("ilexmaint", "ilextest-four")?);
+    ensure!(
+        stamp::provisional(
+            &[first.clone(), second.clone()],
+            std::slice::from_ref(&third),
+            &fourth
+        ) == [first.clone(), second.clone(), third.clone()],
+        "the provisional stamp is not the earlier digests then the seen ones"
+    );
+    // Unattended answers A alone (seen, nothing carried): nothing is kept, so
+    // that A is still not "already installed" after a failure and a reboot.
+    ensure!(
+        stamp::provisional(&[], std::slice::from_ref(&first), &first).is_empty()
+            && stamp::provisional(&[], &[], &first).is_empty(),
+        "the answers being installed were kept in the provisional stamp"
+    );
+    // Answers refused in favour of this installation stay; the installation's
+    // own digest is out wherever it is named, and the others keep their order.
+    ensure!(
+        stamp::provisional(
+            &[first.clone(), second.clone()],
+            &[third.clone(), first.clone()],
+            &first
+        ) == [second.clone(), third.clone()]
+            && stamp::provisional(
+                std::slice::from_ref(&first),
+                std::slice::from_ref(&second),
+                &third
+            ) == [first.clone(), second.clone()],
+        "the provisional stamp lost a refused digest, or kept this request's own"
+    );
+    // The finished stamp is the provisional one and the request's own, last.
+    ensure!(
+        stamp::merge(
+            &[first.clone(), second.clone()],
+            std::slice::from_ref(&third),
+            &fourth
+        ) == [first.clone(), second.clone(), third.clone(), fourth.clone()]
+            && stamp::provisional(
+                &[first.clone(), second.clone()],
+                std::slice::from_ref(&third),
+                &fourth
+            )[..]
+                == stamp::merge(
+                    &[first.clone(), second.clone()],
+                    std::slice::from_ref(&third),
+                    &fourth
+                )[..3],
+        "the finished stamp is not the provisional one and the request's own"
+    );
+    // A digest of the oldest, named again among the seen, is kept (moved) and
+    // the cut is of the oldest unnamed, with the request's own out.
+    let many: Vec<String> = (0..stamp::MAX_DIGESTS + 5)
+        .map(|n| format!("{n:064x}"))
+        .collect();
+    let cut = stamp::provisional(&many, std::slice::from_ref(&many[0]), &many[10]);
+    ensure!(
+        cut.len() == stamp::MAX_DIGESTS - 1
+            && cut.last() == Some(&many[0])
+            && !cut.contains(&many[10])
+            && !cut.contains(&many[1]),
+        "an overfull provisional stamp is cut wrongly: {} digests",
+        cut.len()
+    );
+    // Written on the new `/boot` the way finalise's file is (root's mode 600, a
+    // new file renamed into place and made durable); nothing for no digest.
+    let boot = root.join("boot-stamp");
+    let provisional_file = boot.join(target::REQUEST_STAMP);
+    fs::create_dir_all(&boot)?;
+    ensure!(
+        !stamp::write_provisional(&provisional_file, &[])? && !provisional_file.exists(),
+        "no digest to keep wrote a provisional stamp"
+    );
+    ensure!(
+        fs::read_dir(&boot)?.next().is_none(),
+        "no digest to keep left something in /boot"
+    );
+    ensure!(
+        stamp::write_provisional(&provisional_file, &[first.clone(), second.clone()])?
+            && fs::read_to_string(&provisional_file)? == format!("{first}\n{second}\n")
+            && fs::metadata(&provisional_file)?.permissions().mode() & 0o777 == 0o600
+            && fs::read_dir(&boot)?.count() == 1,
+        "the provisional stamp is not one file of digests, mode 600, with no partial file beside it"
+    );
+    // What answers mode reads of it is a stamp: the digests, not "no digest".
+    ensure!(
+        stamp::parse(&fs::read_to_string(&provisional_file)?)? == [first.clone(), second.clone()],
+        "answers mode cannot read the provisional stamp"
+    );
+    // The finished stamp is written over it, and the file is one file still.
+    install::write_file(
+        &provisional_file,
+        stamp::render(&[first.clone(), fourth.clone()]).as_bytes(),
+        0o600,
+    )?;
+    ensure!(
+        stamp::parse(&fs::read_to_string(&provisional_file)?)? == [first.clone(), fourth.clone()]
+            && fs::read_dir(&boot)?.count() == 1,
+        "the finished stamp did not replace the provisional one"
+    );
+    fs::remove_dir_all(&boot)?;
+    // A link where the file goes is not followed: the stamp is a new file.
+    fs::create_dir_all(&boot)?;
+    symlink("elsewhere", &provisional_file)?;
+    ensure!(
+        stamp::write_provisional(&provisional_file, std::slice::from_ref(&first)).is_ok()
+            && !fs::symlink_metadata(&provisional_file)?
+                .file_type()
+                .is_symlink()
+            && fs::read_to_string(&provisional_file)? == format!("{first}\n"),
+        "a link where the provisional stamp goes was followed"
+    );
+    fs::remove_dir_all(&boot)?;
     // The record of the answers seen: root's own file in /run, written whole.
     let seen = root.join("seen");
     ensure!(

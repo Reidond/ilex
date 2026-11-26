@@ -64,7 +64,7 @@ use ilex_devkit::cmd;
 use ilex_devkit::core::{Capability, Requirement, SecurityLaunch, VmProvider};
 use ilex_devkit::installer_model::{
     probe::Probe,
-    state::{Outcome, StageStatus, State},
+    state::{Outcome, Stage, StageStatus, State},
 };
 use ilex_devkit::provider::LinuxProvider;
 use ilex_devkit::qemu::{self, Vm, VmConfig};
@@ -1347,6 +1347,29 @@ fn install_by_hand(
     artifacts: &Path,
     name: &str,
 ) -> Result<State> {
+    by_hand(vm, disk, host, artifacts, name, true)
+}
+
+/// [`install_by_hand`] when the helper is made to fail the image stage
+/// (`ilex.installer.fault=image`): the state of the failed installation.
+fn install_by_hand_failing(
+    vm: &mut Vm,
+    disk: &str,
+    host: &str,
+    artifacts: &Path,
+    name: &str,
+) -> Result<State> {
+    by_hand(vm, disk, host, artifacts, name, false)
+}
+
+fn by_hand(
+    vm: &mut Vm,
+    disk: &str,
+    host: &str,
+    artifacts: &Path,
+    name: &str,
+    success: bool,
+) -> Result<State> {
     let script = r#"import base64, fcntl, json, os, subprocess, sys, time
 BUS = "org.ilex.Installer1"
 disk, host, admin, password = sys.argv[1], sys.argv[2], sys.argv[3], base64.b64decode(sys.argv[4])
@@ -1416,10 +1439,20 @@ sys.exit(0 if state["outcome"]["result"] == "success" else 1)
         .find_map(|l| l.strip_prefix("STATE "))
         .with_context(|| format!("the installation made by hand left no state: {log}"))?;
     let state: State = serde_json::from_str(state).context("its final state")?;
-    ensure!(
-        matches!(state.outcome, Some(Outcome::Success)) && log.contains("EXIT=0"),
-        "the installation made by hand did not succeed: {log}"
-    );
+    if success {
+        ensure!(
+            matches!(state.outcome, Some(Outcome::Success)) && log.contains("EXIT=0"),
+            "the installation made by hand did not succeed: {log}"
+        );
+    } else {
+        ensure!(
+            matches!(&state.outcome, Some(Outcome::Failed { stage: Stage::Image, reason })
+                if reason.contains("fault=image"))
+                && state.disk_changed
+                && log.contains("EXIT=1"),
+            "the installation made by hand was not made to fail in the image stage, with the disk wiped: {log}"
+        );
+    }
     Ok(state)
 }
 
@@ -1437,6 +1470,111 @@ fn power_off(vm: &mut Vm) -> Result<()> {
         );
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+/// Boot the ISO over a blank target with the answers in `volume`, wait for the
+/// unattended installation to succeed and the machine to power off, and return
+/// the target's SHA-256 as it was left.
+fn install_first(
+    root: &Path,
+    layout: &Layout,
+    artifacts: &Path,
+    name: &str,
+    target: &str,
+    volume: &Volume,
+) -> Result<String> {
+    let mut guest = boot(
+        root,
+        layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let started = Instant::now();
+    let console = install(vm, &serial, artifacts, name).inspect_err(|_| {
+        diagnostics(vm, artifacts, name);
+    })?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-install-serial.txt")),
+        &console,
+    );
+    ensure!(
+        fields(&console, MARKER, "plan")?
+            .get("disk")
+            .map(String::as_str)
+            == Some(target),
+        "the plan is not for {target}: {console}"
+    );
+    println!(
+        "iso::next {name}: installed and powered off in {:?}",
+        started.elapsed()
+    );
+    drop(guest);
+    volume.unchanged()?;
+    target_digest(root, layout)
+}
+
+/// Boot the ISO again over the installed target with the answers in `volume`
+/// (and the test fault `fault`, if any) and require that they are refused as
+/// `wanted`, that nothing is planned or applied, and that the interface starts.
+/// The guest is returned running, with its console.
+#[allow(clippy::too_many_arguments)]
+fn refused_boot(
+    root: &Path,
+    layout: &Layout,
+    artifacts: &Path,
+    name: &str,
+    volume: &Volume,
+    tag: &str,
+    wanted: &str,
+    fault: Option<&str>,
+) -> Result<(Guest, String)> {
+    let mut guest = boot(
+        root,
+        layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            keep_target: true,
+            fault,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-{tag}")))?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-{tag}-serial.txt")),
+        &console,
+    );
+    ensure!(
+        console.contains("result=failed")
+            && console.contains(wanted)
+            && !console.contains("plan=ready")
+            && !console.contains("apply=started")
+            && !console.contains("reinstall=true erases"),
+        "{tag}: the answers were not refused as {wanted:?}: {console}"
+    );
+    ensure!(
+        !console.contains(PASSWORD),
+        "{tag}: the password was printed: {console}"
+    );
+    vm.wait_for(
+        "the interface after a refusal that wrote nothing",
+        "systemctl is-active ilex-installer-session.service",
+        PAGE_TIMEOUT,
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-{tag}")))?;
+    // The console as it was when the refusal was seen has not got the
+    // hand-over's line yet (the program prints it a moment after `result=`).
+    let console = wait_for_text(&serial, "handover=interface", Duration::from_secs(60))
+        .with_context(|| format!("{tag}: the refusal did not hand over to the interface"))?;
+    Ok((guest, console))
 }
 
 /// The machine that powered off after an unattended installation boots the ISO
@@ -1476,83 +1614,11 @@ pub(super) fn run_repeat() -> Result<()> {
 
     // 1. The installation.
     let volume = answers_volume(&root, &answers(target, target, true))?;
-    let mut guest = boot(
-        &root,
-        &layout,
-        Setup {
-            volume: Some(&volume.path),
-            serials: true,
-            ..Setup::default()
-        },
-    )?;
-    let vm = guest.vm.running_mut()?;
-    let serial = vm.info.dir.join("serial.log");
-    let started = Instant::now();
-    let console = install(vm, &serial, &artifacts, name).inspect_err(|_| {
-        diagnostics(vm, &artifacts, name);
-    })?;
-    let _ = fs::write(
-        artifacts.join(format!("next-{name}-install-serial.txt")),
-        &console,
-    );
-    ensure!(
-        fields(&console, MARKER, "plan")?
-            .get("disk")
-            .map(String::as_str)
-            == Some(target),
-        "the plan is not for {target}: {console}"
-    );
-    println!(
-        "iso::next {name}: installed and powered off in {:?}",
-        started.elapsed()
-    );
-    drop(guest);
-    volume.unchanged()?;
-    let installed = target_digest(&root, &layout)?;
+    let installed = install_first(&root, &layout, &artifacts, name, target, &volume)?;
 
     // 2. The same sticks again.
     let again = |volume: &Volume, tag: &str, wanted: &str| -> Result<(Guest, String)> {
-        let mut guest = boot(
-            &root,
-            &layout,
-            Setup {
-                volume: Some(&volume.path),
-                serials: true,
-                keep_target: true,
-                ..Setup::default()
-            },
-        )?;
-        let vm = guest.vm.running_mut()?;
-        let serial = vm.info.dir.join("serial.log");
-        let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
-            .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-{tag}")))?;
-        let _ = fs::write(
-            artifacts.join(format!("next-{name}-{tag}-serial.txt")),
-            &console,
-        );
-        ensure!(
-            console.contains("result=failed")
-                && console.contains(wanted)
-                && !console.contains("plan=ready")
-                && !console.contains("apply=started")
-                && !console.contains("reinstall=true erases"),
-            "{tag}: the answers were not refused as {wanted:?}: {console}"
-        );
-        ensure!(
-            !console.contains(PASSWORD),
-            "{tag}: the password was printed: {console}"
-        );
-        vm.wait_for(
-            "the interface after a refusal that wrote nothing",
-            "systemctl is-active ilex-installer-session.service",
-            PAGE_TIMEOUT,
-        )
-        .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-{tag}")))?;
-        // The console as it was when the refusal was seen has not got the
-        // hand-over's line yet (the program prints it a moment after `result=`).
-        let console = wait_for_text(&serial, "handover=interface", Duration::from_secs(60))
-            .with_context(|| format!("{tag}: the refusal did not hand over to the interface"))?;
-        Ok((guest, console))
+        refused_boot(&root, &layout, &artifacts, name, volume, tag, wanted, None)
     };
     let (mut guest, _) = again(&volume, "again", "already installed")?;
     let vm = guest.vm.running_mut()?;
@@ -1695,6 +1761,315 @@ pub(super) fn run_repeat() -> Result<()> {
     );
     println!(
         "iso::next {name}: the edited answers (reinstall = true) are refused as well; nothing was written"
+    );
+    Ok(())
+}
+
+// --- iso::next_unattended_reboot and iso::next_unattended_retry -----------------
+
+/// The digests the new `/boot` holds in its stamp after a failure, or `None`
+/// for no stamp file at all: the partition read the way answers mode reads it
+/// (read-only, no journal replay).
+fn stamp_or_none(vm: &Vm) -> Result<Option<Vec<String>>> {
+    let out = vm.ssh_ok(
+        "set -e; d=/dev/disk/by-partlabel/ilex-boot; mkdir -p /run/stamp-look; mount -t ext4 -o ro,noload,nodev,nosuid,noexec $d /run/stamp-look; f=/run/stamp-look/ilex-install-request.sha256; if test -e $f; then stat -c 'mode=%a owner=%U' $f; cat $f; else echo none; fi; umount /run/stamp-look",
+    )?;
+    if out == "none" {
+        return Ok(None);
+    }
+    let mut lines = out.lines();
+    let meta = lines.next().unwrap_or_default();
+    let digests: Vec<String> = lines.map(str::to_owned).collect();
+    ensure!(
+        meta == "mode=600 owner=root"
+            && !digests.is_empty()
+            && digests.iter().all(|d| is_digest(d)),
+        "the stamp on /boot is not root's file of digests, one a line: {out}"
+    );
+    Ok(Some(digests))
+}
+
+/// A reboot between a wipe and a successful installation must not lose what
+/// protects an installation, and must not take the answers that failed for
+/// installed ones.
+///
+/// 1. install over a blank disk with `reinstall = true` and power off (stamp
+///    A);
+/// 2. boot the same sticks with `ilex.installer.fault=image`: refused
+///    (`already installed`), the interface starts; a person installs by hand
+///    (digest I): the helper wipes the disk (the stamp goes with it), mounts the
+///    new `/boot`, and the image stage fails. The new `/boot` already holds the
+///    **provisional** stamp: exactly A (carried from the stamp the wipe took and
+///    seen in this boot; I, the request being installed, is not in it), and
+///    `/run/ilex-installer-earlier` holds A;
+/// 3. the machine is stopped as a power cut would (QEMU ends, no shutdown): the
+///    disk is what the failed installation left;
+/// 4. the same sticks (`reinstall = true`) boot again, `/run` new: the answers
+///    are refused (`already installed`), the stamp is read from the disk alone
+///    and is still exactly A, and the 41 GiB disk is byte for byte what the
+///    failed installation left (the partial installation is not wiped).
+pub(super) fn run_reboot() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let iso = iso_path()?;
+    let name = "unattended-reboot";
+    let root = fixtures(name)?;
+    let layout = Layout::new(Source::Cdrom, &root, &iso)?;
+    let target = "virtio-ilex-disk-0";
+
+    // 1. The installation: stamp A.
+    let volume = answers_volume(&root, &answers(target, target, true))?;
+    let installed = install_first(&root, &layout, &artifacts, name, target, &volume)?;
+
+    // 2. The sticks again, with the image stage made to fail: refused, then a
+    // person's installation wipes the disk and fails.
+    let (mut guest, _) = refused_boot(
+        &root,
+        &layout,
+        &artifacts,
+        name,
+        &volume,
+        "again",
+        "already installed",
+        Some("image"),
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let stamp = stamp_of(vm)?;
+    ensure!(
+        stamp.len() == 1 && seen_of(vm)? == stamp,
+        "the stamp of the first installation is not the one digest answers mode saw: {stamp:?}"
+    );
+    let a = stamp[0].clone();
+    let started = Instant::now();
+    let state = install_by_hand_failing(vm, target, "ilextest-hand", &artifacts, name)
+        .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-by-hand")))?;
+    println!(
+        "iso::next {name}: the installation by hand failed in the {:?} stage after {:?}, the disk wiped",
+        match &state.outcome {
+            Some(Outcome::Failed { stage, .. }) => format!("{stage:?}"),
+            _ => "?".into(),
+        },
+        started.elapsed()
+    );
+    ensure!(
+        state
+            .stages
+            .iter()
+            .any(|s| s.stage == Stage::Partition && s.status == StageStatus::Done)
+            && state
+                .stages
+                .iter()
+                .any(|s| s.stage == Stage::Mount && s.status == StageStatus::Done),
+        "the failed installation did not wipe and mount the disk: {state:?}"
+    );
+    // What the new `/boot` holds, the way answers mode reads it: the stamp the
+    // wipe took is back, provisional, and it is not the request being installed.
+    let provisional = stamp_or_none(vm)?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-provisional-stamp.txt")),
+        provisional
+            .as_ref()
+            .map_or("none".to_owned(), |d| d.join("\n")),
+    );
+    ensure!(
+        provisional.as_deref() == Some(std::slice::from_ref(&a)),
+        "the new /boot of the failed installation does not hold exactly the earlier stamp's digest {a}: {provisional:?}"
+    );
+    let record = vm.ssh_ok(
+        "stat -c 'mode=%a owner=%U' /run/ilex-installer-earlier; cat /run/ilex-installer-earlier",
+    )?;
+    ensure!(
+        record == format!("mode=600 owner=root\n{a}"),
+        "the record kept before the wipe: {record}"
+    );
+    // 3. A power cut: the guest is not shut down.
+    drop(guest);
+    volume.unchanged()?;
+    let failed = target_digest(&root, &layout)?;
+    ensure!(
+        failed != installed,
+        "the failed installation did not change the disk"
+    );
+    println!(
+        "iso::next {name}: the machine is stopped without a shutdown after the failure; the new /boot's provisional stamp holds exactly A ({a})"
+    );
+
+    // 4. The same sticks after the reboot: /run is new, the disk is all there is.
+    let (mut guest, console) = refused_boot(
+        &root,
+        &layout,
+        &artifacts,
+        name,
+        &volume,
+        "after-reboot",
+        "already installed",
+        None,
+    )?;
+    let vm = guest.vm.running_mut()?;
+    ensure!(
+        vm.ssh_ok("test -e /run/ilex-installer-earlier && echo present || echo absent")?
+            == "absent",
+        "the record of kept digests survived a reboot"
+    );
+    let after = stamp_or_none(vm)?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-stamp-after-reboot.txt")),
+        after.as_ref().map_or("none".to_owned(), |d| d.join("\n")),
+    );
+    ensure!(
+        after.as_deref() == Some(std::slice::from_ref(&a)),
+        "the disk's stamp after the reboot is not exactly {a}: {after:?}"
+    );
+    ensure!(
+        !console.contains("apply=started"),
+        "the answers wrote after the reboot: {console}"
+    );
+    drop(guest);
+    volume.unchanged()?;
+    ensure!(
+        target_digest(&root, &layout)? == failed,
+        "the answers that installed the disk first erased the partial installation after the reboot"
+    );
+    println!(
+        "iso::next {name}: after the reboot the same answers (reinstall = true) are refused and the disk is byte for byte what the failed installation left"
+    );
+    Ok(())
+}
+
+/// An unattended installation that fails after the wipe leaves its answers
+/// retryable: `iso::next_unattended_retry`.
+///
+/// 1. boot the ISO over a blank target with `reinstall = true` answers and
+///    `ilex.installer.fault=image`: the installation wipes the disk, mounts the
+///    new `/boot` and fails in the image stage (the console says so, and the
+///    interface is not started). The new `/boot` holds **no stamp**: the only
+///    digest in the boot's record is these answers' own, which is not kept;
+/// 2. the machine is stopped without a shutdown;
+/// 3. boot again with the same sticks and no fault: the answers are not refused
+///    as already installed, they erase the partial installation and install;
+///    the installed disk boots and its stamp is these answers' digest alone.
+pub(super) fn run_retry() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let iso = iso_path()?;
+    let name = "unattended-retry";
+    let root = fixtures(name)?;
+    let layout = Layout::new(Source::Cdrom, &root, &iso)?;
+    let target = "virtio-ilex-disk-0";
+    let volume = answers_volume(&root, &answers(target, target, true))?;
+
+    // 1. The failed installation.
+    let mut guest = boot(
+        &root,
+        &layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            fault: Some("image"),
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, INSTALL_TIMEOUT)
+        .inspect_err(|_| diagnostics(vm, &artifacts, name))?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-failed-serial.txt")),
+        &console,
+    );
+    ensure!(
+        console.contains("plan=ready")
+            && console.contains("apply=started")
+            && console.contains("result=failed")
+            && console.contains("fault=image")
+            && !console.contains("handover="),
+        "the unattended installation was not made to fail in the image stage, or started the interface over a disk it wiped: {console}"
+    );
+    ensure!(
+        !console.contains(PASSWORD),
+        "the password was printed: {console}"
+    );
+    let seen = seen_of(vm)?;
+    let held = stamp_or_none(vm)?;
+    ensure!(
+        seen.len() == 1 && held.is_none(),
+        "the answers' own digest was kept in the stamp of the failed installation: seen {seen:?}, stamp {held:?}"
+    );
+    // 2. A power cut.
+    drop(guest);
+    volume.unchanged()?;
+    let failed = target_digest(&root, &layout)?;
+    println!(
+        "iso::next {name}: the installation failed in the image stage with the disk wiped; the new /boot holds no stamp (the answers' own digest is not kept)"
+    );
+
+    // 3. The same sticks, after the reboot: retried.
+    let mut guest = boot(
+        &root,
+        &layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            keep_target: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let started = Instant::now();
+    let console = install(vm, &serial, &artifacts, name).inspect_err(|_| {
+        diagnostics(vm, &artifacts, name);
+    })?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-retry-serial.txt")),
+        &console,
+    );
+    ensure!(
+        !console.contains("already installed")
+            && console.contains("reinstall=true erases:")
+            && console.contains("apply=started"),
+        "the answers of the failed installation were not retried over what it left: {console}"
+    );
+    let digest = fields(&console, MARKER, "plan")?
+        .get("image")
+        .context("the plan line has no image=")?
+        .clone();
+    println!(
+        "iso::next {name}: the same answers install after the reboot, in {:?}, over the failed installation's partitions",
+        started.elapsed()
+    );
+    drop(guest);
+    volume.unchanged()?;
+    ensure!(
+        target_digest(&root, &layout)? != failed,
+        "the retry left the disk as the failed installation did"
+    );
+    let mut config = VmConfig::new(format!("{}-t", layout.purpose()), layout.target(&root));
+    config.snapshot = true;
+    config.memory = "4G".into();
+    let mut installed = Vm::boot(&ws, &config)?;
+    installed
+        .wait_ssh(PAGE_TIMEOUT)
+        .context("the installed disk did not come up")?;
+    let status = installed.ssh_ok("bootc status --json")?;
+    let status: serde_json::Value = serde_json::from_str(&status)?;
+    ensure!(
+        status["status"]["booted"]["image"]["imageDigest"] == digest.as_str(),
+        "the retried system's digest: {}",
+        status["status"]["booted"]["image"]["imageDigest"]
+    );
+    let stamp = installed.ssh_ok(
+        "f=/boot/ilex-install-request.sha256; stat -c 'mode=%a owner=%U links=%h' $f; cat $f",
+    )?;
+    let _ = fs::write(artifacts.join(format!("next-{name}-stamp.txt")), &stamp);
+    let lines: Vec<&str> = stamp.lines().collect();
+    ensure!(
+        lines.len() == 2 && lines[0] == "mode=600 owner=root links=1" && is_digest(lines[1]),
+        "the stamp of the retried installation is not one digest, its own: {stamp}"
+    );
+    println!(
+        "iso::next {name}: the retried system boots on the planned image; its stamp is the answers' digest alone ({})",
+        lines[1]
     );
     Ok(())
 }

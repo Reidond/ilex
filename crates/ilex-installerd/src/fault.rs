@@ -36,9 +36,12 @@ pub fn pause(file: &Path) {
 /// session's, which reads the value `session`). It can only make the installer
 /// fail or stay quiet: `helper` (the helper exits as soon as it starts, so it
 /// never takes its bus name), `answers` (unattended mode kills itself before
-/// it asks the helper for anything) or `apply` (the helper kills itself as
+/// it asks the helper for anything), `apply` (the helper kills itself as
 /// `Apply` has started the installation thread, so that the call is never
-/// answered). Nothing is read from anywhere else.
+/// answered) or `image` (the image stage fails before `bootc` is run, as a pull
+/// that fails does: the disk is wiped, the new `/boot` is mounted and carries
+/// its provisional stamp, nothing is deployed, and the helper stays up).
+/// Nothing is read from anywhere else.
 pub fn credential() -> Option<String> {
     let dir = std::env::var_os("CREDENTIALS_DIRECTORY")?;
     let text = fs::read_to_string(Path::new(&dir).join("ilex.installer.fault")).ok()?;

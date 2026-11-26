@@ -1236,6 +1236,9 @@ echo "setup_label=$(ls -Z $D/etc/ilex/setup.json | cut -d' ' -f1)"
 echo "hostname_label=$(ls -Z $D/etc/hostname | cut -d' ' -f1)"
 echo "logs=$(ls $t/ostree/deploy/default/var/log/ilex-installer | tr '\n' ' ')"
 echo "plan_in_logs=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["id"])' $t/ostree/deploy/default/var/log/ilex-installer/plan.json)"
+L=$t/ostree/deploy/default/var/log/ilex-installer
+echo "provisional_written=$(grep -h 'recorded .* in the provisional /boot/ilex-install-request.sha256' $L/*-mount.log | sed 's/^.*recorded \([0-9]*\) digest.*$/\1/')"
+echo "provisional_after_bootc=$(grep -h 'the provisional stamp on the new /boot is as it was written after bootc' $L/*-image.log | sed 's/^.*bootc (\([0-9]*\) digest.*$/\1/')"
 umount $t
 echo "partitions=$(lsblk -n -o PARTLABEL,FSTYPE,SIZE -r /dev/disk/by-partlabel/ilex-root /dev/disk/by-partlabel/ilex-boot /dev/disk/by-partlabel/ilex-esp | tr '\n' ';')"
 # Nothing of the installation is mounted: in the host's table and in the
@@ -1351,6 +1354,11 @@ fn inspected(text: &str, plan: &Plan) -> Result<()> {
         "partitions: {}",
         field(text, "partitions")?
     );
+    // The provisional stamp (the two digests the test put in the record of
+    // answers seen, and not the request's own) was written on the new `/boot`
+    // before the pull, and `bootc` left it as it was.
+    want("provisional_written", "2")?;
+    want("provisional_after_bootc", "2")?;
     want("mounted_after", "0")?;
     want("helper_namespace_read", "yes")?;
     Ok(())
@@ -1806,18 +1814,38 @@ fn interrupted() -> Result<()> {
     // The old plan and its password are gone with the process.
     let ran = apply(&vm, "ilex-installer", &first.id, &target.id)?;
     refused(&ran, ErrorCode::UnknownPlan, Some("plan"))?;
-    // The disk of the retry holds no stamp (the new `ilex-boot` the first
-    // installation made has none: nothing on it names the old digests), and
-    // the record in /run, which outlives the helper, still does.
+    // The helper had mounted the new `/boot` when it died: the stamp the wipe
+    // took is back on it, provisional (the two old digests, written before the
+    // pull, and not the request being installed), root's, mode 600; and the
+    // record in /run, which outlives the helper, still lists them.
     let left = ok(
         &vm,
-        "set -e; d=/dev/disk/by-partlabel/ilex-boot; mkdir -p /run/stamp-look; mount -t ext4 -o ro,noload,nodev,nosuid,noexec $d /run/stamp-look; echo stamp_files=$(ls -A /run/stamp-look | grep -c '^ilex-install-request' || true); umount /run/stamp-look; echo kept=$(tr '\\n' ' ' < /run/ilex-installer-earlier)",
+        &format!("{LOOK_AT_STAMP}; echo kept=$(tr '\\n' ' ' < /run/ilex-installer-earlier)"),
     )?;
     bench.save("stamp-after-kill.txt", &left);
     ensure!(
-        left == format!("stamp_files=0\nkept={OLD_ONE} {OLD_TWO}"),
-        "the retry's disk, or the record that outlives the helper: {left}"
+        left == format!("mode=600 owner=root\n{OLD_ONE}\n{OLD_TWO}\nkept={OLD_ONE} {OLD_TWO}"),
+        "the provisional stamp on the retry's disk, or the record that outlives the helper: {left}"
     );
+    // A reboot before any retry: the machine is stopped as a power cut would
+    // (the guest is not shut down) and the live system starts again. `/run` is
+    // new, so only the disk can still name the old digests.
+    drop(vm);
+    let vm = bench.boot_live()?;
+    ensure!(
+        ok(
+            &vm,
+            "test -e /run/ilex-installer-earlier && echo present || echo absent"
+        )? == "absent",
+        "the record of kept digests survived a reboot"
+    );
+    let after_reboot = ok(&vm, LOOK_AT_STAMP)?;
+    bench.save("stamp-after-reboot.txt", &after_reboot);
+    ensure!(
+        after_reboot == format!("mode=600 owner=root\n{OLD_ONE}\n{OLD_TWO}"),
+        "the disk's stamp after the reboot does not name the old digests: {after_reboot}"
+    );
+    println!("     after a reboot the new /boot's stamp still names the two old digests");
 
     // A retry: a new plan sees what the dead installation left on the disk
     // (ilex's own partitions, nothing in use), says so and installs over it.
@@ -1895,8 +1923,9 @@ fn interrupted() -> Result<()> {
         login == ADMIN,
         "the retried system's administrator: {login}"
     );
-    // The retry read an empty stamp from its disk, and its own stamp still
-    // holds what the erased one did: both old digests, then the request's own.
+    // The retry, in a boot of its own, read the provisional stamp from its disk
+    // (the record in /run was gone), and its own stamp holds what the erased one
+    // did: both old digests, then the request's own.
     let stamp = installed.ssh_ok(
         "f=/boot/ilex-install-request.sha256; stat -c 'mode=%a owner=%U links=%h' $f; cat $f",
     )?;
@@ -1920,6 +1949,11 @@ fn interrupted() -> Result<()> {
     );
     Ok(())
 }
+
+/// Read the stamp of the new `/boot` the way answers mode does (read-only, no
+/// journal replay): its mode and owner, then its lines. Fails when there is no
+/// stamp.
+const LOOK_AT_STAMP: &str = "set -e; d=/dev/disk/by-partlabel/ilex-boot; mkdir -p /run/stamp-look; mount -t ext4 -o ro,noload,nodev,nosuid,noexec $d /run/stamp-look; f=/run/stamp-look/ilex-install-request.sha256; stat -c 'mode=%a owner=%U' $f; cat $f; umount /run/stamp-look";
 
 /// A script for the live system: the disk `path` gets a GPT with one
 /// `ilex-boot` partition (an XBOOTLDR partition with an ext4 file system) that
