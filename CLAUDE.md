@@ -2401,7 +2401,9 @@ directory outside the artifacts. Seal the successful export with
 `installer/next/` is the live installer of ilex's own installer, which will
 replace Anaconda. This version delivers the live image only: no Anaconda,
 Cockpit, Firefox or Python chooser, and a placeholder interface that names
-the edition and shows the machine's DMI identity. Nothing is installed. The
+the edition and shows the machine's DMI identity; nothing in the live image
+asks a person anything yet. (The root helper below installs, through its bus
+methods and from an answers volume; the pages come later.) The
 Anaconda network installer above is unchanged and stays the released one:
 `installer/next` is excluded from its fingerprint (`ilexctl iso --due`).
 
@@ -2935,7 +2937,9 @@ the Windows paths of this change: no Windows host was available.
 The next installer (a Rust interface per shell on its own live ISO, replacing
 Anaconda) is built beside the released Anaconda ISO. Its live image is
 `installer/next/`; this section covers the shared model and the root helper
-only. Nothing here installs: the helper probes and plans, and writes to no disk.
+only: it probes, plans and, on `Apply`, installs a signed composition to a whole
+disk (no encryption yet). Everything up to the first write is checked again at
+`Apply`; the interface that asks a person for the answers is not here.
 
 `crates/ilex-installer-model` holds what the host that writes the composition
 table and the installer that reads it must agree on: the table types
@@ -2987,8 +2991,8 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   a refused call still starts the helper, which is harmless: it is started at
   boot anyway and answers only the allowed. Every method takes and returns JSON text and none takes
   a path, an image reference, a kernel argument or a command. A crashed helper
-  restarts and forgets its plans (a later Apply must record its stage before it
-  writes anything and must not resume by itself). `Probe()` reports the helper
+  restarts and forgets its plans and secrets, and reports an installation it did
+  not end as failed (see **Apply** below). `Probe()` reports the helper
   and edition, firmware (UEFI, Secure Boot, setup mode), `ilex-enroll`'s probe
   verbatim, the DMI identity and detection, the boot-argument selection (or its
   error), this edition's catalogue, the disks and memory. A disk has a stable id
@@ -3174,13 +3178,11 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   `Plan` opens the chosen disk again after the registry and `systemd-repart`
   have answered, immediately before it returns, and refuses (`in-use`) if the
   kernel now says it is held. That re-check only narrows the window between the
-  plan and the write: **Apply (I3) must claim the disk again right before it
-  writes** and must not rely on an earlier answer. Holding a whole disk
-  exclusively makes the kernel refuse exclusive opens of its partitions
-  (`mkfs`, `cryptsetup`, `mount` on `/dev/sdXN` fail with `EBUSY` while the
-  whole-disk claim is open), so I3 must decide how long to hold it (for the
-  repartitioning itself, then release it for what formats and mounts the new
-  partitions) and what it does in between.
+  plan and the write: **`Apply` claims the disk again right before it writes**
+  and does not rely on an earlier answer (see **Apply** below for how long it
+  holds the claim and why). Holding a whole disk exclusively makes the kernel
+  refuse exclusive opens of its partitions (`mkfs`, `cryptsetup`, `mount` on
+  `/dev/sdXN` fail with `EBUSY` while the whole-disk claim is open).
   The exclusive open does **not** replace the trace: a loop device attached to a
   block device node (`losetup /dev/sdb1`) claims nothing, which is what the
   trace of loop devices is for. **Known limit of both:** a writer that never
@@ -3196,8 +3198,7 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   volume group). A deliberate root saboteur (spoofing a FUSE subtype, crafting
   device nodes and deleting them) is out of scope, though a gap is closed where
   that is cheap and fails closed (the tmpfs/`nodev` rule, the `st_rdev` rule and
-  the FUSE paths above). Whoever writes to a disk (Apply, I3) must open it
-  exclusively as well.
+  the FUSE paths above). `Apply`, which writes to a disk, opens it exclusively too.
   An ESP is mounted read-only (`noexec,nodev,nosuid`) by a child of the helper
   (`--scan-esp`) inside `unshare --mount`, at a per-call mount point in a
   private 0700 directory the helper made under its runtime directory (never a
@@ -3270,7 +3271,159 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   Secrets never print, and a TOML error names the line and column but never the
   text (toml's own message quotes the line). The administrator's password may not
   contain a line break or NUL, the passphrase no NUL.
-  Reading the volume and applying the answers are later work.
+  The volume is read and the answers applied by **answers mode** below.
+- **Apply** (`SetSecret(plan, kind, fd)`, `Apply(plan, erase_disk)`, `State()`
+  and the signals `Progress(stage, fraction, message)` and `Finished(outcome)`,
+  `crates/ilex-installerd/src/{apply,install,secret,policy,target,progress}.rs`)
+  installs what a plan describes to a whole disk, unencrypted: `partition →
+  mount → image → configure → account → finalise`, the plan's 9.1 order without
+  the stages encryption adds (`Apply` refuses an encrypted plan, and a disk
+  passphrase, until those arrive). `SetSecret` takes the administrator's
+  password (`admin-password`) as the file descriptor of a **sealed memfd**
+  (`F_SEAL_SEAL|SHRINK|GROW|WRITE`, 4 KiB at most; anything that is not one is
+  refused without saying what it held), reads it once into `mlock`ed memory
+  that is zeroed when dropped, and keeps it for that plan only (a plan that is
+  forgotten, or a helper that restarts, loses it). The helper has no core dumps
+  and is not traceable (`PR_SET_DUMPABLE=0`); the password reaches `chpasswd` on
+  its standard input and no argument, log line, state field or message ever holds
+  it (the tier greps the helper's files, the journal and the target for it).
+  - **Before the first write**, in this order, each refusal naming its code
+    (`ErrorCode`) and field and leaving every disk byte for byte as it was:
+    the plan is one this helper made and is under 15 minutes old (`unknown-plan`,
+    `plan-expired`); whole-disk mode needs `erase_disk` to repeat the disk's id
+    (`invalid-field`); the administrator's password was set (`missing-secret`);
+    **the image's signature is accepted by the installer's policy**
+    (`signature`: `systemd-repart` and the registry come later, the pull and its
+    verification happen after the disk is erased, so the pinned
+    `repository@sha256:...` goes first through `skopeo copy` into a scratch
+    directory, which checks the policy and the signatures before it fetches a
+    layer and is stopped at the first one; a rejection says so, a network failure
+    is `registry` and not a verdict); a fresh probe still shows the same disk (id,
+    path, model, serial, size, bus, partition table, partitions: `disk-changed`),
+    not the live medium and not in use; **the helper claims the whole disk
+    exclusively** (`O_EXCL`; `in-use` otherwise); with the claim held, the disk
+    is probed again (the held disk is not claimed a second time and its ESP not
+    mounted) and `systemd-repart`'s dry run with the plan's seed must equal the
+    plan's partitions exactly. Only then is the first stage recorded and the
+    installation thread started; `Apply` returns the state as it begins. While it
+    runs, `Probe`, `Plan` and a second `Apply` are refused (`installation-active`).
+  - **How long the claim is held.** From the last look until the moment before
+    the partition stage's first tool, and not a moment longer. `systemd-repart`
+    262 (the live image's) formats a new partition through its own device node
+    (`Formatting /dev/vda1 as vfat`), which the kernel refuses while any other
+    open of the whole disk holds it exclusively: under a held claim it failed with
+    `mkfs.vfat: unable to open /dev/vda1: Device or resource busy` and `Failed to
+    reread partition table: Device or resource busy` (measured on the live image
+    in a VM with `O_EXCL` held from another process). It uses no loop device. Nor
+    can a later stage hold it: `mount`, `mkfs` and `bootc` open the partitions
+    exclusively. So the stage is recorded and `disk_changed` set first, the claim
+    ends, and the stage runs `wipefs --all` and `systemd-repart`, whose JSON must
+    equal the plan's partitions; the new partitions are then found by their UUIDs
+    and checked against sysfs (a block device, the planned number, the planned
+    disk as parent, the planned size) before anything is mounted. A process that
+    claims the disk in that window makes the tools fail closed, with the stage and
+    the disk marked. `wipefs --all` is there because `systemd-repart
+    --empty=force` on a disk that already has partitions wipes the table but not
+    the kernel's partitions and then cannot add the first one (`Failed to create
+    new partition '/dev/vda1': Device or resource busy`, reproduced by running it
+    twice): whole-disk mode on a used disk, the case it exists for, needs the
+    kernel to forget them first, and the stage waits until sysfs lists none.
+  - **The stages.** `mount` mounts the ESP at `boot/efi`, `/boot` and the root
+    (btrfs, no subvolumes, as `bcvk to-disk` makes) under `/run/ilex-installer/target`
+    in the helper's private mount namespace. `image` runs `bootc install
+    to-filesystem --source-imgref registry:<repository>@<digest> --target-imgref
+    <repository>:<tag> --enforce-container-sigpolicy --skip-finalize`. The pull
+    is of the digest the plan pinned (measured: installing the digest of an older
+    image under the current tag deployed the older image, `ostree.manifest-digest`
+    of the deployment being the pinned one; the machine tracks the tag).
+    Three properties of the live system matter and are the ISO's: `bootupd`
+    chooses its components from how the **live system** booted, so it must be
+    UEFI (`bootupctl --auto` on a direct-kernel BIOS boot installs GRUB for BIOS
+    and fails without a BIOS boot partition); SELinux must be **permissive** (the
+    ISO boots `enforcing=0`; under enforcing, bootc cannot enter its `install_t`
+    domain from the helper's: `Failed to enter install_t`); and the live root must
+    not be an ostree host (bootc asks `ostree --repo=/ostree/repo rev-parse
+    --single` and stops at "Multiple commit objects found" if the live image was
+    installed to a disk, as the `installer::` trials do, hence the harness hides
+    `/sysroot/ostree`). Afterwards the deployment must be the only one, its origin
+    must be `ostree-image-signed:docker://<target>` (the container signature
+    policy is enforced for updates) and the manifest digest the pinned one.
+    `configure` writes, with `systemd-firstboot --root=<deployment> --force`,
+    `locale.conf`, `vconsole.conf` (keymap and, from systemd's own map, the X11
+    layout `XKBLAYOUT`), `localtime` and `hostname`; `/etc/ilex/setup.json` as the
+    Anaconda path writes it (schema 1, the composition, the image the machine
+    tracks, no profile, TPM `not-configured`); no line for `/` in `fstab` (bootc
+    writes one for `/boot`); and checks the default target is `graphical.target`
+    for a composition with a shell (the image says so itself; the stage repairs it
+    if a composition ever ships without). `account` bind-mounts the stateroot's
+    `var` at the deployment's `/var` (the deployment's is an empty mount point)
+    and mounts a `proc` at its `/proc`, runs `useradd --root <deployment>
+    --create-home --groups wheel` and `chpasswd --root <deployment>` (password on
+    standard input), and unmounts both. The `/proc` is not decoration: both tools
+    chroot, and without it libselinux cannot see that SELinux is on, let alone
+    permissive, so `pam_unix` asks whether `passwd` may change a password, is told
+    no for the live system's unlabeled domain and `chpasswd` fails with
+    "Authentication token manipulation error" (reproduced on the ISO's layout; it
+    works with SELinux disabled, or with `/proc`). It then verifies the `passwd`,
+    `shadow` (a hash) and `group` entries and relabels what the helper wrote with
+    `setfiles -c <the deployment's compiled policy> -F -r <deployment>` against
+    the deployment's own `file_contexts` (`/etc/passwd`, `shadow`, ...,
+    `/etc/ilex`, `/var/home` with the stateroot as the root of the lookup). `-c`
+    matters: without it `setfiles` validates every context against the policy the
+    live system has loaded, which can be older than the target's, and one type it
+    lacks (the flatpak helper's, measured) fails the whole file with "context ...
+    is invalid" and "Invalid argument". `finalise` copies the stage logs and
+    `plan.json` (no secrets) to the new system's `/var/log/ilex-installer/`,
+    relabels them, `sync`s, `fstrim`s, and unmounts everything of the target,
+    deepest first, including the `/run/bootc/storage` mount `bootc` leaves; it
+    fails if a mount is left. Each tool runs with a clean environment in its own
+    process group under a deadline and `PR_SET_PDEATHSIG`, so a helper that dies
+    takes the tool that writes to the disk with it.
+  - **State, progress, logs.** Each stage is recorded in
+    `/run/ilex-installer/state.json` (mode 0600, written to a file of its own and
+    renamed) **before it writes anything**, and a stage whose record cannot be
+    written does not begin. `State()` carries `active`, `stages` (each with its
+    status and times: the progress page's list), `stage`, `progress` (0 to 1
+    within the stage), `message`, the last 40 lines of what the tools printed,
+    `disk_changed`, `applied` (the plan) and `outcome`; documents from before
+    `Apply` still parse. The pull's bar is the bytes in use on the target against
+    2.4 times the download size, never above 0.97 until `bootc` ends. `Progress`
+    is sent at most every half second and at each stage's start; `Finished`
+    once. Every tool's output goes to `/run/ilex-installer/log/<plan>/NN-<stage>.log`
+    (0700/0600, command lines and exit codes included).
+  - **Failure and a helper that dies.** A failed stage names itself and the tool in
+    `outcome` (`bootc exited 1: <its last line>`), unmounts what is mounted and
+    leaves the partitions as they are with `disk_changed` true; **there is no
+    resuming and no in-place retry**: a retry is a new `Plan` (which lists the
+    leftover ilex partitions as what it erases), a new `SetSecret` and a new
+    `Apply`. A helper that is killed in the middle is started again by systemd
+    (`Restart=on-failure`; its tools died with it), reads the state file, reports
+    the installation as failed in the stage it was in (`the installer's helper
+    stopped ... the disk was already changed`), has no plans or secrets, mounts
+    nothing and starts nothing by itself. (The plan says the unit does not restart
+    mid-installation; it does, so that `State()` still answers and the interface
+    can show the problem.)
+- **Answers mode** (`ilex-installerd --answers [--then poweroff]`, started by
+  `ilex-installer-answers.service`): an installation with no interface. A udev
+  rule starts the unit when a volume labelled `ILEX-ANSWERS` appears (at boot or
+  later); the unit conflicts with the interface's session and its watcher, so
+  none is drawn. It mounts the volume read-only (`nodev,nosuid,noexec`, in the
+  unit's private mount namespace; ext4, XFS, btrfs, exFAT, ISO 9660 or UDF: a FAT
+  volume cannot carry a 12-character label), reads `answers.toml` (a regular
+  file, 64 KiB at most; no link followed), unmounts, and calls the helper's own
+  methods as root: `Probe`, `Plan` (the answers' composition, else the boot
+  choice, else detection), `SetSecret` (a sealed memfd made here), `Apply`, then
+  `State` once a second. It refuses an answers file that is not valid (by line and
+  column, never its text), a whole-disk request whose `confirm-erase` is not the
+  disk, a volume that is on the disk it would erase, and `[encryption] enabled =
+  true` until encryption exists. Every line it prints starts `ILEX-INSTALLER-ANSWERS`
+  with `key=value` words (`volume=`, `plan=ready disk= composition= image=`,
+  `apply=started`, `stage= progress= message=`, and last `result=success` or
+  `result=failed <reason>`), to the journal, the console and, without waiting
+  for it, `/dev/ttyS0`. On success with `--then poweroff` (the unit's) it powers
+  the machine off, so that it does not boot its medium again; on failure it leaves
+  the machine up. One attempt per boot (`StartLimitBurst=1`). The password is read
+  into memory that is wiped and never printed.
 - **The live image** gains the helper and `ilex-enroll` (built in the same
   builder stage), `compositions.json` generated like the Anaconda ISO's, the
   bus policy, the unit and the repart definitions under
@@ -3366,6 +3519,58 @@ mount layout; exiting tasks (a vanished process hides nothing of its
 namespace, `EINVAL` from an exiting task's `mountinfo` is a task that is gone,
 any other failure is not); the live ISO's own boot is `iso::next_helper_usb`,
 `iso::next_helper_cdrom` and, as a file on another disk, `iso::next_helper_loop`.
+
+Three more `installer::` trials write disks, so each boots **UEFI VMs of its own**
+(not the group's bcvk ephemeral VM, which boots a kernel directly: `bootupctl
+--auto` there chooses BIOS, see **Apply**): the live image is written to a disk
+with `bcvk to-disk` (one-time per image, about 20 minutes on a Boat sandbox; the
+harness's layer adds sshd and a bootc install configuration, and the live
+image's own `/etc/containers/policy.json` must leave the local transports open
+for bcvk's inner install), booted under OVMF beside a sparse 41 GiB target and a
+3 GiB sentinel disk, and called as `ilex-installer` over the bus. The installed
+target is then booted in a VM of its own. `installer::policy` is every refusal
+before the first write, each followed by proof that nothing was written (the
+first and last 16 MiB of both disks and `lsblk` are unchanged, no log directory
+exists, `State` is idle): no secret, an unsealed or empty memfd, a password with
+a line break, an unknown kind, a passphrase for an unencrypted plan, a secret for
+an unknown plan, `nobody` and `daemon` refused by the bus, no confirmation, the
+wrong disk's id or a path, an unknown plan, a key that is not ilex's, no
+signature found, a plan older than its validity (the helper restarted with
+`--plan-valid-seconds 5`), a restarted helper that has forgotten its plans, a
+disk partitioned since the plan, a partition mounted since the plan, and a disk
+another process holds open exclusively; at the end the password is in none of the
+helper's files nor the journal. `installer::install` installs `generic.gnome`
+with a German keyboard, locale, zone and host name and an administrator whose
+password has spaces, colons and quotes; watches `Apply`, `Plan` and `Probe` be
+refused during the pull, `State` and `/run/ilex-installer/state.json` agree,
+stages only move forward, the pull's bar rises without ever being full early, and
+the signals (`busctl monitor`) carry every stage and one `Finished`; reads the
+target from the live system (one deployment, origin
+`ostree-image-signed:docker://ghcr.io/reidond/ilex:generic.gnome`, the pinned
+digest in the commit's metadata, `hostname`, `locale.conf`, `vconsole.conf` with
+`XKBLAYOUT`, `localtime`, no `/` line in `fstab`, `graphical.target`,
+`setup.json` key for key, the account and `wheel`, labels `shadow_t`,
+`passwd_file_t`, `user_home_dir_t`, the copied logs); boots it and asserts
+`bootc status` (digest, tracked tag, `containerPolicy`), the answers as `hostnamectl`,
+`timedatectl` and `localectl` report them, running with no failed unit, GDM, the
+administrator's SSH login **with the password** and `sudo`, a wrong password
+refused, no AVC and no `restorecon -n` change, `bootc upgrade --check`, and keeps
+`installed-layout.txt` (`lsblk -f`, the kernel command line, `fstab`, `crypttab`,
+mounts, swap, `bootc status`, the partition table; the Anaconda trial records the
+same) and a screenshot of GDM. `installer::interrupted` kills the helper
+(`SIGKILL`) in the middle of the pull and asserts the state it leaves (failed in
+`image`, `disk_changed`, no tool running, nothing mounted, no resume), that its
+old plan is gone, that a new plan lists what the dead installation left among
+what it erases, and that a new `Apply` on the same disk installs a system that
+boots with the administrator able to log in.
+`iso::next_unattended` (opt-in with the other `iso::next` trials) boots the real
+ISO under UEFI with Secure Boot beside a blank disk and an ext4 volume labelled
+`ILEX-ANSWERS`, follows `ILEX-INSTALLER-ANSWERS` lines on the serial console to
+`result=success` and the power-off, requires that no interface drew a page, boots
+the installed disk and asserts what `installer::install` asserts. It first boots
+the ISO twice more with an answers file that is not valid (refused by line, never
+by text, with a password in the broken line) and one whose `confirm-erase` is not
+the disk, and requires the disk untouched.
 
 ## Conventions
 
