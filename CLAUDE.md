@@ -2611,8 +2611,9 @@ the Windows paths of this change: no Windows host was available.
   silence its mirror.
 - **Tests.** `iso::next_boot`, `iso::next_basic_graphics`, `iso::next_fallback`,
   `iso::next_restart`, `iso::next_serial_backpressure`,
-  `iso::next_serial_unavailable`, `iso::next_serial_stall` and
-  `iso::next_ssh_tmpfiles` are registered only when a filter names
+  `iso::next_serial_unavailable`, `iso::next_serial_stall`,
+  `iso::next_ssh_tmpfiles`, `iso::next_helper_usb` and
+  `iso::next_helper_cdrom` are registered only when a filter names
   `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO).
   `cargo ilexctl test iso::next` builds the ISO (or uses
   `ILEX_ISO_NEXT=<path>`) and needs no OS image. Markers are matched as
@@ -2673,6 +2674,31 @@ the Windows paths of this change: no Windows host was available.
     lines must be `budget` then `busy`: the skip-while-stuck path, which the
     page's own markers (fifteen seconds apart) never reach. What no trial
     reproduces is a real UART's `closing_wait`: `stall` stands in for it.
+  - `iso::next_helper_usb` and `iso::next_helper_cdrom` run the root helper
+    (`ilex-installerd`, see below) on the real ISO: Secure Boot on KVM, the ISO
+    written to a removable USB disk (`/dev/sda`, writable like a real stick,
+    its writes in a temporary overlay) or attached as an optical drive
+    (`/dev/sr0`), beside the VM's own 40 GiB disk, a 41 GiB disk and a 2 GiB
+    disk, all blank. After the page is drawn the trial saves the live system's
+    layout (`losetup`, every mount table, the device-mapper tree, `lsblk`,
+    SELinux mode and labels) as `next-helper-<medium>-layout.txt`, then calls
+    the helper as `ilex-installer` over the system bus: `Probe` must offer the
+    three blank disks with no reason and no note, and (stick) list the boot
+    medium as the one `live_medium` disk (an optical drive is no candidate, so
+    nothing is `live_medium`); `Plan` on the 40 GiB disk must succeed against
+    the registry (retried for 90 s while the guest's link comes up; it needs
+    `ghcr.io`) with the manifest digest pinned; `Plan` on the stick is refused
+    `live-medium` and on the 2 GiB disk `disk-too-small`; a second `Probe` must
+    answer the same, and no scan directory may be left in `/run/ilex-installer`;
+    `ilex-installerd --self-check` must pass on the ISO's own files; and no
+    SELinux denial may have been enforced. The live ISO boots permissive
+    (`enforcing=0`, from image-builder's kernel arguments) with `unlabeled_t`
+    files, every process in `kernel_t`: denials are logged and nothing is
+    stopped, and the ones that name the helper (its user-namespace setup, the
+    `mount` of an ESP under `/run/ilex-installer`) are counted and printed, not
+    asserted. When the ISO enforces, each is a denial of the helper to resolve
+    first. The mounts and the numbers the tracer follows are the ISO's real
+    ones; the container-image tier cannot show them.
 - **CI.** `publish.yml`'s `iso_next` input starts only the `installer-next` job
   and skips the image pipeline and the Anaconda ISO jobs. The run has a
   concurrency group of its own (`iso-next-<hash of the ref>`, also on main: it
@@ -2683,7 +2709,7 @@ the Windows paths of this change: no Windows host was available.
   and the job additionally requires `workflow_dispatch`, has `contents: read`
   and reads no secret, so PRs and forks reach neither it nor the key. It builds
   the ISO in the same privileged Fedora 45 container as the `iso` job, keeps it
-  as the `installer-next-iso` artifact, boots it with Secure Boot (the eight
+  as the `installer-next-iso` artifact, boots it with Secure Boot (the ten
   `iso::next` trials, with the same provisioning-only requirement as locally:
   a runner without KVM SMM fails them) and keeps `installer-next-evidence`.
   Nothing releases or publishes it. Runs without `iso_next` are unchanged.
@@ -2949,7 +2975,7 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   tree, never the text of a source, a device node's name or a path's prefix:
   - a device number (`/sys/dev/block/M:m`) or a device node to a kernel name,
     a partition to its disk, a stacked device (device-mapper, MD: Ventoy's
-    `/dev/mapper/ventoy`, dracut's `live-rw`) down through `slaves/`, and the
+    `/dev/mapper/ventoy`) down through `slaves/`, and the
     devices a file system names in its options (`logdev=`, `rtdev=`,
     `journal_path=`). A device node is the device its `st_rdev` says (`stat`,
     through any `/dev/disk/by-*` link, for `UUID=`/`LABEL=`/`PARTUUID=`/
@@ -3011,9 +3037,14 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   only the host mounts that propagate to it, and none made under a
   `--make-private` subtree. It reads its own table, the host's
   (`/proc/1/mountinfo`) and that of every other mount namespace a process is in
-  (`/proc/<pid>/ns/mnt`, one table per namespace). The host's and its own must
-  be readable or the probe fails; another namespace's table that cannot be read
-  is a use that was not seen (unresolved). The ESP scan stays in its own
+  (`/proc/<pid>/ns/mnt`, one table per namespace, processes oldest first). The
+  host's and its own must be readable or the probe fails; another namespace's
+  table that cannot be read is a use that was not seen (unresolved). A
+  namespace counts as read only once one of its processes' tables has been, so a
+  process that exits first hides nothing of the others in its namespace. A
+  task that is exiting is a process that is gone, not a table that cannot be
+  read: its `ns/mnt` answers `ENOENT`, `ESRCH` or `EACCES`, and its `mountinfo`
+  `EINVAL` (no namespace proxy left), confirmed by looking at `ns/mnt` again. The ESP scan stays in its own
   `unshare --mount`. Paths (the btrfs subvolume lookup, a loop file's name) are
   resolved in the helper's own namespace only.
   What cannot be traced (a device number sysfs does not list, a source that
@@ -3032,9 +3063,28 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     disk of an ISO file), `/run/rootfsbase` (the root image's squashfs), any
     iso9660 or udf mount and a root on dracut's `live-*` device-mapper devices,
     with the loop and device-mapper chains behind them. It does not depend on
-    those mounts still being there: dracut unmounts its squashfs lazily and so
-    may `umount -l /run/initramfs/live`, and the disk is found through the
-    loop device's recorded number.
+    those mounts still being there: anyone may `umount -l /run/initramfs/live`,
+    and the disk is found through the loop device's recorded number.
+    **The real ISO's layout** (booted from a USB stick under QEMU with Secure
+    Boot, `iso::next_helper_usb`, and as an optical drive,
+    `iso::next_helper_cdrom`; the evidence is kept in the artifacts): its
+    squashfs holds the root tree directly, so dracut's dmsquash-live mounts an
+    **overlay root** (`LiveOS_rootfs`, `lowerdir=/run/rootfsbase`, upper and work
+    directories in `/run`, which is tmpfs) over `/run/rootfsbase` (squashfs on
+    `loop0`). The ISO's file system is at `/run/initramfs/live` (iso9660 on
+    `/dev/sda1`, the stick's first partition, or `/dev/sr0`), and `loop0`'s file
+    is `/LiveOS/squashfs.img`, a name the kernel prints relative to the mount
+    that carries the file, so no name in the helper's namespace confirms it;
+    the iso9660 mount that carries its device number resolves it (or, once that
+    mount is gone, the signature lsblk reads from the device). There is **no
+    device-mapper device and no other loop device**: the `live-rw` snapshot
+    over `rootfs.img` (whose copy-on-write file is `/overlay (deleted)` on the
+    initramfs' own file system, which no mount carries) is dracut's layout for
+    an image with `LiveOS/rootfs.img`, which this ISO never has; the helper
+    would refuse every disk under it, as it does for any file that could be a
+    device node. The live ISO also boots with `enforcing=0` (SELinux
+    permissive, from the kernel arguments image-builder gives it) and its files
+    carry `unlabeled_t`, so SELinux does not constrain the helper there yet.
   - `in_use`: why the running system is using the disk otherwise, one sentence
     each: a mounted partition (a btrfs's other devices, an XFS log device), an
     entry of `/proc/swaps`, a loop device attached to a file or block node on
@@ -3063,14 +3113,30 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   backing device, a device-mapper, MD or multi-device btrfs/f2fs member, and
   whatever else claims a block device. `EBUSY` makes the disk `in_use` ("held
   open exclusively by the running system ... though none of what the installer
-  traced says what"); it is retried for half a second so that a claim that is
-  only passing (another probe's scan of an ESP) does not make a disk flicker;
-  any other failure to open it is a reason too. `Plan` opens the chosen disk
-  again after the registry and `systemd-repart` have answered, immediately
-  before it returns, and refuses (`in-use`) if the kernel now says it is held.
+  traced says what"); it is retried for half a second so that a claim somebody
+  else holds only for an instant (a `mkfs` or file system check run from tty2,
+  a partition rescan) does not make a disk flicker (`Probe` and `Plan` never
+  overlap: the helper does one at a time, and its own ESP scan has ended before
+  the next disk is claimed); any other failure to open it is a reason too.
+  `Plan` opens the chosen disk again after the registry and `systemd-repart`
+  have answered, immediately before it returns, and refuses (`in-use`) if the
+  kernel now says it is held. That re-check only narrows the window between the
+  plan and the write: **Apply (I3) must claim the disk again right before it
+  writes** and must not rely on an earlier answer. Holding a whole disk
+  exclusively makes the kernel refuse exclusive opens of its partitions
+  (`mkfs`, `cryptsetup`, `mount` on `/dev/sdXN` fail with `EBUSY` while the
+  whole-disk claim is open), so I3 must decide how long to hold it (for the
+  repartitioning itself, then release it for what formats and mounts the new
+  partitions) and what it does in between.
   The exclusive open does **not** replace the trace: a loop device attached to a
   block device node (`losetup /dev/sdb1`) claims nothing, which is what the
-  trace of loop devices is for.
+  trace of loop devices is for. **Known limit of both:** a writer that never
+  claims the disk is invisible to the trace (it lists mounts, swap, loop
+  devices, zram and journals, none of which it is) and to the exclusive open
+  (nothing is claimed for it to conflict with): `dd of=/dev/sdX`, a virtual
+  machine given the disk directly, or a program that writes to the node. The
+  helper offers such a disk as free, and only the person running those can
+  prevent the damage.
   **The threat model** is accident: the helper protects against wiping the live
   medium or storage in use by mistake, including after ordinary administrator
   actions on tty2 (mounting, `swapon`, `losetup`, `umount -l`, activating a
@@ -3209,7 +3275,8 @@ an ext4 whose journal is on a disk of its own (the mount options say nothing;
 holds, listed by no table, which only the exclusive open of the disk refuses
 (the reason names the claim; the other disks stay offered). The disks nothing
 uses stay offered throughout, beside the live media, the disk in use and the
-zram swap every live boot has (swap on RAM is a use of RAM, never of a disk),
+zram swap a booted system may have (swap on RAM is a use of RAM, never of a
+disk; the real ISO under QEMU had no swap at all),
 and a plan on a refused disk is refused `in-use`; then points the unit at SMBIOS and command-line
 fixtures to exercise detection through the bus (MS-7C35 by system and by board
 alone, case, a vendor alone, the boot override and an unknown one), requires
@@ -3238,8 +3305,12 @@ an unknown file system type, swap by `st_rdev`, a swap file, zram writeback,
 ext4 journals, a directory that cannot be listed, FUSE services at and away from
 their paths, the tables of other mount namespaces, the exclusive open's retry,
 each beside the mounts a live system has: `/dev`, `/run` and `/tmp` with their
-options, zram swap, dracut's layout) and a live ISO's own mount layout; the live
-ISO's own boot is `iso::next…`.
+options, zram swap, the real ISO's overlay layout, and dracut's other layout
+with its deleted copy-on-write file, which is refused) and a live ISO's own
+mount layout; exiting tasks (a vanished process hides nothing of its
+namespace, `EINVAL` from an exiting task's `mountinfo` is a task that is gone,
+any other failure is not); the live ISO's own boot is `iso::next_helper_usb`
+and `iso::next_helper_cdrom`.
 
 ## Conventions
 
