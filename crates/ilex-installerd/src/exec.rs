@@ -154,3 +154,197 @@ pub fn run_ok(program: &str, args: &[&str], timeout: Duration) -> Result<Output>
     }
     Ok(output)
 }
+
+// --- tools that run for a long time -------------------------------------------
+
+/// A tool of the installation itself: it can run for minutes (a pull), prints
+/// progress as it goes, may be fed one secret on its standard input and is
+/// stopped, process group and all, when it overruns its deadline.
+pub struct Job<'a> {
+    pub program: &'a str,
+    pub args: &'a [&'a str],
+    /// Added to the clean environment every tool gets.
+    pub env: &'a [(&'a str, &'a str)],
+    /// Written to the tool's standard input, which is then closed. Never an
+    /// argument: arguments are visible in `/proc` and in logs.
+    pub stdin: Option<&'a [u8]>,
+    pub timeout: Duration,
+}
+
+/// What a line sink says about the job it is reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Continue,
+    /// Stop the job now: what it was run to find out is known.
+    Stop,
+}
+
+/// How a job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exit {
+    /// The exit status, or `None` when a signal ended it.
+    pub code: Option<i32>,
+    /// The sink stopped it ([`Flow::Stop`]).
+    pub stopped: bool,
+}
+
+impl Exit {
+    pub fn success(self) -> bool {
+        self.code == Some(0)
+    }
+
+    pub fn describe(self) -> String {
+        self.code
+            .map_or_else(|| "was killed by a signal".into(), |c| format!("exited {c}"))
+    }
+}
+
+/// A line of a job's output made safe to keep and show: no control characters,
+/// bounded. (Progress bars end their lines with `\r`: each is a line.)
+pub fn clean_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(300)
+        .collect()
+}
+
+/// Run a job to the end. Its standard output and error arrive, merged and in
+/// order, as lines for `line`; `tick` is called about once a second while it
+/// runs (for progress that is measured, not printed). The child dies with the
+/// calling thread's process (`PR_SET_PDEATHSIG`): a helper that is killed
+/// takes the tools that write to the disk with it.
+pub fn run_job(
+    job: &Job<'_>,
+    line: &mut dyn FnMut(&str) -> Flow,
+    tick: &mut dyn FnMut(),
+) -> Result<Exit> {
+    use std::{io::Write, os::unix::process::CommandExt, sync::mpsc};
+    let (mut reader, writer) = std::io::pipe().context("making a pipe")?;
+    let mut command = Command::new(job.program);
+    command
+        .args(job.args)
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin")
+        .env("LC_ALL", "C.UTF-8")
+        .env("SYSTEMD_COLORS", "0")
+        .env("SYSTEMD_PAGER", "")
+        .envs(job.env.iter().copied())
+        .stdin(if job.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(writer.try_clone().context("duplicating the pipe")?)
+        .stderr(writer)
+        .process_group(0);
+    // SAFETY: only async-signal-safe `prctl` runs between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("starting {}", job.program))?;
+    // The parent's copies of the write end are inside `command`: drop them so
+    // the reader sees the end of the output when the child is gone.
+    drop(command);
+    if let (Some(bytes), Some(mut stdin)) = (job.stdin, child.stdin.take()) {
+        // Small (a password line) and the tool reads it first thing: the pipe
+        // buffer holds it, so this does not wait for the tool.
+        let _ = stdin.write_all(bytes);
+    }
+    let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+    let pump = thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    for &byte in &chunk[..n] {
+                        if byte == b'\n' || byte == b'\r' {
+                            if !pending.is_empty() {
+                                let _ = sender.send(std::mem::take(&mut pending));
+                            }
+                        } else if pending.len() < 4096 {
+                            pending.push(byte);
+                        }
+                    }
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let _ = sender.send(pending);
+        }
+    });
+    let pgid = child.id() as libc::pid_t;
+    let deadline = Instant::now() + job.timeout;
+    let mut next_tick = Instant::now() + Duration::from_secs(1);
+    let mut stopped = false;
+    let status = loop {
+        while let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(50)) {
+            if line(&clean_line(&bytes)) == Flow::Stop {
+                stopped = true;
+                break;
+            }
+        }
+        if stopped {
+            // SAFETY: a signal to the job's own process group.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+            break child.wait().context("waiting for the tool")?;
+        }
+        if let Some(status) = child.try_wait().context("waiting for the tool")? {
+            break status;
+        }
+        if Instant::now() >= next_tick {
+            tick();
+            next_tick = Instant::now() + Duration::from_secs(1);
+        }
+        if Instant::now() >= deadline {
+            // SAFETY: a signal to the job's own process group.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+            let _ = child.wait();
+            bail!(
+                "{} did not finish within {}s and was stopped",
+                job.program,
+                job.timeout.as_secs()
+            );
+        }
+    };
+    // What the tool printed last, with a bound: a grandchild that keeps the
+    // pipe open must not keep the helper waiting.
+    let end = Instant::now() + Duration::from_secs(2);
+    while !stopped && Instant::now() < end {
+        match receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(bytes) => {
+                if line(&clean_line(&bytes)) == Flow::Stop {
+                    stopped = true;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if pump.is_finished() {
+                    break;
+                }
+            }
+        }
+    }
+    // Anything the tool left running in its group goes with it.
+    // SAFETY: a signal to the job's own process group.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+    Ok(Exit {
+        code: status.code(),
+        stopped,
+    })
+}

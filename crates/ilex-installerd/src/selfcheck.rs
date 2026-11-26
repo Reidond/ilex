@@ -3,9 +3,9 @@
 //! the installer VM by the `installer::` tier.
 
 use crate::{
-    disks, exec, helper, registry, repart,
+    answers, apply, disks, exec, helper, install, policy, progress, registry, repart,
     scratch::Scratch,
-    sys,
+    secret, stagelog, sys, target,
     topology::{self, FileId, LoopRow, Roots, System, Tracer},
 };
 use anyhow::{Context, Result, ensure};
@@ -3071,10 +3071,556 @@ pub fn run(config: &helper::Config) -> Result<String> {
     check_namespaces(parent.path()).context("the mount namespaces")?;
     check_exiting_tasks(parent.path()).context("tasks that are exiting")?;
     check_claims(parent.path()).context("the exclusive open of a disk")?;
+    check_secrets().context("secrets")?;
+    check_jobs(parent.path()).context("the tools an installation runs")?;
+    check_state(parent.path()).context("the installation's state")?;
+    check_target(parent.path()).context("the target system's files")?;
+    check_apply_rules().context("the checks before the first write")?;
+    check_answers(parent.path()).context("answers mode")?;
     check_files(parent.path()).context("files")?;
     let repart = check_repart(config, parent.path()).context("repart")?;
     let system = check_system(config).context("system")?;
     Ok(format!(
-        "{model}; parsers, registry, subprocess limits, scratch, topology, files, {repart}; {system}"
+        "{model}; parsers, registry, subprocess limits, scratch, topology, installation, files, {repart}; {system}"
     ))
+}
+
+// --- what Apply adds ----------------------------------------------------------
+
+/// Secrets arrive as sealed memfds and nothing else.
+fn check_secrets() -> Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let reads = |fd: OwnedFd| secret::Secret::from_memfd(fd, 4096);
+    let sealed = secret::sealed_memfd(b"correct horse")?;
+    let kept = reads(sealed)?;
+    ensure!(kept.expose() == b"correct horse", "a sealed memfd was misread");
+    ensure!(
+        secret::admin_password(&kept)? == "correct horse",
+        "the password was not accepted"
+    );
+    // An unsealed memfd could change after it was read; a memfd that can still
+    // grow could be made to look different through the same descriptor.
+    let raw = unsafe { libc::memfd_create(c"unsealed".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    ensure!(raw >= 0, "memfd_create");
+    let unsealed = unsafe { OwnedFd::from_raw_fd(raw) };
+    ensure!(
+        unsafe { libc::write(unsealed.as_raw_fd(), b"x".as_ptr().cast(), 1) } == 1,
+        "writing the memfd"
+    );
+    ensure!(reads(unsealed).is_err(), "an unsealed memfd was accepted");
+    // Not a memfd at all: a pipe, an ordinary file.
+    let (reader, writer) = std::io::pipe()?;
+    drop(writer);
+    ensure!(reads(OwnedFd::from(reader)).is_err(), "a pipe was accepted");
+    let file = fs::File::open("/etc/os-release")?;
+    ensure!(reads(OwnedFd::from(file)).is_err(), "a regular file was accepted");
+    ensure!(
+        reads(secret::sealed_memfd(b"")?).is_err(),
+        "an empty secret was accepted"
+    );
+    ensure!(
+        secret::Secret::from_memfd(secret::sealed_memfd(&[b'x'; 33])?, 32).is_err(),
+        "an oversized secret was accepted"
+    );
+    // The password goes to chpasswd as one line.
+    for bad in [&b"a\nb"[..], b"a\rb", b"a\0b", b"\xff\xfe"] {
+        let secret = reads(secret::sealed_memfd(bad)?)?;
+        ensure!(
+            secret::admin_password(&secret).is_err(),
+            "a password with a line break, NUL or invalid UTF-8 was accepted"
+        );
+    }
+    // A password may hold what a person types: spaces, colons, quotes.
+    let secret = reads(secret::sealed_memfd(b" a:b 'c' \"d\" ")?)?;
+    ensure!(
+        secret::admin_password(&secret)? == " a:b 'c' \"d\" ",
+        "a password with punctuation was changed"
+    );
+    Ok(())
+}
+
+/// The runner of long jobs: merged output in order, a secret on standard
+/// input, a deadline that ends the whole process group, an early stop.
+fn check_jobs(parent: &Path) -> Result<()> {
+    let run = |script: &str, stdin: Option<&[u8]>, timeout: Duration| -> Result<(exec::Exit, Vec<String>, u32)> {
+        let mut lines = Vec::new();
+        let mut ticks = 0;
+        let exit = exec::run_job(
+            &exec::Job {
+                program: "sh",
+                args: &["-c", script],
+                env: &[("ILEX_CHECK", "set")],
+                stdin,
+                timeout,
+            },
+            &mut |line| {
+                lines.push(line.to_owned());
+                exec::Flow::Continue
+            },
+            &mut || ticks += 1,
+        )?;
+        Ok((exit, lines, ticks))
+    };
+    let (exit, lines, _) = run(
+        "echo out; echo err >&2; printf 'bar\\r50%%\\rdone\\n'; read secret; echo \"got $secret\"; echo $ILEX_CHECK; echo ${HOME:-nohome}; exit 3",
+        Some(b"hunter2\n"),
+        Duration::from_secs(20),
+    )?;
+    ensure!(exit.code == Some(3) && !exit.stopped, "the exit status: {exit:?}");
+    ensure!(
+        lines == ["out", "err", "bar", "50%", "done", "got hunter2", "set", "nohome"],
+        "the lines of a job: {lines:?}"
+    );
+    // One tick a second while it runs.
+    let (_, _, ticks) = run("sleep 2.5", None, Duration::from_secs(20))?;
+    ensure!((2..=3).contains(&ticks), "{ticks} ticks in 2.5 seconds");
+    // A deadline ends the job and what it started: a sleeping grandchild, which
+    // holds the output pipe, does not outlive it.
+    let marker = parent.join("grandchild");
+    let started = std::time::Instant::now();
+    let error = run(
+        &format!("sleep 30 & echo $! > {}; wait", marker.display()),
+        None,
+        Duration::from_secs(2),
+    )
+    .err()
+    .context("a job past its deadline was not stopped")?;
+    ensure!(
+        started.elapsed() < Duration::from_secs(10) && format!("{error:#}").contains("did not finish"),
+        "the deadline: {error:#}"
+    );
+    let pid: i32 = fs::read_to_string(&marker)?.trim().parse()?;
+    std::thread::sleep(Duration::from_millis(200));
+    ensure!(
+        unsafe { libc::kill(pid, 0) } != 0,
+        "the job's grandchild outlived the job"
+    );
+    // A sink that has what it wanted stops the job.
+    let mut seen = 0;
+    let exit = exec::run_job(
+        &exec::Job {
+            program: "sh",
+            args: &["-c", "echo first; sleep 30; echo never"],
+            env: &[],
+            stdin: None,
+            timeout: Duration::from_secs(60),
+        },
+        &mut |line| {
+            seen += 1;
+            if line == "first" {
+                exec::Flow::Stop
+            } else {
+                exec::Flow::Continue
+            }
+        },
+        &mut || {},
+    )?;
+    ensure!(exit.stopped && !exit.success() && seen == 1, "stopping a job: {exit:?}");
+    ensure!(
+        exec::clean_line(b"a\x1b[31mb\tc\x07").as_str() == "a[31mbc",
+        "control characters of a line"
+    );
+    ensure!(
+        install::json_array(&["Applying".into(), "[".into(), "  {}".into(), "]".into(), "done".into()])? == "[\n  {}\n]"
+            && install::json_array(&["no list".into()]).is_err()
+            && install::json_array(&["[".into()]).is_err(),
+        "the partition list of systemd-repart's output"
+    );
+    // The policy engine's words, as skopeo prints them.
+    for (lines, success, expected) in [
+        (&["Getting image source signatures", "Copying blob sha256:aa"][..], false, "accepted"),
+        (&["Error: copying system image from manifest list: Source image rejected: A signature was required, but no signature exists"][..], false, "rejected"),
+        (&["Error: Source image rejected: cryptographic signature verification failed: invalid signature"][..], false, "rejected"),
+        (&["Error: ... Running image docker://quay.io/fedora/fedora-bootc:45 is rejected by policy."][..], false, "rejected"),
+        (&["Error: initializing source docker://ghcr.io/x: pinging container registry ghcr.io: dial tcp: lookup ghcr.io: no such host"][..], false, "unreachable"),
+        (&[][..], false, "unreachable"),
+    ] {
+        let mut judge = policy::Judge::new();
+        lines.iter().for_each(|l| judge.line(l));
+        let verdict = match judge.finish(success) {
+            policy::Verdict::Accepted => "accepted",
+            policy::Verdict::Rejected(_) => "rejected",
+            policy::Verdict::Unreachable(_) => "unreachable",
+        };
+        ensure!(verdict == expected, "{lines:?} was judged {verdict}, not {expected}");
+    }
+    // Logs: one directory per plan, root's alone.
+    let logs = stagelog::Logs::new(parent, &"ab".repeat(16))?;
+    let mut log = logs.stage(ilex_installer_model::state::Stage::Image)?;
+    log.command("bootc", &["install", "to-filesystem"]);
+    let mode = |p: &Path| fs::metadata(p).map(|m| m.permissions().mode() & 0o777);
+    ensure!(
+        mode(logs.dir())? == 0o700
+            && mode(&logs.dir().join("04-image.log"))? == 0o600
+            && fs::read_to_string(logs.dir().join("04-image.log"))?.contains("$ bootc install to-filesystem"),
+        "the stage log's modes or content"
+    );
+    ensure!(
+        stagelog::Logs::new(parent, "../../etc").is_err() && stagelog::Logs::new(parent, "short").is_err(),
+        "a plan id that is not 32 hex digits made a log directory"
+    );
+    Ok(())
+}
+
+/// The state record: written before a stage begins, recovered after a crash,
+/// never resumed.
+fn check_state(parent: &Path) -> Result<()> {
+    use ilex_installer_model::state::{Outcome, Stage, StageStatus, State};
+    let dir = TestDir::new(parent, "state")?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let tracker = progress::Tracker::new(&dir.0);
+    tracker.set_sender(sender);
+    ensure!(tracker.state().stage == Stage::Idle && !tracker.active(), "a fresh tracker");
+    tracker.begin(&"c".repeat(32), &Stage::UNENCRYPTED)?;
+    tracker.start(Stage::Partition, "Writing the partition table")?;
+    tracker.disk_changed()?;
+    tracker.line("Formatting /dev/vda1 as vfat");
+    let on_disk: State = serde_json::from_slice(&fs::read(dir.0.join("state.json"))?)?;
+    ensure!(
+        on_disk.active
+            && on_disk.stage == Stage::Partition
+            && on_disk.stages.len() == 6
+            && on_disk.stages[0].status == StageStatus::Running
+            && on_disk.stages[1].status == StageStatus::Pending
+            && on_disk.disk_changed,
+        "the record written before the stage: {on_disk:?}"
+    );
+    ensure!(
+        mode_of(&dir.0.join("state.json"))? == 0o600,
+        "the state file is not root's alone"
+    );
+    // A helper that dies here leaves exactly that file. The next one reads it.
+    let successor = progress::Tracker::new(&dir.0);
+    let recovered = successor.state();
+    ensure!(
+        !recovered.active
+            && recovered.disk_changed
+            && recovered.stages[0].status == StageStatus::Failed
+            && matches!(&recovered.outcome, Some(Outcome::Failed { stage: Stage::Partition, reason })
+                if reason.contains("partition") && reason.contains("disk was already changed")),
+        "a crashed installation was not reported as failed: {recovered:?}"
+    );
+    // Nothing resumes: the new helper has no installation to continue.
+    ensure!(!successor.active(), "a recovered installation is active");
+    // Progress goes up within a stage and never down, and is not sent more
+    // than twice a second.
+    std::thread::sleep(Duration::from_millis(600));
+    tracker.progress(0.6, Some("more than half"));
+    tracker.progress(0.9, Some("dropped: too soon after the last"));
+    ensure!(
+        (tracker.state().progress - 0.6).abs() < 1e-9,
+        "progress sent too often: {}",
+        tracker.state().progress
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    tracker.progress(0.2, Some("less than before"));
+    ensure!(
+        (tracker.state().progress - 0.6).abs() < 1e-9
+            && tracker.state().message == "less than before",
+        "progress went backwards: {:?}",
+        tracker.state()
+    );
+    tracker.done(Stage::Partition);
+    tracker.fail(Stage::Image, "bootc exited 1");
+    let events: Vec<progress::Event> = receiver.try_iter().collect();
+    ensure!(
+        events.iter().any(|e| matches!(e, progress::Event::Progress { stage: Stage::Partition, fraction, .. } if *fraction == 0.0))
+            && matches!(events.last(), Some(progress::Event::Finished(Outcome::Failed { stage: Stage::Image, .. }))),
+        "the events: {events:?}"
+    );
+    // A stage whose record cannot be written does not begin.
+    let blocked = dir.0.join("not-a-directory");
+    write(&blocked, "")?;
+    let stuck = progress::Tracker::new(&blocked);
+    ensure!(
+        stuck.begin(&"d".repeat(32), &Stage::UNENCRYPTED).is_err() && !stuck.active(),
+        "an installation began without its record"
+    );
+    // An old state file of an installation that ended is kept as it was.
+    let done = progress::recover(
+        State {
+            outcome: Some(Outcome::Success),
+            ..State::idle(1)
+        },
+        2,
+    );
+    ensure!(done.outcome == Some(Outcome::Success) && done.updated == 1, "a finished state was changed");
+    // `State` documents without the fields later changes add still parse.
+    let old: State = serde_json::from_str(
+        r#"{"schema":1,"stage":"idle","plan":null,"progress":0.0,"message":"","outcome":null,"updated":1}"#,
+    )?;
+    ensure!(old.stages.is_empty() && !old.active, "an old state document");
+    Ok(())
+}
+
+fn mode_of(path: &Path) -> Result<u32> {
+    Ok(fs::metadata(path)?.permissions().mode() & 0o777)
+}
+
+/// What is found below the target and what is written into it.
+fn check_target(parent: &Path) -> Result<()> {
+    let tree = TestDir::new(parent, "target")?;
+    let root = &tree.0;
+    let checksum = "ab".repeat(32);
+    let deploy = root.join("ostree/deploy/default/deploy");
+    fs::create_dir_all(deploy.join(format!("{checksum}.0")))?;
+    fs::create_dir_all(root.join("ostree/deploy/default/var"))?;
+    ensure!(
+        target::find_deployment(root).is_err(),
+        "a deployment without an origin was found"
+    );
+    write(
+        &deploy.join(format!("{checksum}.0.origin")),
+        "[origin]\ncontainer-image-reference=ostree-image-signed:docker://ghcr.io/reidond/ilex:generic.gnome\n",
+    )?;
+    let found = target::find_deployment(root)?;
+    ensure!(
+        found.path == deploy.join(format!("{checksum}.0"))
+            && found.checksum == checksum
+            && found.var == root.join("ostree/deploy/default/var")
+            && target::origin_reference(&found.origin)
+                == Some("ostree-image-signed:docker://ghcr.io/reidond/ilex:generic.gnome"),
+        "the deployment: {found:?}"
+    );
+    ensure!(
+        target::expected_origin("ghcr.io/reidond/ilex:generic.gnome")
+            == "ostree-image-signed:docker://ghcr.io/reidond/ilex:generic.gnome",
+        "the origin an enforcing install writes"
+    );
+    // Two deployments, a stray stateroot or a link in place of a directory is
+    // not what a fresh install makes.
+    fs::create_dir_all(deploy.join(format!("{}.0", "cd".repeat(32))))?;
+    ensure!(target::find_deployment(root).is_err(), "two deployments were accepted");
+    fs::remove_dir(deploy.join(format!("{}.0", "cd".repeat(32))))?;
+    fs::create_dir_all(root.join("ostree/deploy/other"))?;
+    ensure!(target::find_deployment(root).is_err(), "two stateroots were accepted");
+    fs::remove_dir(root.join("ostree/deploy/other"))?;
+    fs::create_dir_all(root.join("elsewhere"))?;
+    fs::remove_dir(deploy.join(format!("{checksum}.0")))?;
+    symlink(root.join("elsewhere"), deploy.join(format!("{checksum}.0")))?;
+    ensure!(target::find_deployment(root).is_err(), "a linked deployment was accepted");
+    fs::remove_file(deploy.join(format!("{checksum}.0")))?;
+
+    // The reserved record of the Anaconda path, key for key.
+    let plan = fixture_plan()?;
+    let record: serde_json::Value = serde_json::from_str(&target::setup_record(&plan))?;
+    ensure!(
+        record
+            == serde_json::json!({
+                "schema": 1,
+                "composition": "generic.gnome",
+                "image": "ghcr.io/reidond/ilex:generic.gnome",
+                "profile": {"id": null, "schema": null},
+                "security": {"capabilities": {}, "tpm": {"requested": "unspecified", "capability": "unknown", "status": "not-configured"}},
+            })
+            && target::setup_record(&plan).ends_with("}\n"),
+        "setup.json: {record}"
+    );
+    // No line for `/`.
+    let (kept, dropped) = target::strip_root_fstab(
+        "# comment /\nUUID=1 / btrfs subvol=root 0 0\nUUID=2 /boot ext4 defaults 0 2\n/dev/x\t/\text4\tdefaults\t0 0\n#UUID=3 / x\n",
+    );
+    ensure!(
+        dropped == 2 && kept == "# comment /\nUUID=2 /boot ext4 defaults 0 2\n#UUID=3 / x\n",
+        "the fstab: {kept:?} ({dropped})"
+    );
+    ensure!(target::strip_root_fstab("").0.is_empty(), "an empty fstab");
+    // The default target: the administrator's link first, else the vendor's.
+    let dep = root.join("dep");
+    fs::create_dir_all(dep.join("usr/lib/systemd/system"))?;
+    symlink("graphical.target", dep.join("usr/lib/systemd/system/default.target"))?;
+    ensure!(target::default_target(&dep)? == "graphical.target", "the vendor default target");
+    fs::create_dir_all(dep.join("etc/systemd/system"))?;
+    symlink("/usr/lib/systemd/system/multi-user.target", dep.join("etc/systemd/system/default.target"))?;
+    ensure!(target::default_target(&dep)? == "multi-user.target", "the administrator's default target");
+    // What is mounted of the target: below it, and anywhere its partitions are
+    // mounted (bootc leaves /run/bootc/storage), deepest first.
+    let mounts = topology::parse_mountinfo(concat!(
+        "10 1 0:1 / / rw - ext4 /dev/vda1 rw\n",
+        "20 10 0:20 / /run/ilex-installer/target rw - btrfs /dev/vdb3 rw\n",
+        "21 20 0:21 / /run/ilex-installer/target/boot rw - ext4 /dev/vdb2 rw\n",
+        "22 21 0:22 / /run/ilex-installer/target/boot/efi rw - vfat /dev/vdb1 rw\n",
+        "23 10 0:20 /ostree/bootc/storage /run/bootc/storage rw - btrfs /dev/vdb3 rw\n",
+        "24 20 0:20 /ostree/deploy/default/var /run/ilex-installer/target/ostree/deploy/default/deploy/x.0/var rw - btrfs /dev/vdb3 rw\n",
+        "25 10 0:30 / /run/ilex-installer/target-other rw - tmpfs tmpfs rw\n",
+    ))?;
+    let nodes: BTreeSet<String> = ["/dev/vdb1", "/dev/vdb2", "/dev/vdb3"].iter().map(|s| (*s).to_owned()).collect();
+    let left = target::leftover_mounts(&mounts, Path::new("/run/ilex-installer/target"), &nodes);
+    let at = |point: &str| left.iter().position(|p| p == point);
+    ensure!(
+        left.len() == 5
+            && at("/run/bootc/storage").is_some()
+            && at("/run/ilex-installer/target/ostree/deploy/default/deploy/x.0/var") < at("/run/ilex-installer/target/boot/efi")
+            && at("/run/ilex-installer/target/boot/efi") < at("/run/ilex-installer/target/boot")
+            && at("/run/ilex-installer/target/boot") < at("/run/ilex-installer/target"),
+        "mounts to remove, children before their parents: {left:?}"
+    );
+    ensure!(
+        target::leftover_mounts(&mounts[..1], Path::new("/run/ilex-installer/target"), &nodes).is_empty(),
+        "the root file system was to be unmounted"
+    );
+    // The new partitions are found by UUID and must be what sysfs says: here
+    // there is no such link, so none are found.
+    let by_partuuid = root.join("by-partuuid");
+    fs::create_dir_all(&by_partuuid)?;
+    ensure!(
+        target::wait_for_partitions(&plan, &root.join("sys"), &by_partuuid, Duration::from_millis(300)).is_err(),
+        "partitions were found where there are none"
+    );
+    ensure!(
+        target::used_bytes(root).is_some_and(|used| used > 0),
+        "the bytes in use of a file system"
+    );
+    // The target's compiled policy: the highest version, files only.
+    let dep = root.join("selinux-dep");
+    write(&dep.join("etc/selinux/targeted/policy/policy.33"), "x")?;
+    write(&dep.join("etc/selinux/targeted/policy/policy.35"), "x")?;
+    write(&dep.join("etc/selinux/targeted/policy/policy.bin"), "x")?;
+    fs::create_dir_all(dep.join("etc/selinux/targeted/policy/policy.99"))?;
+    ensure!(
+        target::selinux_policy_file(&dep)? == dep.join("etc/selinux/targeted/policy/policy.35"),
+        "the target's policy file"
+    );
+    ensure!(
+        target::selinux_policy_file(&root.join("not-there")).is_err(),
+        "a policy was found where there is none"
+    );
+    // The kernel's partitions of a disk: the directories with a `partition`
+    // file, and only those of the disk asked for.
+    let sys = root.join("sys");
+    write(&sys.join("block/vda/vda1/partition"), "1\n")?;
+    write(&sys.join("block/vda/vda2/partition"), "2\n")?;
+    write(&sys.join("block/vda/size"), "83886080\n")?;
+    fs::create_dir_all(sys.join("block/vda/queue"))?;
+    write(&sys.join("block/vdb/size"), "83886080\n")?;
+    ensure!(
+        target::kernel_partitions(&sys, "vda") == ["vda1", "vda2"]
+            && target::kernel_partitions(&sys, "vdb").is_empty()
+            && target::kernel_partitions(&sys, "vdz").is_empty(),
+        "the kernel's partitions: {:?}",
+        target::kernel_partitions(&sys, "vda")
+    );
+    ensure!(
+        target::wait_for_no_partitions(&sys, "vda", Duration::from_millis(300)).is_err()
+            && target::wait_for_no_partitions(&sys, "vdb", Duration::from_millis(300)).is_ok(),
+        "waiting for the kernel to forget its partitions"
+    );
+    Ok(())
+}
+
+fn fixture_plan() -> Result<ilex_installer_model::plan::Plan> {
+    use ilex_installer_model::plan::{Plan, PlanRequest};
+    let plan: Plan = serde_json::from_value(serde_json::json!({
+        "schema": 1, "id": "e".repeat(32), "created": 1, "valid_seconds": 900,
+        "seed": "0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11", "edition": "gnome",
+        "request": serde_json::from_str::<PlanRequest>(
+            r#"{"composition":"generic.gnome","disk":"virtio-blank","mode":"whole-disk","encrypt":false,"administrator":"ilexmaint"}"#,
+        )?,
+        "composition": {"tag": "generic.gnome", "machine": "generic", "shells": ["gnome"], "reason": null},
+        "image": {"target": "ghcr.io/reidond/ilex:generic.gnome", "source": format!("ghcr.io/reidond/ilex@sha256:{}", "a".repeat(64)),
+                  "digest": format!("sha256:{}", "a".repeat(64)), "download_bytes": 1, "version": null, "revision": null},
+        "disk": {"id": "virtio-blank", "path": "/dev/vda", "model": "", "serial": "blank", "size_bytes": 42949672960u64},
+        "partitions": [{"number": 1, "path": "/dev/vda1", "kind": "esp", "label": "ilex-esp",
+                        "uuid": "e2857866-e04d-4eb3-915d-101cbf838697", "start_bytes": 1048576,
+                        "size_bytes": 536870912, "filesystem": "vfat", "encrypted": false}],
+        "erases": {"disk": "virtio-blank", "partitions": [], "systems": []},
+        "encryption": {"enabled": false, "tpm": {"requested": "off", "will_enroll": false, "reason": "x"}},
+        "warnings": [],
+    }))?;
+    Ok(plan)
+}
+
+/// The comparison of the disk a plan was made for with the one found at Apply.
+fn check_apply_rules() -> Result<()> {
+    use ilex_installer_model::probe::{Disk, Partition};
+    let partition = Partition {
+        number: 1,
+        path: "/dev/vda1".into(),
+        start_bytes: 1 << 20,
+        size_bytes: 1 << 30,
+        type_id: "0fc63daf-8483-4772-8e79-3d69d8477de4".into(),
+        label: "data".into(),
+        filesystem: "ext4".into(),
+        filesystem_label: "keep".into(),
+    };
+    let then = Disk {
+        id: "virtio-blank".into(),
+        path: "/dev/vda".into(),
+        model: "QEMU HARDDISK".into(),
+        serial: "blank".into(),
+        size_bytes: 40 << 30,
+        sector_size: 512,
+        bus: "virtio".into(),
+        removable: false,
+        live_medium: false,
+        in_use: vec![],
+        notes: vec![],
+        partition_table: Some("gpt".into()),
+        partitions: vec![partition.clone()],
+        free_extents: vec![],
+        other_systems: vec![],
+    };
+    ensure!(apply::disk_difference(&then, &then.clone()).is_none(), "a disk differs from itself");
+    // What a disk the helper holds cannot show (an ESP's loaders) and what
+    // changes by itself (notes) is not a difference.
+    let mut same = then.clone();
+    same.notes.push("an ESP that could not be read".into());
+    same.other_systems.push(ilex_installer_model::probe::OtherSystem {
+        kind: "efi-loader".into(),
+        partition: None,
+        description: "x".into(),
+    });
+    ensure!(apply::disk_difference(&then, &same).is_none(), "the loaders of an ESP are compared");
+    type Change = Box<dyn Fn(&mut Disk)>;
+    let cases: [(&str, Change); 9] = [
+        ("id", Box::new(|d| d.id = "virtio-other".into())),
+        ("kernel name", Box::new(|d| d.path = "/dev/vdb".into())),
+        ("model", Box::new(|d| d.model = "Other".into())),
+        ("serial", Box::new(|d| d.serial = "other".into())),
+        ("size", Box::new(|d| d.size_bytes += 1)),
+        ("bus", Box::new(|d| d.removable = true)),
+        ("partition table", Box::new(|d| d.partition_table = None)),
+        ("partitions", Box::new(|d| d.partitions[0].size_bytes += 1 << 20)),
+        ("partitions", Box::new(|d| d.partitions.clear())),
+    ];
+    for (what, change) in cases {
+        let mut now = then.clone();
+        change(&mut now);
+        ensure!(
+            apply::disk_difference(&then, &now).is_some_and(|d| d.contains(what)),
+            "a change of the disk's {what} was not noticed"
+        );
+    }
+    Ok(())
+}
+
+/// Answers mode: finding the volume and reading its file.
+fn check_answers(parent: &Path) -> Result<()> {
+    let tree = TestDir::new(parent, "answers")?;
+    let root = &tree.0;
+    // The volume is whatever udev links; it must be a block device.
+    fs::create_dir_all(root.join("by-label"))?;
+    ensure!(answers::find_volume(&root.join("by-label")).is_err(), "no volume was found");
+    symlink("/dev/null", root.join("by-label").join(answers::VOLUME_LABEL))?;
+    ensure!(
+        answers::find_volume(&root.join("by-label")).is_err(),
+        "a character device was taken for the volume"
+    );
+    // The file: regular, not a link, bounded.
+    write(&root.join("answers.toml"), "schema = 1\n")?;
+    ensure!(
+        answers::read_file(root)?.as_slice() == b"schema = 1\n",
+        "the answers file was misread"
+    );
+    fs::remove_file(root.join("answers.toml"))?;
+    write(&root.join("elsewhere"), "schema = 1\n")?;
+    symlink("elsewhere", root.join("answers.toml"))?;
+    ensure!(answers::read_file(root).is_err(), "a link was followed");
+    fs::remove_file(root.join("answers.toml"))?;
+    fs::write(root.join("answers.toml"), vec![b'#'; 70_000])?;
+    ensure!(answers::read_file(root).is_err(), "an oversized answers file was read");
+    fs::remove_file(root.join("answers.toml"))?;
+    fs::create_dir(root.join("answers.toml"))?;
+    ensure!(answers::read_file(root).is_err(), "a directory was read as the answers file");
+    Ok(())
 }

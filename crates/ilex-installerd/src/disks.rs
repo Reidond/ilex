@@ -344,6 +344,11 @@ pub fn claim_with(
 /// MD or btrfs member). The opened file must be the device with `expect`'s
 /// number.
 fn open_exclusive(path: &str, expect: DevNum) -> io::Result<()> {
+    open_exclusive_file(path, expect).map(drop)
+}
+
+/// The claim itself: the file, open for as long as the claim is to last.
+fn open_exclusive_file(path: &str, expect: DevNum) -> io::Result<fs::File> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_EXCL)
@@ -355,7 +360,75 @@ fn open_exclusive(path: &str, expect: DevNum) -> io::Result<()> {
             expect.0, expect.1
         )));
     }
-    Ok(())
+    Ok(file)
+}
+
+/// A whole disk the helper holds exclusively (`O_EXCL`), as the kernel's claim
+/// on it for as long as this lives. While it does, nothing else can claim the
+/// disk or any partition of it: not a `mount`, not a `swapon`, not a `mkfs`.
+/// That includes the helper's own children, so it is held for the checks that
+/// come right before the disk is written and let go of just before
+/// `systemd-repart` starts (which formats the new partitions through their own
+/// device nodes and so cannot run under it: `mkfs.vfat: unable to open
+/// /dev/vda1: Device or resource busy`, measured on the live image, systemd
+/// 262).
+#[derive(Debug)]
+pub struct Hold {
+    file: fs::File,
+    pub kname: String,
+}
+
+impl Hold {
+    /// The claim is over: closing the descriptor releases it.
+    pub fn release(self) {
+        drop(self.file);
+    }
+}
+
+/// Run `open` until it succeeds, fails for another reason or has been refused
+/// `attempts` times for `EBUSY`: [`claim_with`] for a claim that is kept.
+pub fn hold_with(
+    open: &mut dyn FnMut() -> io::Result<fs::File>,
+    attempts: u32,
+    pause: Duration,
+) -> Result<fs::File, Claim> {
+    for attempt in 0..attempts {
+        match open() {
+            Ok(file) => return Ok(file),
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+                if attempt + 1 < attempts {
+                    thread::sleep(pause);
+                }
+            }
+            Err(e) => return Err(Claim::Unknown(e.to_string())),
+        }
+    }
+    Err(Claim::Busy)
+}
+
+/// Claim `path` (the whole disk `kname`) exclusively and keep the claim.
+pub fn hold_disk(sys: &Path, kname: &str, path: &str) -> Result<Hold, Claim> {
+    let Some(expect) = device_number(sys, kname) else {
+        return Err(Claim::Unknown(format!(
+            "sysfs does not give the number of {kname}"
+        )));
+    };
+    let file = hold_with(
+        &mut || open_exclusive_file(path, expect),
+        CLAIM_ATTEMPTS,
+        CLAIM_PAUSE,
+    )?;
+    Ok(Hold {
+        file,
+        kname: kname.to_owned(),
+    })
+}
+
+/// [`hold_disk`] on this system.
+pub fn hold(disk: &Disk) -> Result<Hold, String> {
+    let kname = kernel_name(&disk.path);
+    hold_disk(&Roots::real().sys, &kname, &disk.path)
+        .map_err(|claim| claim_reason(&disk.path, &claim).unwrap_or_default())
 }
 
 /// The device number sysfs gives a block device.
@@ -712,10 +785,19 @@ fn unlocated(reason: &str) -> String {
 /// Scan every disk of this computer. `run_dir` holds the call's private
 /// scratch directory, where an ESP is mounted for reading.
 pub fn scan(run_dir: &Path) -> Result<Vec<Disk>> {
-    scan_with(run_dir, &Roots::real())
+    scan_with(run_dir, &Roots::real(), None)
 }
 
-fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
+/// [`scan`] while the helper holds the disk `held` exclusively: that disk's
+/// claim is not asked for again (it would be refused: the holder is the helper
+/// itself) and its partitions are not mounted for reading (the claim would
+/// refuse that too); everything else about it, and every other disk, is read
+/// as in [`scan`].
+pub fn scan_held(run_dir: &Path, held: &Hold) -> Result<Vec<Disk>> {
+    scan_with(run_dir, &Roots::real(), Some(&held.kname))
+}
+
+fn scan_with(run_dir: &Path, roots: &Roots, held: Option<&str>) -> Result<Vec<Disk>> {
     let mut scratch = Scratch::new(run_dir, "scan")?;
     let output = exec::run_ok(
         "lsblk",
@@ -795,7 +877,8 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
         // The kernel's own claim on the disk is the authority on everything it
         // shows: what the trace did not find, an exclusive open does. A disk
         // that is the live medium or is already in use needs no second answer.
-        if reasons.is_empty() && !disk.live_medium {
+        let ours = held == Some(raw.kname.as_str());
+        if reasons.is_empty() && !disk.live_medium && !ours {
             let claim = claim_disk(&roots.sys, &raw.kname, &disk.path);
             reasons.extend(claim_reason(&disk.path, &claim));
         }
@@ -810,7 +893,7 @@ fn scan_with(run_dir: &Path, roots: &Roots) -> Result<Vec<Disk>> {
         };
         disk.free_extents = free_extents(disk.size_bytes, usable, &disk.partitions);
         for partition in disk.partitions.clone() {
-            if partition.type_id == ESP_TYPE {
+            if partition.type_id == ESP_TYPE && !ours {
                 esp_count += 1;
                 let (systems, notes) = scan_esp(&partition.path, &mut scratch, esp_count);
                 disk.other_systems.extend(systems);

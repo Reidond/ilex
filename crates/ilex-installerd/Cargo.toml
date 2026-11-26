@@ -1,6 +1,6 @@
 [package]
 name = "ilex-installerd"
-description = "The ilex installer's root helper: probe, plan and (later) install over D-Bus"
+description = "The ilex installer's root helper: probe, plan and install over D-Bus"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,3 +17,4 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 zbus = "6"
+zeroize = "1"

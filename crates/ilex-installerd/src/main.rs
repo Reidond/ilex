@@ -1,6 +1,10 @@
 //! ilex-installerd: the installer's root helper.
 
 #[cfg(target_os = "linux")]
+mod answers;
+#[cfg(target_os = "linux")]
+mod apply;
+#[cfg(target_os = "linux")]
 mod bus;
 #[cfg(target_os = "linux")]
 mod disks;
@@ -9,15 +13,27 @@ mod exec;
 #[cfg(target_os = "linux")]
 mod helper;
 #[cfg(target_os = "linux")]
+mod install;
+#[cfg(target_os = "linux")]
+mod policy;
+#[cfg(target_os = "linux")]
+mod progress;
+#[cfg(target_os = "linux")]
 mod registry;
 #[cfg(target_os = "linux")]
 mod repart;
 #[cfg(target_os = "linux")]
 mod scratch;
 #[cfg(target_os = "linux")]
+mod secret;
+#[cfg(target_os = "linux")]
 mod selfcheck;
 #[cfg(target_os = "linux")]
+mod stagelog;
+#[cfg(target_os = "linux")]
 mod sys;
+#[cfg(target_os = "linux")]
+mod target;
 #[cfg(target_os = "linux")]
 mod topology;
 
@@ -70,17 +86,52 @@ fn run() -> anyhow::Result<()> {
         /// Read the kernel command line from this file instead of /proc/cmdline
         #[arg(long, hide = true)]
         cmdline: Option<PathBuf>,
+        /// How long a plan is valid, in seconds (the `installer::` tier's
+        /// fixture; the interface's contract is 15 minutes)
+        #[arg(long, hide = true)]
+        plan_valid_seconds: Option<u64>,
         /// Look for the UEFI firmware's directory here instead of
         /// /sys/firmware/efi (the `installer::` tier's fixtures)
         #[arg(long, hide = true)]
         efi_dir: Option<PathBuf>,
+        /// Install without an interface, from the answers on the volume
+        /// labelled ILEX-ANSWERS, by calling this helper's own methods as an
+        /// interface would
+        #[arg(long)]
+        answers: bool,
+        /// With `--answers`: what to do when the installation succeeded
+        #[arg(long, value_enum, default_value = "nothing", requires = "answers")]
+        then: ThenArg,
+        /// With `--answers`: read the answers from this file instead of the
+        /// volume (the `installer::` tier's fixtures)
+        #[arg(long, hide = true, requires = "answers")]
+        answers_file: Option<PathBuf>,
         /// Internal: mount an EFI system partition read-only at the directory,
         /// print its loader directories as JSON and unmount it. The helper
         /// starts this inside `unshare --mount`.
         #[arg(long, hide = true, num_args = 2, value_names = ["DEVICE", "DIR"])]
         scan_esp: Option<Vec<PathBuf>>,
     }
+    #[derive(Clone, Copy, clap::ValueEnum)]
+    enum ThenArg {
+        Nothing,
+        Poweroff,
+    }
     let args = Args::parse();
+    if args.answers {
+        let options = answers::Options {
+            run_dir: args
+                .run_dir
+                .clone()
+                .unwrap_or_else(|| helper::Config::default().run_dir),
+            file: args.answers_file.clone(),
+            then: match args.then {
+                ThenArg::Nothing => answers::Then::Nothing,
+                ThenArg::Poweroff => answers::Then::PowerOff,
+            },
+        };
+        return answers::run(&options);
+    }
     if let Some(scan) = args.scan_esp {
         let result = disks::scan_esp_child(&scan[0].to_string_lossy(), &scan[1]);
         println!("{}", serde_json::to_string(&result)?);
@@ -109,11 +160,15 @@ fn run() -> anyhow::Result<()> {
     if let Some(efi_dir) = args.efi_dir {
         config.efi_dir = efi_dir;
     }
+    if let Some(seconds) = args.plan_valid_seconds {
+        config.plan_valid_seconds = seconds;
+    }
     if args.self_check {
         println!("ILEX-INSTALLERD-CHECK OK: {}", selfcheck::run(&config)?);
         return Ok(());
     }
-    // No secrets are held yet, but the helper never dumps core: Apply will.
+    // The helper holds secrets (an administrator's password) once SetSecret
+    // has run: it never dumps core and cannot be traced.
     ilex_enroll::harden()?;
     let helper = Arc::new(helper::Helper::new(config)?);
     helper.publish_state();

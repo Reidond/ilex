@@ -2,21 +2,22 @@
 //! plan an installation, report where things stand. Nothing here writes to a
 //! disk; the partitions a plan names are repart's dry run of them.
 
-use crate::{disks, registry, repart, sys};
+use crate::{disks, progress::Tracker, registry, repart, secret::Secret, sys};
 use anyhow::{Context, Result, bail};
 use ilex_installer_model::{
     Edition, Identity, Table,
     edition::EditionRecord,
     plan::{
         Erase, ErrorCode, PLAN_SCHEMA, PLAN_VALID_SECONDS, Plan, PlanError, PlanRequest,
-        PlannedComposition, PlannedDisk, PlannedEncryption, PlannedTpm, TpmMode, check_request,
+        PlannedComposition, PlannedDisk, PlannedEncryption, PlannedTpm, SecretKind, TpmMode,
+        check_request,
     },
-    probe::{EditionInfo, HelperInfo, Probe},
+    probe::{Disk, EditionInfo, HelperInfo, Probe},
     select,
     state::State,
 };
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -43,6 +44,8 @@ pub struct Config {
     pub passwd: PathBuf,
     pub group: PathBuf,
     pub sysusers: Vec<PathBuf>,
+    /// How long a plan is valid (the `installer::` tier shortens it).
+    pub plan_valid_seconds: u64,
 }
 
 impl Default for Config {
@@ -65,12 +68,21 @@ impl Default for Config {
                 "/etc/sysusers.d".into(),
                 "/run/sysusers.d".into(),
             ],
+            plan_valid_seconds: PLAN_VALID_SECONDS,
         }
     }
 }
 
 /// The most plans kept: each is a few KiB.
 const PLANS_KEPT: usize = 8;
+
+/// A plan the helper made, with the disk as it was probed then: `Apply`
+/// compares the disk it finds with this, not only with the plan's summary.
+#[derive(Clone)]
+pub struct Recorded {
+    pub plan: Plan,
+    pub disk: Disk,
+}
 
 pub struct Helper {
     pub config: Config,
@@ -81,10 +93,15 @@ pub struct Helper {
     pub table: Table,
     /// The edition's display name.
     edition_name: String,
-    plans: Mutex<VecDeque<Plan>>,
-    state: Mutex<State>,
-    /// One probe or plan at a time: they share scratch space and the disks.
-    work: Mutex<()>,
+    pub(crate) plans: Mutex<VecDeque<Recorded>>,
+    /// The secrets `SetSecret` was given, by plan. Held in locked memory and
+    /// wiped when taken or when their plan is forgotten.
+    pub(crate) secrets: Mutex<BTreeMap<(String, SecretKind), Secret>>,
+    /// Where an installation is.
+    pub tracker: Tracker,
+    /// One probe, plan or apply at a time: they share scratch space and the
+    /// disks.
+    pub(crate) work: Mutex<()>,
 }
 
 impl Helper {
@@ -118,6 +135,7 @@ impl Helper {
             (None, None) => Edition::of_default(&full)?,
         };
         let table = full.for_edition(&edition)?;
+        let config_run_dir = config.run_dir.clone();
         let edition_name = match &record {
             Some(record) if record.edition() == edition => record.display_name.clone(),
             _ => edition.fallback_name(&full),
@@ -129,32 +147,43 @@ impl Helper {
             full,
             table,
             plans: Mutex::default(),
-            state: Mutex::new(State::idle(sys::unix_time())),
+            secrets: Mutex::default(),
+            tracker: Tracker::new(&config_run_dir),
             work: Mutex::default(),
         })
     }
 
     pub fn state(&self) -> State {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.tracker.state()
     }
 
-    fn set_plan(&self, id: &str) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.plan = Some(id.to_owned());
-        state.updated = sys::unix_time();
-        let _ = write_state(&self.config.run_dir, &state);
-    }
-
+    /// Write the record of this helper's own state (a helper that finds an
+    /// installation another one did not end records that it is over).
     pub fn publish_state(&self) {
-        let _ = write_state(&self.config.run_dir, &self.state());
+        let _ = crate::progress::write_state(&self.config.run_dir, &self.state());
     }
 
-    pub fn probe(&self) -> Result<Probe> {
+    /// While an installation runs the disks and the scratch space are its:
+    /// nothing else probes, plans or applies.
+    fn refuse_while_installing(&self) -> Result<(), PlanError> {
+        if self.tracker.active() {
+            return Err(PlanError::new(
+                ErrorCode::InstallationActive,
+                None,
+                "an installation is running; wait for it to finish",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn probe(&self) -> Result<Probe, PlanError> {
         let _busy = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        self.refuse_while_installing()?;
         self.probe_locked()
+            .map_err(|e| PlanError::new(ErrorCode::Internal, None, format!("{e:#}")))
     }
 
-    fn probe_locked(&self) -> Result<Probe> {
+    pub(crate) fn probe_locked(&self) -> Result<Probe> {
         let identity = Identity::read(&self.config.dmi_dir);
         // Detection sees every machine of the catalogue, then maps into this
         // edition: a conflict with a machine of another edition still counts.
@@ -196,6 +225,7 @@ impl Helper {
         let internal =
             |e: anyhow::Error| PlanError::new(ErrorCode::Internal, None, format!("{e:#}"));
         let _busy = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        self.refuse_while_installing()?;
         let probe = self.probe_locked().map_err(internal)?;
         let checked = check_request(&request, &probe)?;
         self.check_system_names(&checked.request)?;
@@ -253,7 +283,7 @@ impl Helper {
             schema: PLAN_SCHEMA,
             id,
             created: sys::unix_time(),
-            valid_seconds: PLAN_VALID_SECONDS,
+            valid_seconds: self.config.plan_valid_seconds,
             seed,
             edition: self.edition.id().into(),
             request: checked.request.clone(),
@@ -301,12 +331,19 @@ impl Helper {
         };
         {
             let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
-            plans.push_back(plan.clone());
+            plans.push_back(Recorded {
+                plan: plan.clone(),
+                disk: checked.disk.clone(),
+            });
+            let mut secrets = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
             while plans.len() > PLANS_KEPT {
-                plans.pop_front();
+                if let Some(forgotten) = plans.pop_front() {
+                    // A secret does not outlive the plan it was given for.
+                    secrets.retain(|(id, _), _| *id != forgotten.plan.id);
+                }
             }
         }
-        self.set_plan(&plan.id);
+        self.tracker.set_plan(&plan.id);
         Ok(plan)
     }
 
@@ -453,16 +490,4 @@ fn systemd_version() -> Option<String> {
     )
     .ok()?;
     out.stdout_text().lines().next().map(str::to_owned)
-}
-
-/// `/run/ilex-installer/state.json`: the stage record the plan describes.
-fn write_state(dir: &Path, state: &State) -> Result<()> {
-    use std::io::Write;
-    fs::create_dir_all(dir)?;
-    let temporary = dir.join(".state.json.tmp");
-    let mut file = fs::File::create(&temporary)?;
-    file.write_all(&serde_json::to_vec_pretty(state)?)?;
-    file.sync_all()?;
-    fs::rename(&temporary, dir.join("state.json"))?;
-    Ok(())
 }
