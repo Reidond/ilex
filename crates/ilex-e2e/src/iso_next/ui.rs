@@ -93,12 +93,13 @@ fn boot(purpose: &'static str, usb_keyboard: bool, smbios: Vec<String>) -> Resul
     config.snapshot = false;
     config.memory = memory;
     config.cdrom = Some(iso.clone());
-    config.smbios = smbios;
     let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
     // Provisioning is required, a qualified host is not (see `boot` above).
     spec.security_launch = SecurityLaunch::QualificationFixture;
     spec.secure_boot = Requirement::Required;
-    let provider = LinuxProvider::new(ws.clone())?.with_usb_keyboard(usb_keyboard);
+    let provider = LinuxProvider::new(ws.clone())?
+        .with_usb_keyboard(usb_keyboard)
+        .with_smbios(smbios);
     let caps = provider.probe(&spec)?;
     caps.require_provisioning(Capability::FirmwareEnforcement)?;
     let vm = provider.create(spec)?;

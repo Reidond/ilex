@@ -222,6 +222,7 @@ pub struct LinuxProvider {
     usb_keyboard: bool,
     usb_medium: bool,
     esp_dir: Option<PathBuf>,
+    smbios: Vec<String>,
 }
 pub struct LinuxVm {
     spec: VmSpec,
@@ -246,6 +247,7 @@ impl LinuxProvider {
             usb_keyboard: false,
             usb_medium: false,
             esp_dir: None,
+            smbios: Vec::new(),
         })
     }
     /// Give the guest an xHCI USB keyboard instead of a virtio one, for
@@ -254,6 +256,14 @@ impl LinuxProvider {
     #[must_use]
     pub fn with_usb_keyboard(mut self, enabled: bool) -> Self {
         self.usb_keyboard = enabled;
+        self
+    }
+    /// Extra QEMU `-smbios` arguments (a machine's identity for a detection
+    /// trial, a systemd credential). Empty by default: it changes no existing
+    /// launch.
+    #[must_use]
+    pub fn with_smbios(mut self, smbios: Vec<String>) -> Self {
+        self.smbios = smbios;
         self
     }
     /// Attach the spec's ISO as a USB stick (`/dev/sdX`, removable) instead of
@@ -411,6 +421,7 @@ impl VmProvider for LinuxProvider {
         config.usb_keyboard = self.usb_keyboard;
         config.usb_medium = self.usb_medium;
         config.esp_dir = self.esp_dir.clone();
+        config.smbios.extend(self.smbios.iter().cloned());
         config.efi_vars = vm.spec.firmware_state.clone();
         config.extra_disks = vm
             .spec

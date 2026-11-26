@@ -2378,11 +2378,12 @@ directory outside the artifacts. Seal the successful export with
 ## The next installer
 
 `installer/next/` is the live installer of ilex's own installer, which will
-replace Anaconda. This version delivers the live image only: no Anaconda,
-Cockpit, Firefox or Python chooser, and a placeholder interface that names
-the edition and shows the machine's DMI identity. Nothing is installed. The
-Anaconda network installer above is unchanged and stays the released one:
-`installer/next` is excluded from its fingerprint (`ilexctl iso --due`).
+replace Anaconda: no Anaconda, Cockpit, Firefox or Python chooser, and an
+interface of its own, described in "The next installer's interface" below. It
+has the welcome, machine and administrator pages and ends there: nothing is
+installed. The Anaconda network installer above is unchanged and stays the
+released one: `installer/next` is excluded from its fingerprint (`ilexctl iso
+--due`).
 
 ```sh
 ilexctl iso --next [--edition gnome] [--output-dir D]  # <state dir>/iso-next/ilex-installer-gnome.iso
@@ -2424,8 +2425,9 @@ the Windows paths of this change: no Windows host was available.
   `cargo clippy --workspace` needs no `gtk4-devel`: lint it with
   `cargo clippy -p ilex-installer --features gui --all-targets` where
   `gtk4-devel` and `libadwaita-devel` are installed. `ilex-installer
-  --self-check` reads the edition record and the DMI strings without a display
-  and fails when the live image is incomplete; the session unit runs it first.
+  --self-check` needs no display: it runs the flow's rules on the simulation's
+  fixtures, reads the edition record and the image's keyboard catalogue and
+  fails when the live image is incomplete; the session unit runs it first.
 - **Session.** `ilex-installer-session.service` opens a logind session for the
   unprivileged `ilex-installer` user (sysusers.d, PAM service `ilex-installer`
   on tty1), so GNOME Kiosk (mutter) gets seat0's DRM and input devices without
@@ -2569,8 +2571,9 @@ the Windows paths of this change: no Windows host was available.
 - **Serial markers.** The session script and the interface print marker lines
   to the journal and to `/dev/ttyS0` (the user is in `dialout`):
   `ILEX-INSTALLER-SESSION compositor=… graphics=default|basic secure-boot=0|1`,
-  `ILEX-INSTALLER page=placeholder edition=… renderer=… uptime=…` once the
-  window is mapped, `ILEX-INSTALLER-STATS mem_total_kib=…` fifteen seconds
+  `ILEX-INSTALLER page=welcome edition=… language=… keyboard=… renderer=…
+  scale=… uptime=…` once the window is mapped (and one `ILEX-INSTALLER page=…`
+  line for every page shown after it, see the interface's section), `ILEX-INSTALLER-STATS mem_total_kib=…` fifteen seconds
   later, `ILEX-INSTALLER-SESSION ended child=compositor|installer status=…`
   when the session ends and `ILEX-INSTALLER-FALLBACK session=failed result=…`
   at the give-up. The session script prints them through `ilex-installer
@@ -2590,8 +2593,10 @@ the Windows paths of this change: no Windows host was available.
 - **Tests.** `iso::next_boot`, `iso::next_basic_graphics`, `iso::next_fallback`,
   `iso::next_restart`, `iso::next_serial_backpressure`,
   `iso::next_serial_unavailable`, `iso::next_serial_stall`,
-  `iso::next_ssh_tmpfiles`, `iso::next_helper_usb` and
-  `iso::next_helper_cdrom` are registered only when a filter names
+  `iso::next_ssh_tmpfiles`, `iso::next_helper_usb`,
+  `iso::next_helper_cdrom`, `iso::next_welcome`, `iso::next_detect_board`,
+  `iso::next_detect_generic`, `iso::next_kernel_argument` and
+  `iso::next_kernel_argument_unknown` are registered only when a filter names
   `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO);
   `iso::next_helper_loop` only when a filter names `next_helper_loop` (it needs
   `mke2fs`, `sfdisk` and a second copy of the ISO on the host, which no other
@@ -2726,8 +2731,8 @@ the Windows paths of this change: no Windows host was available.
   and the job additionally requires `workflow_dispatch`, has `contents: read`
   and reads no secret, so PRs and forks reach neither it nor the key. It builds
   the ISO in the same privileged Fedora 45 container as the `iso` job, keeps it
-  as the `installer-next-iso` artifact, boots it with Secure Boot (the ten
-  `iso::next` trials, with the same provisioning-only requirement as locally:
+  as the `installer-next-iso` artifact, boots it with Secure Boot (the `iso::next`
+  trials, with the same provisioning-only requirement as locally:
   a runner without KVM SMM fails them) and keeps `installer-next-evidence`.
   Nothing releases or publishes it. Runs without `iso_next` are unchanged.
 - **Fingerprints.** The root image's fingerprint (the early `ilex.root-inputs`
@@ -3246,6 +3251,164 @@ mount layout; exiting tasks (a vanished process hides nothing of its
 namespace, `EINVAL` from an exiting task's `mountinfo` is a task that is gone,
 any other failure is not); the live ISO's own boot is `iso::next_helper_usb`,
 `iso::next_helper_cdrom` and, as a file on another disk, `iso::next_helper_loop`.
+
+## The next installer's interface
+
+`crates/ilex-installer-flow` is the installer's flow, shared by every interface;
+`crates/ilex-installer` is the GNOME edition's GTK 4 + libadwaita (relm4)
+application over it. The KDE edition's Kirigami interface (Qt Quick through
+cxx-qt, a later change) drives the same flow crate: nothing in it knows a
+toolkit, a compositor or a thread. It stops where this version stops: the
+welcome, machine and administrator pages and a closing page; nothing is
+installed, and no page writes to a disk.
+
+- **The flow crate.** No GTK or Qt types, no `async`.
+  - `flow::Flow` is a state machine with no I/O: the pages in order
+    (`PageId`: `welcome`, `machine`, `account`, `ready`), what each needs before
+    Continue works (`can_continue`), and what Continue does (`advance` returns
+    a `Step`: `Goto(page)`, `RunPlan(request)` or `Stay`). An interface calls
+    `set_probe`, the setters of the page it shows (`set_language`,
+    `set_keyboard`, `select_machine`, `set_administrator`, `set_password`,
+    `set_confirmation`), `can_continue`, `advance`, `back`, and gives the
+    helper's answer to a `RunPlan` back with `plan_finished`. It never calls
+    the helper itself, so GTK drives it from relm4 messages and commands and
+    Kirigami will from cxx-qt signals and a worker thread.
+  - `backend::Backend` is the root helper as a trait with blocking calls (make
+    them from a worker thread): `probe`, `plan` and `state` over
+    `org.ilex.Installer1` (`DbusBackend`: zbus, the system bus,
+    `zbus::block_on`, connecting on first use and again after a failure, so the
+    interface starts before the bus or the helper is up and shows the problem;
+    a helper refusal arrives as `ClientError::Refused(PlanError)`, the bus's own
+    errors as `HelperUnavailable` or `AccessDenied`). `set_secret`, `apply`
+    and `next_report` (the `Progress` and `Finished` signals) are typed stubs
+    answering `ClientError::NotYet`: the helper's installation (a later change)
+    fills them, and the pages that need them are written against these
+    signatures. `Secret` holds a password wiped on drop and never in a request.
+  - `simulate::Simulated` is the same trait over JSON fixtures
+    (`crates/ilex-installer-flow/fixtures/*.json`, compiled in: `generic`,
+    `ms-7c35`, `ms-7c35-board`, `conflict`, `no-composition`, `boot-override`,
+    `bad-override`, `bios`, `no-disk`, `helper-down`, `registry-down`,
+    `installing`). Each holds a complete `Probe`, a `Plan` to return and
+    optionally a refusal, a failing probe or an installation's `State`; the
+    simulation still applies the model's own `check_request` to every request
+    and the helper's live-image account names, so a refusal on a page is the
+    real rule's. `ilex-installer --simulate [SCENARIO]` runs the application on
+    them, and is refused unless the kernel command line carries
+    `ilex.installer.simulate` (optionally `=<scenario>`, which the session then
+    runs without a flag) or `ILEX_INSTALLER_SIMULATE_ALLOW` is set (the
+    development and self-check containers): a released ISO cannot be talked
+    into pretending by anyone who cannot already edit its boot line.
+  - `messages` is every sentence a refusal or failure becomes, in one place
+    (`Message { title, detail }`, `plan_error`, `ClientError::message`);
+    `machine::MachineView` is the machine page's content made from the probe;
+    `account` the administrator page's rules; `progress::Progress` the stages
+    of an installation as rows (`for_plan`, `apply(&State)`, `overall`) for the
+    progress page of a later change; `keyboard` and `language` the catalogues.
+    The model stays the one definition of every rule the helper also applies:
+    names (`is_user_name`, `is_reserved_user`, the catalogue's public profile
+    names), tags, detection and `check_request`.
+  - `selfcheck::run` exercises all of it on the fixtures (the keyboard
+    parser, every language, every refusal's wording, the name and password
+    rules, each scenario's machine page, the walk from the welcome page to the
+    checked plan, the helper's refusal of a name, BIOS, a missing helper, no
+    usable disk, a registry that does not answer, an unknown boot argument, the
+    progress rows of an installation) and `selfcheck::system` reads the live
+    image's keyboard catalogue.
+- **The pages.** `AdwNavigationView`, a header bar with the automatic Back
+  button (and Escape), Continue at the bottom right of every page, Enter
+  continues where the page is valid (each page's default widget; the entry
+  rows activate it), the first control has the focus when a page is shown, every
+  control has a visible label and the error style of a refused field is also
+  its accessible invalid state with the message as its error message. No
+  window buttons: the session's only window cannot be closed.
+  - *Welcome.* The installed system's language (a short table of UTF-8 locales:
+    the live image has no list of the locales the installed system can
+    generate, so the model checks syntax only) and the keyboard layout, with a
+    field to try it. The layout catalogue is what the image ships: kbd's
+    console keymaps converted from xkeyboard-config
+    (`/usr/lib/kbd/keymaps/xkb/<layout>[-<variant>].map.gz`, which the helper's
+    own existence check accepts by construction) named by xkeyboard-config's
+    `evdev.lst`; `us` is the default. Choosing one switches the session through
+    GNOME Kiosk's own interface, `org.gnome.Kiosk.InputSources.SetInputSources`
+    on the session bus (`[("xkb", "de+nodeadkeys")]`), and reads
+    `SelectedInputSource` back before reporting it applied (Kiosk applies the
+    sources a moment after the call returns). It is the compositor's interface,
+    not localed's, so it needs no polkit action: the session's polkit rule is
+    unchanged. The `keyboard` request field is the console keymap name, so the
+    session's layout and the installed system's agree. A BIOS boot or a helper
+    that does not answer stops the installer on this page, with a sentence (and
+    Try again for the helper).
+  - *This computer.* From the probe: this computer's SMBIOS strings, the
+    edition's catalogue as one radio row per machine (the description before its
+    first `: ` is the title), and what the model decided: the detected machine
+    preselected; no match, two matches (named) and a machine without a
+    composition in this edition fall back to the default and say so; an
+    `ilex.composition=` boot argument is preselected and said to come from the
+    boot options; an unknown tag shows the model's error (with its list of
+    offers) and keeps the detection's choice. There is no desktop choice. The
+    page prints `ILEX-COMPOSITION <tag> (<reason>) installs <image>` when it is
+    shown and when the person picks another configuration, in the format the
+    selection trials have always read.
+  - *Administrator.* The maintenance and recovery account's name (the model's
+    `is_user_name`, `is_reserved_user` and the catalogue's profile names, with
+    the helper's own refusal of a name the live image defines shown beside the
+    field) and a password twice: no policy beyond what `chpasswd` can take (no
+    control characters, at most 255 bytes), and a hint under eight characters.
+    The password never enters a request, a marker or a log. Computer name and
+    time zone are not asked yet (the model's defaults apply).
+  - *Ready.* Continue on the administrator page calls `Plan` with the choices
+    so far on the first disk the installer could use (not the medium it started
+    from, not in use, at least the helper's minimum size): the disk page of a
+    later change replaces that provisional choice. The page shows the answer,
+    the checked image's version, download size and digest, or why nothing can
+    be installed (every disk's reason, a registry that does not answer, the
+    helper's refusal) with Try again. Nothing is written.
+- **Markers.** Every page prints `ILEX-INSTALLER page=<id> edition=…` plus its
+  own words when it is shown (`language=` and `keyboard=` on the welcome page;
+  `selected=`, `origin=` (`detected`, `not-recognised`, `conflict`,
+  `no-composition`, `chosen`, `bad-override`), `detected=` and `offered=` on the
+  machine page; `check=` on the last), and `ILEX-INSTALLER event=…` lines:
+  `probe result=ok|failed`, `language`, `layout layout=<id> applied=true|false`,
+  `try layout=<id> text=<what was typed in the test field>` (the field holds
+  nothing private; no other field's content is ever printed) and `plan
+  result=…`. The session serial mirror and its faults are unchanged.
+- **`--self-check --render DIR [--dark]`** draws every page and error state to
+  PNG files with GTK's renderer from the window's widget tree at the surface's
+  own scale (`<state>-<light|dark>-<scale>x.png`, 25 states): the welcome page
+  in German, BIOS and without a helper; the machine page for every kind of
+  detection result; the administrator page empty, with each refusal and valid;
+  the last page checked, without a disk, without a registry and after Back. It
+  runs the application's own pages with the same messages the person's input
+  sends, against the fixtures, and needs only a display: GNOME Kiosk's
+  `--headless --virtual-monitor 1920x1200` is enough, with the scale from a
+  `monitors.xml` for the virtual monitor (`MetaVendor` / `MetaVirtualMonitor`,
+  connector `Meta-0`, serial `0x00`). `installer::ui` does that in the live
+  image's VM: the flow's rules, `--simulate` refused on a real boot, and 75
+  images (light and dark at 1x, light at 1.5x, 1280x800 and 1920x1200) that
+  must all be PNGs of their size, drawn and mostly different, kept under
+  `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
+  these files. They are not an accessibility walk: AT-SPI driving of the pages
+  is not done.
+- **On the real ISO** (`iso::next_*`, Secure Boot on KVM, real key input over
+  QMP, the real helper): `iso::next_welcome` opens the layout list with the
+  keyboard, searches it, chooses German (no dead keys), waits for GNOME Kiosk to
+  apply it, types `yz` into the test field and requires `zy` (the two keys swap
+  between the US and German layouts: the switch is real and at run time), then
+  continues with Enter. `iso::next_detect_board` gives the VM only the
+  MSI MEG X570 UNIFY's baseboard SMBIOS strings and requires `ms-7c35.gnome`
+  preselected as `detected`; `iso::next_detect_generic` a VM nothing matches and
+  requires `generic.gnome` as `not-recognised`; both require the edition to
+  offer exactly two configurations. `iso::next_kernel_argument` types
+  `ilex.composition=invalid-first-choice ilex.composition=ms-7c35.gnome` into
+  GRUB's editor and requires the last to win, `chosen`, and the model's own
+  serial line; `iso::next_kernel_argument_unknown` an unoffered tag: `bad-override`
+  with the detection's choice kept. Screenshots of each are kept in the
+  artifacts.
+- **Not done here.** Strings are English constants (no gettext catalogue); the
+  installed system's computer name and time zone, the display's scale and the
+  network, disk, encryption, review, progress, done and problem pages, the
+  daily profile page, and a screen reader's walk of the pages are later
+  changes. No new polkit action and no change to the bus policy was needed.
 
 ## Conventions
 
