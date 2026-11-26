@@ -132,7 +132,7 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     let mut report = vmtest::Report::default();
     report.check(
         "a Plasma logout leaves nothing in the user manager",
-        manager_clean(vm),
+        manager_clean(vm, false),
     );
     report.check(
         "and nothing in the home that GNOME reads",
@@ -434,17 +434,23 @@ fn gnome_logout(vm: &mut Vm) -> Result<()> {
 }
 
 /// After Plasma's logout the lingering user manager holds no trace of Plasma:
-/// its target is down and the environment it exported is gone.
-fn manager_clean(vm: &Vm) -> Result<()> {
+/// its target is down and the environment it exported is gone. `portal_kept`
+/// allows `GTK_USE_PORTAL=1` to stay: `startplasma` puts the manager's
+/// environment back as it found it, and a session that started after a crash
+/// found the crashed session's variable there (benign: GNOME's own portal
+/// answers, see the crash step).
+fn manager_clean(vm: &Vm, portal_kept: bool) -> Result<()> {
     let env = user(vm, "systemctl --user show-environment")?;
     let plasma = user(vm, "systemctl --user is-active plasma-workspace.target")
         .unwrap_or_else(|_| "inactive".into());
     let stale: Vec<_> = env
         .lines()
         .filter(|l| {
-            ["GTK_USE_PORTAL=", "DCONF_PROFILE=", "GTK_THEME="]
-                .iter()
-                .any(|p| l.starts_with(p))
+            let mut vars = vec!["DCONF_PROFILE=", "GTK_THEME="];
+            if !portal_kept {
+                vars.push("GTK_USE_PORTAL=");
+            }
+            vars.iter().any(|p| l.starts_with(p))
         })
         .collect();
     if !stale.is_empty() || plasma == "active" {
@@ -1085,5 +1091,5 @@ fn late_watch_plasma(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str)
     .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
     // And its logout ends the session the way it always does.
     kde::logout(vm)?;
-    manager_clean(vm)
+    manager_clean(vm, true)
 }

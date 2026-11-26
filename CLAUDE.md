@@ -871,7 +871,11 @@ checks that the overlay holds nothing else):
   `closing` counts as over. The Wayland clients that lost the compositor fail (for
   example `xdg-desktop-portal-gtk`); they are stopped, not running.
   `GTK_USE_PORTAL=1` stays in the manager (no shutdown script runs after a crash)
-  and is benign: GNOME's own portal answers.
+  and is benign: GNOME's own portal answers. A later Plasma session's `startplasma`
+  takes the manager's environment as it finds it when it starts and puts it back when
+  it ends, so the variable also outlives that session's own shutdown script (measured:
+  the script unsets it, it is back once `startplasma` is done; with the variable removed
+  before the login the manager stays clean).
   **The end of the tracked session never justifies a stop by itself**: the user can
   log in again before the watch looks (Plasma's or GNOME's session in the same
   lingering manager, a login manager's auto-relogin, a slow `loginctl`). Whatever the
@@ -1033,8 +1037,9 @@ GNOME's dark choice. Two more crashes follow with the session watch stopped
 up; the late watch must then clear the leftovers, leave `graphical-session.target`
 inactive, and the next GNOME login must work and look as GNOME chose) and a Plasma
 login (which must stop the leftovers itself, get its own compositor and shell, show
-the desktop rather than the greeter, and not be touched by the watch). Screenshots
-land in `<state dir>/artifacts/graphical*/`.
+the desktop rather than the greeter, and not be touched by the watch, then end with
+a normal logout that leaves no Plasma target, `DCONF_PROFILE` or theme in the manager).
+Screenshots land in `<state dir>/artifacts/graphical*/`.
 The Anaconda installer's catalogue offers only the installer composition's shell
 list (GNOME), so KDE compositions are not offered there and its release does not
 wait for their tags; KDE installs arrive with the KDE installer edition.
