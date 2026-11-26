@@ -63,7 +63,8 @@ LABEL ilex.installer-edition="${EDITION}"
 # mounter for its user (udisks2 lets an active session mount any block device
 # without a password), no firmware updater or its metadata cache (fwupd,
 # passim) and no mDNS responder (avahi, which listens on the network): nothing
-# requires them, and `rpm -e` without --nodeps fails the build if that changes.
+# outside their own subpackages requires them, and `rpm -e` without --nodeps
+# fails the build if that changes.
 # Install and removal share one
 # RUN so that rpm's database is written inside one layer (removing in a later
 # layer left it corrupt on one build host), and the final check fails the build
@@ -79,7 +80,7 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
         'mesa-vulkan-drivers' 'intel-mediasdk' 'qemu-user-static*' \
         'intel-audio-firmware' 'cirrus-audio-firmware' \
     | xargs -r rpm -e --nodeps && \
-    rpm -qa 'udisks2' 'fwupd' 'passim' 'avahi' \
+    rpm -qa 'udisks2*' 'fwupd*' 'passim*' 'avahi' \
     | xargs -r rpm -e && \
     rpm --verifydb
 
