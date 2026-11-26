@@ -669,8 +669,11 @@ impl Vm {
                     "tpm-tis,tpmdev=tpm0",
                 ]);
         }
+        // A stick (and its controller, `ilexusb`) exists only with an ISO to
+        // put on it; `usb_medium` alone adds nothing.
+        let usb_stick = config.usb_medium && config.cdrom.is_some();
         if let Some(iso) = &config.cdrom {
-            if config.usb_medium {
+            if usb_stick {
                 // A stick: the whole ISO as a removable USB disk, first in
                 // the boot order, on a controller of its own. The guest can
                 // write to it, as to a real stick (a read-only disk is not
@@ -707,7 +710,7 @@ impl Vm {
                 config.width, config.height
             ))
             .args(["-device", "virtio-tablet-pci"]);
-        if config.usb_keyboard && config.usb_medium {
+        if config.usb_keyboard && usb_stick {
             qemu.args(["-device", "usb-kbd,bus=ilexusb.0"]);
         } else if config.usb_keyboard {
             qemu.args(["-device", "qemu-xhci", "-device", "usb-kbd"]);
