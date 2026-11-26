@@ -156,8 +156,8 @@ RUN chmod 0755 /usr/libexec/ilex/update-notify /usr/lib/dracut/modules.d/91ilex-
     mkdir /app && \
     chmod 4755 /usr/libexec/drupe/drupe-enter && \
     systemctl set-default "$(python3 -I -S -c 'import json; print("graphical.target" if json.load(open("/usr/share/ilex/image.json"))["shells"] else "multi-user.target")')" && \
-    { read -r greeter || true; while read -r other; do systemctl disable "$other"; done; \
-      if [ -n "$greeter" ]; then systemctl enable --force "$greeter"; fi; } < /tmp/ilex-compose/greeters && \
+    { read -r greeter || true; while read -r other; do systemctl disable -- "$other"; done; \
+      if [ -n "$greeter" ]; then systemctl enable --force -- "$greeter"; fi; } < /tmp/ilex-compose/greeters && \
     systemctl preset bootc-fetch-apply-updates.timer ilex-sigpolicy.service drupe.service systemd-homed.service ilex-enrollment-report.service && \
     systemctl preset ilex-security-verify.service && \
     systemctl --global enable ilex-profile.service && \

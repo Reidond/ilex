@@ -123,7 +123,7 @@ def shell(path, is_default):
             fail(path, "greeter", "is required for the default shell")
         greeter = table(path, "greeter", data.get("greeter"), {"unit"})
         unit = string(path, "greeter.unit", greeter.get("unit"))
-        if not re.fullmatch(r"[A-Za-z0-9_@.-]+\.service", unit):
+        if not re.fullmatch(r"[A-Za-z0-9_@][A-Za-z0-9_@.-]*\.service", unit):
             fail(path, "greeter.unit", "must name a systemd service")
     return data
 
@@ -441,11 +441,16 @@ def image(args):
             "packages": base_packages, "shell-packages": shell_packages,
         }))
         generated.write("usr/share/ilex/machine.json", json_bytes(machine))
-    # The default shell's greeter owns display-manager.service. Every shell's
-    # package enables its own greeter, so with several shells the last scriptlet
-    # would win: the Containerfile disables the others and enables this one.
-    greeters = [m["greeter"]["unit"] for m in manifests if m["name"] == shell_default] + \
-               [m["greeter"]["unit"] for m in manifests if m["name"] != shell_default and "greeter" in m]
+    # display-manager.service has one owner: the default shell's greeter. Every
+    # shell's package enables its own greeter when it installs, and the first
+    # package to install wins that alias, which need not be the default's. The
+    # Containerfile therefore disables every other greeter and `enable --force`s
+    # the first line of `greeters`. A unit shared by several shells is listed once.
+    greeters = []
+    for unit in ([m["greeter"]["unit"] for m in manifests if m["name"] == shell_default and "greeter" in m] +
+                 [m["greeter"]["unit"] for m in manifests if m["name"] != shell_default and "greeter" in m]):
+        if unit not in greeters:
+            greeters.append(unit)
     with Tree(out / "install", "installation staging", create=True) as staging:
         staging.write("overlays.json", json_bytes(overlays))
         staging.write("greeters", "".join(unit + "\n" for unit in greeters).encode("utf-8"))

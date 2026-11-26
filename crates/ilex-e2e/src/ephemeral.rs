@@ -530,10 +530,12 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
             })?;
         }
         check_packages(vm, &manifest)?;
-        // Only the default shell's greeter is enabled: with several shells each
-        // package enables its own, and the Containerfile leaves the default's.
+        // The default shell's greeter owns display-manager.service: with several
+        // shells each package enables its own, and the Containerfile leaves the
+        // default's. A secondary shell that names the same unit shares it.
         if Some(name.as_str()) != selection.default_shell.as_deref()
             && let Ok(unit) = common::shell_property(&manifest, "greeter", "unit")
+            && common::greeter()?.as_deref() != Some(unit.as_str())
         {
             let state = vm.ssh(&format!("systemctl is-enabled -- {}", common::quote(&unit)))?;
             ensure(state.out() != "enabled", || {
