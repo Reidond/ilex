@@ -104,7 +104,8 @@ impl Layouts {
             };
             let name = match variant {
                 None => layout_name.clone(),
-                Some(variant) => match names.variants.get(&(layout.to_owned(), variant.to_owned())) {
+                Some(variant) => match names.variants.get(&(layout.to_owned(), variant.to_owned()))
+                {
                     Some(name) => name.clone(),
                     None => continue,
                 },
@@ -196,9 +197,10 @@ fn parse_rules(text: &str) -> Names {
             }
             "variant" => {
                 if let Some((layout, name)) = rest.split_once(": ") {
-                    names
-                        .variants
-                        .insert((layout.trim().to_owned(), code.to_owned()), name.trim().to_owned());
+                    names.variants.insert(
+                        (layout.trim().to_owned(), code.to_owned()),
+                        name.trim().to_owned(),
+                    );
                 }
             }
             _ => {}

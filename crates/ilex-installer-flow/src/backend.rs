@@ -184,7 +184,9 @@ mod dbus {
                     };
                 }
                 match name.as_str() {
-                    "org.freedesktop.DBus.Error.AccessDenied" => ClientError::AccessDenied(description),
+                    "org.freedesktop.DBus.Error.AccessDenied" => {
+                        ClientError::AccessDenied(description)
+                    }
                     "org.freedesktop.DBus.Error.ServiceUnknown"
                     | "org.freedesktop.DBus.Error.NameHasNoOwner"
                     | "org.freedesktop.DBus.Error.NoReply" => {

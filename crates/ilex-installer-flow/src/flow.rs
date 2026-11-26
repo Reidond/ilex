@@ -200,13 +200,13 @@ impl Flow {
     pub fn blocking_problem(&self) -> Option<Message> {
         match &self.probe {
             ProbeState::Failed(message) => Some(message.clone()),
-            ProbeState::Ready(probe) if !probe.firmware.uefi => Some(
-                crate::messages::plan_error(&ilex_installer_model::plan::PlanError::new(
+            ProbeState::Ready(probe) if !probe.firmware.uefi => Some(crate::messages::plan_error(
+                &ilex_installer_model::plan::PlanError::new(
                     ErrorCode::UnsupportedFirmware,
                     None,
                     "",
-                )),
-            ),
+                ),
+            )),
             _ => None,
         }
     }
@@ -242,7 +242,8 @@ impl Flow {
         }
         match self.page {
             PageId::Welcome => {
-                language::find(&self.language).is_some() && self.layouts.get(&self.keyboard).is_some()
+                language::find(&self.language).is_some()
+                    && self.layouts.get(&self.keyboard).is_some()
             }
             PageId::Machine => {
                 self.probe().is_some()
