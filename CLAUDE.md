@@ -2437,6 +2437,38 @@ the Windows paths of this change: no Windows host was available.
   Testing the file rather than either credential admits both and nothing else.
   `iso::next_serial_*` boot without the credential and check that nothing
   answers on the forwarded port.
+- **What the session can reach.** The live session is an active local session
+  on seat0, which polkit's defaults treat as the person at the machine, so the
+  image is cut down to what the installer needs. Removed (nothing requires
+  them): `udisks2` (an active session may mount any block device without a
+  password), `fwupd` and its plugins, `passim`, `avahi`. Masked: the
+  `bootc-fetch-apply-updates` and `rpm-ostree` units (including the `countme`
+  metrics timer), `systemd-homed` and `sssd`. `systemd-resolved` answers no
+  LLMNR or multicast DNS (it listened on 5355 on every address). A polkit rule,
+  `00-ilex-installer.rules`, denies every action to the `ilex-installer` user;
+  a page that needs one (a restart button, the network page) adds it to that
+  file in its own change and to `POLKIT_ALLOWED` in the trial. `iso::next_boot`
+  checks all of this on the running guest and writes `next-surface.txt` beside
+  the other artifacts: `pkcheck` against the session's own process for every
+  action (none is authorized), a control that moves the rule away and back
+  (two actions the defaults allow are then authorized, and denied again once it
+  is restored), the system bus names, the listening sockets (nothing beyond
+  loopback but the harness's sshd) and the running services. **What remains,
+  measured on this image (2026-11-26):** the session is denied every polkit
+  action; the system bus still offers `systemd1`, `login1`, `hostname1`,
+  `locale1`, `timedate1`, `resolve1`, `timesync1`, `oom1`, `sysupdate1`,
+  `home1` and `nm_dispatcher`/`nm_priv_helper` (all gated by polkit, and so
+  denied for this user, or inert), NetworkManager and `wpa_supplicant` (the
+  Wi-Fi support later pages use; their polkit actions are denied until the
+  network page adds its own), `PolicyKit1`, `RealtimeKit1`, `ColorManager`
+  (colord, started by the compositor) and `GeoClue2` (activatable only, a
+  dependency of gnome-settings-daemon); the listeners are loopback-only
+  (resolver stub on 127.0.0.53 and .54, chrony on 323) plus sshd on 22 when a
+  key was provisioned. The services running are chronyd, colord, dbus-broker,
+  gssproxy, irqbalance, NetworkManager, polkit, rtkit, sshd (with a key),
+  hostnamed, journald, localed, logind, oomd, resolved, udevd, userdbd and the
+  installer's own two units. `gssproxy`, `irqbalance` and `rtkit` expose
+  nothing to the session and stay as fedora-bootc ships them.
 - **Boot entries.** "Install ilex" and "Install ilex (basic graphics)"
   (`nomodeset`); the second makes the session set `GSK_RENDERER=cairo` and
   `LIBGL_ALWAYS_SOFTWARE=1`. The ISO's volume label is
@@ -2463,8 +2495,9 @@ the Windows paths of this change: no Windows host was available.
   second UART, `/dev/ttyS1`. They can only stop the installer from starting or
   silence its mirror.
 - **Tests.** `iso::next_boot`, `iso::next_basic_graphics`, `iso::next_fallback`,
-  `iso::next_restart`, `iso::next_serial_backpressure` and
-  `iso::next_serial_unavailable` are registered only when a filter names
+  `iso::next_restart`, `iso::next_serial_backpressure`,
+  `iso::next_serial_unavailable`, `iso::next_serial_stall` and
+  `iso::next_ssh_tmpfiles` are registered only when a filter names
   `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO).
   `cargo ilexctl test iso::next` builds the ISO (or uses
   `ILEX_ISO_NEXT=<path>`) and needs no OS image. Markers are matched as
@@ -2494,11 +2527,19 @@ the Windows paths of this change: no Windows host was available.
     report no stale socket and bring the page up, `NRestarts=1`), then kills
     the client (`NRestarts=2`), and requires that the fallback never fires:
     three starts in five minutes are the unit's limit.
-  - `iso::next_serial_backpressure` and `iso::next_serial_unavailable` boot
-    with `ilex.installer.serial-test` and without the SSH credential. The page
-    comes up (readiness is read from `/dev/ttyS1`), every faulted marker write
-    is reported there as the injected failure in under a second, none of them
-    reaches the faulted console, and the forwarded SSH port sends no banner.
+  - `iso::next_ssh_tmpfiles` boots without the harness's credential and gives
+    its key the way bcvk does (a `tmpfiles.extra` credential), and requires
+    sshd to start and accept it.
+  - `iso::next_serial_backpressure`, `_unavailable` and `_stall` boot with
+    `ilex.installer.serial-test` and without the SSH key. The page comes up
+    (readiness is read from `/dev/ttyS1`) and every faulted marker write is
+    reported there, in under a second, as the injected failure (a pty with
+    stopped output, no device) or, for `stall` (the worker hangs for three
+    seconds, as a UART that never drains would in `close()`), as having met the
+    200 ms deadline (`budget`) or been skipped behind the stuck worker
+    (`busy`); the first three never reach the faulted console, and the
+    forwarded SSH port sends no banner. What no trial reproduces is a real
+    UART's `closing_wait`: `stall` stands in for it.
 - **CI.** `publish.yml`'s `iso_next` input starts only the `installer-next` job
   and skips the image pipeline and the Anaconda ISO jobs. The run has a
   concurrency group of its own (`iso-next-<hash of the ref>`, also on main: it
@@ -2509,7 +2550,7 @@ the Windows paths of this change: no Windows host was available.
   and the job additionally requires `workflow_dispatch`, has `contents: read`
   and reads no secret, so PRs and forks reach neither it nor the key. It builds
   the ISO in the same privileged Fedora 45 container as the `iso` job, keeps it
-  as the `installer-next-iso` artifact, boots it with Secure Boot (the six
+  as the `installer-next-iso` artifact, boots it with Secure Boot (the eight
   `iso::next` trials, with the same provisioning-only requirement as locally:
   a runner without KVM SMM fails them) and keeps `installer-next-evidence`.
   Nothing releases or publishes it. Runs without `iso_next` are unchanged.

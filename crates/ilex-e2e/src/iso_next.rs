@@ -28,6 +28,9 @@
 //! * `iso::next_restart`: a window close request does not end the session; a
 //!   compositor that is killed leaves its socket behind and the next attempt
 //!   still comes up; so does a killed client.
+//! * `iso::next_ssh_tmpfiles`: the key arrives the way bcvk delivers it (a
+//!   `tmpfiles.extra` credential, not `ssh.authorized_keys.root`) and sshd
+//!   still starts.
 //! * `iso::next_serial_backpressure` / `_unavailable` / `_stall`: the serial
 //!   mirror of the markers fails on purpose (a fixed test credential: a stopped
 //!   pty, no device, a worker that hangs for three seconds); the page still
@@ -84,6 +87,7 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_serial_backpressure", || serial("backpressure")),
         trial("iso::next_serial_unavailable", || serial("unavailable")),
         trial("iso::next_serial_stall", || serial("stall")),
+        trial("iso::next_ssh_tmpfiles", ssh_tmpfiles),
     ]
 }
 
@@ -955,4 +959,58 @@ fn ssh_banner(port: u16) -> Result<String> {
         }
         Err(error) => Err(error).context("reading from the forwarded SSH port"),
     }
+}
+
+/// bcvk delivers its SSH key as a `tmpfiles.extra` credential that writes
+/// `/root/.ssh/authorized_keys` (`f+~`), not as `ssh.authorized_keys.root`. The
+/// live image starts sshd once that file exists, whichever way it got there.
+fn ssh_tmpfiles() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let key = qemu::test_key(&ws)?;
+    let tmpfiles = format!(
+        "d- /root/.ssh 0700 - - -\nf+~ /root/.ssh/authorized_keys 0700 - - - {}\n",
+        base64(key.public.as_bytes())
+    );
+    let (mut vm, _) = plain_vm(&ws, "iso-next-tmpfiles", |config| {
+        config.ssh_credential = false;
+        config.smbios.push(format!(
+            "type=11,value=io.systemd.credential.binary:tmpfiles.extra={}",
+            base64(tmpfiles.as_bytes())
+        ));
+    })?;
+    let outcome = vm
+        .wait_ssh(Duration::from_secs(300))
+        .context("sshd did not start from a key delivered as tmpfiles.extra")
+        .and_then(|()| {
+            let state = vm.ssh_ok("systemctl is-active sshd")?;
+            ensure!(state == "active", "sshd is {state}");
+            Ok(())
+        });
+    if outcome.is_err() {
+        diagnostics(&mut vm, &artifacts, "ssh-tmpfiles");
+    }
+    outcome?;
+    println!("iso::next ssh_tmpfiles: sshd starts on a key delivered as tmpfiles.extra");
+    Ok(())
+}
+
+/// Standard base64 (the credential's wire encoding).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
