@@ -74,10 +74,12 @@ as_user() {
 }
 # The manager's merged unit: the stock PartOf and Plasma's.
 parts=$(as_user systemctl --user show -P PartOf xdg-desktop-portal-gtk.service)
-case " $parts " in
-*" graphical-session.target "*" plasma-workspace.target "* | *" plasma-workspace.target "*" graphical-session.target "*) ;;
-*) fail "xdg-desktop-portal-gtk.service is PartOf: $parts" ;;
-esac
+for target in graphical-session.target plasma-workspace.target; do
+    case " $parts " in
+    *" $target "*) ;;
+    *) fail "xdg-desktop-portal-gtk.service is not PartOf $target (PartOf: $parts)" ;;
+    esac
+done
 interface() { as_user env DCONF_PROFILE=ilex-kde dconf dump /org/gnome/desktop/interface/; }
 expect() { # name expected-text
     [ "$(interface)" = "$2" ] || fail "$1: got
