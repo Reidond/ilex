@@ -104,12 +104,18 @@ fn read_regular(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
         meta.file_type().is_file(),
         "{FILE_NAME} is not a regular file (a link or something else)"
     );
-    ensure!(meta.len() <= MAX_BYTES, "{FILE_NAME} is larger than {MAX_BYTES} bytes");
+    ensure!(
+        meta.len() <= MAX_BYTES,
+        "{FILE_NAME} is larger than {MAX_BYTES} bytes"
+    );
     let mut bytes = Zeroizing::new(Vec::with_capacity(meta.len() as usize));
     fs::File::open(path)?
         .take(MAX_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= MAX_BYTES, "{FILE_NAME} grew while it was read");
+    ensure!(
+        bytes.len() as u64 <= MAX_BYTES,
+        "{FILE_NAME} grew while it was read"
+    );
     Ok(bytes)
 }
 
@@ -155,7 +161,9 @@ fn describe(error: &zbus::Error) -> String {
         return format!(
             "{:?}{}: {}",
             refusal.code,
-            refusal.field.map_or_else(String::new, |f| format!(" ({f})")),
+            refusal
+                .field
+                .map_or_else(String::new, |f| format!(" ({f})")),
             refusal.message
         );
     }
@@ -212,7 +220,9 @@ async fn drive(options: &Options) -> Result<()> {
     let answers = Answers::parse(std::str::from_utf8(&text).context("answers.toml is not UTF-8")?)?;
     drop(text);
 
-    let connection = Connection::system().await.context("connecting to the system bus")?;
+    let connection = Connection::system()
+        .await
+        .context("connecting to the system bus")?;
     let proxy = Proxy::new(&connection, NAME, PATH, NAME).await?;
     let probe: String = call(&proxy, "Probe", &()).await?;
     let probe: Probe = serde_json::from_str(&probe).context("reading the probe")?;
@@ -220,7 +230,9 @@ async fn drive(options: &Options) -> Result<()> {
         .selection
         .as_ref()
         .map_or_else(|| probe.detection.tag.clone(), |s| s.tag.clone());
-    let request = answers.to_request(&selected).map_err(|e| anyhow::anyhow!("answers.toml: {}", e.message))?;
+    let request = answers
+        .to_request(&selected)
+        .map_err(|e| anyhow::anyhow!("answers.toml: {}", e.message))?;
     // The volume must not be on the disk the installation would erase.
     if let Some(disk) = probe.disks.iter().find(|d| d.id == request.disk)
         && options.file.is_none()
@@ -270,7 +282,10 @@ async fn drive(options: &Options) -> Result<()> {
         let state: State = serde_json::from_str(&state).context("reading the state")?;
         let stage = state.stage.name().to_owned();
         if stage != last.0 || (state.progress - last.1).abs() >= 0.1 {
-            say(&format!("stage={stage} progress={:.2} message={}", state.progress, state.message));
+            say(&format!(
+                "stage={stage} progress={:.2} message={}",
+                state.progress, state.message
+            ));
             last = (stage, state.progress);
         }
         match &state.outcome {

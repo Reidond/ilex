@@ -194,8 +194,10 @@ impl Exit {
     }
 
     pub fn describe(self) -> String {
-        self.code
-            .map_or_else(|| "was killed by a signal".into(), |c| format!("exited {c}"))
+        self.code.map_or_else(
+            || "was killed by a signal".into(),
+            |c| format!("exited {c}"),
+        )
     }
 }
 

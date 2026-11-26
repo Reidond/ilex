@@ -66,7 +66,9 @@ pub fn find_deployment(target: &Path) -> Result<Deployment> {
         .into_iter()
         .filter(|name| {
             name.split_once('.').is_some_and(|(checksum, serial)| {
-                is_checksum(checksum) && !serial.is_empty() && serial.bytes().all(|b| b.is_ascii_digit())
+                is_checksum(checksum)
+                    && !serial.is_empty()
+                    && serial.bytes().all(|b| b.is_ascii_digit())
             })
         })
         .collect();
@@ -140,9 +142,7 @@ pub fn strip_root_fstab(text: &str) -> (String, usize) {
         .lines()
         .filter(|line| {
             let mut fields = line.split_whitespace();
-            let root = fields
-                .next()
-                .is_some_and(|first| !first.starts_with('#'))
+            let root = fields.next().is_some_and(|first| !first.starts_with('#'))
                 && fields.next() == Some("/");
             dropped += usize::from(root);
             !root
@@ -176,9 +176,7 @@ pub fn default_target(deployment: &Path) -> Result<String> {
 pub fn leftover_mounts(mounts: &[Mount], target: &Path, nodes: &BTreeSet<String>) -> Vec<String> {
     let mut points: Vec<String> = mounts
         .iter()
-        .filter(|m| {
-            Path::new(&m.mount_point).starts_with(target) || nodes.contains(&m.source)
-        })
+        .filter(|m| Path::new(&m.mount_point).starts_with(target) || nodes.contains(&m.source))
         .map(|m| m.mount_point.clone())
         .collect();
     points.sort_by(|a, b| {

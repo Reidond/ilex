@@ -3093,14 +3093,22 @@ fn check_secrets() -> Result<()> {
     let reads = |fd: OwnedFd| secret::Secret::from_memfd(fd, 4096);
     let sealed = secret::sealed_memfd(b"correct horse")?;
     let kept = reads(sealed)?;
-    ensure!(kept.expose() == b"correct horse", "a sealed memfd was misread");
+    ensure!(
+        kept.expose() == b"correct horse",
+        "a sealed memfd was misread"
+    );
     ensure!(
         secret::admin_password(&kept)? == "correct horse",
         "the password was not accepted"
     );
     // An unsealed memfd could change after it was read; a memfd that can still
     // grow could be made to look different through the same descriptor.
-    let raw = unsafe { libc::memfd_create(c"unsealed".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    let raw = unsafe {
+        libc::memfd_create(
+            c"unsealed".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
     ensure!(raw >= 0, "memfd_create");
     let unsealed = unsafe { OwnedFd::from_raw_fd(raw) };
     ensure!(
@@ -3113,7 +3121,10 @@ fn check_secrets() -> Result<()> {
     drop(writer);
     ensure!(reads(OwnedFd::from(reader)).is_err(), "a pipe was accepted");
     let file = fs::File::open("/etc/os-release")?;
-    ensure!(reads(OwnedFd::from(file)).is_err(), "a regular file was accepted");
+    ensure!(
+        reads(OwnedFd::from(file)).is_err(),
+        "a regular file was accepted"
+    );
     ensure!(
         reads(secret::sealed_memfd(b"")?).is_err(),
         "an empty secret was accepted"
@@ -3142,7 +3153,10 @@ fn check_secrets() -> Result<()> {
 /// The runner of long jobs: merged output in order, a secret on standard
 /// input, a deadline that ends the whole process group, an early stop.
 fn check_jobs(parent: &Path) -> Result<()> {
-    let run = |script: &str, stdin: Option<&[u8]>, timeout: Duration| -> Result<(exec::Exit, Vec<String>, u32)> {
+    let run = |script: &str,
+               stdin: Option<&[u8]>,
+               timeout: Duration|
+     -> Result<(exec::Exit, Vec<String>, u32)> {
         let mut lines = Vec::new();
         let mut ticks = 0;
         let exit = exec::run_job(
@@ -3166,9 +3180,22 @@ fn check_jobs(parent: &Path) -> Result<()> {
         Some(b"hunter2\n"),
         Duration::from_secs(20),
     )?;
-    ensure!(exit.code == Some(3) && !exit.stopped, "the exit status: {exit:?}");
     ensure!(
-        lines == ["out", "err", "bar", "50%", "done", "got hunter2", "set", "nohome"],
+        exit.code == Some(3) && !exit.stopped,
+        "the exit status: {exit:?}"
+    );
+    ensure!(
+        lines
+            == [
+                "out",
+                "err",
+                "bar",
+                "50%",
+                "done",
+                "got hunter2",
+                "set",
+                "nohome"
+            ],
         "the lines of a job: {lines:?}"
     );
     // One tick a second while it runs.
@@ -3186,7 +3213,8 @@ fn check_jobs(parent: &Path) -> Result<()> {
     .err()
     .context("a job past its deadline was not stopped")?;
     ensure!(
-        started.elapsed() < Duration::from_secs(10) && format!("{error:#}").contains("did not finish"),
+        started.elapsed() < Duration::from_secs(10)
+            && format!("{error:#}").contains("did not finish"),
         "the deadline: {error:#}"
     );
     let pid: i32 = fs::read_to_string(&marker)?.trim().parse()?;
@@ -3215,24 +3243,61 @@ fn check_jobs(parent: &Path) -> Result<()> {
         },
         &mut || {},
     )?;
-    ensure!(exit.stopped && !exit.success() && seen == 1, "stopping a job: {exit:?}");
+    ensure!(
+        exit.stopped && !exit.success() && seen == 1,
+        "stopping a job: {exit:?}"
+    );
     ensure!(
         exec::clean_line(b"a\x1b[31mb\tc\x07").as_str() == "a[31mbc",
         "control characters of a line"
     );
     ensure!(
-        install::json_array(&["Applying".into(), "[".into(), "  {}".into(), "]".into(), "done".into()])? == "[\n  {}\n]"
+        install::json_array(&[
+            "Applying".into(),
+            "[".into(),
+            "  {}".into(),
+            "]".into(),
+            "done".into()
+        ])? == "[\n  {}\n]"
             && install::json_array(&["no list".into()]).is_err()
             && install::json_array(&["[".into()]).is_err(),
         "the partition list of systemd-repart's output"
     );
     // The policy engine's words, as skopeo prints them.
     for (lines, success, expected) in [
-        (&["Getting image source signatures", "Copying blob sha256:aa"][..], false, "accepted"),
-        (&["Error: copying system image from manifest list: Source image rejected: A signature was required, but no signature exists"][..], false, "rejected"),
-        (&["Error: Source image rejected: cryptographic signature verification failed: invalid signature"][..], false, "rejected"),
-        (&["Error: ... Running image docker://quay.io/fedora/fedora-bootc:45 is rejected by policy."][..], false, "rejected"),
-        (&["Error: initializing source docker://ghcr.io/x: pinging container registry ghcr.io: dial tcp: lookup ghcr.io: no such host"][..], false, "unreachable"),
+        (
+            &["Getting image source signatures", "Copying blob sha256:aa"][..],
+            false,
+            "accepted",
+        ),
+        (
+            &[
+                "Error: copying system image from manifest list: Source image rejected: A signature was required, but no signature exists",
+            ][..],
+            false,
+            "rejected",
+        ),
+        (
+            &[
+                "Error: Source image rejected: cryptographic signature verification failed: invalid signature",
+            ][..],
+            false,
+            "rejected",
+        ),
+        (
+            &[
+                "Error: ... Running image docker://quay.io/fedora/fedora-bootc:45 is rejected by policy.",
+            ][..],
+            false,
+            "rejected",
+        ),
+        (
+            &[
+                "Error: initializing source docker://ghcr.io/x: pinging container registry ghcr.io: dial tcp: lookup ghcr.io: no such host",
+            ][..],
+            false,
+            "unreachable",
+        ),
         (&[][..], false, "unreachable"),
     ] {
         let mut judge = policy::Judge::new();
@@ -3242,7 +3307,10 @@ fn check_jobs(parent: &Path) -> Result<()> {
             policy::Verdict::Rejected(_) => "rejected",
             policy::Verdict::Unreachable(_) => "unreachable",
         };
-        ensure!(verdict == expected, "{lines:?} was judged {verdict}, not {expected}");
+        ensure!(
+            verdict == expected,
+            "{lines:?} was judged {verdict}, not {expected}"
+        );
     }
     // Logs: one directory per plan, root's alone.
     let logs = stagelog::Logs::new(parent, &"ab".repeat(16))?;
@@ -3252,11 +3320,13 @@ fn check_jobs(parent: &Path) -> Result<()> {
     ensure!(
         mode(logs.dir())? == 0o700
             && mode(&logs.dir().join("04-image.log"))? == 0o600
-            && fs::read_to_string(logs.dir().join("04-image.log"))?.contains("$ bootc install to-filesystem"),
+            && fs::read_to_string(logs.dir().join("04-image.log"))?
+                .contains("$ bootc install to-filesystem"),
         "the stage log's modes or content"
     );
     ensure!(
-        stagelog::Logs::new(parent, "../../etc").is_err() && stagelog::Logs::new(parent, "short").is_err(),
+        stagelog::Logs::new(parent, "../../etc").is_err()
+            && stagelog::Logs::new(parent, "short").is_err(),
         "a plan id that is not 32 hex digits made a log directory"
     );
     Ok(())
@@ -3270,7 +3340,10 @@ fn check_state(parent: &Path) -> Result<()> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let tracker = progress::Tracker::new(&dir.0);
     tracker.set_sender(sender);
-    ensure!(tracker.state().stage == Stage::Idle && !tracker.active(), "a fresh tracker");
+    ensure!(
+        tracker.state().stage == Stage::Idle && !tracker.active(),
+        "a fresh tracker"
+    );
     tracker.begin(&"c".repeat(32), &Stage::UNENCRYPTED)?;
     tracker.start(Stage::Partition, "Writing the partition table")?;
     tracker.disk_changed()?;
@@ -3344,12 +3417,18 @@ fn check_state(parent: &Path) -> Result<()> {
         },
         2,
     );
-    ensure!(done.outcome == Some(Outcome::Success) && done.updated == 1, "a finished state was changed");
+    ensure!(
+        done.outcome == Some(Outcome::Success) && done.updated == 1,
+        "a finished state was changed"
+    );
     // `State` documents without the fields later changes add still parse.
     let old: State = serde_json::from_str(
         r#"{"schema":1,"stage":"idle","plan":null,"progress":0.0,"message":"","outcome":null,"updated":1}"#,
     )?;
-    ensure!(old.stages.is_empty() && !old.active, "an old state document");
+    ensure!(
+        old.stages.is_empty() && !old.active,
+        "an old state document"
+    );
     Ok(())
 }
 
@@ -3390,15 +3469,24 @@ fn check_target(parent: &Path) -> Result<()> {
     // Two deployments, a stray stateroot or a link in place of a directory is
     // not what a fresh install makes.
     fs::create_dir_all(deploy.join(format!("{}.0", "cd".repeat(32))))?;
-    ensure!(target::find_deployment(root).is_err(), "two deployments were accepted");
+    ensure!(
+        target::find_deployment(root).is_err(),
+        "two deployments were accepted"
+    );
     fs::remove_dir(deploy.join(format!("{}.0", "cd".repeat(32))))?;
     fs::create_dir_all(root.join("ostree/deploy/other"))?;
-    ensure!(target::find_deployment(root).is_err(), "two stateroots were accepted");
+    ensure!(
+        target::find_deployment(root).is_err(),
+        "two stateroots were accepted"
+    );
     fs::remove_dir(root.join("ostree/deploy/other"))?;
     fs::create_dir_all(root.join("elsewhere"))?;
     fs::remove_dir(deploy.join(format!("{checksum}.0")))?;
     symlink(root.join("elsewhere"), deploy.join(format!("{checksum}.0")))?;
-    ensure!(target::find_deployment(root).is_err(), "a linked deployment was accepted");
+    ensure!(
+        target::find_deployment(root).is_err(),
+        "a linked deployment was accepted"
+    );
     fs::remove_file(deploy.join(format!("{checksum}.0")))?;
 
     // The reserved record of the Anaconda path, key for key.
@@ -3428,11 +3516,23 @@ fn check_target(parent: &Path) -> Result<()> {
     // The default target: the administrator's link first, else the vendor's.
     let dep = root.join("dep");
     fs::create_dir_all(dep.join("usr/lib/systemd/system"))?;
-    symlink("graphical.target", dep.join("usr/lib/systemd/system/default.target"))?;
-    ensure!(target::default_target(&dep)? == "graphical.target", "the vendor default target");
+    symlink(
+        "graphical.target",
+        dep.join("usr/lib/systemd/system/default.target"),
+    )?;
+    ensure!(
+        target::default_target(&dep)? == "graphical.target",
+        "the vendor default target"
+    );
     fs::create_dir_all(dep.join("etc/systemd/system"))?;
-    symlink("/usr/lib/systemd/system/multi-user.target", dep.join("etc/systemd/system/default.target"))?;
-    ensure!(target::default_target(&dep)? == "multi-user.target", "the administrator's default target");
+    symlink(
+        "/usr/lib/systemd/system/multi-user.target",
+        dep.join("etc/systemd/system/default.target"),
+    )?;
+    ensure!(
+        target::default_target(&dep)? == "multi-user.target",
+        "the administrator's default target"
+    );
     // What is mounted of the target: below it, and anywhere its partitions are
     // mounted (bootc leaves /run/bootc/storage), deepest first.
     let mounts = topology::parse_mountinfo(concat!(
@@ -3444,19 +3544,28 @@ fn check_target(parent: &Path) -> Result<()> {
         "24 20 0:20 /ostree/deploy/default/var /run/ilex-installer/target/ostree/deploy/default/deploy/x.0/var rw - btrfs /dev/vdb3 rw\n",
         "25 10 0:30 / /run/ilex-installer/target-other rw - tmpfs tmpfs rw\n",
     ))?;
-    let nodes: BTreeSet<String> = ["/dev/vdb1", "/dev/vdb2", "/dev/vdb3"].iter().map(|s| (*s).to_owned()).collect();
+    let nodes: BTreeSet<String> = ["/dev/vdb1", "/dev/vdb2", "/dev/vdb3"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
     let left = target::leftover_mounts(&mounts, Path::new("/run/ilex-installer/target"), &nodes);
     let at = |point: &str| left.iter().position(|p| p == point);
     ensure!(
         left.len() == 5
             && at("/run/bootc/storage").is_some()
-            && at("/run/ilex-installer/target/ostree/deploy/default/deploy/x.0/var") < at("/run/ilex-installer/target/boot/efi")
+            && at("/run/ilex-installer/target/ostree/deploy/default/deploy/x.0/var")
+                < at("/run/ilex-installer/target/boot/efi")
             && at("/run/ilex-installer/target/boot/efi") < at("/run/ilex-installer/target/boot")
             && at("/run/ilex-installer/target/boot") < at("/run/ilex-installer/target"),
         "mounts to remove, children before their parents: {left:?}"
     );
     ensure!(
-        target::leftover_mounts(&mounts[..1], Path::new("/run/ilex-installer/target"), &nodes).is_empty(),
+        target::leftover_mounts(
+            &mounts[..1],
+            Path::new("/run/ilex-installer/target"),
+            &nodes
+        )
+        .is_empty(),
         "the root file system was to be unmounted"
     );
     // The new partitions are found by UUID and must be what sysfs says: here
@@ -3464,7 +3573,13 @@ fn check_target(parent: &Path) -> Result<()> {
     let by_partuuid = root.join("by-partuuid");
     fs::create_dir_all(&by_partuuid)?;
     ensure!(
-        target::wait_for_partitions(&plan, &root.join("sys"), &by_partuuid, Duration::from_millis(300)).is_err(),
+        target::wait_for_partitions(
+            &plan,
+            &root.join("sys"),
+            &by_partuuid,
+            Duration::from_millis(300)
+        )
+        .is_err(),
         "partitions were found where there are none"
     );
     ensure!(
@@ -3560,17 +3675,24 @@ fn check_apply_rules() -> Result<()> {
         free_extents: vec![],
         other_systems: vec![],
     };
-    ensure!(apply::disk_difference(&then, &then.clone()).is_none(), "a disk differs from itself");
+    ensure!(
+        apply::disk_difference(&then, &then.clone()).is_none(),
+        "a disk differs from itself"
+    );
     // What a disk the helper holds cannot show (an ESP's loaders) and what
     // changes by itself (notes) is not a difference.
     let mut same = then.clone();
     same.notes.push("an ESP that could not be read".into());
-    same.other_systems.push(ilex_installer_model::probe::OtherSystem {
-        kind: "efi-loader".into(),
-        partition: None,
-        description: "x".into(),
-    });
-    ensure!(apply::disk_difference(&then, &same).is_none(), "the loaders of an ESP are compared");
+    same.other_systems
+        .push(ilex_installer_model::probe::OtherSystem {
+            kind: "efi-loader".into(),
+            partition: None,
+            description: "x".into(),
+        });
+    ensure!(
+        apply::disk_difference(&then, &same).is_none(),
+        "the loaders of an ESP are compared"
+    );
     type Change = Box<dyn Fn(&mut Disk)>;
     let cases: [(&str, Change); 9] = [
         ("id", Box::new(|d| d.id = "virtio-other".into())),
@@ -3580,7 +3702,10 @@ fn check_apply_rules() -> Result<()> {
         ("size", Box::new(|d| d.size_bytes += 1)),
         ("bus", Box::new(|d| d.removable = true)),
         ("partition table", Box::new(|d| d.partition_table = None)),
-        ("partitions", Box::new(|d| d.partitions[0].size_bytes += 1 << 20)),
+        (
+            "partitions",
+            Box::new(|d| d.partitions[0].size_bytes += 1 << 20),
+        ),
         ("partitions", Box::new(|d| d.partitions.clear())),
     ];
     for (what, change) in cases {
@@ -3600,8 +3725,14 @@ fn check_answers(parent: &Path) -> Result<()> {
     let root = &tree.0;
     // The volume is whatever udev links; it must be a block device.
     fs::create_dir_all(root.join("by-label"))?;
-    ensure!(answers::find_volume(&root.join("by-label")).is_err(), "no volume was found");
-    symlink("/dev/null", root.join("by-label").join(answers::VOLUME_LABEL))?;
+    ensure!(
+        answers::find_volume(&root.join("by-label")).is_err(),
+        "no volume was found"
+    );
+    symlink(
+        "/dev/null",
+        root.join("by-label").join(answers::VOLUME_LABEL),
+    )?;
     ensure!(
         answers::find_volume(&root.join("by-label")).is_err(),
         "a character device was taken for the volume"
@@ -3618,9 +3749,15 @@ fn check_answers(parent: &Path) -> Result<()> {
     ensure!(answers::read_file(root).is_err(), "a link was followed");
     fs::remove_file(root.join("answers.toml"))?;
     fs::write(root.join("answers.toml"), vec![b'#'; 70_000])?;
-    ensure!(answers::read_file(root).is_err(), "an oversized answers file was read");
+    ensure!(
+        answers::read_file(root).is_err(),
+        "an oversized answers file was read"
+    );
     fs::remove_file(root.join("answers.toml"))?;
     fs::create_dir(root.join("answers.toml"))?;
-    ensure!(answers::read_file(root).is_err(), "a directory was read as the answers file");
+    ensure!(
+        answers::read_file(root).is_err(),
+        "a directory was read as the answers file"
+    );
     Ok(())
 }

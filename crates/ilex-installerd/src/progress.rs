@@ -14,10 +14,7 @@ use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        mpsc::Sender,
-    },
+    sync::{Mutex, mpsc::Sender},
     time::{Duration, Instant},
 };
 

@@ -102,9 +102,10 @@ pub fn run(helper: Arc<Helper>, plan: Plan, hold: Hold, admin: Secret) {
     let logs = match Logs::new(&helper.config.run_dir, &plan.id) {
         Ok(logs) => logs,
         Err(e) => {
-            helper
-                .tracker
-                .fail(Stage::Partition, &format!("the logs cannot be opened: {e:#}"));
+            helper.tracker.fail(
+                Stage::Partition,
+                &format!("the logs cannot be opened: {e:#}"),
+            );
             return;
         }
     };
@@ -151,20 +152,15 @@ impl Install {
         self.partition(hold)?;
         self.mount()?;
         self.image()?;
-        let deployment = target::find_deployment(&self.target)
-            .context("looking for what bootc deployed")?;
+        let deployment =
+            target::find_deployment(&self.target).context("looking for what bootc deployed")?;
         self.configure(&deployment)?;
         self.account(&deployment)?;
         self.finalise(&deployment)
     }
 
     /// Run a tool, logging its command line and every line it prints.
-    fn tool(
-        &self,
-        log: &mut StageLog,
-        job: &Job<'_>,
-        tick: &mut dyn FnMut(),
-    ) -> Result<Output> {
+    fn tool(&self, log: &mut StageLog, job: &Job<'_>, tick: &mut dyn FnMut()) -> Result<Output> {
         log.command(job.program, job.args);
         let tracker = &self.helper.tracker;
         let mut lines = Vec::new();
@@ -204,7 +200,11 @@ impl Install {
             &mut || {},
         )?;
         if !out.exit.success() {
-            bail!("{program} {}: {}", out.exit.describe(), last_line(&out.lines));
+            bail!(
+                "{program} {}: {}",
+                out.exit.describe(),
+                last_line(&out.lines)
+            );
         }
         Ok(out.lines)
     }
@@ -314,7 +314,12 @@ impl Install {
         self.checked(
             &mut log,
             "mount",
-            &["-t", &boot.filesystem, boot_node, &boot_dir.to_string_lossy()],
+            &[
+                "-t",
+                &boot.filesystem,
+                boot_node,
+                &boot_dir.to_string_lossy(),
+            ],
             TOOL,
         )?;
         let esp_dir = boot_dir.join("efi");
@@ -384,7 +389,9 @@ impl Install {
         if !out.exit.success() {
             bail!("bootc {}: {}", out.exit.describe(), last_line(&out.lines));
         }
-        self.helper.tracker.progress(0.99, Some("Checking what was installed"));
+        self.helper
+            .tracker
+            .progress(0.99, Some("Checking what was installed"));
         // What was installed is what the plan pinned and what the machine will
         // verify its updates against.
         let deployment = target::find_deployment(&self.target)?;
@@ -420,7 +427,10 @@ impl Install {
     // --- configure -------------------------------------------------------
 
     fn configure(&mut self, deployment: &target::Deployment) -> Result<()> {
-        let mut log = self.begin(Stage::Configure, "Setting up language, keyboard, time zone and host name")?;
+        let mut log = self.begin(
+            Stage::Configure,
+            "Setting up language, keyboard, time zone and host name",
+        )?;
         let root = format!("--root={}", deployment.path.display());
         let request = &self.plan.request;
         // locale.conf, vconsole.conf (with the keymap's X11 layout, as
@@ -451,7 +461,11 @@ impl Install {
         // the profile service decide what to do from it).
         let setup = etc.join("ilex");
         make_dir_mode(&setup, 0o755)?;
-        write_file(&setup.join("setup.json"), target::setup_record(&self.plan).as_bytes(), 0o644)?;
+        write_file(
+            &setup.join("setup.json"),
+            target::setup_record(&self.plan).as_bytes(),
+            0o644,
+        )?;
         // No line for `/`: the root is an overlay the initramfs mounts.
         match fs::read_to_string(etc.join("fstab")) {
             Ok(text) => {
@@ -565,7 +579,8 @@ impl Install {
         drop(password_line);
         // The mounts end whatever happened above.
         let proc_unmounted = if proc_is_mounted(&proc) {
-            self.checked(&mut log, "umount", &[&proc.to_string_lossy()], TOOL).map(|_| ())
+            self.checked(&mut log, "umount", &[&proc.to_string_lossy()], TOOL)
+                .map(|_| ())
         } else {
             Ok(())
         };
@@ -592,7 +607,10 @@ impl Install {
         let group = fs::read_to_string(etc.join("group"))?;
         ensure!(
             group.lines().any(|l| {
-                l.starts_with("wheel:") && l.rsplit(':').next().is_some_and(|m| m.split(',').any(|u| u == name))
+                l.starts_with("wheel:")
+                    && l.rsplit(':')
+                        .next()
+                        .is_some_and(|m| m.split(',').any(|u| u == name))
             }),
             "{name} is not in the wheel group"
         );
@@ -607,7 +625,12 @@ impl Install {
     /// the deployment's path off the name (`setfiles -r`); the home directory
     /// and the logs are in the stateroot's `var`, which is `/var` on the
     /// machine, so they are looked up with the stateroot's path taken off.
-    fn relabel(&self, log: &mut StageLog, deployment: &target::Deployment, var: &[&str]) -> Result<()> {
+    fn relabel(
+        &self,
+        log: &mut StageLog,
+        deployment: &target::Deployment,
+        var: &[&str],
+    ) -> Result<()> {
         let contexts = deployment
             .path
             .join("etc/selinux/targeted/contexts/files/file_contexts");

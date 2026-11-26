@@ -3,10 +3,7 @@
 //! JSON text, and none takes a path, an image reference, a kernel argument or a
 //! command. A refusal's error message is the `PlanError` document.
 
-use crate::{
-    helper::Helper,
-    progress::Event,
-};
+use crate::{helper::Helper, progress::Event};
 use anyhow::Result;
 use ilex_installer_model::plan::{ErrorCode, PlanError};
 use std::sync::{Arc, mpsc};
@@ -154,7 +151,13 @@ pub fn serve(helper: Arc<Helper>) -> Result<()> {
                             Event::Finished(outcome) => {
                                 let json = serde_json::to_string(&outcome).unwrap_or_default();
                                 emitter
-                                    .emit_signal(None::<&str>, PATH, NAME, "Finished", &(json.as_str(),))
+                                    .emit_signal(
+                                        None::<&str>,
+                                        PATH,
+                                        NAME,
+                                        "Finished",
+                                        &(json.as_str(),),
+                                    )
                                     .await
                             }
                         }

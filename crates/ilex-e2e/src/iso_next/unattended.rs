@@ -23,16 +23,17 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
+use ilex_devkit::cmd;
 use ilex_devkit::core::{Capability, Requirement, SecurityLaunch, VmProvider};
+use ilex_devkit::installer_model::{answers::Answers, probe::Probe};
 use ilex_devkit::provider::LinuxProvider;
 use ilex_devkit::qemu::{self, Vm, VmConfig};
-use ilex_devkit::installer_model::{answers::Answers, probe::Probe};
-use ilex_devkit::cmd;
 
 use ilex_vmctl::Vmctl;
 
 use super::{
-    Guest, PAGE_TIMEOUT, blank_disk_of, count_markers, diagnostics, fields, iso_path, wait_for_marker,
+    Guest, PAGE_TIMEOUT, blank_disk_of, count_markers, diagnostics, fields, iso_path,
+    wait_for_marker,
 };
 use crate::common;
 use crate::installer::apply::{ADMIN, Expected, PASSWORD, check_installed, gdm_screenshot};
@@ -162,7 +163,10 @@ pub(super) fn run() -> Result<()> {
         started.elapsed()
     );
     let plan = fields(&console, MARKER, "plan")?;
-    let digest = plan.get("image").context("the plan line has no image=")?.clone();
+    let digest = plan
+        .get("image")
+        .context("the plan line has no image=")?
+        .clone();
     ensure!(digest.starts_with("sha256:"), "the plan's image: {digest}");
     // No interface was ever drawn: the session did not get to start (or was
     // stopped) before an answers file was found, and no page was reported.
@@ -200,7 +204,10 @@ pub(super) fn run() -> Result<()> {
     // The ISO's own answers file was never written to, and the volume is what
     // it was (the helper read it once, read-only).
     let volume = fs::read_to_string(root.join("answers/answers.toml"))?;
-    ensure!(Answers::parse(&volume).is_ok(), "the answers fixture is not valid");
+    ensure!(
+        Answers::parse(&volume).is_ok(),
+        "the answers fixture is not valid"
+    );
     Ok(())
 }
 
@@ -269,16 +276,28 @@ fn refuse_invalid(root: &Path, artifacts: &Path) -> Result<()> {
     let mut guest = boot(&dir, &text)?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER-ANSWERS", "result", 1, PAGE_TIMEOUT)
-        .inspect_err(|_| diagnostics(vm, artifacts, "unattended-invalid"))?;
-    let _ = fs::write(artifacts.join("next-unattended-invalid-serial.txt"), &console);
+    let console = wait_for_marker(
+        vm,
+        &serial,
+        "ILEX-INSTALLER-ANSWERS",
+        "result",
+        1,
+        PAGE_TIMEOUT,
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, "unattended-invalid"))?;
+    let _ = fs::write(
+        artifacts.join("next-unattended-invalid-serial.txt"),
+        &console,
+    );
     ensure!(
         console.contains("result=failed") && console.contains("line 3"),
         "an invalid answers file was not refused with its position: {console}"
     );
     ensure!(!console.contains(secret), "the password was printed");
     assert_untouched(vm, &dir)?;
-    println!("iso::next unattended: an invalid answers file is refused by position, without its text");
+    println!(
+        "iso::next unattended: an invalid answers file is refused by position, without its text"
+    );
     Ok(())
 }
 
@@ -290,9 +309,19 @@ fn refuse_confirmation(root: &Path, artifacts: &Path) -> Result<String> {
     let mut guest = boot(&dir, &answers("a-disk", "another-disk"))?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER-ANSWERS", "result", 1, PAGE_TIMEOUT)
-        .inspect_err(|_| diagnostics(vm, artifacts, "unattended-confirmation"))?;
-    let _ = fs::write(artifacts.join("next-unattended-confirmation-serial.txt"), &console);
+    let console = wait_for_marker(
+        vm,
+        &serial,
+        "ILEX-INSTALLER-ANSWERS",
+        "result",
+        1,
+        PAGE_TIMEOUT,
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, "unattended-confirmation"))?;
+    let _ = fs::write(
+        artifacts.join("next-unattended-confirmation-serial.txt"),
+        &console,
+    );
     ensure!(
         console.contains("result=failed") && console.contains("confirm-erase"),
         "a wrong confirm-erase was not refused: {console}"
@@ -310,7 +339,11 @@ fn refuse_confirmation(root: &Path, artifacts: &Path) -> Result<String> {
         .with_context(|| {
             format!(
                 "no disk of {TARGET_BYTES} bytes in the probe: {:?}",
-                probe.disks.iter().map(|d| (&d.id, d.size_bytes)).collect::<Vec<_>>()
+                probe
+                    .disks
+                    .iter()
+                    .map(|d| (&d.id, d.size_bytes))
+                    .collect::<Vec<_>>()
             )
         })?;
     Ok(target.id.clone())

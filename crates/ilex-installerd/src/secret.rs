@@ -14,7 +14,8 @@ use zeroize::Zeroize;
 
 /// What a caller must have sealed: the contents cannot change under the
 /// helper's feet, and nobody can lift the seals.
-const REQUIRED_SEALS: i32 = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+const REQUIRED_SEALS: i32 =
+    libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
 
 /// A secret held in memory that is locked (`mlock`: never swapped out) and
 /// zeroed when dropped. It does not implement `Debug`, `Clone` or `Display`.
@@ -45,10 +46,7 @@ impl Secret {
         let file = File::from(fd);
         let size = file.metadata().context("looking at the memfd")?.len();
         ensure!(size > 0, "the secret is empty");
-        ensure!(
-            size <= max as u64,
-            "the secret is larger than {max} bytes"
-        );
+        ensure!(size <= max as u64, "the secret is larger than {max} bytes");
         let size = size as usize;
         let bytes = vec![0u8; size];
         // Locked before anything is read into it; the vector never grows, so
@@ -110,7 +108,11 @@ pub fn sealed_memfd(content: &[u8]) -> Result<OwnedFd> {
     let mut file = File::from(owned.try_clone()?);
     io::Write::write_all(&mut file, content).context("writing the memfd")?;
     let sealed = unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, REQUIRED_SEALS) };
-    ensure!(sealed == 0, "sealing the memfd: {}", io::Error::last_os_error());
+    ensure!(
+        sealed == 0,
+        "sealing the memfd: {}",
+        io::Error::last_os_error()
+    );
     Ok(owned)
 }
 

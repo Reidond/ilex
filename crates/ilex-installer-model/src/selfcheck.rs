@@ -643,7 +643,11 @@ password = "hunter2"
     }
     ensure!(
         Stage::UNENCRYPTED.windows(2).all(|w| w[0] < w[1])
-            && Stage::UNENCRYPTED.iter().all(|s| s.name() == serde_json::to_value(s).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()),
+            && Stage::UNENCRYPTED.iter().all(|s| s.name()
+                == serde_json::to_value(s)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default()),
         "the stages are not in order or their names are not their wire names"
     );
     let old: State = serde_json::from_value(json!({
@@ -655,8 +659,10 @@ password = "hunter2"
         "a state document from before Apply does not read as an idle one"
     );
     ensure!(
-        serde_json::to_value(Outcome::Failed { stage: Stage::Image, reason: "x".into() })?
-            == json!({"result": "failed", "stage": "image", "reason": "x"}),
+        serde_json::to_value(Outcome::Failed {
+            stage: Stage::Image,
+            reason: "x".into()
+        })? == json!({"result": "failed", "stage": "image", "reason": "x"}),
         "the outcome's wire form"
     );
     Ok("table rules, editions, detection, selection, requests, answers, secrets, stages".into())

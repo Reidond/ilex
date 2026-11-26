@@ -26,9 +26,7 @@ use crate::{
 };
 use anyhow::Context;
 use ilex_installer_model::{
-    plan::{
-        ErrorCode, Mode, Plan, PlanError, SECRET_MAX_BYTES, SecretKind,
-    },
+    plan::{ErrorCode, Mode, Plan, PlanError, SECRET_MAX_BYTES, SecretKind},
     probe::Disk,
     state::State,
 };
@@ -90,7 +88,8 @@ impl Helper {
     /// kind replaces the first. Refused without saying anything about the
     /// content.
     pub fn set_secret(&self, plan_id: &str, kind: &str, fd: OwnedFd) -> Result<(), PlanError> {
-        let invalid = |message: String| PlanError::new(ErrorCode::InvalidSecret, Some("fd"), message);
+        let invalid =
+            |message: String| PlanError::new(ErrorCode::InvalidSecret, Some("fd"), message);
         let kind = SecretKind::parse(kind).ok_or_else(|| {
             PlanError::new(
                 ErrorCode::InvalidSecret,
@@ -121,7 +120,8 @@ impl Helper {
             }
         }
         // The descriptor is read and closed whatever follows.
-        let secret = Secret::from_memfd(fd, SECRET_MAX_BYTES).map_err(|e| invalid(format!("{e:#}")))?;
+        let secret =
+            Secret::from_memfd(fd, SECRET_MAX_BYTES).map_err(|e| invalid(format!("{e:#}")))?;
         secret::admin_password(&secret).map_err(|e| invalid(format!("{e:#}")))?;
         let id = recorded.plan.id.clone();
         drop(plans);
@@ -273,7 +273,10 @@ impl Helper {
             PlanError::new(
                 ErrorCode::DiskChanged,
                 Some("disk"),
-                format!("{} is not the disk that was planned: {why}; plan again", plan.disk.id),
+                format!(
+                    "{} is not the disk that was planned: {why}; plan again",
+                    plan.disk.id
+                ),
             )
         };
         let Some(now) = disks.iter().find(|d| d.id == plan.disk.id) else {
@@ -312,7 +315,8 @@ impl Helper {
             |e: anyhow::Error| PlanError::new(ErrorCode::Internal, None, format!("{e:#}"));
         let disks = disks::scan_held(&self.config.run_dir, hold).map_err(internal)?;
         let now = self.disk_for_apply(&disks, plan, planned)?;
-        let layout = repart::layout(&self.config.definitions, plan.request.encrypt).map_err(internal)?;
+        let layout =
+            repart::layout(&self.config.definitions, plan.request.encrypt).map_err(internal)?;
         let made = repart::dry_run(&layout, &now.path, &plan.seed)
             .map_err(|e| PlanError::new(ErrorCode::Repart, None, format!("{e:#}")))?;
         if made != plan.partitions {
