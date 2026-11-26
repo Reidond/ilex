@@ -5,7 +5,7 @@
 use crate::{
     answers, apply, disks, exec, helper, install, policy, progress, registry, repart,
     scratch::Scratch,
-    secret, stagelog, sys, target,
+    secret, stagelog, stamp, sys, target,
     topology::{self, FileId, LoopRow, Roots, System, Tracer},
 };
 use anyhow::{Context, Result, ensure};
@@ -4239,12 +4239,258 @@ fn check_answers(parent: &Path) -> Result<()> {
             && first != target::request_digest(&request("someone", "ilextest")?),
         "the request's digest does not follow the request"
     );
+    let second = target::request_digest(&request("ilexmaint", "ilextest-two")?);
+    let third = target::request_digest(&request("ilexmaint", "ilextest-three")?);
     ensure!(
-        answers::stamp_is_these_answers(Some(&first), &first)
-            && !answers::stamp_is_these_answers(None, &first)
-            && !answers::stamp_is_these_answers(Some(&"0".repeat(64)), &first),
+        first != second && second != third,
+        "different requests have the same digest"
+    );
+
+    // The stamp holds many digests, one per line: the request of this
+    // installation, the earlier stamp's, and the answers refused in this boot.
+    ensure!(
+        stamp::holds(std::slice::from_ref(&first), &first)
+            && stamp::holds(&[second.clone(), first.clone()], &first)
+            && !stamp::holds(&[], &first)
+            && !stamp::holds(&[second.clone(), "0".repeat(64)], &first),
         "the stamp is compared loosely"
     );
+    ensure!(
+        stamp::parse(&format!("{first}\n{second}\n"))? == [first.clone(), second.clone()]
+            && stamp::parse(&format!("\n{first}\r\n\n{second}"))?
+                == [first.clone(), second.clone()]
+            && stamp::parse(&format!("{first}\n{first}\n"))? == [first.clone()],
+        "a stamp of digests was misread"
+    );
+    for (what, text) in [
+        ("an empty stamp", String::new()),
+        ("a blank stamp", "\n \n".to_owned()),
+        ("a short digest", format!("{}\n", &first[..63])),
+        ("a long digest", format!("{first}0\n")),
+        ("a capital digit", format!("{}\n", first.to_uppercase())),
+        ("text after a digest", format!("{first}\nhello\n")),
+        ("two digests on a line", format!("{first} {second}\n")),
+    ] {
+        ensure!(
+            stamp::parse(&text).is_err(),
+            "{what} was taken for a stamp of digests"
+        );
+    }
+    ensure!(
+        stamp::parse(&"a".repeat(64)).is_ok()
+            && stamp::parse(
+                &(0..=stamp::MAX_DIGESTS)
+                    .map(|n| format!("{n:064x}\n"))
+                    .collect::<String>()
+            )
+            .is_err(),
+        "the stamp's size is not bounded"
+    );
+    // What an installation writes: the earlier stamp's digests, the answers seen
+    // in this boot, then its own; each once, the oldest dropped when there are
+    // too many and its own never.
+    ensure!(
+        stamp::merge(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&second),
+            &third
+        ) == [first.clone(), second.clone(), third.clone()]
+            && stamp::merge(&[], &[], &first) == [first.clone()]
+            && stamp::merge(
+                std::slice::from_ref(&first),
+                std::slice::from_ref(&first),
+                &first
+            ) == [first.clone()]
+            && stamp::merge(
+                &[second.clone(), first.clone()],
+                std::slice::from_ref(&second),
+                &third
+            ) == [second.clone(), first.clone(), third.clone()]
+            && stamp::render(&[first.clone(), second.clone()]) == format!("{first}\n{second}\n"),
+        "the stamp's digests were merged wrongly"
+    );
+    let many: Vec<String> = (0..stamp::MAX_DIGESTS + 5)
+        .map(|n| format!("{n:064x}"))
+        .collect();
+    let merged = stamp::merge(&many, std::slice::from_ref(&second), &first);
+    ensure!(
+        merged.len() == stamp::MAX_DIGESTS
+            && merged.last() == Some(&first)
+            && merged.contains(&second)
+            && !merged.contains(&many[0]),
+        "an overfull stamp was not cut at its oldest digests"
+    );
+    // The record of the answers seen: root's own file in /run, written whole.
+    let seen = root.join("seen");
+    ensure!(
+        stamp::read_seen(&seen)?.is_empty(),
+        "a record that is not there held digests"
+    );
+    if unsafe { libc::geteuid() } == 0 {
+        stamp::record_seen(&seen, &first)?;
+        stamp::record_seen(&seen, &second)?;
+        stamp::record_seen(&seen, &first)?;
+        ensure!(
+            stamp::read_seen(&seen)? == [first.clone(), second.clone()]
+                && fs::metadata(&seen)?.permissions().mode() & 0o777 == 0o600
+                && !root.join("seen.partial").exists(),
+            "the record of the answers seen was not kept"
+        );
+        fs::set_permissions(&seen, fs::Permissions::from_mode(0o644))?;
+        ensure!(
+            stamp::read_seen(&seen).is_err(),
+            "a record that others can read was believed"
+        );
+        fs::remove_file(&seen)?;
+        write(&seen, "not a digest\n")?;
+        fs::set_permissions(&seen, fs::Permissions::from_mode(0o600))?;
+        ensure!(
+            stamp::read_seen(&seen).is_err(),
+            "a record that is not made of digests was believed"
+        );
+        stamp::record_seen(&seen, &third)?;
+        ensure!(
+            stamp::read_seen(&seen)? == [third.clone()],
+            "a record that was not ours was not replaced"
+        );
+        fs::remove_file(&seen)?;
+        symlink("elsewhere", &seen)?;
+        ensure!(
+            stamp::read_seen(&seen).is_err(),
+            "a link was followed as the record"
+        );
+        fs::remove_file(&seen)?;
+    }
+
+    // What `Apply`'s answer means for the flag that keeps the interface out. A
+    // structured refusal of the helper (its own error name, and the model's
+    // document as the message) lowers it; every other way the call can end does
+    // not, because none says the installation thread had not started.
+    let refusal = serde_json::to_string(&ilex_installer_model::plan::PlanError::new(
+        ilex_installer_model::plan::ErrorCode::DiskChanged,
+        Some("disk"),
+        "the disk is not the one that was planned",
+    ))?;
+    let refused = "org.ilex.Installer1.Error.Refused";
+    ensure!(
+        answers::structured_refusal(refused, &refusal).is_some()
+            && answers::structured_refusal("org.ilex.Installer1.Error.Failed", &refusal).is_some(),
+        "the helper's own refusals were not recognised"
+    );
+    for (what, name, message) in [
+        (
+            "a bus error with the helper's document",
+            "org.freedesktop.DBus.Error.NoReply",
+            refusal.as_str(),
+        ),
+        (
+            "another service's error",
+            "org.example.Error.Refused",
+            refusal.as_str(),
+        ),
+        (
+            "the helper's name with another message",
+            refused,
+            "Message recipient disconnected from message bus without replying",
+        ),
+        (
+            "a name with no kind",
+            "org.ilex.Installer1.Error.",
+            refusal.as_str(),
+        ),
+        (
+            "a name below another interface",
+            "org.ilex.Installer1.Errors.Refused",
+            refusal.as_str(),
+        ),
+        (
+            "a name with more parts",
+            "org.ilex.Installer1.Error.Refused.More",
+            refusal.as_str(),
+        ),
+        ("an empty message", refused, ""),
+        ("a document of another shape", refused, r#"{"code":"x"}"#),
+    ] {
+        ensure!(
+            answers::structured_refusal(name, message).is_none(),
+            "{what} was taken for a refusal of the helper"
+        );
+    }
+    let method_error = |name: &str, text: &str| -> Result<zbus::Error> {
+        let call = zbus::Message::method_call("/org/ilex/Installer1", "Apply")
+            .build(&())
+            .context("building a method call")?;
+        let reply = zbus::Message::error(&call.header(), name)
+            .build(&(text,))
+            .context("building an error reply")?;
+        Ok(zbus::Error::from(reply))
+    };
+    let flag = root.join("applying");
+    let raise = || fs::write(&flag, b"");
+    // The helper refused: nothing was written; the flag is lowered, the
+    // interface may start, and the console says why.
+    raise()?;
+    let mut reached = answers::Reached::default();
+    let said = answers::settle(Err(method_error(refused, &refusal)?), &flag, &mut reached)
+        .err()
+        .context("a refusal was taken for an answer")?;
+    ensure!(
+        !flag.exists() && !reached.applied && format!("{said:#}").contains("DiskChanged"),
+        "a refusal of the helper kept the interface out: flag {}, applied {}, said {said:#}",
+        flag.exists(),
+        reached.applied
+    );
+    // Everything else: the flag stays, the run counts as applied, and the
+    // failure is what the console shows.
+    let no_reply = method_error(
+        "org.freedesktop.DBus.Error.NoReply",
+        "Message recipient disconnected from message bus without replying",
+    )?;
+    for (what, error) in [
+        ("no reply from the bus", no_reply),
+        (
+            "a connection that ended",
+            zbus::Error::InputOutput(std::sync::Arc::new(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            ))),
+        ),
+        (
+            "a failure of the client",
+            zbus::Error::Failure("anything".into()),
+        ),
+        (
+            "a bus error with a refusal's document",
+            method_error("org.freedesktop.DBus.Error.Failed", &refusal)?,
+        ),
+        (
+            "the helper's name with a message that is no document",
+            method_error(refused, "no")?,
+        ),
+    ] {
+        raise()?;
+        let mut reached = answers::Reached::default();
+        let said = answers::settle(Err(error), &flag, &mut reached)
+            .err()
+            .with_context(|| format!("{what} was taken for an answer"))?;
+        ensure!(
+            flag.exists()
+                && reached.applied
+                && format!("{said:#}").contains("interface is not started"),
+            "{what} lowered the flag, or did not count as applied: flag {}, applied {}, said {said:#}",
+            flag.exists(),
+            reached.applied
+        );
+    }
+    raise()?;
+    let mut reached = answers::Reached::default();
+    ensure!(
+        answers::settle(Ok("{}".into()), &flag, &mut reached)? == "{}"
+            && flag.exists()
+            && reached.applied,
+        "an accepted Apply lowered the flag"
+    );
+    fs::remove_file(&flag)?;
 
     // The by-id name: a plain name of /dev/disk/by-id, never a path.
     for bad in ["", ".", "..", "../sda", "a/b", "/dev/sda", "bad\nname"] {

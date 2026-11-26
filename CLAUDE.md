@@ -3491,11 +3491,28 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   the session with `rm` and `systemctl` (nothing of the answers program) however
   the unit ended (killed, crashed, never got to its first call), unless
   `/run/ilex-answers-applying` exists: the program writes that flag just before
-  it calls `Apply` and removes it again if `Apply` refused. A helper that cannot
-  start, and a process killed before it asks anything, therefore both end in
-  the interface (`iso::next_unattended_handover` makes each with the fixed
-  credential `ilex.installer.fault=helper|answers`, which the helper's and the
-  answers units import and which can only make the installer fail).
+  it calls `Apply` and removes it again **only when the helper itself refused**:
+  one of its own structured errors, whose name is
+  `org.ilex.Installer1.Error.<Kind>` and whose message parses as the model's
+  `PlanError` (`answers::structured_refusal`; the helper makes those before it
+  writes anything). **Any other end of the `Apply` call keeps the flag**: the bus
+  reporting no reply or a vanished peer, a closed connection, a helper that
+  crashes before it answers, a reply in another shape (none says whether the
+  installation thread had started). The run then counts as applied: the
+  interface is not started over a disk that may be written, no hand-over runs,
+  and the console shows `result=failed Apply: no refusal came back, so the
+  installation may have begun and the interface is not started (...)` with
+  what the bus said after it. A helper that
+  cannot start, and a process killed before it asks anything, therefore both end
+  in the interface; a helper killed as `Apply` starts the installation ends
+  with the failure on the console and no interface. (`iso::next_unattended_handover`
+  makes each with the fixed credential
+  `ilex.installer.fault=helper|answers|apply`, which the helper's and the
+  answers units import and which can only make the installer fail; `apply` makes
+  the helper SIGKILL itself right after it has started the installation thread.
+  `ilex-installerd --self-check` runs `answers::settle` over a structured
+  refusal, a bus `NoReply`, a closed connection, a client failure, a bus error
+  that carries a refusal's document and a helper-named error with no document.)
   It then reads **the volume the boot recorded and no other**: the marker must
   name exactly one device, and the listing taken now (this unit waits for the
   network, so it is some time after the gate) must be exactly that device (a stick
@@ -3539,26 +3556,44 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   **The machine that boots the installer again.** After `reinstall = true` the
   machine powers off, and if both sticks stay in and the firmware later tries USB
   first, the same answers would erase the fresh installation, every boot. So the
-  installation stamps what it made: the finalise stage writes the digest of the
-  plan's request (`target::request_digest`: SHA-256 of the request as the plan
-  records it, defaults resolved) to `/boot/ilex-install-request.sha256` (the
-  partition labelled `ilex-boot`; root's, mode 600, labelled by the target's own
-  policy), once the image and the account are in place, so an installation that
-  did not get that far has no stamp and may be run again. Answers mode mounts that
-  partition read-only without journal replay (`ro,noload`: nothing is written),
-  in its private namespace, before `Plan`, reads the stamp, unmounts, and
-  **refuses when it is the digest of the request now being made** (`these answers
-  already installed <disk> ...: remove the stick, or edit the answers`), whatever
-  `reinstall` says, handing over to the interface. A partition labelled `ilex-boot`
-  with an ext4 file system that cannot be mounted, or a stamp that is not a
-  digest, is a refusal too (what cannot be read is not "no stamp"); no such
-  partition, or none with a stamp, is no stamp. **The digest is of the request,
-  not of the answers file**: the file holds the administrator's password in
-  plaintext, `/boot` can be read by anyone with the disk, and a fast hash of a
-  file whose only unknown is a short password would let them guess it. The
-  consequence is that answers differing only in the password are the same
-  request; any other change (host name, user name, composition, disk...) is new
-  answers.
+  installation stamps what it made: the finalise stage writes
+  `/boot/ilex-install-request.sha256` (the partition labelled `ilex-boot`; root's,
+  mode 600, labelled by the target's own policy), once the image and the account
+  are in place, so an installation that did not get that far has no stamp and may
+  be run again. **The stamp holds every digest that must not erase the
+  installation, one 64-digit digest (`target::request_digest`: SHA-256 of the
+  request as the plan records it, defaults resolved) per line, oldest first**
+  (`stamp.rs`): the digests of the disk's *previous* stamp, which the helper reads
+  in `Apply` before the disk is claimed and wiped (an unreadable one is logged
+  and not carried: the person confirmed the erase, and answers mode itself refuses
+  such a disk); the digests answers mode **recorded in this boot** in
+  `/run/ilex-answers-seen` (root's file, mode 600, opened without following a
+  link and checked on the descriptor; gone at the next boot); and this
+  installation's own, last, each once, at most 256 (the oldest are dropped).
+  Answers mode records the digest of its request **as soon as it has one**,
+  whatever becomes of it: refused for the stamp, for a disk that holds a system,
+  for the registry, for the helper's refusal. A person who then installs through
+  the interface does not make those answers look new, and neither does a second
+  interactive installation, which carries what the first one's stamp held (an
+  overwritten stamp used to let the original `reinstall = true` answers erase an
+  installation made by hand on the next USB-first boot). Only the digest of a
+  request that was built can be recorded: answers that fail before that
+  (an invalid file, no helper to ask for the probe, a boot choice that names
+  nothing) leave nothing, because there is no request to name.
+  Answers mode mounts the partition read-only without journal replay
+  (`ro,noload`: nothing is written), in its private namespace, before `Plan`,
+  reads the stamp, unmounts, and **refuses when the digest of the request now
+  being made is any line** (`these answers already installed <disk> ...: remove
+  the stick, or edit the answers`), whatever `reinstall` says, handing over to
+  the interface. A partition labelled `ilex-boot` with an ext4 file system that
+  cannot be mounted, or a stamp with a line that is not a digest (or no line), is
+  a refusal too (what cannot be read is not "no stamp"); no such partition, or
+  none with a stamp, is no stamp. **The digest is of the request, not of the
+  answers file**: the file holds the administrator's password in plaintext,
+  `/boot` can be read by anyone with the disk, and a fast hash of a file whose
+  only unknown is a short password would let them guess it. The consequence is
+  that answers differing only in the password are the same request; any other
+  change (host name, user name, composition, disk...) is new answers.
 - **The live image** gains the helper and `ilex-enroll` (built in the same
   builder stage), `compositions.json` generated like the Anaconda ISO's, the
   bus policy, the unit and the repart definitions under
@@ -3704,7 +3739,9 @@ digest in the commit's metadata, `hostname`, `locale.conf`, `vconsole.conf` with
 `bootc status` (digest, tracked tag, `containerPolicy`), the answers as `hostnamectl`,
 `timedatectl` and `localectl` report them, running with no failed unit, GDM, the
 administrator's SSH login **with the password** and `sudo`, a wrong password
-refused, no AVC and `restorecon -n -v -r /etc /var/home /var/log/ilex-installer`
+refused, a stamp on `/boot` of the two digests the test put in
+`/run/ilex-answers-seen` before `Apply` (as answers mode leaves them when it
+hands over) and then the request's own, root's, mode 600, no AVC and `restorecon -n -v -r /etc /var/home /var/log/ilex-installer`
 (and `/boot`, `/boot/efi`) with exit status 0 and nothing to relabel,
 `/boot/ilex-install-request.sha256` (root's, mode 600, one 64-digit line),
 `bootc upgrade --check`, and keeps
@@ -3762,22 +3799,41 @@ with its signature still on it, the `lvm-pv-uuid-*` link present beside
 then runs **over that LVM physical volume with `reinstall = true`** (it is what
 the disk's by-id link wiping used to break) and the console must say
 `reinstall=true erases: ... LVM2_member ...`; the installed system's
-`/boot/ilex-install-request.sha256` is a 64-digit stamp (root, mode 600).
-`iso::next_unattended_repeat` installs onto a blank disk with `reinstall = true`,
-then boots the ISO **again with the same sticks** and requires that the console
-refuse (`already installed`, no `plan=ready`, no `apply=started`), that the
-interface start, that the stamp read in the guest (read-only) be a digest, and
-that the whole 41 GiB target be byte for byte what the installation left (its
-SHA-256 from the host before and after); a third boot with the host name changed
-and `reinstall` off is not refused for the stamp but at the reinstall rule, and
-writes nothing either. `iso::next_unattended_handover` boots with the fixed
+`/boot/ilex-install-request.sha256` is a stamp of one 64-digit digest (root, mode 600).
+`iso::next_unattended_repeat` installs onto a blank disk with `reinstall = true`
+(stamp: the answers' digest A), then boots the ISO **again with the same sticks**
+and requires that the console refuse (`already installed`, no `plan=ready`, no
+`apply=started`), that the interface start, that the stamp read in the guest
+(read-only) be A and `/run/ilex-answers-seen` hold the same digest, and that the
+whole 41 GiB target be byte for byte what the installation left (its SHA-256
+from the host before and after). A third boot, with the host name changed and
+`reinstall` off, is not refused for the stamp but at the reinstall rule and
+writes nothing; the boot's record holds that request's digest E (and the stamp
+is still A). **In that guest a person then installs through the interface**:
+`Plan`, `SetSecret` (a sealed memfd from `python3`) and `Apply` over the bus as
+root, then `State` until it succeeds, which is not answers mode and records
+nothing; the stamp on the new `/boot` must be exactly `[A, E, I]` (the earlier
+stamp's digest carried across the wipe, the digest answers mode had seen, then
+the installation's own). The guest powers off and the target's SHA-256 is taken;
+the **original sticks** (`reinstall = true`) then boot again and must be refused
+(`already installed`) and the disk be byte for byte what the installation by hand
+left; and the edited answers made `reinstall = true` are refused the same way
+(their digest was only seen, never installed), the disk again untouched.
+`iso::next_unattended_handover` boots with the fixed
 credential `ilex.installer.fault=helper` (the helper exits before it takes its bus
 name) and then `=answers` (the unattended process kills itself with `SIGKILL`
 after reading the answers and before it asks the helper anything): in both the
 session unit must become active, the gate's marker be gone, Apply's flag never
 raised, the disk untouched and the answers volume unchanged; for `answers` the
 unit must end `failed` by `signal` with no `result=` line, and the console say
-`handover=interface by=systemd`.
+`handover=interface by=systemd`. A third boot with `=apply` (the helper kills
+itself as `Apply` has started the installation thread, so the call is never
+answered) must show the opposite: `plan=ready`, then `result=failed Apply: no
+refusal came back` and `the interface is not started`, no `apply=started` and no
+`handover=`, the gate's marker and Apply's flag still there, the answers unit
+`failed`, the session unit `inactive` 45 seconds later and systemd's hand-over
+unit skipped by its condition (the disk is not asserted untouched: the thread may
+have begun).
 `iso::next_unattended_fat` boots with a **FAT** stick labelled `ILEXANSWERS` (made
 with `mkfs.fat` and `mcopy`; the host needs `dosfstools` and `mtools`) whose answers
 name the right disk with a wrong confirmation: the console must say `volume=...

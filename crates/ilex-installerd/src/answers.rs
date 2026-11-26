@@ -23,7 +23,7 @@ use crate::{
     disks::{self, node_number},
     exec, fault,
     scratch::Scratch,
-    secret, target,
+    secret, stamp, target,
     topology::{DevNum, split_dev},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -65,11 +65,13 @@ pub const FILE_SYSTEMS: [&str; 7] = ["ext4", "ext3", "ext2", "xfs", "vfat", "iso
 pub const BOOT_MARKER: &str = "/run/ilex-answers-volume";
 /// Started when answers mode fails before it has changed any disk.
 const SESSION: &str = "ilex-installer-session.service";
-/// Present from just before `Apply` is called until `Apply` has refused (or for
-/// the rest of the boot once it did not): it says the helper may have begun to
-/// write. The systemd-level hand-over (`ilex-installer-answers-handover.service`,
-/// the answers unit's `OnFailure=`) does nothing while it exists, and starts
-/// the interface when the unit ended without it.
+/// Present from just before `Apply` is called until the helper has refused it
+/// with one of its own structured errors ([`settle`]), and for the rest of the
+/// boot otherwise (accepted, or any failure of the call that is not such a
+/// refusal): it says the helper may have begun to write. The systemd-level
+/// hand-over (`ilex-installer-answers-handover.service`, the answers unit's
+/// `OnFailure=`) does nothing while it exists, and starts the interface when the
+/// unit ended without it.
 pub const APPLYING_FLAG: &str = "/run/ilex-answers-applying";
 
 /// What to do once the installation has succeeded.
@@ -322,7 +324,7 @@ fn read_regular(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
 
 /// [`read_regular`] for any file of at most `max` bytes; `what` names it in the
 /// messages.
-fn read_bounded(path: &Path, what: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
+pub(crate) fn read_bounded(path: &Path, what: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
@@ -489,94 +491,6 @@ fn ensure_not_on(volume: &Volume, disk: &Disk) -> Result<()> {
     Ok(())
 }
 
-/// What the disk's `/boot` says it was installed from: the digest in
-/// [`target::REQUEST_STAMP`], when the disk has a partition labelled
-/// `ilex-boot` with an ext4 file system that has one. `None` is no such
-/// partition, or no stamp on it (an installation that did not finish, or one
-/// made by another program). A file system that cannot be mounted, or a stamp
-/// that is not a digest, is an error: it may be exactly the installation this
-/// check exists to protect, and what cannot be read is not "no stamp". The
-/// partition is mounted read-only, without journal replay (`noload`: not one
-/// byte is written), in this unit's private mount namespace, and unmounted
-/// before anything else is asked of the disk.
-fn read_stamp(run_dir: &Path, disk: &Disk) -> Result<Option<String>> {
-    let Some(boot) = disk
-        .partitions
-        .iter()
-        .find(|p| p.label == target::BOOT_LABEL && p.filesystem == "ext4")
-    else {
-        return Ok(None);
-    };
-    let number = node_number(&boot.path).map_err(anyhow::Error::msg)?;
-    let mut scratch = Scratch::new(run_dir, "stamp")?;
-    let mountpoint = scratch.subdir("boot")?;
-    let mount_point = mountpoint.to_string_lossy().into_owned();
-    let mounted = exec::run(
-        "mount",
-        &[
-            "-t",
-            "ext4",
-            "-o",
-            "ro,noload,nodev,nosuid,noexec",
-            &boot.path,
-            &mount_point,
-        ],
-        Duration::from_secs(60),
-    )?;
-    ensure!(
-        mounted.success(),
-        "{} ({}) could not be mounted read-only to look for the stamp of an earlier installation ({}); erasing what might be an installation is not done blind",
-        boot.path,
-        target::BOOT_LABEL,
-        exec::clean_line(
-            mounted
-                .stderr
-                .lines()
-                .last()
-                .unwrap_or("no message")
-                .as_bytes()
-        )
-    );
-    let table = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let same = mounted_number(&table, &mount_point) == Some(number);
-    let read = if same {
-        match fs::symlink_metadata(mountpoint.join(target::REQUEST_STAMP)) {
-            Ok(_) => {
-                read_bounded(&mountpoint.join(target::REQUEST_STAMP), "the stamp", 4096).map(Some)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("looking for the stamp: {e}")),
-        }
-    } else {
-        Err(anyhow::anyhow!(
-            "what was mounted is not {} (the partition was replaced)",
-            boot.path
-        ))
-    };
-    let unmounted = exec::run("umount", &[&mount_point], Duration::from_secs(60));
-    let read = read?;
-    ensure!(
-        unmounted.is_ok_and(|o| o.success()),
-        "the partition {} could not be unmounted after the stamp was read",
-        boot.path
-    );
-    let Some(bytes) = read else {
-        return Ok(None);
-    };
-    let text = std::str::from_utf8(&bytes)
-        .ok()
-        .map(str::trim)
-        .filter(|t| t.len() == 64 && t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
-        .with_context(|| format!("the stamp on {} is not a digest", boot.path))?;
-    Ok(Some(text.to_owned()))
-}
-
-/// Whether the stamp of a disk is the digest of the request now being made:
-/// these answers already installed this disk.
-pub fn stamp_is_these_answers(stamp: Option<&str>, digest: &str) -> bool {
-    stamp == Some(digest)
-}
-
 /// What the disk already holds that a person would want to keep: ilex's own
 /// partitions, another operating system, a boot loader.
 pub fn existing_systems(disk: &Disk) -> Vec<String> {
@@ -622,22 +536,49 @@ pub fn choose_composition(
     }
 }
 
-/// What a refused call says: the helper's JSON refusal when the error carries
+/// The prefix of every error name the helper's own methods return
+/// (`bus::Error`).
+const ERROR_PREFIX: &str = "org.ilex.Installer1.Error.";
+
+/// The helper's refusal, from the name and the message a failed call carries: the
+/// error is one of the helper's own (`org.ilex.Installer1.Error.<Kind>`) and its
+/// message is the model's [`PlanError`] document. Nothing else is a refusal:
+/// not a bus error (`NoReply`, `ServiceUnknown`), not a lost connection, not
+/// a message in another shape, whatever it says.
+pub fn structured_refusal(name: &str, message: &str) -> Option<PlanError> {
+    let kind = name.strip_prefix(ERROR_PREFIX)?;
+    if kind.is_empty() || kind.contains('.') {
+        return None;
+    }
+    serde_json::from_str(message).ok()
+}
+
+/// [`structured_refusal`] of a failed call.
+fn refusal_of(error: &zbus::Error) -> Option<PlanError> {
+    match error {
+        zbus::Error::MethodError(name, Some(message), _) => {
+            structured_refusal(name.as_str(), message)
+        }
+        _ => None,
+    }
+}
+
+fn describe_refusal(refusal: &PlanError) -> String {
+    format!(
+        "{:?}{}: {}",
+        refusal.code,
+        refusal
+            .field
+            .as_ref()
+            .map_or_else(String::new, |f| format!(" ({f})")),
+        refusal.message
+    )
+}
+
+/// What a failed call says: the helper's JSON refusal when the error carries
 /// one, else the error itself.
 fn describe(error: &zbus::Error) -> String {
-    if let zbus::Error::MethodError(_, Some(message), _) = error
-        && let Ok(refusal) = serde_json::from_str::<PlanError>(message)
-    {
-        return format!(
-            "{:?}{}: {}",
-            refusal.code,
-            refusal
-                .field
-                .map_or_else(String::new, |f| format!(" ({f})")),
-            refusal.message
-        );
-    }
-    error.to_string()
+    refusal_of(error).map_or_else(|| error.to_string(), |r| describe_refusal(&r))
 }
 
 async fn call<R>(
@@ -664,9 +605,45 @@ fn text_of(state: &State) -> String {
 
 /// How far an unattended installation got.
 #[derive(Default)]
-struct Reached {
-    /// `Apply` was accepted: a disk may have been written.
-    applied: bool,
+pub struct Reached {
+    /// `Apply` may have begun the installation: it was accepted, or the helper
+    /// said nothing that tells it did not. A disk may be being written.
+    pub applied: bool,
+}
+
+/// What the answer to `Apply` means. The flag ([`APPLYING_FLAG`]) was raised
+/// before the call and says the helper may have begun to write; it is lowered
+/// (and the interface may start) only when the helper itself refused, with one
+/// of its own structured errors ([`structured_refusal`]), which it makes before
+/// anything is written. Any other failure of the call (the bus reports no
+/// reply, the connection ends, the helper crashes before it answers) says
+/// nothing about whether the installation thread had started: the flag stays,
+/// the run counts as applied, and the console shows the failure with the
+/// interface not started.
+pub fn settle(result: zbus::Result<String>, flag: &Path, reached: &mut Reached) -> Result<String> {
+    match result {
+        Ok(state) => {
+            // Whatever happens next (even a state this program cannot read),
+            // the disk may be changing and the interface stays out.
+            reached.applied = true;
+            Ok(state)
+        }
+        Err(error) => match refusal_of(&error) {
+            Some(refusal) => {
+                let _ = fs::remove_file(flag);
+                Err(anyhow::anyhow!("Apply: {}", describe_refusal(&refusal)))
+            }
+            None => {
+                reached.applied = true;
+                // What a person must know comes first: the console line is cut at
+                // 300 characters, and what the bus says can be long.
+                Err(anyhow::anyhow!(
+                    "Apply: no refusal came back, so the installation may have begun and the interface is not started (journalctl -u ilex-installerd): {}",
+                    exec::clean_line(error.to_string().as_bytes())
+                ))
+            }
+        },
+    }
 }
 
 /// Run an unattended installation. Ok only when it succeeded; whatever else
@@ -750,6 +727,15 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     let request = answers
         .to_request(&selected)
         .map_err(|e| anyhow::anyhow!("answers.toml: {}", e.message))?;
+    // From here these answers are a request with a digest, and whatever ends
+    // them before `Apply` (a refusal, the helper, the registry, a signal) must
+    // not make them new answers once the person has installed by hand: the
+    // digest is recorded now, and the installation that ends in this boot
+    // keeps it in the disk's stamp (a record in `/run`, root's, gone at the
+    // next boot).
+    let digest = target::request_digest(&request);
+    stamp::record_seen(Path::new(stamp::SEEN), &digest)
+        .context("recording the digest of these answers")?;
     let disk = probe
         .disks
         .iter()
@@ -780,9 +766,11 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     }
     // The answers that installed this disk once do not install it again: the
     // machine powered off after its installation, and with the stick still in
-    // it the firmware booted the installer once more.
-    let digest = target::request_digest(&request);
-    if stamp_is_these_answers(read_stamp(&options.run_dir, disk)?.as_deref(), &digest) {
+    // it the firmware booted the installer once more. So do answers that were
+    // refused here before and then overtaken by an installation made by hand:
+    // the stamp holds both kinds.
+    let stamped = stamp::read_boot(&options.run_dir, disk)?;
+    if stamp::holds(&stamped, &digest) {
         bail!(
             "these answers already installed {} (the installation recorded their digest in /boot/{}): remove the stick, or edit the answers (anything but the password makes them new answers) to install again",
             disk.id,
@@ -828,18 +816,12 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     let confirm = answers.install.confirm_erase.clone().unwrap_or_default();
     drop(answers);
     // From here the helper may begin to write: the flag tells the systemd-level
-    // hand-over to stay out of it. A refusal (nothing was written) lowers it.
+    // hand-over to stay out of it. Only a refusal of the helper lowers it.
     fs::write(APPLYING_FLAG, b"").context("writing the flag that says Apply was called")?;
-    let state: String = match call(&proxy, "Apply", &(plan.id.as_str(), confirm.as_str())).await {
-        Ok(state) => state,
-        Err(error) => {
-            let _ = fs::remove_file(APPLYING_FLAG);
-            return Err(error);
-        }
-    };
-    // Apply was accepted: whatever happens next (even a state this program
-    // cannot read), the disk may be changing and the interface stays out.
-    reached.applied = true;
+    let reply: zbus::Result<String> = proxy
+        .call("Apply", &(plan.id.as_str(), confirm.as_str()))
+        .await;
+    let state = settle(reply, Path::new(APPLYING_FLAG), reached)?;
     let _: State = serde_json::from_str(&state).context("reading the state")?;
     say("apply=started");
 

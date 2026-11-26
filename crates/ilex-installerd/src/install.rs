@@ -16,7 +16,7 @@ use crate::{
     repart,
     secret::{self, Secret},
     stagelog::{Logs, StageLog},
-    target,
+    stamp, target,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use ilex_installer_model::{
@@ -65,6 +65,8 @@ pub struct Install {
     /// The device nodes of the partitions this installation made.
     nodes: BTreeSet<String>,
     admin: Secret,
+    /// What the disk's stamp held before it was wiped.
+    earlier: stamp::Earlier,
     /// The stage that is running (or failed).
     stage: Stage,
 }
@@ -101,7 +103,14 @@ pub fn json_array(lines: &[String]) -> Result<String> {
 }
 
 /// Run the installation and record how it ended. This is the thread's body.
-pub fn run(helper: Arc<Helper>, plan: Plan, hold: Hold, address: String, admin: Secret) {
+pub fn run(
+    helper: Arc<Helper>,
+    plan: Plan,
+    hold: Hold,
+    address: String,
+    admin: Secret,
+    earlier: stamp::Earlier,
+) {
     let logs = match Logs::new(&helper.config.run_dir, &plan.id) {
         Ok(logs) => logs,
         Err(e) => {
@@ -121,6 +130,7 @@ pub fn run(helper: Arc<Helper>, plan: Plan, hold: Hold, address: String, admin: 
         address,
         nodes: BTreeSet::new(),
         admin,
+        earlier,
         stage: Stage::Partition,
     };
     match install.stages(hold) {
@@ -789,20 +799,45 @@ impl Install {
         Ok(())
     }
 
-    /// Leave the digest of the request this installation was made from on the
-    /// new `/boot` ([`target::REQUEST_STAMP`]), where unattended mode finds it
-    /// (read-only) on a later boot of the installer and refuses to erase this
-    /// installation again for the same answers. Written last-but-one, once the
-    /// image and the account are in place: an installation that did not get
-    /// this far has no stamp and may be run again.
+    /// Leave the digests of the requests that must not erase this installation
+    /// on the new `/boot` ([`target::REQUEST_STAMP`], one per line), where
+    /// unattended mode finds them (read-only) on a later boot of the installer.
+    /// They are: what the disk's stamp held before it was wiped, what answers
+    /// mode saw in this boot and handed over (the file [`stamp::SEEN`]: answers
+    /// that did not install and must not become new answers because the person
+    /// installed by hand), and this installation's own request. Written
+    /// last-but-one, once the image and the account are in place: an
+    /// installation that did not get this far has no stamp and may be run
+    /// again.
     fn stamp(&self, log: &mut StageLog, deployment: &target::Deployment) -> Result<()> {
         let file = self.target.join("boot").join(target::REQUEST_STAMP);
-        let digest = target::request_digest(&self.plan.request);
-        write_file(&file, format!("{digest}\n").as_bytes(), 0o600)?;
+        let own = target::request_digest(&self.plan.request);
+        if let Some(why) = &self.earlier.unreadable {
+            // The person confirmed the erase of this disk: what could not be
+            // read is not carried, and the log says so.
+            log.line(&format!(
+                "the disk's earlier stamp could not be read before it was wiped, so its digests are not carried: {why}"
+            ));
+        }
+        let seen = match stamp::read_seen(&self.helper.config.seen_file) {
+            Ok(seen) => seen,
+            Err(why) => {
+                log.line(&format!(
+                    "the record of the answers seen in this boot could not be read ({why:#}), so it is not carried"
+                ));
+                Vec::new()
+            }
+        };
+        let digests = stamp::merge(&self.earlier.digests, &seen, &own);
+        write_file(&file, stamp::render(&digests).as_bytes(), 0o600)?;
         self.relabel_mount_point(log, deployment, &file)?;
         log.line(&format!(
-            "recorded the request's digest in /boot/{}",
-            target::REQUEST_STAMP
+            "recorded {} digest{} in /boot/{} (this request's, {} carried from the disk's earlier stamp, {} of answers seen in this boot)",
+            digests.len(),
+            if digests.len() == 1 { "" } else { "s" },
+            target::REQUEST_STAMP,
+            self.earlier.digests.len(),
+            seen.len()
         ));
         Ok(())
     }

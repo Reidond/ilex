@@ -58,6 +58,11 @@ const BARE_BYTES: u64 = 36 * GIB;
 const MEMORY: &str = "6G";
 const BUS: &str = "org.ilex.Installer1";
 pub(crate) const ADMIN: &str = "ilexmaint";
+/// Digests of answers that were refused in the boot, for the stamp: not any
+/// request's, only two lines the helper must carry.
+const SEEN_ONE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const SEEN_TWO: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
 /// What a person types: spaces, a colon, quotes. It must survive the memfd,
 /// the bus, chpasswd's one line and PAM.
 pub(crate) const PASSWORD: &str = "Correct horse: 'battery' \"staple\"";
@@ -938,6 +943,14 @@ fn install() -> Result<()> {
         &vm,
         "nohup busctl --system --json=short monitor org.ilex.Installer1 > /run/signals.json 2>/dev/null &\necho $! > /run/monitor.pid; sleep 1; echo monitoring",
     )?;
+    // What answers mode leaves when it saw a request and handed over (two
+    // digests, root's file, mode 600): the installation keeps them in the stamp.
+    ok(
+        &vm,
+        &format!(
+            "umask 077; printf '%s\\n' {SEEN_ONE} {SEEN_TWO} > /run/ilex-answers-seen; stat -c 'mode=%a owner=%U' /run/ilex-answers-seen"
+        ),
+    )?;
     let ran = set_secret(
         &vm,
         "ilex-installer",
@@ -1177,6 +1190,7 @@ fn install() -> Result<()> {
             layout: "de",
             admin: ADMIN,
             password: PASSWORD,
+            stamp: &[SEEN_ONE, SEEN_TWO],
         },
     )?;
     gdm_screenshot(
@@ -1351,6 +1365,10 @@ pub(crate) struct Expected<'a> {
     pub layout: &'a str,
     pub admin: &'a str,
     pub password: &'a str,
+    /// The digests the stamp on `/boot` holds before this installation's own
+    /// (the last line): what the disk's earlier stamp held and what answers
+    /// mode had seen in the boot, in that order, each once.
+    pub stamp: &'a [&'a str],
 }
 
 /// The installed disk, booted. `save` keeps evidence under a name.
@@ -1413,20 +1431,21 @@ pub(crate) fn check_installed(save: &dyn Fn(&str, &str), vm: &Vm, e: &Expected<'
         })(),
     );
     check(
-        "the request's digest is stamped on /boot (root's, mode 600, one line of 64 hex digits)",
+        "the digests are stamped on /boot (root's, mode 600, one 64-digit digest a line: the earlier ones, then this request's)",
         (|| {
             let out = vm.ssh_ok(
                 "f=/boot/ilex-install-request.sha256; stat -c 'mode=%a owner=%U links=%h' $f; ls -Z $f; cat $f",
             )?;
             save("request-stamp.txt", &out);
-            let digest = out.lines().last().unwrap_or_default();
+            let digests: Vec<&str> = out.lines().skip(2).collect();
             ensure!(
                 out.contains("mode=600 owner=root links=1")
-                    && digest.len() == 64
-                    && digest
-                        .bytes()
-                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-                "the stamp on /boot: {out}"
+                    && digests.iter().all(|d| d.len() == 64
+                        && d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+                    && digests.len() == e.stamp.len() + 1
+                    && digests[..e.stamp.len()] == *e.stamp,
+                "the stamp on /boot (wanted {:?} and the request's own): {out}",
+                e.stamp
             );
             Ok(())
         })(),

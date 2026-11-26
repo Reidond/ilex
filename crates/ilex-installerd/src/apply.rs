@@ -22,9 +22,9 @@
 
 use crate::{
     disks::{self, Hold},
-    install, policy, repart,
+    fault, install, policy, repart,
     secret::{self, Secret},
-    sys,
+    stamp, sys,
 };
 use anyhow::Context;
 use ilex_installer_model::{
@@ -231,6 +231,11 @@ impl Helper {
             ));
         }
         let now = self.disk_for_apply(&probe.disks, &plan, &planned)?;
+        // What the disk's `/boot` says it was installed from, read now: the
+        // claim below keeps a partition from being mounted, and the wipe takes
+        // the stamp with it. The installation writes these digests into the
+        // new stamp beside its own.
+        let earlier = stamp::earlier(&self.config.run_dir, now);
 
         // The `installer::` tier's fault (never set in production): a mount
         // or an exclusive open that comes after the probe and before the claim.
@@ -288,7 +293,7 @@ impl Helper {
             .name("ilex-apply".into())
             .spawn({
                 let plan = plan.clone();
-                move || install::run(helper, plan, hold, address, admin)
+                move || install::run(helper, plan, hold, address, admin, earlier)
             })
             .context("starting the installation thread")
             .map_err(internal);
@@ -298,6 +303,18 @@ impl Helper {
                 &error.message,
             );
             return Err(error);
+        }
+        // The `iso::next_unattended_handover` trial's fault (the fixed
+        // credential ilex.installer.fault=apply; it can only make the
+        // installer fail): the helper dies as the installation thread has
+        // started, so that the caller of `Apply` gets no answer at all and
+        // cannot know whether the disk is being written.
+        if fault::requested("apply") {
+            eprintln!(
+                "ilex-installerd: fault=apply (a test credential): killed as the installation thread started"
+            );
+            // SAFETY: ends this process.
+            unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
         }
         Ok(self.state())
     }

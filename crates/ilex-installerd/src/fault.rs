@@ -35,8 +35,10 @@ pub fn pause(file: &Path) {
 /// puts on the VM, imported by the helper's and the answers unit, and by the
 /// session's, which reads the value `session`). It can only make the installer
 /// fail or stay quiet: `helper` (the helper exits as soon as it starts, so it
-/// never takes its bus name) or `answers` (unattended mode kills itself before
-/// it asks the helper for anything). Nothing is read from anywhere else.
+/// never takes its bus name), `answers` (unattended mode kills itself before
+/// it asks the helper for anything) or `apply` (the helper kills itself as
+/// `Apply` has started the installation thread, so that the call is never
+/// answered). Nothing is read from anywhere else.
 pub fn credential() -> Option<String> {
     let dir = std::env::var_os("CREDENTIALS_DIRECTORY")?;
     let text = fs::read_to_string(Path::new(&dir).join("ilex.installer.fault")).ok()?;

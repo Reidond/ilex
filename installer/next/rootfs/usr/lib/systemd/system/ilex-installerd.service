@@ -17,8 +17,10 @@ RuntimeDirectory=ilex-installer
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 LimitCORE=0
-# Test-only fault, from the fixed credential ilex.installer.fault=helper: the
-# helper exits as soon as it starts. It can only make the installer fail.
+# Test-only faults, from the fixed credential ilex.installer.fault: `helper`
+# makes the helper exit as soon as it starts, `apply` makes it kill itself as
+# Apply has started the installation (the call is never answered). They can only
+# make the installer fail.
 ImportCredential=ilex.installer.fault
 # The helper's mounts (an ESP mounted read-only to name its loaders, and
 # anything a later stage mounts) stay out of the host's mount namespace. The

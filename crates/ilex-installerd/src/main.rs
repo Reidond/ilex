@@ -33,6 +33,8 @@ mod selfcheck;
 #[cfg(target_os = "linux")]
 mod stagelog;
 #[cfg(target_os = "linux")]
+mod stamp;
+#[cfg(target_os = "linux")]
 mod sys;
 #[cfg(target_os = "linux")]
 mod target;

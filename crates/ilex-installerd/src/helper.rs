@@ -53,6 +53,9 @@ pub struct Config {
     /// mount or an exclusive open made in that moment is the race the claim
     /// itself must catch.
     pub pause_before_hold: Option<PathBuf>,
+    /// The digests answers mode saw in this boot ([`crate::stamp::SEEN`]): the
+    /// installation that ends writes them into the disk's stamp.
+    pub seen_file: PathBuf,
 }
 
 impl Default for Config {
@@ -77,6 +80,7 @@ impl Default for Config {
             ],
             plan_valid_seconds: PLAN_VALID_SECONDS,
             pause_before_hold: None,
+            seen_file: crate::stamp::SEEN.into(),
         }
     }
 }
