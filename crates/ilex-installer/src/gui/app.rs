@@ -527,8 +527,6 @@ impl Widgets {
         let test = adw::EntryRow::builder()
             .title("Type here to try the layout")
             .build();
-        // Enter in the field continues, like on every other page.
-        test.set_activates_default(true);
         let welcome_banner = banner(None);
         let welcome_button = continue_button("Continue");
         let language_group = group(
@@ -600,14 +598,11 @@ impl Widgets {
 
         // --- account ---
         let name = adw::EntryRow::builder().title("User name").build();
-        name.set_activates_default(true);
         name.set_input_hints(gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::LOWERCASE);
         let password = adw::PasswordEntryRow::builder().title("Password").build();
-        password.set_activates_default(true);
         let confirmation = adw::PasswordEntryRow::builder()
             .title("Confirm the password")
             .build();
-        confirmation.set_activates_default(true);
         let name_message = message_label();
         let password_message = message_label();
         let name_group = group("", "");
@@ -740,32 +735,34 @@ impl Widgets {
                 }
             }
         });
-        // Enter continues where it can, and the first control has the focus.
-        for (page, button, focus) in [
-            (
-                &welcome_page,
-                &welcome_button,
-                language.clone().upcast::<gtk::Widget>(),
-            ),
-            (
-                &machine_page,
-                &machine_button,
-                machine_button.clone().upcast(),
-            ),
-            (&account_page, &account_button, name.clone().upcast()),
+        // Enter in a text field continues when the page is valid (the flow
+        // refuses when it is not). Enter elsewhere keeps its own meaning: it
+        // opens a list, toggles a row, presses the focused button. A window
+        // default widget would take Enter from the combo rows, so there is none.
+        for row in [
+            test.upcast_ref::<adw::EntryRow>(),
+            name.upcast_ref(),
+            password.upcast_ref(),
+            confirmation.upcast_ref(),
         ] {
-            let window = root.clone();
-            let button = button.clone();
-            page.connect_showing(move |_| window.set_default_widget(Some(&button)));
+            row.connect_entry_activated({
+                let input = input.clone();
+                move |_| input.emit(Msg::Continue)
+            });
+        }
+        // The first control of each page has the focus when the page is shown.
+        for (page, focus) in [
+            (&welcome_page, language.clone().upcast::<gtk::Widget>()),
+            (&machine_page, machine_button.clone().upcast()),
+            (&account_page, name.clone().upcast()),
+        ] {
             page.connect_shown(move |_| {
                 focus.grab_focus();
             });
         }
 
-        // `add` shows the first page of an empty view, before the handlers
-        // below exist: the first page's default widget and focus are set here.
-        root.set_default_widget(Some(&welcome_button));
-        GtkWindowExt::set_focus(root, Some(&language));
+        // `add` shows the first page of an empty view before the handler above
+        // exists: GTK's own first focus (the first row) stays.
 
         Self {
             nav,
