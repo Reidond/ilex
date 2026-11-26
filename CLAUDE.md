@@ -1640,32 +1640,65 @@ and on demand. A small routing job compares the full ref in Bash and acquires
 its concurrency group before calling `publish-pipeline.yml`.
 `image.toml` supplies the installer composition (currently
 `generic.gnome`) and `info --publications` supplies the validated tag, kind,
-parent, machine and ordered shells of every publication. This workflow builds
-the installer root first, then every other root, including `base`.
+parent, machine and ordered shells of every publication. Every root, including
+`base`, builds, rechunks, stages and boots in jobs of its own on its own runner,
+all in parallel: the installer root in `publish-pipeline.yml`, every other root
+in its own call of `publish-root.yml`. One root's failure never blocks another
+root's signing, the installer root's machines or the installer release.
 The existing legacy tags (`latest`, `candidate`, bare date and `sha-` tags)
 stay in the registry: CI neither moves nor deletes them.
 
 A registry job snapshots each published composition by digest before build or
 upgrade starts. A missing tag is recorded as `-`. The same job records legacy
 `latest` once if needed. These values select the build comparisons, upgrade v1,
-layer-reuse pulls and machine inputs. Three paths run on separate runners:
+layer-reuse pulls and machine inputs, and lists the roots other than the
+installer's for the matrix below. The job graph (every arrow is a `needs`):
 
-- `build`: take the recorded snapshots, check selected inputs → build its
-  shell selection → `changed` against that
+```text
+snapshot ─┬─► build ───┬─► publish ─┬─► machines        installer root
+          │            │            └─► v1-disk dispatch  (publish-pipeline.yml)
+          ├─► upgrade ─┘   (publish needs build and upgrade; upgrade polls build's staging)
+          │
+          ├─► other-roots[base], other-roots[<next root>] …  one call each, parallel,
+          │     fail-fast off; each is publish-root.yml:  build ─► publish ─► machines
+          │
+          └─► roots-report   (summary table; nothing needs it)
+
+installer-due ─► iso ─┐
+build, upgrade, publish ─┴─► installer-release        (no other-roots, no machines)
+```
+
+Paths on separate runners:
+
+- `build`: the installer root only. Take the recorded snapshots, check selected
+  inputs → build its shell selection → `changed` against that
   immutable snapshot → rechunk → unsigned
-  staging through `publish --stage --as` → `ephemeral::`.
+  staging through `publish --stage --as` → `ephemeral::`, plus the security,
+  apps and encrypted opt-in tiers.
   From its first minute, `vm-prep.sh ephemeral` prepares the VM stack and pulls
-  each root's current digest for compressed-blob reuse, installer first. Only while its tag is
+  the root's current digest for compressed-blob reuse. Only while its tag is
   absent does the reuse pull fall back to legacy `latest`. Staging freezes the
   local ID and checks the pushed manifest's config digest before reporting a
   staged digest and fingerprint. Capability checks and tests boot that same
-  immutable rechunked image ID. The installer stages before other roots build,
-  so upgrade starts without waiting for `base`. A validated JSON job output
-  records each root's tag, own snapshot, changed flag, staged digest,
-  fingerprint and tested image ID, only after all ephemeral tests succeed.
-  Every root runs `ephemeral::` and capability checks; only the installer runs
-  `upgrade::`. The base shares its update implementation, has no installed v1
-  yet, and gets no legacy-desktop upgrade. `tool::` remains a local tier.
+  immutable rechunked image ID. Its last step, `.github/root-evidence.sh`,
+  writes the validated one-row JSON inventory (tag, own snapshot, changed flag,
+  staged digest, fingerprint and tested image ID) as a job output, so the row
+  exists only after every step of the job succeeded.
+- `other-roots`: a matrix over `snapshot`'s list of every other root (`base`
+  and any further desktop), `fail-fast: false`, each entry a call of
+  `.github/workflows/publish-root.yml` (`needs` for jobs inside one call apply
+  to that call only; secrets and the pins of `publish-pipeline.yml` are passed
+  down as inputs). A call's `build` job runs the same steps as the installer's
+  (inputs check → build with the root's own selection → `changed` → rechunk →
+  stage → capability check → `ephemeral::` → evidence row; no `upgrade::`,
+  security, apps or encrypted tiers, and no wait for another job) and ends with
+  the same `root-evidence.sh`. A failing root marks only its own call red, with
+  an error annotation and a summary section naming it.
+  Its `publish` job (below) and its `machines` job (the layers of that
+  parent) belong to that call. Every root runs `ephemeral::` and capability
+  checks; only the installer runs `upgrade::`. The base shares its update
+  implementation, has no installed v1 yet, and gets no legacy-desktop upgrade.
+  `tool::` remains a local tier.
 - `upgrade`: `.github/upgrade-from.sh` selects the installer's snapshot as v1;
   only explicit absence permits legacy `latest` as the first-run fallback.
   Registry/authentication errors are fatal. It records `own` (the installer
@@ -1673,15 +1706,16 @@ layer-reuse pulls and machine inputs. Three paths run on separate runners:
   `v1-disk-boot-mask-<bcvk>-<v1 digest>`, with plain image install options.
   The earlier kernel-argument profile is not restored. It installs
   v1 itself on a cache miss, in the background with the VM stack. It waits for
-  build's "Stage the candidate", resolves this ref's staging tag, pulls by
-  digest, and runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`
+  the installer `build` job's "Stage the candidate" (found by its job name, so
+  no other job may be named `build` or `pipeline / build`), resolves this ref's
+  staging tag, pulls by digest, and runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`
   and no upgrade tier is the explicit first-publish case.
 - `installer-due` → `iso`: described below. Automatic due builds run on main;
   a branch requests an ISO explicitly with `iso=true`.
 
-`publish` requires successful build and upgrade jobs, changed content, this
-repository, main and a push/schedule/dispatch event. A skipped or failed test
-job cannot reach signing. It first builds the publisher without the signing
+The installer root's `publish` requires successful `build` and `upgrade` jobs,
+changed content, this repository, main and a push/schedule/dispatch event. A
+skipped or failed test job cannot reach signing. It first builds the publisher without the signing
 key, then invokes that executable directly. `.github/publish-root.sh` checks
 that upgrade tested exactly the staged digest (unless neither v1 exists),
 validates all explicit outputs, including the fingerprint recorded by staging,
@@ -1720,25 +1754,32 @@ Only a real publication sets `published=true`; v1-disk dispatch and machines
 on a changed root require it. Failed dependencies and green stale-root skips
 start neither. Forced tests do not republish an unchanged fingerprint.
 
-`publish-roots.sh` processes changed roots independently. The `publish` job
-handles only the installer root; `publish-other-roots` handles the others,
-including `base`, in parallel after the complete build/test inventory passes.
-`base` uses its ephemeral evidence without borrowing upgrade outputs. Results
+`publish-roots.sh` publishes the one root its job built (`ROOT_SCOPE` is
+`installer` in the pipeline's `publish` job and `other` in a `publish-root.yml`
+call, so neither can sign the other's row). Every root's `publish` job needs only
+its own `build` job, plus `upgrade` for the installer; `base` and any further
+desktop use their own ephemeral evidence without borrowing upgrade outputs and
+publish as soon as their own build passes, whatever another root does. Results
 record `published=true|false` per root; v1-disk dispatch depends only on the
-installer's result. The release job depends only on the installer publisher:
-a failed or slow base publication cannot block it. A stale-root skip continues
-to later roots in its job. A hard failure stops that job red; independent
-successful publications stay signed. Build/test failures block all signing;
-machines use only their own parent's positive publication result. Missing
-results from a failed parent publisher skip that parent's layers. A fresh run
-catches up. Different revisions on `base` and `generic.gnome` are
+installer's result. The release job depends only on the installer root's
+build, upgrade and publish jobs and `iso`: a failed, red or slow other root
+cannot block it. A failed root's build/test failure blocks only that root's
+signing and layers; a hard publication failure stops only that call red, and
+every independent successful publication stays signed. Machines use only their
+own parent's positive publication result. Missing results from a failed parent
+publisher skip that parent's layers. A fresh run catches up. Different revisions
+on `base` and `generic.gnome` are
 not an inconsistent dependency pair: both are independent root builds, and
 nothing builds `FROM` the published base. A mismatched machine/parent pair
 would be a layer built on a digest other than its published parent; the
 per-parent result and parent-current guards forbid that.
 
-`machines` reads the five-column publications table and each parent's row in
-the tested-root inventory. Each row
+Machine layers run per parent root: the installer root's in the pipeline's
+`machines` job (`needs` build, upgrade, publish), every other root's in the
+`machines` job of its own `publish-root.yml` call (`needs` its build and
+publish). Each reads the five-column publications table, plans only the layers
+whose parent is its own root (`ROOT_TAG`), and takes that parent's row of its
+own one-row tested-root inventory. Each row
 retains its composition tag, parent tag, machine and shell list. The parent is
 the exact staged/tested digest when changed in this run; main requires it to
 have published. An unchanged main root uses its initial signed digest,
@@ -1848,8 +1889,9 @@ allow, then tested ID/config/revision checks precede sign/verify and tag moves.
 ISO is due because its fingerprint changed and builds in parallel into the
 `installer-iso` artifact. `installer-release` waits for successful build/upgrade
 and actual default-composition publication (`published=true`), but does not
-wait for `machines`: that job is not in its `needs`. On the first publication,
-`generic.gnome` can be signed while `ms-7c35.gnome` is still being built/signed.
+wait for `machines` or any other root's call: those jobs are not in its `needs`.
+On the first publication, `generic.gnome` can be signed while `ms-7c35.gnome`
+(or any other root) is still being built/signed.
 The all-composition guard runs before cosign; any missing offered tag or
 signature tag, including the default's, makes `installer-target.sh` return
 `available=false` successfully. Installation and release are skipped, the ISO
@@ -1894,10 +1936,10 @@ has enough space without clearing toolchains. VM packages use the apt-debs
 Actions cache; background logs have timestamps. Rechunk runs before both tiers:
 testing the unrechunked image breaks layer sharing in the upgrade test.
 
-The extra base shares the Rust build and package layer locally, then adds its
-own small final build, rechunk, stage and ephemeral boot. Budget: about 3–4
-minutes when changed, less than a minute when unchanged. It does not delay
-installer staging or the start of upgrade. Each published root records
+Each root now builds on a runner of its own, so roots no longer share the Rust
+build or package layers locally (kache and the registry blob reuse still help);
+the slowest root, not their sum, sets a run's length, and no root delays the
+installer's staging or the start of upgrade. TIMINGS_PLACEHOLDER Each published root records
 `ilex.root-inputs`: selected source trees/selection plus both Fedora build
 image digests. `changed --root <tag> --inputs-only` compares that key against
 the root's own immutable snapshot before building. Missing keys force a build.
@@ -1929,8 +1971,9 @@ ilexctl publish <machine-image> --as ms-7c35.gnome --tested-image-id <tested-id>
 ```
 
 Publishing and releases only happen in CI. A branch dispatch with `test=true`
-builds, stages each root under its branch tag, runs their ephemeral tests,
-upgrades the installer (including legacy fallback) and tests machine layers.
+builds, stages each root under its branch tag in its own parallel job, runs
+their ephemeral tests, upgrades the installer (including legacy fallback) and
+tests machine layers.
 Upgrade and machine tests use registry digests. Encrypted qualification uses
 the immutable local image ID and a disposable signed loopback fixture.
 Branch runs sign nothing in GHCR and move no published tag. Add `iso=true`

@@ -752,6 +752,51 @@ jobs:
       COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
       COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
+  # One table of every root's outcome in the run summary, and an error
+  # annotation for each failed root. It gates nothing: a red root already turns
+  # the run red through its own jobs, and no job needs this one.
+  roots-report:
+    needs: [snapshot, build, upgrade, publish, machines, other-roots]
+    if: ${{ !cancelled() && !inputs.v1_disk && needs.snapshot.result == 'success' }}
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Every root's build, publication and layers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_TAG: ${{ needs.snapshot.outputs.installer }}
+          OTHERS: ${{ needs.snapshot.outputs.others }}
+        run: |
+          jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | {name, result: (.conclusion // .status)}' | jq -s -c .)
+          # The caller job is named `pipeline` in publish.yml; the matrix jobs
+          # are `pipeline / other-roots (<tag>) / <job>`. Missing names show `-`.
+          rows=$(jq -r --arg installer "$INSTALLER_TAG" --argjson others "$OTHERS" '
+            def result($name): ([.[] | select(.name == $name) | .result] | first) // "-";
+            . as $jobs
+            | ([{tag: $installer, prefix: "pipeline / "}] +
+               [$others[] | {tag: ., prefix: "pipeline / other-roots (\(.)) / "}])[]
+            | . as $root
+            | [$root.tag] + ["build", "publish", "machines"]
+              | map(. as $part | if $part == $root.tag then $part else ($jobs | result($root.prefix + $part)) end)
+              | "| " + join(" | ") + " |"' <<<"$jobs")
+          {
+            echo '### Roots'
+            echo
+            echo '| Root | Build and tests | Publication | Layers |'
+            echo '| --- | --- | --- | --- |'
+            echo "$rows"
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=$(jq -r '
+            [.[] | select(.name == "pipeline / build" or (.name | test("^pipeline / other-roots \\(.*\\) / build$")))
+              | select(.result == "failure") | .name] | join(", ")' <<<"$jobs")
+          if [ -n "$failed" ]; then
+            echo "::error title=Failed root build/test jobs::$failed; every other root and the installer root carried on"
+          fi
+          echo "$rows"
+
   # The exact tested/published generic base plus one squashed machine layer.
   # No rechunk and no machine candidate tag. A branch only builds and tests.
   # Only the installer root's layers: every other root's layers run in its own
