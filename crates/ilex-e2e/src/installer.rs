@@ -101,19 +101,31 @@ fn live_image() -> Result<String> {
     }
 }
 
-/// The live image has no SSH server (a released ISO must not). The harness adds
-/// one in a layer of its own and keeps the kiosk session from starting in a VM
-/// without a display. The layer is this checkout's: its tag carries the
-/// checkout's slug, the image it extends is part of the tag, and the image is
+/// The live image has no SSH server of its own on a real boot (a released ISO
+/// must not open a port): sshd starts only once root's `authorized_keys` has
+/// been provisioned, which bcvk does with its `tmpfiles.extra` credential. The
+/// harness adds openssh-server in a layer of its own and keeps the kiosk
+/// session from starting in a VM without a display. The layer is this
+/// checkout's: its tag carries the checkout's slug, the image it extends and the
+/// layer's own recipe (a changed recipe is a different tag), and the image is
 /// labelled with the checkout's owner like every other image the tooling builds.
 fn with_ssh(ws: &Workspace, live: &str) -> Result<String> {
     let id =
         cmd::output(Command::new("podman").args(["image", "inspect", "--format", "{{.Id}}", live]))
             .with_context(|| format!("the installer image {live} is not in local storage"))?;
+    let recipe = format!(
+        "FROM {live}\n\
+         RUN dnf -y install --setopt=install_weak_deps=0 openssh-server && \\\n\
+             systemctl enable sshd.service && \\\n\
+             systemctl mask ilex-installer-session.service ilex-installer-fallback.service\n\
+         LABEL ilex.installer-test=\"ssh\"\n"
+    );
     let tag = format!(
-        "localhost/ilex-installer-next-test:{}.{}",
+        "localhost/ilex-installer-next-test:{}.{}.{}",
         ws.slug,
-        &id[..12.min(id.len())]
+        &id[..12.min(id.len())],
+        // "sha256:" and the first eight digits of the recipe's.
+        &ilex_devkit::core::digest(recipe.as_bytes())[7..15]
     );
     if ownership::image_exists(&tag)? {
         // An existing tag is reused only when this checkout built it.
@@ -125,16 +137,7 @@ fn with_ssh(ws: &Workspace, live: &str) -> Result<String> {
     let dir = ws.state_dir().join("installer");
     fs::create_dir_all(&dir)?;
     let containerfile = dir.join("Containerfile.ssh");
-    fs::write(
-        &containerfile,
-        format!(
-            "FROM {live}\n\
-             RUN dnf -y install --setopt=install_weak_deps=0 openssh-server && \\\n\
-                 systemctl enable sshd.service && \\\n\
-                 systemctl mask ilex-installer-session.service ilex-installer-fallback.service\n\
-             LABEL ilex.installer-test=\"ssh\"\n"
-        ),
-    )?;
+    fs::write(&containerfile, &recipe)?;
     cmd::run(
         Command::new("podman")
             .args(["build", "--network=host", "--file"])
@@ -1979,9 +1982,11 @@ fn plan_body(vm: &EphemeralVm) -> Result<()> {
         ),
         // Names the live image defines (a user, a group) and the installed
         // system's marker groups; names the length of a Unix name allows.
+        // (`rpcuser` is nfs-utils' sysusers.d account: not on the helper's own
+        // list, so only the live image's own files can refuse it.)
         (
             "a user of the live image",
-            Box::new(|r| r["administrator"] = json!("passim")),
+            Box::new(|r| r["administrator"] = json!("rpcuser")),
             "reserved-name",
             Some("administrator"),
         ),
