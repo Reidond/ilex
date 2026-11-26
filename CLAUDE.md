@@ -1793,6 +1793,25 @@ binary v2.1.1, empty token and PR comments disabled; cosign-installer v4.1.3 is
 pinned to `756fe2d284c7292c4e9b62c8a28f1e5629c59532`. `build-publisher.sh` builds
 with `--locked` and discovers the executable from Cargo metadata before the
 key-bearing step. No Cargo, rustc, kache or build script runs with the key.
+That includes the one thing the publisher used to ask cargo for: the root
+image's crate closure for the fingerprint (`cargo metadata` starts rustc, so a
+`RUSTC_WRAPPER` such as kache, and can fetch from crates.io). `build-publisher.sh`
+runs `ilexctl info --image-crates` in its keyless step (`cargo fetch --locked`,
+then `cargo metadata --offline --locked`) and records the closure in
+`$RUNNER_TEMP/image-crates`, bound to the checkout's source digest, exporting
+`ILEX_IMAGE_CRATES`. `ilexctl publish` (anything but a loopback registry
+with a throwaway key) refuses to start without that file, reads it, checks the
+digest and forbids cargo for the rest of the process: the only code that
+starts cargo (`fingerprint::closure` and `fetch_dependencies`) fails once the
+record is in use, so `rechunk::fingerprint` cannot reach it. The log line is
+`image crates (signing process): N crates read from … ; cargo, rustc and kache
+are not run by this process`. `publish-root.sh` and `publish-machines.sh` also
+start the publisher with `.github/no-cargo.sh`'s shims first on `PATH`
+(`cargo`, `rustc`, `rustup`, `rustdoc`, `kache` exit 97 with an error), so a
+regression is a red step before a signature exists. `ilexctl doctor
+--self-check-recorded-crates <image>` runs the same call with `ILEX_IMAGE_CRATES`
+set and prints the fingerprint it gets without cargo; it must equal
+`doctor --self-check-fingerprint <image>`'s `rechunk_fingerprint`.
 The key/password are step environment values; the installer and cache post
 steps have none. Guard subprocesses explicitly remove them. The trusted signing
 shell, prebuilt publisher and required git/podman/skopeo/cosign tools retain
@@ -2419,10 +2438,16 @@ the Windows paths of this change: no Windows host was available.
   the session unit and, once, when it is `failed` for good (its start limit),
   prints on tty1 what failed and where to look (Ctrl+Alt+F2 has a root shell, an
   agetty autologin) and the `ILEX-INSTALLER-FALLBACK` marker. It polls every two
-  seconds and is not subject to a start limit, so a slow boot cannot make it
-  miss the end state. Fedora 45's `kmscon` is masked and the virtual terminals
-  get agetty: kmscon is a DRM client of seat0 and takes the GPU on tty1 before
-  the compositor can. Blanking, locking and sleep are off (dconf defaults, a
+  seconds and is not subject to a start limit (`StartLimitIntervalSec=0` in its
+  `[Unit]` section, the only place systemd reads it), so a slow boot cannot make
+  it miss the end state. The session script bounds its `--self-check` with
+  `timeout` like every other call. Fedora 45's `kmscon` is masked and the
+  virtual terminals get agetty: kmscon is a DRM client of seat0 and takes the
+  GPU on tty1 before the compositor can. `autovt@tty1.service` is masked too:
+  when the person presses Ctrl+Alt+F2 and back to a tty1 that has no session
+  (the fallback's), logind starts `autovt@tty1`, whose agetty clears the screen
+  and the message with it. While the session runs, logind finds it on tty1 and
+  starts nothing; the tty2 shell is unaffected. Blanking, locking and sleep are off (dconf defaults, a
   logind drop-in and masked sleep targets): an installation must not stop when
   the screen would lock.
 - **SSH.** The live image keeps fedora-bootc's `sshd`, but a drop-in condition,
@@ -2435,21 +2460,31 @@ the Windows paths of this change: no Windows host was available.
   use that credential, passes its key as a `tmpfiles.extra` credential
   (`f+~ /root/.ssh/authorized_keys`), so bcvk VMs of this image accept SSH too.
   Testing the file rather than either credential admits both and nothing else.
-  `iso::next_serial_*` boot without the credential and check that nothing
-  answers on the forwarded port.
+  `iso::next_serial_backpressure` and `_unavailable` boot without the credential
+  and check that nothing answers on the forwarded port.
+  **The trust boundary is the boot chain or physical access**, not the key
+  file: whoever controls the firmware or hypervisor (SMBIOS credentials), the
+  kernel command line (a GRUB edit can add a credential) or the machine itself
+  can make root's key non-empty, or just boot a shell; sshd adds no way in for
+  anyone who could not already do that, and an unprovisioned boot listens on no
+  SSH port.
 - **What the session can reach.** The live session is an active local session
   on seat0, which polkit's defaults treat as the person at the machine, so the
   image is cut down to what the installer needs. Removed (nothing requires
   them): `udisks2` (an active session may mount any block device without a
   password), `fwupd` and its plugins, `passim`, `avahi`. Masked: the
   `bootc-fetch-apply-updates` and `rpm-ostree` units (including the `countme`
-  metrics timer), `systemd-homed` and `sssd`. `systemd-resolved` answers no
+  metrics timer), `systemd-homed`, `sssd` and `geoclue` (activatable for
+  gnome-settings-daemon; nothing in the live image uses location). `systemd-resolved` answers no
   LLMNR or multicast DNS (it listened on 5355 on every address). A polkit rule,
   `00-ilex-installer.rules`, denies every action to the `ilex-installer` user;
   a page that needs one (a restart button, the network page) adds it to that
   file in its own change and to `POLKIT_ALLOWED` in the trial. `iso::next_boot`
   checks all of this on the running guest and writes `next-surface.txt` beside
-  the other artifacts: `pkcheck` against the session's own process for every
+  the other artifacts (for the installer's session on seat0, not the user
+  manager's own `manager-early` session; its seat, VT, class and state are
+  asserted, and so is that `geoclue.service` and `autovt@tty1.service` are
+  masked): `pkcheck` against the session's own process for every
   action (none is authorized), a control that moves the rule away and back
   (two actions the defaults allow are then authorized, and denied again once it
   is restored), the system bus names, the listening sockets (nothing beyond
@@ -2463,8 +2498,9 @@ the Windows paths of this change: no Windows host was available.
   are masked, NetworkManager and `wpa_supplicant` (the
   Wi-Fi support later pages use; their polkit actions are denied until the
   network page adds its own), `PolicyKit1`, `RealtimeKit1`, `ColorManager`
-  (colord, started by the compositor) and `GeoClue2` (activatable only, a
-  dependency of gnome-settings-daemon); the listeners are loopback-only
+  (colord, started by the compositor) and `GeoClue2` (still listed as an
+  activatable name, but its unit is masked and `iso::next_boot` requires it);
+  the listeners are loopback-only
   (resolver stub on 127.0.0.53 and .54, chrony on 323) plus sshd on 22 when a
   key was provisioned. The services running are chronyd, colord, dbus-broker,
   gssproxy, irqbalance, NetworkManager, polkit, rtkit, sshd (with a key),
@@ -2518,12 +2554,17 @@ the Windows paths of this change: no Windows host was available.
     The basic graphics entry is chosen in GRUB with real key input over a USB
     keyboard (`LinuxProvider::with_usb_keyboard`). The default entry also
     writes `next-surface.txt` (below) and fails on any polkit action beyond
-    the allowlist in `iso_next.rs` (empty).
+    the allowlist in `iso_next.rs` (empty). After the page it does the same VT
+    round trip and requires the page again, the session unit still `active`
+    and no getty on tty1.
   - `iso::next_fallback` makes the session fail (fixed credential), requires
     exactly three failures, then exactly one `ILEX-INSTALLER-FALLBACK` (it
     waits eight seconds for a second), and reads the message back from the
     VT's own text, `/dev/vcs1`, over the harness's SSH key; a QMP screenshot
-    must be light text on a dark screen, not a drawn page and not black.
+    must be light text on a dark screen, not a drawn page and not black. It then
+    sends Ctrl+Alt+F2 and Ctrl+Alt+F1 (the kernel's active VT, read from the
+    guest, must be `tty2` then `tty1`) and requires the same message, no login
+    prompt, no getty on tty1 and no second `ILEX-INSTALLER-FALLBACK`.
   - `iso::next_restart` sends Alt+F4 (the page stays, no restart), kills the
     compositor with SIGKILL (its socket stays behind; the next attempt must
     report no stale socket and bring the page up, `NRestarts=1`), then kills
@@ -2533,15 +2574,21 @@ the Windows paths of this change: no Windows host was available.
     its key the way bcvk does (a `tmpfiles.extra` credential), and requires
     sshd to start and accept it.
   - `iso::next_serial_backpressure`, `_unavailable` and `_stall` boot with
-    `ilex.installer.serial-test` and without the SSH key. The page comes up
-    (readiness is read from `/dev/ttyS1`) and every faulted marker write is
-    reported there, in under a second, as the injected failure (a pty with
+    `ilex.installer.serial-test`; the first two without the SSH key. The page
+    comes up (readiness is read from `/dev/ttyS1`) and every faulted marker
+    write is reported there, in under a second, as a complete
+    `ILEX-INSTALLER-SERIAL` line with `message=ILEX-INSTALLER-SESSION` and
+    `message=ILEX-INSTALLER` among them, as the injected failure (a pty with
     stopped output, no device) or, for `stall` (the worker hangs for three
     seconds, as a UART that never drains would in `close()`), as having met the
     200 ms deadline (`budget`) or been skipped behind the stuck worker
-    (`busy`); the first three never reach the faulted console, and the
-    forwarded SSH port sends no banner. What no trial reproduces is a real
-    UART's `closing_wait`: `stall` stands in for it.
+    (`busy`); the first three never reach the faulted console, and without a
+    key the forwarded SSH port sends no banner. `stall` has the harness's key
+    and, over it, runs `ilex-installer --marker` with two lines in one process
+    under the same credential (`systemd-run -p ImportCredential=…`): the audit
+    lines must be `budget` then `busy`: the skip-while-stuck path, which the
+    page's own markers (fifteen seconds apart) never reach. What no trial
+    reproduces is a real UART's `closing_wait`: `stall` stands in for it.
 - **CI.** `publish.yml`'s `iso_next` input starts only the `installer-next` job
   and skips the image pipeline and the Anaconda ISO jobs. The run has a
   concurrency group of its own (`iso-next-<hash of the ref>`, also on main: it
@@ -2558,12 +2605,34 @@ the Windows paths of this change: no Windows host was available.
   Nothing releases or publishes it. Runs without `iso_next` are unchanged.
 - **Fingerprints.** The root image's fingerprint (the early `ilex.root-inputs`
   key and the content fingerprint, `ilex_tooling_linux::fingerprint`) hashes
-  the workspace crates in the dependency closure of what the root
-  `Containerfile` builds, not all of `crates/`: `image_crates` reads the
-  `cargo build -p …` lines of the Containerfile (their `-p` packages and
+  the crates in the dependency closure of what the root `Containerfile`
+  builds, not all of `crates/`: `image_crates` reads the `cargo build -p …`
+  commands of the Containerfile (their `-p` packages and
   `--no-default-features`; any named feature widens to all features) and
-  walks `cargo metadata --locked --filter-platform x86_64-unknown-linux-gnu`
-  from them over normal and build dependencies. Today that is `ilexctl` (built
+  walks `cargo metadata --offline --locked --filter-platform
+  x86_64-unknown-linux-gnu` from them over normal and build dependencies
+  (`cargo fetch --locked` runs first: the only step that may use the network).
+  Every package without a registry or git source, workspace member or `path =`
+  dependency, is hashed by its directory; one outside the checkout, or at its
+  root, fails the fingerprint. Registry and git packages are covered by
+  `Cargo.lock`.
+  **The Containerfile parser fails closed.** It joins `\` continuations, drops
+  comments, splits shell lines into simple commands and understands `RUN --mount=…`, `&&`/`;`/`|` chains, `if`/`then`/`do` words, `NAME=value`
+  prefixes (a `CARGO_*` one other than `CARGO_HOME`, `CARGO_TARGET_DIR`,
+  `CARGO_INCREMENTAL`, `CARGO_TERM_COLOR` is refused), `cargo +toolchain`,
+  `cargo build`/`b` with `-p X`, `-p=X`, `-pX`, `--package X|=X`, `-F`/
+  `--features`/`-Ffeat` (widening), `--all-features`, `--no-default-features`
+  and a short list of flags that cannot change the package set. Anything else
+  that names `cargo`, `rustc`, `rustup` or `rustdoc` in a shell command (other
+  than a package manager installing the `cargo` package) is an error naming the
+  line: `cargo install|rustc|test|run|…`, an unknown flag, a positional
+  argument, `--target`, `--manifest-path`, `--workspace`, a variable, quote or
+  glob in the arguments, `sh -c '…'`, `xargs cargo …`, `nice cargo …`. A `RUN`
+  that hands the build to a script is invisible to it (scripts under `build/`
+  are hashed whole, not parsed). `ilexctl doctor --self-check` runs 35 parser
+  fixtures (4 accepted, 31 refused), the closure fixtures (a path dependency
+  in the checkout, one outside, one at the root, registry and git packages, a
+  dev edge) and the recorded-record fixtures; a regression is a failed check. Today that is `ilexctl` (built
   with `--no-default-features`), `ilex-agent`, `ilex-enroll` and `drupe`; the
   installer, the e2e harness, `xtask`, the devkit, the vmctl and the tooling
   crates are not inputs, so editing them no longer rebuilds, re-signs and

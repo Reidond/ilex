@@ -42,7 +42,7 @@
 //! qualification of the host is not. They measure whatever the host gives them
 //! and never promote its qualification record.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
@@ -329,6 +329,17 @@ fn observe(
     println!("iso::next {}: {report}", entry.name());
 
     if entry == Entry::Normal {
+        // The session still owns tty1 after a look at the other VT.
+        vm.wait_ssh(Duration::from_secs(180))
+            .context("the harness's SSH key did not give a login to the live ISO")?;
+        vt_round_trip(vm, &ctl)?;
+        wait_page(vm, &ctl, artifacts, "after-vt-switch")?;
+        ctl.save_screenshot(&artifacts.join("next-normal-after-vt-switch.png"))?;
+        let session = vm.ssh_ok("systemctl is-active ilex-installer-session.service")?;
+        ensure!(
+            session == "active",
+            "the session is {session} after a VT round trip"
+        );
         surface(vm, artifacts)?;
     }
     Ok(())
@@ -344,7 +355,15 @@ pid=$(systemctl show ilex-installer-session.service -p MainPID --value)
 rule=/usr/share/polkit-1/rules.d/00-ilex-installer.rules
 echo "=== session (main pid $pid)"
 loginctl list-sessions --no-pager --no-legend
-loginctl show-session "$(loginctl --no-legend list-sessions | awk '$3 == "ilex-installer" {print $1; exit}')" -p Active -p Remote -p Class -p Type -p State
+# The user manager has a session of its own (class manager-early, no seat):
+# the installer's is the one on seat0.
+sid=$(loginctl --no-legend list-sessions | awk '$3 == "ilex-installer" && $4 == "seat0" {print $1; exit}')
+echo "SESSION-ID ${sid:-none}"
+loginctl show-session "${sid:-none}" -p Id -p Seat -p VTNr -p Active -p Remote -p Class -p Type -p State
+echo "=== masked units"
+for unit in geoclue.service autovt@tty1.service; do
+    echo "UNIT $unit $(systemctl is-enabled "$unit" 2>&1)"
+done
 echo "=== polkit: authorized for the session without a password"
 for action in $(pkaction); do
     pkcheck --action-id "$action" --process "$pid" >/dev/null 2>&1 && echo "AUTHORIZED $action"
@@ -373,6 +392,35 @@ systemctl list-units --type=service --state=running --no-legend --no-pager | awk
         .context("the harness's SSH key did not give a login to the live ISO")?;
     let report = vm.ssh_ok(SCRIPT).context("collecting the polkit surface")?;
     fs::write(artifacts.join("next-surface.txt"), &report)?;
+    // The report is about the installer's own session, not the user manager's.
+    for expected in [
+        "Seat=seat0",
+        "VTNr=1",
+        "Active=yes",
+        "Remote=no",
+        "Class=user",
+    ] {
+        ensure!(
+            report.lines().any(|line| line == expected),
+            "the seat0 session of ilex-installer lacks {expected} (full report: next-surface.txt)"
+        );
+    }
+    // Nothing needs location services or a getty on tty1 in the live image.
+    for unit in ["geoclue.service", "autovt@tty1.service"] {
+        ensure!(
+            report
+                .lines()
+                .any(|line| line == format!("UNIT {unit} masked")),
+            "{unit} is not masked (full report: next-surface.txt)"
+        );
+    }
+    ensure!(
+        !report
+            .split("=== units running\n")
+            .nth(1)
+            .is_some_and(|running| running.contains("geoclue")),
+        "geoclue is running (full report: next-surface.txt)"
+    );
     let mut authorized: Vec<&str> = report
         .lines()
         .filter_map(|line| line.strip_prefix("AUTHORIZED "))
@@ -505,14 +553,30 @@ fn fields(console: &str, name: &str, key: &str) -> Result<BTreeMap<String, Strin
         .with_context(|| {
             format!("no complete {name} line with {key}= on the serial console: {console}")
         })?;
-    Ok(line
-        .split_whitespace()
+    Ok(words(line))
+}
+
+/// The `key=value` words of one marker line (its first word is the name).
+fn words(line: &str) -> BTreeMap<String, String> {
+    line.split_whitespace()
         .skip(1)
         .filter_map(|word| {
             let (key, value) = word.split_once('=')?;
             Some((key.to_owned(), value.to_owned()))
         })
-        .collect())
+        .collect()
+}
+
+/// Did a complete `ILEX-INSTALLER-SESSION ended` line report `child` (with
+/// `status`, when given)?
+fn session_ended(console: &str, child: &str, status: Option<&str>) -> bool {
+    complete_lines(console)
+        .filter(|line| is_marker(line, "ILEX-INSTALLER-SESSION", Some("child")))
+        .map(words)
+        .any(|w| {
+            w.get("child").map(String::as_str) == Some(child)
+                && status.is_none_or(|status| w.get("status").map(String::as_str) == Some(status))
+        })
 }
 
 fn field<'a>(fields: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str> {
@@ -642,6 +706,51 @@ fn text_drawn(frame: &Frame) -> bool {
     total > 0 && dark * 100 > total * 60 && light * 2000 > total
 }
 
+/// The VT the kernel has in front, read from the guest: a key chord that did
+/// nothing cannot pass for a VT switch.
+fn active_vt(vm: &Vm) -> Result<String> {
+    vm.ssh_ok("cat /sys/class/tty/tty0/active")
+}
+
+fn wait_vt(vm: &Vm, wanted: &str) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let active = active_vt(vm)?;
+        if active == wanted {
+            return Ok(());
+        }
+        ensure!(
+            started.elapsed() < Duration::from_secs(30),
+            "the active VT is {active}, expected {wanted} after the key chord"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Ctrl+Alt+F2 and back to tty1, the way a person looks at the shell and
+/// returns. Nothing may take tty1 over meanwhile: logind starts `autovt@tty1`
+/// (a getty) on a switch to a VT without a session, which wipes the fallback
+/// message, and the unit must not be running, active or enabled either way.
+fn vt_round_trip(vm: &Vm, ctl: &Vmctl) -> Result<()> {
+    ensure!(
+        active_vt(vm)? == "tty1",
+        "tty1 is not in front before the round trip"
+    );
+    ctl.key("ctrl+alt+F2")?;
+    wait_vt(vm, "tty2")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.key("ctrl+alt+F1")?;
+    wait_vt(vm, "tty1")?;
+    // Past the time logind needs to start autovt@tty1, were it to.
+    std::thread::sleep(Duration::from_secs(4));
+    let states = vm.ssh_ok("systemctl is-active getty@tty1.service autovt@tty1.service || true")?;
+    ensure!(
+        states.lines().all(|state| state == "inactive"),
+        "a getty took tty1 over after the VT round trip (getty@tty1, autovt@tty1): {states:?}"
+    );
+    Ok(())
+}
+
 /// A plain (not Secure Boot) guest booted from the ISO on a blank disk.
 fn plain_vm(
     ws: &ilex_devkit::Workspace,
@@ -731,8 +840,32 @@ fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         text_drawn(&frame),
         "the screen is not light text on a dark background"
     );
+
+    // The message must outlast a look at the tty2 shell: no getty may be
+    // started on tty1 when the person comes back.
+    vt_round_trip(vm, &ctl)?;
+    let after = vm.ssh_ok("cat /dev/vcs1")?;
+    fs::write(artifacts.join("next-fallback-vcs1-after-vt-switch.txt"), &after)?;
+    let squeezed = after.split_whitespace().collect::<Vec<_>>().join(" ");
+    ensure!(
+        squeezed.contains("could not start its graphical session")
+            && !squeezed.contains("login:"),
+        "tty1 lost the fallback message after a VT round trip: {after:?}"
+    );
+    let frame = ctl.save_screenshot(&artifacts.join("next-fallback-after-vt-switch.png"))?;
+    ensure!(
+        text_drawn(&frame) && !page_drawn(&frame),
+        "the screen after the VT round trip is not the fallback message"
+    );
+    let console = self::console(&serial)?;
+    ensure!(
+        count_markers(&console, "ILEX-INSTALLER-FALLBACK", None) == 1,
+        "the fallback fired again after a VT round trip: {console}"
+    );
     fs::write(artifacts.join("next-fallback-serial.txt"), console)?;
-    println!("iso::next fallback: three failures, then the message on tty1, once");
+    println!(
+        "iso::next fallback: three failures, then the message on tty1, once, kept across a VT round trip"
+    );
     Ok(())
 }
 
@@ -792,14 +925,13 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     vm.ssh_ok(KILL_COMPOSITOR)?;
     let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 2, PAGE_TIMEOUT)?;
     ensure!(
-        console
-            .lines()
-            .any(|l| l.starts_with("ILEX-INSTALLER-SESSION ended child=compositor status=137")),
+        session_ended(&console, "compositor", Some("137")),
         "the session did not report the compositor's death: {console}"
     );
     ensure!(
-        !console.contains("compositor exited before listening")
-            && !console.contains("compositor is not listening"),
+        !complete_lines(&console).any(|line| is_marker(line, "ILEX-INSTALLER-SESSION", None)
+            && (line.contains("compositor exited before listening")
+                || line.contains("compositor is not listening"))),
         "the second attempt was spent on a stale socket: {console}"
     );
     wait_page(vm, &ctl, artifacts, "restart")?;
@@ -812,9 +944,7 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     vm.ssh_ok(KILL_INSTALLER)?;
     let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 3, PAGE_TIMEOUT)?;
     ensure!(
-        console
-            .lines()
-            .any(|l| l.starts_with("ILEX-INSTALLER-SESSION ended child=installer")),
+        session_ended(&console, "installer", None),
         "the session did not report the installer's death: {console}"
     );
     wait_page(vm, &ctl, artifacts, "restart")?;
@@ -836,8 +966,10 @@ const KILL_COMPOSITOR: &str = "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/de
 const KILL_INSTALLER: &str = "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = ilex-installer ] && kill -KILL ${p#/proc/}; done; true";
 
 /// The serial mirror of the markers fails on purpose; the interface must not
-/// notice, and every failed write must be reported on the second UART. Boots
-/// without the harness's key: the live image's SSH server must stay off.
+/// notice, and every failed write must be reported on the second UART. The
+/// `backpressure` and `unavailable` variants boot without the harness's key:
+/// the live image's SSH server must stay off. `stall` has the key, to start a
+/// second marker while the first worker is stuck.
 fn serial(mode: &'static str) -> Result<()> {
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
@@ -849,7 +981,9 @@ fn serial(mode: &'static str) -> Result<()> {
     let (mut vm, _) = plain_vm(&ws, &purpose, |config| {
         config.memory = "3G".into();
         config.secondary_serial = true;
-        config.ssh_credential = false;
+        // The stall variant needs a shell to start a second marker while the
+        // first worker is stuck; the other two prove there is no SSH server.
+        config.ssh_credential = mode == "stall";
         config.smbios.push(format!(
             "type=11,value=io.systemd.credential:ilex.installer.serial-test={mode}"
         ));
@@ -868,19 +1002,22 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
     let secondary = vm.info.dir.join("serial-secondary.log");
     let ctl = Vmctl::from_info(vm.info.clone());
     // The faulted sink never sees a marker: readiness comes from the other UART.
-    let console = wait_for_marker(vm, &secondary, "ILEX-INSTALLER", "page", 1, PAGE_TIMEOUT)?;
+    wait_for_marker(vm, &secondary, "ILEX-INSTALLER", "page", 1, PAGE_TIMEOUT)?;
     wait_page(vm, &ctl, artifacts, &format!("serial-{mode}"))?;
+    if mode == "stall" {
+        stall_burst(vm, &secondary)?;
+    }
+    let console = self::console(&secondary)?;
 
     let mut audited = 0;
     let mut budgets = 0;
+    let mut busies = 0;
+    let mut messages = BTreeSet::new();
     for line in
         complete_lines(&console).filter(|l| is_marker(l, "ILEX-INSTALLER-SERIAL", Some("mode")))
     {
-        let words: BTreeMap<String, String> = line
-            .split_whitespace()
-            .skip(1)
-            .filter_map(|w| w.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
-            .collect();
+        let words = words(line);
+        messages.insert(field(&words, "message")?.to_owned());
         let status = field(&words, "status")?;
         // `stall` hangs its worker: the write that meets the deadline reports
         // `budget`, and the ones that come while it is still stuck `busy`.
@@ -894,6 +1031,7 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
             "a marker write did not fail as {mode} ({expected:?}): {line}"
         );
         budgets += usize::from(status == "budget");
+        busies += usize::from(status == "busy");
         let seconds: f64 = field(&words, "seconds")?
             .parse()
             .with_context(|| format!("unparsable duration in {line}"))?;
@@ -907,34 +1045,79 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
         audited >= 2,
         "expected an audit line for the session's and the page's markers, saw {audited}: {console}"
     );
-    ensure!(
-        has_marker(&console, "ILEX-INSTALLER-SERIAL", Some("message")),
-        "no audit line for the page marker: {console}"
-    );
+    // Complete audit lines for the session's marker and for the page's own.
+    for message in ["ILEX-INSTALLER-SESSION", "ILEX-INSTALLER"] {
+        ensure!(
+            messages.contains(message),
+            "no complete audit line with message={message} (saw {messages:?}): {console}"
+        );
+    }
     if mode == "stall" {
         // The first write hit the deadline (200 ms), and the page was shown
-        // while its worker was still stuck for seconds.
+        // while its worker was still stuck for seconds; a second marker of the
+        // same process, while that worker was stuck, was skipped as busy.
         ensure!(budgets >= 1, "no write met the 200 ms deadline: {console}");
+        ensure!(
+            busies >= 1,
+            "no marker was skipped while the stuck worker held the port: {console}"
+        );
     } else {
         ensure!(
             !has_marker(&self::console(&primary)?, "ILEX-INSTALLER", Some("page")),
             "the page marker reached the faulted console"
         );
     }
-    // No key, no SSH server.
-    let banner = ssh_banner(vm.info.ssh_port)?;
-    ensure!(
-        !banner.starts_with("SSH-"),
-        "an SSH server answers on the live ISO without the harness's key: {banner:?}"
-    );
+    // No key, no SSH server (the stall variant booted with the key).
+    if mode != "stall" {
+        let banner = ssh_banner(vm.info.ssh_port)?;
+        ensure!(
+            !banner.starts_with("SSH-"),
+            "an SSH server answers on the live ISO without the harness's key: {banner:?}"
+        );
+    }
     fs::write(
         artifacts.join(format!("next-serial-{mode}-secondary.txt")),
         console,
     )?;
     println!(
-        "iso::next serial {mode}: {audited} faulted writes, each reported within {SERIAL_BUDGET_SECONDS}s; no SSH server"
+        "iso::next serial {mode}: {audited} faulted writes ({budgets} met the deadline, {busies} skipped as busy), each reported within {SERIAL_BUDGET_SECONDS}s"
     );
     Ok(())
+}
+
+/// Two markers from one process while its first worker is stuck: the first
+/// meets the 200 ms deadline, the second is skipped (`busy`) rather than queued
+/// behind it. The fault credential reaches the process the way it reaches the
+/// session's: through `ImportCredential`.
+fn stall_burst(vm: &mut Vm, secondary: &Path) -> Result<()> {
+    vm.wait_ssh(Duration::from_secs(180))
+        .context("the harness's SSH key did not give a login to the live ISO")?;
+    vm.ssh_ok(
+        "systemd-run --quiet --wait --collect --pipe -p ImportCredential=ilex.installer.serial-test \
+         ilex-installer --marker 'ILEX-INSTALLER-BURST one' 'ILEX-INSTALLER-BURST two' >/dev/null",
+    )?;
+    let started = Instant::now();
+    loop {
+        let console = console(secondary)?;
+        let statuses: Vec<String> = complete_lines(&console)
+            .filter(|l| is_marker(l, "ILEX-INSTALLER-SERIAL", Some("message")))
+            .map(words)
+            .filter(|w| w.get("message").map(String::as_str) == Some("ILEX-INSTALLER-BURST"))
+            .filter_map(|w| w.get("status").cloned())
+            .collect();
+        if statuses.len() >= 2 {
+            ensure!(
+                statuses == ["budget", "busy"],
+                "the two markers of one process reported {statuses:?}, expected budget then busy: {console}"
+            );
+            return Ok(());
+        }
+        ensure!(
+            started.elapsed() < Duration::from_secs(30),
+            "the burst's audit lines did not arrive (saw {statuses:?}): {console}"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 /// Whatever the forwarded SSH port sends first: QEMU accepts the connection

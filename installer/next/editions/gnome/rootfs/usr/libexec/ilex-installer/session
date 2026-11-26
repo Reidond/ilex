@@ -24,8 +24,9 @@ if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "$CREDENTIALS_DIRECTORY/ilex.inst
 fi
 
 # The page's inputs (edition record, DMI) must be readable before anything
-# starts; this prints ILEX-INSTALLER-SELFCHECK on the serial console.
-ilex-installer --self-check || { marker "ILEX-INSTALLER-SESSION self-check failed"; exit 1; }
+# starts; this prints ILEX-INSTALLER-SELFCHECK on the serial console. Bounded
+# like every other call here: a hung check is a failed attempt, not a stuck unit.
+timeout 20 ilex-installer --self-check || { marker "ILEX-INSTALLER-SESSION self-check failed"; exit 1; }
 
 # Basic graphics: the boot entry's nomodeset leaves the display on the
 # firmware's framebuffer, so GTK draws on the CPU too.

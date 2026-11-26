@@ -90,11 +90,15 @@ RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
 # Fedora 45 runs kmscon on the virtual terminals; as a DRM client of seat0 it
 # takes the GPU on tty1 before the compositor can ("Device or resource busy"),
 # so the terminals get plain agetty (the tty2 shell's autologin drop-in is on
-# getty@).
+# getty@). tty1 belongs to the installer session and, if that fails, to the
+# message the fallback unit prints there: logind starts autovt@tty1 (a getty,
+# which clears the screen) whenever the VT is switched to while no session is on
+# it, so that one instance is masked. GeoClue is activatable on the system bus
+# for gnome-settings-daemon, and nothing here uses location: masked.
 RUN mkdir -p /etc/systemd/system && \
     for unit in bootloader-update.service sleep.target suspend.target \
                 hibernate.target hybrid-sleep.target suspend-then-hibernate.target \
-                kmsconvt@.service \
+                kmsconvt@.service autovt@tty1.service geoclue.service \
                 bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service \
                 rpm-ostreed.service rpm-ostree-countme.timer rpm-ostree-countme.service \
                 systemd-homed.service systemd-homed-activate.service sssd.service; do \

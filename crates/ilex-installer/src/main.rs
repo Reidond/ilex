@@ -5,8 +5,10 @@
 //! It runs as the unprivileged `ilex-installer` user under GNOME Kiosk (see
 //! `installer/next/`). `--self-check` needs no display: it reads what the page
 //! would show and fails when the live image is incomplete. `--marker LINE`
-//! prints one marker line the way the page does (journal, then the serial
-//! console through a bounded worker), for the session script.
+//! prints marker lines the way the page does (journal, then the serial
+//! console through a bounded worker), for the session script. Several lines in
+//! one call are written by one process, which is how the tests meet a worker
+//! that is still stuck on the first.
 
 mod identity;
 mod serial;
@@ -16,7 +18,8 @@ mod window;
 
 use anyhow::Result;
 
-const USAGE: &str = "usage: ilex-installer [--self-check | --windowed | --marker LINE | --version]";
+const USAGE: &str =
+    "usage: ilex-installer [--self-check | --windowed | --marker LINE... | --version]";
 
 fn main() {
     let mut mode = Mode::Window { fullscreen: true };
@@ -26,11 +29,14 @@ fn main() {
             "--self-check" => mode = Mode::SelfCheck,
             "--windowed" => mode = Mode::Window { fullscreen: false },
             "--marker" => {
-                let Some(line) = args.next() else {
+                let lines: Vec<String> = args.collect();
+                if lines.is_empty() {
                     eprintln!("{USAGE}");
                     std::process::exit(2);
-                };
-                serial::marker(&line);
+                }
+                for line in &lines {
+                    serial::marker(line);
+                }
                 return;
             }
             "--version" => {
