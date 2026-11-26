@@ -2617,9 +2617,10 @@ the Windows paths of this change: no Windows host was available.
   `iso::next_ssh_tmpfiles`, `iso::next_helper_usb` and
   `iso::next_helper_cdrom` are registered only when a filter names
   `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO);
-  `iso::next_helper_loop` only when a filter names `next_helper_loop` (it needs
-  `mke2fs`, `sfdisk` and a second copy of the ISO on the host, which no other
-  trial does).
+  `iso::next_helper_loop` and `iso::next_unattended_loop` only when a filter
+  names `next_helper_loop` or `next_unattended_loop` (they need `mke2fs`,
+  `sfdisk` and a second copy of the ISO on the host, which no other trial
+  does).
   `cargo ilexctl test iso::next` builds the ISO (or uses
   `ILEX_ISO_NEXT=<path>`) and needs no OS image. Markers are matched as
   complete lines by their first word and a key, never as substrings, and a
@@ -2728,6 +2729,14 @@ the Windows paths of this change: no Windows host was available.
     disk, with no reason and no note, and a plan on it is refused
     `live-medium`; the three blank disks, found by their sizes (virtio names
     follow the firmware's order), are offered, planned and checked as above.
+    The live disk is identified by its size, which must be the host disk's
+    (the fixture records it), not by being the one left when the others are
+    accounted for; and `losetup` must report a loop device whose backing name
+    is the file-system-relative `/boot/isos/ilex.iso` while `test -e` of that
+    name fails in the guest, so the trial fails if dracut ever changes the
+    name and the helper's search below the file system's mounts stops being
+    what carries it. A stick and the loader's FAT disk never share
+    `bootindex=1`: with both, the stick is first and the FAT disk second.
     **What dracut leaves** (recorded in `next-helper-loop-layout.txt`): the
     host disk's ext4 read-only at `/run/initramfs/isoscan` (`/dev/vdb1`), `loop0`
     on the ISO file (`/boot/isos/ilex.iso`, device `253:17`) mounted at
@@ -3578,6 +3587,20 @@ the installed disk and asserts what `installer::install` asserts. It first boots
 the ISO twice more with an answers file that is not valid (refused by line, never
 by text, with a password in the broken line) and one whose `confirm-erase` is not
 the disk, and requires the disk untouched.
+`iso::next_unattended_loop` (opt-in, named explicitly like `next_helper_loop`)
+runs the same installation with the ISO as a **file on another disk** (iso-scan,
+see `iso::next_helper_loop`), so that the live-medium logic is exercised on the
+install path as well: the VM's own disk is the host disk that holds the file, the
+blank target and the answers volume are attached beside it, and the harness finds
+each by its size. After the two refusals above, answers that name the host disk
+(the probe's `live_medium` disk, whose size must be the host disk's) are refused
+as `LiveMedium` before anything starts (`apply=started` never appears); the
+SHA-256 of the host disk's file is taken before the first boot and must be the
+same after that refusal and again after the installation and power-off (the live
+system boots from a file on it and writes nothing to it), and the target is blank
+after each refusal. Then the answers that name the blank target install, the
+installed disk boots alone and every `installer::install` assertion holds.
+Measured 2026-11-26: 494 s for the trial, the installation powered off after 370 s.
 
 ## Conventions
 

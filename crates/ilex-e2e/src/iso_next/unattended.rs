@@ -292,7 +292,7 @@ fn run_from(source: Source) -> Result<()> {
             "the host disk changed during the installation"
         );
     }
-    let mut config = VmConfig::new(&format!("{}-t", layout.purpose()), layout.target(&root));
+    let mut config = VmConfig::new(format!("{}-t", layout.purpose()), layout.target(&root));
     config.snapshot = true;
     config.memory = "4G".into();
     let mut installed = Vm::boot(&ws, &config)?;
