@@ -107,7 +107,10 @@ pub struct Extent {
 /// Evidence of something already on a disk the person should hear about.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OtherSystem {
-    /// `efi-loader`, `windows`, `bitlocker`, `linux`, `apple` or `encrypted`.
+    /// `efi-loader`, `windows`, `bitlocker`, `linux`, `apple`, `encrypted`,
+    /// `filesystem` (a signature on the whole disk that is none of those) or
+    /// `unreadable-esp` (an EFI system partition that could not be read).
+    /// A signature on the whole disk has no `partition`.
     pub kind: String,
     pub partition: Option<String>,
     pub description: String,

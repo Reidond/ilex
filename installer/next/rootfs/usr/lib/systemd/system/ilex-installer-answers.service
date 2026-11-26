@@ -3,10 +3,20 @@ Description=ilex unattended installation from the answers volume
 Documentation=https://github.com/Reidond/ilex
 # Only when the gate found an answers volume at this boot. It drives the
 # helper's own methods as root, as an interface would.
-Requires=ilex-installerd.service ilex-installer-answers-gate.service
+#
+# Wants=, not Requires=: with Requires=, a helper that fails to start (or a
+# gate that fails) makes systemd cancel this unit's start job, so that the
+# program never runs, never reaches its own hand-over to the interface, and
+# the gate's file keeps the session from starting: an empty tty1. With Wants=
+# the unit starts after them whatever became of them, and the program fails at
+# its first call and hands over.
+Wants=ilex-installerd.service ilex-installer-answers-gate.service network-online.target
 After=ilex-installerd.service ilex-installer-answers-gate.service dbus.socket network-online.target
-Wants=network-online.target
 ConditionPathExists=/run/ilex-answers-volume
+# And whatever else ends this unit (the program killed, crashing, or failing
+# before it has begun to write: it makes no difference how) the interface is
+# started by systemd itself, unless Apply was called: see the hand-over unit.
+OnFailure=ilex-installer-answers-handover.service
 # No interface: an unattended installation has nobody to answer it. The
 # session is ordered after the gate and skipped by the same file; it is not
 # stopped by this unit (there is no Conflicts= on it: with one, a boot that
@@ -28,6 +38,10 @@ PrivateMounts=yes
 LimitCORE=0
 # It may hold a plaintext password for the moment it is read and passes it to
 # the helper as a sealed memfd: nothing about it is printed.
+# Test-only fault (the fixed credential ilex.installer.fault=answers makes this
+# program kill itself before it asks the helper for anything); it can only make
+# the installer fail.
+ImportCredential=ilex.installer.fault
 ExecStart=/usr/libexec/ilex-installer/ilex-installerd --answers --then poweroff
 # A pull takes as long as the network does: the helper's own deadlines apply.
 TimeoutStartSec=infinity

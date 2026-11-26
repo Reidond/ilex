@@ -5,8 +5,9 @@
 
 use crate::topology::{self, Mount};
 use anyhow::{Context, Result, bail, ensure};
-use ilex_installer_model::plan::{Plan, PlannedPartition};
+use ilex_installer_model::plan::{Plan, PlanRequest, PlannedPartition};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
@@ -18,6 +19,34 @@ use std::{
 
 /// The stateroot `bootc install` uses unless told otherwise.
 pub const STATEROOT: &str = "default";
+
+/// The file an installation leaves on the new `/boot` (the partition labelled
+/// `ilex-boot`): the digest of the request it was made from
+/// ([`request_digest`]). Unattended mode reads it, read-only, to refuse
+/// answers that already installed this disk (a machine that powered off after
+/// an installation and boots the installer again, with the same stick in it,
+/// would otherwise erase its own fresh installation, every boot).
+pub const REQUEST_STAMP: &str = "ilex-install-request.sha256";
+
+/// The partition label of the new `/boot`.
+pub const BOOT_LABEL: &str = "ilex-boot";
+
+/// What identifies an installation's request: SHA-256 over the request as the
+/// plan records it (every default resolved), serialised in the model's own
+/// field order. It holds nothing secret and is not derived from a secret: the
+/// administrator's password is not part of a request (it travels by
+/// `SetSecret`), so this digest cannot serve to guess it. (A digest of the
+/// whole answers file, which holds the password in plaintext, would be a fast
+/// hash of a short secret that anyone able to read `/boot` could try to
+/// guess.) The consequence: two answers that differ only in the password are
+/// the same request.
+pub fn request_digest(request: &PlanRequest) -> String {
+    let text = serde_json::to_string(&request.normalized()).unwrap_or_default();
+    let mut hash = Sha256::new();
+    hash.update(b"ilex-install-request-v1\n");
+    hash.update(text.as_bytes());
+    format!("{:x}", hash.finalize())
+}
 
 /// What `bootc install to-filesystem` deployed.
 #[derive(Debug, PartialEq, Eq)]

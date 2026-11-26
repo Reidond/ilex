@@ -1,7 +1,13 @@
 # A volume labelled ILEX-ANSWERS (or ILEXANSWERS, the name a FAT volume can
 # carry) is read at boot only (ilex-installer-answers-gate.service decides, once,
-# after udev has settled). One that appears later is not read: this rule only
-# has the helper say so, once, on the console and the serial port; it starts
-# nothing and stops nothing. The label is read by udev's blkid probe
+# after udev has settled). One that appears later is not read: these rules only
+# have the helper say so, once, on the console and the serial port; they start
+# nothing and stop nothing. The label is read by udev's blkid probe
 # (60-persistent-storage.rules runs first).
-ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="ILEX-ANSWERS|ILEXANSWERS", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ilex-installer-answers-late@%k.service"
+#
+# FAT and exFAT labels are kept in the case they were written (a tool may write
+# lower case), and the program that reads the volume matches them without
+# regard to case; every other file system's label is matched exactly, as the
+# program does.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="vfat|exfat", ENV{ID_FS_LABEL}=="[Ii][Ll][Ee][Xx]-[Aa][Nn][Ss][Ww][Ee][Rr][Ss]|[Ii][Ll][Ee][Xx][Aa][Nn][Ss][Ww][Ee][Rr][Ss]", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ilex-installer-answers-late@%k.service"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}!="vfat|exfat", ENV{ID_FS_LABEL}=="ILEX-ANSWERS|ILEXANSWERS", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ilex-installer-answers-late@%k.service"

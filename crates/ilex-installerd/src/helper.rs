@@ -22,7 +22,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
-    time::Instant,
+    time::Duration,
 };
 
 /// Where the helper reads its inputs. Production uses the defaults; the
@@ -90,9 +90,10 @@ const PLANS_KEPT: usize = 8;
 pub struct Recorded {
     pub plan: Plan,
     pub disk: Disk,
-    /// When the helper made it, on the monotonic clock: a plan's age is not
-    /// the wall clock's (which a clock set backwards, or an NTP step, moves).
-    pub made: Instant,
+    /// When the helper made it, on `CLOCK_BOOTTIME` ([`sys::boottime`]): a plan's
+    /// age is not the wall clock's (which a clock set backwards, or an NTP
+    /// step, moves), and it counts the time the machine was suspended too.
+    pub made: Duration,
 }
 
 pub struct Helper {
@@ -345,7 +346,7 @@ impl Helper {
             plans.push_back(Recorded {
                 plan: plan.clone(),
                 disk: checked.disk.clone(),
-                made: Instant::now(),
+                made: sys::boottime(),
             });
             let mut secrets = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
             while plans.len() > PLANS_KEPT {

@@ -10,6 +10,26 @@ pub fn unix_time() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// Time since boot on `CLOCK_BOOTTIME`: it keeps counting while the machine is
+/// suspended (`CLOCK_MONOTONIC` and `Instant` do not), and neither a wall
+/// clock set backwards nor an NTP step moves it. A plan's age is read from it.
+pub fn boottime() -> std::time::Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a timespec to fill; CLOCK_BOOTTIME is always present.
+    let read = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) };
+    if read != 0 {
+        // Cannot happen on Linux 2.6.39 or later; the monotonic clock then.
+        return std::time::Duration::from_secs(0);
+    }
+    std::time::Duration::new(
+        now.tv_sec.max(0) as u64,
+        now.tv_nsec.clamp(0, 999_999_999) as u32,
+    )
+}
+
 pub fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut bytes = [0u8; N];
     fs::File::open("/dev/urandom")

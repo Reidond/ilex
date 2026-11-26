@@ -21,9 +21,9 @@
 
 use crate::{
     disks::{self, node_number},
-    exec,
+    exec, fault,
     scratch::Scratch,
-    secret,
+    secret, target,
     topology::{DevNum, split_dev},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -65,6 +65,12 @@ pub const FILE_SYSTEMS: [&str; 7] = ["ext4", "ext3", "ext2", "xfs", "vfat", "iso
 pub const BOOT_MARKER: &str = "/run/ilex-answers-volume";
 /// Started when answers mode fails before it has changed any disk.
 const SESSION: &str = "ilex-installer-session.service";
+/// Present from just before `Apply` is called until `Apply` has refused (or for
+/// the rest of the boot once it did not): it says the helper may have begun to
+/// write. The systemd-level hand-over (`ilex-installer-answers-handover.service`,
+/// the answers unit's `OnFailure=`) does nothing while it exists, and starts
+/// the interface when the unit ended without it.
+pub const APPLYING_FLAG: &str = "/run/ilex-answers-applying";
 
 /// What to do once the installation has succeeded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +221,14 @@ pub fn gate() -> Result<()> {
         .iter()
         .map(|v| format!("{}:{}\n", v.number.0, v.number.1))
         .collect();
-    fs::write(BOOT_MARKER, numbers).context("writing the boot marker")?;
+    // Written whole or not at all (a marker that is there but empty or cut
+    // short would keep the interface from starting and leave nothing to read).
+    let partial = format!("{BOOT_MARKER}.partial");
+    let written = fs::write(&partial, numbers).and_then(|()| fs::rename(&partial, BOOT_MARKER));
+    if let Err(error) = written {
+        let _ = fs::remove_file(&partial);
+        return Err(error).context("writing the boot marker");
+    }
     say(&format!(
         "gate=present volumes={} (unattended: the interface does not start)",
         found.len()
@@ -246,6 +259,54 @@ pub fn late(device: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The systemd-level hand-over has run (`--answers-handed-over`, from
+/// `ilex-installer-answers-handover.service`): say so on the console and the
+/// serial port, once. The marker was removed and the session started by the
+/// unit's own commands, which need nothing of this program.
+pub fn handed_over() {
+    say(
+        "handover=interface by=systemd (the unattended installation ended before it began to write; the installer's interface starts)",
+    );
+}
+
+/// What the boot recorded in [`BOOT_MARKER`]: the device numbers of the answers
+/// volumes the gate found, one `major:minor` per line. A line that is not one
+/// is an error, never skipped.
+pub fn parse_marker(text: &str) -> Result<Vec<DevNum>> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.trim()
+                .split_once(':')
+                .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+                .with_context(|| "the boot's record of the answers volume is not a device number")
+        })
+        .collect()
+}
+
+/// The volume to read: the one the boot recorded, and no other. Exactly one
+/// device was recorded; what is listed now must be exactly that device (the
+/// time between the gate and this read is long enough to unplug a stick, swap
+/// it for another or plug a second one in).
+pub fn check_boot_volume(recorded: &[DevNum], found: &[Volume]) -> Result<Volume> {
+    ensure!(
+        recorded.len() == 1,
+        "the boot recorded {} answers volumes; exactly one is read (remove the others and restart)",
+        recorded.len()
+    );
+    let volume = find_volume(found)?;
+    ensure!(
+        volume.number == recorded[0],
+        "the answers volume found now ({} is {}:{}) is not the one the boot recorded ({}:{}): a stick was swapped or added after the boot, so nothing is read",
+        exec::clean_line(volume.path.as_bytes()),
+        volume.number.0,
+        volume.number.1,
+        recorded[0].0,
+        recorded[0].1
+    );
+    Ok(volume.clone())
+}
+
 /// Read `answers.toml` from `directory`.
 pub fn read_file(directory: &Path) -> Result<Zeroizing<Vec<u8>>> {
     read_regular(&directory.join(FILE_NAME))
@@ -256,26 +317,23 @@ pub fn read_file(directory: &Path) -> Result<Zeroizing<Vec<u8>>> {
 /// and checked on the descriptor it opened: what is read is what was
 /// checked, and what was checked is a regular file.
 fn read_regular(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
+    read_bounded(path, FILE_NAME, MAX_BYTES)
+}
+
+/// [`read_regular`] for any file of at most `max` bytes; `what` names it in the
+/// messages.
+fn read_bounded(path: &Path, what: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
         .open(path)
-        .with_context(|| format!("{FILE_NAME} cannot be opened (missing, or a link)"))?;
-    let meta = file.metadata().context("looking at the answers file")?;
-    ensure!(
-        meta.file_type().is_file(),
-        "{FILE_NAME} is not a regular file"
-    );
-    ensure!(
-        meta.len() <= MAX_BYTES,
-        "{FILE_NAME} is larger than {MAX_BYTES} bytes"
-    );
+        .with_context(|| format!("{what} cannot be opened (missing, or a link)"))?;
+    let meta = file.metadata().context("looking at the file")?;
+    ensure!(meta.file_type().is_file(), "{what} is not a regular file");
+    ensure!(meta.len() <= max, "{what} is larger than {max} bytes");
     let mut bytes = Zeroizing::new(Vec::with_capacity(meta.len() as usize));
-    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= MAX_BYTES,
-        "{FILE_NAME} grew while it was read"
-    );
+    file.take(max + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= max, "{what} grew while it was read");
     Ok(bytes)
 }
 
@@ -299,8 +357,13 @@ struct Answered {
 
 /// Mount the volume read-only in a private directory, read the file, unmount.
 fn read_volume(run_dir: &Path) -> Result<Answered> {
+    // Which volume the gate found at boot, and no other: the listing below is
+    // taken a long time after it (this unit waits for the network), and what
+    // was plugged in, swapped or removed in between is not to be read.
+    let recorded =
+        parse_marker(&fs::read_to_string(BOOT_MARKER).context("reading what the boot recorded")?)?;
     let all = volumes()?;
-    let volume = find_volume(&all)?.clone();
+    let volume = check_boot_volume(&recorded, &all)?;
     ensure!(
         FILE_SYSTEMS.contains(&volume.fs.as_str()),
         "the volume {} holds a {} file system; an answers volume holds one of {}",
@@ -310,8 +373,8 @@ fn read_volume(run_dir: &Path) -> Result<Answered> {
     );
     // The device is whatever the numbers say, not whatever a name says later.
     ensure!(
-        node_number(&volume.path) == Ok(volume.number),
-        "{} is not the device lsblk listed (it was replaced)",
+        node_number(&volume.path) == Ok(volume.number) && volume.number == recorded[0],
+        "{} is not the device the boot recorded (it was replaced)",
         volume.path
     );
     say(&format!(
@@ -350,8 +413,11 @@ fn read_volume(run_dir: &Path) -> Result<Answered> {
     );
     // What is mounted is the device that was chosen (a disk swapped between
     // the listing and the mount would answer to the same name).
+    // Checked twice: against the mount table and against the mounted file
+    // system's own device number.
     let table = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let same = mounted_number(&table, &mount_point) == Some(volume.number);
+    let same = mounted_number(&table, &mount_point) == Some(volume.number)
+        && fs::metadata(&mountpoint).is_ok_and(|m| split_dev(m.dev()) == recorded[0]);
     let read = if same {
         read_file(&mountpoint)
     } else {
@@ -421,6 +487,94 @@ fn ensure_not_on(volume: &Volume, disk: &Disk) -> Result<()> {
         disk.id
     );
     Ok(())
+}
+
+/// What the disk's `/boot` says it was installed from: the digest in
+/// [`target::REQUEST_STAMP`], when the disk has a partition labelled
+/// `ilex-boot` with an ext4 file system that has one. `None` is no such
+/// partition, or no stamp on it (an installation that did not finish, or one
+/// made by another program). A file system that cannot be mounted, or a stamp
+/// that is not a digest, is an error: it may be exactly the installation this
+/// check exists to protect, and what cannot be read is not "no stamp". The
+/// partition is mounted read-only, without journal replay (`noload`: not one
+/// byte is written), in this unit's private mount namespace, and unmounted
+/// before anything else is asked of the disk.
+fn read_stamp(run_dir: &Path, disk: &Disk) -> Result<Option<String>> {
+    let Some(boot) = disk
+        .partitions
+        .iter()
+        .find(|p| p.label == target::BOOT_LABEL && p.filesystem == "ext4")
+    else {
+        return Ok(None);
+    };
+    let number = node_number(&boot.path).map_err(anyhow::Error::msg)?;
+    let mut scratch = Scratch::new(run_dir, "stamp")?;
+    let mountpoint = scratch.subdir("boot")?;
+    let mount_point = mountpoint.to_string_lossy().into_owned();
+    let mounted = exec::run(
+        "mount",
+        &[
+            "-t",
+            "ext4",
+            "-o",
+            "ro,noload,nodev,nosuid,noexec",
+            &boot.path,
+            &mount_point,
+        ],
+        Duration::from_secs(60),
+    )?;
+    ensure!(
+        mounted.success(),
+        "{} ({}) could not be mounted read-only to look for the stamp of an earlier installation ({}); erasing what might be an installation is not done blind",
+        boot.path,
+        target::BOOT_LABEL,
+        exec::clean_line(
+            mounted
+                .stderr
+                .lines()
+                .last()
+                .unwrap_or("no message")
+                .as_bytes()
+        )
+    );
+    let table = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let same = mounted_number(&table, &mount_point) == Some(number);
+    let read = if same {
+        match fs::symlink_metadata(mountpoint.join(target::REQUEST_STAMP)) {
+            Ok(_) => {
+                read_bounded(&mountpoint.join(target::REQUEST_STAMP), "the stamp", 4096).map(Some)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("looking for the stamp: {e}")),
+        }
+    } else {
+        Err(anyhow::anyhow!(
+            "what was mounted is not {} (the partition was replaced)",
+            boot.path
+        ))
+    };
+    let unmounted = exec::run("umount", &[&mount_point], Duration::from_secs(60));
+    let read = read?;
+    ensure!(
+        unmounted.is_ok_and(|o| o.success()),
+        "the partition {} could not be unmounted after the stamp was read",
+        boot.path
+    );
+    let Some(bytes) = read else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(&bytes)
+        .ok()
+        .map(str::trim)
+        .filter(|t| t.len() == 64 && t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .with_context(|| format!("the stamp on {} is not a digest", boot.path))?;
+    Ok(Some(text.to_owned()))
+}
+
+/// Whether the stamp of a disk is the digest of the request now being made:
+/// these answers already installed this disk.
+pub fn stamp_is_these_answers(stamp: Option<&str>, digest: &str) -> bool {
+    stamp == Some(digest)
 }
 
 /// What the disk already holds that a person would want to keep: ilex's own
@@ -522,7 +676,15 @@ struct Reached {
 /// hands the machine to the interface, so that the screen is not left empty.
 pub fn run(options: &Options) -> Result<()> {
     let mut reached = Reached::default();
-    let outcome = zbus::block_on(drive(options, &mut reached));
+    // A flag left by an earlier attempt of this boot says nothing about this one.
+    let _ = fs::remove_file(APPLYING_FLAG);
+    // The answers file may hold a password: this process never dumps core and
+    // cannot be traced, as the helper that receives the password. It is done
+    // here, before the volume is read, so that its failure is a failure like
+    // any other before `Apply`: the machine is handed to the interface.
+    let outcome = ilex_enroll::harden()
+        .context("hardening this process")
+        .and_then(|()| zbus::block_on(drive(options, &mut reached)));
     if let Err(error) = &outcome {
         say(&format!(
             "result=failed {}",
@@ -559,6 +721,17 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     };
     let answers = Answers::parse(std::str::from_utf8(&text).context("answers.toml is not UTF-8")?)?;
     drop(text);
+    // The `installer::` and `iso::next_unattended_handover` tiers' fault (the
+    // fixed credential ilex.installer.fault=answers; it can only make this
+    // program fail): this process ends as a crash would, before it has asked
+    // the helper for anything, so that only systemd can start the interface.
+    if fault::requested("answers") {
+        say(
+            "fault=answers (a test credential): this process is killed before it asks the helper for anything",
+        );
+        // SAFETY: ends this process.
+        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+    }
 
     let connection = Connection::system()
         .await
@@ -605,6 +778,17 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     if let Some(volume) = &volume {
         ensure_not_on(volume, disk)?;
     }
+    // The answers that installed this disk once do not install it again: the
+    // machine powered off after its installation, and with the stick still in
+    // it the firmware booted the installer once more.
+    let digest = target::request_digest(&request);
+    if stamp_is_these_answers(read_stamp(&options.run_dir, disk)?.as_deref(), &digest) {
+        bail!(
+            "these answers already installed {} (the installation recorded their digest in /boot/{}): remove the stick, or edit the answers (anything but the password makes them new answers) to install again",
+            disk.id,
+            target::REQUEST_STAMP
+        );
+    }
     // A disk that already holds a system is erased only when the answers say so.
     let found = existing_systems(disk);
     if !found.is_empty() && !answers.install.reinstall {
@@ -641,9 +825,20 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     drop(memfd);
     let confirm = answers.install.confirm_erase.clone().unwrap_or_default();
     drop(answers);
-    let state: String = call(&proxy, "Apply", &(plan.id.as_str(), confirm.as_str())).await?;
-    let _: State = serde_json::from_str(&state).context("reading the state")?;
+    // From here the helper may begin to write: the flag tells the systemd-level
+    // hand-over to stay out of it. A refusal (nothing was written) lowers it.
+    fs::write(APPLYING_FLAG, b"").context("writing the flag that says Apply was called")?;
+    let state: String = match call(&proxy, "Apply", &(plan.id.as_str(), confirm.as_str())).await {
+        Ok(state) => state,
+        Err(error) => {
+            let _ = fs::remove_file(APPLYING_FLAG);
+            return Err(error);
+        }
+    };
+    // Apply was accepted: whatever happens next (even a state this program
+    // cannot read), the disk may be changing and the interface stays out.
     reached.applied = true;
+    let _: State = serde_json::from_str(&state).context("reading the state")?;
     say("apply=started");
 
     // Follow it. State is the contract: it is what an interface that restarts

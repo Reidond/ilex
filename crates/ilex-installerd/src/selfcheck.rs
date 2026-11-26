@@ -208,6 +208,116 @@ fn check_parsers() -> Result<()> {
         disks::stable_ids("vdb", &[link("by-id", "virtio-blank-part1")]) == "vdb",
         "partition link used"
     );
+    // A link that describes what is on the disk (an LVM physical volume's
+    // UUID, a device-mapper or MD name) sorts ahead of `virtio-`, `usb-` and
+    // `scsi-` but is no identity: it goes when the signature is wiped.
+    ensure!(
+        disks::stable_ids(
+            "vdb",
+            &[
+                link("by-id", "lvm-pv-uuid-abcdef-1234"),
+                link("by-id", "dm-name-vg-root"),
+                link("by-id", "dm-uuid-LVM-abc"),
+                link("by-id", "md-uuid-abcd:ef"),
+                link("by-id", "md-name-host:0"),
+                link("by-id", "virtio-ilex-disk-1"),
+            ]
+        ) == "virtio-ilex-disk-1",
+        "a link that names the disk's contents was chosen over the hardware's"
+    );
+    ensure!(
+        disks::stable_ids("vdb", &[link("by-id", "lvm-pv-uuid-abcdef-1234")]) == "vdb"
+            && disks::stable_ids(
+                "vdb",
+                &[
+                    link("by-id", "lvm-pv-uuid-abcdef-1234"),
+                    link("by-path", "pci-0000:00:05.0")
+                ]
+            ) == "pci-0000:00:05.0",
+        "a disk whose only by-id link names its contents was given that name"
+    );
+    for hardware in [
+        "nvme-eui.0025",
+        "nvme-Samsung_SSD_990_S1",
+        "wwn-0x5000c500a1b2c3d4",
+        "ata-Samsung_SSD_870_S1",
+        "scsi-SATA_Disk_S1",
+        "usb-SanDisk_Cruzer_0001-0:0",
+        "mmc-SD16G_0x1234",
+        "virtio-ilex-disk-1",
+        "ccw-0.0.0100",
+        "ieee1394-0x1234",
+    ] {
+        ensure!(
+            disks::is_hardware_id(hardware),
+            "{hardware} is the hardware's name of a disk"
+        );
+    }
+    for contents in [
+        "lvm-pv-uuid-abc",
+        "dm-name-vg-root",
+        "dm-uuid-LVM-abc",
+        "md-uuid-abc",
+        "md-name-h:0",
+        "LVM-xyz",
+        "raid-x",
+        "",
+    ] {
+        ensure!(
+            !disks::is_hardware_id(contents),
+            "{contents:?} was taken for the hardware's name of a disk"
+        );
+    }
+
+    // A signature on the whole disk (no partition table) is data too: a file
+    // system, LUKS, an LVM physical volume, a swap area, and any other signature.
+    let whole = disks::parse_lsblk(
+        r#"{"blockdevices":[
+ {"name":"/dev/vdb","kname":"/dev/vdb","type":"disk","size":42949672960,"serial":"b","tran":"virtio","rm":false,"ro":false,"log-sec":512,"pttype":null,"fstype":"LVM2_member","label":null,"children":null},
+ {"name":"/dev/vdc","kname":"/dev/vdc","type":"disk","size":42949672960,"serial":"c","tran":"virtio","rm":false,"ro":false,"log-sec":512,"pttype":null,"fstype":"ext4","label":"data","children":null},
+ {"name":"/dev/vdd","kname":"/dev/vdd","type":"disk","size":42949672960,"serial":"d","tran":"virtio","rm":false,"ro":false,"log-sec":512,"pttype":null,"fstype":"crypto_LUKS","label":null,"children":null},
+ {"name":"/dev/vde","kname":"/dev/vde","type":"disk","size":42949672960,"serial":"e","tran":"virtio","rm":false,"ro":false,"log-sec":512,"pttype":null,"fstype":"zfs_member","label":"tank\u0007","children":null},
+ {"name":"/dev/vdf","kname":"/dev/vdf","type":"disk","size":42949672960,"serial":"f","tran":"virtio","rm":false,"ro":false,"log-sec":512,"pttype":null,"fstype":null,"label":null,"children":null},
+ {"name":"/dev/vdg","kname":"/dev/vdg","type":"disk","size":42949672960,"serial":"g","tran":"virtio","rm":false,"ro":false,"log-sec":512,"pttype":"gpt","fstype":null,"label":null,"children":[]}]}"#,
+        &|_| None,
+        &|_| None,
+    )?;
+    let described = |index: usize| -> Vec<(String, Option<String>, String)> {
+        whole[index]
+            .disk
+            .other_systems
+            .iter()
+            .map(|s| (s.kind.clone(), s.partition.clone(), s.description.clone()))
+            .collect()
+    };
+    ensure!(
+        whole.len() == 6
+            && described(0).len() == 1
+            && described(0)[0].0 == "linux"
+            && described(0)[0].1.is_none()
+            && described(0)[0].2.contains("LVM2_member")
+            && described(0)[0].2.contains("whole disk /dev/vdb"),
+        "a whole-disk LVM physical volume is not a system: {:?}",
+        described(0)
+    );
+    ensure!(
+        described(1).len() == 1
+            && described(1)[0].2.contains("ext4")
+            && described(1)[0].2.contains("\"data\"")
+            && described(2).len() == 1
+            && described(2)[0].0 == "encrypted"
+            && described(3).len() == 1
+            && described(3)[0].0 == "filesystem"
+            && described(3)[0].2.contains("zfs_member")
+            && !described(3)[0].2.contains('\u{7}')
+            && described(4).is_empty()
+            && described(5).is_empty(),
+        "whole-disk signatures: {:?} {:?} {:?} {:?}",
+        described(1),
+        described(2),
+        described(3),
+        described(4)
+    );
 
     // repart's plan, the registry's manifests, meminfo.
     let layout = repart::Layout {
@@ -4044,6 +4154,98 @@ fn check_answers(parent: &Path) -> Result<()> {
         "no selection at all was accepted"
     );
 
+    // Whole-disk signatures and an unreadable EFI system partition count as
+    // another system: the answers must say `reinstall = true` for them too.
+    let whole_pv = disks::classify_whole_disk("/dev/vdc", "LVM2_member", "")
+        .context("a whole-disk LVM physical volume was not classified")?;
+    let unreadable = OtherSystem {
+        kind: "unreadable-esp".into(),
+        partition: Some("/dev/vdc1".into()),
+        description: "an EFI system partition (/dev/vdc1) that could not be read (mount failed)"
+            .into(),
+    };
+    ensure!(
+        answers::existing_systems(&disk(vec![], vec![whole_pv.clone()])).len() == 1
+            && answers::existing_systems(&disk(vec![], vec![unreadable])).len() == 1,
+        "a whole-disk signature or an unreadable EFI system partition was not noticed"
+    );
+    ensure!(
+        disks::classify_whole_disk("/dev/vdc", "", "").is_none(),
+        "a disk with no signature was classified"
+    );
+
+    // What the boot recorded, and the volume read later must be exactly it.
+    let recorded = answers::parse_marker("252:16\n")?;
+    ensure!(recorded == [(252, 16)], "the boot's record: {recorded:?}");
+    ensure!(
+        answers::parse_marker("")?.is_empty()
+            && answers::parse_marker("252:16\n252:32\n")?.len() == 2
+            && answers::parse_marker("252:x\n").is_err()
+            && answers::parse_marker("garbage\n").is_err(),
+        "the boot's record is parsed loosely"
+    );
+    let stick = |path: &str, number| answers::Volume {
+        path: path.into(),
+        fs: "ext4".into(),
+        number,
+    };
+    ensure!(
+        answers::check_boot_volume(&recorded, &[stick("/dev/vdb", (252, 16))]).is_ok(),
+        "the volume the boot recorded was refused"
+    );
+    for (what, recorded, found) in [
+        (
+            "a stick swapped for another",
+            vec![(252, 16)],
+            vec![stick("/dev/vdc", (252, 32))],
+        ),
+        (
+            "a second stick plugged in",
+            vec![(252, 16)],
+            vec![stick("/dev/vdb", (252, 16)), stick("/dev/vdc", (252, 32))],
+        ),
+        ("the stick removed", vec![(252, 16)], vec![]),
+        (
+            "two sticks at boot",
+            vec![(252, 16), (252, 32)],
+            vec![stick("/dev/vdb", (252, 16))],
+        ),
+        (
+            "nothing recorded",
+            vec![],
+            vec![stick("/dev/vdb", (252, 16))],
+        ),
+    ] {
+        ensure!(
+            answers::check_boot_volume(&recorded, &found).is_err(),
+            "{what}: the volume was read"
+        );
+    }
+
+    // The stamp: the request's digest, never derived from a secret.
+    let request = |administrator: &str, host: &str| {
+        ilex_installer_model::plan::PlanRequest::parse(&format!(
+            r#"{{"composition":"generic.gnome","disk":"virtio-x","mode":"whole-disk","encrypt":false,"host_name":"{host}","administrator":"{administrator}"}}"#
+        ))
+    };
+    let first = target::request_digest(&request("ilexmaint", "ilextest")?);
+    ensure!(
+        first.len() == 64
+            && first
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && first == target::request_digest(&request("ilexmaint", "ilextest")?)
+            && first != target::request_digest(&request("ilexmaint", "other")?)
+            && first != target::request_digest(&request("someone", "ilextest")?),
+        "the request's digest does not follow the request"
+    );
+    ensure!(
+        answers::stamp_is_these_answers(Some(&first), &first)
+            && !answers::stamp_is_these_answers(None, &first)
+            && !answers::stamp_is_these_answers(Some(&"0".repeat(64)), &first),
+        "the stamp is compared loosely"
+    );
+
     // The by-id name: a plain name of /dev/disk/by-id, never a path.
     for bad in ["", ".", "..", "../sda", "a/b", "/dev/sda", "bad\nname"] {
         ensure!(
@@ -4055,6 +4257,21 @@ fn check_answers(parent: &Path) -> Result<()> {
         disks::by_id_node("this-disk-does-not-exist-0000").is_err(),
         "a name that is not there was resolved"
     );
+    // Never a name that describes contents, even when the link exists.
+    for contents in [
+        "lvm-pv-uuid-abc",
+        "dm-name-root",
+        "md-uuid-abc",
+        "dm-uuid-LVM-x",
+    ] {
+        let refused = disks::by_id_node(contents)
+            .err()
+            .context("a name that describes the disk's contents was accepted")?;
+        ensure!(
+            refused.contains("hardware"),
+            "the refusal for {contents} does not say why: {refused}"
+        );
+    }
 
     // The file: regular, not a link, bounded, and opened without waiting.
     write(&root.join("answers.toml"), "schema = 1\n")?;

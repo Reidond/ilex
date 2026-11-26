@@ -228,6 +228,10 @@ pub fn parse_lsblk(
             .collect();
         partitions.sort_by_key(|p| p.start_bytes);
         let table = text(device, "pttype");
+        // A signature on the whole disk (a file system, LUKS, an LVM physical
+        // volume, a swap area: no partition table in between) is data a person
+        // would want to keep just as a partition's is.
+        let whole = classify_whole_disk(&path, &text(device, "fstype"), &text(device, "label"));
         disks.push(Raw {
             disk: Disk {
                 id: String::new(),
@@ -244,7 +248,7 @@ pub fn parse_lsblk(
                 partition_table: (!table.is_empty()).then_some(table),
                 partitions,
                 free_extents: vec![],
-                other_systems: vec![],
+                other_systems: whole.into_iter().collect(),
             },
             kname,
         });
@@ -395,6 +399,12 @@ pub fn by_id_node(id: &str) -> Result<(String, DevNum), String> {
     if id.is_empty() || id.starts_with('.') || id.contains('/') || id.chars().any(char::is_control)
     {
         return Err(format!("{id:?} is not a name in /dev/disk/by-id"));
+    }
+    if !is_hardware_id(id) {
+        return Err(format!(
+            "{id:?} is not the hardware's name of a disk in /dev/disk/by-id (it must start with one of {}): a name that describes what is on the disk, or a bus path, goes when the disk is wiped or swapped",
+            HARDWARE_ID_PREFIXES.join(", ")
+        ));
     }
     let path = format!("/dev/disk/by-id/{id}");
     let link = fs::symlink_metadata(&path).map_err(|e| {
@@ -593,6 +603,33 @@ fn sysfs_start(name: &str) -> Option<u64> {
         .ok()
 }
 
+/// What a `/dev/disk/by-id` name of a disk starts with when it names the
+/// hardware (the bus's identity of the device): NVMe, WWN, ATA, SCSI, USB,
+/// MMC, virtio, s390 channel and FireWire disks. Every other name of that
+/// directory describes what is *on* the disk or what is stacked on it
+/// (`lvm-pv-uuid-*` for a physical volume's signature, `dm-name-*`,
+/// `dm-uuid-*`, `md-uuid-*`, `md-name-*`): such a link disappears when
+/// `wipefs` erases the signature, and a disk addressed by it cannot be found
+/// again by the tools that write it.
+const HARDWARE_ID_PREFIXES: [&str; 10] = [
+    "nvme-eui.",
+    "wwn-",
+    "nvme-",
+    "ata-",
+    "scsi-",
+    "usb-",
+    "mmc-",
+    "virtio-",
+    "ccw-",
+    "ieee1394-",
+];
+
+/// Whether `name` (one name of `/dev/disk/by-id`) names hardware, not
+/// contents: see [`HARDWARE_ID_PREFIXES`]. Never `dm-`, `md-` or `lvm-`.
+pub fn is_hardware_id(name: &str) -> bool {
+    HARDWARE_ID_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
 /// A stable name for each disk: `/dev/disk/by-id` when the hardware has an
 /// identity, else the bus path, else the kernel name.
 pub fn stable_ids(kname: &str, links: &[(String, String)]) -> String {
@@ -603,7 +640,10 @@ pub fn stable_ids(kname: &str, links: &[(String, String)]) -> String {
             ("by-id", n) if n.contains("-part") => continue,
             ("by-id", n) if n.starts_with("nvme-eui.") => 0,
             ("by-id", n) if n.starts_with("wwn-") => 1,
-            ("by-id", _) => 2,
+            ("by-id", n) if is_hardware_id(n) => 2,
+            // A link that describes the contents (an LVM physical volume's
+            // UUID, a device-mapper or MD name) is not an identity.
+            ("by-id", _) => continue,
             ("by-path", n) if n.contains("-part") => continue,
             ("by-path", _) => 3,
             _ => continue,
@@ -661,6 +701,47 @@ pub fn classify(partition: &Partition) -> Option<OtherSystem> {
         partition: Some(partition.path.clone()),
         description: name,
     })
+}
+
+/// What a signature on the *whole disk* (no partition table, no partition:
+/// `lsblk` gives the disk itself a file system type) says: any signature at all
+/// is something to keep (a file system, a LUKS volume, an LVM or MD member, a
+/// swap area), so unlike [`classify`] nothing is left unnamed.
+pub fn classify_whole_disk(path: &str, filesystem: &str, label: &str) -> Option<OtherSystem> {
+    if filesystem.is_empty() {
+        return None;
+    }
+    let as_partition = Partition {
+        number: 0,
+        path: path.to_owned(),
+        start_bytes: 0,
+        size_bytes: 0,
+        type_id: String::new(),
+        label: String::new(),
+        filesystem: filesystem.to_owned(),
+        filesystem_label: label.to_owned(),
+    };
+    let mut found = classify(&as_partition).unwrap_or_else(|| {
+        let clean: String = filesystem
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(32)
+            .collect();
+        let named = if label.is_empty() {
+            format!("{clean} signature")
+        } else {
+            let label: String = label.chars().filter(|c| !c.is_control()).take(64).collect();
+            format!("{clean} signature \"{label}\"")
+        };
+        OtherSystem {
+            kind: "filesystem".into(),
+            partition: None,
+            description: named,
+        }
+    });
+    found.partition = None;
+    found.description = format!("{} on the whole disk {path}", found.description);
+    Some(found)
 }
 
 /// The names of the loader directories of a mounted ESP (`<root>/EFI/*`)
@@ -774,9 +855,18 @@ pub fn scan_esp_child(device: &str, mountpoint: &Path) -> EspScan {
 /// namespace of its own. Failure is reported, not hidden: the other systems
 /// on that disk may then be missing from the list.
 fn scan_esp(device: &str, scratch: &mut Scratch, n: usize) -> (Vec<OtherSystem>, Vec<String>) {
+    // An ESP that cannot be read may hold any loader: it counts as another
+    // system, so that erasing the disk is something the answers must say.
     let unreadable = |why: String| {
+        let why: String = why.chars().filter(|c| !c.is_control()).take(160).collect();
         (
-            vec![],
+            vec![OtherSystem {
+                kind: "unreadable-esp".into(),
+                partition: Some(device.to_owned()),
+                description: format!(
+                    "an EFI system partition ({device}) that could not be read ({why}), which may hold another system's loader"
+                ),
+            }],
             vec![format!(
                 "could not read the EFI system partition {device} ({why}); other systems on this disk may be missing from the list"
             )],

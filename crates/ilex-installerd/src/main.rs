@@ -117,6 +117,11 @@ fn run() -> anyhow::Result<()> {
         /// it is ignored unless it was here at boot
         #[arg(long, value_name = "DEVICE", conflicts_with_all = ["answers", "self_check"])]
         answers_late: Option<PathBuf>,
+        /// Say that the systemd-level hand-over to the interface has run (from
+        /// `ilex-installer-answers-handover.service`): one line on the
+        /// console and the serial port
+        #[arg(long, conflicts_with_all = ["answers", "self_check", "answers_gate"])]
+        answers_handed_over: bool,
         /// With `--answers`: read the answers from this file instead of the
         /// volume (the `installer::` tier's fixtures)
         #[arg(long, hide = true, requires = "answers")]
@@ -139,10 +144,14 @@ fn run() -> anyhow::Result<()> {
     if let Some(device) = &args.answers_late {
         return answers::late(device);
     }
+    if args.answers_handed_over {
+        answers::handed_over();
+        return Ok(());
+    }
     if args.answers {
-        // The answers file may hold a password: this process never dumps core
-        // and cannot be traced, as the helper that receives the password.
-        ilex_enroll::harden()?;
+        // (`answers::run` hardens the process itself, before it reads the
+        // volume, so that a failure to do so hands the machine to the
+        // interface like any other failure before `Apply`.)
         let options = answers::Options {
             run_dir: args
                 .run_dir
@@ -191,6 +200,13 @@ fn run() -> anyhow::Result<()> {
     if args.self_check {
         println!("ILEX-INSTALLERD-CHECK OK: {}", selfcheck::run(&config)?);
         return Ok(());
+    }
+    // The `installer::` tier's fault (the fixed credential
+    // ilex.installer.fault=helper; it can only make the installer fail): the
+    // helper never takes its bus name.
+    if fault::requested("helper") {
+        eprintln!("ilex-installerd: fault=helper (a test credential): not starting");
+        std::process::exit(1);
     }
     // The helper holds secrets (an administrator's password) once SetSecret
     // has run: it never dumps core and cannot be traced.

@@ -24,6 +24,7 @@ use crate::{
     disks::{self, Hold},
     install, policy, repart,
     secret::{self, Secret},
+    sys,
 };
 use anyhow::Context;
 use ilex_installer_model::{
@@ -170,9 +171,9 @@ impl Helper {
                     "the helper has no such plan (it keeps the latest eight and forgets them when it restarts): plan again",
                 )
             })?;
-        // The plan's age is the helper's own, on the monotonic clock (the wall
+        // The plan's age is the helper's own, on the boot clock (the wall
         // clock the plan document carries can be set backwards or stepped).
-        let age = made.elapsed().as_secs();
+        let age = sys::boottime().saturating_sub(made).as_secs();
         if age > plan.valid_seconds {
             return Err(PlanError::new(
                 ErrorCode::PlanExpired,

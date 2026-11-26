@@ -1,4 +1,5 @@
-//! The `installer::` tier's one fault: a pause at a named point of `Apply`, so
+//! The `installer::` tier's faults. The first is a pause at a named point of
+//! `Apply`, so
 //! that the test can do what a person or a program could do in that moment
 //! (mount a partition, open the disk exclusively) and see the helper's own
 //! claim refuse. Nothing calls it unless the hidden `--pause-before-hold` flag
@@ -27,4 +28,22 @@ pub fn pause(file: &Path) {
     while file.exists() && started.elapsed() < LONGEST {
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// The fault a test asks for through the fixed credential
+/// `ilex.installer.fault` (an SMBIOS `io.systemd.credential:` string the harness
+/// puts on the VM, imported by the helper's and the answers unit, and by the
+/// session's, which reads the value `session`). It can only make the installer
+/// fail or stay quiet: `helper` (the helper exits as soon as it starts, so it
+/// never takes its bus name) or `answers` (unattended mode kills itself before
+/// it asks the helper for anything). Nothing is read from anywhere else.
+pub fn credential() -> Option<String> {
+    let dir = std::env::var_os("CREDENTIALS_DIRECTORY")?;
+    let text = fs::read_to_string(Path::new(&dir).join("ilex.installer.fault")).ok()?;
+    Some(text.trim().to_owned())
+}
+
+/// Whether the credential names `fault`.
+pub fn requested(fault: &str) -> bool {
+    credential().as_deref() == Some(fault)
 }

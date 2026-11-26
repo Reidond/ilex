@@ -238,6 +238,7 @@ impl Install {
         log.line(&format!(
             "releasing the exclusive claim on {kernel_name}; the disk is {disk} from now on"
         ));
+        let held = hold.rdev;
         hold.release();
         // A disk that has partitions must lose them first. `systemd-repart
         // --empty=force` wipes the table but not the kernel's partitions, and
@@ -254,6 +255,39 @@ impl Install {
             .unwrap_or(&kernel_name)
             .to_owned();
         target::wait_for_no_partitions(Path::new("/sys"), &kname, Duration::from_secs(20))?;
+        // udev has seen the signatures go and the partitions with them: let it
+        // finish removing and making its links before anything is written, so
+        // that repart does not race it (a link of the old contents vanishes
+        // only now).
+        let _ = self.tool(
+            &mut log,
+            &Job {
+                program: "udevadm",
+                args: &["settle", "--timeout=30"],
+                env: &[],
+                stdin: None,
+                timeout: Duration::from_secs(40),
+            },
+            &mut || {},
+        );
+        // The disk's stable name is a hardware identity, so it is still there
+        // and still leads to the disk that was held; if it is not, the disk is
+        // gone or another took its place, and nothing more is written to it.
+        let (_, now) = disks::by_id_node(&self.plan.disk.id).map_err(|why| {
+            anyhow!(
+                "{} is gone after the disk was wiped ({why}); the disk was erased, install again from a new plan",
+                self.address
+            )
+        })?;
+        ensure!(
+            now == held,
+            "{} no longer leads to the disk that was wiped ({}:{} against {}:{}); the disk was erased, install again from a new plan",
+            self.address,
+            now.0,
+            now.1,
+            held.0,
+            held.1
+        );
         let lines = self.checked(
             &mut log,
             "systemd-repart",
@@ -572,7 +606,14 @@ impl Install {
         });
         // chpasswd reads `name:password` from its standard input only: the
         // password is in no argument and in no log.
-        let password_line = Zeroizing::new(format!("{name}:{password}\n"));
+        // Built in a buffer of exactly its length, so that it never grows
+        // (a `format!` reallocates and leaves the earlier copies, unwiped, in
+        // freed heap).
+        let mut password_line = Zeroizing::new(Vec::with_capacity(name.len() + password.len() + 2));
+        password_line.extend_from_slice(name.as_bytes());
+        password_line.push(b':');
+        password_line.extend_from_slice(password.as_bytes());
+        password_line.push(b'\n');
         let set = added.and_then(|_| {
             let out = self.tool(
                 &mut log,
@@ -580,7 +621,7 @@ impl Install {
                     program: "chpasswd",
                     args: &["--root", &root],
                     env: &[],
-                    stdin: Some(password_line.as_bytes()),
+                    stdin: Some(password_line.as_slice()),
                     timeout: TOOL,
                 },
                 &mut || {},
@@ -708,6 +749,7 @@ impl Install {
     fn finalise(&mut self, deployment: &target::Deployment) -> Result<()> {
         let mut log = self.begin(Stage::Finalise, "Finishing and unmounting")?;
         self.copy_logs(&mut log, deployment);
+        self.stamp(&mut log, deployment)?;
         self.relabel(&mut log, deployment, &["var/log"])?;
         self.checked(&mut log, "sync", &[], TOOL)?;
         // Free space the new file systems can discard; not every device
@@ -744,6 +786,24 @@ impl Install {
             "the target file systems could not be unmounted"
         );
         self.end(Stage::Finalise, &mut log);
+        Ok(())
+    }
+
+    /// Leave the digest of the request this installation was made from on the
+    /// new `/boot` ([`target::REQUEST_STAMP`]), where unattended mode finds it
+    /// (read-only) on a later boot of the installer and refuses to erase this
+    /// installation again for the same answers. Written last-but-one, once the
+    /// image and the account are in place: an installation that did not get
+    /// this far has no stamp and may be run again.
+    fn stamp(&self, log: &mut StageLog, deployment: &target::Deployment) -> Result<()> {
+        let file = self.target.join("boot").join(target::REQUEST_STAMP);
+        let digest = target::request_digest(&self.plan.request);
+        write_file(&file, format!("{digest}\n").as_bytes(), 0o600)?;
+        self.relabel_mount_point(log, deployment, &file)?;
+        log.line(&format!(
+            "recorded the request's digest in /boot/{}",
+            target::REQUEST_STAMP
+        ));
         Ok(())
     }
 
