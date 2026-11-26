@@ -1,0 +1,403 @@
+# One root's whole chain, for a root that is not the installer's: build →
+# changed → rechunk → stage the unsigned candidate → the ephemeral tier, then its
+# signing job, then the machine layers that sit on it. publish-pipeline.yml
+# calls it once per such root (`base`, a second desktop, ...) in a matrix that
+# never fails fast, so the calls run in parallel on their own runners, and a
+# failure in one stops neither the others nor the installer root's own jobs
+# (build, upgrade, publish, machines, installer-release), which do not depend on
+# any call of this workflow.
+#
+# Everything of one root's chain is a `needs` chain inside one call, so a root
+# is signed only when this call's build job (build, tests, evidence row)
+# succeeded, and its layers wait only for their own parent's publication.
+# The installer root keeps its jobs in publish-pipeline.yml because its
+# publication also needs the upgrade tier and its job feeds that tier.
+#
+# Runner: `vars.ILEX_RUNNER` (repository variable) or ubuntu-26.04, as everywhere.
+name: publish root
+
+on:
+  workflow_call:
+    secrets:
+      COSIGN_PRIVATE_KEY:
+        required: false
+      COSIGN_PASSWORD:
+        required: false
+    inputs:
+      tag:
+        description: This root's composition tag (a kind `root` row of `info --publications`, not the installer's)
+        type: string
+        required: true
+      installer_tag:
+        description: The installer root's composition tag
+        type: string
+        required: true
+      snapshots:
+        description: JSON object of every published composition's digest at the start of the run, '-' when absent
+        type: string
+        required: true
+      legacy:
+        description: Legacy latest's digest at the start of the run, '-' when absent or not needed
+        type: string
+        required: true
+      main:
+        type: boolean
+        required: true
+      test:
+        type: boolean
+        default: false
+      apps:
+        type: boolean
+        default: false
+      # The pins of publish-pipeline.yml, handed down so that there is one copy.
+      cosign_version:
+        type: string
+        required: true
+      bcvk_version:
+        type: string
+        required: true
+      bcvk_sha256:
+        type: string
+        required: true
+      apt_debs:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  COSIGN_VERSION: ${{ inputs.cosign_version }}
+  BCVK_VERSION: ${{ inputs.bcvk_version }}
+  BCVK_SHA256: ${{ inputs.bcvk_sha256 }}
+  APT_DEBS: ${{ inputs.apt_debs }}
+
+jobs:
+  # 26.04, not 24.04: see publish-pipeline.yml's build job.
+  build:
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 90
+    outputs:
+      # The one-row inventory (root-evidence.sh): only the last step writes it.
+      roots: ${{ steps.roots.outputs.roots }}
+      changed: ${{ steps.roots.outputs.changed }}
+      # Whether any machine layer sits on this root.
+      layers: ${{ steps.composition.outputs.layers }}
+    env:
+      ROOT_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Registry names and root selection
+        id: composition
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INSTALLER_TAG: ${{ inputs.installer_tag }}
+          SNAPSHOTS: ${{ inputs.snapshots }}
+          LEGACY_DIGEST: ${{ inputs.legacy }}
+        run: |
+          echo "STARTED=$(date +%s)" >> "$GITHUB_ENV"
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
+          tag=$ROOT_TAG
+          bash .github/publication-tag.sh "$tag"
+          bash .github/publication-tag.sh "$INSTALLER_TAG"
+          if [ "$tag" = "$INSTALLER_TAG" ]; then
+            echo "::error::$tag is the installer root: its jobs are in publish-pipeline.yml"
+            exit 2
+          fi
+          cargo ilexctl info --publications > "$RUNNER_TEMP/publications"
+          shells=$(awk -F '\t' -v tag="$tag" '$1 == tag && $2 == "root" {print $5}' "$RUNNER_TEMP/publications")
+          test -n "$shells"
+          selection=$shells
+          if [ "$selection" = - ]; then selection=none; fi
+          echo "ILEX_SHELLS=$selection" >> "$GITHUB_ENV"
+          layers=false
+          if awk -F '\t' -v tag="$tag" '$2 == "layer" && $3 == tag {found = 1} END {exit !found}' "$RUNNER_TEMP/publications"; then
+            layers=true
+          fi
+          echo "layers=$layers" >> "$GITHUB_OUTPUT"
+          # `changed` needs skopeo before the VM stack is installed.
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+          snapshot=$(jq -er --arg tag "$tag" '.[$tag]' <<<"$SNAPSHOTS")
+          echo "snapshot=$snapshot" >> "$GITHUB_OUTPUT"
+          # Only this root's current digest (legacy latest while its tag is
+          # absent), for the compressed-blob reuse pull below.
+          digest=$snapshot
+          if [ "$digest" = - ]; then digest=$LEGACY_DIGEST; fi
+          printf '%s\t%s\n' "$tag" "$digest" > "$RUNNER_TEMP/root-pulls"
+          echo "ILEX_ROOT_PULLS=$RUNNER_TEMP/root-pulls" >> "$GITHUB_ENV"
+          # Resolve both floating inputs once. Their digests plus the selected
+          # source trees permit an early no-build skip.
+          podman pull --quiet quay.io/fedora/fedora-bootc:45
+          podman pull --quiet quay.io/fedora/fedora:45
+          reference=-
+          if [ "$snapshot" != - ]; then reference="$IMAGE_REPO@$snapshot"; fi
+          cargo ilexctl changed "$reference" --root "$tag" --inputs-only
+
+      - name: Disk
+        run: df -h / /mnt
+
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          github-cache: "true"
+
+      # In the background while the image builds: the VM stack for the
+      # ephemeral tier, and a pull of this root's published image (blob reuse
+      # at staging, as for the installer root). A run that changed nothing
+      # never waits for either; the end of the job stops them.
+      - name: apt's packages from the cache
+        id: debs
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ env.APT_DEBS }}
+          restore-keys: ${{ env.APT_DEBS }}
+
+      - name: VM stack and this root's published image (background)
+        run: nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
+
+      - name: Build the candidate image
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps
+        timeout-minutes: 40
+        run: cargo ilexctl build --tag "localhost/ilex:candidate.$ROOT_TAG" --no-pull
+
+      - name: Compare with the published image
+        id: changed
+        if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps
+        timeout-minutes: 10
+        run: |
+          reference=-
+          if [ "$SNAPSHOT" != - ]; then reference="$IMAGE_REPO@$SNAPSHOT"; fi
+          cargo ilexctl changed "$reference" --image "localhost/ilex:candidate.$ROOT_TAG"
+        env:
+          SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The image the tests run on and publication signs; a forced test of an
+      # unchanged image is rechunked too (see the installer root's job).
+      - name: Rechunk (reproducible layers)
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
+        timeout-minutes: 40
+        run: cargo ilexctl rechunk "localhost/ilex:candidate.$ROOT_TAG" --output "localhost/ilex:rechunked.$ROOT_TAG" --fingerprint "$FINGERPRINT"
+        env:
+          FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
+
+      - name: Wait for this root's published image
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
+        timeout-minutes: 15
+        run: .github/vm-prep.sh wait "root-pull.$ROOT_TAG"
+
+      # Unsigned, never the composition tag: a branch run stages too, but only
+      # main publishes. Staging freezes the local ID and checks the pushed
+      # config digest before reporting digest and fingerprint.
+      - name: Stage the candidate
+        id: stage
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
+        timeout-minutes: 30
+        run: |
+          image_id=$(podman image inspect --format '{{.Id}}' "localhost/ilex:rechunked.$ROOT_TAG")
+          image_id="sha256:${image_id#sha256:}"
+          stage_tag=$(bash .github/candidate-tag.sh "$ROOT_TAG")
+          cargo ilexctl publish "$image_id" --stage --as "$ROOT_TAG" \
+            --stage-tag "$stage_tag" --stage-snapshot "$SNAPSHOT"
+          echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
+
+      - name: Wait for the VM stack
+        id: stack
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
+        timeout-minutes: 15
+        run: |
+          .github/vm-prep.sh wait vm-stack
+          echo "debs=$APT_DEBS$(cat "$RUNNER_TEMP/apt-debs.sum")" >> "$GITHUB_OUTPUT"
+
+      # Only when apt downloaded packages the cache lacked.
+      - name: Keep apt's packages in the cache
+        if: steps.stack.outputs.debs != '' && steps.stack.outputs.debs != steps.debs.outputs.cache-matched-key
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ steps.stack.outputs.debs }}
+
+      - name: e2e tests (ephemeral)
+        if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
+        timeout-minutes: 40
+        env:
+          # Always the rechunked image: the one staged above.
+          ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
+        run: |
+          podman run --rm -i --network=none --entrypoint python3 "$ILEX_IMAGE" -I -S - < .github/check-filecaps.py
+          sg libvirt -c 'cargo ilexctl test ephemeral::'
+
+      # Last step: the row exists only when everything above succeeded, and
+      # the jobs below need this whole job to have succeeded.
+      - name: Record this root's evidence
+        id: roots
+        env:
+          TAG: ${{ env.ROOT_TAG }}
+          SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
+          CHANGED: ${{ steps.changed.outputs.changed || 'false' }}
+          DIGEST: ${{ steps.stage.outputs.digest }}
+          FINGERPRINT: ${{ steps.stage.outputs.fingerprint }}
+          IMAGE_ID: ${{ steps.stage.outputs.image_id }}
+        run: bash .github/root-evidence.sh
+
+      # The run's summary and annotations name the failed root; the jobs of
+      # every other root and of the installer root carry on.
+      - name: Report this root's failure
+        if: failure()
+        run: |
+          echo "::error title=Root $ROOT_TAG failed::build or test failure; nothing of $ROOT_TAG is signed or published, other roots are unaffected"
+          printf '### Root %s FAILED\n\nNothing of this root is signed or published in this run. Its layers are skipped; the installer root and the other roots are unaffected. Failed step: see this job.\n' "$ROOT_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  # Main only: a manual run dispatched from another branch builds, stages and
+  # tests, but never moves a published tag. Signs this root's staged digest, the
+  # one its ephemeral tier tested. No upgrade tier: the installer root alone
+  # feeds it. It has no signing credentials until the last step, and a
+  # failure of any other root cannot reach it.
+  publish:
+    needs: build
+    if: >-
+      needs.build.result == 'success' && needs.build.outputs.changed == 'true' &&
+      github.repository == 'Reidond/ilex' && inputs.main &&
+      contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 30
+    outputs:
+      roots: ${{ steps.publication.outputs.roots }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          version: v2.1.1
+          token: ""
+          pr-comment: "false"
+          github-cache: "true"
+
+      - name: Build publisher without signing credentials
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          bash .github/build-publisher.sh
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Publish and sign this root
+        id: publication
+        env:
+          ROOTS: ${{ needs.build.outputs.roots }}
+          ROOT_SCOPE: other
+          INSTALLER_TAG: ${{ inputs.installer_tag }}
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          bash .github/publish-roots.sh
+
+  # The machine layers that sit on this root: its exact tested/published
+  # digest plus one squashed layer each. No rechunk and no machine candidate
+  # tag. A branch only builds and tests. Each layer needs only this root's
+  # own build and publication, never another root's.
+  machines:
+    needs: [build, publish]
+    # !cancelled() permits the intentionally skipped publish job, but never a
+    # failed build/test job. On main a changed root MUST have been published.
+    # No PR/fork event can reach code with registry or signing credentials.
+    if: >-
+      !cancelled() && github.repository == 'Reidond/ilex' &&
+      contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
+      needs.build.result == 'success' && needs.build.outputs.layers == 'true'
+    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # v1: token is used for release discovery/PR comments, not the cache API.
+      # Pin both action code and binary version so neither needs a token input.
+      # The job token still has packages:write; this is not a per-step sandbox.
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          version: v2.1.1
+          token: ""
+          pr-comment: "false"
+          github-cache: "true"
+
+      - name: Publications (validated compositions, parents and selections)
+        run: cargo ilexctl info --publications > "$RUNNER_TEMP/publications"
+
+      - name: Plan changed machine compositions (registry metadata only)
+        id: plan
+        env:
+          ROOTS: ${{ needs.build.outputs.roots }}
+          ROOT_TAG: ${{ inputs.tag }}
+          SNAPSHOTS: ${{ inputs.snapshots }}
+          PUBLISHED_ROOTS: ${{ needs.publish.outputs.roots || '[]' }}
+          FORCE_TEST: ${{ inputs.test == true || inputs.apps == true }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
+          echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
+          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
+          bash .github/plan-machines.sh
+
+      - name: apt's packages from the cache
+        if: steps.plan.outputs.build == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ env.APT_DEBS }}
+          restore-keys: ${{ env.APT_DEBS }}
+
+      - name: Build and test changed machine layers
+        id: tested
+        if: steps.plan.outputs.build == 'true'
+        env:
+          FORCE_TEST: ${{ inputs.test == true || inputs.apps == true }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/test-machines.sh
+
+      - name: Build publisher without signing credentials
+        if: steps.tested.outputs.changed == 'true'
+        run: bash .github/build-publisher.sh
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: >-
+          success() && inputs.main &&
+          steps.tested.outputs.changed == 'true'
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      # Only this step receives the cosign key/password. Registry authorization
+      # is the job's packages:write token; action inputs are not a sandbox.
+      - name: Publish and sign tested machines (main only)
+        if: >-
+          success() && inputs.main &&
+          steps.tested.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: bash .github/publish-machines.sh

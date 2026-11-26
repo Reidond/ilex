@@ -7,22 +7,29 @@
 # with an unchanged generic image skips its rechunk and base tests; machines
 # still check their inputs and published base identity below.
 #
-# Three jobs start together, so the slow parts overlap on separate machines:
+# Every root of `info --publications` has its own jobs on its own runner, so the
+# slow parts overlap and a failing root cannot block another one:
 #
-# * build: build → changed → rechunk → stage the unsigned candidate in ghcr
-#   → the ephemeral tier;
+# * build: the installer root (:generic.gnome): build → changed → rechunk →
+#   stage the unsigned candidate in ghcr → the ephemeral tier (and the opt-in
+#   security/encrypted/apps tiers);
 # * upgrade: restores the upgrade tier's v1 (the published :generic.gnome), already
 #   installed to a disk, from the Actions cache (or installs it, ~14 minutes),
 #   waits for the build job to stage the candidate, pulls it by digest and
 #   runs the upgrade tier;
+# * other-roots: one publish-root.yml call per remaining root (`base`, a second
+#   desktop...), in parallel, never failing fast: that root's build, changed,
+#   rechunk, stage, ephemeral tier, then its own signing and its own layers;
 # * installer-due → iso: see below.
 #
-# Then publish signs the staged digest, the one both tiers tested, and moves
-# :generic.gnome to it; nothing is pushed twice. Main stages as
+# Then publish signs the installer root's staged digest, the one both tiers
+# tested, and moves :generic.gnome to it; nothing is pushed twice. Main stages as
 # `:candidate.<tag>` in the `publish` group. Other refs have their own groups
 # and staging tags.
-# Then machines builds/tests opted-in layers on that digest (or current
-# :generic.gnome by digest when unchanged); only main signs/publishes machine tags.
+# Then machines builds/tests the installer root's opted-in layers on that digest
+# (or current :generic.gnome by digest when unchanged); only main signs/publishes
+# machine tags. The installer-release job needs only build, upgrade, publish and
+# iso: no other root can hold it back.
 #
 # After a publish, the publish job starts this workflow again with `v1_disk`:
 # that run (the v1-disk job alone, in a concurrency group of its own, so
@@ -116,6 +123,14 @@ jobs:
       installer: ${{ steps.registry.outputs.installer }}
       compositions: ${{ steps.registry.outputs.compositions }}
       legacy: ${{ steps.registry.outputs.legacy }}
+      # The tags of every root except the installer's: a JSON array, one
+      # publish-root.yml call each.
+      others: ${{ steps.registry.outputs.others }}
+      # This file's pins for those calls (a call's `with` cannot read `env`).
+      cosign_version: ${{ env.COSIGN_VERSION }}
+      bcvk_version: ${{ env.BCVK_VERSION }}
+      bcvk_sha256: ${{ env.BCVK_SHA256 }}
+      apt_debs: ${{ env.APT_DEBS }}
     steps:
       - uses: actions/checkout@v7
       - name: Snapshot published composition digests
@@ -139,7 +154,13 @@ jobs:
           if jq -e 'any(.[]; . == "-")' <<<"$compositions" >/dev/null; then
             legacy=$(bash .github/publish-head.sh digest "$repo:latest")
           fi
-          printf 'installer=%s\ncompositions=%s\nlegacy=%s\n' "$installer" "$compositions" "$legacy" >> "$GITHUB_OUTPUT"
+          # `base` is always published, so this is never empty (an empty
+          # matrix would fail the workflow with an unrelated message).
+          others=$(awk -F '\t' -v tag="$installer" '$2 == "root" && $1 != tag {print $1}' "$RUNNER_TEMP/publications" |
+            jq -R -s -c 'split("\n") | map(select(length > 0))')
+          jq -e 'length > 0' <<<"$others" >/dev/null
+          echo "roots besides the installer's $installer: $others"
+          printf 'installer=%s\ncompositions=%s\nlegacy=%s\nothers=%s\n' "$installer" "$compositions" "$legacy" "$others" >> "$GITHUB_OUTPUT"
 
   build:
     # 26.04, not 24.04: its podman 5.7 / buildah 1.42 / skopeo 1.21 are close
@@ -150,9 +171,8 @@ jobs:
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: ${{ inputs.encrypted_install && 360 || 120 }}
     outputs:
-      changed: ${{ steps.roots.outputs.changed }}
       installer_changed: ${{ steps.changed.outputs.changed || 'false' }}
-      other_changed: ${{ steps.roots.outputs.other_changed }}
+      # The installer root's validated one-row inventory (root-evidence.sh).
       roots: ${{ steps.roots.outputs.roots }}
       # What `cargo ilexctl publish --stage --as` pushed for the installer root.
       digest: ${{ steps.stage.outputs.digest }}
@@ -195,9 +215,6 @@ jobs:
           echo "INSTALLER_TAG=$tag" >> "$GITHUB_ENV"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           cargo ilexctl info --publications > "$RUNNER_TEMP/publications"
-          awk -F '\t' -v tag="$tag" '$1 == tag' "$RUNNER_TEMP/publications" > "$RUNNER_TEMP/ordered-publications"
-          awk -F '\t' -v tag="$tag" '$1 != tag' "$RUNNER_TEMP/publications" >> "$RUNNER_TEMP/ordered-publications"
-          mv "$RUNNER_TEMP/ordered-publications" "$RUNNER_TEMP/publications"
           shells=$(awk -F '\t' -v tag="$tag" '$1 == tag && $2 == "root" {print $5}' "$RUNNER_TEMP/publications")
           test -n "$shells"
           echo "ILEX_SHELLS=$shells" >> "$GITHUB_ENV"
@@ -206,15 +223,14 @@ jobs:
           podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
           snapshot=$(jq -er --arg tag "$tag" '.[$tag]' <<<"$SNAPSHOTS")
           echo "snapshot=$snapshot" >> "$GITHUB_OUTPUT"
-          while IFS=$'\t' read -r root kind _; do
-            [ "$kind" = root ] || continue
-            digest=$(jq -er --arg tag "$root" '.[$tag]' <<<"$SNAPSHOTS")
-            if [ "$digest" = - ]; then digest=$LEGACY_DIGEST; fi
-            printf '%s\t%s\n' "$root" "$digest"
-          done < "$RUNNER_TEMP/publications" > "$RUNNER_TEMP/root-pulls"
+          # Only this root's current digest: the other roots pull their own on
+          # their own runners.
+          digest=$snapshot
+          if [ "$digest" = - ]; then digest=$LEGACY_DIGEST; fi
+          printf '%s\t%s\n' "$tag" "$digest" > "$RUNNER_TEMP/root-pulls"
           echo "ILEX_ROOT_PULLS=$RUNNER_TEMP/root-pulls" >> "$GITHUB_ENV"
-          # Resolve both floating inputs once for every root in this run. Their
-          # digests plus the selected source trees permit an early no-build skip.
+          # Resolve both floating inputs once for this root. Their digests plus
+          # the selected source trees permit an early no-build skip.
           podman pull --quiet quay.io/fedora/fedora-bootc:45
           podman pull --quiet quay.io/fedora/fedora:45
           reference=-
@@ -464,21 +480,20 @@ jobs:
         run: |
           echo "Installed-system Flatpak qualification (apps input): $APPS_RESULT" >> "$GITHUB_STEP_SUMMARY"
 
-      # Keep the installer staging step early: upgrade starts while other roots
-      # build/rechunk/boot. A job output is committed only after all tests pass.
-      - name: Build and test the other roots
+      # Last step: the installer root's inventory row exists only when every
+      # step above succeeded, and publish needs this whole job to have succeeded.
+      # The other roots have their own jobs (other-roots).
+      - name: Record the installer root's evidence
         id: roots
         if: ${{ !inputs.encrypted_install }}
         env:
-          SNAPSHOTS: ${{ needs.snapshot.outputs.compositions }}
-          INSTALLER_SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
-          INSTALLER_CHANGED: ${{ steps.changed.outputs.changed || 'false' }}
-          INSTALLER_DIGEST: ${{ steps.stage.outputs.digest }}
-          INSTALLER_FINGERPRINT: ${{ steps.stage.outputs.fingerprint }}
-          INSTALLER_IMAGE_ID: ${{ steps.stage.outputs.image_id }}
-          FORCE_TEST: ${{ inputs.test == true || inputs.apps == true }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/build-roots.sh
+          TAG: ${{ steps.composition.outputs.tag }}
+          SNAPSHOT: ${{ steps.composition.outputs.snapshot }}
+          CHANGED: ${{ steps.changed.outputs.changed || 'false' }}
+          DIGEST: ${{ steps.stage.outputs.digest }}
+          FINGERPRINT: ${{ steps.stage.outputs.fingerprint }}
+          IMAGE_ID: ${{ steps.stage.outputs.image_id }}
+        run: bash .github/root-evidence.sh
 
   # The upgrade tier on a runner of its own. Installing v1 to a disk takes ~14
   # minutes on a runner, most of the tier's time, so the v1-disk run installs
@@ -701,63 +716,48 @@ jobs:
           gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f v1_disk=true ||
             echo "::warning::could not start the v1-disk run; the next upgrade tier installs v1 itself"
 
-  # Other roots have their own signing job: a failed/slow base publication must
-  # never hold the installer's publication, v1-disk dispatch or ISO release.
-  # Both jobs still require the complete successful build/test inventory.
-  publish-other-roots:
-    needs: [build, upgrade]
+  # Every other root (`base`, a second desktop, ...) has a job chain of its own
+  # in publish-root.yml: its build/changed/rechunk/stage/ephemeral job, then its
+  # signing job, then its own layers. Calls run in parallel on separate runners
+  # and never fail fast: a failed root turns the run red, but the installer
+  # root's build, upgrade, publish, machines and installer-release (and every
+  # other root) do not depend on it. Nothing here needs the signing key until
+  # a call's publish job, and that needs that call's own build to have passed.
+  other-roots:
+    needs: snapshot
     if: >-
-      needs.build.result == 'success' && needs.upgrade.result == 'success' &&
-      needs.build.outputs.other_changed == 'true' &&
-      github.repository == 'Reidond/ilex' && inputs.main &&
-      contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name)
-    runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 30
-    outputs:
-      roots: ${{ steps.publication.outputs.roots }}
+      !cancelled() && !inputs.v1_disk && !inputs.encrypted_install &&
+      needs.snapshot.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.snapshot.outputs.others || '["base"]') }}
     permissions:
       contents: read
       packages: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
-        with:
-          version: v2.1.1
-          token: ""
-          pr-comment: "false"
-          github-cache: "true"
-
-      - name: Build publisher without signing credentials
-        env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
-          bash .github/build-publisher.sh
-          podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
-
-      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
-        with:
-          cosign-release: ${{ env.COSIGN_VERSION }}
-
-      - name: Publish and sign other roots
-        id: publication
-        env:
-          ROOTS: ${{ needs.build.outputs.roots }}
-          ROOT_SCOPE: other
-          INSTALLER_TAG: ${{ needs.build.outputs.tag }}
-          GH_TOKEN: ${{ github.token }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          export IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
-          bash .github/publish-roots.sh
+    uses: ./.github/workflows/publish-root.yml
+    with:
+      tag: ${{ matrix.tag }}
+      installer_tag: ${{ needs.snapshot.outputs.installer }}
+      snapshots: ${{ needs.snapshot.outputs.compositions }}
+      legacy: ${{ needs.snapshot.outputs.legacy }}
+      main: ${{ inputs.main }}
+      test: ${{ inputs.test }}
+      apps: ${{ inputs.apps }}
+      cosign_version: ${{ needs.snapshot.outputs.cosign_version }}
+      bcvk_version: ${{ needs.snapshot.outputs.bcvk_version }}
+      bcvk_sha256: ${{ needs.snapshot.outputs.bcvk_sha256 }}
+      apt_debs: ${{ needs.snapshot.outputs.apt_debs }}
+    secrets:
+      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
   # The exact tested/published generic base plus one squashed machine layer.
   # No rechunk and no machine candidate tag. A branch only builds and tests.
+  # Only the installer root's layers: every other root's layers run in its own
+  # publish-root.yml call, after that root's own publication.
   machines:
-    needs: [snapshot, build, upgrade, publish, publish-other-roots]
+    needs: [snapshot, build, upgrade, publish]
     # !cancelled() permits the intentionally skipped publish job, but never a
     # failed base/test job. On main a changed base MUST have been published.
     # No PR/fork event can reach code with registry or signing credentials.
@@ -792,9 +792,9 @@ jobs:
         id: plan
         env:
           ROOTS: ${{ needs.build.outputs.roots }}
+          ROOT_TAG: ${{ needs.build.outputs.tag }}
           SNAPSHOTS: ${{ needs.snapshot.outputs.compositions }}
-          PUBLISHED_INSTALLER_ROOTS: ${{ needs.publish.outputs.roots || '[]' }}
-          PUBLISHED_OTHER_ROOTS: ${{ needs.publish-other-roots.outputs.roots || '[]' }}
+          PUBLISHED_ROOTS: ${{ needs.publish.outputs.roots || '[]' }}
           FORCE_TEST: ${{ inputs.test == true || inputs.apps == true }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -802,9 +802,6 @@ jobs:
           echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y skopeo; }
           podman login --username "$GITHUB_ACTOR" --password-stdin ghcr.io <<<"$REGISTRY_TOKEN"
-          export PUBLISHED_ROOTS
-          PUBLISHED_ROOTS=$(jq -cs 'add' <<<"$PUBLISHED_INSTALLER_ROOTS
-          $PUBLISHED_OTHER_ROOTS")
           bash .github/plan-machines.sh
 
       - name: apt's packages from the cache

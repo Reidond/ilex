@@ -1,12 +1,16 @@
 #!/bin/bash
 # Each layer resolves only its own parent's successful test/publication row.
+# One job plans one root's layers (ROOT_TAG, with ROOTS holding that root's
+# inventory row): a layer of any other root belongs to that root's own job.
 set -euo pipefail
+bash .github/publication-tag.sh "${ROOT_TAG:?root composition tag required}"
 python3 -I .github/root-table.py <<<"$ROOTS" > "$RUNNER_TEMP/root-rows"
 : > "$RUNNER_TEMP/pending-machines"
 while IFS=$'\t' read -r tag kind parent machine shells; do
     bash .github/publication-tag.sh "$tag"
     [ "$kind" = layer ] || continue
     bash .github/publication-tag.sh "$parent"
+    [ "$parent" = "$ROOT_TAG" ] || continue
     row=$(awk -F '\t' -v parent="$parent" '$1 == parent' "$RUNNER_TEMP/root-rows")
     [ -n "$row" ] || { echo "::error::no tested root row for $parent"; exit 2; }
     IFS=$'\t' read -r _ snapshot BASE_CHANGED STAGED _ _ <<<"$row"
