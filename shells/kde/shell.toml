@@ -23,9 +23,9 @@ install = [
     "dolphin", "konsole", "spectacle", "ark",
     # Software centre with the Flatpak backend, and Flatpak permissions.
     "plasma-discover", "plasma-discover-flatpak", "flatpak-kcm",
-    # Look: Breeze style, icons, and the GTK side of it.
-    "plasma-breeze", "breeze-icon-theme", "xdg-desktop-portal-kde",
-    "kde-gtk-config", "breeze-gtk",
+    # Look: Breeze style and icons; the GTK 3 and GTK 4 Breeze themes (breeze-gtk),
+    # which the KDE-only sync in rootfs/ selects through the GTK settings portal.
+    "plasma-breeze", "breeze-icon-theme", "xdg-desktop-portal-kde", "breeze-gtk",
     # Public profile settings confine the session's dconf writer.
     "bubblewrap",
 ]
@@ -36,6 +36,13 @@ exclude = [
     # bootc owns OS updates: no Discover backend may manage the OS itself.
     "plasma-discover-packagekit", "plasma-discover-rpm-ostree",
     "plasma-discover-offline-updates",
+    # Its notifier would announce system Flatpak updates, which only root
+    # (ilexctl apps) may apply here.
+    "plasma-discover-notifier",
+    # It writes the GTK settings (settings.ini, gtkrc, GSettings) into the shared
+    # home that every desktop of that user reads; the shell mirrors Plasma's look
+    # into a KDE-only database instead (see rootfs/usr/libexec/ilex/kde-gtk-sync).
+    "kde-gtk-config",
 ]
 
 [apps]
@@ -53,6 +60,20 @@ flatpak = [
 # Host integrations for the Flatpaks above: Dolphin's thumbnails for what Okular,
 # Gwenview and Haruna open, and Flatpak's desktop-database triggers.
 rpm = ["kdegraphics-thumbnailers", "ffmpegthumbs", "desktop-file-utils", "xdg-utils"]
+
+# The GTK 3 themes sandboxed GTK 3 applications resolve in Plasma: the portal's
+# gtk-theme names Breeze or Breeze-Dark and GTK 3 cannot take a dark variant of
+# one theme from the portal. Breeze-Dark is end of life on Flathub ("replaced by
+# org.gtk.Gtk3theme.Breeze", whose dark variant needs a gtk-3.0 file shared with
+# every desktop); it still installs, its palette is Plasma 5's. Libadwaita and
+# GTK 4 applications need neither.
+[[apps.flatpak-extension]]
+id = "org.gtk.Gtk3theme.Breeze"
+branch = "3.22"
+
+[[apps.flatpak-extension]]
+id = "org.gtk.Gtk3theme.Breeze-Dark"
+branch = "3.22"
 
 [session]
 # The session file in /usr/share/wayland-sessions, without .desktop.

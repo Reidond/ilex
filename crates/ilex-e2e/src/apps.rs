@@ -141,7 +141,7 @@ import configparser,json,pathlib,subprocess
 state=json.load(open('/var/lib/ilex/apps/state.json'))
 image=json.load(open('/usr/share/ilex/image.json'))
 machine=json.load(open('/usr/share/ilex/machine.json'))
-wanted={app for entry in [*image['shells'],machine] for app in entry.get('apps',{}).get('flatpak',[])}
+wanted={app for entry in [*image['shells'],machine] for app in [*entry.get('apps',{}).get('flatpak',[]),*(e['id'] for e in entry.get('apps',{}).get('flatpak-extension',[]))]}
 assert {a['id'] for a in state['apps']}==wanted and wanted,state
 marker=pathlib.Path('/var/tmp/ilex-e2e-apps-installed')
 assert all(a['status'] in ('installed','declined') for a in state['apps']),state
@@ -161,7 +161,7 @@ for app in state['apps']:
         assert app['origin']=='flathub',app
         assert subprocess.check_output(['flatpak','info','--system','--show-origin',app['id']],text=True).strip()=='flathub',app
         assert subprocess.check_output(['flatpak','info','--system','--show-ref',app['id']],text=True).strip()==app['reference'],app
-        assert pathlib.Path('/var/lib/flatpak/exports/share/applications',app['id']+'.desktop').exists(),app
+        assert app['reference'].startswith('runtime/') or pathlib.Path('/var/lib/flatpak/exports/share/applications',app['id']+'.desktop').exists(),app
 marker.touch()
 print(json.dumps(state,indent=2))
 PY"#)?;

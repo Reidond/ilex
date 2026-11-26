@@ -15,6 +15,7 @@ import tomllib
 from image_tree import Tree, json_bytes, parts
 
 PROFILE_INPUT_LIMIT = 65536  # Each public TOML manifest and initial dotfile.
+APP_ID = r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*){2,}"
 
 
 def fail(path, key, message):
@@ -129,21 +130,41 @@ def shell(path, is_default):
 
 
 def apps(path, data):
-    value = table(path, "apps", data.setdefault("apps", {}), {"flatpak", "rpm"})
+    value = table(path, "apps", data.setdefault("apps", {}), {"flatpak", "flatpak-extension", "rpm"})
     ids = strings(path, "apps.flatpak", value.setdefault("flatpak", []))
     for app_id in ids:
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*){2,}", app_id):
+        if not re.fullmatch(APP_ID, app_id):
             fail(path, "apps.flatpak", "must contain Flatpak application IDs")
     if len(ids) != len(set(ids)):
         fail(path, "apps.flatpak", "must not contain duplicates")
+    # Runtime extensions (themes, codecs) are not applications: they live on a
+    # branch of their own, so each names its branch. Flathub and the system
+    # installation are fixed, exactly as for applications.
+    extensions = value.setdefault("flatpak-extension", [])
+    if not isinstance(extensions, list):
+        fail(path, "apps.flatpak-extension", "must be an array of tables")
+    seen = set(ids)
+    for index, extension in enumerate(extensions):
+        key = f"apps.flatpak-extension[{index}]"
+        table(path, key, extension, {"id", "branch"})
+        extension_id = string(path, f"{key}.id", extension.get("id"))
+        branch = string(path, f"{key}.branch", extension.get("branch"))
+        if not re.fullmatch(APP_ID, extension_id):
+            fail(path, f"{key}.id", "must be a Flatpak extension ID")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", branch):
+            fail(path, f"{key}.branch", "must be a Flatpak branch name")
+        if extension_id in seen:
+            fail(path, f"{key}.id", "duplicates another application or extension")
+        seen.add(extension_id)
     packages(path, "apps.rpm", {"install": value.setdefault("rpm", [])})
     return value
 
 
-def preinstall(generated, kind, value, ids):
-    if ids:
+def preinstall(generated, kind, value, ids, extensions=()):
+    if ids or extensions:
         text = f"# Generated from {kind}/{value}. Do not edit.\n"
         text += "".join(f"[Flatpak Preinstall {app_id}]\nBranch=stable\n\n" for app_id in ids)
+        text += "".join(f"[Flatpak Preinstall {e['id']}]\nBranch={e['branch']}\nIsRuntime=true\n\n" for e in extensions)
         generated.write(f"usr/share/ilex/apps/{kind}-{value}.preinstall", text.encode())
 
 
@@ -205,12 +226,12 @@ def machine(args):
         overlays.append({"name": label, "directory": directory})
     with Tree(out / "install/generated", "generated files", create=True) as generated:
         generated.write("usr/share/ilex/machine.json", json_bytes({"schema": 1, **data}))
-        preinstall(generated, "machine", value, app_set["flatpak"])
+        preinstall(generated, "machine", value, app_set["flatpak"], app_set["flatpak-extension"])
     with Tree(out / "install", "installation staging", create=True) as staging:
         staging.write("overlays.json", json_bytes(overlays))
         staging.write("install-files.py", Path(__file__).with_name("image_tree.py").read_bytes())
     arguments = (package_set.get("install", []) + app_set["rpm"] +
-                 (["flatpak"] if app_set["flatpak"] else []) +
+                 (["flatpak"] if app_set["flatpak"] or app_set["flatpak-extension"] else []) +
                  [f"--exclude={p}" for p in package_set.get("exclude", [])])
     with Tree(out / "build", "package staging", create=True) as build:
         build.write("packages.args", "".join(p + "\n" for p in arguments).encode("utf-8"))
@@ -322,7 +343,7 @@ def user_profiles(ctx, names, generated=None):
             for app in requests:
                 table(path, "apps.flatpaks", app, {"id", "remote"})
                 app_id = string(path, "apps.flatpaks.id", app.get("id"))
-                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*){2,}", app_id):
+                if not re.fullmatch(APP_ID, app_id):
                     fail(path, "apps.flatpaks.id", "must be a Flatpak application ID")
                 if app.get("remote") != "flathub" or app_id in seen_apps:
                     fail(path, "apps.flatpaks", "requires remote flathub and unique application IDs")
@@ -435,7 +456,7 @@ def image(args):
     with Tree(out / "install/generated", "generated files", create=True) as generated:
         user_profiles(ctx, selected(path, "users", data.get("users", [])), generated)
         for manifest in manifests:
-            preinstall(generated, "shell", manifest["name"], manifest["apps"]["flatpak"])
+            preinstall(generated, "shell", manifest["name"], manifest["apps"]["flatpak"], manifest["apps"]["flatpak-extension"])
         generated.write("usr/share/ilex/image.json", json_bytes({
             "schema": 1, "shells": manifests, "default-shell": shell_default,
             "packages": base_packages, "shell-packages": shell_packages,

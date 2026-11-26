@@ -145,7 +145,7 @@ for f in /etc/gtk-2.0/gtkrc /etc/gtk-3.0/settings.ini /etc/gtk-4.0/settings.ini 
          /etc/xdg-desktop-portal/portals.conf /usr/share/xdg-desktop-portal/portals.conf; do
     test ! -e "$f" || { echo "global default $f"; exit 1; }
 done
-if grep -rIls -E '(^|[[:space:]])(export[[:space:]]+)?(GTK_THEME|GTK2_RC_FILES|DCONF_PROFILE|QT_QPA_PLATFORMTHEME)=' \
+if grep -rIls -E '(^|[[:space:]])(export[[:space:]]+)?(GTK_THEME|GTK2_RC_FILES|GTK_USE_PORTAL|DCONF_PROFILE|QT_QPA_PLATFORMTHEME)=' \
     /etc/environment /etc/environment.d /usr/lib/environment.d /etc/profile.d \
     /usr/lib/systemd/user.conf.d /etc/systemd/user.conf.d /usr/lib/systemd/user-environment-generators 2>/dev/null; then
     echo "a global environment default sets a toolkit theme"; exit 1
@@ -160,45 +160,36 @@ done
     if !selection.shells.iter().any(|s| s == "kde") {
         return Ok(());
     }
-    // The KDE shell's GTK pieces are all there.
-    vm.ssh(
-        r#"set -eu
-grep -qx 'UseIn=KDE' /usr/share/xdg-desktop-portal/portals/kde.portal
-grep -q 'org.freedesktop.impl.portal.Settings' /usr/share/xdg-desktop-portal/portals/kde.portal
-grep -qx 'org.freedesktop.impl.portal.Settings=kde;gtk;' /usr/share/xdg-desktop-portal/kde-portals.conf
-test -f /usr/share/themes/Breeze/gtk-3.0/gtk.css -a -f /usr/share/themes/Breeze/gtk-4.0/gtk.css
-test -f /usr/lib64/qt6/plugins/kf6/kded/gtkconfig.so
-test -f /usr/lib64/gtk-3.0/modules/libcolorreload-gtk-module.so
-"#,
-    )?
-    .ok("KDE shell GTK integration files")?;
-    // The Plasma-only defaults: the env script is sourced by startplasma only,
-    // the autostart is KDE-only, and the dconf profile resolves and is empty.
-    vm.ssh(
-        r#"set -eu
-grep -qx 'export DCONF_PROFILE=ilex-kde' /etc/xdg/plasma-workspace/env/50-ilex-kde.sh
-test "$(cat /usr/share/dconf/profile/ilex-kde)" = user-db:kde
-grep -qx 'OnlyShowIn=KDE;' /etc/xdg/autostart/ilex-kde-gtk-theme.desktop
-grep -qx 'Exec=/usr/libexec/ilex/kde-gtk-theme' /etc/xdg/autostart/ilex-kde-gtk-theme.desktop
-test -x /usr/libexec/ilex/kde-gtk-theme
-sh -n /usr/libexec/ilex/kde-gtk-theme
-out=$(DCONF_PROFILE=ilex-kde dconf read /org/gnome/desktop/interface/gtk-theme 2>&1 || true)
-test -z "$out" || { echo "dconf profile ilex-kde: $out"; exit 1; }
-"#,
-    )?
-    .ok("KDE shell Plasma-only defaults")?;
-    println!(
-        "     KDE shell: GTK integration, KDE dconf profile and Plasma-only autostart present"
-    );
-    // Everything the shell's overlay ships is scoped to Plasma.
+    // The KDE shell's GTK look: its pieces, the portal's choice per start, the
+    // sync in a real user session, and nothing left in a shared place.
+    let script = ilex_devkit::qemu::base64(include_bytes!("shell-themes-guest.sh"));
+    let out = vm
+        .ssh(&format!(
+            "printf %s {script} | base64 -d > /run/shell-themes-check.sh && bash /run/shell-themes-check.sh"
+        ))?
+        .ok("KDE shell GTK look")?;
+    for line in out.stdout.lines().filter(|l| l.starts_with("ok:")) {
+        println!("     {line}");
+    }
+    // Everything the shell's overlay ships is scoped to Plasma, except the one
+    // portal drop-in, whose wrapper decides at start (checked above).
     let overlay = common::workspace()?.root.join("shells/kde/rootfs");
     let mut seen = Vec::new();
     kde_overlay_paths(&overlay, &overlay, &mut seen)?;
     for path in &seen {
         let scoped = path.starts_with("etc/xdg/plasma-workspace/env/")
-            || path == "etc/xdg/autostart/ilex-kde-gtk-theme.desktop"
-            || path == "usr/libexec/ilex/kde-gtk-theme"
-            || path == "usr/share/dconf/profile/ilex-kde";
+            || path.starts_with("etc/xdg/plasma-workspace/shutdown/")
+            || path.starts_with("usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-")
+            || [
+                "usr/lib/systemd/user/ilex-kde-gtk.service",
+                "usr/lib/systemd/user/ilex-kde-flathub.service",
+                "usr/lib/systemd/user/xdg-desktop-portal-gtk.service.d/50-ilex-kde.conf",
+                "usr/libexec/ilex/kde-gtk-sync",
+                "usr/libexec/ilex/kde-flathub",
+                "usr/libexec/ilex/portal-gtk",
+                "usr/share/dconf/profile/ilex-kde",
+            ]
+            .contains(&path.as_str());
         ensure(scoped, || {
             format!("KDE overlay path {path} is not scoped to a Plasma session")
         })?;
@@ -700,7 +691,7 @@ fn app_manifest(manifest: &toml::Table) -> Result<Value> {
     let mut value = serde_json::to_value(manifest)?;
     let apps = value.as_object_mut().context("manifest must be a table")?
         .entry("apps").or_insert_with(|| serde_json::json!({}));
-    for key in ["flatpak", "rpm"] {
+    for key in ["flatpak", "flatpak-extension", "rpm"] {
         apps.as_object_mut().context("apps must be a table")?
             .entry(key).or_insert_with(|| serde_json::json!([]));
     }

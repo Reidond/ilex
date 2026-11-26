@@ -435,6 +435,13 @@ def confined(home, directories, command, network=False, runtime=None, replace=Fa
         return run(*arguments, pass_fds=descriptors, timeout=timeout)
 
 
+def dconf_databases(home):
+    """Symlinked or foreign databases are conflicts: the user's own, and the
+    KDE shell's, where Plasma's GTK look lives (profile ilex-kde)."""
+    for database in ("user", "kde"):
+        home.read(f".config/dconf/{database}")
+
+
 def dconf_service():
     """The actual session writer, confined for homed users, with normal IPC."""
     account = pwd.getpwuid(os.getuid())
@@ -449,7 +456,7 @@ def dconf_service():
     home = active_home()
     runtime = Home(f"/run/user/{home.owner}", home.owner)
     try:
-        home.read(".config/dconf/user")
+        dconf_databases(home)
         confined(home, [".config/dconf"], ["/usr/libexec/dconf-service"], runtime=runtime, replace=True)
     finally:
         os.close(runtime.fd)
@@ -565,7 +572,7 @@ def settings_worker(data, previous, conflicts, environment):
 
 
 def writer_identity(home, environment, start=False):
-    home.read(".config/dconf/user")
+    dconf_databases(home)
     def unit_value(property_name):
         return run("/usr/bin/systemctl", "--user", "show", "dconf.service", "--value",
                    "--property=" + property_name, env=environment)

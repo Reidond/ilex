@@ -1,0 +1,13 @@
+#!/bin/sh
+# Discover lists and installs only what a remote of an installation offers, and
+# installs into the installation that remote belongs to. The system installation
+# is root's (ilexctl apps; polkit refuses everyone else, and its Flathub remote
+# is not enumerated), so a user without a remote of their own sees "no Flatpak
+# sources" and an "Add Flathub" that is refused. Give the user the remote GNOME
+# Software and `ilexctl profile apply --install-apps` use too, from the committed
+# trust file: offline, no catalogue is fetched until Discover is opened.
+set -eu
+flatpak remote-add --user --if-not-exists flathub /usr/share/flatpak/remotes.d/flathub.flatpakrepo
+state=${XDG_STATE_HOME:-$HOME/.local/state}/ilex
+mkdir -p "$state"
+: >"$state/kde-flathub-remote"

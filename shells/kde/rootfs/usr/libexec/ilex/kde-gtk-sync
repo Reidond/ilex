@@ -1,0 +1,75 @@
+#!/bin/bash
+# Mirror Plasma's look into the GSettings keys GTK applications read through the
+# settings portal, in the KDE-only dconf database (profile ilex-kde), never in a
+# shared file or database.
+#
+#   kde-gtk-sync          once
+#   kde-gtk-sync watch    once, then again after each change Plasma announces
+#                         (ilex-kde-gtk.service, which only a Plasma session runs)
+set -eu
+export DCONF_PROFILE=ilex-kde
+
+read_key() { # file group key default
+    kreadconfig6 --file "$1" --group "$2" --key "$3" --default "$4"
+}
+# A value that goes into a GVariant text: names and numbers only.
+safe() { # value fallback
+    case $1 in
+    '' | *[!A-Za-z0-9\ ._+-]*) printf '%s' "$2" ;;
+    *) printf '%s' "$1" ;;
+    esac
+}
+# "Noto Sans,10,-1,5,..." (a Qt font description) -> "Noto Sans 10".
+font() { # description fallback
+    local family=${1%%,*} rest=${1#*,}
+    local size=${rest%%,*}
+    case $size in '' | *[!0-9.]*) size=10 ;; esac
+    safe "$family $size" "$2"
+}
+
+sync() {
+    local red green blue theme scheme icons cursor size ui fixed keys
+    IFS=, read -r red green blue <<<"$(read_key kdeglobals Colors:Window BackgroundNormal 239,240,241)"
+    case $red$green$blue in *[!0-9]* | '') red=239 green=240 blue=241 ;; esac
+    # Breeze and Breeze-Dark are the GTK 3 themes (Flatpak: the two
+    # org.gtk.Gtk3theme.Breeze* extensions), picked by the window background.
+    if [ $((red * 299 + green * 587 + blue * 114)) -lt 128000 ]; then
+        theme=Breeze-Dark scheme=prefer-dark
+    else
+        theme=Breeze scheme=prefer-light
+    fi
+    icons=$(safe "$(read_key kdeglobals Icons Theme breeze)" breeze)
+    cursor=$(safe "$(read_key kcminputrc Mouse cursorTheme breeze_cursors)" breeze_cursors)
+    size=$(read_key kcminputrc Mouse cursorSize 24)
+    case $size in '' | *[!0-9]*) size=24 ;; esac
+    ui=$(font "$(read_key kdeglobals General font 'Noto Sans,10')" 'Noto Sans 10')
+    fixed=$(font "$(read_key kdeglobals General fixed 'Noto Sans Mono,10')" 'Noto Sans Mono 10')
+    keys="[/]
+color-scheme='$scheme'
+cursor-size=$size
+cursor-theme='$cursor'
+document-font-name='$ui'
+font-name='$ui'
+gtk-theme='$theme'
+icon-theme='$icons'
+monospace-font-name='$fixed'"
+    # dconf dump lists the keys sorted, as above; skip an unchanged rewrite.
+    [ "$(dconf dump /org/gnome/desktop/interface/)" = "$keys" ] ||
+        printf '%s\n' "$keys" | dconf load /org/gnome/desktop/interface/
+}
+
+command -v kreadconfig6 >/dev/null || exit 0
+if [ "${1:-}" != watch ]; then
+    sync
+    exit
+fi
+# Subscribe first, so a change during the first sync is not missed. Plasma
+# announces a change several times in a row: settle for half a second.
+exec 3< <(busctl --user --json=short monitor \
+    --match "type=signal,interface=org.kde.KGlobalSettings,member=notifyChange" \
+    --match "type=signal,interface=org.freedesktop.portal.Settings,member=SettingChanged")
+sync
+while read -r -u 3 _; do
+    while read -r -u 3 -t 0.5 _; do :; done
+    sync
+done
