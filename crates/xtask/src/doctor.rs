@@ -381,9 +381,10 @@ fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
     );
     result["stale_claim_release_and_reassignment"] = true.into();
     result["concurrent_main_claims_have_one_owner"] = true.into();
-    // Containerfile parser, closure walk and recorded-closure fixtures; each
-    // refusal is an expected failure, so a regression here is a failed check.
-    result["fingerprint_fixtures"] = ilex_devkit::fingerprint::self_check()?;
+    // Containerfile guard, declaration, closure walk and recorded-closure
+    // fixtures; each refusal is an expected failure, so a regression here is
+    // a failed check.
+    result["fingerprint_fixtures"] = ilex_devkit::fingerprint::self_check(ws)?;
     // Ensure the source checkout remains readable; no source mutation above.
     let _ = git::head_sha(&ws.root)?;
     fs::remove_dir_all(&dir)?;

@@ -1,0 +1,18 @@
+# The Rust packages the root image builds, and how: the one list that
+# build/build-image-crates.py (the Containerfile's builder step) builds and that
+# the image fingerprint (ilex_tooling_linux::fingerprint) derives its crate
+# closure from. Add a package or a flag here and nowhere else; the Containerfile
+# does not run the Rust toolchain itself, and `ilexctl doctor --self-check`
+# refuses one that does.
+#
+# Each [[build]] is one `cargo build --release --locked`: `packages` are its
+# `-p` arguments, `no-default-features` adds `--no-default-features`. Nothing
+# else is accepted: an unknown key or a package name that is not a plain name
+# is an error in the build and in the fingerprint.
+
+[[build]]
+packages = ["ilexctl"]
+no-default-features = true
+
+[[build]]
+packages = ["drupe", "ilex-enroll"]
