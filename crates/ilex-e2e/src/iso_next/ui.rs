@@ -463,11 +463,12 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     wait_page(vm, &ctl, artifacts, "account")?;
     ctl.save_screenshot(&artifacts.join("next-account-empty.png"))?;
 
-    // The name has the focus; Tab moves down the fields. A password the
-    // layout types the same way in every layout.
+    // The name has the focus; Tab moves down the fields. A password row has
+    // two stops: its text and the button that shows what was typed.
     ctl.type_text("ilexmaint")?;
     ctl.key("Tab")?;
     ctl.type_text("correct horse battery")?;
+    ctl.key("Tab")?;
     ctl.key("Tab")?;
     ctl.type_text("correct horse battery")?;
     std::thread::sleep(Duration::from_secs(1));
