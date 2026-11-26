@@ -138,10 +138,11 @@ gtk-theme='Breeze'
 icon-theme='breeze'
 monospace-font-name='Noto Sans Mono 10'"
 
-# Nothing a desktop of the same home reads: no key in the user's own database,
-# no GTK settings file.
-[ -z "$(as_user dconf dump /)" ] || fail "the user database holds keys:
-$(as_user dconf dump /)"
+# Nothing a desktop of the same home reads: no interface key in the user's own
+# database (other keys, such as the login screen's, are not Plasma's), no GTK
+# settings file.
+[ -z "$(as_user dconf dump /org/gnome/desktop/interface/)" ] || fail "the user database holds interface keys:
+$(as_user dconf dump /org/gnome/desktop/interface/)"
 for path in .config/gtk-3.0 .config/gtk-4.0 .gtkrc-2.0 .config/xsettingsd; do
     [ ! -e "$home/$path" ] || fail "$home/$path exists"
 done
