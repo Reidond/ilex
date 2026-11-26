@@ -2624,24 +2624,7 @@ the Windows paths of this change: no Windows host was available.
   Every package without a registry or git source, workspace member or `path =`
   dependency, is hashed by its directory; one outside the checkout, or at its
   root, fails the fingerprint. Registry and git packages are covered by
-  `Cargo.lock`.
-  **The Containerfile parser fails closed.** It joins `\` continuations, drops
-  comments, splits shell lines into simple commands and understands `RUN --mount=…`, `&&`/`;`/`|` chains, `if`/`then`/`do` words, `NAME=value`
-  prefixes (a `CARGO_*` one other than `CARGO_HOME`, `CARGO_TARGET_DIR`,
-  `CARGO_INCREMENTAL`, `CARGO_TERM_COLOR` is refused), `cargo +toolchain`,
-  `cargo build`/`b` with `-p X`, `-p=X`, `-pX`, `--package X|=X`, `-F`/
-  `--features`/`-Ffeat` (widening), `--all-features`, `--no-default-features`
-  and a short list of flags that cannot change the package set. Anything else
-  that names `cargo`, `rustc`, `rustup` or `rustdoc` in a shell command (other
-  than a package manager installing the `cargo` package) is an error naming the
-  line: `cargo install|rustc|test|run|…`, an unknown flag, a positional
-  argument, `--target`, `--manifest-path`, `--workspace`, a variable, quote or
-  glob in the arguments, `sh -c '…'`, `xargs cargo …`, `nice cargo …`. A `RUN`
-  that hands the build to a script is invisible to it (scripts under `build/`
-  are hashed whole, not parsed). `ilexctl doctor --self-check` runs 35 parser
-  fixtures (4 accepted, 31 refused), the closure fixtures (a path dependency
-  in the checkout, one outside, one at the root, registry and git packages, a
-  dev edge) and the recorded-record fixtures; a regression is a failed check. Today that is `ilexctl` (built
+  `Cargo.lock`. Today that is `ilexctl` (built
   with `--no-default-features`), `ilex-agent`, `ilex-enroll` and `drupe`; the
   installer, the e2e harness, `xtask`, the devkit, the vmctl and the tooling
   crates are not inputs, so editing them no longer rebuilds, re-signs and
@@ -2658,6 +2641,24 @@ the Windows paths of this change: no Windows host was available.
   make that ISO due the same way; `installer/next` and the new crate do not.
   The first main run after this change rebuilds every root and the ISO once
   (the input set itself changed).
+  **The Containerfile parser fails closed.** It joins `\` continuations, drops
+  comments, splits shell lines into simple commands and understands
+  `RUN --mount=…`, `&&`/`;`/`|` chains, `if`/`then`/`do` words, `NAME=value`
+  prefixes (a `CARGO_*` one other than `CARGO_HOME`, `CARGO_TARGET_DIR`,
+  `CARGO_INCREMENTAL`, `CARGO_TERM_COLOR` is refused), `cargo +toolchain`,
+  `cargo build`/`b` with `-p X`, `-p=X`, `-pX`, `--package X|=X`, `-F`/
+  `--features`/`-Ffeat` (widening), `--all-features`, `--no-default-features`
+  and a short list of flags that cannot change the package set. Anything else
+  that names `cargo`, `rustc`, `rustup` or `rustdoc` in a shell command (other
+  than a package manager installing the `cargo` package) is an error naming the
+  line: `cargo install|rustc|test|run|…`, an unknown flag, a positional
+  argument, `--target`, `--manifest-path`, `--workspace`, a variable, quote or
+  glob in the arguments, `sh -c '…'`, `xargs cargo …`, `nice cargo …`. A `RUN`
+  that hands the build to a script is invisible to it (scripts under `build/`
+  are hashed whole, not parsed). `ilexctl doctor --self-check` runs 35 parser
+  fixtures (4 accepted, 31 refused), the closure fixtures (a path dependency
+  in the checkout, one outside, one at the root, registry and git packages, a
+  dev edge) and the recorded-closure fixtures; a regression is a failed check.
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
   GNOME edition). After the review fixes (2026-11-26) the ISO is 1,494,781,952
   bytes (1.39 GiB): 438 MiB under the Anaconda network ISO's 1.82 GiB and 0.61
