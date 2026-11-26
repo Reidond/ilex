@@ -39,7 +39,10 @@
 //!
 //! * `iso::next_unattended`: an installation with no interface from an
 //!   `ILEX-ANSWERS` volume, then the installed disk booted and checked (see
-//!   `iso_next/unattended.rs`).
+//!   `iso_next/unattended.rs`); `iso::next_unattended_fat` reads the answers
+//!   from a FAT stick labelled `ILEXANSWERS`, and `iso::next_unattended_late`
+//!   plugs a stick in after the interface is up and requires that nothing
+//!   changes.
 //! * `iso::next_helper_usb` / `iso::next_helper_cdrom`: the root helper on the
 //!   real ISO, written to a USB stick or attached as an optical drive, beside
 //!   three blank disks (see `iso_next/helper.rs`): the boot medium is
@@ -116,6 +119,8 @@ pub fn trials() -> Vec<Trial> {
             helper::run(helper::Medium::Cdrom)
         }),
         trial("iso::next_unattended", unattended::run),
+        trial("iso::next_unattended_fat", unattended::run_fat),
+        trial("iso::next_unattended_late", unattended::run_late),
     ]
 }
 
@@ -576,9 +581,10 @@ fn diagnostics(vm: &mut Vm, artifacts: &Path, name: &str) {
     // lines of everything are mostly the harness's own SSH logins.
     let script = "systemctl --no-pager --failed; \
          systemctl --no-pager status ilex-installer-session ilex-installer-fallback sshd; \
-         systemctl --no-pager status ilex-installer-answers.service; \
-         journalctl -b --no-pager -o short-monotonic -u ilex-installer-answers.service -u ilex-installerd.service; \
-         ls -l /dev/disk/by-label; udevadm info --query=property --name=/dev/disk/by-label/ILEX-ANSWERS; \
+         systemctl --no-pager status ilex-installer-answers-gate.service ilex-installer-answers.service; \
+         cat /run/ilex-answers-volume; \
+         journalctl -b --no-pager -o short-monotonic -u ilex-installer-answers-gate.service -u ilex-installer-answers.service -u 'ilex-installer-answers-late@*.service' -u ilex-installerd.service; \
+         ls -l /dev/disk/by-label /dev/disk/by-id; lsblk -o PATH,LABEL,FSTYPE,TYPE,MAJ:MIN; \
          loginctl list-sessions --no-pager; getenforce; \
          pid=$(systemctl show ilex-installer-session.service -p MainPID --value); \
          pkcheck --action-id org.freedesktop.login1.chvt --process $pid; echo pkcheck-chvt=$?; \

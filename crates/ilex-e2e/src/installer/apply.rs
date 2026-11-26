@@ -126,6 +126,9 @@ impl Bench {
         let mut config = VmConfig::new(format!("inst-{}", self.name), &self.live);
         config.memory = MEMORY.into();
         config.extra_disks = vec![self.target.clone(), self.sentinel.clone()];
+        // By-id names for both: an installation writes its disk by the stable
+        // name once it has let go of its exclusive claim.
+        config.disk_serials = true;
         let mut vm = Vm::boot(&self.ws, &config)?;
         vm.wait_ssh(Duration::from_secs(420))
             .context("the live image did not accept the harness's SSH key")?;
@@ -621,11 +624,19 @@ fn policy() -> Result<()> {
         true,
     )?;
     ensure!(ran.code == Some(0), "SetSecret: {}", ran.text);
+    // The wall clock is stepped back two hours (an NTP step, a person setting
+    // the date): a plan's age is the helper's own monotonic one, so it is still
+    // seven seconds old, and expired.
+    ok(&vm, "date -s \"@$(( $(date +%s) - 7200 ))\" >/dev/null")?;
     std::thread::sleep(Duration::from_secs(7));
     let id_short = short.id.clone();
     let ran = apply(&vm, "ilex-installer", &short.id, &target.id)?;
+    ok(&vm, "date -s \"@$(( $(date +%s) + 7200 ))\" >/dev/null")?;
     let error = refused(&ran, ErrorCode::PlanExpired, Some("plan"))?;
-    println!("     refused (a stale plan): {}", error.message);
+    println!(
+        "     refused (a stale plan, the clock stepped back): {}",
+        error.message
+    );
     nothing_happened(&vm, &before, &both, &id_short)?;
     ok(
         &vm,
@@ -688,8 +699,54 @@ fn policy() -> Result<()> {
     println!("     refused (the disk is in use): {}", error.message);
     nothing_happened(&vm, &mounted, &both, &plan3.id)?;
     ok(&vm, "umount /run/inuse")?;
-    // And a claim that is held (the kernel's, with nothing the helper could
-    // trace): the whole disk open exclusively by someone else.
+    // A claim that is made in the moment between the helper's last look at the
+    // disk and its own claim (the kernel's, with nothing the helper could
+    // trace): the helper is restarted with a pause there (a hidden flag that
+    // does nothing unless the file it names exists), `Apply` is let to reach it,
+    // and the disk is then opened exclusively by someone else, or a partition is
+    // mounted. The probe has already said "free", so the refusal can only be
+    // the helper's own hold: a message that says the claim failed.
+    ok(
+        &vm,
+        "mkdir -p /run/systemd/system/ilex-installerd.service.d; printf '[Service]\nExecStart=\nExecStart=/usr/libexec/ilex-installer/ilex-installerd --pause-before-hold /run/hold-pause\n' > /run/systemd/system/ilex-installerd.service.d/pause.conf; systemctl daemon-reload; systemctl reset-failed ilex-installerd 2>/dev/null; systemctl restart ilex-installerd",
+    )?;
+    let raced = |vm: &Vm, what: &str, race: &str, plan_for: &Plan| -> Result<PlanError> {
+        ok(
+            vm,
+            &format!(
+                "rm -f /run/hold-pause.reached /run/apply.out /run/held; touch /run/hold-pause; ( runuser -u ilex-installer -- env SYSTEMD_COLORS=0 SYSTEMD_PAGER= busctl --system --json=short --timeout=120 call {BUS} /org/ilex/Installer1 {BUS} Apply ss {} {} > /run/apply.out 2>&1; echo $? >> /run/apply.out ) >/dev/null 2>&1 &\nfor i in $(seq 1 300); do [ -e /run/hold-pause.reached ] && break; sleep 0.1; done; test -e /run/hold-pause.reached",
+                shell(&plan_for.id),
+                shell(&target.id)
+            ),
+        )
+        .with_context(|| format!("{what}: Apply never reached the pause"))?;
+        // Apply has probed the disk (free) and waits: now the race. What the
+        // race itself writes (a mount touches a superblock) is not Apply's.
+        ok(vm, race).with_context(|| format!("{what}: the race"))?;
+        let before = fingerprint(vm, &both)?;
+        ok(
+            vm,
+            "rm -f /run/hold-pause; for i in $(seq 1 600); do tail -n1 /run/apply.out 2>/dev/null | grep -qE '^[0-9]+$' && break; sleep 0.2; done; tail -n1 /run/apply.out | grep -qE '^[0-9]+$'",
+        )
+        .with_context(|| format!("{what}: Apply did not end"))?;
+        let text = ok(vm, "cat /run/apply.out")?;
+        let mut lines: Vec<&str> = text.lines().collect();
+        let code: i32 = lines.pop().unwrap_or("").trim().parse().unwrap_or(-1);
+        let ran = Ran {
+            code: Some(code),
+            text: lines.join("\n"),
+        };
+        let error = refusal(&ran).with_context(|| format!("{what}: {text}"))?;
+        ensure!(
+            error.code == ErrorCode::InUse
+                && error.field.as_deref() == Some("disk")
+                && error.message.contains("cannot be claimed"),
+            "{what}: wanted the helper's own claim to refuse (InUse, \"cannot be claimed\"), got {error:?}"
+        );
+        println!("     refused ({what}): {}", error.message);
+        nothing_happened(vm, &before, &both, &plan_for.id)?;
+        Ok(error)
+    };
     let plan4 = plan(&vm, &request(&target.id, |_| {}))?;
     let ran = set_secret(
         &vm,
@@ -700,38 +757,53 @@ fn policy() -> Result<()> {
         true,
     )?;
     ensure!(ran.code == Some(0), "SetSecret: {}", ran.text);
-    let held = fingerprint(&vm, &both)?;
-    ok(
+    raced(
         &vm,
+        "the whole disk opened exclusively after the probe",
         &format!(
             "python3 -c 'import os,time; fd=os.open(\"{}\", os.O_RDONLY|os.O_EXCL); open(\"/run/held\", \"w\").write(str(os.getpid())); time.sleep(120)' >/dev/null 2>&1 & for i in $(seq 1 50); do [ -e /run/held ] && break; sleep 0.2; done; test -e /run/held",
             target.path
         ),
+        &plan4,
     )?;
-    let ran = apply(&vm, "ilex-installer", &plan4.id, &target.id)?;
-    let error = refusal(&ran)?;
-    ensure!(
-        matches!(error.code, ErrorCode::InUse | ErrorCode::DiskChanged)
-            && error.field.as_deref() == Some("disk"),
-        "a disk held exclusively by another process: {error:?}"
-    );
-    println!("     refused (held open exclusively): {}", error.message);
-    nothing_happened(&vm, &held, &both, &plan4.id)?;
     ok(&vm, "kill $(cat /run/held); rm -f /run/held")?;
+    // The plan was refused, not spent: the same one, the claim gone, is applied
+    // as far as the pause (it is not let through: the file is made again, the
+    // helper told to wait, and the plan is then abandoned by the restart below).
+    let plan5 = plan(&vm, &request(&target.id, |_| {}))?;
+    let ran = set_secret(
+        &vm,
+        "ilex-installer",
+        &plan5.id,
+        "admin-password",
+        PASSWORD,
+        true,
+    )?;
+    ensure!(ran.code == Some(0), "SetSecret: {}", ran.text);
+    raced(
+        &vm,
+        "a partition mounted after the probe",
+        &format!("mkdir -p /run/raced && mount {}1 /run/raced", target.path),
+        &plan5,
+    )?;
+    ok(&vm, "umount /run/raced")?;
+    ok(
+        &vm,
+        "rm -rf /run/systemd/system/ilex-installerd.service.d; systemctl daemon-reload; systemctl reset-failed ilex-installerd 2>/dev/null; systemctl restart ilex-installerd",
+    )?;
 
-    // Nothing of the secrets is anywhere.
-    let leaks = ssh(
+    // Nothing of the secrets is anywhere: the helper's files and the journal,
+    // counted exactly (no hit is not "the output ends in a 0").
+    let leaks = ok(
         &vm,
         &format!(
-            "grep -rlF -e {} /run/ilex-installer 2>/dev/null; journalctl -u ilex-installerd --no-pager | grep -cF -e {}",
-            shell(PASSWORD),
-            shell(PASSWORD)
+            "set -eu\nfiles=$(grep -rlF -e {p} /run/ilex-installer 2>/dev/null || true)\necho \"leaked_files=$(printf %s \"$files\" | grep -c . || true)\"\necho \"journal_hits=$(journalctl --no-pager | grep -cF -e {p} || true)\"",
+            p = shell(PASSWORD)
         ),
     )?;
     ensure!(
-        !leaks.text.lines().any(|l| l.starts_with("/run/")) && leaks.text.trim_end().ends_with('0'),
-        "the password is in the helper's files or journal: {}",
-        leaks.text
+        field(&leaks, "leaked_files")? == "0" && field(&leaks, "journal_hits")? == "0",
+        "the password is in the helper's files or journal: {leaks}"
     );
     println!(
         "     {} refusals; the disks and the helper were untouched",
@@ -860,6 +932,17 @@ fn install() -> Result<()> {
             refused(&replan, ErrorCode::InstallationActive, None)?;
             let reprobe = ssh(&vm, &busctl("ilex-installer", "Probe", &[]))?;
             refused(&reprobe, ErrorCode::InstallationActive, None)?;
+            // A secret is not taken while an installation runs, for its own
+            // plan or any other.
+            let again = set_secret(
+                &vm,
+                "ilex-installer",
+                &plan.id,
+                "admin-password",
+                "another password",
+                true,
+            )?;
+            refused(&again, ErrorCode::InstallationActive, None)?;
             let on_disk: State =
                 serde_json::from_str(&ok(&vm, "cat /run/ilex-installer/state.json")?)?;
             ensure!(
@@ -867,7 +950,7 @@ fn install() -> Result<()> {
                 "state.json while installing: {on_disk:?}"
             );
             println!(
-                "     during the pull: Apply, Plan and Probe are refused; state.json says {}",
+                "     during the pull: Apply, Plan, Probe and SetSecret are refused; state.json says {}",
                 on_disk.stage.name()
             );
         }
@@ -923,12 +1006,40 @@ fn install() -> Result<()> {
         image_bar.iter().copied().fold(0.0, f64::max)
     );
 
-    // The signals the interface would have heard.
+    // The signals the interface would have heard: busctl's JSON, one message
+    // per line, parsed. Each of the six stages was announced by a `Progress`
+    // (with a fraction in 0..=1, never going backwards across stages), and
+    // exactly one `Finished` reported the success.
     let signals = ok(
         &vm,
         "kill $(cat /run/monitor.pid) || true; sleep 1; cat /run/signals.json",
     )?;
     bench.save("signals.json", &signals);
+    let mut progress: Vec<(String, f64)> = Vec::new();
+    let mut finished_signals: Vec<Outcome> = Vec::new();
+    for line in signals.lines().filter(|l| l.trim_start().starts_with('{')) {
+        let message: Value = serde_json::from_str(line)
+            .with_context(|| format!("a line of busctl monitor: {line}"))?;
+        if message["type"] != "signal" || message["interface"] != BUS {
+            continue;
+        }
+        let data = &message["payload"]["data"];
+        match message["member"].as_str() {
+            Some("Progress") => {
+                let stage = data[0].as_str().context("Progress's stage")?.to_owned();
+                let fraction = data[1].as_f64().context("Progress's fraction")?;
+                ensure!(
+                    (0.0..=1.0).contains(&fraction) && data[2].is_string(),
+                    "a Progress signal: {data}"
+                );
+                progress.push((stage, fraction));
+            }
+            Some("Finished") => finished_signals.push(serde_json::from_str(
+                data[0].as_str().context("Finished's outcome")?,
+            )?),
+            _ => {}
+        }
+    }
     for stage in [
         "partition",
         "mount",
@@ -938,14 +1049,30 @@ fn install() -> Result<()> {
         "finalise",
     ] {
         ensure!(
-            signals.contains("\"member\":\"Progress\"")
-                && signals.contains(&format!("\"{stage}\"")),
-            "no Progress signal for {stage}"
+            progress.iter().any(|(s, _)| s == stage),
+            "no Progress signal for {stage}: {progress:?}"
         );
     }
+    let order: Vec<&str> = {
+        let mut stages: Vec<&str> = progress.iter().map(|(s, _)| s.as_str()).collect();
+        stages.dedup();
+        stages
+    };
     ensure!(
-        signals.contains("\"member\":\"Finished\"") && signals.contains("success"),
-        "no Finished signal"
+        order
+            == [
+                "partition",
+                "mount",
+                "image",
+                "configure",
+                "account",
+                "finalise"
+            ],
+        "the stages the signals announced, in order: {order:?}"
+    );
+    ensure!(
+        finished_signals == [Outcome::Success],
+        "exactly one Finished (success) was wanted: {finished_signals:?}"
     );
 
     // What is on the disk, from the live system.
@@ -962,18 +1089,25 @@ fn install() -> Result<()> {
     inspected(&inspect, &plan)?;
     // The password is nowhere: not in the helper's files or journal, not on the
     // target (where the logs went), not in the state.
-    let leaks = ssh(
+    // A mount that fails fails the script: no leak count is read from a target
+    // that was not looked at.
+    let leaks = ok(
         &vm,
         &format!(
-            "mkdir -p /run/inspect && mount -o ro /dev/disk/by-partlabel/ilex-root /run/inspect && grep -rlF -e {p} /run/ilex-installer /run/inspect/ostree/deploy/default/var/log 2>/dev/null; umount /run/inspect; journalctl --no-pager | grep -cF -e {p}",
+            "set -eu\nmkdir -p /run/inspect\nmount -o ro /dev/disk/by-partlabel/ilex-root /run/inspect\ntrap 'umount /run/inspect' EXIT\nfiles=$(grep -rlF -e {p} /run/ilex-installer /run/inspect/ostree/deploy/default/var/log 2>/dev/null || true)\necho \"leaked_files=$(printf %s \"$files\" | grep -c . || true)\"\necho \"journal_hits=$(journalctl --no-pager | grep -cF -e {p} || true)\"",
             p = shell(PASSWORD)
         ),
     )?;
     ensure!(
-        !leaks.text.lines().any(|l| l.starts_with('/')) && leaks.text.trim_end().ends_with('0'),
-        "the password is in the logs, the state or the journal: {}",
-        leaks.text
+        field(&leaks, "leaked_files")? == "0" && field(&leaks, "journal_hits")? == "0",
+        "the password is in the logs, the state or the journal: {leaks}"
     );
+    // The plan was spent when the installation began: the same one is unknown now.
+    refused(
+        &apply(&vm, "ilex-installer", &plan.id, &target.id)?,
+        ErrorCode::UnknownPlan,
+        Some("plan"),
+    )?;
     ensure!(
         fingerprint(&vm, &[&sentinel])? == sentinel_before,
         "the sentinel disk changed"
@@ -1039,7 +1173,12 @@ echo "logs=$(ls $t/ostree/deploy/default/var/log/ilex-installer | tr '\n' ' ')"
 echo "plan_in_logs=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["id"])' $t/ostree/deploy/default/var/log/ilex-installer/plan.json)"
 umount $t
 echo "partitions=$(lsblk -n -o PARTLABEL,FSTYPE,SIZE -r /dev/disk/by-partlabel/ilex-root /dev/disk/by-partlabel/ilex-boot /dev/disk/by-partlabel/ilex-esp | tr '\n' ';')"
-echo "mounted_after=$(grep -c ilex-installer/target /proc/self/mountinfo)"
+# Nothing of the installation is mounted: in the host's table and in the
+# helper's own (it runs in a private mount namespace). The probe after a
+# failed or finished installation (installer::interrupted) is the other proof.
+helper=$(systemctl show -p MainPID --value ilex-installerd)
+echo "mounted_after=$(cat /proc/1/mountinfo /proc/$helper/mountinfo | grep -c ilex-installer/target || true)"
+echo "helper_namespace_read=$(test -s /proc/$helper/mountinfo && echo yes || echo no)"
 "#;
 
 fn field<'a>(text: &'a str, key: &str) -> Result<&'a str> {
@@ -1148,6 +1287,7 @@ fn inspected(text: &str, plan: &Plan) -> Result<()> {
         field(text, "partitions")?
     );
     want("mounted_after", "0")?;
+    want("helper_namespace_read", "yes")?;
     Ok(())
 }
 
@@ -1302,12 +1442,15 @@ pub(crate) fn check_installed(save: &dyn Fn(&str, &str), vm: &Vm, e: &Expected<'
             // a unit looking at a unit file); the installer's are the ones about a
             // file it wrote and did not label (`unlabeled_t`) or labeled wrongly
             // (`/etc/.pwd.lock`, which useradd leaves and DynamicUser needs).
-            let out = vm.ssh("journalctl -b --no-pager -g 'avc: +denied' > /run/avc.txt; echo total=$(wc -l < /run/avc.txt); echo ours=$(grep -cE 'unlabeled_t|\\.pwd\\.lock' /run/avc.txt); grep -E 'unlabeled_t|\\.pwd\\.lock' /run/avc.txt | head -5; echo ---; cat /run/avc.txt | sed 's/^.*avc: *denied/denied/' | cut -c1-200 | sort | uniq -c | sort -rn | head -12; echo ---; restorecon -n -v /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock /etc/hostname /etc/locale.conf /etc/vconsole.conf /etc/localtime /etc/ilex /etc/ilex/setup.json /etc/fstab /var/home /var/home/ilexmaint /var/log/ilex-installer /boot /boot/efi 2>&1 | head")?;
+            let out = vm.ssh("journalctl -b --no-pager -g 'avc: +denied' > /run/avc.txt; echo total=$(wc -l < /run/avc.txt); echo ours=$(grep -cE 'unlabeled_t|\\.pwd\\.lock' /run/avc.txt); grep -E 'unlabeled_t|\\.pwd\\.lock' /run/avc.txt | head -5; echo ---; cat /run/avc.txt | sed 's/^.*avc: *denied/denied/' | cut -c1-200 | sort | uniq -c | sort -rn | head -12; echo ---; restorecon -n -v -r /etc /var/home /var/log/ilex-installer > /run/restorecon.txt 2>&1; echo restorecon_exit=$?; restorecon -n -v /boot /boot/efi >> /run/restorecon.txt 2>&1; echo restorecon_boot_exit=$?; head -20 /run/restorecon.txt")?;
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
             save("avc.txt", &text);
             ensure!(
-                text.contains("ours=0") && !text.contains("Would relabel"),
-                "a file the installer wrote is not labeled:\n{text}"
+                text.contains("ours=0")
+                    && text.contains("restorecon_exit=0")
+                    && text.contains("restorecon_boot_exit=0")
+                    && !text.contains("Would relabel"),
+                "a file the installer wrote is not labeled (or restorecon failed):\n{text}"
             );
             Ok(())
         })(),
@@ -1528,9 +1671,13 @@ fn interrupted() -> Result<()> {
     );
     // Nothing resumed by itself, no tool is left writing, nothing is mounted.
     std::thread::sleep(Duration::from_secs(3));
+    // (What the killed helper had mounted lived in its own mount namespace,
+    // which died with it: no table of this system can show it. That it holds
+    // nothing is what the probe below says of the disk: not in use, by the
+    // trace and by the exclusive open.)
     let left = ssh(
         &vm,
-        "pgrep -a 'bootc|systemd-repart|skopeo|ostree' || echo none; grep -c 'ilex-installer/target' /proc/1/mountinfo /proc/self/mountinfo; findmnt -rn -S /dev/disk/by-partlabel/ilex-root || echo unmounted",
+        "pgrep -a 'bootc|systemd-repart|skopeo|ostree' || echo none; findmnt -rn -S /dev/disk/by-partlabel/ilex-root || echo unmounted",
     )?;
     println!("     after the kill: {}", left.text.replace('\n', " | "));
     ensure!(

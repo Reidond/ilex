@@ -222,6 +222,8 @@ pub struct LinuxProvider {
     usb_keyboard: bool,
     usb_medium: bool,
     esp_dir: Option<PathBuf>,
+    disk_serials: bool,
+    hotplug_port: bool,
 }
 pub struct LinuxVm {
     spec: VmSpec,
@@ -246,6 +248,8 @@ impl LinuxProvider {
             usb_keyboard: false,
             usb_medium: false,
             esp_dir: None,
+            disk_serials: false,
+            hotplug_port: false,
         })
     }
     /// Give the guest an xHCI USB keyboard instead of a virtio one, for
@@ -269,6 +273,21 @@ impl LinuxProvider {
     #[must_use]
     pub fn with_esp_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.esp_dir = Some(dir.into());
+        self
+    }
+    /// Give the extra disks serial numbers, so that they have
+    /// `/dev/disk/by-id` names (see [`qemu::VmConfig::disk_serials`]). Off by
+    /// default: it changes no existing launch.
+    #[must_use]
+    pub fn with_disk_serials(mut self, enabled: bool) -> Self {
+        self.disk_serials = enabled;
+        self
+    }
+    /// An empty PCIe root port a disk can be added to while the guest runs
+    /// (see [`qemu::VmConfig::hotplug_port`]). Off by default.
+    #[must_use]
+    pub fn with_hotplug_port(mut self, enabled: bool) -> Self {
+        self.hotplug_port = enabled;
         self
     }
 }
@@ -411,6 +430,8 @@ impl VmProvider for LinuxProvider {
         config.usb_keyboard = self.usb_keyboard;
         config.usb_medium = self.usb_medium;
         config.esp_dir = self.esp_dir.clone();
+        config.disk_serials = self.disk_serials;
+        config.hotplug_port = self.hotplug_port;
         config.efi_vars = vm.spec.firmware_state.clone();
         config.extra_disks = vm
             .spec

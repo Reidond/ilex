@@ -438,6 +438,16 @@ pub struct VmConfig {
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
+    /// Give each disk a serial number (`ilex-disk-0` for the main disk, then
+    /// `ilex-disk-1`, `ilex-disk-2`, ... for the extra ones), which udev turns
+    /// into a `/dev/disk/by-id/virtio-<serial>` name. Without one a virtio disk has
+    /// no by-id name at all (its id is its PCI slot), and an installation that
+    /// writes a disk by that name has no name to write it by.
+    pub disk_serials: bool,
+    /// A PCIe root port with nothing in it (`ilexhp`), which a disk can be
+    /// added to while the guest runs (QMP `device_add ... bus=ilexhp`): the
+    /// stick someone plugs in after the boot.
+    pub hotplug_port: bool,
     /// A directory served read-only as a small FAT disk (QEMU's `fat:`), first
     /// in the boot order: an EFI system partition whose `EFI/BOOT/BOOTX64.EFI`
     /// is the boot loader. For booting an ISO that is a *file* on another disk
@@ -477,6 +487,8 @@ impl VmConfig {
             usb_keyboard: false,
             usb_medium: false,
             extra_disks: Vec::new(),
+            disk_serials: false,
+            hotplug_port: false,
             esp_dir: None,
             ssh_credential: true,
             smbios: Vec::new(),
@@ -662,8 +674,13 @@ impl Vm {
             ))
             .arg("-drive")
             .arg(format!(
-                "if=virtio,format={drive_format},file={}",
-                drive_file.display()
+                "if=virtio,format={drive_format},file={}{}",
+                drive_file.display(),
+                if config.disk_serials {
+                    ",serial=ilex-disk-0"
+                } else {
+                    ""
+                }
             ));
         if security.is_some() {
             qemu.args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
@@ -708,11 +725,22 @@ impl Vm {
                 ));
             }
         }
-        for extra in &config.extra_disks {
+        for (index, extra) in config.extra_disks.iter().enumerate() {
             qemu.arg("-drive").arg(format!(
-                "if=virtio,format=raw,file={}",
-                std::path::absolute(extra)?.display()
+                "if=virtio,format=raw,file={}{}",
+                std::path::absolute(extra)?.display(),
+                if config.disk_serials {
+                    format!(",serial=ilex-disk-{}", index + 1)
+                } else {
+                    String::new()
+                }
             ));
+        }
+        if config.hotplug_port {
+            qemu.args([
+                "-device",
+                "pcie-root-port,id=ilexhp,bus=pcie.0,chassis=9,slot=9",
+            ]);
         }
         if let Some(dir) = &config.esp_dir {
             // Two devices never share a boot index: with a stick (first) the
