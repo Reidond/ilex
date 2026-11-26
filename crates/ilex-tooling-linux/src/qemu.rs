@@ -765,32 +765,24 @@ impl Vm {
             .spawn()
             .context("spawning qemu-system-x86_64")?;
 
-        // QEMU creates the QMP socket before it starts the guest.
-        let started = Instant::now();
-        while !qmp_sock.exists() {
+        // QEMU binds the QMP socket (creating its path) before it listens, and
+        // answers only once its main loop runs; a QEMU that hangs while starting
+        // up never does, and the guest it never started would otherwise be waited
+        // for until a marker deadline. One deadline covers the path appearing,
+        // the connection and the handshake, and the process is always reaped.
+        if let Err(e) = crate::qmp::Qmp::connect_ready(&qmp_sock, QMP_READY_TIMEOUT, || {
+            Ok(child.try_wait()?.is_some())
+        }) {
+            let log = fs::read_to_string(dir.join("qemu.log")).unwrap_or_default();
             if let Some(status) = child.try_wait()? {
-                bail!(
-                    "qemu exited with {status} before it was ready:\n{}",
-                    fs::read_to_string(dir.join("qemu.log")).unwrap_or_default()
-                );
+                bail!("qemu exited with {status} before it was ready:\n{log}");
             }
-            if started.elapsed() > Duration::from_secs(30) {
-                let _ = child.kill();
-                bail!("qemu did not create {} within 30s", qmp_sock.display());
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        // QEMU listens on that socket early but answers only once its main loop
-        // runs; a QEMU that hangs while starting up never does, and the guest it
-        // never started would otherwise be waited for until a marker deadline.
-        if let Err(e) = crate::qmp::Qmp::connect_with_timeout(&qmp_sock, QMP_READY_TIMEOUT) {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "qemu (pid {}) did not answer on {} within {QMP_READY_TIMEOUT:?}, so it hung while starting: {e:#}\nqemu.log:\n{}",
+                "qemu (pid {}) was not ready on {} within {QMP_READY_TIMEOUT:?}, so it hung while starting: {e:#}\nqemu.log:\n{log}",
                 child.id(),
                 qmp_sock.display(),
-                fs::read_to_string(dir.join("qemu.log")).unwrap_or_default()
             );
         }
 
