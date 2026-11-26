@@ -2822,51 +2822,91 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   the running system's own disks out of reach, and they follow one rule
   (`crates/ilex-installerd/src/topology.rs`): **a disk is offered as a target
   only if the helper has positively traced every current use of block storage
-  and none reaches that disk.** The uses are every mount in the helper's mount
-  table (the live medium's or not), every `/proc/swaps` entry and every bound
-  loop device (mounted or not). Each is followed to whole disks through the
-  kernel's own tree, never the text of a source or a path's prefix:
-  - a device number (`/sys/dev/block/M:m`) or a device node (`/dev/disk/by-*`
-    names, `UUID=`/`LABEL=`/`PARTUUID=`/`PARTLABEL=` sources included) to a
-    kernel name, a partition to its disk, a stacked device (device-mapper, MD:
-    Ventoy's `/dev/mapper/ventoy`, dracut's `live-rw`) down through `slaves/`,
-    and the devices a file system names in its options (`logdev=`, `rtdev=`,
-    `journal_path=`);
+  and none reaches that disk.** The uses are every mount of every mount
+  namespace (the live medium's or not), every `/proc/swaps` entry, every bound
+  loop device (mounted or not), every zram writeback device and every external
+  file system journal. Each is followed to whole disks through the kernel's own
+  tree, never the text of a source, a device node's name or a path's prefix:
+  - a device number (`/sys/dev/block/M:m`) or a device node to a kernel name,
+    a partition to its disk, a stacked device (device-mapper, MD: Ventoy's
+    `/dev/mapper/ventoy`, dracut's `live-rw`) down through `slaves/`, and the
+    devices a file system names in its options (`logdev=`, `rtdev=`,
+    `journal_path=`). A device node is the device its `st_rdev` says (`stat`,
+    through any `/dev/disk/by-*` link, for `UUID=`/`LABEL=`/`PARTUUID=`/
+    `PARTLABEL=` sources too), never the one its name suggests: anyone with
+    `mknod` can name a node anything;
+  - a swap area by its `Type` in `/proc/swaps`: a `partition` must stat as a
+    block device and is that device; a `file` cannot be placed (the kernel
+    lists only its name, and it is on some block file system) and is
+    untraceable;
   - a multi-device btrfs to every member (`/sys/fs/btrfs/<uuid>/devices/`);
+  - zram: `/sys/block/zram<N>/backing_dev` of **every** zram device (not only
+    those that are swap areas or mounted), because zram claims its writeback
+    device exclusively and the device shows no `holders/` or `slaves/` link.
+    `none`, empty or no such file (a kernel without writeback) is no use; a
+    device that cannot be found or a file that cannot be read is unresolved;
+  - ext4 journals: `/proc/fs/jbd2/` has an entry per journal, `<device>-<inode>`
+    for one inside its file system and `<device>` (`!` for `/`) for one on a
+    device of its own, which no mount option shows. An entry that is itself a
+    block device name is an external journal and is traced; one that is
+    `<device>-<digits>` of a known device is internal; any other is unresolved;
   - a loop device to its backing file as the kernel recorded it: the helper
     reads `losetup --json --list --output NAME,BACK-FILE,BACK-INO,BACK-MAJ:MIN`
     (the kernel's `lo_device` and `lo_inode`, an empty column meaning unknown)
     and does not place the file by its name. A number with a major names the
     block device the file's file system is on, so a mount that was detached
-    lazily, a deleted file or a name that now means another file changes
-    nothing. An anonymous number is the mount that carries it: tmpfs, ramfs,
-    network file systems and virtiofs hold no local disk, a block file system is
-    traced, `overlay` (its bytes are in its layers) and the kernel's interfaces
-    are not places a file can be traced from, and `devtmpfs` holds device nodes,
-    so it counts only for a file confirmed to be one. A block device node
-    backing a loop (`losetup /dev/sdb1`) shows the device of `/dev` and the
-    node's inode: once `stat` of the name returns that same `(dev, ino)`, its
-    `st_rdev` is followed too. A btrfs subvolume's own number appears in no
-    mount table: the file is then found by name, confirmed by `(dev, ino)`, and
-    the btrfs mounts that contain it are traced. Every loop device sysfs says is
-    bound must also be in losetup's table, and each bound loop device is a use
-    of its file's disk whether or not anything mounts it;
+    lazily, a deleted file or a name that now means another file changes which
+    disk is in use. An anonymous number is the mount that carries it: tmpfs,
+    ramfs, network file systems and virtiofs hold no local disk, a block file
+    system is traced, `overlay` (its bytes are in its layers) and the kernel's
+    interfaces are not places a file can be traced from, and `devtmpfs` holds
+    device nodes, so it counts only for a file confirmed to be one. A block
+    device node backing a loop (`losetup /dev/sdb1`) shows the device of `/dev`
+    and the node's inode: once `stat` of the name returns that same
+    `(dev, ino)`, its `st_rdev` is followed too. A btrfs subvolume's own number
+    appears in no mount table: the file is then found by name, confirmed by
+    `(dev, ino)` and by a name with no link or `..` in it
+    (`canonicalize(path) == path`; the text of any other name would send the
+    lookup to other mounts), and the btrfs mounts that contain it are traced.
+    **A file the name does not confirm** (deleted, renamed, hidden by a mount)
+    may still be a block device node of any disk, which no number says
+    (`mknod /tmp/n b 8 1; losetup -f /tmp/n; rm /tmp/n`); it is resolved only
+    where a node cannot have been opened as a device (every mount that carries
+    the file system is `nodev`: the mount's own options, not the file system's)
+    or cannot be there after the fact (an image: iso9660, udf, squashfs, erofs,
+    found among the mounts or, for a file system that was detached, by the
+    signature lsblk reads from its device); everywhere else the use is
+    unresolved. Every loop device sysfs says is bound must also be in losetup's
+    table, and each bound loop device is a use of its file's disk whether or not
+    anything mounts it;
   - a mount is **not** block-backed only if its file system type is on an
     explicit list of in-memory, kernel-interface (`proc`, `sysfs`, `cgroup2`,
     `devpts`, `devtmpfs`, `mqueue`, ...), layered (`overlay`: each layer is a
-    mount of its own), desktop-session FUSE (`fuse.portal`, `fuse.gvfsd-fuse`)
-    and network (`nfs`, `cifs`, `9p`, `virtiofs`, ...) types. Every other type
-    (btrfs, zfs, FUSE block file systems, a type nobody has heard of) must be
-    traced to a device; and a swap *file* cannot be (the kernel lists only its
-    name, and it is on some block file system), so it is untraceable too.
+    mount of its own) and network (`nfs`, `cifs`, `9p`, `virtiofs`, ...) types,
+    and a desktop session's FUSE services **at their paths**: `fuse.portal` at
+    `/run/user/<uid>/doc` and `fuse.gvfsd-fuse` at `/run/user/<uid>/gvfs`.
+    Every other type (btrfs, zfs, FUSE block file systems, the same FUSE type
+    anywhere else, a type nobody has heard of) must be traced to a device.
+  Which tables are read: the helper runs with `PrivateMounts=yes`, so it sees
+  only the host mounts that propagate to it, and none made under a
+  `--make-private` subtree. It reads its own table, the host's
+  (`/proc/1/mountinfo`) and that of every other mount namespace a process is in
+  (`/proc/<pid>/ns/mnt`, one table per namespace). The host's and its own must
+  be readable or the probe fails; another namespace's table that cannot be read
+  is a use that was not seen (unresolved). The ESP scan stays in its own
+  `unshare --mount`. Paths (the btrfs subvolume lookup, a loop file's name) are
+  resolved in the helper's own namespace only.
   What cannot be traced (a device number sysfs does not list, a source that
   names no device, a loop device with no file name, inode or device in losetup's
-  table or missing from it, a name that no longer matches what the kernel
-  recorded, a deleted or unreadable file on an anonymous number, an unknown
-  file system type, a swap file) is never guessed at: every disk is `in_use`
-  with the reason that the installer cannot tell whether it holds the medium it
-  started from or is in use. A mount table, `/proc/swaps` or `losetup` that
-  cannot be read fails the probe. The two flags:
+  table or missing from it, a file the name does not confirm on a file system
+  that can hold a device node, an unknown file system type, a swap file, a
+  directory that exists but cannot be listed) is never guessed at: every disk
+  is `in_use` with the reason that the installer cannot tell whether it holds
+  the medium it started from or is in use. Only a directory that is not there
+  lists nothing; any other failure to read one is a failure to trace. A mount
+  table or `/proc/swaps` line the helper cannot parse, and a table, `/proc/swaps`
+  or `losetup` that cannot be read, fail the probe (a dropped line would hide a
+  use). The two flags:
   - `live_medium`: the disk reached through the live system's own mounts:
     `/run/initramfs/live` and `/run/initramfs/isoscan` (dracut's, with the host
     disk of an ISO file), `/run/rootfsbase` (the root image's squashfs), any
@@ -2878,8 +2918,9 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   - `in_use`: why the running system is using the disk otherwise, one sentence
     each: a mounted partition (a btrfs's other devices, an XFS log device), an
     entry of `/proc/swaps`, a loop device attached to a file or block node on
-    it (mounted or not), or a device stacked on it or a partition (non-empty
-    `holders/`: LVM, MD, dm-crypt). A disk that carries an old Linux
+    it (mounted or not), a zram writeback or an ext4 journal on it, or a device
+    stacked on it or a partition (non-empty `holders/`: LVM, MD, dm-crypt). A
+    disk that carries an old Linux
     installation is therefore offered only while the live system has not
     activated its volume group or array, so the live image activates none:
     `rd.lvm=0 rd.md=0 rd.luks=0 rd.dm=0` is on both boot entries and baked
@@ -2890,9 +2931,34 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     `/etc/mdadm.conf` (`AUTO -all`) quiet udev once the system is up. Activating
     one by hand (`vgchange -ay`) makes its disks `in-use` again until it is
     deactivated from the tty2 shell; the helper never deactivates anything.
-  What the helper's own mount namespace does not show (a file system mounted in
-  another namespace, a layer of an overlay whose mount was detached) is not
-  traced; whoever writes to a disk (Apply, I3) must open it exclusively as well.
+  **The backstop.** The trace follows what the kernel lists; the kernel's own
+  claim on a disk is the authority on what it holds. In every probe, for each
+  candidate whole disk that is not the live medium and for which the trace found
+  no use, the helper opens the disk `O_RDONLY|O_EXCL` (after checking that the
+  node is the block device with the number sysfs gives) and closes it at once.
+  On a block device `O_EXCL` claims it as a mounted file system or a swap area
+  does, and the kernel answers `EBUSY` while anything holds the disk **or any of
+  its partitions**: a partition mounted (even by a mount that was unmounted
+  lazily and is still held by a process), swap, a file system journal, a zram
+  backing device, a device-mapper, MD or multi-device btrfs/f2fs member, and
+  whatever else claims a block device. `EBUSY` makes the disk `in_use` ("held
+  open exclusively by the running system ... though none of what the installer
+  traced says what"); it is retried for half a second so that a claim that is
+  only passing (another probe's scan of an ESP) does not make a disk flicker;
+  any other failure to open it is a reason too. `Plan` opens the chosen disk
+  again after the registry and `systemd-repart` have answered, immediately
+  before it returns, and refuses (`in-use`) if the kernel now says it is held.
+  The exclusive open does **not** replace the trace: a loop device attached to a
+  block device node (`losetup /dev/sdb1`) claims nothing, which is what the
+  trace of loop devices is for.
+  **The threat model** is accident: the helper protects against wiping the live
+  medium or storage in use by mistake, including after ordinary administrator
+  actions on tty2 (mounting, `swapon`, `losetup`, `umount -l`, activating a
+  volume group). A deliberate root saboteur (spoofing a FUSE subtype, crafting
+  device nodes and deleting them) is out of scope, though a gap is closed where
+  that is cheap and fails closed (the tmpfs/`nodev` rule, the `st_rdev` rule and
+  the FUSE paths above). Whoever writes to a disk (Apply, I3) must open it
+  exclusively as well.
   An ESP is mounted read-only (`noexec,nodev,nosuid`) by a child of the helper
   (`--scan-esp`) inside `unshare --mount`, at a per-call mount point in a
   private 0700 directory the helper made under its runtime directory (never a
@@ -2999,16 +3065,32 @@ live media and the disk in use), shows that the event of the old installation's
 disk appearing activates neither its volume group nor its array, then that the
 same event does activate both once the image's LVM and MD configuration is moved
 aside (so the first check proves something) and that the disk, now held, is
-refused (`in-use`) and offered again once the configuration is back, shows that a
-the uses the mount table does not show are traced, each reproduced with real
-devices: a loop device on a partition's device node (the kernel records the
+refused (`in-use`) and offered again once the configuration is back, then shows
+that the uses the mount table does not show are traced or refused, each
+reproduced with real devices, mounts and processes:
+a loop device on a partition's device node (the kernel records the
 device of `/dev` and the node's inode; the disk is `in_use` and a plan on it is
-refused), an unmounted loop device on a file whose file system was unmounted
+refused); an unmounted loop device on a file whose file system was unmounted
 lazily (the kernel then names the file `/x.img`, which `/` contains; its disk is
-`in_use`, the others stay offered), and dracut's live layout with its host disk
-mount, its medium mount and then both unmounted lazily (the host disk stays the
-live medium from the loop device's recorded numbers, and with both gone it is
-`in_use`, never offered); then points the unit at SMBIOS and command-line
+`in_use`, and since the file might be a block device node of any disk, which
+the numbers do not say, every other disk is refused as well); dracut's live
+layout with its host disk mount, its medium mount and then both unmounted
+lazily (the host disk stays the live medium from the loop device's recorded
+numbers; the host disk's own mount detached leaves a file on an ext4 the
+helper cannot confirm, and every disk is refused; with only the medium's mount
+gone nothing else changes); a block device node copied to a tmpfs that is not
+`nodev`, attached to a loop device and deleted (every disk refused); zram
+writing back to a disk (`in_use`, the kernel's exclusive claim shown beside it);
+an ext4 whose journal is on a disk of its own (the mount options say nothing;
+`/proc/fs/jbd2` does; both disks `in_use`); a partition mounted under a
+`--make-private` subtree, which the helper's own mount namespace never sees
+(shown from `nsenter` into the helper's namespace; found through
+`/proc/1/mountinfo`); and a file system unmounted lazily that a process still
+holds, listed by no table, which only the exclusive open of the disk refuses
+(the reason names the claim; the other disks stay offered). The disks nothing
+uses stay offered throughout, beside the live media, the disk in use and the
+zram swap every live boot has (swap on RAM is a use of RAM, never of a disk),
+and a plan on a refused disk is refused `in-use`; then points the unit at SMBIOS and command-line
 fixtures to exercise detection through the bus (MS-7C35 by system and by board
 alone, case, a vendor alone, the boot override and an unknown one), requires
 `Access denied` for `nobody` and `daemon` on every method and on introspection,
@@ -3027,12 +3109,17 @@ registry's classification is exercised in the self-check on fixtures of what a
 registry answers. Planning needs the registry (`ghcr.io/reidond/ilex:generic.gnome`).
 A VM cannot carry another board's firmware identity, and libblkid only takes a
 real BitLocker header for BitLocker: the `--self-check` covers conflicting
-machines, the BitLocker and NTFS classification, the trace of every mount, swap
-entry and loop device (a lazily unmounted medium, a loop on a block node, an
-unmounted loop, btrfs by UUID and of two devices, an unknown file system type,
-a swap file, a colliding file name, each beside the mounts a live system has)
-and a live ISO's own mount layout; the live ISO's own boot is
-`iso::next…`.
+machines, the BitLocker and NTFS classification, the parsers of what the kernel
+prints (a mount or swap line they cannot read fails), the trace of every mount,
+swap entry and loop device (a lazily unmounted medium, a loop on a block node,
+a file the name no longer confirms on a `nodev`, an image and an ordinary file
+system, an unmounted loop, btrfs by UUID and of two devices and through a link,
+an unknown file system type, swap by `st_rdev`, a swap file, zram writeback,
+ext4 journals, a directory that cannot be listed, FUSE services at and away from
+their paths, the tables of other mount namespaces, the exclusive open's retry,
+each beside the mounts a live system has: `/dev`, `/run` and `/tmp` with their
+options, zram swap, dracut's layout) and a live ISO's own mount layout; the live
+ISO's own boot is `iso::next…`.
 
 ## Conventions
 
