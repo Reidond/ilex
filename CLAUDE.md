@@ -3656,11 +3656,17 @@ trace and by the exclusive open), that its
 old plan is gone, that a new plan lists what the dead installation left among
 what it erases, and that a new `Apply` on the same disk installs a system that
 boots with the administrator able to log in.
-Measured on a 16-vCPU Boat sandbox (2026-11-26): `installer::policy` 54 s,
-`installer::install` 5 minutes after the live disk exists (the pull and
-deployment 3 to 4.3 minutes, every other stage together under 10 seconds),
-`installer::interrupted` 4 minutes, `iso::next_unattended` 6 minutes (installed
-and powered off in 256 s), and the Anaconda ISO's own `iso::install` 11 minutes.
+Measured on a 16-vCPU Boat sandbox (2026-11-26): the five `installer::` trials
+together 1,251 s once the live image's disk exists (1,617 s with it rebuilt;
+`installer::install` alone 250 s: the pull and deployment 3 to 4.3 minutes, every
+other stage together under 10 seconds), `iso::next_unattended` with its two
+siblings 404 to 524 s (the installation powered off after 220 to 318 s),
+`iso::next_unattended_loop` 451 s (installed and powered off after 292 s), and the
+Anaconda ISO's own `iso::install` 11 minutes. A guest of the `iso::next_unattended*`
+trials that prints nothing at all on its serial console for 150 seconds (QEMU's
+vCPU threads idle at 0 s: a flake of the sandbox, seen in two of three first boots
+of the loop trial and never with output) is destroyed and started again, up to
+twice, and the retry is printed.
 `iso::next_unattended` (opt-in with the other `iso::next` trials) boots the real
 ISO under UEFI with Secure Boot beside a target disk and an ext4 volume labelled
 `ILEX-ANSWERS`, follows `ILEX-INSTALLER-ANSWERS` lines on the serial console to
