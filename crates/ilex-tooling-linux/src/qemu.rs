@@ -13,6 +13,7 @@
 //! vm.toml    TOML description of the running VM (see [`VmInfo`])
 //! qemu.log   QEMU's stdout/stderr
 //! serial.log guest serial console
+//! firmware.log OVMF's debug console (only with `ILEX_VM_FIRMWARE_LOG=1`)
 //! ```
 //!
 //! The guest is reached over SSH through a user-mode-networking port forward
@@ -361,6 +362,10 @@ pub fn find_vm(ws: &Workspace, purpose: Option<&str>) -> Result<VmInfo> {
 // Booting
 // ---------------------------------------------------------------------------
 
+/// How long a started QEMU may take to answer its first QMP client. It does so
+/// within a few tens of milliseconds, loaded or not.
+const QMP_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
 const SSH_OPTS: &[&str] = &[
     "-o",
     "StrictHostKeyChecking=no",
@@ -697,8 +702,13 @@ impl Vm {
             .arg(format!(
                 "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root={}",
                 base64(key.public.as_bytes())
-            ))
-            .arg("-serial")
+            ));
+        if std::env::var_os("ILEX_VM_FIRMWARE_LOG").is_some_and(|v| !v.is_empty()) {
+            qemu.arg("-debugcon")
+                .arg(format!("file:{}", dir.join("firmware.log").display()))
+                .args(["-global", "isa-debugcon.iobase=0x402"]);
+        }
+        qemu.arg("-serial")
             .arg(format!("file:{}", dir.join("serial.log").display()))
             .arg("-qmp")
             .arg(format!("unix:{},server=on,wait=off", qmp_sock.display()));
@@ -721,6 +731,17 @@ impl Vm {
                 base64(b"[Unit]\nConditionPathExists=/run/ilex-harness-enable-apps\n")
             ));
         }
+        // The VNC server asks for an audio backend, and QEMU 11 then probes its
+        // list in order, PipeWire first. Without a PipeWire daemon the probe
+        // fails and tears its thread loop down with `pw_thread_loop_stop`, which
+        // in libpipewire intermittently never returns (the loop thread idles in
+        // `epoll_wait`, QEMU's main thread waits in `pthread_join`): the guest
+        // never starts, its serial console stays empty and nothing answers on
+        // QMP. About one boot in a hundred hung that way on the Boat hosts. No
+        // test wants sound, so name the one backend that does nothing: QEMU
+        // then loads and probes none (strace: no audio module, no connect to a
+        // PipeWire or PulseAudio socket).
+        qemu.args(["-audiodev", "none,id=ilex-noaudio"]);
         // QEMU refuses a VNC server next to a GL display ("Display vnc is
         // incompatible with the GL context").
         if !gl {
@@ -758,6 +779,19 @@ impl Vm {
                 bail!("qemu did not create {} within 30s", qmp_sock.display());
             }
             thread::sleep(Duration::from_millis(50));
+        }
+        // QEMU listens on that socket early but answers only once its main loop
+        // runs; a QEMU that hangs while starting up never does, and the guest it
+        // never started would otherwise be waited for until a marker deadline.
+        if let Err(e) = crate::qmp::Qmp::connect_with_timeout(&qmp_sock, QMP_READY_TIMEOUT) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "qemu (pid {}) did not answer on {} within {QMP_READY_TIMEOUT:?}, so it hung while starting: {e:#}\nqemu.log:\n{}",
+                child.id(),
+                qmp_sock.display(),
+                fs::read_to_string(dir.join("qemu.log")).unwrap_or_default()
+            );
         }
 
         let info = VmInfo {
