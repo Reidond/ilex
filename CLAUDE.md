@@ -3735,6 +3735,8 @@ when this stack is rebased onto the change that fixes QEMU's audio-probe hang
 `qemu.log` and `serial.log` are copied into the artifacts
 (`next-<trial>-<dir>-silent-attemptN-<time>-qemu.log`, `...-serial.log`), so that
 a later attempt, which reuses the VM's directory, does not overwrite them.
+`ILEX_ISO_NEXT_FORCE_SILENT=1` calls the first attempt of every boot silent after
+three seconds, which exercises the retry and the kept logs without the flake.
 `iso::next_unattended` (opt-in with the other `iso::next` trials) boots the real
 ISO under UEFI with Secure Boot beside a target disk and an ext4 volume labelled
 `ILEX-ANSWERS`, follows `ILEX-INSTALLER-ANSWERS` lines on the serial console to
