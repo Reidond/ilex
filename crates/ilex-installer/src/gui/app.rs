@@ -14,10 +14,9 @@ use ilex_installer_flow::backend::Backend;
 use ilex_installer_flow::flow::{
     Flow, KeyboardStatus, PageId, PlanCheck, ProbeState, Step, human_bytes,
 };
-use ilex_installer_flow::keyboard::{Layouts, SessionKeyboard};
+use ilex_installer_flow::keyboard::SessionKeyboard;
 use ilex_installer_flow::language::{self, LANGUAGES};
 use ilex_installer_flow::machine::{MachineView, Severity};
-use ilex_installer_flow::markers;
 use ilex_installer_flow::messages::{self, ClientError};
 use ilex_installer_flow::secret::Secret;
 use ilex_installer_model::plan::Plan;
@@ -36,18 +35,13 @@ const STATS_DELAY: Duration = Duration::from_secs(15);
 pub struct Init {
     pub backend: Arc<dyn Backend>,
     pub keyboard: Arc<dyn SessionKeyboard + Send + Sync>,
-    pub layouts: Layouts,
+    /// The flow, with its marker lines on (the real session) or off (the
+    /// renderer): what is printed, and when, is the flow's decision
+    /// (`Flow::drain_markers`); this application prints what it is handed.
+    pub flow: Flow,
     pub fullscreen: bool,
-    /// The edition identifier, for the serial markers.
-    pub edition: String,
-    /// Print marker lines (the real session); the renderer turns them off.
-    pub markers: bool,
     /// Report memory fifteen seconds after the first page.
     pub stats: bool,
-    /// The layout test field's text may be printed in a marker (the test
-    /// credential, or a simulated session). Otherwise the field is not even
-    /// read: people type their intended passwords there.
-    pub echo_try: bool,
     /// Where the application reports what it shows, for the renderer to wait
     /// on instead of a fixed time.
     pub observer: Option<Arc<Mutex<Observed>>>,
@@ -74,14 +68,9 @@ pub struct App {
     flow: Flow,
     backend: Arc<dyn Backend>,
     keyboard: Arc<dyn SessionKeyboard + Send + Sync>,
-    edition: String,
-    markers: bool,
     stats: bool,
-    echo_try: bool,
     observer: Option<Arc<Mutex<Observed>>>,
     mapped: bool,
-    /// The page whose marker was printed last.
-    announced: Option<PageId>,
 }
 
 /// Secrets travel as `Secret`s: their `Debug` is redacted, so this derived
@@ -108,6 +97,8 @@ pub enum Msg {
     Mapped,
     /// Show a page directly (the renderer only).
     Jump(PageId),
+    /// The session has settled: report memory.
+    Stats,
     /// Everything sent before this has been handled when the flag is set
     /// (the renderer only).
     Ping(Arc<AtomicBool>),
@@ -131,9 +122,11 @@ pub enum Cmd {
 }
 
 impl App {
-    fn marker(&self, line: &str) {
-        if self.markers {
-            serial::marker(line);
+    /// Print the marker lines the flow queued, in its order. Nothing is
+    /// decided here: a line the flow did not queue is not printed.
+    fn print_markers(&mut self) {
+        for line in self.flow.drain_markers() {
+            serial::marker(&line);
         }
     }
 
@@ -175,38 +168,6 @@ impl App {
         }
     }
 
-    /// Print the page's marker (and the composition line and the notice on
-    /// the machine page) when the flow's page changed.
-    fn announce(&mut self, root: &adw::ApplicationWindow) {
-        let page = self.flow.page();
-        if self.announced == Some(page) {
-            return;
-        }
-        let first = self.announced.is_none();
-        self.announced = Some(page);
-        let mut line = self.flow.page_marker(&self.edition);
-        if first {
-            let renderer = root
-                .native()
-                .and_then(|native| native.renderer())
-                .map_or_else(|| "none".to_owned(), |r| r.type_().name().to_owned());
-            line.push_str(&format!(
-                " renderer={renderer} scale={} uptime={}",
-                root.scale_factor(),
-                markers::uptime()
-            ));
-        }
-        self.marker(&line);
-        if page == PageId::Machine {
-            if let Some(composition) = self.flow.composition_line() {
-                self.marker(&composition);
-            }
-            if let Some(view) = self.flow.machine_view() {
-                self.marker(&markers::notice(&view.notice()));
-            }
-        }
-    }
-
     /// Tell the renderer what is shown.
     fn observe(&self) {
         if let Some(observer) = &self.observer {
@@ -238,8 +199,8 @@ impl Component for App {
     }
 
     fn init(init: Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
-        let flow = Flow::new(init.layouts);
-        let widgets = Widgets::build(&root, &flow, &sender, init.echo_try);
+        let flow = init.flow;
+        let widgets = Widgets::build(&root, &flow, &sender);
         root.set_fullscreened(init.fullscreen);
         if init.fullscreen {
             // The only window of a live session: the compositor's close
@@ -254,16 +215,13 @@ impl Component for App {
             flow,
             backend: init.backend,
             keyboard: init.keyboard,
-            edition: init.edition,
-            markers: init.markers,
             stats: init.stats,
-            echo_try: init.echo_try,
             observer: init.observer,
             mapped: false,
-            announced: None,
         };
         let step = model.flow.start_probe();
         model.carry_out(step, &sender);
+        model.print_markers();
         model.observe();
         ComponentParts { model, widgets }
     }
@@ -277,20 +235,25 @@ impl Component for App {
             Msg::Mapped => {
                 if !self.mapped {
                     self.mapped = true;
-                    self.announce(root);
+                    // The window is on screen: the flow queues the first
+                    // page's marker, with the toolkit's own words.
+                    let renderer = root
+                        .native()
+                        .and_then(|native| native.renderer())
+                        .map_or_else(|| "none".to_owned(), |r| r.type_().name().to_owned());
+                    self.flow.window_shown(&format!(
+                        "renderer={renderer} scale={}",
+                        root.scale_factor()
+                    ));
                     if self.stats {
-                        glib::timeout_add_local_once(STATS_DELAY, || {
-                            serial::marker(&markers::stats());
-                        });
+                        let input = sender.input_sender().clone();
+                        glib::timeout_add_local_once(STATS_DELAY, move || input.emit(Msg::Stats));
                     }
                 }
             }
             Msg::Language(index) => {
-                if let Some(language) = LANGUAGES.get(index as usize)
-                    && self.flow.language() != language.locale
-                    && self.flow.set_language(language.locale)
-                {
-                    self.marker(&markers::language(language.locale));
+                if let Some(language) = LANGUAGES.get(index as usize) {
+                    self.flow.set_language(language.locale);
                 }
             }
             Msg::Layout(index) => {
@@ -311,20 +274,9 @@ impl Component for App {
                 let step = self.flow.retry_keyboard();
                 self.carry_out(step, &sender);
             }
-            Msg::TryText(text) => {
-                // Only a test can have asked for this (see `markers`): on a
-                // normal boot nothing reads the field and nothing is printed.
-                if let Some(line) = markers::tried(self.flow.keyboard(), &text, self.echo_try) {
-                    self.marker(&line);
-                }
-            }
+            Msg::TryText(text) => self.flow.try_text(&text),
             Msg::Machine(tag) => {
-                if self.flow.machine_tag() != Some(tag.as_str())
-                    && self.flow.select_machine(&tag)
-                    && let Some(line) = self.flow.composition_line()
-                {
-                    self.marker(&line);
-                }
+                self.flow.select_machine(&tag);
             }
             Msg::Name(text) => {
                 self.flow.set_administrator(&text);
@@ -350,37 +302,21 @@ impl Component for App {
                 while self.flow.page() != page && self.flow.back().is_some() {}
             }
             Msg::Jump(page) => self.flow.show(page),
+            Msg::Stats => self.flow.report_stats(),
             Msg::Ping(flag) => flag.store(true, Ordering::SeqCst),
         }
-        self.announce(root);
+        self.print_markers();
         self.observe();
     }
 
-    fn update_cmd(&mut self, message: Cmd, sender: ComponentSender<Self>, root: &Self::Root) {
+    fn update_cmd(&mut self, message: Cmd, sender: ComponentSender<Self>, _root: &Self::Root) {
         match message {
             Cmd::Probed { generation, result } => {
-                let line = if self.flow.probe_is_current(generation) {
-                    markers::probe(&result)
-                } else {
-                    markers::stale("probe")
-                };
                 let step = self.flow.probe_finished(generation, result);
-                self.marker(&line);
                 self.carry_out(step, &sender);
-                // The machine page may be showing already: its marker, the
-                // composition line and the notice follow the answer.
-                if self.flow.page() == PageId::Machine {
-                    self.announced = None;
-                }
             }
             Cmd::Planned { generation, result } => {
-                let line = if self.flow.plan_is_current(generation) {
-                    markers::plan(&result)
-                } else {
-                    markers::stale("plan")
-                };
                 let step = self.flow.plan_finished(generation, result);
-                self.marker(&line);
                 self.carry_out(step, &sender);
             }
             Cmd::Switched {
@@ -388,7 +324,6 @@ impl Component for App {
                 layout,
                 result,
             } => {
-                self.marker(&markers::layout(&layout, result.is_ok()));
                 if let Err(why) = &result {
                     eprintln!("ilex-installer: switching the session's layout to {layout}: {why}");
                 }
@@ -396,7 +331,7 @@ impl Component for App {
                 self.carry_out(step, &sender);
             }
         }
-        self.announce(root);
+        self.print_markers();
         self.observe();
     }
 
@@ -592,12 +527,7 @@ fn property_row(title: &str) -> adw::ActionRow {
 }
 
 impl Widgets {
-    fn build(
-        root: &adw::ApplicationWindow,
-        flow: &Flow,
-        sender: &ComponentSender<App>,
-        echo_try: bool,
-    ) -> Self {
+    fn build(root: &adw::ApplicationWindow, flow: &Flow, sender: &ComponentSender<App>) -> Self {
         let nav = adw::NavigationView::new();
         root.set_content(Some(&nav));
 
@@ -712,6 +642,12 @@ impl Widgets {
             .title("Confirm the password")
             .name("confirmation")
             .build();
+        // GtkText keeps an undo history of what is typed, unwiped, and with
+        // "show" on it holds the visible text too: nothing a person types
+        // into these fields is kept for Ctrl+Z.
+        test.set_enable_undo(false);
+        password.set_enable_undo(false);
+        confirmation.set_enable_undo(false);
         let name_message = message_label();
         let password_message = message_label();
         let name_group = group("", "");
@@ -799,9 +735,9 @@ impl Widgets {
             let input = input.clone();
             move |row| input.emit(Msg::Layout(row.selected()))
         });
-        // The layout test field is read only when a test allows its text in a
-        // marker: people type their intended passwords there.
-        if echo_try {
+        // The layout test field is read only when the flow says its text may be
+        // printed (a test): people type their intended passwords there.
+        if flow.echo_try() {
             test.connect_changed({
                 let input = input.clone();
                 move |row| input.emit(Msg::TryText(secret_of(row)))
@@ -1114,7 +1050,8 @@ impl Widgets {
                     r.problem.set_icon_name(Some(icon));
                     r.problem.set_title(&message.title);
                     r.problem.set_description(Some(&message.detail));
-                    r.retry.set_visible(true);
+                    // Not when only a restart helps (a BIOS boot).
+                    r.retry.set_visible(flow.can_retry());
                     r.stack.set_visible_child_name("problem");
                 }
             }

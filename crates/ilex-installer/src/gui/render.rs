@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ilex_installer_flow::backend::Backend;
-use ilex_installer_flow::flow::PageId;
+use ilex_installer_flow::flow::{Flow, PageId};
 use ilex_installer_flow::keyboard::{Layout, Layouts, SessionKeyboard, Sources};
 use ilex_installer_flow::language;
 use ilex_installer_flow::markers;
@@ -317,12 +317,10 @@ async fn shoot(job: &Job) -> Result<Summary> {
             .launch(Init {
                 backend,
                 keyboard: Arc::new(RenderKeyboard(Arc::clone(&failing))),
-                layouts: job.layouts.clone(),
+                // No markers: the renderer prints nothing but its own result.
+                flow: Flow::new(job.layouts.clone()),
                 fullscreen: false,
-                edition: "gnome".to_owned(),
-                markers: false,
                 stats: false,
-                echo_try: false,
                 observer: Some(Arc::clone(&observer)),
             })
             .detach();
