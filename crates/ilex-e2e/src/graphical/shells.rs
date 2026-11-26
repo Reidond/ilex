@@ -535,9 +535,29 @@ fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
             }
         },
     );
-    report.check("GNOME's own dconf database holds no interface setting", {
+    // The keys that decide a look. Other keys of the schema are not Plasma's
+    // doing: AT-SPI's bus launcher, which any session starts on demand, writes
+    // `toolkit-accessibility` into whichever database it sees.
+    report.check("GNOME's own dconf database holds no look setting", {
         let keys = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
-        if keys.trim().is_empty() {
+        let looks: Vec<_> = keys
+            .lines()
+            .filter(|l| {
+                [
+                    "accent-color",
+                    "color-scheme",
+                    "cursor-",
+                    "document-font-name",
+                    "font-name",
+                    "gtk-theme",
+                    "icon-theme",
+                    "monospace-font-name",
+                ]
+                .iter()
+                .any(|k| l.starts_with(k))
+            })
+            .collect();
+        if looks.is_empty() {
             Ok(())
         } else {
             Err(anyhow!("Plasma wrote into GNOME's database:\n{keys}"))
