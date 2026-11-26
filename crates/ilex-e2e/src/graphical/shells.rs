@@ -314,20 +314,23 @@ fn toolkits(vm: &Vm, look: ToolkitLook) -> Result<()> {
 fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     let mut report = vmtest::Report::default();
     // (GTK_USE_PORTAL is left behind on purpose, as a crash would: harmless.)
-    report.check("the session is GNOME and carries no profile or theme of Plasma's", {
-        let env = user(vm, "systemctl --user show-environment")?;
-        if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME")
-            && !env.lines().any(|l| {
-                ["DCONF_PROFILE=", "GTK_THEME="]
-                    .iter()
-                    .any(|p| l.starts_with(p))
-            })
+    report.check(
+        "the session is GNOME and carries no profile or theme of Plasma's",
         {
-            Ok(())
-        } else {
-            Err(anyhow!("session environment:\n{env}"))
-        }
-    });
+            let env = user(vm, "systemctl --user show-environment")?;
+            if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME")
+                && !env.lines().any(|l| {
+                    ["DCONF_PROFILE=", "GTK_THEME="]
+                        .iter()
+                        .any(|p| l.starts_with(p))
+                })
+            {
+                Ok(())
+            } else {
+                Err(anyhow!("session environment:\n{env}"))
+            }
+        },
+    );
     report.check("GNOME's own dconf database holds no interface setting", {
         let keys = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
         if keys.trim().is_empty() {

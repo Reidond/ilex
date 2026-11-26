@@ -703,11 +703,16 @@ fn literal_names(list: &Value, what: &str) -> Result<Vec<String>> {
 /// Every named package is installed. One SSH session for the lot: every
 /// `bcvk ephemeral ssh` holds an inotify instance, of which a host has 128.
 fn check_installed(vm: &EphemeralVm, names: &[String], what: &str) -> Result<()> {
-    let names: Vec<_> = names.iter().filter(|n| !n.starts_with('@')).map(|n| common::quote(n)).collect();
+    let names: Vec<_> = names
+        .iter()
+        .filter(|n| !n.starts_with('@'))
+        .map(|n| common::quote(n))
+        .collect();
     if names.is_empty() {
         return Ok(());
     }
-    vm.ssh(&format!("rpm -q -- {}", names.join(" ")))?.ok(what)?;
+    vm.ssh(&format!("rpm -q -- {}", names.join(" ")))?
+        .ok(what)?;
     Ok(())
 }
 
@@ -728,11 +733,19 @@ fn check_absent(vm: &EphemeralVm, names: &[String]) -> Result<()> {
 fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {
     if let Some(packages) = manifest.get("apps").and_then(|a| a.get("rpm")) {
         let packages = serde_json::to_value(packages)?;
-        check_installed(vm, &literal_names(&packages, "app RPM")?, "app RPMs installed")?;
+        check_installed(
+            vm,
+            &literal_names(&packages, "app RPM")?,
+            "app RPMs installed",
+        )?;
     }
     if let Some(packages) = manifest.get("packages").and_then(|p| p.get("install")) {
         let packages = serde_json::to_value(packages)?;
-        check_installed(vm, &literal_names(&packages, "package")?, "manifest packages installed")?;
+        check_installed(
+            vm,
+            &literal_names(&packages, "package")?,
+            "manifest packages installed",
+        )?;
     }
     Ok(())
 }
@@ -747,7 +760,8 @@ fn check_overlay(
     let mut script = String::from("status=0\n");
     overlay_checks(root, directory, &mut script)?;
     script.push_str("exit $status\n");
-    vm.ssh(&script)?.ok("overlay files and links survive unchanged")?;
+    vm.ssh(&script)?
+        .ok("overlay files and links survive unchanged")?;
     Ok(())
 }
 
@@ -775,7 +789,10 @@ fn overlay_checks(
             let host = ilex_devkit::cmd::output(
                 std::process::Command::new("sha256sum").arg("--").arg(&path),
             )?;
-            let hash = host.split_whitespace().next().context("sha256sum printed nothing")?;
+            let hash = host
+                .split_whitespace()
+                .next()
+                .context("sha256sum printed nothing")?;
             script.push_str(&format!(
                 "[ \"$(sha256sum -- {destination} | cut -d' ' -f1)\" = {hash} ] || {{ echo \"sha256 differs: \"{destination}; status=1; }}\n"
             ));

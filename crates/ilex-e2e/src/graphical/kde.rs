@@ -765,17 +765,25 @@ mod apps {
     /// catalogue or a prompt Discover cannot satisfy.
     fn discover(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         // The catalogue Discover shows is the remote's AppStream data; fetch it
-        // as GNOME Software's test does, so the page opens at once. Discover
-        // lowercases the host of an `appstream://` URL, so the application's ID
-        // must be lowercase (Baobab, `org.gnome.baobab`).
+        // as GNOME Software's test does. Discover loads its backends after it
+        // starts, and an application page asked for before that is "not found":
+        // open the window first, give it time to load the catalogue, then ask the
+        // running instance for the page (a second launch forwards to it).
         user(vm, "flatpak update --user --appstream -y --noninteractive")?;
         user(
             vm,
-            "systemd-run --user --collect --quiet --unit=ilex-discover plasma-discover appstream://org.gnome.baobab.desktop",
+            "systemd-run --user --collect --quiet --unit=ilex-discover plasma-discover",
         )?;
-        std::thread::sleep(Duration::from_secs(15));
+        std::thread::sleep(Duration::from_secs(45));
         settle(ctl)?;
-        shot(ctl, artifacts, "09-discover-page")?;
+        shot(ctl, artifacts, "09-discover-home")?;
+        user(
+            vm,
+            "systemd-run --user --collect --quiet --unit=ilex-discover-open plasma-discover appstream://org.gnome.baobab.desktop",
+        )?;
+        std::thread::sleep(Duration::from_secs(8));
+        settle(ctl)?;
+        shot(ctl, artifacts, "10-discover-page")?;
         // "Install from Flathub (user)": the button of the application's page
         // in Discover's default window.
         ctl.click(1868, 522, Button::Left, 1)?;
@@ -788,7 +796,7 @@ mod apps {
         )?;
         std::thread::sleep(Duration::from_secs(5));
         settle(ctl)?;
-        shot(ctl, artifacts, "10-discover-installed")?;
+        shot(ctl, artifacts, "11-discover-installed")?;
         let mut report = vmtest::Report::default();
         report.check(
             "the application went to the user installation, not the system's",
