@@ -887,8 +887,9 @@ Measured: `generic.kde` is 5,185,668,697 bytes (4,945 MiB, 1,378 RPMs) against
 `generic.gnome`'s 4,250,881,635 (4,054 MiB, 1,075): +891 MiB, from a shells
 transaction of 776 packages (712 MiB downloaded) against 473 (458 MiB). The base
 is unchanged. Both shells together are 6,061,869,164 bytes (1,602 RPMs).
-`ilexctl apps sync` of the 22 KDE Flatpaks plus runtimes on a fresh KDE
-VM: 3 min 16 s, 2 GB of RAM at peak, from Flathub.
+`ilexctl apps sync` of the 22 KDE Flatpaks, the two Breeze GTK 3 themes and
+their runtimes (KDE 6.11, Freedesktop 25.08) on a fresh KDE VM: 4 min 38 s,
+3.9 GB of memory at peak, 4.6 GB added to `/var`, from Flathub.
 
 Plasma picks its own display scale (KScreen): 2.7 on the VM's virtual 4K
 panel; nothing is measured for the AOC panel of `ms-7c35`.
