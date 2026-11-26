@@ -1,6 +1,6 @@
 [package]
 name = "ilex-installer"
-description = "The ilex installer's interface for the GNOME edition (placeholder page)"
+description = "The ilex installer's interface for the GNOME edition: GTK 4 + libadwaita (relm4) over the shared flow"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,10 +14,13 @@ gui = ["dep:relm4"]
 
 [dependencies]
 anyhow.workspace = true
+ilex-installer-flow.workspace = true
+ilex-installer-model.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+zbus = "6"
 # gnome_49: the GTK 4.20 / libadwaita 1.8 API (Fedora 45 ships 4.24 / 1.10).
 relm4 = { version = "0.11", features = ["libadwaita", "gnome_49"], optional = true }

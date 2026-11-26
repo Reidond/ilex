@@ -1482,10 +1482,25 @@ name = "ilex-installer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ilex-installer-flow",
+ "ilex-installer-model",
  "libc",
  "relm4",
  "serde",
  "serde_json",
+ "zbus",
+]
+
+[[package]]
+name = "ilex-installer-flow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ilex-installer-model",
+ "serde",
+ "serde_json",
+ "zbus",
+ "zeroize",
 ]
 
 [[package]]
