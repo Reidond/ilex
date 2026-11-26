@@ -832,10 +832,15 @@ jobs:
           raw=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
             --jq '.jobs[] | {name, status, conclusion, steps: [(.steps // [])[] | {name, conclusion, completed_at}]}' | jq -s -c .)
           jobs=$(jq -c '[.[] | {name, result: (.conclusion // .status)}]' <<<"$raw")
+          # This attempt's start, which the decision needs to tell a step of a
+          # carried-over job from one of this attempt. Unreadable is never
+          # qualified: the program then answers false.
+          started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" --jq .run_started_at) || started=
+          [ -n "$started" ] || echo "::warning title=Installer qualification: no run_started_at::this attempt's start time could not be read; the installer root cannot be shown as qualified"
           # The installer root's qualification, decided by the very program the
           # gate runs (not from the two jobs' conclusions alone: a job carried
           # over from an earlier attempt qualifies nothing it did not test).
-          qualification=$(jq -c -f .github/installer-qualification.jq <<<"$raw")
+          qualification=$(jq -c --arg started "$started" -f .github/installer-qualification.jq <<<"$raw")
           verdict=$(jq -r .verdict <<<"$qualification")
           why=$(jq -r .why <<<"$qualification")
           # The caller job is named `pipeline` in publish.yml; the installer
@@ -876,7 +881,7 @@ jobs:
             echo '| --- | --- | --- | --- | --- |'
             jq -r '.roots[] | "| \(.tag) | \(.build) | \(.qual) | \(.publish) | \(.machines) |"' <<<"$report"
             echo
-            echo 'Qualification: the installer root'"'"'s `upgrade` job; for every other root, whether the installer root'"'"'s `build` (security tier) and `upgrade` jobs both succeeded and the upgrade tier passed on this attempt'"'"'s candidate (a job carried over from an earlier attempt does not count), which its signing and its layers wait for.'
+            echo 'Qualification: the installer root'"'"'s `upgrade` job; for every other root, whether the installer root'"'"'s `build` (security tier) and `upgrade` jobs both succeeded and the upgrade tier passed on this attempt'"'"'s candidate (the staging and the upgrade must both be of this attempt, or both carried over together; one of each does not count), which its signing and its layers wait for.'
             echo
             case "$verdict" in true) label=met ;; false) label='NOT met' ;; *) label=pending ;; esac
             echo "Installer qualification: $label. $why."

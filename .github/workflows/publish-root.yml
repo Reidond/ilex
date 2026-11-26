@@ -309,10 +309,14 @@ jobs:
   # gates only signing (publish and machines below). A conclusion of `success`
   # qualifies when the evidence agrees (installer-qualification.jq): the
   # installer root was unchanged (its tiers are skipped steps of a green job), or
-  # no v1 exists, or the upgrade tier passed after this attempt's candidate was
-  # staged (a job carried over by "Re-run failed jobs" tested nothing of it); a
-  # failed, timed-out or cancelled installer job does not. No credentials but a
-  # read-only jobs API token, and no dependency of the installer root on this job.
+  # no v1 exists, or the upgrade tier passed after the candidate was staged and
+  # both steps are of one attempt (this attempt's, or both carried over
+  # together: a lone job carried over by "Re-run failed jobs" tested nothing of
+  # this attempt's candidate, and an upgrade job re-run beside a build carried
+  # over resolves a staging tag a newer run may have overwritten); a failed,
+  # timed-out or cancelled installer job does not. No credentials but a
+  # read-only token for the run's jobs and attempt records, and no dependency of
+  # the installer root on this job.
   qualification:
     needs: build
     # Runs when this root could sign something: a changed root, a root with

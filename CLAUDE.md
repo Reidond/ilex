@@ -1738,11 +1738,24 @@ Paths on separate runners:
   candidate" step was not skipped), the upgrade job's `e2e tests (upgrade)` step
   must have succeeded and completed no earlier than the staging step (step
   timestamps, since `run_attempt` is the new attempt for a carried-over job
-  too). An unchanged installer root (staging skipped; its tiers are skipped steps
+  too), **and the two steps must be of the same attempt**. The gate reads this
+  attempt's `run_started_at` (`gh api repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT`;
+  `roots-report` passes the same value to the shared filter) and requires
+  "Stage the candidate" and `e2e tests (upgrade)` both to have completed in this
+  attempt (at or after it), or both before it, carried over together, with the
+  ordering rule above. One of each never qualifies: the upgrade job resolves the
+  per-ref staging tag when it runs, and a newer run on the same ref may have
+  overwritten it. (Run A's attempt 1 stages at T1 and its upgrade fails; run B
+  restages the tag at T2; "Re-run failed jobs" on A carries the build over and
+  re-runs `upgrade`, which now tests B's candidate at T3 > T1, not the one A
+  staged.) An unreadable `run_started_at` is retried like any API error and, at
+  the deadline, leaves the root unsigned; `roots-report` shows it as not met. An
+  unchanged installer root (staging skipped; its tiers are skipped steps
   of a green job, nothing of it could have changed) and no existing v1
   (`upgrade` has nothing to test) still qualify; a step missing from the listing
-  never does. A carried-over job that does not qualify is cured by re-running
-  all jobs or the installer root's `upgrade` job. One job ending in `failure`,
+  never does. A job that does not qualify is cured by **re-running all jobs**:
+  re-running only the installer root's `upgrade` job (which "Re-run failed jobs"
+  does when that is the failed one) no longer is. One job ending in `failure`,
   `timed_out` or `cancelled` decides at once: the root is not qualified, its
   `publish` and `machines` jobs are skipped (a green call; `roots-report` shows
   `NOT met` with the reason, and an error annotation names the failed installer
