@@ -182,6 +182,7 @@ fn wait_line(
         if let Some(status) = vm.exited()? {
             bail!("the VM exited with {status} while waiting for {what}; serial: {text}");
         }
+        super::ensure_firmware_output(vm)?;
         if started.elapsed() > timeout {
             bail!("no {what} within {timeout:?}; serial: {text}");
         }
@@ -544,6 +545,11 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     welcome_up(vm, &ctl, &serial, artifacts, "account")?;
     continue_to_machine(&ctl)?;
     wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
+    // The page's marker comes when its window is mapped; Continue gets the
+    // focus when the page has finished sliding in (`shown`). A press sent
+    // before then goes to the previous page's field, so wait for the settled
+    // page like the other trials do.
+    wait_page(vm, &ctl, artifacts, "account-machine")?;
     // The machine page has Continue focused: Enter presses it.
     ctl.key("Return")?;
     wait_page_marker(vm, &serial, "account", EVENT_TIMEOUT)?;
