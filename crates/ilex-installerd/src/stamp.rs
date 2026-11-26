@@ -15,6 +15,11 @@
 //!
 //! A digest holds nothing secret and is not derived from a secret (see
 //! [`target::request_digest`]).
+//!
+//! Every list here is ordered oldest first, each digest once, and a digest
+//! that comes again is *moved* to the newest place, never skipped: the newest
+//! installation's own digest is always the last line, and what is dropped past
+//! [`MAX_DIGESTS`] is what has not been named for longest.
 
 use crate::{
     answers::{mounted_number, read_bounded},
@@ -29,7 +34,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -38,6 +43,14 @@ use std::{
 /// one digest per line, gone at the next boot. The helper reads it when an
 /// installation finishes.
 pub const SEEN: &str = "/run/ilex-answers-seen";
+
+/// Where an installation keeps the digests of the stamp the disk held, as the
+/// last thing before the disk is wiped: root's file in `/run` (mode 0600), the
+/// same format as [`SEEN`], gone at the next boot. The wipe takes the stamp
+/// with it, and an installation that then fails (the pull, say) leaves a new
+/// `ilex-boot` with none: a retry in the same boot reads that and would carry
+/// nothing, so the retry's own stamp is made from this record as well.
+pub const EARLIER: &str = "/run/ilex-installer-earlier";
 
 /// The most digests one stamp holds: the newest are kept. Each is 65 bytes, so
 /// the file is at most about 16 KiB; nobody installs a disk this many times.
@@ -63,9 +76,7 @@ pub fn parse(text: &str) -> Result<Vec<String>> {
             continue;
         }
         ensure!(is_digest(line), "line {} is not a digest", n + 1);
-        if !digests.iter().any(|d| d == line) {
-            digests.push(line.to_owned());
-        }
+        push_newest(&mut digests, line);
     }
     ensure!(!digests.is_empty(), "it holds no digest");
     ensure!(
@@ -80,20 +91,37 @@ pub fn render(digests: &[String]) -> String {
     digests.iter().map(|d| format!("{d}\n")).collect()
 }
 
-/// The stamp of the installation that ends: what the disk's earlier stamp held,
-/// then what answers mode saw in this boot, then its own digest, each once (the
-/// first place counts), the oldest dropped past [`MAX_DIGESTS`]. The newest
-/// installation's own digest is always there.
-pub fn merge(carried: &[String], seen: &[String], own: &str) -> Vec<String> {
+/// Put `digest` last: where it already is, it moves there.
+fn push_newest(all: &mut Vec<String>, digest: &str) {
+    all.retain(|d| d != digest);
+    all.push(digest.to_owned());
+}
+
+/// `digests` in order, each once at the place of its *last* mention, the oldest
+/// dropped past [`MAX_DIGESTS`]. What comes last always stays.
+fn newest_kept<'a>(digests: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut all: Vec<String> = Vec::new();
-    for digest in carried.iter().chain(seen).map(String::as_str).chain([own]) {
-        if !all.iter().any(|d| d == digest) {
-            all.push(digest.to_owned());
-        }
+    for digest in digests {
+        push_newest(&mut all, digest);
     }
     let excess = all.len().saturating_sub(MAX_DIGESTS);
     all.drain(..excess);
     all
+}
+
+/// Two lists of digests as one, `older` then `newer`, each digest once at the
+/// place of its last mention (a digest in both is the newer list's).
+pub fn union(older: &[String], newer: &[String]) -> Vec<String> {
+    newest_kept(older.iter().chain(newer).map(String::as_str))
+}
+
+/// The stamp of the installation that ends: what the disk's earlier stamp held,
+/// then what answers mode saw in this boot, then its own digest, each once at
+/// the place of its last mention (a digest that comes again is moved to the
+/// newest place, not left where it was first), the oldest dropped past
+/// [`MAX_DIGESTS`]. The newest installation's own digest is always there, last.
+pub fn merge(carried: &[String], seen: &[String], own: &str) -> Vec<String> {
+    newest_kept(carried.iter().chain(seen).map(String::as_str).chain([own]))
 }
 
 /// Whether the digest of the request now being made is one the stamp holds:
@@ -103,11 +131,12 @@ pub fn holds(stamp: &[String], digest: &str) -> bool {
     stamp.iter().any(|d| d == digest)
 }
 
-/// The digests answers mode saw in this boot, from the file `path` ([`SEEN`]).
-/// Not there is no digest. The file must be a regular file of root's, not
-/// readable or writable by anyone else, opened without following a link: it is
-/// what a program that could write in `/run` would otherwise forge.
-pub fn read_seen(path: &Path) -> Result<Vec<String>> {
+/// The digests of a record in `/run`, from the file `path` ([`SEEN`] or
+/// [`EARLIER`]). Not there is no digest. The file must be a regular file of
+/// root's, not readable or writable by anyone else, opened without following a
+/// link: it is what a program that could write in `/run` would otherwise
+/// forge.
+pub fn read_record(path: &Path) -> Result<Vec<String>> {
     match fs::symlink_metadata(path) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -139,20 +168,10 @@ pub fn read_seen(path: &Path) -> Result<Vec<String>> {
     parse(text).with_context(|| format!("{}", path.display()))
 }
 
-/// Add `digest` to the record at `path` ([`SEEN`]): written whole (a new file
-/// renamed over the old one), mode 0600, once. Called with the digest of the
-/// request answers mode has built, before anything else can end it.
-pub fn record_seen(path: &Path, digest: &str) -> Result<()> {
-    ensure!(is_digest(digest), "not a digest");
-    // A record that cannot be read is replaced (it was not ours).
-    let mut all = read_seen(path).unwrap_or_default();
-    if all.iter().any(|d| d == digest) {
-        return Ok(());
-    }
-    all.push(digest.to_owned());
-    let excess = all.len().saturating_sub(MAX_DIGESTS);
-    all.drain(..excess);
-    let partial = path.with_extension("partial");
+/// The record at `path` written whole: a new file renamed over the old one,
+/// mode 0600.
+fn write_record(path: &Path, digests: &[String]) -> Result<()> {
+    let partial = PathBuf::from(format!("{}.partial", path.display()));
     let _ = fs::remove_file(&partial);
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -161,10 +180,44 @@ pub fn record_seen(path: &Path, digest: &str) -> Result<()> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(&partial)
         .with_context(|| format!("writing {}", partial.display()))?;
-    file.write_all(render(&all).as_bytes())?;
+    file.write_all(render(digests).as_bytes())?;
     file.sync_all()?;
     fs::rename(&partial, path).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Add `digest` to the record at `path` ([`SEEN`]) as its newest: written whole
+/// (a new file renamed over the old one), mode 0600. Called with the digest of
+/// the request answers mode has built, before anything else can end it; the
+/// same answers seen again (a restart of the unit in one boot) are the newest
+/// again, not left among the oldest.
+pub fn record_seen(path: &Path, digest: &str) -> Result<()> {
+    ensure!(is_digest(digest), "not a digest");
+    // A record that cannot be read is replaced (it was not ours).
+    let before = read_record(path).unwrap_or_default();
+    let all = union(&before, &[digest.to_owned()]);
+    if all == before {
+        return Ok(());
+    }
+    write_record(path, &all)
+}
+
+/// Keep the digests of the stamp a disk held in the record at `path`
+/// ([`EARLIER`]), beside what an earlier attempt of this boot kept: the stamp
+/// is about to be wiped with the disk, and a retry that reads the new, empty
+/// one must still find them. No digest changes nothing (a retry's own stamp is
+/// empty, and must not blot out what the first attempt kept). A record that
+/// cannot be read is replaced.
+pub fn keep_earlier(path: &Path, digests: &[String]) -> Result<()> {
+    if digests.is_empty() {
+        return Ok(());
+    }
+    let before = read_record(path).unwrap_or_default();
+    let all = union(&before, digests);
+    if all == before {
+        return Ok(());
+    }
+    write_record(path, &all)
 }
 
 /// What a disk's `/boot` held, read before anything is written to it.

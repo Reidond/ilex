@@ -238,6 +238,14 @@ impl Install {
         let disk = self.address.clone();
         disks::by_id_address(&self.plan.disk.id, &hold)
             .map_err(|why| anyhow!("{} no longer names the held disk: {why}", self.address))?;
+        // The wipe takes the disk's stamp with it, and an installation that
+        // fails after it (the pull, say) leaves a new, empty `ilex-boot` for a
+        // retry in this boot to read: the digests the stamp held are kept in
+        // `/run` first, and the stamp of whatever installation ends in this
+        // boot is made from them too. Nothing is written to the disk yet, so a
+        // failure to keep them ends the installation here, with the disk as it
+        // was.
+        self.keep_earlier(&mut log)?;
         // The disk is as good as written from here: recorded first, so that a
         // helper that dies before it returns leaves a record that says so.
         self.helper.tracker.disk_changed()?;
@@ -320,6 +328,23 @@ impl Install {
             "the partitions systemd-repart made are not the planned ones; the disk was erased, install again from a new plan"
         );
         self.end(Stage::Partition, &mut log);
+        Ok(())
+    }
+
+    /// Keep the digests of the stamp the disk held in [`stamp::EARLIER`], the
+    /// last thing before it is wiped.
+    fn keep_earlier(&self, log: &mut StageLog) -> Result<()> {
+        if self.earlier.digests.is_empty() {
+            return Ok(());
+        }
+        stamp::keep_earlier(&self.helper.config.earlier_file, &self.earlier.digests)
+            .context("keeping the digests of the disk's stamp before it is wiped")?;
+        log.line(&format!(
+            "kept the {} digest{} of the disk's earlier stamp in {}, to carry them into the stamp of whatever installation ends in this boot",
+            self.earlier.digests.len(),
+            if self.earlier.digests.len() == 1 { "" } else { "s" },
+            self.helper.config.earlier_file.display()
+        ));
         Ok(())
     }
 
@@ -802,13 +827,15 @@ impl Install {
     /// Leave the digests of the requests that must not erase this installation
     /// on the new `/boot` ([`target::REQUEST_STAMP`], one per line), where
     /// unattended mode finds them (read-only) on a later boot of the installer.
-    /// They are: what the disk's stamp held before it was wiped, what answers
-    /// mode saw in this boot and handed over (the file [`stamp::SEEN`]: answers
-    /// that did not install and must not become new answers because the person
-    /// installed by hand), and this installation's own request. Written
-    /// last-but-one, once the image and the account are in place: an
-    /// installation that did not get this far has no stamp and may be run
-    /// again.
+    /// They are: what the disk's stamp held before it was wiped, from this
+    /// attempt and from any earlier attempt of this boot that was wiped and
+    /// failed (the file [`stamp::EARLIER`], kept just before each wipe: the
+    /// disk of a retry holds nothing of it), what answers mode saw in this boot
+    /// and handed over (the file [`stamp::SEEN`]: answers that did not install
+    /// and must not become new answers because the person installed by hand),
+    /// and this installation's own request. Written last-but-one, once the
+    /// image and the account are in place: an installation that did not get
+    /// this far has no stamp and may be run again.
     fn stamp(&self, log: &mut StageLog, deployment: &target::Deployment) -> Result<()> {
         let file = self.target.join("boot").join(target::REQUEST_STAMP);
         let own = target::request_digest(&self.plan.request);
@@ -819,7 +846,18 @@ impl Install {
                 "the disk's earlier stamp could not be read before it was wiped, so its digests are not carried: {why}"
             ));
         }
-        let seen = match stamp::read_seen(&self.helper.config.seen_file) {
+        let kept = match stamp::read_record(&self.helper.config.earlier_file) {
+            Ok(kept) => kept,
+            Err(why) => {
+                log.line(&format!(
+                    "the record of the stamps this boot's installations wiped could not be read ({why:#}), so it is not carried"
+                ));
+                Vec::new()
+            }
+        };
+        // What the first attempt kept is older than what this one read.
+        let carried = stamp::union(&kept, &self.earlier.digests);
+        let seen = match stamp::read_record(&self.helper.config.seen_file) {
             Ok(seen) => seen,
             Err(why) => {
                 log.line(&format!(
@@ -828,15 +866,15 @@ impl Install {
                 Vec::new()
             }
         };
-        let digests = stamp::merge(&self.earlier.digests, &seen, &own);
+        let digests = stamp::merge(&carried, &seen, &own);
         write_file(&file, stamp::render(&digests).as_bytes(), 0o600)?;
         self.relabel_mount_point(log, deployment, &file)?;
         log.line(&format!(
-            "recorded {} digest{} in /boot/{} (this request's, {} carried from the disk's earlier stamp, {} of answers seen in this boot)",
+            "recorded {} digest{} in /boot/{} (this request's, {} carried from the disk's earlier stamps, {} of answers seen in this boot)",
             digests.len(),
             if digests.len() == 1 { "" } else { "s" },
             target::REQUEST_STAMP,
-            self.earlier.digests.len(),
+            carried.len(),
             seen.len()
         ));
         Ok(())

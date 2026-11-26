@@ -1722,6 +1722,12 @@ pub(super) fn run_repeat() -> Result<()> {
 ///   console, systemd's hand-over is skipped by its condition, and the
 ///   interface does not start. The disk is not asserted untouched (the
 ///   thread may have begun).
+/// * `restart` (no fault): the unit is killed while the installation runs (the
+///   helper goes on writing) and started again as its own comment documents
+///   (`systemctl reset-failed`, then `start`). The new run finds the flag the
+///   first one raised, asks `State()`, is told an installation is active,
+///   keeps the flag, plans nothing, and starts no interface over the running
+///   installation.
 pub(super) fn run_handover() -> Result<()> {
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
@@ -1813,7 +1819,8 @@ pub(super) fn run_handover() -> Result<()> {
             "iso::next unattended-handover: with fault={fault} the interface starts, nothing was written and the disk is untouched"
         );
     }
-    handover_apply_fault(&root, &layout, &artifacts, target)
+    handover_apply_fault(&root, &layout, &artifacts, target)?;
+    handover_restart(&root, &layout, &artifacts, target)
 }
 
 /// The `apply` fault: the answers are valid and the target is blank, the helper
@@ -1887,6 +1894,115 @@ fn handover_apply_fault(
     volume.unchanged()?;
     println!(
         "iso::next unattended-handover: with fault=apply (the helper killed as Apply started the installation) the failure stays on the console, the flag stays and the interface does not start"
+    );
+    Ok(())
+}
+
+/// The helper's own state, asked over the bus from inside the guest.
+fn helper_state(vm: &Vm) -> Result<State> {
+    let out = vm.ssh_ok(
+        "busctl --system --json=short --timeout=30 call org.ilex.Installer1 /org/ilex/Installer1 org.ilex.Installer1 State",
+    )?;
+    let message: serde_json::Value = serde_json::from_str(&out).context("busctl's answer")?;
+    serde_json::from_str(message["data"][0].as_str().context("State's document")?)
+        .context("the helper's state")
+}
+
+/// The unit is started again while the installation of its first run goes on.
+/// The answers are valid and the target is blank; no fault is asked for. Once
+/// the pull is under way the unit is killed (the helper does not care: the
+/// installation is its own thread) and started again the way its comment
+/// documents. The new run finds the flag the first one raised and must not
+/// delete it, plan, or start the interface: `State()` says an installation is
+/// active.
+fn handover_restart(root: &Path, layout: &Layout, artifacts: &Path, target: &str) -> Result<()> {
+    let dir = root.join("restart");
+    fs::create_dir_all(&dir)?;
+    let volume = answers_volume(&dir, &answers(target, target, false))?;
+    let mut guest = boot(
+        &dir,
+        layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let tag = "unattended-handover-restart";
+    // The installation is running (its first stage past the partition table).
+    wait_for_text(&serial, "stage=image", INSTALL_TIMEOUT)
+        .inspect_err(|_| diagnostics(vm, artifacts, tag))?;
+    vm.wait_ssh(PAGE_TIMEOUT)
+        .context("the live system did not accept the harness's SSH key")?;
+    let before = helper_state(vm)?;
+    ensure!(
+        before.active && before.disk_changed,
+        "the installation is not running before the unit is restarted: {before:?}"
+    );
+    // The first run ends as a crash would (the flag stays, systemd's
+    // hand-over is skipped by its condition), and the installation goes on.
+    vm.ssh_ok("systemctl kill --signal=SIGKILL --kill-whom=main ilex-installer-answers.service")?;
+    vm.wait_for(
+        "the first run's unit to have failed",
+        "test \"$(systemctl show -p ActiveState --value ilex-installer-answers.service)\" = failed",
+        Duration::from_secs(60),
+    )?;
+    // What its own comment says to do: forget the failure and start it again.
+    vm.ssh_ok(
+        "systemctl reset-failed ilex-installer-answers.service; systemctl --no-block start ilex-installer-answers.service",
+    )?;
+    let console = wait_for_text(
+        &serial,
+        "an installation is running",
+        Duration::from_secs(180),
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, tag))?;
+    let _ = fs::write(artifacts.join(format!("next-{tag}-serial.txt")), &console);
+    // Long enough for a hand-over by mistake (the program's own, or systemd's
+    // through `OnFailure=`) to have started the interface.
+    std::thread::sleep(Duration::from_secs(45));
+    let console = fs::read(&serial)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let facts = vm.wait_for(
+        "the guest after the unit was started again",
+        "echo marker=$(test -e /run/ilex-answers-volume && echo present || echo gone); echo applying=$(test -e /run/ilex-answers-applying && echo present || echo absent); echo session=$(systemctl is-active ilex-installer-session.service); echo answers=$(systemctl show -p ActiveState,Result --value ilex-installer-answers.service | tr '\\n' ' '); echo handover_state=$(systemctl show -p ActiveState --value ilex-installer-answers-handover.service); echo handover_skipped=$(journalctl -b -u ilex-installer-answers-handover.service --no-pager -o cat | grep -c skipped || true)",
+        Duration::from_secs(60),
+    )?;
+    let _ = fs::write(artifacts.join(format!("next-{tag}-units.txt")), &facts);
+    ensure!(
+        facts.contains("marker=present")
+            && facts.contains("applying=present")
+            && facts.contains("session=inactive")
+            && facts.contains("answers=failed")
+            && facts.contains("handover_state=inactive")
+            && !facts.contains("handover_skipped=0"),
+        "the interface was started over the installation, the flag was lowered, systemd's hand-over was not skipped by its condition, or the unit did not fail: {facts}"
+    );
+    ensure!(
+        !console.contains("handover=")
+            && console.contains("result=failed")
+            && console.matches("plan=ready").count() == 1
+            && console.matches("apply=started").count() == 1,
+        "the second run handed over, or planned, or applied again: {console}"
+    );
+    ensure!(
+        !console.contains(PASSWORD),
+        "the password was printed: {console}"
+    );
+    // And the installation was not disturbed: it is still the helper's, and
+    // still running.
+    let after = helper_state(vm)?;
+    ensure!(
+        after.active && after.applied == before.applied,
+        "the installation of the first run did not go on: {after:?}"
+    );
+    drop(guest);
+    volume.unchanged()?;
+    println!(
+        "iso::next unattended-handover: with the unit started again while the installation ran (reset-failed and start) the second run kept the flag, planned nothing and did not start the interface"
     );
     Ok(())
 }

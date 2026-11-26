@@ -56,6 +56,10 @@ pub struct Config {
     /// The digests answers mode saw in this boot ([`crate::stamp::SEEN`]): the
     /// installation that ends writes them into the disk's stamp.
     pub seen_file: PathBuf,
+    /// The digests of the stamps this boot's installations wiped
+    /// ([`crate::stamp::EARLIER`]): kept just before each wipe, so that a retry
+    /// after a failed installation still carries them.
+    pub earlier_file: PathBuf,
 }
 
 impl Default for Config {
@@ -81,6 +85,7 @@ impl Default for Config {
             plan_valid_seconds: PLAN_VALID_SECONDS,
             pause_before_hold: None,
             seen_file: crate::stamp::SEEN.into(),
+            earlier_file: crate::stamp::EARLIER.into(),
         }
     }
 }

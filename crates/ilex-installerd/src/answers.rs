@@ -29,7 +29,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use ilex_installer_model::{
     answers::Answers,
-    plan::{Plan, PlanError},
+    plan::{ErrorCode, Plan, PlanError},
     probe::{Disk, Probe},
     state::{Outcome, State},
 };
@@ -66,12 +66,15 @@ pub const BOOT_MARKER: &str = "/run/ilex-answers-volume";
 /// Started when answers mode fails before it has changed any disk.
 const SESSION: &str = "ilex-installer-session.service";
 /// Present from just before `Apply` is called until the helper has refused it
-/// with one of its own structured errors ([`settle`]), and for the rest of the
-/// boot otherwise (accepted, or any failure of the call that is not such a
-/// refusal): it says the helper may have begun to write. The systemd-level
-/// hand-over (`ilex-installer-answers-handover.service`, the answers unit's
-/// `OnFailure=`) does nothing while it exists, and starts the interface when the
-/// unit ended without it.
+/// with one of its own structured errors that says nothing was written
+/// ([`settle`]; not `installation-active`, which says one is running), and for
+/// the rest of the boot otherwise (accepted, or any failure of the call that is
+/// not such a refusal): it says the helper may have begun to write. A run that
+/// starts finds it left by an attempt of this boot and deletes it only when
+/// `State()` says no installation is active ([`leftover_flag`]). The
+/// systemd-level hand-over (`ilex-installer-answers-handover.service`, the
+/// answers unit's `OnFailure=`) does nothing while it exists, and starts the
+/// interface when the unit ended without it.
 pub const APPLYING_FLAG: &str = "/run/ilex-answers-applying";
 
 /// What to do once the installation has succeeded.
@@ -581,6 +584,44 @@ fn describe(error: &zbus::Error) -> String {
     refusal_of(error).map_or_else(|| error.to_string(), |r| describe_refusal(&r))
 }
 
+/// An end of answers mode after which the interface must not be started: an
+/// installation is running (the helper refused a call with
+/// `installation-active`, or a flag of an attempt that began one is there and
+/// the helper does not say that none is), and the interface would put a second
+/// session over a disk that is being written. The run's last line says so and
+/// nothing is handed over; the flag stays.
+#[derive(Debug)]
+pub struct KeepsInterfaceOut(String);
+
+impl std::fmt::Display for KeepsInterfaceOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for KeepsInterfaceOut {}
+
+/// Whether `error` (or what it was made from) is a [`KeepsInterfaceOut`].
+pub fn keeps_interface_out(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| e.is::<KeepsInterfaceOut>())
+}
+
+/// What a failed call of `method` is: the helper saying that an installation is
+/// running keeps the interface out ([`KeepsInterfaceOut`]: it is no proof that
+/// nothing was written, and no reason to start a second interface over a disk
+/// that is); anything else is the error as the helper or the bus put it.
+pub fn classify(method: &str, error: &zbus::Error) -> anyhow::Error {
+    match refusal_of(error) {
+        Some(refusal) if refusal.code == ErrorCode::InstallationActive => {
+            anyhow::Error::new(KeepsInterfaceOut(format!(
+                "{method}: {}; an installation is running, so the interface is not started over it",
+                describe_refusal(&refusal)
+            )))
+        }
+        _ => anyhow::anyhow!("{method}: {}", describe(error)),
+    }
+}
+
 async fn call<R>(
     proxy: &Proxy<'_>,
     method: &'static str,
@@ -592,7 +633,7 @@ where
     proxy
         .call(method, body)
         .await
-        .map_err(|e| anyhow::anyhow!("{method}: {}", describe(&e)))
+        .map_err(|e| classify(method, &e))
 }
 
 fn text_of(state: &State) -> String {
@@ -619,7 +660,10 @@ pub struct Reached {
 /// reply, the connection ends, the helper crashes before it answers) says
 /// nothing about whether the installation thread had started: the flag stays,
 /// the run counts as applied, and the console shows the failure with the
-/// interface not started.
+/// interface not started. So does `installation-active`, the one refusal that
+/// says something *is* being written (the installation of an earlier attempt of
+/// this boot, say, when the unit was restarted while it still ran): the flag
+/// stays, nothing is handed over, and the run ends with [`KeepsInterfaceOut`].
 pub fn settle(result: zbus::Result<String>, flag: &Path, reached: &mut Reached) -> Result<String> {
     match result {
         Ok(state) => {
@@ -629,6 +673,10 @@ pub fn settle(result: zbus::Result<String>, flag: &Path, reached: &mut Reached) 
             Ok(state)
         }
         Err(error) => match refusal_of(&error) {
+            Some(refusal) if refusal.code == ErrorCode::InstallationActive => {
+                reached.applied = true;
+                Err(classify("Apply", &error))
+            }
             Some(refusal) => {
                 let _ = fs::remove_file(flag);
                 Err(anyhow::anyhow!("Apply: {}", describe_refusal(&refusal)))
@@ -646,6 +694,49 @@ pub fn settle(result: zbus::Result<String>, flag: &Path, reached: &mut Reached) 
     }
 }
 
+/// What the flag a run finds at its start (left by an attempt of this boot: the
+/// unit restarted after `systemctl reset-failed`) comes to, given what
+/// `State()` said. The flag says the helper may have begun to write, and it is
+/// deleted only when the helper says that no installation is active. When one
+/// is, or the helper cannot be asked, the flag stays and the run ends with
+/// [`KeepsInterfaceOut`]: starting the interface over a running installation is
+/// what the flag is there to prevent.
+pub fn settle_leftover(flag: &Path, state: Result<State>) -> Result<()> {
+    match state {
+        Ok(state) if !state.active => {
+            let _ = fs::remove_file(flag);
+            Ok(())
+        }
+        Ok(_) => Err(anyhow::Error::new(KeepsInterfaceOut(
+            "an installation is running (the flag an earlier attempt of this boot left is kept), so nothing is read or planned and the interface is not started over it"
+                .into(),
+        ))),
+        Err(why) => Err(anyhow::Error::new(KeepsInterfaceOut(format!(
+            "the helper cannot say whether the installation an earlier attempt of this boot may have begun is still running ({why:#}): the flag it left is kept and the interface is not started"
+        )))),
+    }
+}
+
+/// [`settle_leftover`] for a flag that may be there: with none there is nothing
+/// to delete and nothing to ask.
+async fn leftover_flag(flag: &Path) -> Result<()> {
+    if let Err(e) = fs::symlink_metadata(flag)
+        && e.kind() == std::io::ErrorKind::NotFound
+    {
+        return Ok(());
+    }
+    let asked = async {
+        let connection = Connection::system()
+            .await
+            .context("connecting to the system bus")?;
+        let proxy = Proxy::new(&connection, NAME, PATH, NAME).await?;
+        let state: String = call(&proxy, "State", &()).await?;
+        serde_json::from_str::<State>(&state).context("reading the state")
+    }
+    .await;
+    settle_leftover(flag, asked)
+}
+
 /// Run an unattended installation. Ok only when it succeeded; whatever else
 /// happened, the last `ILEX-INSTALLER-ANSWERS` line says `result=` and why
 /// (a refusal of the helper, a file that is not valid by its position, never
@@ -653,21 +744,31 @@ pub fn settle(result: zbus::Result<String>, flag: &Path, reached: &mut Reached) 
 /// hands the machine to the interface, so that the screen is not left empty.
 pub fn run(options: &Options) -> Result<()> {
     let mut reached = Reached::default();
-    // A flag left by an earlier attempt of this boot says nothing about this one.
-    let _ = fs::remove_file(APPLYING_FLAG);
     // The answers file may hold a password: this process never dumps core and
     // cannot be traced, as the helper that receives the password. It is done
     // here, before the volume is read, so that its failure is a failure like
     // any other before `Apply`: the machine is handed to the interface.
     let outcome = ilex_enroll::harden()
         .context("hardening this process")
-        .and_then(|()| zbus::block_on(drive(options, &mut reached)));
+        .and_then(|()| {
+            zbus::block_on(async {
+                // A flag left by an earlier attempt of this boot says nothing
+                // about this one, unless that attempt's installation is still
+                // running: it is deleted only when the helper says none is.
+                leftover_flag(Path::new(APPLYING_FLAG)).await?;
+                drive(options, &mut reached).await
+            })
+        });
     if let Err(error) = &outcome {
         say(&format!(
             "result=failed {}",
             exec::clean_line(format!("{error:#}").as_bytes())
         ));
-        if !reached.applied && options.file.is_none() {
+        if keeps_interface_out(error) {
+            // An installation is running: the flag says so to the
+            // systemd-level hand-over as well, however this run began.
+            let _ = fs::write(APPLYING_FLAG, b"");
+        } else if !reached.applied && options.file.is_none() {
             hand_over();
         }
     }

@@ -4287,8 +4287,9 @@ fn check_answers(parent: &Path) -> Result<()> {
         "the stamp's size is not bounded"
     );
     // What an installation writes: the earlier stamp's digests, the answers seen
-    // in this boot, then its own; each once, the oldest dropped when there are
-    // too many and its own never.
+    // in this boot, then its own; each once, at the place of its last mention (a
+    // digest that comes again is moved to the newest place, not left where it
+    // was first), the oldest dropped when there are too many and its own never.
     ensure!(
         stamp::merge(
             std::slice::from_ref(&first),
@@ -4305,10 +4306,21 @@ fn check_answers(parent: &Path) -> Result<()> {
                 &[second.clone(), first.clone()],
                 std::slice::from_ref(&second),
                 &third
-            ) == [second.clone(), first.clone(), third.clone()]
-            && stamp::render(&[first.clone(), second.clone()]) == format!("{first}\n{second}\n"),
+            ) == [first.clone(), second.clone(), third.clone()]
+            && stamp::merge(&[first.clone(), second.clone()], &[], &first)
+                == [second.clone(), first.clone()]
+            && stamp::union(
+                &[first.clone(), second.clone()],
+                &[third.clone(), first.clone()]
+            ) == [second.clone(), third.clone(), first.clone()]
+            && stamp::render(&[first.clone(), second.clone()]) == format!("{first}\n{second}\n")
+            && stamp::parse(&format!("{first}\n{second}\n{first}\n"))?
+                == [second.clone(), first.clone()],
         "the stamp's digests were merged wrongly"
     );
+    // An overfull stamp is cut at its oldest digests, and a digest that comes
+    // again (as one of the answers seen, or as the installation's own) is the
+    // newest, not the oldest: it is never what is cut.
     let many: Vec<String> = (0..stamp::MAX_DIGESTS + 5)
         .map(|n| format!("{n:064x}"))
         .collect();
@@ -4320,10 +4332,59 @@ fn check_answers(parent: &Path) -> Result<()> {
             && !merged.contains(&many[0]),
         "an overfull stamp was not cut at its oldest digests"
     );
+    let oldest = &many[0];
+    for (what, seen, own) in [
+        (
+            "answers seen that are the oldest digest",
+            std::slice::from_ref(oldest),
+            &first,
+        ),
+        (
+            "an installation whose own digest is the oldest",
+            &[][..],
+            oldest,
+        ),
+        (
+            "answers seen and an installation that are both the oldest digest",
+            std::slice::from_ref(oldest),
+            oldest,
+        ),
+    ] {
+        let merged = stamp::merge(&many, seen, own);
+        ensure!(
+            merged.len() == stamp::MAX_DIGESTS
+                && merged.last() == Some(own)
+                && merged.contains(oldest)
+                && !merged.contains(&many[1])
+                && merged
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == merged.len(),
+            "{what} was cut from an overfull stamp, or listed twice"
+        );
+    }
+    // The digest that was seen is the one before the installation's own.
+    let merged = stamp::merge(&many, std::slice::from_ref(oldest), &first);
+    ensure!(
+        merged[merged.len() - 2] == *oldest,
+        "answers seen again were not the newest but one"
+    );
+    // The same at the size the stamp is read at: a stamp of exactly the most
+    // digests, with one answers seen that is its oldest.
+    let full = &many[..stamp::MAX_DIGESTS];
+    let merged = stamp::merge(full, std::slice::from_ref(&full[0]), &second);
+    ensure!(
+        merged.len() == stamp::MAX_DIGESTS
+            && merged.contains(&full[0])
+            && !merged.contains(&full[1])
+            && merged.last() == Some(&second),
+        "a full stamp lost the digest of answers seen again"
+    );
     // The record of the answers seen: root's own file in /run, written whole.
     let seen = root.join("seen");
     ensure!(
-        stamp::read_seen(&seen)?.is_empty(),
+        stamp::read_record(&seen)?.is_empty(),
         "a record that is not there held digests"
     );
     if unsafe { libc::geteuid() } == 0 {
@@ -4331,35 +4392,97 @@ fn check_answers(parent: &Path) -> Result<()> {
         stamp::record_seen(&seen, &second)?;
         stamp::record_seen(&seen, &first)?;
         ensure!(
-            stamp::read_seen(&seen)? == [first.clone(), second.clone()]
+            stamp::read_record(&seen)? == [second.clone(), first.clone()]
                 && fs::metadata(&seen)?.permissions().mode() & 0o777 == 0o600
                 && !root.join("seen.partial").exists(),
-            "the record of the answers seen was not kept"
+            "the record of the answers seen was not kept (the same answers seen again are the newest)"
         );
         fs::set_permissions(&seen, fs::Permissions::from_mode(0o644))?;
         ensure!(
-            stamp::read_seen(&seen).is_err(),
+            stamp::read_record(&seen).is_err(),
             "a record that others can read was believed"
         );
         fs::remove_file(&seen)?;
         write(&seen, "not a digest\n")?;
         fs::set_permissions(&seen, fs::Permissions::from_mode(0o600))?;
         ensure!(
-            stamp::read_seen(&seen).is_err(),
+            stamp::read_record(&seen).is_err(),
             "a record that is not made of digests was believed"
         );
         stamp::record_seen(&seen, &third)?;
         ensure!(
-            stamp::read_seen(&seen)? == [third.clone()],
+            stamp::read_record(&seen)? == [third.clone()],
             "a record that was not ours was not replaced"
         );
         fs::remove_file(&seen)?;
         symlink("elsewhere", &seen)?;
         ensure!(
-            stamp::read_seen(&seen).is_err(),
+            stamp::read_record(&seen).is_err(),
             "a link was followed as the record"
         );
         fs::remove_file(&seen)?;
+
+        // The digests of the stamp a disk held, kept in /run before the wipe
+        // takes it, for a retry in the same boot: a failed installation leaves
+        // a new, empty `ilex-boot`, and the retry's own read of it finds
+        // nothing. Its stamp is made from this record as well.
+        let earlier = root.join("earlier");
+        ensure!(
+            stamp::read_record(&earlier)?.is_empty(),
+            "a record that is not there held digests"
+        );
+        stamp::keep_earlier(&earlier, &[])?;
+        ensure!(
+            !earlier.exists(),
+            "no digest to keep wrote a record all the same"
+        );
+        stamp::keep_earlier(&earlier, &[first.clone(), second.clone()])?;
+        ensure!(
+            stamp::read_record(&earlier)? == [first.clone(), second.clone()]
+                && fs::metadata(&earlier)?.permissions().mode() & 0o777 == 0o600
+                && !root.join("earlier.partial").exists(),
+            "the digests of the stamp that was wiped were not kept (root's, mode 600)"
+        );
+        // The retry read an empty stamp (the disk is new): nothing is lost.
+        stamp::keep_earlier(&earlier, &[])?;
+        ensure!(
+            stamp::read_record(&earlier)? == [first.clone(), second.clone()],
+            "an empty stamp blotted out the digests an earlier attempt kept"
+        );
+        // And a digest that comes again is the newest, not the oldest.
+        stamp::keep_earlier(&earlier, &[first.clone(), third.clone()])?;
+        ensure!(
+            stamp::read_record(&earlier)? == [second.clone(), first.clone(), third.clone()],
+            "the digests of a second wipe were not kept after the first's"
+        );
+        // The stamp the retry writes: the kept digests (the retry's own read of
+        // the disk added none), what answers mode saw, then its own request.
+        let kept = stamp::read_record(&earlier)?;
+        let carried = stamp::union(&kept, &[]);
+        let stamp_of_the_retry =
+            stamp::merge(&carried, std::slice::from_ref(&"0".repeat(64)), &first);
+        ensure!(
+            stamp_of_the_retry == [second.clone(), third.clone(), "0".repeat(64), first.clone()],
+            "the retry's stamp does not hold the old digests: {stamp_of_the_retry:?}"
+        );
+        fs::set_permissions(&earlier, fs::Permissions::from_mode(0o644))?;
+        ensure!(
+            stamp::read_record(&earlier).is_err(),
+            "a record of kept digests that others can read was believed"
+        );
+        // One that cannot be read is replaced (it was not ours), never merged.
+        stamp::keep_earlier(&earlier, std::slice::from_ref(&first))?;
+        ensure!(
+            stamp::read_record(&earlier)? == [first.clone()],
+            "a record of kept digests that was not ours was not replaced"
+        );
+        fs::remove_file(&earlier)?;
+        symlink("elsewhere", &earlier)?;
+        ensure!(
+            stamp::read_record(&earlier).is_err(),
+            "a link was followed as the record of kept digests"
+        );
+        fs::remove_file(&earlier)?;
     }
 
     // What `Apply`'s answer means for the flag that keeps the interface out. A
@@ -4490,6 +4613,96 @@ fn check_answers(parent: &Path) -> Result<()> {
             && reached.applied,
         "an accepted Apply lowered the flag"
     );
+    fs::remove_file(&flag)?;
+
+    // `installation-active` is the helper's own refusal, and the one that says
+    // something *is* being written: the unit restarted (`systemctl reset-failed`
+    // and start, as its own comment documents) while the installation of an
+    // earlier attempt still runs. It keeps the flag, hands nothing over and ends
+    // the run as one that keeps the interface out.
+    let active = serde_json::to_string(&ilex_installer_model::plan::PlanError::new(
+        ilex_installer_model::plan::ErrorCode::InstallationActive,
+        None,
+        "an installation is already running",
+    ))?;
+    raise()?;
+    let mut reached = answers::Reached::default();
+    let said = answers::settle(Err(method_error(refused, &active)?), &flag, &mut reached)
+        .err()
+        .context("installation-active was taken for an answer")?;
+    ensure!(
+        flag.exists()
+            && reached.applied
+            && answers::keeps_interface_out(&said)
+            && format!("{said:#}").contains("interface is not started")
+            && format!("{said:#}").contains("InstallationActive"),
+        "installation-active lowered the flag, or let the interface start: flag {}, applied {}, said {said:#}",
+        flag.exists(),
+        reached.applied
+    );
+    // In any call (Probe, Plan, SetSecret) it is the same: the run is not one
+    // that hands over, and every other error is.
+    for method in ["Probe", "Plan", "SetSecret", "State"] {
+        let said = answers::classify(method, &method_error(refused, &active)?);
+        ensure!(
+            answers::keeps_interface_out(&said) && format!("{said:#}").starts_with(method),
+            "{method}: installation-active did not keep the interface out: {said:#}"
+        );
+        let said = anyhow::anyhow!("{method}").context("the run");
+        ensure!(
+            !answers::keeps_interface_out(&said),
+            "an error that is not installation-active kept the interface out"
+        );
+        let said = answers::classify(method, &method_error(refused, &refusal)?);
+        ensure!(
+            !answers::keeps_interface_out(&said)
+                && !answers::keeps_interface_out(&answers::classify(
+                    method,
+                    &method_error(
+                        "org.freedesktop.DBus.Error.NoReply",
+                        "Message recipient disconnected from message bus without replying"
+                    )?
+                )),
+            "{method}: a refusal that wrote nothing, or a bus error, kept the interface out"
+        );
+    }
+    // The error stays one through the context the caller adds.
+    ensure!(
+        answers::keeps_interface_out(
+            &answers::classify("Plan", &method_error(refused, &active)?).context("planning")
+        ),
+        "context hid that the interface is kept out"
+    );
+    fs::remove_file(&flag)?;
+    // A flag left by an attempt of this boot is deleted at the start of a run
+    // only when `State()` says no installation is active; when one is, or the
+    // helper cannot say, it stays and the run keeps the interface out.
+    let idle = ilex_installer_model::state::State::idle(0);
+    let mut running = idle.clone();
+    running.active = true;
+    raise()?;
+    answers::settle_leftover(&flag, Ok(idle))?;
+    ensure!(
+        !flag.exists(),
+        "a flag left over with no installation running was kept"
+    );
+    for (what, state) in [
+        ("an installation that is running", Ok(running)),
+        (
+            "a helper that could not be asked",
+            Err(anyhow::anyhow!("State: the bus has no reply")),
+        ),
+    ] {
+        raise()?;
+        let said = answers::settle_leftover(&flag, state)
+            .err()
+            .with_context(|| format!("{what} was taken for no installation"))?;
+        ensure!(
+            flag.exists() && answers::keeps_interface_out(&said),
+            "{what} lowered the flag, or let the interface start: flag {}, said {said:#}",
+            flag.exists()
+        );
+    }
     fs::remove_file(&flag)?;
 
     // The by-id name: a plain name of /dev/disk/by-id, never a path.

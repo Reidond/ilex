@@ -11,7 +11,10 @@ Documentation=https://github.com/Reidond/ilex
 #
 # Not when the program called Apply: from then on the helper may be writing to
 # the disk, and the installation, not the interface, owns the screen (the
-# flag is written just before Apply and removed if Apply refuses).
+# flag is written just before Apply and removed if Apply refuses, except with
+# installation-active: that is an installation running, not a refusal that
+# wrote nothing; a run that finds the flag at its start deletes it only when
+# the helper says none is active).
 ConditionPathExists=!/run/ilex-answers-applying
 StartLimitIntervalSec=0
 

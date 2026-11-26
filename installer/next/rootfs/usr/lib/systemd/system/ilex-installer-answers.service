@@ -26,7 +26,11 @@ OnFailure=ilex-installer-answers-handover.service
 # One attempt per boot. A failure leaves the machine as it is for whoever
 # looks (the reason is on the console, the serial port and in the journal);
 # starting it again is `systemctl reset-failed ilex-installer-answers; systemctl
-# start ...`, and the helper makes a fresh plan every time.
+# start ...`, and the helper makes a fresh plan every time. While an
+# installation of this boot is still running (the helper goes on with it
+# whatever happens to this unit) the new run changes nothing: it finds the flag
+# the first one raised, asks the helper's State(), is told one is active, keeps
+# the flag, plans nothing, starts no interface and fails with that reason.
 StartLimitIntervalSec=infinity
 StartLimitBurst=1
 

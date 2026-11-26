@@ -62,6 +62,10 @@ pub(crate) const ADMIN: &str = "ilexmaint";
 /// request's, only two lines the helper must carry.
 const SEEN_ONE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const SEEN_TWO: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+/// Digests of the stamp a disk held before an installation erased it
+/// (`installer::interrupted`): not any request's either.
+const OLD_ONE: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+const OLD_TWO: &str = "4444444444444444444444444444444444444444444444444444444444444444";
 
 /// What a person types: spaces, a colon, quotes. It must survive the memfd,
 /// the bus, chpasswd's one line and PAM.
@@ -1659,6 +1663,19 @@ fn interrupted() -> Result<()> {
     let probe = probe(&vm)?;
     let (target, sentinel) = disks_of(&probe)?;
     let sentinel_before = fingerprint(&vm, &[&sentinel])?;
+    // The target already holds an installation's `/boot`, with the stamp it
+    // left (two digests of answers that installed it before). The first
+    // installation here erases it; the retry that follows reads the empty
+    // `ilex-boot` the first one made, so only what the first one kept in /run
+    // can carry the digests into the retry's own stamp.
+    ok(&vm, &stamped_boot(&target.path))?;
+    let probe = probe_after(&vm)?;
+    let (target, sentinel) = disks_of(&probe)?;
+    ensure!(
+        target.partitions.iter().any(|p| p.label == "ilex-boot"),
+        "the stamped /boot is not on the target: {:?}",
+        target.partitions
+    );
     let first = plan(&vm, &request(&target.id, |_| {}))?;
     let ran = set_secret(
         &vm,
@@ -1693,6 +1710,17 @@ fn interrupted() -> Result<()> {
         );
         std::thread::sleep(Duration::from_secs(2));
     }
+    // The disk was wiped, and the stamp's digests were kept in /run first
+    // (root's, mode 600).
+    let kept = ok(
+        &vm,
+        "stat -c 'mode=%a owner=%U' /run/ilex-installer-earlier; cat /run/ilex-installer-earlier",
+    )?;
+    bench.save("earlier-kept.txt", &kept);
+    ensure!(
+        kept == format!("mode=600 owner=root\n{OLD_ONE}\n{OLD_TWO}"),
+        "what the installation kept of the disk's stamp before it wiped it: {kept}"
+    );
     // The helper is killed as a crash would: no chance to say anything. The
     // tools it started go with it.
     let main_pid = ok(&vm, "systemctl show -p MainPID --value ilex-installerd")?;
@@ -1778,6 +1806,18 @@ fn interrupted() -> Result<()> {
     // The old plan and its password are gone with the process.
     let ran = apply(&vm, "ilex-installer", &first.id, &target.id)?;
     refused(&ran, ErrorCode::UnknownPlan, Some("plan"))?;
+    // The disk of the retry holds no stamp (the new `ilex-boot` the first
+    // installation made has none: nothing on it names the old digests), and
+    // the record in /run, which outlives the helper, still does.
+    let left = ok(
+        &vm,
+        "set -e; d=/dev/disk/by-partlabel/ilex-boot; mkdir -p /run/stamp-look; mount -t ext4 -o ro,noload,nodev,nosuid,noexec $d /run/stamp-look; echo stamp_files=$(ls -A /run/stamp-look | grep -c '^ilex-install-request' || true); umount /run/stamp-look; echo kept=$(tr '\\n' ' ' < /run/ilex-installer-earlier)",
+    )?;
+    bench.save("stamp-after-kill.txt", &left);
+    ensure!(
+        left == format!("stamp_files=0\nkept={OLD_ONE} {OLD_TWO}"),
+        "the retry's disk, or the record that outlives the helper: {left}"
+    );
 
     // A retry: a new plan sees what the dead installation left on the disk
     // (ilex's own partitions, nothing in use), says so and installs over it.
@@ -1855,7 +1895,55 @@ fn interrupted() -> Result<()> {
         login == ADMIN,
         "the retried system's administrator: {login}"
     );
+    // The retry read an empty stamp from its disk, and its own stamp still
+    // holds what the erased one did: both old digests, then the request's own.
+    let stamp = installed.ssh_ok(
+        "f=/boot/ilex-install-request.sha256; stat -c 'mode=%a owner=%U links=%h' $f; cat $f",
+    )?;
+    bench.save("request-stamp.txt", &stamp);
+    let lines: Vec<&str> = stamp.lines().collect();
+    ensure!(
+        lines.len() == 4
+            && lines[0] == "mode=600 owner=root links=1"
+            && lines[1] == OLD_ONE
+            && lines[2] == OLD_TWO
+            && lines[3].len() == 64
+            && lines[3]
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && lines[3] != OLD_ONE
+            && lines[3] != OLD_TWO,
+        "the stamp of the retried installation does not hold the digests the erased stamp held, then its own: {stamp}"
+    );
+    println!(
+        "     the retried installation's stamp holds the erased stamp's two digests and its own"
+    );
     Ok(())
+}
+
+/// A script for the live system: the disk `path` gets a GPT with one
+/// `ilex-boot` partition (an XBOOTLDR partition with an ext4 file system) that
+/// holds a stamp of [`OLD_ONE`] and [`OLD_TWO`], as an earlier installation
+/// leaves it (root's, mode 600).
+fn stamped_boot(path: &str) -> String {
+    format!(
+        r#"set -eu
+disk={disk}
+printf 'label: gpt\nsize=1GiB, type=BC13C2FF-59E6-4262-A352-B275FD6F7172, name="ilex-boot"\n' | sfdisk --quiet "$disk"
+udevadm settle --timeout=30
+part=$(lsblk -n -r -o PATH,PARTLABEL "$disk" | awk '$2=="ilex-boot" {{print $1; exit}}')
+test -n "$part"
+mkfs.ext4 -q -L ilex-boot "$part"
+mkdir -p /run/stamp-seed
+mount -t ext4 "$part" /run/stamp-seed
+umask 077
+printf '%s\n' {OLD_ONE} {OLD_TWO} > /run/stamp-seed/ilex-install-request.sha256
+sync
+umount /run/stamp-seed
+udevadm settle --timeout=30
+echo stamped"#,
+        disk = shell(path)
+    )
 }
 
 /// A probe, asked again for a few seconds while the restarted helper settles.

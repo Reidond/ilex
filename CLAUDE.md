@@ -3495,14 +3495,27 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   one of its own structured errors, whose name is
   `org.ilex.Installer1.Error.<Kind>` and whose message parses as the model's
   `PlanError` (`answers::structured_refusal`; the helper makes those before it
-  writes anything). **Any other end of the `Apply` call keeps the flag**: the bus
+  writes anything) **and whose code is not `installation-active`**, which says
+  that an installation is *running* (see below). **Any other end of the `Apply` call keeps the flag**: the bus
   reporting no reply or a vanished peer, a closed connection, a helper that
   crashes before it answers, a reply in another shape (none says whether the
   installation thread had started). The run then counts as applied: the
   interface is not started over a disk that may be written, no hand-over runs,
   and the console shows `result=failed Apply: no refusal came back, so the
   installation may have begun and the interface is not started (...)` with
-  what the bus said after it. A helper that
+  what the bus said after it. **`installation-active` never lowers the flag and
+  never hands over**, from any call (`Probe`, `Plan`, `SetSecret` or `Apply`): it
+  ends the run with `answers::KeepsInterfaceOut` (`result=failed ...; an
+  installation is running, so the interface is not started over it`), and the run
+  makes sure the flag exists so that systemd's hand-over stays out as well. This is
+  the operator's own path: after `systemctl reset-failed ilex-installer-answers`
+  and a start (what the unit's comment documents) while the installation the first
+  run began still runs in the helper, the new run used to delete the leftover
+  flag at its start and then hand the screen to the interface. A run now deletes a
+  flag it finds at its start **only when `State()` says no installation is
+  active** (`answers::settle_leftover`); when one is, or `State()` itself fails,
+  the flag stays, nothing is read, planned or handed over, and the run fails with
+  that reason. A helper that
   cannot start, and a process killed before it asks anything, therefore both end
   in the interface; a helper killed as `Apply` starts the installation ends
   with the failure on the console and no interface. (`iso::next_unattended_handover`
@@ -3511,8 +3524,10 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   answers units import and which can only make the installer fail; `apply` makes
   the helper SIGKILL itself right after it has started the installation thread.
   `ilex-installerd --self-check` runs `answers::settle` over a structured
-  refusal, a bus `NoReply`, a closed connection, a client failure, a bus error
-  that carries a refusal's document and a helper-named error with no document.)
+  refusal, `installation-active`, a bus `NoReply`, a closed connection, a client
+  failure, a bus error that carries a refusal's document and a helper-named error
+  with no document, and `answers::settle_leftover` over an idle helper, a running
+  installation and a helper that cannot be asked.)
   It then reads **the volume the boot recorded and no other**: the marker must
   name exactly one device, and the listing taken now (this unit waits for the
   network, so it is some time after the gate) must be exactly that device (a stick
@@ -3566,10 +3581,23 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   (`stamp.rs`): the digests of the disk's *previous* stamp, which the helper reads
   in `Apply` before the disk is claimed and wiped (an unreadable one is logged
   and not carried: the person confirmed the erase, and answers mode itself refuses
-  such a disk); the digests answers mode **recorded in this boot** in
+  such a disk), **kept in `/run/ilex-installer-earlier` (root's file, mode 600,
+  like the record below) as the last thing before the disk is wiped**, and read
+  back by the finalise stage of whatever installation ends in this boot: a
+  failure after the wipe (the pull, say) leaves a new `ilex-boot` with no stamp,
+  so a retry in the same boot used to carry nothing, and the old answers could
+  later erase the retried installation. (A failure to keep them ends the
+  installation in the partition stage with the disk as it was; no digest to keep
+  writes nothing, so a retry's empty read never blots out what the first attempt
+  kept.) The digests answers mode **recorded in this boot** in
   `/run/ilex-answers-seen` (root's file, mode 600, opened without following a
   link and checked on the descriptor; gone at the next boot); and this
-  installation's own, last, each once, at most 256 (the oldest are dropped).
+  installation's own, last. Each digest is listed once **at the place of its last
+  mention**: a digest that comes again (answers seen that the earlier stamp held,
+  an installation's own digest that the stamp or the record held) is *moved* to the
+  newest place, never left among the oldest where the cut of at most 256 digests
+  (the oldest are dropped) could take it, so the newest installation's own digest
+  is always the last line.
   Answers mode records the digest of its request **as soon as it has one**,
   whatever becomes of it: refused for the stamp, for a disk that holds a system,
   for the registry, for the helper's refusal. A person who then installs through
@@ -3747,7 +3775,9 @@ hands over) and then the request's own, root's, mode 600, no AVC and `restorecon
 `bootc upgrade --check`, and keeps
 `installed-layout.txt` (`lsblk -f`, the kernel command line, `fstab`, `crypttab`,
 mounts, swap, `bootc status`, the partition table; the Anaconda trial records the
-same) and a screenshot of GDM. `installer::interrupted` kills the helper
+same) and a screenshot of GDM. `installer::interrupted` first puts an `ilex-boot`
+partition with a stamp of two digests on the target (an earlier installation's;
+the live system's `sfdisk` and `mkfs.ext4`), then kills the helper
 (`SIGKILL`) in the middle of the pull and asserts the state it leaves (failed in
 `image`, `disk_changed`, no tool running, no resume; what the dead helper had
 mounted lived in its own mount namespace, which died with it, so that nothing
@@ -3755,7 +3785,11 @@ is held is what the probe after the restart says of the disk: not in use, by the
 trace and by the exclusive open), that its
 old plan is gone, that a new plan lists what the dead installation left among
 what it erases, and that a new `Apply` on the same disk installs a system that
-boots with the administrator able to log in.
+boots with the administrator able to log in. In the middle of the pull the
+helper has kept the two digests in `/run/ilex-installer-earlier` (root, mode
+600); after the kill the disk's new `ilex-boot` holds no stamp while that record
+still lists them (it outlives the helper); and the retried installation's stamp
+on the booted disk is exactly the two old digests and its own.
 Measured on a 16-vCPU Boat sandbox (2026-11-26): the five `installer::` trials
 together 1,251 s once the live image's disk exists (1,617 s with it rebuilt;
 `installer::install` alone 250 s: the pull and deployment 3 to 4.3 minutes, every
@@ -3833,7 +3867,15 @@ refusal came back` and `the interface is not started`, no `apply=started` and no
 `handover=`, the gate's marker and Apply's flag still there, the answers unit
 `failed`, the session unit `inactive` 45 seconds later and systemd's hand-over
 unit skipped by its condition (the disk is not asserted untouched: the thread may
-have begun).
+have begun). A fourth boot with no fault restarts the unit **while the
+installation runs**: once the console says `stage=image` the answers unit is
+`SIGKILL`ed (the helper's installation goes on and the flag stays), then
+`systemctl reset-failed` and a start. The new run must print `result=failed ...
+an installation is running`, with no second `plan=ready` or `apply=started` and no
+`handover=`; the gate's marker and the flag are still there, the answers unit is
+`failed`, systemd's hand-over is skipped by its condition, the session unit is
+`inactive` 45 seconds later, and the helper's `State` still says the first run's
+installation is active.
 `iso::next_unattended_fat` boots with a **FAT** stick labelled `ILEXANSWERS` (made
 with `mkfs.fat` and `mcopy`; the host needs `dosfstools` and `mtools`) whose answers
 name the right disk with a wrong confirmation: the console must say `volume=...
