@@ -242,7 +242,8 @@ struct Setup<'a> {
     /// Serial numbers on the disks, so that they have `/dev/disk/by-id` names.
     serials: bool,
     /// A target that already holds an ilex installation (a partition labelled
-    /// `ilex-root`).
+    /// `ilex-root`) and an EFI system partition that cannot be read (no file
+    /// system in it).
     existing: bool,
     /// An empty slot a disk can be added to while the guest runs.
     hotplug: bool,
@@ -348,7 +349,9 @@ fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
         write_lvm_pv(&target)?;
     }
     if setup.existing {
-        // What an earlier installation left: a GPT with ilex's partition.
+        // What an earlier installation left: a GPT with ilex's partition, and
+        // an EFI system partition with no file system in it (one that cannot be
+        // read counts as another system too).
         cmd::require("sfdisk")?;
         let mut sfdisk = Command::new("sfdisk");
         sfdisk
@@ -358,7 +361,7 @@ fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
         let mut child = sfdisk.spawn().context("starting sfdisk")?;
         std::io::Write::write_all(
             child.stdin.as_mut().context("sfdisk's input")?,
-            b"label: gpt\nsize=64MiB, name=\"ilex-root\"\n",
+            b"label: gpt\nsize=64MiB, name=\"ilex-root\"\nsize=64MiB, type=U, name=\"esp-unreadable\"\n",
         )?;
         ensure!(child.wait()?.success(), "sfdisk could not write the table");
     }
@@ -865,9 +868,10 @@ fn refuse_existing(root: &Path, artifacts: &Path, layout: &Layout, target: &str)
         console.contains("result=failed")
             && console.contains("reinstall = true")
             && console.contains("ilex")
+            && console.contains("could not be read")
             && !console.contains("apply=started")
             && !console.contains("plan=ready"),
-        "a disk that holds an ilex installation was not refused: {console}"
+        "a disk that holds an ilex installation, and an EFI system partition that cannot be read, was not refused: {console}"
     );
     // The disk is as it was: one partition, labelled ilex-root.
     vm.wait_ssh(PAGE_TIMEOUT)
@@ -881,7 +885,7 @@ fn refuse_existing(root: &Path, artifacts: &Path, layout: &Layout, target: &str)
         .filter(|l| l.starts_with("part"))
         .collect();
     ensure!(
-        rows.len() == 1 && rows[0].ends_with("ilex-root"),
+        rows.len() == 2 && rows[0].ends_with("ilex-root") && rows[1].ends_with("esp-unreadable"),
         "the refused installation changed the disk: {out}"
     );
     volume.unchanged()?;

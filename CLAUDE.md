@@ -3749,9 +3749,10 @@ must start (`handover=interface`: a refusal that wrote nothing does not leave th
 screen empty), on a VM **without** serial numbers, whose helper names the target
 by its bus path; answers that name that bus path (`result=failed ... by-id`); one
 whose `confirm-erase` is not the disk; and a target that already holds an ilex
-installation (a GPT with a partition labelled `ilex-root`, made with `sfdisk`)
-under answers without `reinstall = true` (refused, naming it, with the partition
-table as it was); and a target that is, whole, **an LVM physical volume** (a
+installation (a GPT with a partition labelled `ilex-root` and an EFI-system-typed
+partition with no file system, made with `sfdisk`: the second is an ESP that cannot
+be read, which counts as another system) under answers without `reinstall = true`
+(refused, naming both, with the partition table as it was); and a target that is, whole, **an LVM physical volume** (a
 label written into the second sector by the harness, which `blkid` is asked to
 take for one: no partition table), likewise refused without `reinstall = true`,
 with its signature still on it, the `lvm-pv-uuid-*` link present beside
