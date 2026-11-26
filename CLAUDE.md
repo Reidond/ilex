@@ -2673,14 +2673,14 @@ the Windows paths of this change: no Windows host was available.
   line: `cargo install|rustc|test|run|…`, an unknown flag, a positional
   argument, `--target`, `--manifest-path`, `--workspace`, a variable, quote or
   glob in the arguments, `sh -c '…'`, `xargs cargo …`, `nice cargo …`, an
-  exec-form `RUN ["cargo", …]` (any exec-form `RUN` that mentions the
-  toolchain), a command word with a `$`, backtick, quote, bracket, brace,
+  exec-form `RUN ["cargo", …]` (any `RUN` that is a JSON array of strings and
+  mentions the toolchain; one that does not is an argv, not shell), a command word with a `$`, backtick, quote, bracket, brace,
   backslash or glob (`$CARGO install`, `"cargo"`, `[c]argo`, `{cargo,}`; only
   `[` and `[[` as the test command pass), and a line that ends inside a quote
   or substitution while mentioning the toolchain. A `RUN`
   that hands the build to a script is invisible to it (scripts under `build/`
-  are hashed whole, not parsed). `ilexctl doctor --self-check` runs 65 parser
-  fixtures (8 accepted, 57 refused), the closure fixtures (a path dependency
+  are hashed whole, not parsed). `ilexctl doctor --self-check` runs 67 parser
+  fixtures (9 accepted, 58 refused), the closure fixtures (a path dependency
   in the checkout, one outside, one at the root, registry and git packages, a
   dev edge) and the recorded-closure fixtures; a regression is a failed check.
 - **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the

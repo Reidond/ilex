@@ -549,12 +549,18 @@ fn cargo_builds(containerfile: &str) -> Result<Vec<CargoBuild>> {
     let mut builds = Vec::new();
     for (number, line) in logical_lines(containerfile) {
         let (instruction, rest) = line.split_once(char::is_whitespace).unwrap_or((&line, ""));
-        // Case-sensitive on purpose: a lowercase `env cargo build …` in a
-        // heredoc is shell, not an `ENV` instruction.
-        if matches!(instruction, "ENV" | "ARG") {
+        // Instruction names are case-insensitive, so `env` and `arg` count
+        // here too: a lowercase `env` is also a shell command, and the names
+        // it sets are refused the same way.
+        if ["env", "arg"]
+            .iter()
+            .any(|name| instruction.eq_ignore_ascii_case(name))
+        {
             check_environment_instruction(&line, rest)
                 .with_context(|| format!("Containerfile line {number}"))?;
         }
+        // Case-sensitive on purpose: a lowercase `env cargo build …` in a
+        // heredoc is shell, not an `ENV` instruction.
         if NON_SHELL_INSTRUCTIONS.contains(&instruction) {
             continue;
         }
@@ -566,16 +572,18 @@ fn cargo_builds(containerfile: &str) -> Result<Vec<CargoBuild>> {
                     .split_once(char::is_whitespace)
                     .map_or("", |(_, r)| r);
             }
-            // `RUN ["cargo", "build", …]` runs no shell; its JSON is not
-            // parsed, so it must not mention the toolchain at all.
-            if shell.trim_start().starts_with('[') {
+            // `RUN ["cargo", "build", …]` runs no shell. Builders take a
+            // line as exec form when it is a JSON array of strings (a shell
+            // `[ -f x ] && …` is not one); its words are not parsed, so none
+            // may mention the toolchain.
+            if let Ok(argv) = serde_json::from_str::<Vec<String>>(shell.trim()) {
+                let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
                 ensure!(
-                    !shell.contains("cargo")
-                        && !shell.contains("rustc")
-                        && !shell.contains("rustup")
-                        && !shell.contains("rustdoc"),
+                    !mentions_toolchain(&argv),
                     "Containerfile line {number}: `{line}` is an exec-form RUN that mentions cargo or rustc; use a shell-form `RUN cargo build -p …`"
                 );
+                // An argv, not a shell line.
+                continue;
             }
         }
         let (commands, balanced) = simple_commands(shell);
@@ -1105,6 +1113,11 @@ RUN set -e && CARGO_INCREMENTAL=0 /root/.cargo/bin/cargo +stable build \
             Ok(vec![build(&["a"], false, false)]),
         ),
         (
+            "an exec-form RUN without the toolchain and a shell test",
+            "RUN [\"dnf\", \"install\", \"-y\", \"gcc\"]\nRUN [ -f /x ] && cargo build -p a\n",
+            Ok(vec![build(&["a"], false, false)]),
+        ),
+        (
             "a flag after a redirection",
             "RUN cargo build -p a 2>log --workspace\n",
             Err("--workspace"),
@@ -1197,6 +1210,11 @@ RUN set -e && CARGO_INCREMENTAL=0 /root/.cargo/bin/cargo +stable build \
         (
             "ENV after a quoted value",
             "ENV A=\"x y\" CARGO_BUILD_TARGET=z\nRUN cargo build -p a\n",
+            Err("CARGO_BUILD_TARGET"),
+        ),
+        (
+            "a lowercase env instruction",
+            "env CARGO_BUILD_TARGET x\nRUN cargo build -p a\n",
             Err("CARGO_BUILD_TARGET"),
         ),
         (
