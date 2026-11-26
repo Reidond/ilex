@@ -152,6 +152,16 @@ pub fn build_image(ws: &Workspace, spec: &Build) -> Result<String> {
         generated.join("iso.yaml"),
         MENU.replace("{edition}", &edition.id),
     )?;
+    // What the installation verifies the image against besides the policy
+    // (installer/next/rootfs/etc/containers/policy.json): the registry
+    // configuration that makes the signatures findable, and the public key.
+    // The same files the Anaconda installer and the installed system ship.
+    for (from, to) in [
+        ("rootfs/etc/containers/registries.d/ilex.yaml", "ilex.yaml"),
+        ("rootfs/etc/pki/containers/ilex.pub", "ilex.pub"),
+    ] {
+        fs::copy(ws.root.join(from), generated.join(to))?;
+    }
     for file in ["Cargo.toml", "Cargo.lock"] {
         fs::copy(ws.root.join(file), generated.join(file))?;
     }

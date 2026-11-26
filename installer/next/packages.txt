@@ -27,3 +27,15 @@ kbd
 tzdata
 cryptsetup
 tpm2-tss
+
+# What `Apply` runs: bootc (with bootupd and ostree) installs the image, the
+# shadow-utils tools make the administrator, systemd's firstboot and
+# policycoreutils' setfiles configure and label the deployment, and
+# efibootmgr is what bootupd writes the boot entry with. fedora-bootc has them
+# all; they are listed so that a change to the base cannot drop one.
+bootc
+bootupd
+ostree
+shadow-utils
+policycoreutils
+efibootmgr

@@ -1,0 +1,34 @@
+[Unit]
+Description=ilex unattended installation from the ILEX-ANSWERS volume
+Documentation=https://github.com/Reidond/ilex
+# It drives the helper's own methods as root, as an interface would.
+Requires=ilex-installerd.service
+After=ilex-installerd.service dbus.socket network-online.target
+Wants=network-online.target
+# No interface: an unattended installation has nobody to answer it. With the
+# volume there at boot the session is skipped by its own condition; one that
+# comes later stops a session that is already up (below). There is no
+# Conflicts= on the session: udev adds this unit to the transaction of the
+# device that appeared; with a Conflicts= on the session here, a boot with the
+# volume never started this unit.
+# One attempt per boot. A failure leaves the machine as it is for whoever
+# looks (the log is on tty1 and in the journal); starting it again is
+# `systemctl reset-failed ilex-installer-answers; systemctl start ...`, and
+# the helper makes a fresh plan every time.
+StartLimitIntervalSec=infinity
+StartLimitBurst=1
+
+[Service]
+Type=simple
+# The answers volume is mounted read-only inside this unit's private mount
+# namespace for the moment it takes to read it, and nowhere else.
+PrivateMounts=yes
+LimitCORE=0
+# It may hold a plaintext password for the moment it is read and passes it to
+# the helper as a sealed memfd: nothing about it is printed.
+ExecStartPre=-/usr/bin/systemctl --no-block stop ilex-installer-session.service
+ExecStart=/usr/libexec/ilex-installer/ilex-installerd --answers --then poweroff
+# A pull takes as long as the network does: the helper's own deadlines apply.
+TimeoutStartSec=infinity
+StandardOutput=journal+console
+StandardError=journal+console

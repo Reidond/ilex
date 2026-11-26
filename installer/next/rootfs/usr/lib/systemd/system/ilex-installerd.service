@@ -23,10 +23,12 @@ LimitCORE=0
 # a private subtree does not, so the helper reads the host's own table
 # (/proc/1/mountinfo) and every other mount namespace's to see what is in use.
 PrivateMounts=yes
-# Probe, Plan and State read; they hold nothing an installation needs, so a
-# restart loses only the latest plans. Apply (a later PR) records its stage
-# on disk before it writes anything and must not resume a half-done
-# installation on its own.
+# Apply records each stage in /run/ilex-installer/state.json before it writes
+# anything. A helper that dies mid-installation (and the tools it started die
+# with it) is started again here and reports what it finds: an installation
+# that was not ended, failed in the stage it was in, with the disk marked
+# changed. It never resumes: the next attempt is a new plan, a new secret and a
+# new Apply. Its plans and secrets are not kept: they are memory only.
 Restart=on-failure
 RestartSec=1s
 

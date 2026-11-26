@@ -1,0 +1,6 @@
+# A volume labelled ILEX-ANSWERS holds an answers.toml: it starts the
+# unattended installation (ilex-installer-answers.service), whether it is
+# there at boot or plugged in later. The label is read by udev's blkid probe
+# (60-persistent-storage.rules runs first). A FAT volume cannot carry it: FAT
+# labels are at most 11 characters and this one has 12.
+SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="ILEX-ANSWERS", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ilex-installer-answers.service"

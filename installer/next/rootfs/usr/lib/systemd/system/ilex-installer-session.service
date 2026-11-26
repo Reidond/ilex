@@ -9,6 +9,12 @@ Wants=systemd-logind.service
 Conflicts=getty@tty1.service
 After=getty@tty1.service
 ConditionPathExists=/usr/share/ilex-installer/edition.json
+# An unattended installation has no interface: with an ILEX-ANSWERS volume
+# there at boot (udev has linked it by the time this unit is started), the
+# session is skipped, not failed, so the fallback says nothing.
+# ilex-installer-answers.service stops the session itself when the volume
+# comes later.
+ConditionPathExists=!/dev/disk/by-label/ILEX-ANSWERS
 # Three starts in five minutes, then the unit gives up (start-limit-hit) and
 # stays failed. ilex-installer-fallback.service sees that final state and says
 # so on tty1; there is no OnFailure= here, which would fire after every failed

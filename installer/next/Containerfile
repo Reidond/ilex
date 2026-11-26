@@ -123,6 +123,15 @@ COPY editions/${EDITION}/rootfs/ /
 COPY --from=generated edition.json /usr/share/ilex-installer/edition.json
 COPY --from=generated compositions.json /usr/share/ilex-installer/compositions.json
 COPY --from=generated iso.yaml /usr/lib/image-builder/bootc/iso.yaml
+# What `Apply` verifies the image against, before and while it installs it: the
+# policy (rootfs/etc/containers/policy.json: default reject, and from a
+# registry only ilex images signed with this key; the local transports are
+# open because nothing here pulls from them but the tools that write this image
+# to a disk), the registry configuration that makes the cosign signatures
+# findable and the public key. `bootc install --enforce-container-sigpolicy`
+# refuses to start under any other default.
+COPY --from=generated ilex.yaml /etc/containers/registries.d/ilex.yaml
+COPY --from=generated ilex.pub /etc/pki/containers/ilex.pub
 COPY --from=ui-build /out/ /
 # image-builder omits the live ISO's RPM database: bind the tool versions the
 # helper's eligibility probe compares to the files actually shipped.
