@@ -1939,7 +1939,17 @@ testing the unrechunked image breaks layer sharing in the upgrade test.
 Each root now builds on a runner of its own, so roots no longer share the Rust
 build or package layers locally (kache and the registry blob reuse still help);
 the slowest root, not their sum, sets a run's length, and no root delays the
-installer's staging or the start of upgrade. TIMINGS_PLACEHOLDER Each published root records
+installer's staging or the start of upgrade. Hosted `ubuntu-26.04` runners
+measured on 2026-11-26 (branch dispatch with `test=true`): the shell-free
+`base` root job took 5.6 minutes (build 2.3, rechunk 0.6, stage 0.2, `ephemeral::`
+1.0) and the GNOME installer root 26.7 minutes, 12 of them for the same four
+steps (5.0, 2.4, 0.2, 2.5) and 14.7 for the security tier. A KDE desktop root
+measured 6 / 12 / 7–9 minutes (build / rechunk / `ephemeral::`) on a 16-vCPU
+host. A root's `build` job is capped at 75 minutes, with step caps of 30
+(build), 30 (rechunk), 20 (stage) and 25 (`ephemeral::`); its `publish` job at
+30, its `machines` job at 60. The installer's `build` job keeps its 120 minutes
+(360 for the encrypted qualification): without the other roots its measured
+time is 27 minutes plus the opt-in tiers. Each published root records
 `ilex.root-inputs`: selected source trees/selection plus both Fedora build
 image digests. `changed --root <tag> --inputs-only` compares that key against
 the root's own immutable snapshot before building. Missing keys force a build.

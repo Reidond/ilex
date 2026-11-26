@@ -76,9 +76,14 @@ env:
 
 jobs:
   # 26.04, not 24.04: see publish-pipeline.yml's build job.
+  # Timeouts are sized from measured hosted-runner runs (about 3x the slowest
+  # root): GNOME desktop root 5 min build, 2.5 min rechunk, 2.5 min ephemeral;
+  # shell-free `base` 2.3 / 0.6 / 1 min; a KDE desktop root 6 / 12 / 7-9 min on a
+  # 16-vCPU host, about 30 min end to end. The job cap bounds what the step caps
+  # allow in total.
   build:
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 90
+    timeout-minutes: 75
     outputs:
       # The one-row inventory (root-evidence.sh): only the last step writes it.
       roots: ${{ steps.roots.outputs.roots }}
@@ -92,6 +97,7 @@ jobs:
 
       - name: Registry names and root selection
         id: composition
+        timeout-minutes: 15
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INSTALLER_TAG: ${{ inputs.installer_tag }}
@@ -162,7 +168,7 @@ jobs:
 
       - name: Build the candidate image
         if: steps.composition.outputs.inputs_changed == 'true' || inputs.test || inputs.apps
-        timeout-minutes: 40
+        timeout-minutes: 30
         run: cargo ilexctl build --tag "localhost/ilex:candidate.$ROOT_TAG" --no-pull
 
       - name: Compare with the published image
@@ -181,7 +187,7 @@ jobs:
       # unchanged image is rechunked too (see the installer root's job).
       - name: Rechunk (reproducible layers)
         if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
-        timeout-minutes: 40
+        timeout-minutes: 30
         run: cargo ilexctl rechunk "localhost/ilex:candidate.$ROOT_TAG" --output "localhost/ilex:rechunked.$ROOT_TAG" --fingerprint "$FINGERPRINT"
         env:
           FINGERPRINT: ${{ steps.changed.outputs.fingerprint }}
@@ -197,7 +203,7 @@ jobs:
       - name: Stage the candidate
         id: stage
         if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
-        timeout-minutes: 30
+        timeout-minutes: 20
         run: |
           image_id=$(podman image inspect --format '{{.Id}}' "localhost/ilex:rechunked.$ROOT_TAG")
           image_id="sha256:${image_id#sha256:}"
@@ -227,7 +233,7 @@ jobs:
 
       - name: e2e tests (ephemeral)
         if: steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps
-        timeout-minutes: 40
+        timeout-minutes: 25
         env:
           # Always the rechunked image: the one staged above.
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
@@ -324,7 +330,7 @@ jobs:
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
       needs.build.result == 'success' && needs.build.outputs.layers == 'true'
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
