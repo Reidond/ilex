@@ -130,6 +130,10 @@ jobs:
       # The tags of every root except the installer's: a JSON array, one
       # publish-root.yml call each.
       others: ${{ steps.registry.outputs.others }}
+      # Fedora's two floating build images, resolved once for every root of
+      # this run (fedora-pins.sh): each root pulls these digests, never the tag.
+      fedora_bootc: ${{ steps.fedora.outputs.bootc }}
+      fedora_builder: ${{ steps.fedora.outputs.builder }}
       # This file's pins for those calls (a call's `with` cannot read `env`).
       cosign_version: ${{ env.COSIGN_VERSION }}
       bcvk_version: ${{ env.BCVK_VERSION }}
@@ -165,6 +169,16 @@ jobs:
           jq -e 'length > 0' <<<"$others" >/dev/null
           echo "roots besides the installer's $installer: $others"
           printf 'installer=%s\ncompositions=%s\nlegacy=%s\nothers=%s\n' "$installer" "$compositions" "$legacy" "$others" >> "$GITHUB_OUTPUT"
+
+      # `fedora-bootc:45` and `fedora:45` float. Every root builds from the
+      # digests resolved here, once: an upstream push between two roots' pulls
+      # could otherwise leave the installer root unchanged (its tiers skipped,
+      # the qualification gate true) while another root builds and signs a new,
+      # untested boot chain. A partial re-run reuses this job's outputs, so the
+      # pins also hold across attempts.
+      - name: Pin Fedora's floating build images
+        id: fedora
+        run: bash .github/fedora-pins.sh resolve >> "$GITHUB_OUTPUT"
 
   build:
     # 26.04, not 24.04: its podman 5.7 / buildah 1.42 / skopeo 1.21 are close
@@ -208,6 +222,8 @@ jobs:
           INSTALLER_TAG: ${{ needs.snapshot.outputs.installer }}
           SNAPSHOTS: ${{ needs.snapshot.outputs.compositions }}
           LEGACY_DIGEST: ${{ needs.snapshot.outputs.legacy }}
+          FEDORA_BOOTC: ${{ needs.snapshot.outputs.fedora_bootc }}
+          FEDORA_BUILDER: ${{ needs.snapshot.outputs.fedora_builder }}
         run: |
           IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
@@ -230,10 +246,11 @@ jobs:
           if [ "$digest" = - ]; then digest=$LEGACY_DIGEST; fi
           printf '%s\t%s\n' "$tag" "$digest" > "$RUNNER_TEMP/root-pulls"
           echo "ILEX_ROOT_PULLS=$RUNNER_TEMP/root-pulls" >> "$GITHUB_ENV"
-          # Resolve both floating inputs once for this root. Their digests plus
-          # the selected source trees permit an early no-build skip.
-          podman pull --quiet quay.io/fedora/fedora-bootc:45
-          podman pull --quiet quay.io/fedora/fedora:45
+          # Both floating inputs at the digests `snapshot` pinned for every root
+          # of this run (tagged :45 locally; the build below uses --no-pull).
+          # Their digests plus the selected source trees permit an early
+          # no-build skip.
+          bash .github/fedora-pins.sh pull "$FEDORA_BOOTC" "$FEDORA_BUILDER"
           reference=-
           if [ "$snapshot" != - ]; then reference="$IMAGE_REPO@$snapshot"; fi
           cargo ilexctl changed "$reference" --root "$tag" --inputs-only
@@ -611,16 +628,29 @@ jobs:
           # than the default 30 jobs, and `build` can fall on a later page.
           jobs="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
           query='.jobs[] | select(.name == "build" or .name == "pipeline / build")
-                 | "\(.status) \(([.steps[] | select(.name == "Stage the candidate") | .conclusion][0]) // "pending")"'
+                 | "\(.status) \(([(.steps // [])[] | select(.name == "Stage the candidate") | .conclusion][0]) // "pending")"'
+          # 30 s: this and every non-installer root's qualification gate poll the
+          # run with the repository's shared token. An API error is not a verdict:
+          # it is logged and the poll goes on (the step's timeout ends it).
+          errors=0
           while :; do
-            state=$(gh api --paginate "$jobs" --jq "$query" 2>/dev/null) || state=""
+            if state=$(gh api --paginate "$jobs" --jq "$query" 2>"$RUNNER_TEMP/jobs-error"); then
+              errors=0
+            else
+              state=""
+              errors=$((errors + 1))
+              echo "jobs API request failed (${errors} in a row): $(head -c 300 "$RUNNER_TEMP/jobs-error" | tr '\n' ' ')"
+              if [ "$errors" -eq 10 ]; then
+                echo "::warning title=Upgrade tier: jobs API keeps failing::${errors} requests in a row failed while waiting for the installer build's staging step; still polling"
+              fi
+            fi
             case "$state" in
               *" success") break ;;
               "completed "*)
                 echo "::notice::the build job ended without staging a candidate ($state): nothing to test"
                 exit 0 ;;
             esac
-            sleep 10
+            sleep 30
           done
           stage_tag=$(bash .github/candidate-tag.sh "$INSTALLER_TAG")
           digest=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE_REPO:$stage_tag")
@@ -760,6 +790,8 @@ jobs:
       installer_tag: ${{ needs.snapshot.outputs.installer }}
       snapshots: ${{ needs.snapshot.outputs.compositions }}
       legacy: ${{ needs.snapshot.outputs.legacy }}
+      fedora_bootc: ${{ needs.snapshot.outputs.fedora_bootc }}
+      fedora_builder: ${{ needs.snapshot.outputs.fedora_builder }}
       main: ${{ inputs.main }}
       test: ${{ inputs.test }}
       apps: ${{ inputs.apps }}
@@ -782,37 +814,51 @@ jobs:
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 5
     permissions:
+      contents: read
       actions: read
     steps:
+      # Only for .github/installer-qualification.jq, the gate's own decision.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
       - name: Every root's build, qualification, publication and layers
         env:
           GH_TOKEN: ${{ github.token }}
           INSTALLER_TAG: ${{ needs.snapshot.outputs.installer }}
           OTHERS: ${{ needs.snapshot.outputs.others }}
         run: |
-          jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
-            --jq '.jobs[] | {name, result: (.conclusion // .status)}' | jq -s -c .)
+          raw=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | {name, status, conclusion, steps: [(.steps // [])[] | {name, conclusion, completed_at}]}' | jq -s -c .)
+          jobs=$(jq -c '[.[] | {name, result: (.conclusion // .status)}]' <<<"$raw")
+          # The installer root's qualification, decided by the very program the
+          # gate runs (not from the two jobs' conclusions alone: a job carried
+          # over from an earlier attempt qualifies nothing it did not test).
+          qualification=$(jq -c -f .github/installer-qualification.jq <<<"$raw")
+          verdict=$(jq -r .verdict <<<"$qualification")
+          why=$(jq -r .why <<<"$qualification")
           # The caller job is named `pipeline` in publish.yml; the installer
           # root's jobs are `pipeline / <job>` and every other root's are
           # `pipeline / other-roots (<tag>) / <job>`. Missing names show `-`.
           # Qualification: the installer's own upgrade job, and for every other
-          # root whether the installer's build and upgrade jobs both succeeded
-          # (the verdict of its `qualification` job, which polls the same jobs).
-          report=$(jq -c --arg installer "$INSTALLER_TAG" --argjson others "$OTHERS" '
+          # root the gate's verdict on the installer's build and upgrade jobs
+          # (what its `qualification` job decided from the same listing).
+          report=$(jq -c --arg installer "$INSTALLER_TAG" --argjson others "$OTHERS" --arg verdict "$verdict" '
             def result($name): ([.[] | select(.name == $name) | .result] | first) // "-";
             def bad: . == "failure" or . == "timed_out" or . == "cancelled";
             . as $jobs
-            | (result("pipeline / build")) as $ib
-            | (result("pipeline / upgrade")) as $iu
-            | ($ib == "success" and $iu == "success") as $met
+            | ($verdict == "true") as $met
             | [{tag: $installer, prefix: "pipeline / ", installer: true}] +
               [$others[] | {tag: ., prefix: "pipeline / other-roots (\(.)) / ", installer: false}]
             | map(. as $r
                 | ($r.prefix) as $p
                 | ($jobs | result($p + "build")) as $build
-                | (if $r.installer then ($jobs | result($p + "upgrade"))
+                | (if $r.installer then
+                     ($jobs | result($p + "upgrade")) as $tier
+                     | if $tier == "success" and $verdict == "false" then "success (installer NOT qualified, see below)" else $tier end
                    else ($jobs | result($p + "qualification")) as $gate
-                        | if $gate == "success" then (if $met then "met" else "NOT met" end) else $gate end
+                        | if $gate == "success" then (if $met then "met" elif $verdict == "pending" then "pending" else "NOT met" end) else $gate end
                    end) as $qual
                 | ($jobs | result($p + "publish")) as $publish
                 | ($jobs | result($p + "machines")) as $machines
@@ -830,8 +876,14 @@ jobs:
             echo '| --- | --- | --- | --- | --- |'
             jq -r '.roots[] | "| \(.tag) | \(.build) | \(.qual) | \(.publish) | \(.machines) |"' <<<"$report"
             echo
-            echo 'Qualification: the installer root'"'"'s `upgrade` job; for every other root, whether the installer root'"'"'s `build` (security tier) and `upgrade` jobs both succeeded, which its signing and its layers wait for.'
+            echo 'Qualification: the installer root'"'"'s `upgrade` job; for every other root, whether the installer root'"'"'s `build` (security tier) and `upgrade` jobs both succeeded and the upgrade tier passed on this attempt'"'"'s candidate (a job carried over from an earlier attempt does not count), which its signing and its layers wait for.'
+            echo
+            case "$verdict" in true) label=met ;; false) label='NOT met' ;; *) label=pending ;; esac
+            echo "Installer qualification: $label. $why."
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$verdict" = false ]; then
+            echo "::warning title=Installer qualification not met::$why. The other roots are not signed in this run"
+          fi
           jq -r '.roots[] | select(.failed | length > 0) | "\(.tag)\t\(.installer)\t\(.failed | join(", "))"' <<<"$report" |
             while IFS=$'\t' read -r tag installer failed; do
               if [ "$installer" = true ]; then
@@ -861,7 +913,7 @@ jobs:
       !cancelled() && !inputs.v1_disk && github.repository == 'Reidond/ilex' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
       needs.build.result == 'success' && needs.upgrade.result == 'success' &&
-      needs.publish.result != 'failure'
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 120
     permissions:

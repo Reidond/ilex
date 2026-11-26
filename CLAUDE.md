@@ -1659,7 +1659,11 @@ A registry job snapshots each published composition by digest before build or
 upgrade starts. A missing tag is recorded as `-`. The same job records legacy
 `latest` once if needed. These values select the build comparisons, upgrade v1,
 layer-reuse pulls and machine inputs, and lists the roots other than the
-installer's for the matrix below. The job graph (every arrow is a `needs`):
+installer's for the matrix below. The same job pins Fedora's two floating build
+images: `.github/fedora-pins.sh resolve` records the manifest digests of
+`quay.io/fedora/fedora-bootc:45` and `fedora:45` once (skopeo), and every
+root's job pulls those digests (see "Fedora pins" below). The job graph (every
+arrow is a `needs`):
 
 ```text
 snapshot ─┬─► build ───┬─► publish ─┬─► machines        installer root
@@ -1720,17 +1724,32 @@ Paths on separate runners:
   shares, which another root's own `ephemeral::` does not. So a non-installer
   root's signing waits for both: its call's `qualification` job runs
   `.github/installer-qualification.sh`, which polls this run's jobs API
-  (`per_page=100`, every page, 15 s) for the jobs named `pipeline / build` and
-  `pipeline / upgrade`. The root is **qualified** when both concluded `success`,
-  which includes an unchanged installer root (its tiers are skipped steps of a
-  green job; nothing of it could have changed) and no existing v1 (`upgrade`
-  has nothing to test). One job ending in `failure`, `timed_out` or
-  `cancelled` decides at once: the root is not qualified, its `publish` and
-  `machines` jobs are skipped (a green call; `roots-report` shows `NOT met`
-  and an error annotation names the failed installer job). No verdict within
-  125 minutes (the installer jobs' caps are 120) fails the `qualification` job
-  and so the root, closed. Only signing waits: the root's `build`, tests and
-  staging run at once and never wait for the installer. The gate is one-way:
+  (`per_page=100`, every page, every 60 s; an API error is logged, never a
+  verdict) for the jobs named `pipeline / build` and `pipeline / upgrade`. The
+  root is **qualified** when both concluded `success` *and the evidence agrees*
+  (`.github/installer-qualification.jq`, also run by `roots-report`, so the
+  summary never says `met` when the gate says false). A conclusion alone is not
+  evidence: "Re-run failed jobs" carries every job that succeeded in an earlier
+  attempt into the new one, listed under the new attempt number but with its old
+  steps and timestamps, so an `upgrade` job that ended green in attempt 1
+  because the installer build failed before staging (it tested nothing) must not
+  qualify the candidate attempt 2's build stages. Whenever the build's "Stage the
+  candidate" step succeeded and a v1 exists (the upgrade job's "Wait for the
+  candidate" step was not skipped), the upgrade job's `e2e tests (upgrade)` step
+  must have succeeded and completed no earlier than the staging step (step
+  timestamps, since `run_attempt` is the new attempt for a carried-over job
+  too). An unchanged installer root (staging skipped; its tiers are skipped steps
+  of a green job, nothing of it could have changed) and no existing v1
+  (`upgrade` has nothing to test) still qualify; a step missing from the listing
+  never does. A carried-over job that does not qualify is cured by re-running
+  all jobs or the installer root's `upgrade` job. One job ending in `failure`,
+  `timed_out` or `cancelled` decides at once: the root is not qualified, its
+  `publish` and `machines` jobs are skipped (a green call; `roots-report` shows
+  `NOT met` with the reason, and an error annotation names the failed installer
+  job). No verdict within 125 minutes (the installer jobs' caps are 120) fails
+  the `qualification` job and so the root, closed. Only signing waits: the
+  root's `build`, tests and staging run at once and never wait for the
+  installer. The gate is one-way:
   no installer job needs any call of `publish-root.yml`, so a failing or slow
   non-installer root never blocks the installer's build, upgrade, publish,
   machines or release. The `qualification` job runs when its root's build
@@ -1750,7 +1769,8 @@ Paths on separate runners:
   the installer `build` job's "Stage the candidate" (found by its job name in
   the paginated jobs listing, 100 per page, so no other job may be named
   `build` or `pipeline / build` and many roots cannot push it off the first
-  page), resolves this ref's
+  page; polled every 30 s, an API error is logged and the poll goes on),
+  resolves this ref's
   staging tag, pulls by digest, and runs `upgrade::` on it. With neither source present, `exists=false`, v1 `-`
   and no upgrade tier is the explicit first-publish case.
 - `installer-due` → `iso`: described below. Automatic due builds run on main;
@@ -1825,7 +1845,9 @@ per-parent result and parent-current guards forbid that.
 Machine layers run per parent root: the installer root's in the pipeline's
 `machines` job (`needs` build, upgrade, publish), every other root's in the
 `machines` job of its own `publish-root.yml` call (`needs` its build,
-`qualification` and publish). Neither runs after a failed `publish`. Each reads the five-column publications table, plans only the layers
+`qualification` and publish). Neither runs after a failed, timed-out or
+cancelled `publish` (only a successful or intentionally skipped one lets layers
+through). Each reads the five-column publications table, plans only the layers
 whose parent is its own root (`ROOT_TAG`), and takes that parent's row of its
 own one-row tested-root inventory. Each row
 retains its composition tag, parent tag, machine and shell list. The parent is
@@ -2011,11 +2033,26 @@ affects neither root inputs nor content fingerprints. Base packages,
 base-only input change cannot leave the desktop unchanged when that input is
 shared; independent RPM/content outcomes and snapshots can still let either
 root skip while the other publishes. Neither changing `[[publish]]` alone nor
-an unrelated shell changes an existing root's inputs. Each root's job pulls
-both Fedora build images itself before its own check, and builds with them
-(`--no-pull`), so a root's key always names the images it was built from; a
-nightly upstream change invalidates every root's key, and a push between two
-roots' pulls can leave them on different digests for that run.
+an unrelated shell changes an existing root's inputs.
+
+**Fedora pins.** `fedora-bootc:45` and `fedora:45` float. `snapshot` resolves
+both manifest digests once per run (`.github/fedora-pins.sh resolve`, skopeo)
+and passes them to every root, the installer's included (`snapshot`'s
+`fedora_bootc`/`fedora_builder` outputs; `publish-root.yml` takes them as
+inputs). Each root's job runs `fedora-pins.sh pull`: it pulls both images by
+digest and tags them `:45` locally, which is how `ilexctl`, the Containerfile
+and the rechunker name them, before `changed --inputs-only`, then builds with
+`--no-pull`. A root's key therefore names the pinned digests, and all roots of
+one run build from the same boot chain: an upstream push between two roots'
+pulls can no longer leave the installer root unchanged (its security and
+upgrade tiers skipped, the qualification gate true) while another root builds
+and signs a new, untested one. A nightly upstream change invalidates every
+root's key at the next run's `snapshot`; a partial re-run keeps the pins of its
+run (a re-run long after the original pulls an old digest, which the registry
+may no longer serve: start a fresh run then). Not pinned: the machine layers'
+`compose` stage (`machines/Containerfile`: it only runs `compose.py` over the
+machine directory, and what a layer ships is built on its pinned parent), and
+the installer ISO's own images.
 
 ```sh
 ilexctl info --publications

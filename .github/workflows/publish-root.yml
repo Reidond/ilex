@@ -48,6 +48,14 @@ on:
         description: Legacy latest's digest at the start of the run, '-' when absent or not needed
         type: string
         required: true
+      fedora_bootc:
+        description: Digest of quay.io/fedora/fedora-bootc:45 that `snapshot` pinned for every root of this run
+        type: string
+        required: true
+      fedora_builder:
+        description: Digest of quay.io/fedora/fedora:45 that `snapshot` pinned for every root of this run
+        type: string
+        required: true
       main:
         type: boolean
         required: true
@@ -113,6 +121,8 @@ jobs:
           INSTALLER_TAG: ${{ inputs.installer_tag }}
           SNAPSHOTS: ${{ inputs.snapshots }}
           LEGACY_DIGEST: ${{ inputs.legacy }}
+          FEDORA_BOOTC: ${{ inputs.fedora_bootc }}
+          FEDORA_BUILDER: ${{ inputs.fedora_builder }}
         run: |
           echo "STARTED=$(date +%s)" >> "$GITHUB_ENV"
           IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
@@ -153,10 +163,11 @@ jobs:
           if [ "$digest" = - ]; then digest=$LEGACY_DIGEST; fi
           printf '%s\t%s\n' "$tag" "$digest" > "$RUNNER_TEMP/root-pulls"
           echo "ILEX_ROOT_PULLS=$RUNNER_TEMP/root-pulls" >> "$GITHUB_ENV"
-          # Resolve both floating inputs once. Their digests plus the selected
-          # source trees permit an early no-build skip.
-          podman pull --quiet quay.io/fedora/fedora-bootc:45
-          podman pull --quiet quay.io/fedora/fedora:45
+          # Both floating inputs at the digests `snapshot` pinned for every root
+          # of this run, the installer root's included (tagged :45 locally; the
+          # build below uses --no-pull). Their digests plus the selected source
+          # trees permit an early no-build skip.
+          bash .github/fedora-pins.sh pull "$FEDORA_BOOTC" "$FEDORA_BUILDER"
           reference=-
           if [ "$snapshot" != - ]; then reference="$IMAGE_REPO@$snapshot"; fi
           cargo ilexctl changed "$reference" --root "$tag" --inputs-only
@@ -296,10 +307,12 @@ jobs:
   # security::firmware tier, and its `upgrade` job, which runs `upgrade::`: both
   # exercise the boot chain and the update path every root shares. Its verdict
   # gates only signing (publish and machines below). A conclusion of `success`
-  # qualifies, including when the installer root was unchanged (its tiers are
-  # skipped steps of a green job) or no v1 exists; a failed, timed-out or
-  # cancelled installer job does not. No credentials but a read-only jobs API
-  # token, and no dependency of the installer root on this job.
+  # qualifies when the evidence agrees (installer-qualification.jq): the
+  # installer root was unchanged (its tiers are skipped steps of a green job), or
+  # no v1 exists, or the upgrade tier passed after this attempt's candidate was
+  # staged (a job carried over by "Re-run failed jobs" tested nothing of it); a
+  # failed, timed-out or cancelled installer job does not. No credentials but a
+  # read-only jobs API token, and no dependency of the installer root on this job.
   qualification:
     needs: build
     # Runs when this root could sign something: a changed root, a root with
@@ -407,8 +420,8 @@ jobs:
   machines:
     needs: [build, qualification, publish]
     # !cancelled() permits the intentionally skipped publish job, but never a
-    # failed build/test job, a failed publish or a root the installer root's
-    # qualification did not clear. On main a changed root MUST have been
+    # failed build/test job, a failed, timed-out or cancelled publish or a root
+    # the installer root's qualification did not clear. On main a changed root MUST have been
     # published. No PR/fork event can reach code with registry or signing
     # credentials.
     if: >-
@@ -416,7 +429,7 @@ jobs:
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
       needs.build.result == 'success' && needs.build.outputs.layers == 'true' &&
       needs.qualification.result == 'success' && needs.qualification.outputs.qualified == 'true' &&
-      needs.publish.result != 'failure'
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60
     permissions:
