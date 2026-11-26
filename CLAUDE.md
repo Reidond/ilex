@@ -2551,10 +2551,11 @@ the Windows paths of this change: no Windows host was available.
   `enforcing=1` appended after `${root}` (the last `enforcing=` wins) and a
   policy module for the installer's own units and the root helper. Until then
   SELinux confines nothing here: ordinary services already run as `kernel_t`.
-  Measured on the 2026-11-26 image: **154 `avc:  denied` events per boot in the
-  journal's audit transport** (19 of them printed again by the kernel, plus a
-  few from dbus-broker), all permissive, from `systemd-sysctl`, `systemd`,
-  `polkitd`, `systemd-oomd`, `systemd-journald`, `udev-worker`, `systemd-userdbd`,
+  Measured on the 2026-11-26 image: **about 155 `avc:  denied` events per boot**
+  (154 and 158 on two runs, counted in the journal's audit transport; the
+  kernel prints 19 of them a second time and dbus-broker adds a few as
+  `USER_AVC`), all permissive, from `systemd-sysctl`, `systemd`,
+  `polkitd`, `systemd-oomd`, `systemd-journald`, `udev-worker`, `systemd-userd` (as the kernel truncates it),
   `systemd-resolved`, `irqbalance`, `rtkit-daemon`, `colord`, `chronyd` and
   `systemd-logind`, with source domain `kernel_t` (sysctl files, device nodes,
   `mounton` of `/var`, executing `unlabeled_t`). `iso::next_boot` writes the
