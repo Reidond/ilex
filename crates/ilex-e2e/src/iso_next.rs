@@ -128,6 +128,13 @@ pub fn loop_trial() -> Trial {
     })
 }
 
+/// `iso::next_unattended_loop`: the unattended installation from the ISO as a
+/// file on another disk. Registered only when a filter names it, for the same
+/// reason as [`loop_trial`].
+pub fn unattended_loop_trial() -> Trial {
+    trial("iso::next_unattended_loop", unattended::run_loop)
+}
+
 fn trial(name: &'static str, run: fn() -> Result<()>) -> Trial {
     Trial::test(name, move || {
         let started = Instant::now();

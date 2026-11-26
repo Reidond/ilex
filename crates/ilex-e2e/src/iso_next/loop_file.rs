@@ -36,6 +36,9 @@ const MIB: u64 = 1 << 20;
 /// boot loader.
 pub(super) struct Fixture {
     pub disk: PathBuf,
+    /// The host disk's size: what the helper must report for the disk it
+    /// calls the live medium.
+    pub disk_bytes: u64,
     pub esp: PathBuf,
     /// The kernel arguments the ISO's own menu gives, and the ones this boot
     /// gives (saved with the evidence).
@@ -95,7 +98,8 @@ pub(super) fn build(root: &Path, iso: &Path) -> Result<Fixture> {
     let partition = (iso_bytes + 768 * MIB).div_ceil(MIB) * MIB;
     let disk = root.join("host.raw");
     let _ = fs::remove_file(&disk);
-    fs::File::create(&disk)?.set_len(MIB + partition + MIB)?;
+    let disk_bytes = MIB + partition + MIB;
+    fs::File::create(&disk)?.set_len(disk_bytes)?;
     cmd::run(
         Command::new("mke2fs")
             // Only what GRUB's ext2 driver reads: Fedora's mke2fs profile adds
@@ -119,6 +123,7 @@ pub(super) fn build(root: &Path, iso: &Path) -> Result<Fixture> {
     let _ = fs::remove_dir_all(&tree);
     Ok(Fixture {
         disk,
+        disk_bytes,
         esp,
         original_args,
         args,

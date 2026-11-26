@@ -16,6 +16,15 @@
 //! Two refusals come first, each on a VM of its own that must power nothing on
 //! and write nothing: an answers file that is not valid (the line and column,
 //! never its text), and one whose `confirm-erase` is not the disk.
+//!
+//! `iso::next_unattended_loop` runs the same thing with the ISO as a *file* on
+//! another disk (GRUB's loopback and dracut's `iso-scan/filename=`, see
+//! `loop_file.rs`), so that the live-medium logic is exercised on the install
+//! path too: the disk that holds the file is found by its size and the probe
+//! calls it the live medium; answers that name it as the target are refused
+//! and the disk (the file included) is byte for byte what it was; the answers
+//! that name the blank disk install, and the host disk is again unchanged
+//! after the installation and the power-off.
 
 use std::fs;
 use std::path::Path;
@@ -32,7 +41,7 @@ use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
 
 use super::{
-    Guest, PAGE_TIMEOUT, blank_disk_of, count_markers, diagnostics, fields, iso_path,
+    Guest, PAGE_TIMEOUT, blank_disk_of, count_markers, diagnostics, fields, iso_path, loop_file,
     wait_for_marker,
 };
 use crate::common;
@@ -47,6 +56,54 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 /// the page cache share the rest.
 const MEMORY: &str = "6G";
 const MARKER: &str = "ILEX-INSTALLER-ANSWERS";
+
+/// Where the ISO comes from.
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    /// An optical drive: the VM's own disk is the target.
+    Cdrom,
+    /// A file on another disk: the VM's own disk is that host disk, and the
+    /// target is attached beside it.
+    File,
+}
+
+/// What a trial boots: its source, its files and the names it gives things.
+struct Layout {
+    source: Source,
+    /// The host disk and the boot loader's FAT disk, built once for the
+    /// trial's VMs (the file source only).
+    fixture: Option<loop_file::Fixture>,
+}
+
+impl Layout {
+    fn new(source: Source, root: &Path, iso: &Path) -> Result<Self> {
+        let fixture = match source {
+            Source::Cdrom => None,
+            Source::File => Some(loop_file::build(&root.join("loop"), iso)?),
+        };
+        Ok(Self { source, fixture })
+    }
+    /// What the trial's files and artifacts are called.
+    fn name(&self) -> &'static str {
+        match self.source {
+            Source::Cdrom => "unattended",
+            Source::File => "unattended-loop",
+        }
+    }
+    /// VM purposes stay short: they name Unix socket paths.
+    fn purpose(&self) -> &'static str {
+        match self.source {
+            Source::Cdrom => "iso-next-unatt",
+            Source::File => "iso-next-unatf",
+        }
+    }
+    fn target(&self, root: &Path) -> std::path::PathBuf {
+        match self.source {
+            Source::Cdrom => root.join("target.qcow2"),
+            Source::File => root.join("target.raw"),
+        }
+    }
+}
 
 /// `answers.toml` for the target disk: answers that are not the defaults, so
 /// that applying them is visible.
@@ -97,22 +154,39 @@ fn answers_volume(root: &Path, text: &str) -> Result<std::path::PathBuf> {
 }
 
 /// The ISO, a blank target and an answers volume, booted: UEFI, Secure Boot.
-fn boot(root: &Path, text: &str) -> Result<Guest> {
+/// The target is blank every time; with a file as the source, the host disk
+/// that holds the file is the VM's own disk and the loader's FAT disk is
+/// attached last.
+fn boot(root: &Path, text: &str, layout: &Layout) -> Result<Guest> {
     let ws = common::workspace()?;
-    let iso = iso_path()?;
-    let target = root.join("target.qcow2");
-    blank_disk_of(&target, "41G")?;
+    let target = layout.target(root);
     let volume = answers_volume(root, text)?;
     let memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| MEMORY.into());
-    let mut config = VmConfig::new("iso-next-unatt", &target);
+    let mut provider = LinuxProvider::new(ws.clone())?;
+    let mut config = match &layout.fixture {
+        None => {
+            blank_disk_of(&target, "41G")?;
+            let mut config = VmConfig::new(layout.purpose(), &target);
+            config.cdrom = Some(iso_path()?);
+            config.extra_disks = vec![volume];
+            config
+        }
+        Some(fixture) => {
+            let _ = fs::remove_file(&target);
+            fs::File::create(&target)
+                .and_then(|file| file.set_len(TARGET_BYTES))
+                .with_context(|| format!("creating {}", target.display()))?;
+            provider = provider.with_esp_dir(&fixture.esp);
+            let mut config = VmConfig::new(layout.purpose(), &fixture.disk);
+            config.extra_disks = vec![target, volume];
+            config
+        }
+    };
     config.snapshot = false;
     config.memory = memory;
-    config.cdrom = Some(iso);
-    config.extra_disks = vec![volume];
     let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
     spec.security_launch = SecurityLaunch::QualificationFixture;
     spec.secure_boot = Requirement::Required;
-    let provider = LinuxProvider::new(ws.clone())?;
     let caps = provider.probe(&spec)?;
     caps.require_provisioning(Capability::FirmwareEnforcement)?;
     let vm = provider.create(spec)?;
@@ -134,32 +208,67 @@ fn boot(root: &Path, text: &str) -> Result<Guest> {
 }
 
 pub(super) fn run() -> Result<()> {
+    run_from(Source::Cdrom)
+}
+
+pub(super) fn run_loop() -> Result<()> {
+    run_from(Source::File)
+}
+
+fn run_from(source: Source) -> Result<()> {
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
-    let root = ws.state_dir().join("iso-next-fixtures").join("unattended");
+    let iso = iso_path()?;
+    let name = match source {
+        Source::Cdrom => "unattended",
+        Source::File => "unattended-loop",
+    };
+    let root = ws.state_dir().join("iso-next-fixtures").join(name);
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root)?;
+    let layout = Layout::new(source, &root, &iso)?;
+    // The host disk is what it is now, and has to be so at the end: the live
+    // system boots from a file on it and must never write to it.
+    let host_before = layout
+        .fixture
+        .as_ref()
+        .map(|f| sha256_of(&f.disk))
+        .transpose()?;
 
-    refuse_invalid(&root, &artifacts)?;
-    // Which also says what the disk is called: the same VM, with the same
-    // devices in the same order, names it the same way.
-    let target = refuse_confirmation(&root, &artifacts)?;
-    println!("iso::next unattended: the target is {target}");
+    refuse_invalid(&root, &artifacts, &layout)?;
+    // Which also says what the disks are called: the same VM, with the same
+    // devices in the same order, names them the same way.
+    let found = refuse_confirmation(&root, &artifacts, &layout)?;
+    println!(
+        "iso::next {name}: the target is {} (live medium: {})",
+        found.target,
+        found.live.as_deref().unwrap_or("none")
+    );
+    if let Some(live) = &found.live {
+        // The install path's own view of the medium: answers that name it are
+        // refused, and nothing, the ISO file included, is written.
+        refuse_live_medium(&root, &artifacts, &layout, live)?;
+        ensure!(
+            host_before.as_deref()
+                == Some(sha256_of(&layout.fixture.as_ref().unwrap().disk)?.as_str()),
+            "the host disk changed while its installation was refused"
+        );
+    }
 
     // The installation.
-    let mut guest = boot(&root, &answers(&target, &target))?;
+    let mut guest = boot(&root, &answers(&found.target, &found.target), &layout)?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
     let started = Instant::now();
-    let outcome = install(vm, &serial, &artifacts);
+    let outcome = install(vm, &serial, &artifacts, name);
     if let Err(error) = &outcome {
-        diagnostics(vm, &artifacts, "unattended");
+        diagnostics(vm, &artifacts, name);
         return Err(anyhow::anyhow!("{error:#}"));
     }
     let console = outcome?;
-    let _ = fs::write(artifacts.join("next-unattended-serial.txt"), &console);
+    let _ = fs::write(artifacts.join(format!("next-{name}-serial.txt")), &console);
     println!(
-        "iso::next unattended: installed and powered off in {:?}",
+        "iso::next {name}: installed and powered off in {:?}",
         started.elapsed()
     );
     let plan = fields(&console, MARKER, "plan")?;
@@ -176,7 +285,14 @@ pub(super) fn run() -> Result<()> {
     );
     // The machine is off; the disk it installed boots on its own.
     drop(guest);
-    let mut config = VmConfig::new("iso-next-unatt-t", root.join("target.qcow2"));
+    if let Some(fixture) = &layout.fixture {
+        // The disk the ISO file lies on was not touched by the installation.
+        ensure!(
+            host_before.as_deref() == Some(sha256_of(&fixture.disk)?.as_str()),
+            "the host disk changed during the installation"
+        );
+    }
+    let mut config = VmConfig::new(&format!("{}-t", layout.purpose()), layout.target(&root));
     config.snapshot = true;
     config.memory = "4G".into();
     let mut installed = Vm::boot(&ws, &config)?;
@@ -184,8 +300,8 @@ pub(super) fn run() -> Result<()> {
         .wait_ssh(PAGE_TIMEOUT)
         .context("the installed disk did not come up")?;
     check_installed(
-        &|name, text| {
-            let _ = qemu::write_artifact(&artifacts, &format!("next-unattended-{name}"), text);
+        &|file, text| {
+            let _ = qemu::write_artifact(&artifacts, &format!("next-{name}-{file}"), text);
         },
         &installed,
         &Expected {
@@ -200,7 +316,10 @@ pub(super) fn run() -> Result<()> {
             password: PASSWORD,
         },
     )?;
-    gdm_screenshot(&mut installed, &artifacts.join("next-unattended-gdm.png"))?;
+    gdm_screenshot(
+        &mut installed,
+        &artifacts.join(format!("next-{name}-gdm.png")),
+    )?;
     // The ISO's own answers file was never written to, and the volume is what
     // it was (the helper read it once, read-only).
     let volume = fs::read_to_string(root.join("answers/answers.toml"))?;
@@ -211,10 +330,24 @@ pub(super) fn run() -> Result<()> {
     Ok(())
 }
 
+/// The SHA-256 of a file (`sha256sum`, which streams it).
+fn sha256_of(path: &Path) -> Result<String> {
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .context("running sha256sum")?;
+    ensure!(out.status.success(), "sha256sum {} failed", path.display());
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+        .context("sha256sum printed nothing")
+}
+
 /// Boot to the end of the installation: the markers say what happened. On the
 /// way, once the pull is under way, the screen is saved: what a person at the
 /// machine sees of an unattended installation.
-fn install(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<String> {
+fn install(vm: &mut Vm, serial: &Path, artifacts: &Path, name: &str) -> Result<String> {
     let started = Instant::now();
     let mut shown = false;
     let console = loop {
@@ -228,7 +361,7 @@ fn install(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<String> {
         {
             shown = true;
             let _ = Vmctl::from_info(vm.info.clone())
-                .save_screenshot(&artifacts.join("next-unattended-progress.png"));
+                .save_screenshot(&artifacts.join(format!("next-{name}-progress.png")));
         }
         if count_markers(&console, MARKER, Some("result")) >= 1 {
             break console;
@@ -267,13 +400,14 @@ fn install(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<String> {
 
 /// An answers file that is not valid: refused with where and not what, and
 /// nothing is written.
-fn refuse_invalid(root: &Path, artifacts: &Path) -> Result<()> {
+fn refuse_invalid(root: &Path, artifacts: &Path, layout: &Layout) -> Result<()> {
+    let name = layout.name();
     let dir = root.join("invalid");
     fs::create_dir_all(&dir)?;
     // A password in a line that is wrong: the error must not quote it.
     let secret = "S3cret-never-to-be-printed";
     let text = format!("schema = 1\n[administrator]\npassword = \"{secret}\" extra\n");
-    let mut guest = boot(&dir, &text)?;
+    let mut guest = boot(&dir, &text, layout)?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
     let console = wait_for_marker(
@@ -284,9 +418,9 @@ fn refuse_invalid(root: &Path, artifacts: &Path) -> Result<()> {
         1,
         PAGE_TIMEOUT,
     )
-    .inspect_err(|_| diagnostics(vm, artifacts, "unattended-invalid"))?;
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-invalid")))?;
     let _ = fs::write(
-        artifacts.join("next-unattended-invalid-serial.txt"),
+        artifacts.join(format!("next-{name}-invalid-serial.txt")),
         &console,
     );
     ensure!(
@@ -294,19 +428,27 @@ fn refuse_invalid(root: &Path, artifacts: &Path) -> Result<()> {
         "an invalid answers file was not refused with its position: {console}"
     );
     ensure!(!console.contains(secret), "the password was printed");
-    assert_untouched(vm, &dir)?;
-    println!(
-        "iso::next unattended: an invalid answers file is refused by position, without its text"
-    );
+    assert_untouched(vm, &dir, layout)?;
+    println!("iso::next {name}: an invalid answers file is refused by position, without its text");
     Ok(())
 }
 
-/// Whole-disk mode erases: `confirm-erase` has to repeat the disk's id. Returns
-/// the id of the target disk, as this VM's helper names it.
-fn refuse_confirmation(root: &Path, artifacts: &Path) -> Result<String> {
+/// The disks as the helper names them in this VM.
+struct Found {
+    /// The blank target.
+    target: String,
+    /// The disk the ISO file lies on (the file source only).
+    live: Option<String>,
+}
+
+/// Whole-disk mode erases: `confirm-erase` has to repeat the disk's id. Also
+/// says how this VM's helper names the target and, for a boot from a file, the
+/// medium.
+fn refuse_confirmation(root: &Path, artifacts: &Path, layout: &Layout) -> Result<Found> {
+    let name = layout.name();
     let dir = root.join("confirmation");
     fs::create_dir_all(&dir)?;
-    let mut guest = boot(&dir, &answers("a-disk", "another-disk"))?;
+    let mut guest = boot(&dir, &answers("a-disk", "another-disk"), layout)?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
     let console = wait_for_marker(
@@ -317,17 +459,17 @@ fn refuse_confirmation(root: &Path, artifacts: &Path) -> Result<String> {
         1,
         PAGE_TIMEOUT,
     )
-    .inspect_err(|_| diagnostics(vm, artifacts, "unattended-confirmation"))?;
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-confirmation")))?;
     let _ = fs::write(
-        artifacts.join("next-unattended-confirmation-serial.txt"),
+        artifacts.join(format!("next-{name}-confirmation-serial.txt")),
         &console,
     );
     ensure!(
         console.contains("result=failed") && console.contains("confirm-erase"),
         "a wrong confirm-erase was not refused: {console}"
     );
-    assert_untouched(vm, &dir)?;
-    println!("iso::next unattended: a wrong confirm-erase is refused and the disk is untouched");
+    assert_untouched(vm, &dir, layout)?;
+    println!("iso::next {name}: a wrong confirm-erase is refused and the disk is untouched");
     // The helper's own probe: the disk of the target's size.
     let reply = vm.ssh_ok("busctl --system --json=short call org.ilex.Installer1 /org/ilex/Installer1 org.ilex.Installer1 Probe")?;
     let reply: serde_json::Value = serde_json::from_str(&reply).context("busctl's JSON")?;
@@ -346,20 +488,83 @@ fn refuse_confirmation(root: &Path, artifacts: &Path) -> Result<String> {
                     .collect::<Vec<_>>()
             )
         })?;
-    Ok(target.id.clone())
+    ensure!(
+        !target.live_medium,
+        "the blank target is called the live medium: {target:?}"
+    );
+    let live: Vec<_> = probe.disks.iter().filter(|d| d.live_medium).collect();
+    let live = match &layout.fixture {
+        // An optical drive is no disk: nothing is the medium.
+        None => {
+            ensure!(live.is_empty(), "a disk is the live medium: {live:?}");
+            None
+        }
+        // The disk that holds the file, by its size, not by elimination.
+        Some(fixture) => {
+            ensure!(
+                live.len() == 1 && live[0].size_bytes == fixture.disk_bytes,
+                "the disk holding the ISO file is not the one live_medium disk ({} bytes): {live:?}",
+                fixture.disk_bytes
+            );
+            Some(live[0].id.clone())
+        }
+    };
+    Ok(Found {
+        target: target.id.clone(),
+        live,
+    })
 }
 
-/// The target has no partition table: nothing was written to it.
-fn assert_untouched(vm: &mut Vm, dir: &Path) -> Result<()> {
+/// Answers that name the disk the ISO file lies on are refused as the live
+/// medium, before anything is written: the target stays blank, and the
+/// caller compares the host disk's checksum.
+fn refuse_live_medium(root: &Path, artifacts: &Path, layout: &Layout, live: &str) -> Result<()> {
+    let name = layout.name();
+    let dir = root.join("medium");
+    fs::create_dir_all(&dir)?;
+    let mut guest = boot(&dir, &answers(live, live), layout)?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let console = wait_for_marker(
+        vm,
+        &serial,
+        "ILEX-INSTALLER-ANSWERS",
+        "result",
+        1,
+        PAGE_TIMEOUT,
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-medium")))?;
+    let _ = fs::write(
+        artifacts.join(format!("next-{name}-medium-serial.txt")),
+        &console,
+    );
+    ensure!(
+        console.contains("result=failed") && console.contains("medium"),
+        "answers naming the live medium were not refused as such: {console}"
+    );
+    ensure!(
+        !console.contains("apply=started"),
+        "an installation started on the live medium: {console}"
+    );
+    assert_untouched(vm, &dir, layout)?;
+    println!("iso::next {name}: answers that name the disk holding the ISO file are refused");
+    Ok(())
+}
+
+/// The target has no partition table: nothing was written to it. It is found
+/// by its size (with the ISO as a file the VM's first disk is the host).
+fn assert_untouched(vm: &mut Vm, dir: &Path, layout: &Layout) -> Result<()> {
     vm.wait_ssh(PAGE_TIMEOUT)
         .context("the live system did not accept the harness's SSH key")?;
-    let out = vm.ssh_ok("lsblk -n -o NAME,TYPE,PTTYPE,FSTYPE /dev/vda; systemctl is-active ilex-installer-session.service || true")?;
+    let out = vm.ssh_ok(&format!(
+        "d=$(lsblk -b -d -n -o NAME,SIZE | awk -v s={TARGET_BYTES} '$2==s{{print $1}}'); [ -n \"$d\" ] || {{ echo no-target-disk; exit 3; }}; lsblk -n -o NAME,TYPE,PTTYPE /dev/$d; systemctl is-active ilex-installer-session.service || true"
+    ))?;
     ensure!(
         !out.contains("part") && !out.contains("gpt"),
         "the refused installation wrote to the disk: {out}"
     );
     ensure!(
-        dir.join("target.qcow2").is_file(),
+        layout.target(dir).is_file(),
         "the target disk image is gone"
     );
     Ok(())

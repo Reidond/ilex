@@ -108,6 +108,8 @@ pub(super) fn run(medium: Medium) -> Result<()> {
     raw_disk(&small, SMALL_BYTES)?;
     let memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| MEMORY.into());
     let mut provider = LinuxProvider::new(ws.clone())?.with_usb_medium(medium == Medium::Usb);
+    // The size of the disk that holds the ISO file, known only to a boot from one.
+    let mut host_bytes = None;
     let mut config = match medium {
         Medium::Usb | Medium::Cdrom => {
             let first = root.join("first.qcow2");
@@ -131,6 +133,7 @@ pub(super) fn run(medium: Medium) -> Result<()> {
                 ),
             )?;
             provider = provider.with_esp_dir(&fixture.esp);
+            host_bytes = Some(fixture.disk_bytes);
             let blank = root.join("blank.raw");
             raw_disk(&blank, FIRST_BYTES)?;
             let mut config = VmConfig::new(medium.purpose(), &fixture.disk);
@@ -158,7 +161,7 @@ pub(super) fn run(medium: Medium) -> Result<()> {
         vm.info.secure_boot,
         "the VM was not started with Secure Boot"
     );
-    let outcome = observe(vm, medium, &artifacts);
+    let outcome = observe(vm, medium, &artifacts, host_bytes);
     if outcome.is_err() {
         diagnostics(vm, &artifacts, &format!("helper-{}", medium.name()));
     }
@@ -400,7 +403,7 @@ fn offered(probe: &Probe, path: &str, bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
+fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path, host_bytes: Option<u64>) -> Result<()> {
     let serial = vm.info.dir.join("serial.log");
     // The session first: the helper is looked at in the state a person finds it
     // in, with the compositor and the page running beside it.
@@ -514,6 +517,38 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path) -> Result<()> {
             ensure!(
                 live.len() == 1 && live[0].bus == "virtio" && !live[0].removable,
                 "the disk holding the ISO file is not the one live_medium disk: {live:?}"
+            );
+            // It is *that* disk, the one the harness made for the file, not
+            // the one left over when the others were accounted for.
+            let host_bytes = host_bytes.context("the loop trial has no host disk size")?;
+            ensure!(
+                live[0].size_bytes == host_bytes,
+                "the live medium is {} bytes, not the {host_bytes}-byte disk that holds the ISO file: {live:?}",
+                live[0].size_bytes
+            );
+            // And the kernel names the loop device's file relative to its file
+            // system's root (`/boot/isos/ilex.iso`), a name no path of the live
+            // system confirms. The trial fails if dracut ever changes that, so
+            // that the helper's search below the file system's mounts is no
+            // longer what carries it.
+            let loops = ssh(vm, "losetup --json --list --output NAME,BACK-FILE")?;
+            ensure!(loops.code == Some(0), "losetup: {}", loops.text);
+            let loops: Value = serde_json::from_str(&loops.text).context("losetup's JSON")?;
+            let relative = loops["loopdevices"].as_array().is_some_and(|devices| {
+                devices
+                    .iter()
+                    .any(|d| d["back-file"].as_str() == Some(loop_file::ISO_FILE))
+            });
+            ensure!(
+                relative,
+                "no loop device reports the file-system-relative name {}: {loops}",
+                loop_file::ISO_FILE
+            );
+            let visible = ssh(vm, &format!("test -e {}", loop_file::ISO_FILE))?;
+            ensure!(
+                visible.code != Some(0),
+                "{} exists in the live system's own namespace, so the name needs no search to be placed",
+                loop_file::ISO_FILE
             );
             ensure!(
                 live[0].in_use.is_empty() && live[0].notes.is_empty(),

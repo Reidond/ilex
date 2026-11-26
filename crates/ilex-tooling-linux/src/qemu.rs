@@ -715,12 +715,18 @@ impl Vm {
             ));
         }
         if let Some(dir) = &config.esp_dir {
+            // Two devices never share a boot index: with a stick (first) the
+            // loader disk comes second, and without one it is first.
+            let bootindex = if usb_stick { 2 } else { 1 };
             qemu.arg("-drive")
                 .arg(format!(
                     "if=none,id=esp,format=raw,readonly=on,file=fat:{}",
                     std::path::absolute(dir)?.display()
                 ))
-                .args(["-device", "virtio-blk-pci,drive=esp,bootindex=1"]);
+                .args([
+                    "-device",
+                    &format!("virtio-blk-pci,drive=esp,bootindex={bootindex}"),
+                ]);
         }
         let gl = config.gl && config.display != Display::None;
         let vga = if gl { "virtio-vga-gl" } else { "virtio-vga" };

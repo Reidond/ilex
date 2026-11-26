@@ -106,6 +106,9 @@ fn main() {
     if filters.iter().any(|f| f.contains("next_helper_loop")) {
         trials.push(iso_next::loop_trial());
     }
+    if filters.iter().any(|f| f.contains("next_unattended_loop")) {
+        trials.push(iso_next::unattended_loop_trial());
+    }
     // The next installer's root helper: a VM of its live image, no ISO.
     if filters.iter().any(|f| f.contains("installer::")) {
         trials.extend(installer::trials());
