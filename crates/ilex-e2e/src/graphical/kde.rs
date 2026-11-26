@@ -765,11 +765,13 @@ mod apps {
     /// catalogue or a prompt Discover cannot satisfy.
     fn discover(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
         // The catalogue Discover shows is the remote's AppStream data; fetch it
-        // as GNOME Software's test does, so the page opens at once.
+        // as GNOME Software's test does, so the page opens at once. Discover
+        // lowercases the host of an `appstream://` URL, so the application's ID
+        // must be lowercase (Baobab, `org.gnome.baobab`).
         user(vm, "flatpak update --user --appstream -y --noninteractive")?;
         user(
             vm,
-            "systemd-run --user --collect --quiet --unit=ilex-discover plasma-discover appstream://org.gnome.Chess.desktop",
+            "systemd-run --user --collect --quiet --unit=ilex-discover plasma-discover appstream://org.gnome.baobab.desktop",
         )?;
         std::thread::sleep(Duration::from_secs(15));
         settle(ctl)?;
@@ -778,9 +780,9 @@ mod apps {
         // in Discover's default window.
         ctl.click(1868, 522, Button::Left, 1)?;
         vm.wait_for(
-            "Discover to install Chess for the user",
+            "Discover to install Disk Usage Analyzer for the user",
             &format!(
-                "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/$(id -u {USER}) flatpak info --user org.gnome.Chess"
+                "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/$(id -u {USER}) flatpak info --user org.gnome.baobab"
             ),
             Duration::from_secs(600),
         )?;
@@ -791,20 +793,20 @@ mod apps {
         report.check(
             "the application went to the user installation, not the system's",
             {
-                let system = vm.ssh("flatpak info --system org.gnome.Chess")?;
+                let system = vm.ssh("flatpak info --system org.gnome.baobab")?;
                 if system.status.success() {
-                    Err(anyhow!("Chess is also installed system-wide"))
+                    Err(anyhow!("Disk Usage Analyzer is also installed system-wide"))
                 } else {
                     Ok(())
                 }
             },
         );
-        report.check("the GNOME runtime of the system installation was reused", {
-            let user_runtime = user(vm, "flatpak info --user org.gnome.Platform//51");
-            if user_runtime.is_ok() {
-                Err(anyhow!("the runtime was installed again for the user"))
-            } else {
+        report.check("the runtime of the system installation was reused", {
+            let runtimes = user(vm, "flatpak list --user --runtime --columns=application")?;
+            if runtimes.trim().is_empty() {
                 Ok(())
+            } else {
+                Err(anyhow!("the user installation holds runtimes:\n{runtimes}"))
             }
         });
         report.check("no system catalogue was fetched for Discover", {

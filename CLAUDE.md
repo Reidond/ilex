@@ -902,7 +902,7 @@ colours of its window, not a theme name), and the portal values libadwaita reads
 installs GNOME Calculator (libadwaita), gedit (GTK 3), dconf-editor and the two
 theme extensions, probes what GTK 3, GTK 4 and libadwaita resolve inside their
 sandboxes in dark and light, writes a setting with the dconf-backed
-dconf-editor, and installs GNOME Chess through Discover's own page and Install
+dconf-editor, and installs GNOME Disk Usage Analyzer through Discover's own page and Install
 button with real input, into the user installation; it does not install the KDE
 list. `graphical::shells` is explicit-only and needs `--shell gnome --shell kde`:
 Plasma ending in Breeze Dark, a normal logout, GNOME's GTK 3, GTK 4 and libadwaita
