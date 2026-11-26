@@ -27,7 +27,15 @@
 //!    must then clear Plasma's leftovers without stopping what it must not, and
 //!    the next GNOME login must work and look as GNOME chose. The Plasma login
 //!    must get a stack of its own (the login stops the leftovers), show the
-//!    desktop rather than the greeter, and keep it when the watch wakes.
+//!    desktop rather than the greeter, and keep it when the watch wakes;
+//! 8. a live Plasma session while the manager's `XDG_SESSION_ID` names a session
+//!    that is over (what a login that failed after exporting its id leaves): a
+//!    second login's hook, sourced by hand as GDM attaches a second Plasma login
+//!    of the user to the live session, must leave the running Plasma alone; and
+//! 9. a Plasma login while the watch's own stop is still running: the targets
+//!    are down at once and a unit's stop job is held up (a drop-in, released by
+//!    the test), which Plasma's target cannot be started over. The login's hook
+//!    must wait for it and the login must get a desktop.
 //!
 //! Select it explicitly (`ilexctl test graphical::shells --shell gnome --shell kde`).
 
@@ -215,6 +223,10 @@ fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
     // 6 and 7. The watch is late: a login arrives before it acts.
     late_watch_gnome(vm, ctl, artifacts, &password)?;
     late_watch_plasma(vm, ctl, artifacts, &password)?;
+
+    // 8 and 9. A login next to a live Plasma, and one during a stop.
+    second_login(vm, ctl, artifacts, &password)?;
+    login_during_stop(vm, ctl, artifacts, &password)?;
     Ok(())
 }
 
@@ -827,6 +839,26 @@ fn stale_plasma(vm: &Vm, what: &str) -> Result<(Vec<u32>, Vec<u32>)> {
     Ok((compositor, shell))
 }
 
+/// Plasma's targets and the session watch are active.
+fn plasma_up(vm: &Vm) -> Result<Result<()>> {
+    let mut down = Vec::new();
+    for unit in [
+        "plasma-workspace.target",
+        "graphical-session.target",
+        "ilex-kde-session.service",
+    ] {
+        let state = user(vm, &format!("systemctl --user is-active {unit} || true"))?;
+        if state != "active" {
+            down.push(format!("{unit} {state}"));
+        }
+    }
+    Ok(if down.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("{}", down.join(", ")))
+    })
+}
+
 /// The most common colour's share of the screen, over a sample of its pixels
 /// (colours in steps of 16): the greeter is one flat colour with a small tile,
 /// a Plasma desktop is not.
@@ -1051,24 +1083,10 @@ fn late_watch_plasma(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str)
             Err(anyhow!("{flat:.2} of the screen is one colour"))
         }
     });
-    report.check("Plasma's targets and the session watch are up", {
-        let mut down = Vec::new();
-        for unit in [
-            "plasma-workspace.target",
-            "graphical-session.target",
-            "ilex-kde-session.service",
-        ] {
-            let state = user(vm, &format!("systemctl --user is-active {unit} || true"))?;
-            if state != "active" {
-                down.push(format!("{unit} {state}"));
-            }
-        }
-        if down.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!("{}", down.join(", ")))
-        }
-    });
+    report.check(
+        "Plasma's targets and the session watch are up",
+        plasma_up(vm)?,
+    );
     report.check("the watch stopped nothing of the new session", {
         if log.contains("stopping") {
             Err(anyhow!("the watch's log:\n{log}"))
@@ -1090,6 +1108,307 @@ fn late_watch_plasma(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str)
     )?
     .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
     // And its logout ends the session the way it always does.
+    kde::logout(vm)?;
+    manager_clean(vm, true)
+}
+
+/// The guest script that sources Plasma's login-time hook as a login of the user.
+const HOOK_PROBE: &[u8] = include_bytes!("hook-probe.sh");
+
+/// A session id logind does not have: `offset` above the highest it lists.
+fn unused_session_id(vm: &Vm, offset: u32) -> Result<String> {
+    let highest =
+        vm.ssh_ok("loginctl list-sessions --no-legend | awk '{print $1}' | sort -n | tail -n 1")?;
+    let highest: u32 = highest
+        .trim()
+        .parse()
+        .with_context(|| format!("the highest session id `{highest}`"))?;
+    Ok((highest + offset).to_string())
+}
+
+/// Step 8: another login of the user, next to a Plasma session that is live. The
+/// manager has one `XDG_SESSION_ID`, the one of whichever login imported its
+/// environment last: a login that failed (GNOME's, refusing to start next to a
+/// live Plasma, exports its id and closes) leaves the id of a session that is
+/// gone beside a Plasma that is alive, and the next Plasma login's hook must not
+/// take that for a crashed session's leftovers. GDM attaches a second Plasma
+/// login of the same user to the live session instead of starting one, so the hook
+/// is sourced by hand, as a login with an id of its own (a session id logind has
+/// never had, as nothing of the hook looks at more than the listing), against the
+/// real manager, logind and Plasma. Also with a `loginctl` that always fails.
+fn second_login(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
+    plasma_login(vm, ctl, password)?;
+    let live = user_sessions(vm)?;
+    let [owner] = live.as_slice() else {
+        bail!("expected one graphical session of the user, found {live:?}");
+    };
+    let owner = owner.clone();
+    let (compositor, shell) = (pids(vm, "kwin_wayland")?, pids(vm, "plasmashell")?);
+    let (gone, own) = (unused_session_id(vm, 50)?, unused_session_id(vm, 51)?);
+    vm.ssh_ok(&format!(
+        "printf %s {} | base64 -d > /tmp/hook-probe.sh && chmod 644 /tmp/hook-probe.sh",
+        qemu::base64(HOOK_PROBE)
+    ))?;
+    let since = now(vm)?;
+    user(
+        vm,
+        &format!("systemctl --user set-environment XDG_SESSION_ID={gone}"),
+    )?;
+    let probes = (|| {
+        Ok::<_, anyhow::Error>((
+            user(vm, &format!("sh /tmp/hook-probe.sh {own}"))?,
+            user(vm, &format!("sh /tmp/hook-probe.sh {own} loginctl-fails"))?,
+        ))
+    })();
+    // The owner's id is the manager's again, whatever the probes said.
+    user(
+        vm,
+        &format!("systemctl --user set-environment XDG_SESSION_ID={owner}"),
+    )?;
+    let (normal, failing) = probes?;
+    println!(
+        "     live session {owner}, the manager named {gone}, this login {own}; the hook said:\n{normal}\n     and with a failing loginctl:\n{failing}"
+    );
+    let frame = settle(ctl)?;
+    let flat = flat_share(&frame.rgb, frame.width, frame.height);
+    shot(ctl, artifacts, "23-second-login-next-to-plasma")?;
+    let log = watch_log(vm, &since)?;
+
+    let mut report = vmtest::Report::default();
+    for (what, out, session) in [
+        ("with logind answering", &normal, owner.as_str()),
+        ("with a loginctl that fails", &failing, "?"),
+    ] {
+        report.check(
+            &format!("the hook leaves the live Plasma alone {what}"),
+            if out.starts_with("status=0 stdout=[]")
+                && out.contains(&format!(
+                    "stderr: ilex: session(s) {session} of this user are live, leaving the running Plasma alone"
+                ))
+                && !out.contains("stopping")
+            {
+                Ok(())
+            } else {
+                Err(anyhow!("{out}"))
+            },
+        );
+    }
+    report.check("the compositor and the shell are the same processes", {
+        let (c, s) = (pids(vm, "kwin_wayland")?, pids(vm, "plasmashell")?);
+        if c == compositor && s == shell && !c.is_empty() && !s.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "kwin_wayland {compositor:?} -> {c:?}, plasmashell {shell:?} -> {s:?}"
+            ))
+        }
+    });
+    report.check(
+        "Plasma's targets and the session watch are up",
+        plasma_up(vm)?,
+    );
+    report.check("the session is still the live one", {
+        let now = user_sessions(vm)?;
+        if now == live {
+            session_active(vm)
+        } else {
+            Err(anyhow!("sessions {live:?} -> {now:?}"))
+        }
+    });
+    report.check("the screen still shows the desktop, not the greeter", {
+        if flat < 0.9 {
+            Ok(())
+        } else {
+            Err(anyhow!("{flat:.2} of the screen is one colour"))
+        }
+    });
+    report.check("the session watch stopped nothing", {
+        if log.contains("stopping") {
+            Err(anyhow!("the watch's log:\n{log}"))
+        } else {
+            Ok(())
+        }
+    });
+    report.finish()?;
+    kde::logout(vm)?;
+    manager_clean(vm, true)
+}
+
+/// The Plasma unit whose stop the test holds up in step 9. It is in Plasma's
+/// start closure, so a start of the target over its pending stop is refused,
+/// like one over a compositor that is still stopping.
+const HELD_UNIT: &str = "plasma-polkit-agent.service";
+
+/// A drop-in that keeps a stop of the unit running until the test creates the
+/// release file: the stop job stays queued, and the targets are down already.
+const HOLD_DROPIN: &str = "[Service]\n\
+    ExecStop=/bin/sh -c 'while [ ! -e /run/user/%U/ilex-test-release ]; do sleep 0.2; done'\n\
+    TimeoutStopSec=150\n";
+
+fn hold_dropin_dir(vm: &Vm) -> Result<(String, String)> {
+    let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
+    let dir = format!("/run/user/{uid}/systemd/user/{HELD_UNIT}.d");
+    Ok((uid, dir))
+}
+
+/// Hold the stop of [`HELD_UNIT`] up, or let go of it for good.
+fn hold_stop(vm: &Vm, hold: bool) -> Result<()> {
+    let (uid, dir) = hold_dropin_dir(vm)?;
+    if hold {
+        vm.ssh_ok(&format!(
+            "install -d {dir} && printf %s {} | base64 -d > {dir}/90-ilex-test-hold.conf && rm -f /run/user/{uid}/ilex-test-release",
+            qemu::base64(HOLD_DROPIN.as_bytes())
+        ))?;
+    } else {
+        vm.ssh_ok(&format!(
+            "touch /run/user/{uid}/ilex-test-release; rm -rf {dir}"
+        ))?;
+    }
+    user(vm, "systemctl --user daemon-reload")?;
+    if !hold {
+        vm.ssh_ok(&format!("rm -f /run/user/{uid}/ilex-test-release"))?;
+    }
+    Ok(())
+}
+
+/// Step 9: a Plasma login while the stop of the crashed session's stack is still
+/// running. The watch's stop does not wait for the stop jobs it queues: the
+/// targets are down at once, a compositor's or a portal's own stop ends later, and
+/// Plasma's target cannot be started over it (`TransactionIsDestructive`, "Could
+/// not start systemd managed Plasma session", the greeter stays). The stop of one
+/// unit of Plasma's start closure is held up by a drop-in, so the window is as long
+/// as the test needs; the login's hook must wait for it, and the session that
+/// starts after it must have a desktop of its own.
+fn login_during_stop(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
+    plasma_login(vm, ctl, password)?;
+    let first = user_sessions(vm)?;
+    let since = now(vm)?;
+    hold_stop(vm, true)?;
+    let result = login_during_stop_held(vm, ctl, artifacts, password, &first, &since);
+    // Whatever happened, the next test does not wait for a held unit.
+    let _ = hold_stop(vm, false);
+    result
+}
+
+fn login_during_stop_held(
+    vm: &mut Vm,
+    ctl: &Vmctl,
+    artifacts: &Path,
+    password: &str,
+    first: &[String],
+    since: &str,
+) -> Result<()> {
+    freeze_watch(vm)?;
+    kill_plasma(vm)?;
+    let (stale_compositor, stale_shell) = stale_plasma(vm, "after the crash, the watch late")?;
+    // The watch wakes and stops the stack: the targets go inactive at once, the
+    // held unit's stop job stays queued.
+    thaw_watch(vm)?;
+    let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
+    vm.wait_for(
+        "Plasma's targets to be down after the watch's stop",
+        &kde::user_cmd(
+            &uid,
+            "sh -c '! systemctl --user is-active --quiet plasma-workspace.target && \
+             ! systemctl --user is-active --quiet graphical-session.target'",
+        ),
+        Duration::from_secs(60),
+    )?;
+    let jobs = user(vm, "systemctl --user list-jobs --no-legend --full || true")?;
+    println!("     the manager's jobs while its targets are down:\n{jobs}");
+    if !jobs
+        .lines()
+        .any(|l| l.split_whitespace().nth(1) == Some(HELD_UNIT) && l.contains(" stop"))
+    {
+        bail!(
+            "no stop job of {HELD_UNIT} is queued with Plasma's targets down: the window this step needs is not there"
+        );
+    }
+
+    // The login arrives inside that window.
+    choose_session(vm, "plasma")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    let waited = vm.wait_for(
+        "the login's hook to wait for the stop",
+        &format!(
+            "journalctl -b --no-pager -o cat -t ilex-kde-stale --since '{since}' | grep -F 'still stopping, waiting'"
+        ),
+        Duration::from_secs(40),
+    );
+    let during = user(vm, "systemctl --user list-jobs --no-legend --full || true")?;
+    println!("     the hook waits ({waited:?}); the manager's jobs then:\n{during}");
+    // Let the stop go: the hook returns and startplasma starts the session.
+    let (_, dir) = hold_dropin_dir(vm)?;
+    vm.ssh_ok(&format!(
+        "touch /run/user/{uid}/ilex-test-release; rm -rf {dir}"
+    ))?;
+    let not_stale = |name: &str, stale: &[u32]| {
+        let skip: String = stale.iter().map(|p| format!(" -e {p}")).collect();
+        format!("pgrep -u {USER} -x {name} | grep -qvxF{skip}")
+    };
+    let compositor = vm.wait_for(
+        "a Plasma compositor of the new session",
+        &not_stale("kwin_wayland", &stale_compositor),
+        SESSION_TIMEOUT,
+    );
+    let shell = vm.wait_for(
+        "a Plasma shell of the new session",
+        &not_stale("plasmashell", &stale_shell),
+        SESSION_TIMEOUT,
+    );
+    let frame = settle(ctl)?;
+    let flat = flat_share(&frame.rgb, frame.width, frame.height);
+    println!("     the new session on screen: {flat:.2} of it is one colour");
+    shot(ctl, artifacts, "24-plasma-login-during-a-stop")?;
+    let second = user_sessions(vm)?;
+    let journal = vm.ssh_ok(&format!(
+        "journalctl -b --no-pager -o cat --since '{since}' | grep -aE 'still stopping|still up, stopping it|leaving the running Plasma alone|TransactionIsDestructive|Could not start systemd managed Plasma' | cut -c1-200; true"
+    ))?;
+    println!("     what the login said:\n{journal}");
+
+    let mut report = vmtest::Report::default();
+    report.check(
+        "the hook saw the stop job and waited for it",
+        waited.map(drop),
+    );
+    report.check(
+        "the new login is a session of its own, active",
+        if second.len() == 1 && first != second.as_slice() {
+            session_active(vm)
+        } else {
+            Err(anyhow!("sessions: first {first:?}, second {second:?}"))
+        },
+    );
+    report.check(
+        "the new session has a compositor and a shell of its own",
+        compositor.and(shell).map(drop),
+    );
+    report.check("the screen shows the new session, not the greeter", {
+        if flat < 0.9 {
+            Ok(())
+        } else {
+            Err(anyhow!("{flat:.2} of the screen is one colour"))
+        }
+    });
+    report.check(
+        "Plasma's targets and the session watch are up",
+        plasma_up(vm)?,
+    );
+    report.check(
+        "Plasma's target was not refused for the stop that was running",
+        {
+            if journal.contains("TransactionIsDestructive")
+                || journal.contains("Could not start systemd managed Plasma")
+            {
+                Err(anyhow!("{journal}"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    report.finish()?;
+    plasma_unchanged(vm)?;
     kde::logout(vm)?;
     manager_clean(vm, true)
 }

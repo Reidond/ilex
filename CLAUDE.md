@@ -900,8 +900,13 @@ checks that the overlay holds nothing else):
   4. only then `graphical-session.target` is stopped, as a GNOME logout does. The
      logind listing is the last check before the stop: logind creates a login's
      session well before anything of it reaches the manager. What remains is the
-     few milliseconds between that listing and the stop job; a login that lands
-     there finds its own start queued behind the stop, nothing of it torn down.
+     few milliseconds between that listing and the stop job. The stop is
+     `--no-block` and the targets go inactive at once, while the stop jobs of the
+     compositor, the shell and the portals are still queued: a Plasma login that
+     lands there is not queued behind them (Plasma's target cannot be started over a
+     stop job that is still running) but waits for them in its env script (below) and
+     then starts its own stack; a GNOME login there can fail like one right after a
+     crash.
   The watch polls: logind announces `SessionNew`, `SessionRemoved` and a session's
   `Active` property on its bus (measured with `gdbus monitor --system --dest
   org.freedesktop.login1`; one crashed session went `Active=false` 0.4 s after the
@@ -914,24 +919,45 @@ checks that the overlay holds nothing else):
   watch (each of the four steps, a login with Plasma or GNOME or one the environment
   does not name yet arriving before the watch acts, a closing, tty, X11, unqueryable
   or unlistable session, an unreadable environment), and the login-time script
-  below in 8.
+  below in 27.
 - `/etc/xdg/plasma-workspace/env/10-ilex-kde-stale.sh` is sourced by `startplasma`
-  before it starts anything, quietly (the environment is read back from that shell).
-  A login that comes while the previous session's Plasma is still up (a crash, the
-  watch not yet awake) would start over a compositor that has no seat: measured,
-  `startplasma-wayland` finds `plasma-workspace.target` active, starts nothing, and
-  the greeter stays on screen next to a session logind calls active. The script
-  stops that stack and waits until the manager has no stop job left (starting
-  Plasma's target over one is refused: `TransactionIsDestructive`,
-  "Could not start systemd managed Plasma session"), so the session starts its own.
-  It acts only when `plasma-workspace.target` is active or activating, the manager's
-  `XDG_SESSION_ID` is neither this session's nor empty, and logind has dropped that
-  session or calls it closing: a live one is a second session of the same user,
-  not its to touch. `graphical-session.target` stays active under a GNOME session,
-  and GNOME's `gnome-session-init-worker` refuses to start over it ("A graphical
-  session is already running!", GDM then drops the login), so no live GNOME session
-  can ever sit next to leftovers of Plasma's stack: Plasma's target is bound to
-  graphical-session.target.
+  before it starts anything. It is quiet on stdout (the environment is read back
+  from that shell) and what it writes to stderr is dropped, so what it decides goes
+  to the journal too (tag `ilex-kde-stale`). A login that comes while the previous
+  session's Plasma is still up (a crash, the watch not yet awake) would start over a
+  compositor that has no seat: measured, `startplasma-wayland` finds
+  `plasma-workspace.target` active, starts nothing, and the greeter stays on screen
+  next to a session logind calls active. The script stops that stack, under the
+  watch's rule that a doubt means no stop. The manager's one `XDG_SESSION_ID` is the
+  one of whichever login imported its environment last, so a login that failed after
+  exporting its id (GNOME's, refusing to start next to a live Plasma, or a second
+  login of the user) leaves a gone or closing id beside a Plasma that is alive. It
+  therefore acts only when `plasma-workspace.target` is active or activating, the
+  recorded id is neither this login's nor empty and logind has dropped that session
+  or calls it `closing` (a `loginctl` that fails or is slow counts as alive), no
+  gnome-session target is active, activating or deactivating (or they cannot be
+  listed), and logind lists no other graphical (`wayland`, `x11`, `mir`) session of
+  this user that is not closing (a session it cannot query counts as one, and so does
+  a user it cannot list). A live session of the user is not the script's to touch, so
+  the second of two Plasma logins of one user (a shape the watch does not support
+  either) finds the first intact.
+  The script then stops that stack and waits, and the wait is for stop jobs, not for
+  Plasma's target: the watch's own stop is `--no-block`, the targets go inactive at
+  once and the compositor's, the shell's and the portals' stop jobs finish later, and
+  starting Plasma's target over a stop job that is still running is refused
+  (`TransactionIsDestructive`, "Could not start systemd managed Plasma session", the
+  greeter stays on screen; `graphical::shells` step 9 reproduces it by holding up the
+  stop of one unit with a drop-in). So whenever a stop job of
+  `graphical-session.target`, `plasma-*`, `ilex-kde-*` or `xdg-desktop-portal*` is
+  queued, whoever queued it and in whatever state Plasma's target is (inactive and
+  deactivating too), the script waits for it, 60 seconds at most, and only for those:
+  another job of the user manager (a start, an application's scope) is not its
+  business and does not delay a login. A login that arrives during the watch's own
+  stop thus starts its own stack once that stop is done. `graphical-session.target`
+  stays active under a GNOME session, and GNOME's `gnome-session-init-worker` refuses
+  to start over it ("A graphical session is already running!", GDM then drops the
+  login), so no live GNOME session can ever sit next to leftovers of Plasma's stack:
+  Plasma's target is bound to graphical-session.target.
 - Plasma's env script exports only `GTK_USE_PORTAL=1`, so GTK applications of the
   session ask the portal (and Plasma's file dialogs). Left behind by a crash it is
   benign: GNOME's own portal answers from GNOME's own settings. A shutdown script
@@ -1039,6 +1065,18 @@ inactive, and the next GNOME login must work and look as GNOME chose) and a Plas
 login (which must stop the leftovers itself, get its own compositor and shell, show
 the desktop rather than the greeter, and not be touched by the watch, then end with
 a normal logout that leaves no Plasma target, `DCONF_PROFILE` or theme in the manager).
+Two more steps test the login-time script against the real manager, logind and
+Plasma. Step 8: next to a live Plasma session, with the manager's `XDG_SESSION_ID`
+naming a session logind does not have (what a failed login leaves), the script is
+sourced by hand as a login of its own (GDM attaches a second Plasma login of the
+user to the live session instead of starting one), also with a `loginctl` that
+always fails: it must stop nothing (the same compositor and shell, targets up,
+the screen still the desktop). Step 9: a Plasma login while the watch's stop is
+still running, made long enough by a runtime drop-in that holds the stop of
+`plasma-polkit-agent.service` until the test releases it: with the targets down and
+that stop job queued, the login's script must log that it waits (in the journal), and
+once the stop is released the login must get a compositor and shell of its own and
+the desktop, with no "Could not start systemd managed Plasma session" in the journal.
 Screenshots land in `<state dir>/artifacts/graphical*/`.
 The Anaconda installer's catalogue offers only the installer composition's shell
 list (GNOME), so KDE compositions are not offered there and its release does not

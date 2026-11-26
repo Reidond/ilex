@@ -80,6 +80,10 @@ drop() { rm -f "\$sessions/\$1" "\$S/session.\$1"; }
 # desktop ID DESKTOP: what the manager exports after that session's login.
 desktop() { printf 'PATH=/usr/bin\nXDG_SESSION_ID=%s\nXDG_CURRENT_DESKTOP=%s\n' "\$1" "\$2" >"\$S/env"; }
 LIB
+cat >>"$watch/lib.sh" <<'LIB'
+# endjob: the first stop job of one of Plasma's units has finished.
+endjob() { sed -i '0,/^ *[0-9]\+ \+\(graphical-session\.target\|plasma-[^ ]*\|ilex-kde-[^ ]*\|xdg-desktop-portal[^ ]*\) \+stop/{//d}' "$S/jobs"; }
+LIB
 cat >"$watch/bin/systemctl" <<'STUB'
 #!/bin/bash
 . "$WATCH_LIB"
@@ -89,10 +93,16 @@ show-environment) cat "$S/env" ;;
 is-active) [ -e "$S/plasma-up" ] ;;
 list-units) cat "$S/gnome" ;;
 show) cat "$S/target-state" ;;
-list-jobs) ;;
+list-jobs) [ ! -e "$S/jobs" ] || cat "$S/jobs" ;;
 stop | --no-block) echo "$* [sessions: $(ls "$sessions" | tr '\n' ' ')]" >>"$S/calls" ;;
 *) echo "stub systemctl: $*" >&2; exit 1 ;;
 esac
+STUB
+# What the hook sends to the journal (systemd-cat reads it on stdin).
+cat >"$watch/bin/systemd-cat" <<'STUB'
+#!/bin/bash
+. "$WATCH_LIB"
+cat >>"$S/journal"
 STUB
 cat >"$watch/bin/loginctl" <<'STUB'
 #!/bin/bash
@@ -116,6 +126,7 @@ STUB
 cat >"$watch/bin/sleep" <<'STUB'
 #!/bin/bash
 . "$WATCH_LIB"
+echo $(($(cat "$S/sleeps" 2>/dev/null || echo 0) + 1)) >"$S/sleeps"
 if [ -s "$S/events" ]; then
     line=$(head -n 1 "$S/events")
     sed -i 1d "$S/events"
@@ -128,7 +139,7 @@ else
         kill -TERM "$PPID"
     fi
 fi
-exec /usr/bin/sleep 0.2
+exec /usr/bin/sleep "$(cat "$S/real-sleep" 2>/dev/null || echo 0.2)"
 STUB
 chmod 755 "$watch"/bin/*
 
@@ -271,35 +282,102 @@ env PATH="$watch/bin:$PATH" WATCH_LIB="$watch/lib.sh" bash "$watch/script" 2>/de
 # A Plasma login starts from a clean manager: the env script stops what a crashed
 # session left up (the compositor of a dead session has no seat, a session over
 # it shows nothing), and only that. Session 6 is this login; the manager still
-# exports session 5, whose Plasma may be up.
+# exports session 5, whose Plasma may be up. The manager's one XDG_SESSION_ID is
+# whichever login imported its environment last, so a session other than 5 can be
+# the owner (a failed login that exported its id and closed): any other graphical
+# session of the user that is not closing, or that cannot be asked about, is a
+# reason to stop nothing, like a `loginctl` or `systemctl` that fails. A stop job
+# of Plasma's units (the watch's own stop does not wait for them) is waited for
+# whether or not Plasma's target is still up, and no other job is.
 sed "s|/run/systemd/sessions|$watch/sessions|g" /etc/xdg/plasma-workspace/env/10-ilex-kde-stale.sh >"$watch/stale.sh"
-stale() { # name wanted-calls setup...: the env script as startplasma sources it
-    name=$1 wanted=$2
+stale() { # name wanted-calls wanted-waits setup...: the env script as startplasma sources it
+    name=$1 wanted=$2 waits=$3
     . "$watch/lib.sh"
     rm -rf "${sessions:?}"/* "${S:?}"/*
-    : >"$S/calls"
+    : >"$S/calls" >"$S/gnome"
     echo active >"$S/target-state"
     session 6 active wayland
+    echo 6 >"$S/user-sessions"
     desktop 5 KDE
-    shift 2
+    shift 3
     for setup in "$@"; do eval "$setup"; done
-    out=$(env PATH="$watch/bin:$PATH" WATCH_LIB="$watch/lib.sh" XDG_SESSION_ID=6 sh -c ". $watch/stale.sh" 2>/dev/null) ||
-        fail "$name: the env script failed"
+    out=$(env PATH="$watch/bin:$PATH" WATCH_LIB="$watch/lib.sh" XDG_SESSION_ID=6 sh -c ". $watch/stale.sh" 2>"$S/log") ||
+        fail "$name: the env script failed:
+$(cat "$S/log")"
     [ -z "$out" ] || fail "$name: the env script wrote to stdout (startplasma reads it): $out"
     [ "$(tr '\n' '|' <"$S/calls")" = "$wanted" ] || fail "$name: calls were
-$(cat "$S/calls")
-wanted: $wanted"
+$(tr '\n' '|' <"$S/calls")
+wanted: $wanted
+log:
+$(cat "$S/log")"
+    [ "$(cat "$S/sleeps" 2>/dev/null || echo 0)" = "$waits" ] || fail "$name: waited $(cat "$S/sleeps" 2>/dev/null || echo 0) times, wanted $waits
+log:
+$(cat "$S/log")"
 }
+# What the stand-in `systemctl list-jobs` lists: the columns are padded as the
+# real ones. `drain N` ends N stop jobs of Plasma's units, one at each wait.
+queue() { printf '%s\n' "$@" >"$S/jobs"; }
+drain() { for _ in $(seq "$1"); do echo endjob >>"$S/events"; done; }
+JOB_KWIN='   41 plasma-kwin_wayland.service    stop running'
+JOB_PORTAL='   42 xdg-desktop-portal.service     stop waiting'
+JOB_TARGET='   43 plasma-workspace.target        stop waiting'
+JOB_SESSION='   44 graphical-session.target       stop running'
+JOB_UNRELATED=('   50 plasma-kwin_wayland.service    start running'
+    '   51 dbus-broker.service            stop running'
+    '   52 xplasma-extra.service          stop waiting'
+    '   53 app-org.kde.kate-4242.scope    stop running'
+    '   54 xdg-document-portal.service    stop running')
 STOP='stop graphical-session.target plasma-workspace*.target plasma-*.service ilex-kde-*.service xdg-desktop-portal*.service [sessions: 6 ]|'
-stale "the crashed session's Plasma is up" "$STOP"
-stale "... and is only starting" "$STOP" 'echo activating >"$S/target-state"'
-stale "... and its session is closing" 'stop graphical-session.target plasma-workspace*.target plasma-*.service ilex-kde-*.service xdg-desktop-portal*.service [sessions: 5 6 ]|' 'session 5 closing wayland'
-stale "no Plasma is up" "" 'echo inactive >"$S/target-state"'
-stale "Plasma is going down" "" 'echo deactivating >"$S/target-state"'
-stale "the session that started Plasma is alive" "" 'session 5 active wayland'
-stale "the manager already exports this session" "" 'desktop 6 KDE'
-stale "the manager exports no session" "" 'printf "PATH=/usr/bin\n" >"$S/env"'
-echo "ok: a Plasma login stops only what a crashed session left"
+STOP_7='stop graphical-session.target plasma-workspace*.target plasma-*.service ilex-kde-*.service xdg-desktop-portal*.service [sessions: 6 7 ]|'
+stale "the crashed session's Plasma is up" "$STOP" 0
+stale "... and is only starting" "$STOP" 0 'echo activating >"$S/target-state"'
+stale "... and its session is closing" 'stop graphical-session.target plasma-workspace*.target plasma-*.service ilex-kde-*.service xdg-desktop-portal*.service [sessions: 5 6 ]|' 0 \
+    'session 5 closing wayland' 'echo "5 6" >"$S/user-sessions"'
+stale "no Plasma is up" "" 0 'echo inactive >"$S/target-state"'
+stale "Plasma is going down" "" 0 'echo deactivating >"$S/target-state"'
+stale "the session that started Plasma is alive" "" 0 'session 5 active wayland'
+stale "the manager already exports this session" "" 0 'desktop 6 KDE'
+stale "the manager exports no session" "" 0 'printf "PATH=/usr/bin\n" >"$S/env"'
+# The manager names a session that is over, while another login of the user is
+# alive: its Plasma is not a crashed session's.
+stale "another Wayland session of the user is live, the manager's is gone" "" 0 \
+    'session 7 active wayland' 'echo "6 7" >"$S/user-sessions"'
+said 'session(s) 7 of this user are live'
+grep -qx 'session(s) 7 of this user are live, leaving the running Plasma alone' "$S/journal" ||
+    fail "$name: the decision did not reach the journal: $(cat "$S/journal" 2>&1)"
+stale "... one that is only online" "" 0 'session 7 online wayland' 'echo "6 7" >"$S/user-sessions"'
+stale "... an X11 one" "" 0 'session 7 active x11' 'echo "6 7" >"$S/user-sessions"'
+stale "... the manager's session is closing" "" 0 'session 5 closing wayland' \
+    'session 7 active wayland' 'echo "5 6 7" >"$S/user-sessions"'
+stale "another session of the user cannot be asked about" "" 0 ': >"$sessions/7"' 'echo "6 7" >"$S/user-sessions"'
+stale "logind cannot list the user's sessions" "" 0 'rm "$S/user-sessions"'
+stale "another session of the user is closing" "$STOP_7" 0 'session 7 closing wayland' 'echo "6 7" >"$S/user-sessions"'
+stale "another session of the user is a text login" "$STOP_7" 0 'session 7 active tty' 'echo "6 7" >"$S/user-sessions"'
+stale "another session of the user has gone from logind meanwhile" "$STOP" 0 'echo "6 7" >"$S/user-sessions"'
+stale "gnome-session's targets are up" "" 0 'echo "gnome-session.target loaded active active GNOME" >"$S/gnome"'
+stale "the manager cannot list gnome-session's targets" "" 0 'rm "$S/gnome"'
+# A stop that is still running: wait for it, with Plasma's target up or not.
+stale "Plasma's target is down, the stop of its units still runs" "" 3 'echo inactive >"$S/target-state"' \
+    'queue "$JOB_SESSION" "$JOB_KWIN" "$JOB_PORTAL"' 'drain 3'
+said 'still stopping, waiting'
+stale "... the target is deactivating" "" 1 'echo deactivating >"$S/target-state"' 'queue "$JOB_TARGET"' 'drain 1'
+stale "... only the stop of the portal is left" "" 1 'echo inactive >"$S/target-state"' 'queue "$JOB_PORTAL"' 'drain 1'
+stale "the leftovers are stopped, then the stop jobs they queued are waited for" "$STOP" 2 \
+    'queue "$JOB_KWIN" "$JOB_TARGET"' 'drain 2'
+# Only stop jobs of Plasma's units are waited for.
+stale "other jobs only, Plasma's target is down" "" 0 'echo inactive >"$S/target-state"' 'queue "${JOB_UNRELATED[@]}"'
+stale "other jobs only, Plasma is stale" "$STOP" 0 'queue "${JOB_UNRELATED[@]}"'
+stale "other jobs and one stop job of Plasma's" "" 1 'echo inactive >"$S/target-state"' \
+    'queue "${JOB_UNRELATED[0]}" "$JOB_KWIN" "${JOB_UNRELATED[@]:1}"' 'drain 1'
+# A stop that never ends: bounded (120 waits of half a second), then login goes on.
+stale "a stop job that never ends" "" 120 'echo inactive >"$S/target-state"' 'echo 0 >"$S/real-sleep"' 'queue "$JOB_KWIN"'
+said 'still stopping after 60 seconds'
+grep -qx "Plasma's units are still stopping after 60 seconds, going on" "$S/journal" ||
+    fail "$name: the bound did not reach the journal: $(cat "$S/journal" 2>&1)"
+# Nothing of the script is left in the shell that sourced it.
+leak=$(env PATH="$watch/bin:$PATH" WATCH_LIB="$watch/lib.sh" XDG_SESSION_ID=6 sh -c ". $watch/stale.sh; set | grep -c '^ilex_' || true" 2>/dev/null)
+[ "$leak" = 0 ] || fail "the env script leaves $leak variables or functions behind"
+echo "ok: a Plasma login stops only what a crashed session left, and waits only for Plasma's own stop jobs"
 rm -rf "$watch"
 echo "ok: the session watch never stops a session that is live"
 
