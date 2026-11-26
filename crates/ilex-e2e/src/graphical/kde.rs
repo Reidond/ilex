@@ -25,6 +25,7 @@ use super::{
     SESSION_TIMEOUT, USER, no_failed_system_units, no_failed_user_units, session_active, settle,
     shot, test_password, wait_greeter, wait_session,
 };
+use crate::common;
 use crate::disk::vmtest;
 
 const GTK3_PROBE: &[u8] = include_bytes!("gtk3-probe.py");
@@ -138,16 +139,12 @@ pub(super) fn user(vm: &Vm, cmd: &str) -> Result<String> {
             .iter()
             .any(|p| l.starts_with(p))
         })
-        .map(|l| format!("{} ", qemu_quote(l)))
+        .map(|l| format!("{} ", common::quote(l)))
         .collect();
     vm.ssh_ok(&format!(
         "runuser -u {USER} -- env XDG_RUNTIME_DIR=/run/user/{uid} \
          DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus {exports} {cmd}"
     ))
-}
-
-fn qemu_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 /// The portal's `org.freedesktop.appearance` value, as `busctl` prints it.
