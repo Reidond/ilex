@@ -12,6 +12,7 @@ blocking = "1"
 clap.workspace = true
 ilex-enroll = { path = "../ilex-enroll" }
 ilex-installer-model.workspace = true
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

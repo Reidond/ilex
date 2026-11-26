@@ -11,9 +11,9 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use ilex_installer_model::probe::{Extent, Partition};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs, io,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     time::Duration,
@@ -2523,6 +2523,78 @@ fn check_namespaces(parent: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The kernel's claim on a disk, as the exclusive open of it answers: free,
+/// refused (`EBUSY`, retried briefly so that a claim that is only passing does
+/// not make a disk flicker) or not answered.
+fn check_claims(parent: &Path) -> Result<()> {
+    let calls = Cell::new(0u32);
+    let busy = || io::Error::from_raw_os_error(libc::EBUSY);
+    let mut passing = || {
+        calls.set(calls.get() + 1);
+        if calls.get() < 4 { Err(busy()) } else { Ok(()) }
+    };
+    ensure!(
+        disks::claim_with(&mut passing, 10, Duration::ZERO) == disks::Claim::Free
+            && calls.get() == 4,
+        "a passing claim: {} tries",
+        calls.get()
+    );
+    calls.set(0);
+    let mut held = || {
+        calls.set(calls.get() + 1);
+        Err(busy())
+    };
+    ensure!(
+        disks::claim_with(&mut held, 10, Duration::ZERO) == disks::Claim::Busy && calls.get() == 10,
+        "a held disk: {} tries",
+        calls.get()
+    );
+    calls.set(0);
+    let mut refused = || {
+        calls.set(calls.get() + 1);
+        Err(io::Error::from_raw_os_error(libc::EACCES))
+    };
+    ensure!(
+        matches!(
+            disks::claim_with(&mut refused, 10, Duration::ZERO),
+            disks::Claim::Unknown(_)
+        ) && calls.get() == 1,
+        "an open that fails for another reason is not retried: {} tries",
+        calls.get()
+    );
+    ensure!(
+        disks::claim_reason("/dev/vdb", &disks::Claim::Free).is_none()
+            && disks::claim_reason("/dev/vdb", &disks::Claim::Busy)
+                .is_some_and(|r| r.contains("/dev/vdb") && r.contains("held open exclusively"))
+            && disks::claim_reason("/dev/vdb", &disks::Claim::Unknown("EIO".into()))
+                .is_some_and(|r| r.contains("could not be opened") && r.contains("EIO")),
+        "the reasons"
+    );
+    // The real thing, on something that is not a disk: not a block device.
+    let tree = TestDir::new(parent, "claim")?;
+    write(&tree.0.join("sys/class/block/fake/dev"), "7:99\n")?;
+    write(&tree.0.join("node"), "")?;
+    ensure!(
+        matches!(
+            disks::claim_disk(
+                &tree.0.join("sys"),
+                "fake",
+                &tree.0.join("node").to_string_lossy()
+            ),
+            disks::Claim::Unknown(_)
+        ),
+        "a file was taken for the disk"
+    );
+    ensure!(
+        matches!(
+            disks::claim_disk(&tree.0.join("sys"), "missing", "/dev/null"),
+            disks::Claim::Unknown(_)
+        ),
+        "a disk sysfs has no number for"
+    );
+    Ok(())
+}
+
 // --- files ------------------------------------------------------------------
 
 fn tzif(path: &Path) -> Result<()> {
@@ -2837,6 +2909,7 @@ pub fn run(config: &helper::Config) -> Result<String> {
     check_tables(parent.path()).context("the tables of the running system")?;
     check_topology(parent.path()).context("the live medium and disks in use")?;
     check_namespaces(parent.path()).context("the mount namespaces")?;
+    check_claims(parent.path()).context("the exclusive open of a disk")?;
     check_files(parent.path()).context("files")?;
     let repart = check_repart(config, parent.path()).context("repart")?;
     let system = check_system(config).context("system")?;
