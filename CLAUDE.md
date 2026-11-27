@@ -4162,7 +4162,9 @@ the erase on the review page.
       the review with its sentence and Try again, which looks at the computer
       again first. An `installation-active` refusal drops the plan and asks
       `State`; an idle answer checks the choices again, so Erase is never
-      offered on a plan the helper refused. If the answer to `Apply` is lost (the bus, a helper that died as
+      offered on a plan the helper refused. While any such `State` is asked the
+      flow is frozen (`is_frozen`): no Back, Continue, Try again or look at the
+      computer starts beside it. If the answer to `Apply` is lost (the bus, a helper that died as
       the installation began) the flow asks `State` before it says anything: what
       the helper says is what happened (`not-started` goes back to the review,
       under way continues, silence is the lost page); while `State` says

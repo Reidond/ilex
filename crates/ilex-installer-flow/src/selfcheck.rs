@@ -3065,6 +3065,20 @@ fn interrupted_attach() -> Result<()> {
         "Erase is offered while State is asked after an active refusal: {:?}",
         flow.plan_check()
     );
+    // Nothing else starts beside that `State` either: no Back, no Try again,
+    // no Continue, no look at the computer.
+    ensure!(
+        flow.is_frozen()
+            && !flow.can_go_back()
+            && !flow.can_retry()
+            && !flow.can_continue()
+            && flow.retry() == Step::Stay
+            && flow.start_probe() == Step::Stay
+            && flow.back().is_none()
+            && flow.page() == PageId::Review,
+        "the review page is not frozen while State is asked: {:?}",
+        flow.plan_check()
+    );
     let step = flow.state_finished(generation, sim.state());
     ensure!(
         matches!(step, Step::RunProbe { .. })

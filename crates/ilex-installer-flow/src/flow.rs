@@ -541,6 +541,11 @@ impl Flow {
     /// while another probe is: one request at a time, so an answer can only
     /// ever be for the one in flight.
     pub fn start_probe(&mut self) -> Step {
+        if self.inst.is_attaching() {
+            // `State` is being asked: the look at the computer follows its
+            // answer, never beside it.
+            return Step::Stay;
+        }
         if self.attach_failed {
             // The helper never said where an installation is (it was not up,
             // or answered an error): that comes first, or a helper that has
@@ -781,7 +786,7 @@ impl Flow {
     }
 
     pub fn can_continue(&self) -> bool {
-        if self.blocking_problem().is_some() {
+        if self.blocking_problem().is_some() || self.inst.is_attaching() {
             return false;
         }
         match self.page {
@@ -979,9 +984,13 @@ impl Flow {
     }
 
     /// Nothing the plan is made of may change: the helper is being asked about
-    /// it, or the installation has been confirmed.
+    /// it, the installation has been confirmed, or `State` is being asked where
+    /// an installation is (its answer may move the flow to the installing page,
+    /// so no look at the computer or check may start beside it).
     pub fn is_frozen(&self) -> bool {
-        self.is_checking() || self.inst.phase != installation::Phase::Idle
+        self.is_checking()
+            || self.inst.phase != installation::Phase::Idle
+            || self.inst.is_attaching()
     }
 
     /// What the review page says when the check did not end in a plan.
