@@ -3842,17 +3842,18 @@ helper); **the live system is then stopped without a shutdown and booted again**
 reads it, still names both digests); and the retried installation, in that new
 boot, leaves a stamp on the booted disk that is exactly the two old digests and
 its own.
-Measured on a 16-vCPU Boat sandbox (2026-11-26): the five `installer::` trials
-together 1,251 s once the live image's disk exists (1,617 s with it rebuilt;
-`installer::install` alone 250 s: the pull and deployment 3 to 4.3 minutes, every
-other stage together under 10 seconds), `iso::next_unattended` with its two
-siblings 404 to 524 s (the installation powered off after 220 to 318 s),
-`iso::next_unattended_loop` 451 s (installed and powered off after 292 s), and the
-Anaconda ISO's own `iso::install` 11 minutes. A guest of the `iso::next_unattended*` trials that
-writes nothing on its serial console in the first 60 seconds is a failed trial, not a
-flake to start again: the shared `ensure_firmware_output` rule of the `iso::next` tier
-(see "A VM that never starts") fails it with what QEMU was doing, and the harness's
-`-audiodev none` removed the hang that caused such guests.
+Measured on a 16-vCPU Boat sandbox (2026-11-27, each trial run on its own): the
+five `installer::` trials together 1,420 s with the live image's disk built in that
+run (`installer::install` alone about 250 s: the pull and deployment 3 to 4.3
+minutes, every other stage together under 10 seconds), `iso::next_unattended` 315 s,
+`_fat` 20 s, `_late` 42 s, `_repeat` 643 s, `_handover` 188 s, `_reboot` 413 s,
+`_reboot_same_plan` 423 s, `_retry` 293 s, `iso::next_unattended_loop` 268 s, and
+the Anaconda ISO's own `iso::install` 11 minutes (2026-11-26). A guest of the
+`iso::next_unattended*` trials that writes nothing on its serial console in the
+first 60 seconds is a failed trial, not a flake to start again: the shared
+`ensure_firmware_output` rule of the `iso::next` tier (see "A VM that never
+starts") fails it with what QEMU was doing, and the harness's `-audiodev none`
+removed the hang that caused such guests.
 `iso::next_unattended` (opt-in with the other `iso::next` trials) boots the real
 ISO under UEFI with Secure Boot beside a target disk and an ext4 volume labelled
 `ILEX-ANSWERS`, follows `ILEX-INSTALLER-ANSWERS` lines on the serial console to
