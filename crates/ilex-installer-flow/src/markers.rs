@@ -14,6 +14,7 @@
 //! ILEX-INSTALLER event=language language=<locale>
 //! ILEX-INSTALLER event=notice severity=info|warning|error text=<the machine page's notice>
 //! ILEX-INSTALLER event=disk disk=<id>
+//! ILEX-INSTALLER event=disk-gone disk=<id>      (the chosen disk is not offered any more)
 //! ILEX-INSTALLER event=attach result=idle|installing|done|failed|unavailable
 //! ILEX-INSTALLER event=confirm state=shown|cancelled|accepted
 //! ILEX-INSTALLER event=install result=started | refused code=<code> | unknown | not-started
@@ -158,6 +159,11 @@ pub fn tried(layout: &str, text: &Secret, echo: bool) -> Option<String> {
 /// The person chose a disk (its id, one word).
 pub fn disk(id: &str) -> String {
     format!("ILEX-INSTALLER event=disk disk={}", one_word(id))
+}
+
+/// The disk the person had chosen is not offered any more.
+pub fn disk_gone(id: &str) -> String {
+    format!("ILEX-INSTALLER event=disk-gone disk={}", one_word(id))
 }
 
 /// Where the interface found the installation when it started.

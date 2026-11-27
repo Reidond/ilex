@@ -9,7 +9,9 @@ use super::app::{
     sync_banner,
 };
 use ilex_installer_flow::disks as flow_disks;
-use ilex_installer_flow::flow::{Flow, LogSave, PlanCheck, ProbeState};
+use ilex_installer_flow::flow::{
+    Control, Flow, LogSave, ProbeState, ProblemIcon, ProblemKind, ReviewBody,
+};
 use ilex_installer_flow::messages;
 use ilex_installer_flow::progress::Status;
 use ilex_installer_flow::review::Confirmation;
@@ -181,6 +183,8 @@ fn set_log(view: &gtk::TextView, lines: &[String]) {
 pub struct DiskPage {
     pub page: adw::NavigationPage,
     banner: adw::Banner,
+    /// Why the page is showing again: the disk that was chosen is gone.
+    notice: adw::Banner,
     stack: gtk::Stack,
     none: adw::StatusPage,
     group: adw::PreferencesGroup,
@@ -194,6 +198,7 @@ pub struct DiskPage {
 impl DiskPage {
     pub fn build(sender: &ComponentSender<App>) -> Self {
         let banner = banner(None);
+        let notice = adw::Banner::new("");
         let button = continue_button("Continue");
         let group = group("Disk", "");
         let away = group_titled("Not available", "ilex cannot be installed to these disks.");
@@ -238,6 +243,10 @@ impl DiskPage {
         stack.add_named(&none, Some("none"));
         stack.add_named(&content, Some("choices"));
         let page = page("Disk", "disk", Some(&banner), &stack, Some(&button));
+        // The notice sits under the helper's banner, in the page's top bar.
+        if let Some(toolbar) = page.child().and_downcast::<adw::ToolbarView>() {
+            toolbar.add_top_bar(&notice);
+        }
         let input = sender.input_sender().clone();
         banner.connect_button_clicked(move |_| input.emit(Msg::Probe));
         let input = sender.input_sender().clone();
@@ -245,6 +254,7 @@ impl DiskPage {
         Self {
             page,
             banner,
+            notice,
             stack,
             none,
             group,
@@ -258,6 +268,13 @@ impl DiskPage {
 
     pub fn sync(&mut self, flow: &Flow, sender: &ComponentSender<App>) {
         sync_banner(&self.banner, flow);
+        match flow.disk_notice() {
+            Some(message) => {
+                self.notice.set_title(&sentence(&message));
+                self.notice.set_revealed(true);
+            }
+            None => self.notice.set_revealed(false),
+        }
         self.button.set_label(flow.continue_label());
         self.button
             .set_sensitive(flow.page() != ilex_installer_flow::PageId::Disk || flow.can_continue());
@@ -292,15 +309,9 @@ impl DiskPage {
                     }
                     let mut first: Option<gtk::CheckButton> = None;
                     for choice in &view.choices {
-                        let mut lines = vec![choice.subtitle.clone()];
-                        lines.extend(choice.contents.iter().cloned());
-                        lines.extend(choice.warning.iter().cloned());
-                        if let Some(why) = &choice.unavailable {
-                            lines.push(format!("Not available: {why}."));
-                        }
                         let row = adw::ActionRow::builder()
                             .title(&choice.title)
-                            .subtitle(lines.join("\n"))
+                            .subtitle(choice.lines().join("\n"))
                             .subtitle_lines(0)
                             .build();
                         if choice.is_offered() {
@@ -444,76 +455,58 @@ impl ReviewPage {
 
     pub fn sync(&mut self, flow: &Flow) {
         let was_checked = std::mem::take(&mut self.checked);
-        self.button.set_visible(false);
-        if flow.is_starting() {
-            self.running.set_title("Starting the installation");
-            self.running.set_description(Some(
-                "The installer's helper is checking the disk and the image once more before it writes anything.",
-            ));
-            self.stack.set_visible_child_name("running");
-            return;
-        }
-        self.running.set_title(messages::CHECKING_TITLE);
-        self.running
-            .set_description(Some(messages::CHECKING_DETAIL));
-        match flow.plan_check() {
-            PlanCheck::NotRun | PlanCheck::Running => {
+        let view = flow.review_page();
+        apply(&self.button, view.button);
+        match &view.body {
+            ReviewBody::Waiting(message) => {
+                self.running.set_title(&message.title);
+                self.running.set_description(Some(&message.detail));
                 self.stack.set_visible_child_name("running");
             }
-            PlanCheck::Checked(_) => {
-                if let Some(review) = flow.review() {
-                    let items =
-                        |rows: &[ilex_installer_flow::review::Row]| -> Vec<(String, String)> {
-                            rows.iter().map(|r| pair(r.title, &r.value)).collect()
-                        };
-                    self.choices.set(&items(&review.choices));
-                    self.disk.set(&items(&review.disk));
-                    let partitions: Vec<(String, String)> = review
-                        .partitions
-                        .iter()
-                        .map(|p| pair(&p.title, &p.detail))
-                        .collect();
-                    self.partitions.set(&partitions);
-                    self.image.set(&items(&review.image));
-                    let mut notes: Vec<(String, String)> = review
-                        .systems
-                        .iter()
-                        .map(|s| pair("Found on the disk", s))
-                        .collect();
-                    notes.extend(review.warnings.iter().map(|w| pair("Note", w)));
-                    self.notes.set(&notes);
-                    self.erase.set_label(&review.erase);
-                    self.button.set_label(&review.button);
-                }
-                self.button.set_visible(true);
-                // Not insensitive while its dialog is open: the focus stays put.
-                self.button.set_sensitive(
-                    flow.can_install()
-                        || flow.phase() == ilex_installer_flow::flow::Phase::Confirming,
-                );
+            ReviewBody::Checked(review) => {
+                let items = |rows: &[ilex_installer_flow::review::Row]| -> Vec<(String, String)> {
+                    rows.iter().map(|r| pair(r.title, &r.value)).collect()
+                };
+                self.choices.set(&items(&review.choices));
+                self.disk.set(&items(&review.disk));
+                let partitions: Vec<(String, String)> = review
+                    .partitions
+                    .iter()
+                    .map(|p| pair(&p.title, &p.detail))
+                    .collect();
+                self.partitions.set(&partitions);
+                self.image.set(&items(&review.image));
+                self.notes.set(&items(&review.notes));
+                self.erase.set_label(&review.erase);
+                self.button.set_label(&review.button);
                 self.stack.set_visible_child_name("checked");
                 self.checked = true;
                 if !was_checked && flow.page() == ilex_installer_flow::PageId::Review {
                     self.button.grab_focus();
                 }
             }
-            PlanCheck::NoDisk(_) | PlanCheck::Failed(_) => {
-                if let Some(message) = flow.check_problem() {
-                    let icon = if matches!(flow.plan_check(), PlanCheck::NoDisk(_)) {
-                        "drive-harddisk-symbolic"
-                    } else {
-                        "dialog-error-symbolic"
-                    };
-                    self.problem.set_icon_name(Some(icon));
-                    self.problem.set_title(&message.title);
-                    self.problem.set_description(Some(&message.detail));
-                    // Not when only a restart helps (a BIOS boot).
-                    self.retry.set_visible(flow.can_retry());
-                    self.stack.set_visible_child_name("problem");
-                }
+            ReviewBody::Problem {
+                message,
+                icon,
+                retry,
+            } => {
+                self.problem.set_icon_name(Some(match icon {
+                    ProblemIcon::Disk => "drive-harddisk-symbolic",
+                    ProblemIcon::Error => "dialog-error-symbolic",
+                }));
+                self.problem.set_title(&message.title);
+                self.problem.set_description(Some(&message.detail));
+                apply(&self.retry, *retry);
+                self.stack.set_visible_child_name("problem");
             }
         }
     }
+}
+
+/// Show and enable a button as the flow says.
+fn apply(button: &gtk::Button, control: Control) {
+    button.set_visible(control.visible);
+    button.set_sensitive(control.enabled);
 }
 
 /// The erase confirmation: the dialog's heading and body say which disk, and
@@ -677,10 +670,7 @@ impl InstallingPage {
         self.message.set_label(&view.message);
         match &view.waiting {
             Some(waiting) => {
-                self.banner.set_title(&format!(
-                    "The installer's helper is not answering. {}",
-                    waiting.title
-                ));
+                self.banner.set_title(&sentence(waiting));
                 self.banner.set_revealed(true);
             }
             None => self.banner.set_revealed(false),
@@ -873,18 +863,14 @@ impl ProblemPage {
         };
         self.status.set(&view.message.title, &view.message.detail);
         self.status.set_icon(match view.kind {
-            ilex_installer_flow::flow::ProblemKind::Lost => "network-error-symbolic",
-            ilex_installer_flow::flow::ProblemKind::Failed { .. } => "dialog-error-symbolic",
+            ProblemKind::Lost => "network-error-symbolic",
+            ProblemKind::Failed { .. } => "dialog-error-symbolic",
         });
         set_log(&self.log, &view.log);
         self.log_box.set_visible(!view.log.is_empty());
-        self.retry.set_visible(view.can_retry);
-        self.save.set_visible(!matches!(
-            view.kind,
-            ilex_installer_flow::flow::ProblemKind::Lost
-        ));
-        self.save.set_sensitive(view.can_save_log);
-        self.restart.set_sensitive(view.can_restart);
+        apply(&self.retry, view.retry);
+        apply(&self.save, view.save_log);
+        apply(&self.restart, view.restart);
         show_note(&self.note, view.finishing, view.error.as_ref());
     }
 }

@@ -35,6 +35,8 @@
 //! Erase and install         -->   flow.install(), then confirm_install()
 //! Try again (review page)   -->   flow.retry()
 //! Try again (problem page)  -->   flow.retry_install()
+//! Try again (a failed first   -->   flow.start_probe(): asks State again until the helper
+//!   question to the helper)         has answered it once, then looks at the computer
 //! Restart / Power off       -->   flow.restart() / flow.power_off()
 //! Save the log              -->   flow.choose_log_device(), then flow.save_log(id)
 //! after every call          -->   flow.drain_markers(): the lines to print
@@ -97,7 +99,8 @@ use std::collections::BTreeSet;
 mod installation;
 
 pub use installation::{
-    DoneView, InstallingView, LogChoice, LogSave, Phase, ProblemKind, ProblemView,
+    Control, DoneView, InstallingView, LogChoice, LogSave, Phase, ProblemIcon, ProblemKind,
+    ProblemView, ReviewBody, ReviewPage,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -171,6 +174,21 @@ impl PageId {
             Self::Installing => "Installing",
             Self::Done => "Done",
             Self::Problem => "Problem",
+        }
+    }
+
+    /// The pages a navigation stack holds when this one is showing: the walk up
+    /// to it, or (nobody goes back from the pages an installation ends on, and
+    /// the flow moves between those on its own: Installing, Problem, Done in
+    /// any order) just the page itself. An interface makes its stack this one:
+    /// push or pop when it is a step from the stack it has, replace it
+    /// otherwise.
+    pub fn stack(self) -> Vec<PageId> {
+        if self.is_closing() {
+            vec![self]
+        } else {
+            let at = Self::ORDER.iter().position(|p| *p == self).unwrap_or(0);
+            Self::ORDER[..=at].to_vec()
         }
     }
 
@@ -344,6 +362,17 @@ pub struct Flow {
     disk: Option<String>,
     disk_chosen: bool,
     disk_view: Option<DiskView>,
+    /// `State` could not be asked at start-up (the helper was not up, or is
+    /// restarting) and has not been answered since. Nothing is known of an
+    /// installation that may be under way: the first look at the computer
+    /// waits, and Try again asks `State` again.
+    attach_failed: bool,
+    /// The person's disk is gone (unplugged, in use now) and the flow went to
+    /// the disk page: said there until a disk is chosen.
+    disk_notice: Option<Message>,
+    /// How many times the flow wiped the password it holds (an interface
+    /// clears its own fields when this changes).
+    secrets_wiped: u64,
     /// The installation, from the review page's button to its end.
     inst: installation::Installation,
     administrator: String,
@@ -383,6 +412,9 @@ impl Flow {
             disk: None,
             disk_chosen: false,
             disk_view: None,
+            attach_failed: false,
+            disk_notice: None,
+            secrets_wiped: 0,
             inst: installation::Installation::default(),
             administrator: String::new(),
             password: Secret::default(),
@@ -504,6 +536,13 @@ impl Flow {
     /// while another probe is: one request at a time, so an answer can only
     /// ever be for the one in flight.
     pub fn start_probe(&mut self) -> Step {
+        if self.attach_failed {
+            // The helper never said where an installation is (it was not up,
+            // or answered an error): that comes first, or a helper that has
+            // since restarted would let a probe succeed over an installation
+            // whose outcome nobody read.
+            return self.start();
+        }
         if self.is_checking() || self.probe_in_flight.is_some() {
             return Step::Stay;
         }
@@ -535,7 +574,11 @@ impl Flow {
         self.probe_in_flight = None;
         self.say(markers::probe(&result));
         let step = self.take_probe(result);
-        if matches!(self.page, PageId::Machine | PageId::Disk) {
+        // (A step that moved the flow announced its page already.)
+        if matches!(self.page, PageId::Machine | PageId::Disk)
+            && !self.is_attaching()
+            && !matches!(step, Step::Goto(_))
+        {
             self.announce_page(None);
         }
         step
@@ -557,7 +600,9 @@ impl Flow {
                 }
                 let reset = self.machine != before;
                 // The disk: the person's choice while it is still offered,
-                // else the first disk that can be installed to.
+                // else the first disk that can be installed to. A chosen disk
+                // that is gone is never replaced silently: the disk page says
+                // so (below).
                 let disks = DiskView::from_probe(&probe);
                 let keep_disk = self.disk_chosen
                     && self
@@ -566,6 +611,18 @@ impl Flow {
                         .and_then(|id| disks.choice(id))
                         .is_some_and(DiskChoice::is_offered);
                 let disk_before = self.disk.clone();
+                let gone = (self.disk_chosen && !keep_disk)
+                    .then(|| {
+                        let id = disk_before.as_deref()?;
+                        Some((
+                            id.to_owned(),
+                            self.disk_view
+                                .as_ref()
+                                .and_then(|v| v.choice(id))
+                                .map_or_else(|| id.to_owned(), |c| c.title.clone()),
+                        ))
+                    })
+                    .flatten();
                 if !keep_disk {
                     self.disk = disks.offered().next().map(|c| c.id.clone());
                     self.disk_chosen = false;
@@ -589,11 +646,33 @@ impl Flow {
                     }
                 }
                 self.stale_probe = false;
+                if let Some((id, title)) = gone {
+                    self.say(markers::disk_gone(&id));
+                    self.disk_notice = Some(messages::disk_gone(&title));
+                    if self.page.index() > PageId::Disk.index() {
+                        // Back to the disk page, with what happened: the check
+                        // is over, whatever the helper would have said of the
+                        // disk it found there instead.
+                        self.resume_check = false;
+                        self.check = PlanCheck::NotRun;
+                        return self.go(PageId::Disk);
+                    }
+                }
                 if self.resume_check {
                     self.resume_check = false;
                     return self.run_plan();
                 }
                 Step::Stay
+            }
+            // The helper is installing: the first question to ask is where.
+            Err(ClientError::Refused(ref refusal))
+                if refusal.code == ErrorCode::InstallationActive =>
+            {
+                self.resume_check = false;
+                if self.is_checking() {
+                    self.check = PlanCheck::NotRun;
+                }
+                self.attach_again()
             }
             Err(error) => {
                 self.view = None;
@@ -750,6 +829,13 @@ impl Flow {
         }
         match self.page {
             PageId::Welcome | PageId::Machine | PageId::Disk => {
+                if self.page == PageId::Disk {
+                    // Continuing is accepting the disk that is selected,
+                    // whether the person picked it or it was preselected: a
+                    // later look at the computer must not swap it silently.
+                    self.disk_chosen = self.disk.is_some();
+                    self.disk_notice = None;
+                }
                 let next = self.page.next().unwrap_or(self.page);
                 self.go(next)
             }
@@ -838,6 +924,12 @@ impl Flow {
             Ok(plan) => {
                 self.stale_probe = false;
                 self.conclude(PlanCheck::Checked(Box::new(plan)))
+            }
+            // An installation began without this interface noticing (it was
+            // restarted, or its answer was lost): ask where it is.
+            Err(ClientError::Refused(refusal)) if refusal.code == ErrorCode::InstallationActive => {
+                self.check = PlanCheck::NotRun;
+                self.attach_again()
             }
             Err(ClientError::Refused(refusal))
                 if refusal.field.as_deref() == Some("administrator")
@@ -966,12 +1058,21 @@ impl Flow {
             return false;
         }
         if self.disk.as_deref() != Some(id) {
+            // (A toolkit that echoes the selection back is not choosing: the
+            // notice stays until a disk is picked or Continue is pressed.)
+            self.disk_notice = None;
             self.invalidate_check();
             self.disk = Some(id.to_owned());
             self.disk_chosen = true;
             self.say(markers::disk(id));
         }
         true
+    }
+
+    /// Why the disk page is showing again: the disk the person chose is gone
+    /// (said until a disk is chosen).
+    pub fn disk_notice(&self) -> Option<Message> {
+        self.disk_notice.clone()
     }
 
     /// What the disk page says when no disk can be installed to: every disk's
@@ -1238,6 +1339,20 @@ impl Flow {
 
     pub fn confirmation(&self) -> &Secret {
         &self.confirmation
+    }
+
+    /// Wipe the flow's own copy of the passwords. An interface clears the
+    /// fields it holds them in when [`Flow::secrets_wiped`] changes.
+    fn wipe_secrets(&mut self) {
+        self.password = Secret::default();
+        self.confirmation = Secret::default();
+        self.secrets_wiped += 1;
+    }
+
+    /// How many times the flow has wiped the passwords it holds (after an
+    /// installation succeeded, or when the computer is about to restart).
+    pub fn secrets_wiped(&self) -> u64 {
+        self.secrets_wiped
     }
 
     pub fn account_checks(&self) -> AccountChecks {

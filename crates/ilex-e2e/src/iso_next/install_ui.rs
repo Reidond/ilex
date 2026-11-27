@@ -13,10 +13,13 @@
 //!   policy, the administrator's password and `sudo`, the answers applied, the
 //!   system running, GDM up). The password is on neither the serial console
 //!   nor in the guest's journal.
-//! * `iso::next_reattach`: the interface is killed in the middle of the image
-//!   stage, and then the compositor: each time the session comes back on the
-//!   installing page (not on the welcome page), the installation goes on
-//!   undisturbed and the done page follows.
+//! * `iso::next_reattach`: the interface is killed while the helper's `Apply` is
+//!   still checking (a fixed test credential holds it for a minute after it took
+//!   its lock, as a slow registry would: `State` then says `starting` over the
+//!   previous record), then in the middle of the image stage, and then the
+//!   compositor: each time the session comes back on the installing page (not on
+//!   the welcome page; the first time with every stage waiting), the
+//!   installation goes on undisturbed and the done page follows.
 //! * `iso::next_problem`: the image stage fails (a fixed test credential makes
 //!   it fail before `bootc` runs, as a pull that fails does) and the problem
 //!   page says so; the log is saved to a USB stick by keyboard and the file is
@@ -337,6 +340,19 @@ fn confirm_erase(
     artifacts: &Path,
     name: &str,
 ) -> Result<()> {
+    confirm_erase_with(vm, ctl, serial, artifacts, name, true)
+}
+
+/// The same; `wait_for_begin` false returns as soon as the dialog was accepted
+/// (the helper may be holding `Apply`).
+fn confirm_erase_with(
+    vm: &mut Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+    wait_for_begin: bool,
+) -> Result<()> {
     let shown = |serial: &Path| count(serial, is_event("confirm", "state", "shown"));
     let accepted = count(serial, is_event("confirm", "state", "accepted"))?;
     let begun = count(serial, is_event("install", "result", "started"))?;
@@ -378,6 +394,9 @@ fn confirm_erase(
             );
             std::thread::sleep(Duration::from_secs(1));
         };
+        if confirmed && !wait_for_begin {
+            return Ok(());
+        }
         if confirmed {
             // The helper took the installation: `Apply` answered. (Nothing
             // else is waited for in minutes if it did not.)
@@ -413,6 +432,27 @@ fn helper_state(vm: &Vm) -> Result<State> {
         &ssh(vm, &busctl("ilex-installer", "State", &[]))?,
         "State",
     )?)?)
+}
+
+/// Ask the helper (from the guest) until its `State` satisfies `wanted`.
+fn wait_state(
+    vm: &Vm,
+    what: &str,
+    timeout: Duration,
+    wanted: impl Fn(&State) -> bool,
+) -> Result<State> {
+    let started = Instant::now();
+    loop {
+        let state = helper_state(vm)?;
+        if wanted(&state) {
+            return Ok(state);
+        }
+        ensure!(
+            started.elapsed() < timeout,
+            "the helper never said {what} within {timeout:?}: {state:?}"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn helper_probe(vm: &Vm) -> Result<Probe> {
@@ -637,7 +677,9 @@ fn reattach() -> Result<()> {
     let mut rig = boot(&Setup {
         name: "iso-next-reattach",
         purpose: "iso-next-reat",
-        fault: None,
+        // `Apply` waits after it took the helper's lock: the window the first
+        // restart is made in.
+        fault: Some("slow-apply"),
         usb_medium: false,
         spares: false,
     })?;
@@ -654,15 +696,54 @@ fn reattach() -> Result<()> {
 fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> {
     let ctl = Vmctl::from_info(vm.info.clone());
     to_review(vm, &ctl, serial, artifacts, "reattach", "0")?;
-    confirm_erase(vm, &ctl, serial, artifacts, "reattach")?;
-    nth_marker(
+    confirm_erase_with(vm, &ctl, serial, artifacts, "reattach", false)?;
+    // The helper took `Apply` (it holds the lock for a minute, checking): its
+    // state says so over the previous record, and the interface that asked is
+    // still waiting for its answer, on the review page.
+    let checking = wait_state(
+        vm,
+        "an Apply that is checking",
+        Duration::from_secs(60),
+        |s| s.starting.is_some(),
+    )?;
+    ensure!(
+        !checking.active && checking.applied.is_none(),
+        "State in the window of Apply is not the one before it: {checking:?}"
+    );
+    let plan = checking.starting.clone().context("no starting plan")?;
+    ensure!(
+        count(serial, is_event("install", "result", "started"))? == 0
+            && count(serial, is_page("installing"))? == 0,
+        "the interface moved on before the helper answered"
+    );
+    ctl.save_screenshot(&artifacts.join("next-reattach-starting-review.png"))?;
+    let welcomes = count(serial, is_page("welcome"))?;
+    // The interface is killed in that window, then (in the image stage) the
+    // interface again, and the compositor: each time the session comes back on
+    // the installing page (the first page it shows says so), not on the
+    // welcome page, and the installation is the one the helper took.
+    let mut round = 0;
+    vm.ssh_ok(KILL_INSTALLER)?;
+    round += 1;
+    let page = nth_marker(
         vm,
         serial,
-        "the installing page",
-        1,
-        EVENT_TIMEOUT,
-        is_page("installing"),
+        "the installing page after the interface was killed while Apply checked",
+        round,
+        Duration::from_secs(180),
+        |w| is_page("installing")(w) && w.get("reattached").is_some_and(|r| r == "true"),
     )?;
+    ensure!(
+        field(&page, "stage")? == "starting" && field(&page, "progress")? == "0",
+        "the installing page found the helper's Apply checking, with every stage waiting: {page:?}"
+    );
+    ensure!(
+        count(serial, is_event("attach", "result", "installing"))? >= round,
+        "no attach marker after the interface was killed during Apply: {page:?}"
+    );
+    ctl.save_screenshot(&artifacts.join("next-reattach-starting.png"))?;
+    // The installation the helper then began is the one that was confirmed,
+    // and the new interface follows it (the old one never saw its answer).
     nth_marker(
         vm,
         serial,
@@ -675,32 +756,28 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
         },
     )?;
     let first = helper_state(vm)?;
-    ensure!(first.active, "the installation is not under way: {first:?}");
-    let plan = first.applied.clone().context("no plan applied")?;
-    let welcomes = count(serial, is_page("welcome"))?;
-    // The interface is killed, then the compositor: each time the session
-    // comes back on the installing page (the first page it shows says so), not
-    // on the welcome page, and the installation is the same one.
-    for (round, (what, kill)) in [
+    ensure!(
+        first.active && first.starting.is_none() && first.applied.as_deref() == Some(plan.as_str()),
+        "the installation is not the one Apply was checking: {first:?}"
+    );
+    for (what, kill) in [
         ("interface", KILL_INSTALLER),
         ("compositor", KILL_COMPOSITOR),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ] {
         vm.ssh_ok(kill)?;
+        round += 1;
         // The first page the new interface shows says it found the
         // installation under way.
         let page = nth_marker(
             vm,
             serial,
             &format!("the installing page after the {what} was killed"),
-            round + 1,
+            round,
             Duration::from_secs(180),
             |w| is_page("installing")(w) && w.get("reattached").is_some_and(|r| r == "true"),
         )?;
         ensure!(
-            count(serial, is_event("attach", "result", "installing"))? > round,
+            count(serial, is_event("attach", "result", "installing"))? >= round,
             "no attach marker after the {what} was killed: {page:?}"
         );
         std::thread::sleep(Duration::from_secs(5));
@@ -741,7 +818,8 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
     let state = helper_state(vm)?;
     ensure!(
         matches!(state.outcome, Some(Outcome::Success))
-            && state.applied.as_deref() == Some(plan.as_str()),
+            && state.applied.as_deref() == Some(plan.as_str())
+            && state.starting.is_none(),
         "the helper's record after the restarts: {state:?}"
     );
     no_password(vm, serial)?;

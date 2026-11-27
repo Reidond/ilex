@@ -29,6 +29,19 @@ impl DiskChoice {
     pub fn is_offered(&self) -> bool {
         self.unavailable.is_none()
     }
+
+    /// What the disk's row says under its title, one line each: size and
+    /// connection, what is on it, the warning, and for a disk that is not
+    /// offered why.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = vec![self.subtitle.clone()];
+        lines.extend(self.contents.iter().cloned());
+        lines.extend(self.warning.iter().cloned());
+        if let Some(why) = &self.unavailable {
+            lines.push(format!("Not available: {why}."));
+        }
+        lines
+    }
 }
 
 /// A way of installing.

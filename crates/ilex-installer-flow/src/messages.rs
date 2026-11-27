@@ -17,6 +17,11 @@ pub const CHECKING_TITLE: &str = "Checking your choices";
 pub const CHECKING_DETAIL: &str = "The installer is asking its helper to check them against this computer and the image registry.";
 /// A short line under the layout list while the compositor takes the layout.
 pub const SWITCHING_LAYOUT: &str = "Switching the keyboard layout…";
+/// What the helper is doing between the erase being confirmed and the first
+/// stage: it checks the image's signature, looks at the disk once more and
+/// claims it, and writes nothing.
+pub const STARTING_TITLE: &str = "Starting the installation";
+pub const STARTING_DETAIL: &str = "The installer's helper is checking the disk and the image once more before it writes anything.";
 
 /// A refusal or a problem: a short title that says what happened, and what
 /// the person can do about it (or the model's own sentence naming the cause).
@@ -201,6 +206,17 @@ pub fn no_disk(reasons: &[String]) -> Message {
     )
 }
 
+/// The disk the person chose is not there any more (or is in use now) when the
+/// computer is looked at again: the disk page says so and has them choose.
+pub fn disk_gone(title: &str) -> Message {
+    Message::new(
+        "The disk you chose is no longer available",
+        format!(
+            "{title} is not there any more, or something is using it now. Nothing was changed. Choose a disk to go on."
+        ),
+    )
+}
+
 /// The compositor did not take the keyboard layout the person chose.
 pub fn keyboard_switch_failed(why: &str) -> Message {
     Message::new(
@@ -282,6 +298,26 @@ pub fn install_failed(
         format!("The installation failed while {}", stage_phrase(stage)),
         format!("{} {consequence}", sentence_of(reason)),
     )
+}
+
+/// The helper has not answered the last few questions about the installation:
+/// said above the stage list while it is asked again (a helper that crashed
+/// starts again by itself within a few seconds).
+pub fn helper_silent(error: &ClientError) -> Message {
+    let detail = match error {
+        // The title would say it again.
+        ClientError::HelperUnavailable(_) => {
+            "It is being asked again; a helper that stopped starts again by itself.".to_owned()
+        }
+        other => {
+            let message = other.message();
+            format!(
+                "{}. It is being asked again.",
+                sentence_of(&message.title).trim_end_matches('.')
+            )
+        }
+    };
+    Message::new("The installer's helper is not answering", detail)
 }
 
 /// The installer stopped hearing from its helper during an installation.

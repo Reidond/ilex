@@ -155,6 +155,15 @@ impl Helper {
                 "an installation is already running",
             ));
         }
+        // From here until `begin` (or a refusal) the signature is checked over
+        // the network, the disk probed and claimed: `State()` says an `Apply`
+        // is under way, or an interface that restarts now would read the
+        // previous installation's record and never see this one.
+        let _starting = self.tracker.starting(plan_id);
+        // The `iso::next_reattach` trial's fault (a fixed test credential; it
+        // can only make the installer slower): hold the window open long
+        // enough for the interface to be killed and started again in it.
+        fault::delay("slow-apply");
         // 1. The plan.
         let Recorded {
             plan,

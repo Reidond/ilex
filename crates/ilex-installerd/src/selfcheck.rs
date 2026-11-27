@@ -3762,7 +3762,49 @@ fn check_state(parent: &Path) -> Result<()> {
         tracker.state().stage == Stage::Idle && !tracker.active(),
         "a fresh tracker"
     );
-    tracker.begin(&"c".repeat(32), &Stage::UNENCRYPTED, test_summary())?;
+    // An `Apply` that is checking says so in `State()`, in the file too, until
+    // it refuses (the guard is dropped) or begins (`begin` clears it with the
+    // flag that says the installation is active); a helper that died in that
+    // window leaves a file that its successor reads as not started.
+    let plan = "c".repeat(32);
+    {
+        let refused = tracker.starting(&plan);
+        let during = tracker.state();
+        let in_file: State = serde_json::from_slice(&fs::read(dir.0.join("state.json"))?)?;
+        ensure!(
+            during.starting.as_deref() == Some(plan.as_str())
+                && during.busy()
+                && !during.active
+                && in_file.starting == during.starting,
+            "an Apply under way is not in State: {during:?}"
+        );
+        let successor = progress::Tracker::new(&dir.0);
+        ensure!(
+            successor.state().starting.is_none() && !successor.state().busy(),
+            "a successor read a starting Apply that was never answered"
+        );
+        // `new` rewrote the file as it reads it; this helper's record is its own.
+        tracker.set_plan(&plan);
+        drop(refused);
+        ensure!(
+            tracker.state().starting.is_none() && !tracker.state().busy(),
+            "a refused Apply left its starting mark: {:?}",
+            tracker.state()
+        );
+    }
+    {
+        let _checking = tracker.starting(&plan);
+        tracker.begin(&plan, &Stage::UNENCRYPTED, test_summary())?;
+        ensure!(
+            tracker.state().starting.is_none() && tracker.state().active,
+            "begin did not replace the starting mark with the active flag: {:?}",
+            tracker.state()
+        );
+    }
+    ensure!(
+        tracker.state().active && tracker.state().starting.is_none(),
+        "the guard changed an installation that began"
+    );
     tracker.start(Stage::Partition, "Writing the partition table")?;
     tracker.disk_changed()?;
     tracker.line("Formatting /dev/vda1 as vfat");
@@ -3847,7 +3889,7 @@ fn check_state(parent: &Path) -> Result<()> {
         r#"{"schema":1,"stage":"idle","plan":null,"progress":0.0,"message":"","outcome":null,"updated":1}"#,
     )?;
     ensure!(
-        old.stages.is_empty() && !old.active,
+        old.stages.is_empty() && !old.active && old.starting.is_none() && !old.busy(),
         "an old state document"
     );
     Ok(())
@@ -5182,6 +5224,10 @@ fn check_answers(parent: &Path) -> Result<()> {
     let idle = ilex_installer_model::state::State::idle(0);
     let mut running = idle.clone();
     running.active = true;
+    // An `Apply` of that attempt that is still checking has not begun, but
+    // will: it counts.
+    let mut checking = idle.clone();
+    checking.starting = Some("c".repeat(32));
     raise()?;
     answers::settle_leftover(&flag, Ok(idle))?;
     ensure!(
@@ -5190,6 +5236,7 @@ fn check_answers(parent: &Path) -> Result<()> {
     );
     for (what, state) in [
         ("an installation that is running", Ok(running)),
+        ("an Apply that is still checking", Ok(checking)),
         (
             "a helper that could not be asked",
             Err(anyhow::anyhow!("State: the bus has no reply")),

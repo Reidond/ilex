@@ -11,10 +11,20 @@
 //!               Success --> page Done        (restart, power_off)
 //!               Failed  --> page Problem     (retry_install, save_log, restart)
 //! start()       the first thing an interface does: Step::RunState. An installation
-//!               that is running, or that ended while the interface was away, puts
-//!               the flow on its page again (re-attach); otherwise the first look at
-//!               the computer begins.
+//!               that is running, being started (`State.starting`: the helper took
+//!               `Apply` and is checking) or that ended while the interface was away,
+//!               puts the flow on its page again (re-attach); otherwise the first look
+//!               at the computer begins. Until `State` has been answered once the first
+//!               look waits and Try again asks `State` again; a refusal of `Probe` or
+//!               `Plan` that says an installation is active asks it too.
 //! ```
+//!
+//! **An `Apply` that is still checking counts as running.** The helper holds its
+//! work lock while it checks the image's signature over the network, looks at
+//! the disk and claims it, and its `State` says `starting` for that window while
+//! the rest of the record is the previous installation's. The flow shows the
+//! installing page for it (with every stage waiting and no log), keeps asking,
+//! and a lost answer to `Apply` keeps asking while `State` names its plan.
 //!
 //! **What the helper recorded is what is shown.** The pages draw from `State`
 //! alone (its stage list, progress, last log lines, outcome and summary), so an
@@ -31,15 +41,14 @@
 //! Try again. If the answer to `Apply` is lost, the helper is asked where things
 //! stand and the flow follows what it says.
 
-use super::{Flow, PageId, Step};
+use super::{Flow, PageId, PlanCheck, ProbeState, Step};
 use crate::disks;
 use crate::markers;
 use crate::messages::{self, ClientError, Message};
 use crate::progress::Progress;
 use crate::review::{Confirmation, Review, Row};
-use crate::secret::Secret;
 use ilex_installer_model::finish::{FinishAction, Saved, check_log_device};
-use ilex_installer_model::plan::Plan;
+use ilex_installer_model::plan::{ErrorCode, Plan};
 use ilex_installer_model::probe::Probe;
 use ilex_installer_model::state::{Outcome, Stage, StageStatus, State, Summary};
 use std::collections::BTreeMap;
@@ -70,6 +79,62 @@ pub enum Phase {
     Failed,
     /// The helper stopped answering `State`.
     Lost,
+}
+
+/// A button a page draws: whether it is shown at all, and whether it can be
+/// pressed now. An interface applies both and decides neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Control {
+    pub visible: bool,
+    pub enabled: bool,
+}
+
+impl Control {
+    pub const HIDDEN: Self = Self {
+        visible: false,
+        enabled: false,
+    };
+
+    /// Shown, and pressable or not.
+    pub fn shown(enabled: bool) -> Self {
+        Self {
+            visible: true,
+            enabled,
+        }
+    }
+}
+
+/// The icon of a problem the review page says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProblemIcon {
+    Error,
+    /// No disk can be installed to.
+    Disk,
+}
+
+/// What the review page's body is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReviewBody {
+    /// The helper is being asked (the check) or has been given the erase (the
+    /// start of the installation): a spinner with these words.
+    Waiting(Message),
+    /// The check did not end in a plan.
+    Problem {
+        message: Message,
+        icon: ProblemIcon,
+        /// Not when only a restart helps (a BIOS boot).
+        retry: Control,
+    },
+    Checked(Box<Review>),
+}
+
+/// What the review page shows: its body and its destructive button.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewPage {
+    pub body: ReviewBody,
+    /// Visible only with a checked plan. Not disabled while its own dialog is
+    /// open: the focus stays put.
+    pub button: Control,
 }
 
 /// A stick the log may be written to, or why it cannot be.
@@ -103,7 +168,8 @@ pub enum LogSave {
 #[derive(Default)]
 pub(super) struct Installation {
     pub(super) phase: Phase,
-    /// The first `State` request, made at start-up, is outstanding.
+    /// The first `State` request, made at start-up (or again, see
+    /// [`Flow::attach_again`]), is outstanding.
     attaching: bool,
     /// The toolkit's words for the first page's marker, kept until the helper
     /// has said which page that is.
@@ -120,7 +186,14 @@ pub(super) struct Installation {
     state: Option<State>,
     progress: Option<Progress>,
     summary: Option<Summary>,
+    /// The plan the helper says it is checking (`State.starting`): the record
+    /// in `state` is not this installation's yet, and is not shown.
+    starting: Option<String>,
+    /// What the problem page says when the helper has not answered for long.
     lost: Option<Message>,
+    /// What the installing page says above its list while the helper is asked
+    /// again.
+    silent: Option<Message>,
     /// The interface found the installation under way (or ended) when it
     /// started.
     reattached: bool,
@@ -185,9 +258,12 @@ pub struct ProblemView {
     pub message: Message,
     /// The last lines of what the stage's tools printed.
     pub log: Vec<String>,
-    pub can_retry: bool,
-    pub can_save_log: bool,
-    pub can_restart: bool,
+    /// Try again: shown on both kinds (after silence it asks the helper again).
+    pub retry: Control,
+    /// Save the log: for a failure only (a helper that is not answering cannot
+    /// write one).
+    pub save_log: Control,
+    pub restart: Control,
     pub finishing: Option<&'static str>,
     pub error: Option<Message>,
 }
@@ -206,6 +282,18 @@ impl Flow {
             || self.inst.attaching
             || self.inst.state_in_flight.is_some()
         {
+            return Step::Stay;
+        }
+        self.inst.attaching = true;
+        self.begin_state(0)
+    }
+
+    /// Ask where an installation is, though the flow has begun: a refusal said
+    /// one is running (or the helper's own record has changed under it). The
+    /// answer puts the flow on the page it belongs to, or begins the first
+    /// look at the computer again.
+    pub(super) fn attach_again(&mut self) -> Step {
+        if self.inst.attaching || self.inst.state_in_flight.is_some() {
             return Step::Stay;
         }
         self.inst.attaching = true;
@@ -250,6 +338,9 @@ impl Flow {
             return Step::Stay;
         }
         self.inst.state_in_flight = None;
+        if result.is_ok() {
+            self.attach_failed = false;
+        }
         if self.inst.attaching {
             self.inst.attaching = false;
             return self.attached(result);
@@ -264,11 +355,13 @@ impl Flow {
     /// The start-up request's answer.
     fn attached(&mut self, result: Result<State, ClientError>) -> Step {
         match result {
-            Ok(state) if state.active => {
+            // Under way, or `Apply` is checking: the installing page.
+            Ok(state) if state.busy() => {
                 self.say(markers::attach("installing"));
                 self.inst.reattached = true;
                 self.inst.phase = Phase::Running;
-                self.take_state(state);
+                self.inst.failures = 0;
+                self.take_busy(state);
                 self.go(PageId::Installing);
                 self.begin_state(POLL_MS)
             }
@@ -287,13 +380,35 @@ impl Flow {
                 self.announce_page(None);
                 self.begin_probe()
             }
-            Err(_) => {
-                // The helper may not be up yet: the first look says so on the
-                // welcome page, with a way to try again.
+            Err(error) => {
+                // The helper may not be up yet, or is restarting: nothing is
+                // known of an installation, so the first look at the computer
+                // waits. The welcome page says so, and Try again asks `State`
+                // again (a probe that succeeded now could hide an installation
+                // whose outcome nobody has read).
                 self.say(markers::attach("unavailable"));
+                self.attach_failed = true;
+                self.probe = ProbeState::Failed(error.message());
+                self.view = None;
+                self.disk_view = None;
                 self.announce_page(None);
-                self.begin_probe()
+                Step::Stay
             }
+        }
+    }
+
+    /// The helper says an installation is active (`active`, or `starting`
+    /// while its `Apply` checks): the stage list and the log of an installation
+    /// that is running, and for the checking window the stages all waiting (the
+    /// record the state still holds is the previous installation's).
+    fn take_busy(&mut self, state: State) {
+        if state.active {
+            self.inst.starting = None;
+            self.take_state(state);
+        } else if let Some(plan) = state.starting.clone() {
+            self.inst.starting = Some(plan);
+            self.inst.state = None;
+            self.inst.progress = Some(Progress::starting());
         }
     }
 
@@ -303,10 +418,10 @@ impl Flow {
         match result {
             Ok(state) => {
                 self.inst.failures = 0;
-                if state.active {
+                if state.busy() {
                     let was_lost = self.inst.phase == Phase::Lost;
                     self.inst.phase = Phase::Running;
-                    self.take_state(state);
+                    self.take_busy(state);
                     if was_lost {
                         self.inst.lost = None;
                         self.go(PageId::Installing);
@@ -332,7 +447,7 @@ impl Flow {
                 } else {
                     // A helper that crashed is started again within a second
                     // or two: keep asking, and say so on the page.
-                    self.inst.lost = Some(error.message());
+                    self.inst.silent = Some(messages::helper_silent(&error));
                     self.begin_state(POLL_MS)
                 }
             }
@@ -352,6 +467,7 @@ impl Flow {
     /// Take the helper's state: rows, the last lines, what each stage did, and
     /// the summary of what is being installed.
     fn take_state(&mut self, state: State) {
+        self.inst.starting = None;
         if let Some(summary) = &state.summary {
             self.inst.summary = Some(summary.clone());
         }
@@ -392,9 +508,9 @@ impl Flow {
                 self.say(markers::outcome(&Outcome::Success));
                 self.inst.phase = Phase::Succeeded;
                 // Nothing needs the password again (Try again is for a failure):
-                // it is wiped now, not when the process ends.
-                self.password = Secret::default();
-                self.confirmation = Secret::default();
+                // it is wiped now, not when the process ends, and an interface
+                // clears the fields it holds it in.
+                self.wipe_secrets();
                 self.go(PageId::Done)
             }
             Some(failed @ Outcome::Failed { .. }) => {
@@ -414,6 +530,60 @@ impl Flow {
             return None;
         };
         Some(Review::new(plan, self.review_choices(plan)))
+    }
+
+    /// What the review page shows: the check under way or the installation
+    /// being started (a spinner and its words), the problem the check ended
+    /// in, or the plan with its destructive button.
+    pub fn review_page(&self) -> ReviewPage {
+        let waiting = |message: Message| ReviewPage {
+            body: ReviewBody::Waiting(message),
+            button: Control::HIDDEN,
+        };
+        if self.is_starting() {
+            return waiting(Message::new(
+                messages::STARTING_TITLE,
+                messages::STARTING_DETAIL,
+            ));
+        }
+        match &self.check {
+            PlanCheck::NotRun | PlanCheck::Running => waiting(Message::new(
+                messages::CHECKING_TITLE,
+                messages::CHECKING_DETAIL,
+            )),
+            PlanCheck::Checked(_) => match self.review() {
+                Some(review) => ReviewPage {
+                    body: ReviewBody::Checked(Box::new(review)),
+                    // Not insensitive while its dialog is open: the focus stays
+                    // put there.
+                    button: Control::shown(
+                        self.can_install() || self.inst.phase == Phase::Confirming,
+                    ),
+                },
+                None => waiting(Message::new(
+                    messages::CHECKING_TITLE,
+                    messages::CHECKING_DETAIL,
+                )),
+            },
+            PlanCheck::NoDisk(_) | PlanCheck::Failed(_) => ReviewPage {
+                body: ReviewBody::Problem {
+                    message: self.check_problem().unwrap_or_else(|| {
+                        Message::title("The installer could not check the choices")
+                    }),
+                    icon: if matches!(self.check, PlanCheck::NoDisk(_)) {
+                        ProblemIcon::Disk
+                    } else {
+                        ProblemIcon::Error
+                    },
+                    retry: if self.can_retry() {
+                        Control::shown(true)
+                    } else {
+                        Control::HIDDEN
+                    },
+                },
+                button: Control::HIDDEN,
+            },
+        }
     }
 
     fn review_choices(&self, plan: &Plan) -> Vec<Row> {
@@ -532,6 +702,15 @@ impl Flow {
                 self.go(PageId::Installing);
                 self.begin_state(POLL_MS)
             }
+            Err(ClientError::Refused(error)) if error.code == ErrorCode::InstallationActive => {
+                // The helper is installing already (an earlier `Apply` of this
+                // interface whose answer was lost, or another): where it is
+                // is for `State` to say.
+                self.say(markers::install_refused(&error));
+                self.inst.applying = None;
+                self.inst.phase = Phase::Idle;
+                self.attach_again()
+            }
             Err(ClientError::Refused(error)) => {
                 // Nothing was written. The plan may be what is out of date
                 // (expired, the disk changed): Try again looks again first.
@@ -558,6 +737,13 @@ impl Flow {
     fn after_lost_answer(&mut self, result: Result<State, ClientError>) -> Step {
         let applying = self.inst.applying.as_ref().map(|(_, plan)| plan.clone());
         match result {
+            // The helper took the `Apply` and is still checking (the image's
+            // signature is checked over the network): it has neither begun nor
+            // refused, so nothing is said yet.
+            Ok(state) if state.starting.is_some() => {
+                self.inst.failures = 0;
+                self.begin_state(POLL_MS)
+            }
             Ok(state) if state.applied == applying && (state.active || state.ended()) => {
                 self.say(markers::install("started"));
                 self.inst.applying = None;
@@ -609,10 +795,14 @@ impl Flow {
             heading: format!("Installing {edition}"),
             rows: progress.rows.clone(),
             overall: progress.overall(),
-            message: state.map(|s| s.message.clone()).unwrap_or_default(),
+            message: if self.inst.starting.is_some() {
+                messages::STARTING_TITLE.to_owned()
+            } else {
+                state.map(|s| s.message.clone()).unwrap_or_default()
+            },
             log: state.map(|s| tail(&s.log, LOG_LINES)).unwrap_or_default(),
             waiting: (self.inst.failures > 0 && self.inst.phase == Phase::Running)
-                .then(|| self.inst.lost.clone())
+                .then(|| self.inst.silent.clone())
                 .flatten(),
         })
     }
@@ -687,9 +877,12 @@ impl Flow {
             kind,
             message,
             log: state.map(|s| tail(&s.log, LOG_LINES)).unwrap_or_default(),
-            can_retry: self.can_retry_install(),
-            can_save_log: self.can_save_log(),
-            can_restart: self.can_finish(),
+            retry: Control::shown(self.can_retry_install()),
+            save_log: Control {
+                visible: matches!(kind, ProblemKind::Failed { .. }),
+                enabled: self.can_save_log(),
+            },
+            restart: Control::shown(self.can_finish()),
             finishing: self.inst.finishing,
             error: self.inst.finish_error.clone(),
         })
@@ -730,7 +923,7 @@ impl Flow {
                         ProblemKind::Failed { stage } => stage.name(),
                         ProblemKind::Lost => "unknown",
                     },
-                    view.can_retry,
+                    view.retry.enabled,
                     self.inst.reattached
                 ),
                 None => "kind=unknown".to_owned(),
@@ -777,8 +970,7 @@ impl Flow {
             self.begin_probe()
         } else {
             self.administrator.clear();
-            self.password = Secret::default();
-            self.confirmation = Secret::default();
+            self.wipe_secrets();
             self.name_refusal = None;
             self.machine_chosen = false;
             self.disk_chosen = false;
@@ -875,6 +1067,9 @@ impl Flow {
                 } else {
                     messages::POWERING_OFF
                 });
+                // The computer is going down: nothing will ask for the
+                // password again (this is also the way out of a problem page).
+                self.wipe_secrets();
             }
             (_, Err(error)) => self.inst.finish_error = Some(messages::finish_failed(&error)),
         }

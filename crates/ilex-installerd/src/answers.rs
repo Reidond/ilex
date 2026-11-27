@@ -697,13 +697,14 @@ pub fn settle(result: zbus::Result<String>, flag: &Path, reached: &mut Reached) 
 /// What the flag a run finds at its start (left by an attempt of this boot: the
 /// unit restarted after `systemctl reset-failed`) comes to, given what
 /// `State()` said. The flag says the helper may have begun to write, and it is
-/// deleted only when the helper says that no installation is active. When one
+/// deleted only when the helper says that no installation is active **or being
+/// started** (an `Apply` of that attempt may still be checking). When one
 /// is, or the helper cannot be asked, the flag stays and the run ends with
 /// [`KeepsInterfaceOut`]: starting the interface over a running installation is
 /// what the flag is there to prevent.
 pub fn settle_leftover(flag: &Path, state: Result<State>) -> Result<()> {
     match state {
-        Ok(state) if !state.active => {
+        Ok(state) if !state.busy() => {
             let _ = fs::remove_file(flag);
             Ok(())
         }

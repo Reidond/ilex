@@ -108,6 +108,26 @@ impl Progress {
         }
     }
 
+    /// The stages of an installation that is being started and has no record
+    /// yet (the helper is checking the disk and the image): all of them wait.
+    /// The helper only installs without encryption so far; a later change
+    /// takes the stages from what the helper reports.
+    pub fn starting() -> Self {
+        Self {
+            rows: Stage::UNENCRYPTED
+                .iter()
+                .map(|&stage| Row {
+                    stage,
+                    label: label(stage),
+                    status: Status::Pending,
+                    fraction: 0.0,
+                })
+                .collect(),
+            message: String::new(),
+            outcome: None,
+        }
+    }
+
     /// The rows of an installation the interface has not seen the plan of (it
     /// restarted): the stages the helper recorded, with their outcomes.
     pub fn from_state(state: &State) -> Self {

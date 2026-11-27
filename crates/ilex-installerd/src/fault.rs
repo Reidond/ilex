@@ -38,7 +38,9 @@ pub fn pause(file: &Path) {
 /// never takes its bus name), `answers` (unattended mode kills itself before
 /// it asks the helper for anything), `apply` (the helper kills itself as
 /// `Apply` has started the installation thread, so that the call is never
-/// answered) or `image` (the image stage fails before `bootc` is run, as a pull
+/// answered), `slow-apply` (`Apply` waits a minute after it has taken the
+/// helper's work lock and before it checks anything, the window an interface
+/// that is killed and started again must find the installation in) or `image` (the image stage fails before `bootc` is run, as a pull
 /// that fails does: the disk is wiped, the new `/boot` is mounted and carries
 /// its provisional stamp, nothing is deployed, and the helper stays up).
 /// Nothing is read from anywhere else.
@@ -46,6 +48,20 @@ pub fn credential() -> Option<String> {
     let dir = std::env::var_os("CREDENTIALS_DIRECTORY")?;
     let text = fs::read_to_string(Path::new(&dir).join("ilex.installer.fault")).ok()?;
     Some(text.trim().to_owned())
+}
+
+/// How long the `slow-apply` fault holds `Apply` while it checks.
+pub const SLOW_APPLY: Duration = Duration::from_secs(60);
+
+/// Wait [`SLOW_APPLY`] when the credential names `fault`: the window the
+/// installer's interface must survive being restarted in.
+pub fn delay(fault: &str) {
+    if requested(fault) {
+        eprintln!(
+            "ilex-installerd: fault={fault} (a test credential): Apply waits {SLOW_APPLY:?} before it checks"
+        );
+        thread::sleep(SLOW_APPLY);
+    }
 }
 
 /// Whether the credential names `fault`.

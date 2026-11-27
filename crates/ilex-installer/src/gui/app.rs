@@ -547,6 +547,8 @@ struct Account {
     name_message: gtk::Label,
     password_message: gtk::Label,
     button: gtk::Button,
+    /// The flow's wipe count the fields were last cleared at.
+    wiped: u64,
 }
 
 pub(super) fn sentence(message: &Message) -> String {
@@ -954,7 +956,7 @@ impl Widgets {
             let retry = problem_page.retry.clone();
             let restart = problem_page.restart.clone();
             move |_| {
-                if retry.is_visible() {
+                if retry.is_visible() && retry.is_sensitive() {
                     retry.grab_focus();
                 } else {
                     restart.grab_focus();
@@ -998,6 +1000,7 @@ impl Widgets {
                 name_message,
                 password_message,
                 button: account_button,
+                wiped: flow.secrets_wiped(),
             },
             disk,
             review,
@@ -1020,18 +1023,8 @@ impl Widgets {
         });
         // Which page: the navigation view follows the flow (a page pushed by
         // Continue), and the flow follows the view when the person goes back.
-        let wanted = flow.page();
-        let shown = self
-            .nav
-            .visible_page()
-            .and_then(|p| p.tag())
-            .and_then(|t| PageId::from_id(&t));
-        if shown != Some(wanted) && !flow.is_attaching() {
-            if shown.map(PageId::index) < Some(wanted.index()) {
-                self.nav.push_by_tag(wanted.id());
-            } else {
-                self.nav.pop_to_tag(wanted.id());
-            }
+        if !flow.is_attaching() {
+            show_stack(&self.nav, &flow.page().stack());
         }
         self.sync_welcome(flow);
         self.sync_machine(flow, sender);
@@ -1163,6 +1156,14 @@ impl Widgets {
     }
 
     fn sync_account(&mut self, flow: &Flow) {
+        // The flow wiped its copy of the passwords (the installation is over,
+        // or the computer is going down): the fields that hold them are
+        // cleared too, not left with the text.
+        if self.account.wiped != flow.secrets_wiped() {
+            self.account.wiped = flow.secrets_wiped();
+            self.account.password.set_text("");
+            self.account.confirmation.set_text("");
+        }
         let a = &self.account;
         sync_banner(&a.banner, flow);
         // The choices cannot change while the helper checks them. A field that
@@ -1266,6 +1267,39 @@ pub(super) fn sync_banner(banner: &adw::Banner, flow: &Flow) {
     if let Some(problem) = &problem {
         banner.set_title(&sentence(problem));
         banner.set_button_label(flow.can_retry_probe().then_some("Try again"));
+    }
+}
+
+/// The tags of the pages the navigation view holds, bottom first.
+fn stack_tags(nav: &adw::NavigationView) -> Vec<String> {
+    let stack = nav.navigation_stack();
+    (0..stack.n_items())
+        .filter_map(|i| stack.item(i).and_downcast::<adw::NavigationPage>())
+        .filter_map(|page| page.tag().map(|tag| tag.to_string()))
+        .collect()
+}
+
+/// Make the navigation view hold exactly `want` (the flow's stack for its page):
+/// one step on from what it holds is a push, one step back a pop, anything
+/// else (the flow moved between the pages an installation ends on, which have
+/// nothing under them, or from the review page to the installing page) replaces
+/// the stack. A page the view does not hold is never popped to.
+fn show_stack(nav: &adw::NavigationView, want: &[PageId]) {
+    let want: Vec<&str> = want.iter().map(|p| p.id()).collect();
+    let have = stack_tags(nav);
+    if have.iter().map(String::as_str).eq(want.iter().copied()) {
+        return;
+    }
+    let held = |tags: &[&str]| -> bool {
+        tags.len() == have.len() && tags.iter().zip(&have).all(|(wanted, held)| wanted == held)
+    };
+    let pushed = want.len() == have.len() + 1 && held(&want[..have.len()]);
+    let popped =
+        want.len() < have.len() && have.iter().zip(&want).all(|(held, wanted)| held == wanted);
+    match want.last() {
+        Some(last) if pushed => nav.push_by_tag(last),
+        Some(last) if popped && nav.pop_to_tag(last) => {}
+        _ => nav.replace_with_tags(&want),
     }
 }
 

@@ -34,6 +34,18 @@ pub enum Event {
 /// The smallest interval between two `Progress` events of the same stage.
 const EMIT_EVERY: Duration = Duration::from_millis(500);
 
+/// What [`Tracker::starting`] returns: `State().starting` is cleared when it is
+/// dropped, whichever way `Apply` ends (a refusal, a panic, or after `begin`).
+pub struct Starting<'a> {
+    tracker: &'a Tracker,
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.tracker.clear_starting();
+    }
+}
+
 pub struct Tracker {
     run_dir: PathBuf,
     state: Mutex<State>,
@@ -49,6 +61,8 @@ fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// end its installation: the installation is over, failed in the stage it was
 /// in, and the disk is changed if that stage had begun to write.
 pub fn recover(mut state: State, now: u64) -> State {
+    // An `Apply` that was checking when the helper died began nothing.
+    state.starting = None;
     if state.active {
         let stage = state.stage;
         state.active = false;
@@ -141,6 +155,22 @@ impl Tracker {
         self.update(|state| state.plan = Some(id.to_owned()));
     }
 
+    /// An `Apply` for this plan took the work lock and is checking: until the
+    /// guard is dropped (it refused) or `begin` runs (it began) `State()` says
+    /// so, so that an interface that asks in that window does not read the
+    /// previous installation's record as the answer.
+    pub fn starting(&self, plan: &str) -> Starting<'_> {
+        self.update(|state| state.starting = Some(plan.to_owned()));
+        Starting { tracker: self }
+    }
+
+    fn clear_starting(&self) {
+        let set = locked(&self.state).starting.is_some();
+        if set {
+            self.update(|state| state.starting = None);
+        }
+    }
+
     /// A new installation: every stage of `stages` is pending, the previous
     /// installation's outcome and log are gone. Fails (and changes nothing)
     /// if the record cannot be written: nothing must be written to a disk
@@ -149,6 +179,8 @@ impl Tracker {
         let mut state = locked(&self.state);
         let mut next = state.clone();
         next.active = true;
+        // Atomically with `active`: there is no moment with neither.
+        next.starting = None;
         next.applied = Some(plan.to_owned());
         next.stage = Stage::Idle;
         next.progress = 0.0;

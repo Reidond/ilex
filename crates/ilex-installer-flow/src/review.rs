@@ -39,6 +39,9 @@ pub struct Review {
     pub systems: Vec<String>,
     /// The plan's own warnings (a removable disk, a list that may be short).
     pub warnings: Vec<String>,
+    /// The two lists above as the page shows them: each system as
+    /// `Found on the disk`, each warning as `Note`.
+    pub notes: Vec<Row>,
     /// The destructive button's label.
     pub button: String,
     /// The disk as the erase sentence names it (model and serial number).
@@ -89,6 +92,23 @@ impl Review {
         // The helper words its own warning about other systems; this page says
         // it once, in the erase sentence and the list under it.
         warnings.retain(|w| !w.starts_with("everything on "));
+        let systems: Vec<String> = plan
+            .erases
+            .systems
+            .iter()
+            .map(|s| s.description.clone())
+            .collect();
+        let notes = systems
+            .iter()
+            .map(|system| Row {
+                title: "Found on the disk",
+                value: system.clone(),
+            })
+            .chain(warnings.iter().map(|warning| Row {
+                title: "Note",
+                value: warning.clone(),
+            }))
+            .collect();
         Self {
             choices,
             disk: vec![
@@ -139,12 +159,8 @@ impl Review {
                     if count == 1 { "" } else { "s" }
                 )
             },
-            systems: plan
-                .erases
-                .systems
-                .iter()
-                .map(|s| s.description.clone())
-                .collect(),
+            systems,
+            notes,
             warnings,
             button: format!("Erase {} and install", crate::disks::planned_title(plan)),
             disk_label,

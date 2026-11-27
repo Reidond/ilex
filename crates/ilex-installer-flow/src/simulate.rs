@@ -7,11 +7,19 @@
 //!
 //! A scenario name may carry modifiers after `+` (`generic+fail-image+sticks`):
 //! how the installation that `Apply` starts goes (`success`, the default,
-//! `stalled`, `fail-image`, `fail-partition`, `helper-stopped`, `lost`), the
+//! `stalled`, `fail-image`, `fail-partition`, `helper-stopped`, `lost`,
+//! `lost-then-done` and `lost-then-running`, where the helper is silent for a
+//! while and then answers again), the
 //! state the helper is in when the interface starts (`attach-installing`,
-//! `attach-done`, `attach-failed`), whether USB sticks are plugged in
+//! `attach-done`, `attach-failed`, `attach-starting`: an `Apply` that is still
+//! checking, with the previous installation's failure as the rest of its
+//! record), whether USB sticks are plugged in
 //! (`sticks`, or `bare` for none), whether writing a log to one fails
-//! (`log-fails`), how `Apply` answers (`apply-refused`, `apply-lost`) and
+//! (`log-fails`), how `Apply` answers (`apply-refused`, `apply-lost`, and
+//! `apply-slow`: the answer is lost and the helper goes on, saying `starting`
+//! for a few questions and then installing), whether `State` fails the first
+//! time it is asked (`state-down`: a helper that is restarting), whether the
+//! disk a plan was made for vanishes afterwards (`vanish`) and
 //! whether Restart and Power off fail (`finish-fails`); `early` holds an
 //! installation in its first stage. They are
 //! what the self-check and the screenshots use to reach every page and every
@@ -138,7 +146,19 @@ enum Script {
     Lost,
     /// The partition stage, at 30 percent, for ever (a screenshot).
     Early,
+    /// The helper stops answering `State` for a while (ten requests, more than
+    /// the interface's patience) and then finishes the installation.
+    LostThenDone,
+    /// The same silence, then the installation is where it was.
+    LostThenRunning,
 }
+
+/// The `State` requests the `lost-then-*` scripts leave unanswered: from the
+/// fourth (counting from zero) to the thirty-ninth, long enough that the
+/// interface gives the helper up (eight requests) and shows the problem page
+/// for a good while before the helper answers again.
+const LOST_FROM: usize = 3;
+const LOST_UNTIL: usize = 40;
 
 /// What `Apply` answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,7 +169,13 @@ enum ApplyMode {
     Refuses,
     /// Its answer is lost, and nothing began.
     Lost,
+    /// Its answer is lost, and the helper goes on: `State` says `starting` for
+    /// a few questions, then the installation is running.
+    Slow,
 }
+
+/// How many `State` requests answer `starting` after an `apply-slow`.
+const STARTING_POLLS: usize = 3;
 
 /// The state the helper is in when the interface starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +184,8 @@ enum Attach {
     Installing,
     Done,
     Failed,
+    /// An `Apply` that is still checking, over the previous failure.
+    Starting,
 }
 
 /// What a scenario's modifiers say.
@@ -172,6 +200,10 @@ struct Modifiers {
     log_fails: bool,
     /// Restart and Power off fail.
     finish_fails: bool,
+    /// The first `State` request fails (a helper that is restarting).
+    state_down: bool,
+    /// The disk a plan was made for is gone from every later probe.
+    vanish: bool,
 }
 
 impl Modifiers {
@@ -184,6 +216,8 @@ impl Modifiers {
             bare: false,
             log_fails: false,
             finish_fails: false,
+            state_down: false,
+            vanish: false,
         };
         for word in words {
             match *word {
@@ -193,13 +227,19 @@ impl Modifiers {
                 "helper-stopped" => modifiers.script = Script::HelperStopped,
                 "lost" => modifiers.script = Script::Lost,
                 "early" => modifiers.script = Script::Early,
+                "lost-then-done" => modifiers.script = Script::LostThenDone,
+                "lost-then-running" => modifiers.script = Script::LostThenRunning,
+                "state-down" => modifiers.state_down = true,
+                "vanish" => modifiers.vanish = true,
                 "apply-refused" => modifiers.apply = ApplyMode::Refuses,
                 "apply-lost" => modifiers.apply = ApplyMode::Lost,
+                "apply-slow" => modifiers.apply = ApplyMode::Slow,
                 "bare" => modifiers.bare = true,
                 "finish-fails" => modifiers.finish_fails = true,
                 "attach-installing" => modifiers.attach = Attach::Installing,
                 "attach-done" => modifiers.attach = Attach::Done,
                 "attach-failed" => modifiers.attach = Attach::Failed,
+                "attach-starting" => modifiers.attach = Attach::Starting,
                 "sticks" => modifiers.sticks = true,
                 "log-fails" => modifiers.log_fails = true,
                 other => bail!("no simulation modifier '{other}'"),
@@ -219,6 +259,11 @@ struct Session {
     step: Option<usize>,
     summary: Option<Summary>,
     applied: Option<String>,
+    /// How many more `State` requests say that an `Apply` is checking (the
+    /// plan it names), after which the installation runs.
+    starting: Option<(String, usize)>,
+    /// `State` has been asked (the `state-down` modifier fails the first).
+    asked: bool,
 }
 
 pub struct Simulated {
@@ -346,7 +391,12 @@ impl Simulated {
             Attach::Done => 99,
             _ => 3,
         };
-        if let Ok(state) = script_state(script, step, &plan, &summary) {
+        if let Ok(mut state) = script_state(script, step, &plan, &summary) {
+            if attach == Attach::Starting {
+                // The rest of the record is the previous installation's
+                // failure: what an interface must not show.
+                state.starting = Some(plan.id.clone());
+            }
             self.state = Some(state);
         }
     }
@@ -399,7 +449,7 @@ fn script_state(
     };
     let finished = step >= 8;
     let (running, fraction) = match script {
-        Script::Stalled | Script::Lost => (2, 0.4),
+        Script::Stalled | Script::Lost | Script::LostThenRunning => (2, 0.4),
         Script::Early => (0, 0.3),
         _ => (running, fraction),
     };
@@ -471,7 +521,14 @@ fn script_state(
         }
     };
     match script {
-        Script::Success if finished => {
+        Script::LostThenDone | Script::LostThenRunning
+            if (LOST_FROM..LOST_UNTIL).contains(&step) =>
+        {
+            return Err(ClientError::HelperUnavailable(
+                "org.freedesktop.DBus.Error.NoReply: the helper did not answer".into(),
+            ));
+        }
+        Script::Success | Script::LostThenDone if finished => {
             state.active = false;
             state.stage = Stage::Done;
             state.progress = 1.0;
@@ -546,9 +603,17 @@ impl Backend for Simulated {
         if let Some(why) = &self.probe_error {
             return Err(ClientError::HelperUnavailable(why.clone()));
         }
-        self.probe
+        let mut probe = self
+            .probe
             .clone()
-            .ok_or_else(|| ClientError::BadAnswer("the fixture has no probe".into()))
+            .ok_or_else(|| ClientError::BadAnswer("the fixture has no probe".into()))?;
+        if self.modifiers.vanish
+            && let Some(plan) = &self.session().plan
+        {
+            // The disk that was planned has been unplugged since.
+            probe.disks.retain(|d| d.id != plan.disk.id);
+        }
+        Ok(probe)
     }
 
     fn plan(&self, request: &PlanRequest) -> Result<Plan, ClientError> {
@@ -634,6 +699,24 @@ impl Backend for Simulated {
 
     fn state(&self) -> Result<State, ClientError> {
         let mut session = self.session();
+        if self.modifiers.state_down && !std::mem::replace(&mut session.asked, true) {
+            return Err(ClientError::HelperUnavailable(
+                "org.freedesktop.DBus.Error.ServiceUnknown: the helper is starting".into(),
+            ));
+        }
+        session.asked = true;
+        if let Some((plan, polls)) = session.starting.clone() {
+            // `Apply` is still checking: the rest of the record is the one
+            // before it, with the mark that it is not this installation's.
+            if polls > 0 {
+                session.starting = Some((plan.clone(), polls - 1));
+                let mut state = self.state.clone().unwrap_or_else(|| State::idle(0));
+                state.starting = Some(plan);
+                return Ok(state);
+            }
+            session.starting = None;
+            session.step = Some(0);
+        }
         if let (Some(step), Some(plan), Some(summary)) =
             (session.step, session.plan.clone(), session.summary.clone())
         {
@@ -680,6 +763,7 @@ impl Backend for Simulated {
                     "org.freedesktop.DBus.Error.NoReply: the helper did not answer".into(),
                 ));
             }
+            ApplyMode::Slow => {}
         }
         let mut session = self.session();
         let Some(planned) = session.plan.clone().filter(|p| p.id == plan) else {
@@ -712,6 +796,15 @@ impl Backend for Simulated {
         session.summary = Some(summary.clone());
         session.applied = Some(plan.to_owned());
         session.secrets.clear();
+        if self.modifiers.apply == ApplyMode::Slow {
+            // The helper took the `Apply` and is checking; whoever called it
+            // gets no answer (the call is lost, or the interface was killed).
+            session.starting = Some((plan.to_owned(), STARTING_POLLS));
+            session.step = None;
+            return Err(ClientError::HelperUnavailable(
+                "org.freedesktop.DBus.Error.NoReply: the helper did not answer".into(),
+            ));
+        }
         session.step = Some(1);
         script_state(self.modifiers.script, 0, &planned, &summary)
     }

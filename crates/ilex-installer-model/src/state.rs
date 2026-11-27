@@ -137,6 +137,16 @@ pub struct State {
     /// What the running or last installation installs, and where.
     #[serde(default)]
     pub summary: Option<Summary>,
+    /// The plan an `Apply` is checking right now: the helper took the work
+    /// lock for it and has not yet begun, or refused. For that window (the
+    /// image's signature is checked over the network, the disk is probed and
+    /// claimed) every other field still describes the *previous*
+    /// installation, so an interface that asks must treat this as an
+    /// installation under way, not read the rest. It is set when `Apply`
+    /// takes the lock and cleared when it refuses or begins; the file a
+    /// crashed helper leaves it in is read as not set.
+    #[serde(default)]
+    pub starting: Option<String>,
 }
 
 impl State {
@@ -156,7 +166,14 @@ impl State {
             log: Vec::new(),
             started: None,
             summary: None,
+            starting: None,
         }
+    }
+
+    /// An installation is under way or being started: what an interface that
+    /// restarted shows the installing page for, and keeps asking about.
+    pub fn busy(&self) -> bool {
+        self.active || self.starting.is_some()
     }
 
     /// The installation this state describes has ended (one that was applied
