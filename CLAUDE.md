@@ -3375,11 +3375,12 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
 - **Apply** (`SetSecret(plan, kind, fd)`, `Apply(plan, erase_disk)`, `State()`
   and the signals `Progress(stage, fraction, message)` and `Finished(outcome)`,
   `crates/ilex-installerd/src/{apply,install,secret,policy,target,progress}.rs`)
-  installs what a plan describes to a whole disk, unencrypted: `partition →
-  mount → image → configure → account → finalise`, the plan's 9.1 order without
-  the stages encryption adds (`Apply` refuses an encrypted plan, and a disk
-  passphrase, until those arrive). `SetSecret` takes the administrator's
-  password (`admin-password`) as the file descriptor of a **sealed memfd**
+  installs what a plan describes to a whole disk: `partition → [encrypt →]
+  mount → image → configure → account → finalise`, the plan's 9.1 order (the
+  recovery key and the TPM, which it also lists, come in a later change; an
+  encrypted installation is described in **Encryption** below). `SetSecret` takes
+  the administrator's password (`admin-password`) and, for a plan that encrypts,
+  the disk's passphrase (`disk-passphrase`) as the file descriptor of a **sealed memfd**
   (`F_SEAL_SEAL|SHRINK|GROW|WRITE`, 4 KiB at most; anything that is not one is
   refused without saying what it held), reads it once into memory of its own
   (an anonymous mapping of whole pages that nothing else shares, `mlock`ed, kept
@@ -3399,7 +3400,9 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     neither a wall clock set back nor an NTP step moves; not the wall clock the
     plan document carries) (`unknown-plan`,
     `plan-expired`); whole-disk mode needs `erase_disk` to repeat the disk's id
-    (`invalid-field`); the administrator's password was set (`missing-secret`);
+    (`invalid-field`); the administrator's password was set, and the disk's
+    passphrase when the plan encrypts (`missing-secret`, naming `admin-password` or
+    `disk-passphrase`);
     **the image's signature is accepted by the installer's policy** (`signature`):
     `bootc` verifies when it pulls, which is after the disk has been erased, so the
     pinned `repository@sha256:...` goes first through `skopeo copy` (containers-image,
@@ -4131,22 +4134,22 @@ installed disk boots alone and every `installer::install` assertion holds.
 `crates/ilex-installer` is the GNOME edition's GTK 4 + libadwaita (relm4)
 application over it. The KDE edition's Kirigami interface (Qt Quick through
 cxx-qt, a later change) drives the same flow crate: nothing in it knows a
-toolkit, a compositor or a thread. This version installs an unencrypted whole
-disk: the welcome, machine, disk and administrator pages, the review with its
-confirmation, the installing page and the three pages an installation ends on
-(done, problem). Nothing is written to a disk before the person has confirmed
-the erase on the review page.
+toolkit, a compositor or a thread. This version installs a whole disk, encrypted
+unless the person turns that off: the welcome, machine, disk, encryption and
+administrator pages, the review with its confirmation, the installing page and
+the three pages an installation ends on (done, problem). Nothing is written to a
+disk before the person has confirmed the erase on the review page.
 
 - **The flow crate.** No GTK or Qt types, no `async`.
   - `flow::Flow` is a state machine with no I/O, and **every rule lives
     there**, so that GTK and Kirigami cannot disagree about one: the pages in
-    order (`PageId`: the walk `welcome`, `machine`, `disk`, `account`, `review`,
+    order (`PageId`: the walk `welcome`, `machine`, `disk`, `encryption`, `account`, `review`,
     then `installing`, `done` and `problem`, which nobody goes back from), what
     each needs before Continue works (`can_continue`), what Continue does. Every
     method that can need the helper or the compositor returns a `Step` the
     interface carries out on a worker: `RunProbe { generation }`, `RunPlan {
     generation, request }`, `SwitchKeyboard { generation, layout }`,
-    `RunApply { generation, plan, erase_disk, password }`, `RunState {
+    `RunApply { generation, plan, erase_disk, password, passphrase }`, `RunState {
     generation, delay_ms }`, `RunLogProbe { generation }`, `RunFinish {
     generation, action }`, `Confirm(dialog)` (show it; the answer goes to
     `confirm_install` or `cancel_install`), `Goto(page)` (returned whenever the
@@ -4222,9 +4225,29 @@ the erase on the review page.
       offered, otherwise the default moves on and an earlier check is dropped.
       The way of installing is the whole disk (the other, beside what is
       there, is listed as unavailable). The request that `Plan` takes names
-      that disk, `whole-disk` and **`encrypt: false`** (the helper refuses an
-      encrypted plan until the encryption change). Nothing to install to is the
+      that disk, `whole-disk` and `encrypt` as the encryption page left it (with
+      `tpm: "off"` when it is on: the installation does not enrol the security chip
+      yet, so the plan has nothing to warn of). Nothing to install to is the
       page's own problem (`disk_problem`) with Try again (`start_probe`).
+    - *Encryption.* `encryption.rs` holds the page's rules and words. The
+      disk is encrypted unless the person turns the switch off (`set_encrypt`).
+      With it on, Continue waits for a passphrase typed twice
+      (`set_passphrase`, `set_passphrase_confirmation`, `Secret`s like the
+      password): `encryption_checks` refuses one the model's `passphrase_problem`
+      refuses (empty, over 512 bytes, a control character: what the boot prompt
+      cannot take) and a confirmation that differs, and `passphrase_advice` only
+      advises (under 12 characters) without refusing. The page names the layout the
+      passphrase is typed in (`passphrase_layout_line`: the session's, and what
+      the installed computer's console is put in before it asks). A disabled
+      "security chip" row says that automatic unlock is not available yet. The
+      passphrase goes to the helper only in `RunApply` and only when the plan
+      encrypts (`SetSecret(disk-passphrase)` first), never into a request, a marker
+      (`ILEX-INSTALLER page=encryption encryption=on keyboard=us`,
+      `event=encryption encryption=off`) or a log; the flow wipes it with the
+      password after a success and when the computer restarts. The review page has
+      an Encryption row and the done page says that the computer asks for its
+      passphrase at every start (the helper's `Summary.encrypted`, so that an
+      interface that restarted says it too).
     - *The installation.* The review page (`Flow::review`, from the plan:
       the choices in words, the disk, the partitions that will be created, the
       image as target, version, digest and download size, `Everything on <model>

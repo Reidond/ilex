@@ -615,12 +615,20 @@ pub(crate) fn unlock(vm: &mut Vm, keys: &str, artifacts: &Path, name: &str) -> R
                 break;
             }
         }
-        ensure!(
-            started.elapsed() < Duration::from_secs(if discover { 150 } else { 360 }),
-            "no passphrase prompt within {:?}{}",
-            started.elapsed(),
-            if discover { " (discovery run)" } else { "" }
-        );
+        if started.elapsed() >= Duration::from_secs(if discover { 150 } else { 360 }) {
+            let _ = ctl.save_screenshot(&artifacts.join(format!("{name}-no-prompt.png")));
+            if let Ok(serial) = fs::read(&serial) {
+                let _ = fs::write(
+                    artifacts.join(format!("{name}-no-prompt-serial.txt")),
+                    serial,
+                );
+            }
+            bail!(
+                "no passphrase prompt within {:?}{}",
+                started.elapsed(),
+                if discover { " (discovery run)" } else { "" }
+            );
+        }
         std::thread::sleep(Duration::from_secs(3));
     }
     ctl.type_text(keys)?;
