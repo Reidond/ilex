@@ -3157,21 +3157,56 @@ the Windows paths of this change: no Windows host was available.
     `org.kde.keyboard` (`/Layouts`) on the session bus, which is what the layout
     switch of a later page talks to (there is no `org.gnome.Kiosk.InputSources`).
   - **The interface.** `ilex-installer --features kde` (the `interface-feature` of
-    the edition): `src/kde/` (cxx-qt `Installer` QObject with the edition record's
-    names, the flow, and the two calls that print the markers) and `qml/Main.qml`
-    (`Kirigami.ApplicationWindow` with one page and a
-    `Kirigami.PlaceholderMessage`: "Welcome to ilex Kingiana", from the edition
-    record). The style is `org.kde.breeze` (qqc2-breeze-style, set with
-    `QQuickStyle` unless `QT_QUICK_CONTROLS_STYLE` says otherwise) and the icon
-    theme `breeze`, since the image has no KDE platform theme. The window is
-    fullscreen, refuses a close request (`--windowed`, for development, closes
-    normally) and, on its first frame, prints the page marker through the flow
-    (`ILEX-INSTALLER page=welcome edition=kde language=… keyboard=…
-    renderer=opengl|software scale=1 window=WxH screen=WxH uptime=…`: the same
-    words as GNOME's, plus the two sizes), then `ILEX-INSTALLER-STATS` fifteen
-    seconds later. `ILEX-INSTALLER-SESSION compositor=kwin …` names the
-    compositor. Qt exits with status 255 when its display dies (GTK exits 1). The
-    flow's pages are not rendered yet; the KDE edition's next change drives them.
+    the edition) renders every page the flow defines with Kirigami 6 and Breeze
+    (KDE HIG): `src/kde/` holds one cxx-qt `Installer` QObject and `qml/` the pages.
+    The window is a `Kirigami.ApplicationWindow` over a page row that follows
+    the flow's stack (`view.stack`: one more page is a push, fewer a pop, else
+    it is replaced; going back is Back or Escape, and the flow refuses while the
+    helper is asked, in which case the page is pushed again): `WelcomePage`,
+    `MachinePage`, `DiskPage`, `AccountPage`, `ReviewPage`, `InstallingPage`,
+    `DonePage` and `ProblemPage` (`Kirigami.ScrollablePage`, `FormLayout`,
+    `PasswordField`, `RadioSubtitleDelegate`, `LoadingPlaceholder` and
+    `PlaceholderMessage` for the waiting and empty states, `InlineMessage` for
+    every banner and notice), `ConfirmDialog` (a `Kirigami.PromptDialog`: Cancel
+    first and focused, Escape cancels) and `LogDialog` (the stick to save the log
+    to). The 379 keyboard layouts are chosen in a `Kirigami.SearchDialog`
+    behind a button (a combo box cannot be searched); the 54 languages in a
+    combo box. Enter presses a button as well as Space (`PressButton`: Qt
+    Quick Controls' own buttons take Space only). The style is `org.kde.breeze`
+    (qqc2-breeze-style, set with `QQuickStyle` unless `QT_QUICK_CONTROLS_STYLE`
+    says otherwise) and the icon theme `breeze`, since the image has no KDE
+    platform theme. The window is fullscreen, refuses a close request
+    (`--windowed`, for development, closes normally) and, on its first frame,
+    prints the page marker through the flow (`ILEX-INSTALLER page=welcome
+    edition=kde language=… keyboard=… renderer=opengl|software scale=1
+    window=WxH screen=WxH uptime=…`: the same words as GNOME's, plus the two
+    sizes), then `ILEX-INSTALLER-STATS` fifteen seconds later.
+    `ILEX-INSTALLER-SESSION compositor=kwin …` names the compositor. Qt exits
+    with status 255 when its display dies (GTK exits 1).
+    **No page logic, wording or visibility rule is in the QML or in the Rust glue.**
+    `Flow::view()` (`ilex_installer_flow::view`) is the whole window as one
+    serialisable value: every heading, paragraph and label, which banner or note
+    shows and how loud (a blocking problem before a notice), whether a button is
+    shown or pressable and what it says, which glyph a problem has, when a field
+    is invalid, the stage rows and the log lines. The `Installer` object turns it
+    into JSON (`view`, with an `epoch` that changes when the renderer replaces the
+    flow) and the QML only draws it; the two lists that never change (the
+    languages and the layouts) are the `catalogue`. Inputs go the other way as
+    events by name and one text argument (`send("continue", "")`,
+    `send("password", text)`): `Event::parse` and `Flow::handle` (also GNOME's)
+    say what each means, and the returned `Step` is carried out by
+    `runner::Services::job` on a worker thread (also GNOME's), whose answer is
+    queued back to the Qt thread (`CxxQtThread::queue`) and given to
+    `Flow::answer`. The QML has the page row's navigation, `Qt.callLater` focus
+    on each page's first control (the same ones as GTK's), the glyph-to-icon
+    table and the page that is shown while the helper has not said where an
+    installation is. What is typed in the two password fields is kept by the
+    window (not by the page, which comes and goes with the stack) and cleared,
+    with the fields, when the flow wipes its copy (`account.wiped` changes) or
+    is replaced; Qt gives no way to wipe a `QString`'s old buffer, which GTK's
+    secure text buffer does: the field and the window's copy are emptied and
+    the `String` the Rust side makes of the text is zeroed straight after the
+    event is parsed, but a freed Qt buffer is not overwritten.
     The Rust side is cxx-qt 0.10.0 with `cxx` 1.0.205, pinned (`=`) in
     `crates/ilex-installer/Cargo.toml`: Fedora 45 does not package cxx-qt, so
     the builder stage compiles it from crates.io against Fedora's Qt 6 devel
@@ -5062,13 +5097,13 @@ installed disk boots alone and every `installer::install` assertion holds.
 `crates/ilex-installer-flow` is the installer's flow, shared by every interface;
 `crates/ilex-installer` is the GNOME edition's GTK 4 + libadwaita (relm4)
 application over it (the `gui` feature) and holds the KDE edition's Qt Quick +
-Kirigami one (the `kde` feature, today one placeholder page; see "The KDE
-edition" above). Both drive the same flow crate: nothing in it knows a
-toolkit, a compositor or a thread. This version installs a whole disk, encrypted
-unless the person turns that off: the welcome, machine, disk, encryption and
-administrator pages, the review with its confirmation, the installing page and
-the three pages an installation ends on (done, problem). Nothing is written to a
-disk before the person has confirmed the erase on the review page.
+Kirigami one (the `kde` feature; see "The KDE edition" above). Both drive the
+same flow crate: nothing in it knows a toolkit, a compositor or a thread. This
+version installs a whole disk, encrypted unless the person turns that off: the
+welcome, machine, disk, encryption and administrator pages, the review with its
+confirmation, the installing page and the three pages an installation ends on
+(done, problem). Nothing is written to a disk before the person has confirmed
+the erase on the review page.
 
 - **The flow crate.** No GTK or Qt types, no `async`.
   - `flow::Flow` is a state machine with no I/O, and **every rule lives
@@ -5097,6 +5132,24 @@ disk before the person has confirmed the erase on the review page.
     Kirigami will from cxx-qt signals and a worker thread. A `Secret` that
     `RunApply` carries is a copy for the worker (wiped when dropped); the flow
     keeps its own.
+    - *One view, one vocabulary of inputs, one runner, one table of states.* All
+      four are toolkit-free and used by both interfaces. `Flow::view()` (`view`)
+      is everything a window shows as plain serialisable data (see "The
+      interface" under the KDE edition for what it holds); GTK's `sync` reads it
+      (the headings and labels of its widgets are the view's constants, and
+      which banner or note shows, which button is pressable, which glyph a
+      problem has and when a field is invalid are the view's decisions, not
+      GTK's). `Event` and `Flow::handle` (`events`) are what a person's input
+      means (GTK's `Msg` wraps an `Event`); `Event::parse(name, text)` is the
+      same by name, for QML. `runner::Services::job(step)` turns a `Step` into a
+      blocking `Job` that returns an `Answer`, and `Flow::answer` gives it to the
+      right method with its generation (GTK's `carry_out` and `update_cmd` are
+      these). `shots::SHOTS` is the table of the 71 states the renderers draw (the
+      steps from a fixture scenario's start to the page, check and dialog a shot
+      names); each toolkit's renderer turns a `Do` into its own input.
+      `Flow::observed()` says what is on screen in the flow's words, for a
+      renderer to wait on. `Message::sentence()` is the one way a refusal is
+      joined into a line.
     - *Answers are numbered.* The flow numbers every request and remembers the
       one probe, plan and layout switch in flight; an answer to any other
       number (late, repeated, out of order, before any request, or while a plan
@@ -5587,6 +5640,63 @@ disk before the person has confirmed the erase on the review page.
   `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
   these files. They are not an accessibility walk: AT-SPI driving of the pages
   is not done.
+  The KDE edition's interface draws the **same 71 states** (the same
+  `shots::SHOTS`) with `ilex-installer --self-check --render DIR [--dark]`
+  (`kde::render`): the real window (`Main.qml`, 1280x800 logical, with `rendering`
+  on) under KWin, and a driver thread that plays the person: it sends the events
+  a shot's steps mean, asks the window to type into a password field, go back or
+  open the log, waits until the flow says the page, check and dialog the shot
+  names are there **and the window shows that page** (a page row that has not
+  followed yet is not a state), and has `QQuickWindow::grabWindow` (a small
+  C++ shim, `cpp/ilex_grab.cpp`: `Item.grabToImage` does not exist for Qt's
+  software renderer) write the file at the window's own pixel ratio. Under
+  KWin's `--virtual` output (which has no scale of its own) the 150% pictures use
+  `QT_SCALE_FACTOR=1.5`, and the dark ones take Breeze Dark's colours from a
+  `kdeglobals` the renderer writes into a directory of its own
+  (`kde-dark/kdeglobals`: the image has no Plasma, so no colour schemes). The
+  window prints nothing through Qt's log (cxx-qt-lib routes it nowhere): a
+  window that has something to say sends it to the Rust side
+  (`renderReport("log", …)`), which prints it. `ILEX_RENDER_ONLY=<text>` and
+  `ILEX_RENDER_SETTLE_MS` are development aids. `installer::ui_kde` (registered
+  only for a filter that names it, in a VM of its own from `ILEX_INSTALLER_IMAGE_KDE`,
+  built by `ilexctl test` when unset) runs it in the guest in the same three
+  configurations and holds the KDE edition to the same rules as `installer::ui`:
+  71 shots in each, 213 images of their sizes, mostly different (the count is
+  one constant, `SHOTS`, for both).
+- **On the real KDE ISO** (`iso::next_kde_*`, registered with the other KDE
+  trials: Secure Boot on KVM, real key input over QMP, KWin, the real session
+  unit and the real Kirigami window): the helper is **simulated**
+  (`ilex.installer.simulate=<scenario>` typed into GRUB's editor; a literal `+` is
+  typed as Shift and `=`). The real helper refuses to start on the KDE ISO
+  (`ilex-installerd: edition kde has no generic composition; the catalogue
+  offers: generic.gnome, ms-7c35.gnome`): its catalogue is generated from
+  `image.toml`'s publications and has no composition for the KDE edition until
+  the KDE shell is published (`generic.kde`, PR #85). The trials that need the
+  helper itself (a plan checked against the registry, a real installation, the
+  detection and the boot argument as the model decides them) are K3's and run
+  on the published composition; these show that the pages work on the real
+  ISO. `iso::next_kde_welcome`: the layout search dialog by keyboard, the
+  layout test field, Enter continues; KWin 6.8 **does not take a new layout in a
+  running session** (measured with `--virtual`: after `kxkbrc` is rewritten,
+  `reloadConfig`, a KConfig change notification, `kwriteconfig6` and `org.kde.KWin
+  /KWin reconfigure` each leave `getLayoutsList` as it was; Plasma's keyboard
+  daemon, absent here, is what normally re-reads it and KWin itself owns
+  `org.kde.keyboard` in this session), so choosing another layout shows the
+  refusal with Try again and keeps Continue off, and the trial asserts that
+  (`applied=false`) and that the layout KWin has (US) works. Changing layouts in
+  a running KDE session is not delivered (it needs Plasma's keyboard daemon or a
+  compositor that can be restarted around the page).
+  `iso::next_kde_detect_board` and `_detect_generic`, `_kernel_argument` and
+  `_kernel_argument_unknown`: the machine page for the detected board
+  (`ms-7c35-board`), a computer nothing matches, a boot override and an unknown
+  one, as the fixtures describe them. `iso::next_kde_install`: every page by
+  key (Enter in the test field, Enter on Continue, the name field focused, a
+  password field's two stops), the erase dialog cancelled with Escape and then
+  confirmed (the safe answer first, Tab, Enter), installing, done and Restart;
+  the password in neither the serial console nor the journal.
+  `iso::next_kde_problem`: a failed image stage ends on the problem page and its
+  log is saved to a stick by keyboard. Screenshots of each step are kept under
+  `<state dir>/artifacts/iso-next/next-kde-*.png`.
 - **On the real ISO** (`iso::next_*`, Secure Boot on KVM, real key input over
   QMP, the real helper): `iso::next_welcome` opens the layout list with the
   keyboard, searches it, chooses German (no dead keys), waits for GNOME Kiosk to
