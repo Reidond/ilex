@@ -610,10 +610,12 @@ pub(crate) fn edit_kernel_line(
     }
     grub_key(ctl, "end")?;
     for character in arguments.chars() {
-        let key = if character == ' ' {
-            "space".into()
-        } else {
-            character.to_string()
+        let key = match character {
+            ' ' => "space".into(),
+            // A literal plus cannot be a key name (`+` separates the keys of a
+            // combination): it is Shift and the equals key.
+            '+' => "shift+=".into(),
+            other => other.to_string(),
         };
         grub_key(ctl, &key)?;
     }

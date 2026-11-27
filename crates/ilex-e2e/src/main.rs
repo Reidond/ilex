@@ -124,6 +124,11 @@ fn main() {
     if filters.iter().any(|f| f.contains("installer::")) {
         trials.extend(installer::trials());
     }
+    // The KDE edition's interface checks boot the KDE live image in a VM of
+    // their own: only a filter that names them.
+    if filters.iter().any(|f| f.contains("ui_kde")) {
+        trials.extend(installer::kde_trials());
+    }
     // Security is opt-in, but an explicitly selected unqualified host fails.
     if filters.iter().any(|f| f.contains("security")) {
         trials.extend(security::trials());

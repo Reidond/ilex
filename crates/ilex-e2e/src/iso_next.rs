@@ -111,6 +111,7 @@ use kde::{kde_session, kwin_close_windows, kwin_keys};
 mod helper;
 mod install_ui;
 mod kde;
+mod kde_ui;
 mod loop_file;
 mod security;
 mod ui;
@@ -180,13 +181,16 @@ pub fn trials() -> Vec<Trial> {
 /// names them, because they boot a second ISO (`ILEX_ISO_NEXT_KDE`) that the
 /// GNOME edition's runs do not build.
 pub fn kde_trials() -> Vec<Trial> {
-    vec![
+    let mut trials = vec![
         trial("iso::next_kde_boot", || boot(Entry::Normal, Edition::Kde)),
         trial("iso::next_kde_basic_graphics", || {
             boot(Entry::BasicGraphics, Edition::Kde)
         }),
         trial("iso::next_kde_restart", || restart(Edition::Kde)),
-    ]
+    ];
+    // The interface's pages by keyboard, against the simulated helper.
+    trials.extend(kde_ui::trials());
+    trials
 }
 
 /// `iso::next_helper_loop`: the ISO as a file on another disk. It needs host

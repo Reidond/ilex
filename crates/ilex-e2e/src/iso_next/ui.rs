@@ -44,8 +44,8 @@ use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
 
 use super::{
-    GRUB_COUNTDOWN, Guest, MEMORY, PAGE_TIMEOUT, blank_disk_of, complete_lines, console,
-    diagnostics, field, is_marker, iso_path, trial, wait_for_text, wait_page, words,
+    Edition, GRUB_COUNTDOWN, Guest, MEMORY, PAGE_TIMEOUT, blank_disk_of, complete_lines, console,
+    diagnostics, field, is_marker, iso_path_of, trial, wait_for_text, wait_page, words,
 };
 use crate::common;
 use crate::iso;
@@ -101,11 +101,11 @@ pub(super) fn trials() -> Vec<Trial> {
 }
 
 /// A running installer VM and where its evidence goes.
-struct Booted {
-    guest: Guest,
-    artifacts: PathBuf,
-    iso: PathBuf,
-    work: PathBuf,
+pub(super) struct Booted {
+    pub(super) guest: Guest,
+    pub(super) artifacts: PathBuf,
+    pub(super) iso: PathBuf,
+    pub(super) work: PathBuf,
 }
 
 /// Boot the ISO under Secure Boot on KVM, as the boot trials do, with the
@@ -117,8 +117,19 @@ fn boot(
     smbios: Vec<String>,
     disk_size: &str,
 ) -> Result<Booted> {
+    boot_of(Edition::Gnome, purpose, usb_keyboard, smbios, disk_size)
+}
+
+/// The same for an edition's ISO.
+pub(super) fn boot_of(
+    edition: Edition,
+    purpose: &'static str,
+    usb_keyboard: bool,
+    smbios: Vec<String>,
+    disk_size: &str,
+) -> Result<Booted> {
     let ws = common::workspace()?;
-    let iso = iso_path()?;
+    let iso = iso_path_of(edition)?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
     let root = ws.state_dir().join("iso-next-fixtures").join(purpose);
     let _ = fs::remove_dir_all(&root);
@@ -236,9 +247,21 @@ pub(super) fn welcome_up(
     artifacts: &Path,
     name: &str,
 ) -> Result<()> {
+    welcome_up_of(Edition::Gnome, vm, ctl, serial, artifacts, name)
+}
+
+/// The same for an edition's interface.
+pub(super) fn welcome_up_of(
+    edition: Edition,
+    vm: &mut Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+) -> Result<()> {
     let page = wait_page_marker(vm, serial, "welcome", PAGE_TIMEOUT)?;
     ensure!(
-        field(&page, "edition")? == "gnome"
+        field(&page, "edition")? == edition.id()
             && field(&page, "language")? == "en_US.UTF-8"
             && field(&page, "keyboard")? == "us",
         "the welcome page starts on {page:?}"

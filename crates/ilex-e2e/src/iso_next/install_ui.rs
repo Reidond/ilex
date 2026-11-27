@@ -235,7 +235,7 @@ fn stick_files(path: &Path) -> Result<Vec<String>> {
 
 /// The `n`th complete installer marker (1-based) that `matches`, waiting for it.
 /// Fails at once when the VM exited or the session gave up.
-fn nth_marker(
+pub(super) fn nth_marker(
     vm: &mut Vm,
     serial: &Path,
     what: &str,
@@ -267,11 +267,11 @@ fn nth_marker(
     }
 }
 
-fn is_page(page: &'static str) -> impl Fn(&BTreeMap<String, String>) -> bool {
+pub(super) fn is_page(page: &'static str) -> impl Fn(&BTreeMap<String, String>) -> bool {
     move |w| w.get("page").is_some_and(|p| p == page)
 }
 
-fn is_event(
+pub(super) fn is_event(
     event: &'static str,
     key: &'static str,
     value: &'static str,
@@ -283,7 +283,7 @@ fn is_event(
 }
 
 /// How many markers match.
-fn count(serial: &Path, matches: impl Fn(&BTreeMap<String, String>) -> bool) -> Result<usize> {
+pub(super) fn count(serial: &Path, matches: impl Fn(&BTreeMap<String, String>) -> bool) -> Result<usize> {
     let text = console(serial)?;
     Ok(complete_lines(&text)
         .filter(|l| is_marker(l, MARKER, None))
@@ -453,7 +453,7 @@ fn from_welcome(
 /// The destructive button (it has the focus on the review page) and the erase
 /// dialog: Enter opens it, Tab moves from the safe answer to the other, Enter
 /// takes it.
-fn confirm_erase(
+pub(super) fn confirm_erase(
     vm: &mut Vm,
     ctl: &Vmctl,
     serial: &Path,

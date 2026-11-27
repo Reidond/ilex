@@ -44,6 +44,11 @@
 //!   record), `--simulate` refused on a real boot, and every page and error
 //!   state drawn to PNG files under GNOME Kiosk's headless mode: light, dark
 //!   and at 150% scale (`--self-check --render`).
+//! * `installer::ui_kde` (registered only for a filter that names it): the same
+//!   checks on the KDE edition's live image (`ILEX_INSTALLER_IMAGE_KDE`, a VM of
+//!   its own): its Kirigami interface draws the same states under KWin's
+//!   virtual output, in the same three configurations, and the count is held
+//!   to the GTK interface's (71 states, 213 images).
 //!
 //! The ISO's own boot (the live medium, Secure Boot, the session) is `iso::next…`.
 
@@ -2676,19 +2681,37 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 fn ui(vm: &EphemeralVm) -> Result<()> {
+    check_ui(vm, UI_SCRIPT, "installer-ui", "GNOME Kiosk")
+}
+
+/// How many states the renderers draw, and how many pictures that is in three
+/// configurations (light, dark, light at 150%). One number for both interfaces:
+/// the states are `ilex_installer_flow::shots::SHOTS`.
+const SHOTS: usize = 104;
+const IMAGES: usize = SHOTS * 3;
+
+/// Run `script` (the interface's `--self-check`, a refused `--simulate` and its
+/// renderer in the three configurations, printing the files at the end) in the
+/// guest and hold what it drew to the same rules for either interface.
+fn check_ui(
+    vm: &EphemeralVm,
+    script: &str,
+    artifact_dir: &str,
+    compositor: &str,
+) -> Result<()> {
     let ws = common::workspace()?;
     let out = vm.ssh_timeout(
         &format!(
             "printf %s {} | base64 -d | bash -s",
-            base64(UI_SCRIPT.as_bytes())
+            base64(script.as_bytes())
         ),
         std::time::Duration::from_secs(1800),
     )?;
     let text = printed(&out);
     let (log, files) = text
         .split_once("== files\n")
-        .context("the script did not reach its files")?;
-    let artifacts = ilex_devkit::qemu::artifact_dir(&ws, "installer-ui")?;
+        .with_context(|| format!("the script did not reach its files ({compositor})"))?;
+    let artifacts = ilex_devkit::qemu::artifact_dir(&ws, artifact_dir)?;
     fs::write(artifacts.join("ui-script.log"), log)?;
     println!("     {}", log.trim_end().replace('\n', "\n     "));
 
@@ -2706,7 +2729,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
             .lines()
             .find(|l| l.starts_with(want) && l.contains(&format!("scheme={scheme} scale={scale} ")))
             .with_context(|| format!("no render report for {scheme} at {scale}x:\n{log}"))?;
-        ensure!(line.contains("shots=104 "), "{line}");
+        ensure!(line.contains(&format!("shots={SHOTS} ")), "{line}");
     }
     ensure!(
         !log.contains("render status 1") && log.matches("render status 0").count() == 3,
@@ -2740,8 +2763,8 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         }
     }
     ensure!(
-        seen.len() == 312,
-        "{} images came back, expected 312 (104 states in three configurations)",
+        seen.len() == IMAGES,
+        "{} images came back, expected {IMAGES} ({SHOTS} states in three configurations)",
         seen.len()
     );
     ensure!(
@@ -2757,4 +2780,86 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         artifacts.display()
     );
     Ok(())
+}
+
+// --- the KDE edition's interface -----------------------------------------------
+
+/// The KDE edition's checks of the same kind, in a guest of its own: KWin runs
+/// with a virtual 1920x1200 output (no GPU: Qt's software renderer), and the
+/// Kirigami interface draws every state. The 150% pictures use Qt's own scale
+/// factor (a virtual KWin output has no scale of its own); the dark ones take
+/// Breeze Dark's colours from a `kdeglobals` the renderer writes for itself.
+const UI_SCRIPT_KDE: &str = r#"set -u
+export HOME=/run/ilex-ui-home
+rm -rf /run/ilex-ui-shots; mkdir -p /run/ilex-ui-shots
+echo "== self-check"
+ilex-installer --self-check; echo "self-check status $?"
+echo "== simulate on a real boot"
+env -u ILEX_INSTALLER_SIMULATE_ALLOW ilex-installer --simulate generic 2>&1 | head -2; echo "simulate status ${PIPESTATUS[0]}"
+render() {
+    scheme=$1; scale=$2
+    export XDG_RUNTIME_DIR=/run/ilex-ui
+    rm -rf "$XDG_RUNTIME_DIR" "$HOME"; mkdir -m700 "$XDG_RUNTIME_DIR"; mkdir -p "$HOME/.config"
+    flag=; [ "$scheme" = dark ] && flag=--dark
+    cat > /run/ilex-ui-inner.sh <<'INNER'
+kwin_wayland --virtual --width $OUT_W --height $OUT_H --no-lockscreen --no-global-shortcuts --socket wayland-0 > /run/ilex-ui-kwin.log 2>&1 &
+kwin=$!
+for _ in $(seq 150); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done
+sleep 2
+WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software LIBGL_ALWAYS_SOFTWARE=1 QT_SCALE_FACTOR=$SCALE timeout 900 ilex-installer --self-check --render /run/ilex-ui-shots $RENDER_FLAG 2>&1 | grep -E '^ILEX-INSTALLER-RENDER|^ilex-installer:|rror|panicked|CRITICAL'
+echo "render status ${PIPESTATUS[0]}"
+kill "$kwin" 2>/dev/null
+INNER
+    echo "== render $scheme $scale"
+    # The window is 1280x800 logical, as large as the output at 1x; at 150% its
+    # 1920x1200 pixels need an output that is larger than that, or KWin fits the
+    # window into the usable area and the picture is smaller.
+    out_w=1920; out_h=1200; [ "$scale" = 1.5 ] && { out_w=2400; out_h=1500; }
+    RENDER_FLAG=$flag SCALE=$scale OUT_W=$out_w OUT_H=$out_h dbus-run-session -- bash /run/ilex-ui-inner.sh
+}
+render light 1
+render dark 1
+render light 1.5
+echo "== files"
+for f in /run/ilex-ui-shots/*.png; do echo "FILE $(basename "$f")"; base64 -w0 "$f"; echo; done
+echo "== done"
+"#;
+
+/// What the harness boots for `installer::ui_kde`: the KDE edition's live image.
+fn live_image_kde() -> Result<String> {
+    match std::env::var("ILEX_INSTALLER_IMAGE_KDE") {
+        Ok(image) if !image.is_empty() => Ok(image),
+        _ => bail!(
+            "ILEX_INSTALLER_IMAGE_KDE is not set: run `cargo ilexctl test installer::ui_kde`, which builds the KDE live image first"
+        ),
+    }
+}
+
+/// `installer::ui_kde`: boots the KDE live image in a VM of its own (the group's
+/// VM is the GNOME edition's) and runs [`UI_SCRIPT_KDE`].
+pub fn kde_trials() -> Vec<Trial> {
+    vec![Trial::test("installer::ui_kde", || {
+        let started = std::time::Instant::now();
+        let outcome = (|| {
+            let ws = common::workspace()?;
+            let image = with_ssh(&ws, &live_image_kde()?)?;
+            let name = ws.vm_name("installer-kde");
+            let opts = EphemeralOpts {
+                memory: MEMORY.into(),
+                ..EphemeralOpts::default()
+            };
+            let vm = EphemeralVm::boot(&name, &image, &opts)?;
+            eprintln!(
+                "ilex: {name} is up from {image} (VM slot {})",
+                vm.slot_index()
+            );
+            check_ui(&vm, UI_SCRIPT_KDE, "installer-ui-kde", "KWin")
+        })();
+        println!(
+            "installer::ui_kde: {} after {:.0}s",
+            if outcome.is_ok() { "ok" } else { "FAILED" },
+            started.elapsed().as_secs_f64()
+        );
+        outcome.map_err(|error| libtest_mimic::Failed::from(format!("{error:#}")))
+    })]
 }

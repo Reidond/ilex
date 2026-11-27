@@ -1,0 +1,407 @@
+//! The KDE edition's interface on its real ISO, by real key input over QMP,
+//! observed through the same serial markers as the GNOME edition's and through
+//! screenshots. Secure Boot on KVM, KWin as the session's compositor, the real
+//! session unit and the real Kirigami window.
+//!
+//! The helper is **simulated** (the fixture scenarios of `ilex-installer-flow`,
+//! asked for with `ilex.installer.simulate=<scenario>` typed into GRUB's
+//! editor, which a boot of a released ISO is not talked into): the KDE
+//! edition's catalogue has no composition of its own until the KDE shell is
+//! published (`generic.kde`, PR #85; the helper refuses to start for an edition
+//! the catalogue lacks: "edition kde has no generic composition"), so the real
+//! helper has nothing to plan or install for it yet, and the installation
+//! pages' trials that need it (a checked plan against the registry, a real
+//! installation) belong to the release PR (K3). What these trials show is that
+//! the Kirigami pages work on the real ISO under KWin: the keyboard alone moves
+//! through them, the flow's markers come in the same order and words, an erase
+//! needs its confirmation, a failure ends on the problem page and its log can
+//! be saved, and nothing typed in a password field is printed or logged.
+//!
+//! * `iso::next_kde_welcome`: the welcome page; the layout search dialog by
+//!   keyboard; the layout test field; Enter continues to the machine page.
+//! * `iso::next_kde_detect_board` / `_detect_generic`: the machine page for a
+//!   detected board and for a computer nothing matches.
+//! * `iso::next_kde_kernel_argument` / `_unknown`: the boot override's notice.
+//! * `iso::next_kde_install`: every page by key to the done page, the erase
+//!   dialog cancelled once and then confirmed; the password in neither the
+//!   serial console nor the journal.
+//! * `iso::next_kde_problem`: a failed image stage ends on the problem page;
+//!   Save the log by keyboard.
+
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Result, ensure};
+use ilex_vmctl::Vmctl;
+use libtest_mimic::Trial;
+
+use super::install_ui::{confirm_erase, count, is_event, is_page, nth_marker};
+use super::ui::{
+    Booted, EVENT_TIMEOUT, PASSWORD, boot_of, wait_event, wait_page_marker, welcome_up_of,
+};
+use super::{
+    Edition, GRUB_COUNTDOWN, PAGE_TIMEOUT, console, diagnostics, field, trial, wait_for_text,
+    wait_page,
+};
+use crate::common;
+use crate::iso;
+use crate::selinux;
+use ilex_devkit::installer;
+
+const KDE: Edition = Edition::Kde;
+/// The fixed public test credential (SMBIOS) that lets the interface print the
+/// text of the layout test field.
+const ECHO_CREDENTIAL: &str = "ilex.installer.echo-test";
+/// The administrator's name the install trial types.
+const ADMIN: &str = "ilexmaint";
+
+pub(super) fn trials() -> Vec<Trial> {
+    vec![
+        trial("iso::next_kde_welcome", welcome),
+        trial("iso::next_kde_detect_board", || {
+            detect("iso-next-kde-board", "ms-7c35-board", true, |machine| {
+                ensure!(
+                    field(machine, "selected")? == "ms-7c35.gnome"
+                        && field(machine, "origin")? == "detected",
+                    "the machine page for the detected board: {machine:?}"
+                );
+                Ok(())
+            })
+        }),
+        trial("iso::next_kde_detect_generic", || {
+            detect("iso-next-kde-generic", "generic", false, |machine| {
+                ensure!(
+                    field(machine, "selected")? == "generic.gnome"
+                        && field(machine, "origin")? == "not-recognised",
+                    "the machine page for a computer nothing matches: {machine:?}"
+                );
+                Ok(())
+            })
+        }),
+        trial("iso::next_kde_kernel_argument", || {
+            detect("iso-next-kde-karg", "boot-override", false, |machine| {
+                ensure!(
+                    field(machine, "origin")? == "chosen",
+                    "the machine page for a boot override: {machine:?}"
+                );
+                Ok(())
+            })
+        }),
+        trial("iso::next_kde_kernel_argument_unknown", || {
+            detect("iso-next-kde-karg-bad", "bad-override", false, |machine| {
+                ensure!(
+                    field(machine, "origin")? == "bad-override",
+                    "the machine page for an unknown boot override: {machine:?}"
+                );
+                Ok(())
+            })
+        }),
+        trial("iso::next_kde_install", install),
+        trial("iso::next_kde_problem", problem),
+    ]
+}
+
+/// Boot the KDE ISO with the simulated helper's `scenario` (typed into GRUB's
+/// editor) and the optional SMBIOS strings.
+fn boot(purpose: &'static str, scenario: &str, smbios: Vec<String>) -> Result<Booted> {
+    let mut booted = boot_of(KDE, purpose, true, smbios, "1G")?;
+    let artifacts = booted.artifacts.clone();
+    let (iso, work) = (booted.iso.clone(), booted.work.clone());
+    let vm = booted.guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let ctl = Vmctl::from_info(vm.info.clone());
+    // The countdown is the point at which GRUB starts accepting edit keys.
+    wait_for_text(vm, &serial, GRUB_COUNTDOWN, PAGE_TIMEOUT)?;
+    iso::edit_kernel_line(
+        &iso,
+        &work,
+        &format!(" ilex.installer.simulate={scenario}"),
+        &ctl,
+        &artifacts,
+        &format!("next-{purpose}-grub-edit.png"),
+        vm,
+        &serial,
+    )?;
+    Ok(booted)
+}
+
+/// Run `observe` on a booted VM, with the diagnostics on failure and the
+/// SELinux report (enforcing, no denial) at the end.
+fn run(
+    mut booted: Booted,
+    name: &str,
+    observe: impl FnOnce(&mut ilex_devkit::qemu::Vm, &Path) -> Result<()>,
+) -> Result<()> {
+    let artifacts = booted.artifacts.clone();
+    let vm = booted.guest.vm.running_mut()?;
+    let outcome = observe(vm, &artifacts)
+        .and_then(|()| selinux::check_waiting(vm, &artifacts, &format!("next-{name}")));
+    if outcome.is_err() {
+        diagnostics(vm, &artifacts, name);
+    }
+    outcome
+}
+
+fn welcome() -> Result<()> {
+    let echo = vec![format!(
+        "type=11,value=io.systemd.credential:{ECHO_CREDENTIAL}=1"
+    )];
+    let booted = boot("iso-next-kde-welcome", "generic", echo)?;
+    run(booted, "kde-welcome", |vm, artifacts| {
+        let serial = vm.info.dir.join("serial.log");
+        let ctl = Vmctl::from_info(vm.info.clone());
+        welcome_up_of(KDE, vm, &ctl, &serial, artifacts, "kde-welcome")?;
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome.png"))?;
+
+        // The first control has the focus: Tab reaches the layout button, Enter
+        // opens the search dialog (several hundred layouts are searched, not
+        // scrolled), typing narrows it, Enter chooses the first match.
+        ctl.key("Tab")?;
+        ctl.key("Return")?;
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-layouts.png"))?;
+        ctl.type_text("german (no dead")?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-layouts-search.png"))?;
+        ctl.key("Return")?;
+        let chosen = wait_event(vm, &serial, "layout", EVENT_TIMEOUT, |w| {
+            w.get("layout").is_some_and(|l| l == "de-nodeadkeys")
+        })?;
+        // KWin 6.8 reads its layouts when it starts and nothing in this session
+        // can tell it to read them again (`kde/keyboard.rs`): the page says so
+        // and keeps Continue off, rather than printing a layout it is not in.
+        ensure!(
+            field(&chosen, "applied")? == "false",
+            "KWin took a layout in a running session: {chosen:?} (the interface's note on it is out of date)"
+        );
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-layout-refused.png"))?;
+
+        // Back to the layout KWin has: the page works again, and the test
+        // field shows the layout at work (US: `yz` stays `yz`). The layout button
+        // has the focus again when the dialog has closed.
+        ctl.key("Return")?;
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.type_text("english (us")?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.key("Return")?;
+        let back = wait_event(vm, &serial, "layout", EVENT_TIMEOUT, |w| {
+            w.get("layout").is_some_and(|l| l == "us")
+        })?;
+        ensure!(
+            field(&back, "applied")? == "true",
+            "KWin did not report the US layout it has: {back:?}"
+        );
+        // The dialog has closed and the layout button has the focus again.
+        std::thread::sleep(Duration::from_secs(3));
+        ctl.key("Tab")?;
+        ctl.type_text("yz")?;
+        let tried = wait_event(vm, &serial, "try", EVENT_TIMEOUT, |w| {
+            w.get("text").is_some_and(|t| t == "yz")
+        })?;
+        ensure!(
+            field(&tried, "layout")? == "us",
+            "the test field reports {tried:?}"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-us.png"))?;
+
+        // Enter in the field continues when the page is valid.
+        ctl.key("Return")?;
+        let machine = wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
+        ensure!(
+            field(&machine, "selected")? == "generic.gnome"
+                && field(&machine, "origin")? == "not-recognised",
+            "the machine page after the welcome page: {machine:?}"
+        );
+        wait_page(vm, &ctl, artifacts, "kde-welcome-machine")?;
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-machine.png"))?;
+        Ok(())
+    })
+}
+
+/// The welcome page to the machine page on a computer the scenario describes.
+fn detect(
+    purpose: &'static str,
+    scenario: &str,
+    board: bool,
+    check: impl FnOnce(&std::collections::BTreeMap<String, String>) -> Result<()>,
+) -> Result<()> {
+    let smbios = if board {
+        let ws = common::workspace()?;
+        let table = installer::table(&ws.root, None)?;
+        iso::smbios(&table, Some("ms-7c35"), true)?
+    } else {
+        vec![]
+    };
+    let booted = boot(purpose, scenario, smbios)?;
+    run(booted, purpose, |vm, artifacts| {
+        let serial = vm.info.dir.join("serial.log");
+        let ctl = Vmctl::from_info(vm.info.clone());
+        welcome_up_of(KDE, vm, &ctl, &serial, artifacts, purpose)?;
+        // Tab, Tab: the layout test field; Enter in it continues. (A simulated
+        // session prints that field's text, so what a real boot must not print
+        // is the real-helper trials' to check.)
+        ctl.key("Tab")?;
+        ctl.key("Tab")?;
+        ctl.key("Return")?;
+        let machine = wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
+        check(&machine)?;
+        wait_page(vm, &ctl, artifacts, purpose)?;
+        ctl.save_screenshot(&artifacts.join(format!("next-{purpose}.png")))?;
+        Ok(())
+    })
+}
+
+/// The pages from the welcome page to the review page by keyboard: Enter in
+/// the layout test field, Enter on Continue (focused on the machine and disk
+/// pages), the name field focused on the administrator page.
+fn to_review(
+    vm: &mut ilex_devkit::qemu::Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+) -> Result<()> {
+    welcome_up_of(KDE, vm, ctl, serial, artifacts, name)?;
+    ctl.key("Tab")?;
+    ctl.key("Tab")?;
+    ctl.key("Return")?;
+    nth_marker(vm, serial, "the machine page", 1, EVENT_TIMEOUT, is_page("machine"))?;
+    wait_page(vm, ctl, artifacts, &format!("{name}-machine"))?;
+    ctl.key("Return")?;
+    nth_marker(vm, serial, "the disk page", 1, EVENT_TIMEOUT, is_page("disk"))?;
+    wait_page(vm, ctl, artifacts, &format!("{name}-disk"))?;
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-disk.png")))?;
+    ctl.key("Return")?;
+    nth_marker(vm, serial, "the administrator page", 1, EVENT_TIMEOUT, is_page("account"))?;
+    wait_page(vm, ctl, artifacts, &format!("{name}-account"))?;
+    // The name has the focus; Tab moves down the fields. A password field has
+    // two stops: its text and the button that shows what was typed.
+    ctl.type_text(ADMIN)?;
+    ctl.key("Tab")?;
+    ctl.type_text(PASSWORD)?;
+    ctl.key("Tab")?;
+    ctl.key("Tab")?;
+    ctl.type_text(PASSWORD)?;
+    std::thread::sleep(Duration::from_secs(1));
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-account-filled.png")))?;
+    // Enter in the last field continues: the helper (the simulation) plans.
+    ctl.key("Return")?;
+    let review = nth_marker(
+        vm,
+        serial,
+        "the review page",
+        1,
+        Duration::from_secs(120),
+        is_page("review"),
+    )?;
+    ensure!(
+        field(&review, "check")? == "ok",
+        "the plan was not checked: {review:?}"
+    );
+    wait_page(vm, ctl, artifacts, &format!("{name}-review"))?;
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-review.png")))?;
+    Ok(())
+}
+
+fn install() -> Result<()> {
+    let booted = boot("iso-next-kde-install", "generic", vec![])?;
+    run(booted, "kde-install", |vm, artifacts| {
+        let serial = vm.info.dir.join("serial.log");
+        let ctl = Vmctl::from_info(vm.info.clone());
+        to_review(vm, &ctl, &serial, artifacts, "kde-install")?;
+
+        // The destructive button has the focus: Enter opens the dialog, whose
+        // safe answer (Cancel) has the focus; Escape cancels and nothing began.
+        ctl.key("Return")?;
+        nth_marker(vm, &serial, "the erase dialog", 1, EVENT_TIMEOUT, is_event("confirm", "state", "shown"))?;
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.save_screenshot(&artifacts.join("next-kde-install-erase-dialog.png"))?;
+        ctl.key("Escape")?;
+        nth_marker(vm, &serial, "the cancelled dialog", 1, EVENT_TIMEOUT, is_event("confirm", "state", "cancelled"))?;
+        ensure!(
+            count(&serial, is_event("install", "result", "started"))? == 0,
+            "the installation began after the dialog was cancelled"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join("next-kde-install-erase-cancelled.png"))?;
+
+        // Again: Tab moves from the safe answer to the destructive one, Enter
+        // takes it (tried with one Tab, then two, as the GNOME trials do).
+        confirm_erase(vm, &ctl, &serial, artifacts, "kde-install")?;
+        nth_marker(vm, &serial, "the installing page", 1, EVENT_TIMEOUT, is_page("installing"))?;
+        nth_marker(vm, &serial, "the done page", 1, Duration::from_secs(180), is_page("done"))?;
+        wait_page(vm, &ctl, artifacts, "kde-install-done")?;
+        ctl.save_screenshot(&artifacts.join("next-kde-install-done.png"))?;
+        // Restart has the focus on the done page.
+        ctl.key("Return")?;
+        nth_marker(vm, &serial, "the restart", 1, EVENT_TIMEOUT, is_event("finish", "action", "restart"))?;
+
+        // The password is nowhere on the serial console...
+        let text = console(&serial)?;
+        ensure!(!text.contains(PASSWORD), "the password reached the serial console");
+        // ...and nowhere in the guest's journal, which holds the interface's own
+        // marker lines (the patterns are written so that the command that
+        // searches does not match itself).
+        vm.wait_ssh(Duration::from_secs(180))?;
+        let found = vm.ssh_ok(
+            "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
+             echo markers=$(grep -c -e '^ILEX-INSTALLER page=review edition=kde' /tmp/journal.txt); \
+             echo password=$(grep -c -e '[c]orrect horse battery' -e '[h]orse batt' /tmp/journal.txt); \
+             rm -f /tmp/journal.txt",
+        )?;
+        ensure!(
+            !found.contains("markers=0") && found.contains("password=0"),
+            "the journal holds the review page's marker and no password: {found}"
+        );
+        Ok(())
+    })
+}
+
+fn problem() -> Result<()> {
+    let booted = boot("iso-next-kde-problem", "generic+fail-image+sticks", vec![])?;
+    run(booted, "kde-problem", |vm, artifacts| {
+        let serial = vm.info.dir.join("serial.log");
+        let ctl = Vmctl::from_info(vm.info.clone());
+        to_review(vm, &ctl, &serial, artifacts, "kde-problem")?;
+        confirm_erase(vm, &ctl, &serial, artifacts, "kde-problem")?;
+        nth_marker(vm, &serial, "the failed outcome", 1, Duration::from_secs(120), is_event("outcome", "result", "failed"))?;
+        let problem = nth_marker(vm, &serial, "the problem page", 1, EVENT_TIMEOUT, is_page("problem"))?;
+        println!("iso::next kde problem page: {problem:?}");
+        wait_page(vm, &ctl, artifacts, "kde-problem-page")?;
+        ctl.save_screenshot(&artifacts.join("next-kde-problem.png"))?;
+
+        // Try again has the focus; Tab reaches Save the log, Enter opens the
+        // dialog, which lists the sticks.
+        ctl.key("Tab")?;
+        ctl.key("Return")?;
+        nth_marker(vm, &serial, "the log dialog", 1, EVENT_TIMEOUT, is_event("log", "state", "choosing"))?;
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.save_screenshot(&artifacts.join("next-kde-problem-save-log.png"))?;
+        // Tab moves to a stick's Save here button (the first one that can take
+        // the log), Enter writes it: tried with one Tab, then two, and so on.
+        let mut saved = false;
+        for attempt in 1..=4 {
+            for _ in 0..attempt {
+                ctl.key("Tab")?;
+            }
+            ctl.key("Return")?;
+            std::thread::sleep(Duration::from_secs(3));
+            if count(&serial, is_event("log", "state", "saved"))? > 0 {
+                saved = true;
+                break;
+            }
+            // The dialog is still open: start from the top of it again.
+            ctl.key("Escape")?;
+            std::thread::sleep(Duration::from_secs(1));
+            ctl.key("Tab")?;
+            ctl.key("Return")?;
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        ensure!(saved, "the log was not saved to a stick by keyboard");
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join("next-kde-problem-log-saved.png"))?;
+        Ok(())
+    })
+}

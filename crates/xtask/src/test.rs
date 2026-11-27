@@ -106,8 +106,17 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
             "ILEX_ISO_NEXT_KDE",
         )?;
     }
-    if args.filters.iter().any(|f| f.contains("installer::")) {
+    // The helper's tier boots the GNOME edition's live image; `ui_kde` alone
+    // needs only the KDE edition's.
+    if args
+        .filters
+        .iter()
+        .any(|f| f.contains("installer::") && !f.contains("ui_kde"))
+    {
         prepare_installer_image(ws, &mut test)?;
+    }
+    if args.filters.iter().any(|f| f.contains("ui_kde")) {
+        prepare_installer_image_kde(ws, &mut test)?;
     }
     cmd::run(&mut test)
 }
@@ -126,6 +135,23 @@ fn prepare_installer_image(ws: &Workspace, test: &mut Command) -> Result<()> {
         },
     )?;
     test.env("ILEX_INSTALLER_IMAGE", image);
+    Ok(())
+}
+
+/// Build the KDE edition's live image (unless `ILEX_INSTALLER_IMAGE_KDE` names
+/// one) for `installer::ui_kde`.
+fn prepare_installer_image_kde(ws: &Workspace, test: &mut Command) -> Result<()> {
+    if std::env::var_os("ILEX_INSTALLER_IMAGE_KDE").is_some_and(|p| !p.is_empty()) {
+        return Ok(());
+    }
+    let image = crate::iso_next::build_image(
+        ws,
+        &crate::iso_next::Build {
+            edition: crate::iso_next::KDE_EDITION,
+            output_dir: None,
+        },
+    )?;
+    test.env("ILEX_INSTALLER_IMAGE_KDE", image);
     Ok(())
 }
 
