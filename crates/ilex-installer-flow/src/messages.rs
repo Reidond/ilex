@@ -45,6 +45,16 @@ impl Message {
         Self::new(title, "")
     }
 
+    /// Title and detail as the sentence a banner or a note shows: `Title.
+    /// Detail` (the title alone when there is no detail).
+    pub fn sentence(&self) -> String {
+        if self.detail.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{}. {}", self.title, self.detail)
+        }
+    }
+
     /// Title and detail as one line, for logs and serial markers.
     pub fn one_line(&self) -> String {
         if self.detail.is_empty() {
