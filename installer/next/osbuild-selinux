@@ -14,8 +14,13 @@ enforcing and generic-iso gives it neither labels nor the mode:
    stage between (the one `org.osbuild.selinux` stage of the manifest labels
    the build root). Containers/storage keeps no `security.selinux` xattr in
    a layer, so the image cannot ship labels either. This inserts an
-   `org.osbuild.selinux` stage after the deployment with the image's own
-   `file_contexts`, so the squashfs carries the labels.
+   `org.osbuild.selinux` stage as the LAST stage of `os-tree` with the image's
+   own `file_contexts`, so the squashfs carries the labels of everything in the
+   tree, including what a stage image-builder adds after the deployment writes
+   (such a stage is named on standard error so a change in image-builder shows
+   up in the build log). Right after the deployment it would leave those files
+   unlabelled, and an ISO built that way boots with `unlabeled_t` files and
+   denials nothing here would catch.
 2. `enforcing=0` is in the kernel options both GRUB stages get (image-builder's
    default for a generic ISO). It is removed from them; the policy's own
    `SELINUX=enforcing` (`/etc/selinux/config`) then decides, and a person at
@@ -54,12 +59,16 @@ def transform(manifest):
         fail(f"os-tree has {len(deployed)} container-deploy stages, expected one")
     if any(s.get("type") == "org.osbuild.selinux" for s in stages):
         fail("os-tree already has a selinux stage: image-builder changed, review this wrapper")
-    # Every file of the tree, once everything is in it. Nothing is excluded:
-    # the squashfs is the whole of it.
-    stages.insert(
-        deployed[0] + 1,
-        {"type": "org.osbuild.selinux", "options": {"file_contexts": FILE_CONTEXTS}},
-    )
+    # Every file of the tree, once everything is in it: last, so a stage that
+    # follows the deployment (image-builder may add one) cannot leave a file
+    # unlabelled. Nothing is excluded: the squashfs is the whole of it.
+    after = [s.get("type") for s in stages[deployed[0] + 1 :]]
+    if after:
+        print(
+            f"osbuild-selinux: os-tree has stages after the deployment, labelled by the last one: {after}",
+            file=sys.stderr,
+        )
+    stages.append({"type": "org.osbuild.selinux", "options": {"file_contexts": FILE_CONTEXTS}})
 
     removed = 0
     for pipeline in manifest["pipelines"]:

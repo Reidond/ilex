@@ -3247,9 +3247,11 @@ the Windows paths of this change: no Windows host was available.
   containers/storage does not keep `security.selinux` in a layer.
   `installer/next/osbuild-selinux` (a Python script, only the standard library)
   is therefore the `osbuild` image-builder runs for this ISO: it reads the
-  manifest image-builder pipes in, inserts an `org.osbuild.selinux` stage after
-  the deployment in `os-tree` (`file_contexts` of the image's own policy,
-  `etc/selinux/targeted/contexts/files/file_contexts`, the whole tree), removes
+  manifest image-builder pipes in, appends an `org.osbuild.selinux` stage as the
+  last stage of `os-tree` (`file_contexts` of the image's own policy,
+  `etc/selinux/targeted/contexts/files/file_contexts`, the whole tree: a stage
+  image-builder may add after the deployment cannot leave files unlabelled, and
+  the wrapper names such stages on standard error), removes
   `enforcing=0` from the two GRUB stages, and hands the result to `osbuild` as
   its standard input (an anonymous `memfd`) with the same `--checkpoint build
   --checkpoint os-tree` the Anaconda ISO's wrapper passes. A manifest that is
