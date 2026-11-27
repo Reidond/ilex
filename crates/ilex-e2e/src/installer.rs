@@ -2745,7 +2745,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         seen.len()
     );
     ensure!(
-        distinct.len() >= 165,
+        distinct.len() >= 195,
         "only {} of {} images differ: pages are not drawing their own states",
         distinct.len(),
         seen.len()
