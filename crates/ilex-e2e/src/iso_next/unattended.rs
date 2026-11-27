@@ -72,7 +72,8 @@ use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
 
 use super::{
-    Guest, PAGE_TIMEOUT, count_markers, diagnostics, fields, iso_path, loop_file, wait_for_marker,
+    Guest, PAGE_TIMEOUT, count_markers, diagnostics, fields, iso_path, loop_file, wait_firmware_output,
+    wait_for_marker,
 };
 use crate::common;
 use crate::installer::apply::{ADMIN, Expected, PASSWORD, check_installed, gdm_screenshot};
@@ -260,95 +261,11 @@ struct Setup<'a> {
     fault: Option<&'a str>,
 }
 
-/// [`boot_once`], started again (up to twice) when the guest never ran: on a
-/// Boat sandbox a VM now and then prints nothing at all on its serial console
-/// for as long as it is left (QEMU's vCPU threads at 0 s of CPU: firmware never
-/// started). That is the sandbox, not the installer, and a guest that has not
-/// printed a byte in two and a half minutes will not: a fresh one is started,
-/// and the retry is said out loud.
-///
-/// **A temporary workaround.** It stays until this stack is rebased onto the
-/// change that fixes QEMU's audio-probe hang (PR #90), which is what the
-/// silent guests are suspected to be; it is then removed, with the retry. Each
-/// failed attempt's `qemu.log` and `serial.log` are kept in the artifacts
-/// (never overwritten by the next attempt's, which reuses the VM's directory),
-/// so that the cause can still be found.
-fn boot(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
-    const ATTEMPTS: u32 = 3;
-    const ALIVE_WITHIN: Duration = Duration::from_secs(150);
-    for attempt in 1..=ATTEMPTS {
-        let mut guest = boot_once(root, layout, setup)?;
-        let vm = guest.vm.running_mut()?;
-        let serial = vm.info.dir.join("serial.log");
-        let started = Instant::now();
-        // `ILEX_ISO_NEXT_FORCE_SILENT=1` calls the first attempt of every boot
-        // silent after three seconds, whatever it printed: how the retry and the
-        // logs it keeps are exercised without waiting for the flake.
-        let forced = attempt == 1 && std::env::var_os("ILEX_ISO_NEXT_FORCE_SILENT").is_some();
-        loop {
-            if !forced && fs::metadata(&serial).is_ok_and(|m| m.len() > 0) {
-                return Ok(guest);
-            }
-            if let Some(status) = vm.exited()? {
-                bail!("the VM exited with {status} before it printed anything");
-            }
-            if started.elapsed()
-                > if forced {
-                    Duration::from_secs(3)
-                } else {
-                    ALIVE_WITHIN
-                }
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_secs(if forced { 1 } else { 2 }));
-        }
-        let kept = keep_silent_attempt(vm.info.dir.as_path(), root, layout, attempt);
-        eprintln!(
-            "iso::next: attempt {attempt} of {ATTEMPTS}: the guest printed nothing on its serial console in {ALIVE_WITHIN:?} (the sandbox's idle-vCPU flake; a temporary workaround); {kept}; starting it again"
-        );
-        drop(guest);
-    }
-    bail!("the guest printed nothing on its serial console in {ATTEMPTS} attempts")
-}
-
-/// Copy the logs of a silent attempt into the artifacts under names that no
-/// later attempt reuses; says where they went.
-fn keep_silent_attempt(vm_dir: &Path, root: &Path, layout: &Layout, attempt: u32) -> String {
-    let Ok(ws) = common::workspace() else {
-        return "its logs were not kept (no workspace)".into();
-    };
-    let Ok(artifacts) = qemu::artifact_dir(&ws, "iso-next") else {
-        return "its logs were not kept (no artifact directory)".into();
-    };
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let part = root
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let mut kept = Vec::new();
-    for file in ["qemu.log", "serial.log"] {
-        let to = artifacts.join(format!(
-            "next-{}-{part}-silent-attempt{attempt}-{stamp}-{file}",
-            layout.name()
-        ));
-        if fs::copy(vm_dir.join(file), &to).is_ok() {
-            kept.push(to.display().to_string());
-        }
-    }
-    if kept.is_empty() {
-        "its logs could not be copied".into()
-    } else {
-        format!("its logs are kept in {}", kept.join(" and "))
-    }
-}
-
 /// The ISO, a target and (usually) an answers volume, booted: UEFI, Secure
 /// Boot. The target is fresh every time; with a file as the source, the host
 /// disk that holds the file is the VM's own disk and the loader's FAT disk is
 /// attached last.
-fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
+fn boot(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
     let ws = common::workspace()?;
     let target = layout.target(root);
     let memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| MEMORY.into());
@@ -424,10 +341,16 @@ fn boot_once(root: &Path, layout: &Layout, setup: Setup<'_>) -> Result<Guest> {
         root: scratch,
     };
     guest.provider.start(&mut guest.vm)?;
+    let running = guest.vm.running_mut()?;
     ensure!(
-        guest.vm.running_mut()?.info.secure_boot,
+        running.info.secure_boot,
         "the VM was not started with Secure Boot"
     );
+    // A guest that never started is a failure, not a flake to start again: the
+    // firmware prints within seconds, so one that wrote nothing in
+    // `FIRMWARE_TIMEOUT` fails here with what QEMU was doing, instead of
+    // surfacing as a marker that never comes.
+    wait_firmware_output(running)?;
     Ok(guest)
 }
 

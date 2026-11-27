@@ -3848,18 +3848,11 @@ together 1,251 s once the live image's disk exists (1,617 s with it rebuilt;
 other stage together under 10 seconds), `iso::next_unattended` with its two
 siblings 404 to 524 s (the installation powered off after 220 to 318 s),
 `iso::next_unattended_loop` 451 s (installed and powered off after 292 s), and the
-Anaconda ISO's own `iso::install` 11 minutes. A guest of the `iso::next_unattended*`
-trials that prints nothing at all on its serial console for 150 seconds (QEMU's
-vCPU threads idle at 0 s: a flake of the sandbox, seen in two of three first boots
-of the loop trial and never with output) is destroyed and started again, up to
-twice, and the retry is printed. **This is a temporary workaround**: it is removed
-when this stack is rebased onto the change that fixes QEMU's audio-probe hang
-(PR #90), which the silent guests are suspected to be. Each failed attempt's
-`qemu.log` and `serial.log` are copied into the artifacts
-(`next-<trial>-<dir>-silent-attemptN-<time>-qemu.log`, `...-serial.log`), so that
-a later attempt, which reuses the VM's directory, does not overwrite them.
-`ILEX_ISO_NEXT_FORCE_SILENT=1` calls the first attempt of every boot silent after
-three seconds, which exercises the retry and the kept logs without the flake.
+Anaconda ISO's own `iso::install` 11 minutes. A guest of the `iso::next_unattended*` trials that
+writes nothing on its serial console in the first 60 seconds is a failed trial, not a
+flake to start again: the shared `ensure_firmware_output` rule of the `iso::next` tier
+(see "A VM that never starts") fails it with what QEMU was doing, and the harness's
+`-audiodev none` removed the hang that caused such guests.
 `iso::next_unattended` (opt-in with the other `iso::next` trials) boots the real
 ISO under UEFI with Secure Boot beside a target disk and an ext4 volume labelled
 `ILEX-ANSWERS`, follows `ILEX-INSTALLER-ANSWERS` lines on the serial console to
