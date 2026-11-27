@@ -2657,8 +2657,11 @@ the Windows paths of this change: no Windows host was available.
   (about 0.7 s for the policy load and `systemd`'s re-execution), memory in use
   at the page the same (617-628 MiB against 624-634 MiB). Before, every boot
   logged about 155 permissive denials (all from `kernel_t` on `unlabeled_t`);
-  now it logs none, and the whole `iso::next` tier (26 trials, the two loop ones
-  included) and the `installer::` tier (6) end with `denials=0`.
+  now it logs none, and the whole `iso::next` tier (29 trials, the two loop ones
+  included) and the `installer::` tier (7) end with `denials=0`. That covers
+  `Finish`'s `save-log` too: `iso::next_problem` has the helper, as `install_t`,
+  mount a real USB stick `nodev,nosuid,noexec` in a private mount namespace,
+  write the tarball and unmount it, with no denial, as the helper's other mounts.
 - **Serial markers.** The session script and the interface print marker lines
   to the journal and to `/dev/ttyS0` (the user is in `dialout`):
   `ILEX-INSTALLER-SESSION compositor=… graphics=default|basic secure-boot=0|1`,
