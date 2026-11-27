@@ -3192,6 +3192,20 @@ the Windows paths of this change: no Windows host was available.
     `Cargo.lock` is hashed whole: every root and the Anaconda ISO are due once
     when this lands, as when `ilex-installer` was added. `installer/next` itself
     stays out of both.
+  - **Measured** 2026-11-27 on a Boat sandbox (16 vCPU, nested KVM), Fedora 45
+    (kwin 6.8.3, kf6-kirigami 6.32.0, qqc2-breeze-style 6.8.3, Qt 6.11.2): the
+    ISO is 1,617,838,080 bytes (1.51 GiB: 123 MiB more than the GNOME edition's
+    1.40 GiB, 0.49 GiB under the limit) with 837 packages, 2,178 MiB installed
+    (GNOME: 698 and 1,826; the largest additions are `kwin-common`, `kwin-libs`,
+    `qt6-qtdeclarative` 59 MiB and the KDE Frameworks KWin pulls). `iso --next
+    --edition kde` took 5 minutes 9 seconds with the base images local and 44% of
+    the crates from kache (6 minutes 20 seconds with 4%); the C++ of cxx-qt is
+    compiled every time. Booted under QEMU/KVM with Secure Boot, 2 vCPUs, 4 GiB
+    and a 1280x800 screen, the window was up 6.2 s (default entry, `renderer=opengl`)
+    and 5.6 s (basic graphics, `renderer=software`) after the kernel started
+    (19.0 s and 9.5 s from power-on: GRUB's countdown, which the basic entry's key
+    press skips). Fifteen seconds after the page the guest used 629 MiB and 556
+    MiB (GNOME: 595-626 and 503-520); QEMU's RSS was 2.08 and 1.97 GiB.
   - **Trials.** `iso::next_kde_boot`, `iso::next_kde_basic_graphics` and
     `iso::next_kde_restart` are registered only when a filter names
     `iso::next_kde`, boot `ILEX_ISO_NEXT_KDE=<path>` (built by `ilexctl test`
