@@ -49,6 +49,16 @@
 //! anything. In both the interface starts, so that tty1 is not left empty, and
 //! the disk is untouched.
 //!
+//! `iso::next_unattended_encrypted` installs with `[encryption]` on, a German
+//! keyboard and a passphrase whose characters are on other keys of a US
+//! keyboard (the answers carry it in plaintext, as the documentation says): the
+//! helper's `SetSecret` of the passphrase, the encrypted layout and the LUKS2
+//! volume it makes, the plan's note that the security chip is not used yet; then
+//! the installed disk is booted and its prompt is answered through QMP with the
+//! keys of that layout, and the installed system is checked as
+//! `installer::encrypted_german` checks it. The passphrase is on neither the
+//! serial console nor in the installed system's logs.
+//!
 //! The installation of `iso::next_unattended` goes over a whole-disk LVM
 //! physical volume (a signature with no partition table), which is also refused
 //! without `reinstall = true`: its `/dev/disk/by-id/lvm-pv-uuid-*` link goes
@@ -76,6 +86,7 @@ use super::{
     wait_firmware_output, wait_for_marker,
 };
 use crate::common;
+use crate::installer::apply::encrypted::{self, GERMAN};
 use crate::installer::apply::{ADMIN, Expected, PASSWORD, check_installed, gdm_screenshot};
 use crate::selinux;
 
@@ -361,6 +372,134 @@ pub(super) fn run() -> Result<()> {
 
 pub(super) fn run_loop() -> Result<()> {
     run_from(Source::File)
+}
+
+/// `answers.toml` of an encrypted installation: the German keyboard and a
+/// passphrase with characters a US keyboard types on other keys. The disk is
+/// the one this VM's helper names `virtio-ilex-disk-0` (serial numbers on).
+fn answers_encrypted(disk: &str) -> String {
+    format!(
+        r#"schema = 1
+
+[install]
+disk = "{disk}"
+mode = "whole-disk"
+confirm-erase = "{disk}"
+
+[encryption]
+enabled = true
+passphrase = "{}"
+
+[system]
+keyboard = "{}"
+language = "de_DE.UTF-8"
+time-zone = "Europe/Berlin"
+host-name = "ilextest"
+
+[administrator]
+name = "{ADMIN}"
+password = "{}"
+"#,
+        GERMAN.passphrase.replace('\\', "\\\\").replace('"', "\\\""),
+        GERMAN.keymap,
+        PASSWORD.replace('\\', "\\\\").replace('"', "\\\"")
+    )
+}
+
+/// `iso::next_unattended_encrypted`: see the module's documentation.
+pub(super) fn run_encrypted() -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let name = "unattended-encrypted";
+    let root = fixtures(name)?;
+    let layout = Layout::new(Source::Cdrom, &root, &iso_path()?)?;
+    // With serial numbers on the disks, the VM's own disk is this id.
+    let target = "virtio-ilex-disk-0";
+    let volume = answers_volume(&root, &answers_encrypted(target))?;
+    let mut guest = boot(
+        &root,
+        &layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let started = Instant::now();
+    let console = match install(vm, &serial, &artifacts, name) {
+        Ok(console) => console,
+        Err(error) => {
+            diagnostics(vm, &artifacts, name);
+            return Err(anyhow::anyhow!("{error:#}"));
+        }
+    };
+    let _ = fs::write(artifacts.join(format!("next-{name}-serial.txt")), &console);
+    println!(
+        "iso::next {name}: installed and powered off in {:?}",
+        started.elapsed()
+    );
+    let digest = fields(&console, MARKER, "plan")?
+        .get("image")
+        .context("the plan line has no image=")?
+        .clone();
+    ensure!(digest.starts_with("sha256:"), "the plan's image: {digest}");
+    // The answers left the security chip at its default: the plan says that the
+    // installation does not use it yet, on the console, and nothing is a secret.
+    ensure!(
+        console.contains("warning=unlocking the disk with this computer's security chip"),
+        "the plan's note about the security chip is not on the console: {console}"
+    );
+    ensure!(
+        !console.contains(GERMAN.passphrase)
+            && !console.contains("Zebra")
+            && !console.contains("Süß")
+            && !console.contains(PASSWORD),
+        "a secret of the answers reached the serial console"
+    );
+    ensure!(
+        count_markers(&console, "ILEX-INSTALLER", Some("page")) == 0,
+        "an interface drew a page during an unattended installation: {console}"
+    );
+    drop(guest);
+    volume.unchanged()?;
+
+    // The disk, booted: the prompt is answered with the German keys.
+    let mut config = VmConfig::new(format!("{}-t", layout.purpose()), layout.target(&root));
+    config.snapshot = true;
+    config.memory = "4G".into();
+    let mut installed = Vm::boot(&ws, &config)?;
+    encrypted::unlock(&mut installed, GERMAN.keys, &artifacts, "next-unattended-encrypted")
+        .context("unlocking the installed disk at its prompt")?;
+    installed
+        .wait_ssh(PAGE_TIMEOUT)
+        .context("the unlocked disk did not come up")?;
+    let save = |file: &str, text: &str| {
+        let _ = qemu::write_artifact(&artifacts, &format!("next-{name}-{file}"), text);
+    };
+    check_installed(
+        &save,
+        &installed,
+        &Expected {
+            digest: &digest,
+            target: "ghcr.io/reidond/ilex:generic.gnome",
+            host: "ilextest",
+            zone: "Europe/Berlin",
+            locale: "de_DE.UTF-8",
+            keymap: GERMAN.keymap,
+            layout: GERMAN.layout,
+            admin: ADMIN,
+            password: PASSWORD,
+            stamp: &[],
+        },
+    )?;
+    encrypted::booted_encrypted(&installed, None, &GERMAN, &save)?;
+    gdm_screenshot(
+        &mut installed,
+        &artifacts.join(format!("next-{name}-gdm.png")),
+    )?;
+    Ok(())
 }
 
 fn fixtures(name: &str) -> Result<PathBuf> {

@@ -19,7 +19,7 @@
 use super::*;
 
 /// One passphrase and the keyboard it is typed on.
-pub(super) struct Variant {
+pub(crate) struct Variant {
     pub name: &'static str,
     /// The console keymap the installation is asked for.
     pub keymap: &'static str,
@@ -35,7 +35,7 @@ pub(super) struct Variant {
 /// A passphrase with what a person types: spaces, quotes, a colon, an
 /// ampersand. It must survive the memfd, the bus, repart's key file,
 /// cryptsetup and the console prompt.
-pub(super) const US: Variant = Variant {
+pub(crate) const US: Variant = Variant {
     name: "encrypted",
     keymap: "us",
     layout: "us",
@@ -47,7 +47,7 @@ pub(super) const US: Variant = Variant {
 /// keys a US keyboard has `[`, `-` and `/` on. Neither run's characters are the
 /// same keys on the other layout, so a prompt that is not in the layout the
 /// passphrase was typed in cannot open the volume.
-pub(super) const GERMAN: Variant = Variant {
+pub(crate) const GERMAN: Variant = Variant {
     name: "encrypted-german",
     keymap: "de-nodeadkeys",
     layout: "de",
@@ -244,14 +244,16 @@ pub(super) fn run(variant: &'static Variant) -> Result<()> {
         finished.outcome,
         finished.log.join("\n")
     );
+    // (A poll every few seconds misses the short stages; the signals below
+    // say that every one of them ran.)
     let order: Vec<Stage> = {
         let mut stages: Vec<Stage> = trace.seen.iter().map(|(s, _)| *s).collect();
         stages.dedup();
         stages
     };
     ensure!(
-        order.windows(2).all(|w| w[0] <= w[1]) && order.contains(&Stage::Encrypt),
-        "the stages seen: {order:?}"
+        order.windows(2).all(|w| w[0] <= w[1]),
+        "the stages went backwards: {order:?}"
     );
     let signals = ok(&vm, "kill $(cat /run/monitor.pid) || true; sleep 1; cat /run/signals.json")?;
     ensure!(
@@ -367,7 +369,9 @@ umount /run/stick
             stamp: &[],
         },
     )?;
-    booted_encrypted(&installed, &found, variant, &bench)?;
+    booted_encrypted(&installed, Some(&found.uuid), variant, &|name, text| {
+        bench.save(name, text)
+    })?;
     gdm_screenshot(
         &mut installed,
         &bench.artifacts.join(format!("installer-{}-gdm.png", variant.name)),
@@ -493,10 +497,21 @@ fn encrypted_inspected(text: &str, plan: &Plan, variant: &Variant) -> Result<Fou
     want("disk_swaps", "0")?;
     want("var_inside", "yes")?;
     want("var_on_boot", "no")?;
-    let partitions = field(text, "partitions")?;
+    // Three partitions and no more (no swap): the ESP, /boot and the volume.
+    let partitions: std::collections::BTreeSet<&str> = field(text, "partitions")?
+        .split(';')
+        .filter(|p| !p.is_empty())
+        .collect();
     ensure!(
-        partitions == "ilex-root crypto_LUKS;ilex-boot ext4;ilex-esp vfat;",
-        "the partitions: {partitions}"
+        partitions
+            == [
+                "ilex-esp vfat",
+                "ilex-boot ext4",
+                "ilex-root crypto_LUKS"
+            ]
+            .into_iter()
+            .collect(),
+        "the partitions: {partitions:?}"
     );
     // The record the first boot reads: passphrase only, nothing enrolled.
     let setup: Value = serde_json::from_str(field(text, "setup")?)?;
@@ -566,6 +581,8 @@ impl Bench {
 /// passphrase typed before the prompt exists would be typed into the boot
 /// loader or lost.
 pub(crate) fn unlock(vm: &mut Vm, keys: &str, artifacts: &Path, name: &str) -> Result<()> {
+    // (The VM may not be ours to wait on for ever: a prompt that never comes is
+    // an error with a screenshot, never a hang.)
     let ctl = Vmctl::from_info(vm.info.clone());
     let serial = vm.info.dir.join("serial.log");
     let started = Instant::now();
@@ -611,9 +628,21 @@ pub(crate) fn unlock(vm: &mut Vm, keys: &str, artifacts: &Path, name: &str) -> R
     Ok(())
 }
 
-/// What the unlocked, booted system says of its encryption.
-fn booted_encrypted(vm: &Vm, found: &Found, variant: &Variant, bench: &Bench) -> Result<()> {
-    let uuid = &found.uuid;
+/// What the unlocked, booted system says of its encryption. `uuid` is the
+/// volume's, when the caller knows it (it has read the disk); otherwise the
+/// booted system says it.
+pub(crate) fn booted_encrypted(
+    vm: &Vm,
+    uuid: Option<&str>,
+    variant: &Variant,
+    save: &dyn Fn(&str, &str),
+) -> Result<()> {
+    let own = ok(vm, "cryptsetup luksUUID /dev/disk/by-partlabel/ilex-root")?;
+    ensure!(
+        uuid.is_none_or(|known| known == own),
+        "the volume's UUID is {own} when booted, {uuid:?} on the disk"
+    );
+    let uuid = &own;
     let out = ok(
         vm,
         &format!(
@@ -641,7 +670,7 @@ echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} 
             pass = base64(variant.passphrase.as_bytes())
         ),
     )?;
-    bench.save("booted-encryption.txt", &redact(&out, variant));
+    save("booted-encryption.txt", &redact(&out, variant));
     println!(
         "{}",
         redact(&out, variant)

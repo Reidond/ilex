@@ -46,7 +46,7 @@ use serde_json::{Value, json};
 use crate::common;
 use crate::selinux;
 
-mod encrypted;
+pub(crate) mod encrypted;
 
 const GIB: u64 = 1 << 30;
 /// The disk that is installed to: sparse, larger than the least a plan wants.

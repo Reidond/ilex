@@ -61,6 +61,9 @@ const TRY_SECRET: &str = "hunter2tryfield";
 const OVERRIDE_TAG: &str = "ms-7c35.gnome";
 /// A tag no edition offers.
 const UNKNOWN_TAG: &str = "ms-7c35.kde";
+/// The disk's passphrase the account trial types (the US keyboard's).
+const PASSPHRASE: &str = crate::installer::apply::encrypted::US.keys;
+
 /// The administrator's password the account trial types.
 pub(super) const PASSWORD: &str = "correct horse battery";
 /// How long the interface is given to answer one key press.
@@ -572,6 +575,42 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     wait_page(vm, &ctl, artifacts, "account-disk")?;
     ctl.save_screenshot(&artifacts.join("next-account-disk.png"))?;
     ctl.key("Return")?;
+    // The encryption page: encryption is on and Continue waits for a
+    // passphrase typed twice (the passphrase field has the focus; a password
+    // row has two stops, its text and the button that shows what was typed).
+    let encryption = wait_page_marker(vm, &serial, "encryption", EVENT_TIMEOUT)?;
+    ensure!(
+        field(&encryption, "encryption")? == "on" && field(&encryption, "keyboard")? == "us",
+        "the encryption page: {encryption:?}"
+    );
+    wait_page(vm, &ctl, artifacts, "account-encryption")?;
+    ctl.save_screenshot(&artifacts.join("next-account-encryption-empty.png"))?;
+    // Enter in the empty field does not continue.
+    ctl.key("Return")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ensure!(
+        !console(&serial)?.contains("ILEX-INSTALLER page=account"),
+        "Enter on an empty passphrase continued"
+    );
+    ctl.type_text(PASSPHRASE)?;
+    ctl.key("Tab")?;
+    ctl.key("Tab")?;
+    // A confirmation that is not the passphrase does not continue either.
+    ctl.type_text("not the passphrase")?;
+    ctl.key("Return")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ensure!(
+        !console(&serial)?.contains("ILEX-INSTALLER page=account"),
+        "Enter on a mismatched confirmation continued"
+    );
+    wait_page(vm, &ctl, artifacts, "account-encryption-mismatch")?;
+    ctl.save_screenshot(&artifacts.join("next-account-encryption-mismatch.png"))?;
+    // Select all and retype it right.
+    ctl.key("ctrl+a")?;
+    ctl.type_text(PASSPHRASE)?;
+    std::thread::sleep(Duration::from_secs(1));
+    ctl.save_screenshot(&artifacts.join("next-account-encryption-filled.png"))?;
+    ctl.key("Return")?;
     wait_page_marker(vm, &serial, "account", EVENT_TIMEOUT)?;
     wait_page(vm, &ctl, artifacts, "account")?;
     ctl.save_screenshot(&artifacts.join("next-account-empty.png"))?;
@@ -603,8 +642,8 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     // The password is nowhere on the serial console...
     let text = console(&serial)?;
     ensure!(
-        !text.contains(PASSWORD),
-        "the password reached the serial console"
+        !text.contains(PASSWORD) && !text.contains(PASSPHRASE) && !text.contains("Holly"),
+        "the password or the passphrase reached the serial console"
     );
     no_try_text(&serial)?;
     // ...and nowhere in the guest's journal, where the interface's stdout (the
@@ -618,6 +657,7 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
          echo markers=$(grep -c -e '^ILEX-INSTALLER page=review edition=gnome check=ok' /tmp/journal.txt); \
          echo password=$(grep -c -e '[c]orrect horse battery' -e '[h]orse batt' /tmp/journal.txt); \
+         echo passphrase=$(grep -c -E -e '[P]lant-the-' -e '[b]erries' -e '[n]ot the passphrase' /tmp/journal.txt); \
          echo tried=$(grep -c -e '[h]unter2tryfield' /tmp/journal.txt); \
          echo focus=$(grep -c -e 'GtkText - [d]id not receive a focus-out' /tmp/journal.txt); \
          rm -f /tmp/journal.txt",
@@ -625,6 +665,7 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     ensure!(
         !count.contains("markers=0")
             && count.contains("password=0")
+            && count.contains("passphrase=0")
             && count.contains("tried=0")
             && count.contains("focus=0"),
         "the journal holds the review page's marker, no password or test-field text and no \

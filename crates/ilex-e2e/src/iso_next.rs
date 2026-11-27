@@ -150,6 +150,7 @@ pub fn trials() -> Vec<Trial> {
             helper::run(helper::Medium::Cdrom)
         }),
         trial("iso::next_unattended", unattended::run),
+        trial("iso::next_unattended_encrypted", unattended::run_encrypted),
         trial("iso::next_unattended_fat", unattended::run_fat),
         trial("iso::next_unattended_late", unattended::run_late),
         trial("iso::next_unattended_repeat", unattended::run_repeat),

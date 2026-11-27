@@ -87,7 +87,7 @@ pub fn layout_line(layout: Option<&Layout>) -> String {
 }
 
 /// The paragraph at the top of the page.
-pub const INTRODUCTION: &str = "The disk's contents are encrypted, so that nobody who has the disk or the computer can read them without the passphrase. The computer asks for it every time it starts: if it is forgotten, the data cannot be recovered.";
+pub const INTRODUCTION: &str = "Encryption keeps what is on the disk unreadable to anyone who has the disk or the computer but not the passphrase. The computer asks for the passphrase every time it starts. If it is forgotten, the data cannot be recovered.";
 
 /// The line under the switch while encryption is off.
 pub const OFF_LINE: &str = "Without encryption, anyone who has the disk can read everything on it.";

@@ -5,14 +5,17 @@
 //! (`ILEX-INSTALLER page=…`, `event=…`) and a screenshot of it is kept.
 //!
 //! * `iso::next_keyboard_install`: a complete interactive installation by
-//!   keyboard: the welcome, machine, disk and administrator pages, the review,
+//!   keyboard: the welcome, machine, disk, encryption (the passphrase typed
+//!   twice) and administrator pages, the review,
 //!   the erase confirmation (cancelled once with Escape, then accepted), the
 //!   installing page to the end, the done page's Power off; then the disk that
-//!   was installed boots on its own and every `installer::install` assertion
-//!   holds (the digest the plan pinned, the origin that enforces the signature
+//!   was installed boots on its own, asks for the passphrase at its boot
+//!   prompt (typed through QMP) and every `installer::install` assertion holds
+//!   (the digest the plan pinned, the origin that enforces the signature
 //!   policy, the administrator's password and `sudo`, the answers applied, the
-//!   system running, GDM up). The password is on neither the serial console
-//!   nor in the guest's journal.
+//!   system running, GDM up), with the root on the mapped LUKS2 volume. Neither
+//!   the password nor the passphrase is on the serial console or in the
+//!   guest's journal.
 //! * `iso::next_reattach`: the interface is killed while the helper's `Apply` is
 //!   still checking (a fixed test credential holds it for a minute after it took
 //!   its lock, as a slow registry would: `State` then says `starting` over the
@@ -61,6 +64,7 @@ use super::{
     field, is_marker, iso_path, trial, wait_firmware_output, wait_page, words,
 };
 use crate::common;
+use crate::installer::apply::encrypted::{self, US};
 use crate::installer::apply::{
     ADMIN, Expected, PASSWORD, busctl, check_installed, document, gdm_screenshot, refusal, ssh,
 };
@@ -308,9 +312,10 @@ fn from_welcome(
     unavailable: &str,
 ) -> Result<()> {
     let before = |page: &'static str| count(serial, is_page(page));
-    let (machines, disks, accounts, reviews) = (
+    let (machines, disks, encryptions, accounts, reviews) = (
         before("machine")?,
         before("disk")?,
+        before("encryption")?,
         before("account")?,
         before("review")?,
     );
@@ -344,6 +349,29 @@ fn from_welcome(
     );
     wait_page(vm, ctl, artifacts, &format!("{name}-disk"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-disk.png")))?;
+    ctl.key("Return")?;
+    // The encryption page: on, with the layout the passphrase is typed in. The
+    // passphrase field has the focus; a password row has two stops (its text
+    // and the button that shows what was typed).
+    let encryption = nth_marker(
+        vm,
+        serial,
+        "the encryption page",
+        encryptions + 1,
+        EVENT_TIMEOUT,
+        is_page("encryption"),
+    )?;
+    ensure!(
+        field(&encryption, "encryption")? == "on" && field(&encryption, "keyboard")? == "us",
+        "the encryption page: {encryption:?}"
+    );
+    wait_page(vm, ctl, artifacts, &format!("{name}-encryption"))?;
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-encryption.png")))?;
+    ctl.type_text(US.keys)?;
+    ctl.key("Tab")?;
+    ctl.key("Tab")?;
+    ctl.type_text(US.keys)?;
+    std::thread::sleep(Duration::from_secs(1));
     ctl.key("Return")?;
     nth_marker(
         vm,
@@ -517,8 +545,11 @@ fn helper_probe(vm: &Vm) -> Result<Probe> {
 fn no_password(vm: &mut Vm, serial: &Path) -> Result<()> {
     let text = console(serial)?;
     ensure!(
-        !text.contains(PASSWORD) && !text.contains("orrect horse:"),
-        "the password reached the serial console"
+        !text.contains(PASSWORD)
+            && !text.contains("orrect horse:")
+            && !text.contains(US.passphrase)
+            && !text.contains("Holly"),
+        "the password or the passphrase reached the serial console"
     );
     no_try_text(serial)?;
     vm.wait_ssh(Duration::from_secs(180))
@@ -527,13 +558,16 @@ fn no_password(vm: &mut Vm, serial: &Path) -> Result<()> {
     // itself.
     let count = vm.ssh_ok(
         "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
-         echo password=$(grep -c -F -e '[C]orrect horse:' -e '[s]taple' /tmp/journal.txt); \
+         echo password=$(grep -c -E -e '[C]orrect horse:' -e '[s]taple' /tmp/journal.txt); \
+         echo passphrase=$(grep -c -E -e '[P]lant-the-' -e '[b]erries' /tmp/journal.txt); \
          echo markers=$(grep -c -e '^ILEX-INSTALLER event=stage' /tmp/journal.txt); \
          rm -f /tmp/journal.txt",
     )?;
     ensure!(
-        count.contains("password=0") && !count.contains("markers=0"),
-        "the journal holds the interface's markers and no password: {count}"
+        count.contains("password=0")
+            && count.contains("passphrase=0")
+            && !count.contains("markers=0"),
+        "the journal holds the interface's markers and no password or passphrase: {count}"
     );
     Ok(())
 }
@@ -624,14 +658,17 @@ fn keyboard_install() -> Result<()> {
     config.snapshot = true;
     config.memory = "4G".into();
     let mut installed = Vm::boot(&ws, &config)?;
+    // The disk is encrypted: the passphrase is typed at its boot prompt.
+    encrypted::unlock(&mut installed, US.keys, &artifacts, "next-keyboard-install")
+        .context("unlocking the installed disk at its prompt")?;
     installed
         .wait_ssh(PAGE_TIMEOUT)
-        .context("the installed disk did not come up")?;
+        .context("the unlocked disk did not come up")?;
+    let save = |file: &str, text: &str| {
+        let _ = qemu::write_artifact(&artifacts, &format!("next-keyboard-install-{file}"), text);
+    };
     check_installed(
-        &|file, text| {
-            let _ =
-                qemu::write_artifact(&artifacts, &format!("next-keyboard-install-{file}"), text);
-        },
+        &save,
         &installed,
         &Expected {
             digest: &digest,
@@ -646,6 +683,7 @@ fn keyboard_install() -> Result<()> {
             stamp: &[],
         },
     )?;
+    encrypted::booted_encrypted(&installed, None, &US, &save)?;
     gdm_screenshot(
         &mut installed,
         &artifacts.join("next-keyboard-install-gdm.png"),
