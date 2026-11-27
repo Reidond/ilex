@@ -2592,7 +2592,26 @@ the Windows paths of this change: no Windows host was available.
   installed by `semodule -n -i` in the Containerfile like the OS image's
   `ilex-homed.cil`. Its rules are the answer to denials the trials recorded and
   nothing else (the file says which): no permissive domain and no `dontaudit`,
-  which would hide the records the trials count. TODO-RULES
+  which would hide the records the trials count. There are two. The helper's
+  file is labelled `install_exec_t` (`filecon`), so systemd's own
+  `type_transition init_t install_exec_t:process install_t` runs it, and its
+  answers program, in `install_t`: the domain Fedora gives its installers
+  (Anaconda and initial-setup run in it, and `bootc` is `install_exec_t`), which
+  has the `mac_admin` that bootc's `chcon` probe of an undefined label needs
+  and is an unconfined domain like `unconfined_service_t`. As
+  `unconfined_service_t`, where an unlabeled program lands, `bootc` is denied
+  `capability2 mac_admin` twice (the probe) and then stops with `Failed to enter
+  install_t`, because Fedora lets `init_t` make that transition and not
+  `unconfined_service_t`; the alternative of allowing that domain `mac_admin` or
+  the transition would grant it to every service without a policy of its own,
+  and `BOOTC_SETENFORCE0_FALLBACK` is a switch to permissive. The second rule,
+  `allow install_t install_t:file mounton`, is the one Fedora grants
+  `unconfined_t` for the `(mkfs)` child of `systemd-repart`, which mounts over
+  its own `/proc/<pid>/mounts`. Nothing else was denied through a whole
+  installation (probe, plan, wipe, repart, mkfs, mounts, `bootc`, `useradd`,
+  `chpasswd`, `setfiles`, the `EXT4_IOC_CHECKPOINT` ioctl and the stamp's
+  `ro,noload` mount, the answers volume's read-only mount, `/run/ilex-installer`
+  records, `finalise`), run as the unattended and the interactive trials run it.
   The installer's own units and programs (the session script, GNOME Kiosk,
   the interface, the fallback watcher) have no types of their own: systemd
   starts them from `/usr/libexec` and `/usr/bin` (`bin_t`), which Fedora runs as
@@ -2629,7 +2648,17 @@ the Windows paths of this change: no Windows host was available.
   `::plan` and `::ui` VMs are bcvk's: a virtiofs root cannot carry labels, so
   SELinux is off there (`getenforce` says `Disabled`, asserted) and the ISO's
   trials are what shows the helper under enforcing.
-  TODO-MEASURED
+  **Measured 2026-11-27** against the same image built without the labelling
+  (the permissive ISO of the commit before): the ISO is 1,501,024,256 bytes
+  against 1,499,465,728 (+1.49 MiB: the xattrs in the squashfs, the module, the
+  wrapper's stage); power-on to the drawn page 21.0, 22.0 and 21.0 seconds
+  against 19.0, 23.0 and 22.0 (no change beyond the run-to-run spread), the
+  guest's uptime at the page 7.2, 7.6 and 7.2 seconds against 5.8, 7.2 and 7.0
+  (about 0.7 s for the policy load and `systemd`'s re-execution), memory in use
+  at the page the same (617-628 MiB against 624-634 MiB). Before, every boot
+  logged about 155 permissive denials (all from `kernel_t` on `unlabeled_t`);
+  now it logs none, and the whole `iso::next` tier (26 trials, the two loop ones
+  included) and the `installer::` tier (6) end with `denials=0`.
 - **Serial markers.** The session script and the interface print marker lines
   to the journal and to `/dev/ttyS0` (the user is in `dialout`):
   `ILEX-INSTALLER-SESSION compositor=… graphics=default|basic secure-boot=0|1`,
@@ -2670,7 +2699,10 @@ the Windows paths of this change: no Windows host was available.
   `cargo ilexctl test iso::next` builds the ISO (or uses
   `ILEX_ISO_NEXT=<path>`) and needs no OS image. Markers are matched as
   complete lines by their first word and a key, never as substrings, and a
-  missing field is an error with the console in it, not a panic.
+  missing field is an error with the console in it, not a panic. Every one of
+  these trials, and the disk-booted `installer::` ones, ends with the SELinux
+  check of `crates/ilex-e2e/src/selinux.rs` (see "SELinux" above): enforcing and
+  not one denial, or the trial fails and prints them.
   - The two boot trials start the ISO under QEMU/KVM with Secure Boot required
     (the secure fixture path with `security_launch=qualification_fixture`: it
     requires provisioning, that is KVM with SMM and a Secure Boot firmware
@@ -3459,11 +3491,12 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     and mounts a `proc` at its `/proc`, runs `useradd --root <deployment>
     --create-home --groups wheel` and `chpasswd --root <deployment>` (password on
     standard input), and unmounts both. The `/proc` is not decoration: both tools
-    chroot, and without it libselinux cannot see that SELinux is on, let alone
-    permissive, so `pam_unix` asks whether `passwd` may change a password, is told
-    no for the live system's unlabeled domain and `chpasswd` fails with
-    "Authentication token manipulation error" (reproduced on the ISO's layout; it
-    works with SELinux disabled, or with `/proc`). It then verifies the `passwd`,
+    chroot, and without it libselinux cannot see that SELinux is on, so
+    `pam_unix` asks whether `passwd` may change a password and is refused
+    (`chpasswd` fails with "Authentication token manipulation error"; reproduced
+    on the unlabeled ISO, where the helper ran as `kernel_t`; it works with
+    SELinux disabled, or with `/proc`). Under enforcing the helper runs in
+    `install_t`, which is unconfined, and nothing here is denied. It then verifies the `passwd`,
     `shadow` (a hash) and `group` entries and relabels what the helper wrote with
     `setfiles -c <the deployment's compiled policy> -F -r <deployment>` against
     the deployment's own `file_contexts` (`/etc/passwd`, `shadow`, ...,

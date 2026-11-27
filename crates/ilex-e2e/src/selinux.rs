@@ -135,8 +135,9 @@ pub(crate) fn check_waiting(
     artifacts: &Path,
     name: &str,
 ) -> Result<()> {
-    vm.wait_ssh(Duration::from_secs(180))
-        .with_context(|| format!("{name}: the harness's SSH key did not give a login to the live ISO"))?;
+    vm.wait_ssh(Duration::from_secs(180)).with_context(|| {
+        format!("{name}: the harness's SSH key did not give a login to the live ISO")
+    })?;
     check(vm, artifacts, name)
 }
 
@@ -197,7 +198,9 @@ pub(crate) fn check_tty2(
             }
             std::thread::sleep(Duration::from_secs(1));
         }
-        eprintln!("{name}: no SELinux report on the second UART after typing it (attempt {attempt})");
+        eprintln!(
+            "{name}: no SELinux report on the second UART after typing it (attempt {attempt})"
+        );
     }
     bail!("{name}: tty2's shell never printed the SELinux report on the second UART")
 }

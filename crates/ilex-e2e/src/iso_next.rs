@@ -77,6 +77,10 @@
 //!   stick, every device the log must not go to refused, Try again, and a helper
 //!   killed mid-installation.
 //!
+//! Every trial ends with `selinux::check` (or reads the same report from the
+//! console, for a guest that powers itself off): the ISO boots SELinux
+//! enforcing and the audit log of the trial's boot holds no denial.
+//!
 //! The boot trials use `SecurityLaunch::QualificationFixture`: provisioning
 //! (KVM with SMM, a Secure Boot firmware pair) is required, a passing
 //! qualification of the host is not. They measure whatever the host gives them

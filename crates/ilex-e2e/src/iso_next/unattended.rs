@@ -76,8 +76,8 @@ use super::{
     wait_firmware_output, wait_for_marker,
 };
 use crate::common;
-use crate::selinux;
 use crate::installer::apply::{ADMIN, Expected, PASSWORD, check_installed, gdm_screenshot};
+use crate::selinux;
 
 /// The target's virtual size (`41G` for qemu-img): how the harness finds it in
 /// a probe, since the id a virtio disk gets without a serial is its PCI slot.
@@ -639,8 +639,14 @@ fn refuse_invalid(root: &Path, artifacts: &Path, layout: &Layout) -> Result<Stri
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-invalid"))
-        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-invalid")))?;
+    let console = wait_result(
+        vm,
+        &serial,
+        PAGE_TIMEOUT,
+        artifacts,
+        &format!("{name}-invalid"),
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-invalid")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-invalid-serial.txt")),
         &console,
@@ -690,8 +696,14 @@ fn refuse_bus_path(root: &Path, artifacts: &Path, layout: &Layout, id: &str) -> 
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-bus-path"))
-        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-bus-path")))?;
+    let console = wait_result(
+        vm,
+        &serial,
+        PAGE_TIMEOUT,
+        artifacts,
+        &format!("{name}-bus-path"),
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-bus-path")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-bus-path-serial.txt")),
         &console,
@@ -763,8 +775,14 @@ fn refuse_confirmation(root: &Path, artifacts: &Path, layout: &Layout) -> Result
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-confirmation"))
-        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-confirmation")))?;
+    let console = wait_result(
+        vm,
+        &serial,
+        PAGE_TIMEOUT,
+        artifacts,
+        &format!("{name}-confirmation"),
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-confirmation")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-confirmation-serial.txt")),
         &console,
@@ -831,8 +849,14 @@ fn refuse_existing(root: &Path, artifacts: &Path, layout: &Layout, target: &str)
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-existing"))
-        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-existing")))?;
+    let console = wait_result(
+        vm,
+        &serial,
+        PAGE_TIMEOUT,
+        artifacts,
+        &format!("{name}-existing"),
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-existing")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-existing-serial.txt")),
         &console,
@@ -953,8 +977,14 @@ fn refuse_whole_disk(root: &Path, artifacts: &Path, layout: &Layout, target: &st
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-whole-disk"))
-        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-whole-disk")))?;
+    let console = wait_result(
+        vm,
+        &serial,
+        PAGE_TIMEOUT,
+        artifacts,
+        &format!("{name}-whole-disk"),
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-whole-disk")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-whole-disk-serial.txt")),
         &console,
@@ -1026,8 +1056,14 @@ fn refuse_live_medium(root: &Path, artifacts: &Path, layout: &Layout, live: &str
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-medium"))
-        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-medium")))?;
+    let console = wait_result(
+        vm,
+        &serial,
+        PAGE_TIMEOUT,
+        artifacts,
+        &format!("{name}-medium"),
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-medium")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-medium-serial.txt")),
         &console,
@@ -1578,8 +1614,14 @@ fn refused_boot(
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-{tag}"))
-        .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-{tag}")))?;
+    let console = wait_result(
+        vm,
+        &serial,
+        PAGE_TIMEOUT,
+        artifacts,
+        &format!("{name}-{tag}"),
+    )
+    .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-{tag}")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-{tag}-serial.txt")),
         &console,
@@ -1698,8 +1740,14 @@ pub(super) fn run_repeat() -> Result<()> {
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_result(vm, &serial, PAGE_TIMEOUT, &artifacts, &format!("{name}-edited"))
-        .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-edited")))?;
+    let console = wait_result(
+        vm,
+        &serial,
+        PAGE_TIMEOUT,
+        &artifacts,
+        &format!("{name}-edited"),
+    )
+    .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-edited")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-edited-serial.txt")),
         &console,

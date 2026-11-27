@@ -228,6 +228,7 @@ fn boot() -> Result<Mutex<EphemeralVm>> {
 fn selinux_mode(vm: &EphemeralVm) -> Result<()> {
     let mode = guest_script(vm, "getenforce", "getenforce")?;
     let mode = mode.trim();
+    eprintln!("ilex: the ephemeral installer VM has SELinux {mode}");
     match mode {
         "Disabled" => Ok(()),
         "Enforcing" => {
@@ -236,7 +237,9 @@ fn selinux_mode(vm: &EphemeralVm) -> Result<()> {
             let report = guest_script(vm, crate::selinux::REPORT, "the SELinux report")?;
             crate::selinux::assert_report(&report, &artifacts, "installer-ephemeral")
         }
-        other => bail!("the ephemeral installer VM is {other}: expected Disabled (bcvk) or a clean Enforcing"),
+        other => bail!(
+            "the ephemeral installer VM is {other}: expected Disabled (bcvk) or a clean Enforcing"
+        ),
     }
 }
 
