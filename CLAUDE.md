@@ -2645,7 +2645,7 @@ the Windows paths of this change: no Windows host was available.
   always says 0 cannot pass. The disk-booted `installer::policy`, `::install`
   and `::interrupted` trials boot the live image enforcing too (they no longer
   `setenforce 0`) and end with the same check. The ephemeral `installer::probe`,
-  `::plan` and `::ui` VMs are bcvk's: a virtiofs root cannot carry labels, so
+  `::plan`, `::ui` and `::finish` VMs are bcvk's: a virtiofs root cannot carry labels, so
   SELinux is off there (`getenforce` says `Disabled`, asserted) and the ISO's
   trials are what shows the helper under enforcing.
   **Measured 2026-11-27** against the same image built without the labelling
