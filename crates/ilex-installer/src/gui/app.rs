@@ -1343,13 +1343,15 @@ impl Widgets {
         if e.switch.is_active() != flow.encrypt() {
             e.switch.set_active(flow.encrypt());
         }
-        // The choices cannot change while the helper checks them. A field that
-        // has the focus gives it up first (GTK warns when a focused text
-        // becomes insensitive).
+        // The choices cannot change while the helper checks them (or while it is
+        // asked where an installation is, which is how the application starts).
+        // A field of this page that has the focus gives it up first (GTK warns
+        // when a focused text becomes insensitive); one that has it elsewhere
+        // keeps it: the welcome page's first control has it at the start.
         let editable = !flow.is_frozen();
         if e.switch.is_sensitive() != editable {
-            if !editable && let Some(root) = e.page.root() {
-                root.set_focus(None::<&gtk::Widget>);
+            if !editable {
+                release_focus(&e.page);
             }
             e.switch.set_sensitive(editable);
         }
@@ -1358,8 +1360,8 @@ impl Widgets {
         e.layout.set_visible(flow.encrypt());
         e.off.set_visible(!flow.encrypt());
         if e.passphrase.is_sensitive() != typing {
-            if !typing && let Some(root) = e.page.root() {
-                root.set_focus(None::<&gtk::Widget>);
+            if !typing {
+                release_focus(&e.page);
             }
             e.passphrase.set_sensitive(typing);
             e.confirmation.set_sensitive(typing);
@@ -1458,6 +1460,18 @@ impl Widgets {
         a.button.set_label(flow.continue_label());
         a.button
             .set_sensitive(flow.page() != PageId::Account || flow.can_continue());
+    }
+}
+
+/// Take the focus away from the window if a widget of `page` has it, and from
+/// no other: a page that is not shown must not clear the focus of the one that
+/// is (the welcome page's first control has it when the application starts).
+fn release_focus(page: &adw::NavigationPage) {
+    if let Some(root) = page.root()
+        && let Some(focus) = root.focus()
+        && focus.is_ancestor(page)
+    {
+        root.set_focus(None::<&gtk::Widget>);
     }
 }
 
