@@ -4525,7 +4525,8 @@ the erase on the review page.
     the interface while the helper's `Apply` is checking (the harness reads
     `State` over SSH until it says `starting` over the previous record, the old
     interface is still on the review page, waiting for an answer it will never
-    read), then in the image stage, then the compositor: each time the first
+    read), then the compositor in the image stage (the session unit allows
+    three starts in five minutes, so two kills): each time the first
     page the session shows is the installing page (`reattached=true`, never the
     welcome page; the first time `stage=starting progress=0`, every stage
     waiting), the helper's installation is the plan that was being checked and

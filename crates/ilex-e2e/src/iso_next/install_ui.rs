@@ -16,10 +16,11 @@
 //! * `iso::next_reattach`: the interface is killed while the helper's `Apply` is
 //!   still checking (a fixed test credential holds it for a minute after it took
 //!   its lock, as a slow registry would: `State` then says `starting` over the
-//!   previous record), then in the middle of the image stage, and then the
-//!   compositor: each time the session comes back on the installing page (not on
-//!   the welcome page; the first time with every stage waiting), the
-//!   installation goes on undisturbed and the done page follows.
+//!   previous record), and then the compositor in the middle of the image stage:
+//!   each time the session comes back on the installing page (not on the welcome
+//!   page; the first time with every stage waiting), the installation goes on
+//!   undisturbed and the done page follows. (The session unit allows three
+//!   starts in five minutes: two kills.)
 //! * `iso::next_problem`: the image stage fails (a fixed test credential makes
 //!   it fail before `bootc` runs, as a pull that fails does) and the problem
 //!   page says so; the log is saved to a USB stick by keyboard and the file is
@@ -719,9 +720,11 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
     ctl.save_screenshot(&artifacts.join("next-reattach-starting-review.png"))?;
     let welcomes = count(serial, is_page("welcome"))?;
     // The interface is killed in that window, then (in the image stage) the
-    // interface again, and the compositor: each time the session comes back on
-    // the installing page (the first page it shows says so), not on the
-    // welcome page, and the installation is the one the helper took.
+    // compositor: each time the session comes back on the installing page (the
+    // first page it shows says so), not on the welcome page, and the
+    // installation is the one the helper took. (The session unit's start limit
+    // is three in five minutes, the first start included: a third kill would
+    // end the session.)
     let mut round = 0;
     vm.ssh_ok(KILL_INSTALLER)?;
     round += 1;
@@ -760,10 +763,7 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
         first.active && first.starting.is_none() && first.applied.as_deref() == Some(plan.as_str()),
         "the installation is not the one Apply was checking: {first:?}"
     );
-    for (what, kill) in [
-        ("interface", KILL_INSTALLER),
-        ("compositor", KILL_COMPOSITOR),
-    ] {
+    for (what, kill) in [("compositor", KILL_COMPOSITOR)] {
         vm.ssh_ok(kill)?;
         round += 1;
         // The first page the new interface shows says it found the
