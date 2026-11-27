@@ -106,7 +106,7 @@ use libtest_mimic::{Failed, Trial};
 use crate::common;
 use crate::iso::grub_key;
 use crate::selinux;
-use kde::{kde_session, kwin_close_windows};
+use kde::{kde_session, kwin_close_windows, kwin_keys};
 
 mod helper;
 mod install_ui;
@@ -1374,6 +1374,12 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path, edition: Edition, name: &str) 
         "the page is gone after a close request"
     );
     ensure!(restarts(vm)? == 0, "a close request restarted the session");
+
+    // 1b. KWin's own shortcuts do nothing in this session (no kglobalacceld,
+    //     `--no-global-shortcuts`): the page stays fullscreen and focused.
+    if edition == Edition::Kde {
+        kwin_keys(vm, &ctl, artifacts, name, &serial)?;
+    }
 
     // 2. The compositor is killed hard: its socket stays in the kept runtime
     //    directory, and the next attempt must come up on the first try.
