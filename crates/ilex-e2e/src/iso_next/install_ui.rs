@@ -744,6 +744,7 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
         count(serial, is_event("attach", "result", "installing"))? >= round,
         "no attach marker after the interface was killed during Apply: {page:?}"
     );
+    wait_page(vm, &ctl, artifacts, "reattach-starting")?;
     ctl.save_screenshot(&artifacts.join("next-reattach-starting.png"))?;
     // The installation the helper then began is the one that was confirmed,
     // and the new interface follows it (the old one never saw its answer).
