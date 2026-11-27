@@ -2837,7 +2837,8 @@ fn refused_window() -> Result<()> {
             && flow.problem_view().is_none()
             && flow
                 .check_problem()
-                .is_some_and(|m| m.title == "The installation did not start")
+                .is_some_and(|m| m.title == "The installation did not start"
+                    && !m.detail.contains("choices are gone"))
             && flow.can_retry(),
         "a helper that came back with nothing begun: {step:?} {:?} {:?}",
         flow.page(),
@@ -2929,7 +2930,8 @@ fn other_installation() -> Result<()> {
             && flow.phase() == Phase::Idle
             && flow
                 .check_problem()
-                .is_some_and(|m| m.title == "The installation did not start")
+                .is_some_and(|m| m.title == "The installation did not start"
+                    && !m.detail.contains("choices are gone"))
             && flow.can_retry()
             && flow.problem_view().is_none(),
         "another plan's Apply was refused: {step:?} {:?} {:?}",
@@ -3043,6 +3045,38 @@ fn interrupted_attach() -> Result<()> {
     ensure!(
         step == Step::Stay && flow.can_install(),
         "Try again after the refusal: {step:?} {:?}",
+        flow.plan_check()
+    );
+    // `Apply` refused as active, and `State` then answers idle: while it is
+    // asked, Erase is not offered on the refused plan, and the idle answer
+    // makes the check again rather than leaving the old plan.
+    let (mut flow, sim) = at_review("generic")?;
+    let Step::Confirm(_) = flow.install() else {
+        bail!("no dialog");
+    };
+    let Step::RunApply { generation, .. } = flow.confirm_install() else {
+        bail!("no apply");
+    };
+    let Step::RunState { generation, .. } = flow.apply_finished(generation, Err(active())) else {
+        bail!("an Apply refused as active does not ask where it is");
+    };
+    ensure!(
+        !flow.can_install() && flow.is_attaching(),
+        "Erase is offered while State is asked after an active refusal: {:?}",
+        flow.plan_check()
+    );
+    let step = flow.state_finished(generation, sim.state());
+    ensure!(
+        matches!(step, Step::RunProbe { .. })
+            && flow.is_checking()
+            && flow.page() == PageId::Review,
+        "an idle helper after an Apply refused as active does not check again: {step:?} {:?}",
+        flow.plan_check()
+    );
+    let step = settle(&mut flow, &sim, step)?;
+    ensure!(
+        step == Step::Stay && flow.can_install(),
+        "the check after an Apply refused as active: {step:?} {:?}",
         flow.plan_check()
     );
     Ok(())

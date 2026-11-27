@@ -541,7 +541,11 @@ impl Flow {
             self.resume_check = false;
             self.check = PlanCheck::Failed(match &refusal {
                 Some(error) => messages::not_started(&ClientError::Refused(error.clone())),
-                None => messages::not_begun(None),
+                // The choices are still here: not the restarted interface's
+                // sentence that says they are gone.
+                None => {
+                    messages::not_started(&ClientError::Other(messages::NOT_BEGUN_CAUSE.to_owned()))
+                }
             });
             self.go(PageId::Review)
         } else {
@@ -801,10 +805,13 @@ impl Flow {
             Err(ClientError::Refused(error)) if error.code == ErrorCode::InstallationActive => {
                 // The helper is installing already (an earlier `Apply` of this
                 // interface whose answer was lost, or another): where it is
-                // is for `State` to say.
+                // is for `State` to say. The plan is no longer one to install
+                // from while that is asked: an idle answer makes the check
+                // again, so Erase is not offered on a plan the helper refused.
                 self.say(markers::install_refused(&error));
                 self.inst.applying = None;
                 self.inst.phase = Phase::Idle;
+                self.check = PlanCheck::NotRun;
                 self.attach_again()
             }
             Err(ClientError::Refused(error)) => {

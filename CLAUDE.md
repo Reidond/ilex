@@ -4160,7 +4160,9 @@ the erase on the review page.
       `Backend::start_installation`). A refusal of `Apply` (the plan is older than
       15 minutes or forgotten, the disk changed, the image's signature) returns to
       the review with its sentence and Try again, which looks at the computer
-      again first. If the answer to `Apply` is lost (the bus, a helper that died as
+      again first. An `installation-active` refusal drops the plan and asks
+      `State`; an idle answer checks the choices again, so Erase is never
+      offered on a plan the helper refused. If the answer to `Apply` is lost (the bus, a helper that died as
       the installation began) the flow asks `State` before it says anything: what
       the helper says is what happened (`not-started` goes back to the review,
       under way continues, silence is the lost page); while `State` says

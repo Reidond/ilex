@@ -340,6 +340,11 @@ pub fn not_started(cause: &ClientError) -> Message {
     )
 }
 
+/// Why an `Apply` the interface waited for did not begin, when the helper
+/// recorded no refusal for it.
+pub const NOT_BEGUN_CAUSE: &str =
+    "The installer's helper did not begin it: it refused it, or it stopped while it checked.";
+
 /// A restarted interface found `Apply` checking and then found that the helper
 /// did not begin: it refused (`why` is the refusal it recorded for that plan), or
 /// it stopped while it checked. The interface has no choices to go back to: it
@@ -347,7 +352,7 @@ pub fn not_started(cause: &ClientError) -> Message {
 pub fn not_begun(why: Option<&PlanError>) -> Message {
     let cause = match why {
         Some(error) => sentence_of(&ClientError::Refused(error.clone()).to_string()),
-        None => "The installer's helper did not begin it: it refused it, or it stopped while it checked.".to_owned(),
+        None => NOT_BEGUN_CAUSE.to_owned(),
     };
     Message::new(
         "The installation did not start",
