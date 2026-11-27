@@ -1,5 +1,3 @@
 /target
 /.task-artifacts/
 /.claude/worktrees/
-# Written by cxx-qt-build for the QML language server.
-.qmlls.ini

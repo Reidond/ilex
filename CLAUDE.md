@@ -3178,7 +3178,11 @@ the Windows paths of this change: no Windows host was available.
     packages (`qt6-qtbase-devel`, `qt6-qtdeclarative-devel`, `gcc-c++`), and
     `cxx-qt-build` warns that GNU ld.bfd "will likely fail" without mold, lld or
     gold: the link works with ld.bfd here. The C++ it generates is not cached by
-    kache (only rustc is).
+    kache (only rustc is). `cxx-qt-build` also writes `.qmlls.ini` into the crate
+    when it is missing, and an ignored or new file in a build input directory makes
+    `ilexctl build` and `ilexctl iso` refuse the checkout (the source inventory
+    cannot attest it), so a placeholder is tracked: the builder leaves an
+    existing file alone.
   - **Fingerprints.** The root images' key and content fingerprint do not
     include `ilex-installer` or any of its dependencies (the closure of the
     declared packages is `ilexctl`, `drupe` and `ilex-enroll`; the declaration
