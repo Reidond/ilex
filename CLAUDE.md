@@ -3444,14 +3444,19 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     written does not begin. `State()` carries `active`, `stages` (each with its
     status and times: the progress page's list), `stage`, `progress` (0 to 1
     within the stage, never going back), `message`, the last 40 lines of what
-    the current stage's tools printed, `disk_changed`, `applied` (the plan) and
-    `outcome`; documents from before `Apply` still parse. The pull's bar is the
+    the current stage's tools printed, `disk_changed`, `applied` (the plan),
+    `summary` (the edition's name, the composition, the image's version and
+    digest and the target disk's id and name, from the plan: what an interface
+    that restarted says on its closing pages, and which disk is the
+    installation's) and `outcome`; documents from before `Apply` still parse. The pull's bar is the
     bytes in use on the target against 2.6 times the download size (measured:
     4,150 MiB in use for 1,688 MiB of layers, 2.46), never above 0.97 until
     `bootc` ends. `Progress`
     is sent at most every half second and at each stage's start; `Finished`
     once. Every tool's output goes to `/run/ilex-installer/log/<plan>/NN-<stage>.log`
-    (0700/0600, command lines and exit codes included).
+    (0700/0600, command lines and exit codes included); the plan the installation
+    was applied from is kept beside them as `plan.json` (the request names the
+    administrator, never the password).
   - **Failure and a helper that dies.** A failed stage names itself and the tool in
     `outcome` (`bootc exited 1: <its last line>`), unmounts what is mounted and
     leaves the partitions as they are with `disk_changed` true; **there is no
@@ -3464,6 +3469,46 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     nothing and starts nothing by itself. (The plan says the unit does not restart
     mid-installation; it does, so that `State()` still answers and the interface
     can show the problem.)
+  - **Finish(action)** ends the session: `restart`, `poweroff` or
+    `save-log:<device id>`. The text is parsed by the model
+    (`FinishAction::parse`, which never quotes what it refuses: `invalid-field`
+    on `action`); the method takes the helper's work lock and is refused with
+    `installation-active` while an installation runs. Restart and power off ask
+    systemd (`systemctl --no-block reboot|poweroff`, run by the root helper: the
+    installer's session user has no polkit action for either and the polkit rule
+    still denies it every other). `save-log` writes **a tarball of the last
+    installation's stage logs and `plan.json`, `state.json`, `lsblk.txt` and a
+    `MANIFEST.txt` (member names fixed by the helper, the last 4 MiB of any one
+    log, 48 MiB at most; no secret is ever passed where a tool could print it)
+    to a USB stick** and answers `{file, device, label, bytes}`. The rule for the
+    device (the model's `check_log_device`, which an interface applies to list the
+    sticks it offers) is, in this order: the device is a disk of a **fresh**
+    probe (`unknown-disk`); not the medium the installer started from
+    (`live-medium`); not the disk the last installation was written to
+    (`install-target`, by the id the state's `summary` recorded **and**, when
+    that id still leads to a device, by device number); **removable**
+    (`not-removable`: a fixed disk is never a place for the log); not in use by
+    the running system and claimable (`in-use`, the same trace and exclusive open
+    every disk gets before it is offered); and with a partition (first in table
+    order) of at least 8 MiB holding FAT, exFAT, ext2/3/4 or NTFS
+    (`no-file-system`: a stick with no partition table is refused, as are LUKS
+    and Linux swap). After that the helper checks against sysfs that the
+    partition is the partition of that disk with the number the probe read, opens
+    it exclusively once to see that nothing holds it, builds the tarball in its
+    private scratch directory (a ustar writer of its own: names are fixed, never
+    a path from the bus) and runs itself (`--write-log`, hidden) under
+    `unshare --mount --propagation private`: the child checks the node's device
+    number, mounts the partition `rw,nodev,nosuid,noexec,sync`, checks in
+    `mountinfo` that what is mounted is that device, creates the file
+    (`ilex-installer-log-<first 8 of the plan>-<unix time>.tar`, `O_EXCL`,
+    `O_NOFOLLOW`, never over an existing file: `-1`, `-2` follow), syncs it and the
+    file system and unmounts; the mount existed in that namespace only. Only the
+    installer's user and root may call it (the bus policy is the other methods').
+    `--self-check` covers the grammar, the rule on a fixture probe, the tar writer
+    (read back by the model's own reader and by GNU `tar`, bad names refused), the
+    writer's refusals and a real write to ext4 and FAT loop devices (the first
+    file, the second under another name, the bytes and mode on the stick, nothing
+    left mounted).
 - **Answers mode** (`ilex-installerd --answers [--then poweroff]`, started by
   `ilex-installer-answers.service`): an installation with no interface, decided
   **at boot only**. `ilex-installer-answers-gate.service` (one-shot, once per
@@ -3992,26 +4037,39 @@ installed disk boots alone and every `installer::install` assertion holds.
 `crates/ilex-installer` is the GNOME edition's GTK 4 + libadwaita (relm4)
 application over it. The KDE edition's Kirigami interface (Qt Quick through
 cxx-qt, a later change) drives the same flow crate: nothing in it knows a
-toolkit, a compositor or a thread. It stops where this version stops: the
-welcome, machine and administrator pages and a closing page; nothing is
-installed, and no page writes to a disk.
+toolkit, a compositor or a thread. This version installs an unencrypted whole
+disk: the welcome, machine, disk and administrator pages, the review with its
+confirmation, the installing page and the three pages an installation ends on
+(done, problem). Nothing is written to a disk before the person has confirmed
+the erase on the review page.
 
 - **The flow crate.** No GTK or Qt types, no `async`.
   - `flow::Flow` is a state machine with no I/O, and **every rule lives
     there**, so that GTK and Kirigami cannot disagree about one: the pages in
-    order (`PageId`: `welcome`, `machine`, `account`, `ready`), what each needs
-    before Continue works (`can_continue`), what Continue does. Every method
-    that can need the helper or the compositor returns a `Step` the interface
-    carries out on a worker: `RunProbe { generation }`, `RunPlan { generation,
-    request }`, `SwitchKeyboard { generation, layout }`, `Goto(page)` (returned
-    whenever the page changed) or `Stay`. The interface calls `start_probe`
-    once, the setters of the page it shows (`set_language`, `set_keyboard`,
-    `select_machine`, `set_administrator`, `set_password(Secret)`,
-    `set_confirmation(Secret)`), `can_continue`, `advance`, `back`, `retry`, and
-    gives each answer back with its generation (`probe_finished`,
-    `plan_finished`, `keyboard_switched`). It never calls the helper itself,
-    so GTK drives it from relm4 messages and commands and Kirigami will from
-    cxx-qt signals and a worker thread.
+    order (`PageId`: the walk `welcome`, `machine`, `disk`, `account`, `review`,
+    then `installing`, `done` and `problem`, which nobody goes back from), what
+    each needs before Continue works (`can_continue`), what Continue does. Every
+    method that can need the helper or the compositor returns a `Step` the
+    interface carries out on a worker: `RunProbe { generation }`, `RunPlan {
+    generation, request }`, `SwitchKeyboard { generation, layout }`,
+    `RunApply { generation, plan, erase_disk, password }`, `RunState {
+    generation, delay_ms }`, `RunLogProbe { generation }`, `RunFinish {
+    generation, action }`, `Confirm(dialog)` (show it; the answer goes to
+    `confirm_install` or `cancel_install`), `Goto(page)` (returned whenever the
+    page changed and nothing else is asked) or `Stay`. The interface calls
+    `start` once (it asks the helper where an installation is first, see
+    re-attaching below; `start_probe` is the first look at the computer on
+    its own), the setters of the page it shows (`set_language`, `set_keyboard`
+    (a no-op for the layout that is asked for already), `select_machine`,
+    `set_disk`, `set_administrator`, `set_password(Secret)`,
+    `set_confirmation(Secret)`), `can_continue`, `advance`, `back`, `retry`, the
+    installation's methods below, and gives each answer back with its generation
+    (`probe_finished`, `plan_finished`, `keyboard_switched`, `apply_finished`,
+    `state_finished`, `log_probe_finished`, `finish_finished`). It never calls
+    the helper itself, so GTK drives it from relm4 messages and commands and
+    Kirigami will from cxx-qt signals and a worker thread. A `Secret` that
+    `RunApply` carries is a copy for the worker (wiped when dropped); the flow
+    keeps its own.
     - *Answers are numbered.* The flow numbers every request and remembers the
       one probe, plan and layout switch in flight; an answer to any other
       number (late, repeated, out of order, before any request, or while a plan
@@ -4060,6 +4118,67 @@ installed, and no page writes to a disk.
       credential or a simulated session; an interface reads the field only
       then). `Flow::with_markers(MarkerConfig)` turns it on; a flow without it
       (the renderer, the self-check) queues nothing.
+    - *The disk.* The disk page lists the probe's disks (`disks::DiskView`):
+      the ones that can be installed to first (not the live medium, not in
+      use, at least the helper's minimum), each with its model, size, bus,
+      serial, what is on it (the partitions and every other system the probe
+      found) and a warning for a removable one; then the others, each with its
+      reason. The first disk that can be installed to is chosen until the person
+      chooses (`set_disk`); a later look keeps the person's disk while it is still
+      offered, otherwise the default moves on and an earlier check is dropped.
+      The way of installing is the whole disk (the other, beside what is
+      there, is listed as unavailable). The request that `Plan` takes names
+      that disk, `whole-disk` and **`encrypt: false`** (the helper refuses an
+      encrypted plan until the encryption change). Nothing to install to is the
+      page's own problem (`disk_problem`) with Try again (`start_probe`).
+    - *The installation.* The review page (`Flow::review`, from the plan:
+      the choices in words, the disk, the partitions that will be created, the
+      image as target, version, digest and download size, `Everything on <model>
+      <serial> will be erased[, including N other systems found on it]`) has one
+      destructive button. `install()` only asks for the confirmation dialog
+      (`Step::Confirm`; the choices freeze, Back is off); `cancel_install()` undoes
+      it; **`confirm_install()` is the only call that gives the helper the
+      password and the disk's id** (`RunApply`: `SetSecret`, then `Apply`, see
+      `Backend::start_installation`). A refusal of `Apply` (the plan is older than
+      15 minutes or forgotten, the disk changed, the image's signature) returns to
+      the review with its sentence and Try again, which looks at the computer
+      again first. If the answer to `Apply` is lost (the bus, a helper that died as
+      the installation began) the flow asks `State` before it says anything: what
+      the helper says is what happened (`not-started` goes back to the review,
+      under way continues, silence is the lost page). Then the interface asks
+      `State` about every second (`RunState`; `Progress` and `Finished` are not
+      subscribed to: `State` is the one call that carries the last log lines and
+      the one a restarted interface re-attaches with), and the flow follows the
+      helper's record alone: `installing_view` (the stages as rows with their
+      status and fraction, the overall bar weighted by how long each stage takes,
+      the helper's last sentence, the last lines of the log), then an outcome puts
+      the flow on `done` or `problem`. A helper that does not answer `State` is
+      waited for (8 requests: systemd starts it again within a second or two and
+      the new one reports the installation as failed in the stage it was in);
+      only longer silence is the problem page's `lost` kind, which keeps asking
+      more slowly and moves on by itself when the helper is back.
+    - *Re-attaching.* `start()` asks `State` first. An installation that is
+      running puts the flow on `installing`, one that ended while the interface
+      was away on `done` or `problem` (the pages are drawn from the state alone,
+      whose `summary` names the edition, composition, version and disk); an idle
+      helper or one that does not answer begins the first look at the computer.
+      Until the answer arrives nothing of the pages is shown and the first page's
+      marker (with the toolkit's words) is held for it. Try again on a
+      re-attached problem page starts again from the welcome page: the password
+      and the choices went with the old interface.
+    - *The closing pages.* `done_view` (what was installed, Restart and Power off
+      through `restart()` and `power_off()`, which ask `Finish` once and then
+      say `Restarting…` or `Powering off…`, or why not), `problem_view` (the stage
+      that failed in words, the helper's reason as one sentence and what it means
+      for the disk, the last lines of the log; Try again, Save the log, Restart).
+      Try again after a failure (`retry_install`) looks at the computer, checks
+      the same choices and shows the review page, where the erase is confirmed
+      **again**; every stage can be run again from the start. Save the log
+      (`choose_log_device`: a probe; `log_state`: `Looking`, `Choosing` with every
+      removable disk that is not the medium the installer started from nor the
+      installation's disk and, for each, the sentence that says why the log
+      cannot go there (the model's rule, the helper's), `Saving`, `Saved`,
+      `Failed`; `save_log(id)` only for a stick the list says can take it).
   - `backend::Backend` is the root helper as a trait with blocking calls (make
     them from a worker thread): `probe`, `plan` and `state` over
     `org.ilex.Installer1` (`DbusBackend`: zbus, the system bus,
@@ -4069,11 +4188,10 @@ installed, and no page writes to a disk.
     errors as `HelperUnavailable` or `AccessDenied`; everything that says the
     helper or the bus is gone, `Disconnected`, `TimedOut`, `Spawn.*` and
     `org.freedesktop.systemd1.*` included, is `HelperUnavailable` and makes the
-    next call connect afresh). `set_secret`, `apply`
-    and `next_report` (the `Progress` and `Finished` signals) are typed stubs
-    answering `ClientError::NotYet`: the helper's installation (a later change)
-    fills them, and the pages that need them are written against these
-    signatures. `Secret` holds a password wiped on drop and never in a request,
+    next call connect afresh). `set_secret`, `apply`, `state` and `finish` are
+    implemented too: the password crosses as a **sealed memfd** (`memfd_create`,
+    written, then sealed against writing and resizing, close-on-exec), never as
+    text. `Secret` holds a password wiped on drop and never in a request,
     a marker or a log, with a redacted `Debug`: the interface reads a field once
     into a `Secret` and carries it as one in its message enums (derived `Debug`
     prints nothing of it) up to the flow's setters.
@@ -4085,7 +4203,16 @@ installed, and no page writes to a disk.
     optionally a refusal, a failing probe or an installation's `State`; the
     simulation still applies the model's own `check_request` to every request
     and the helper's live-image account names, so a refusal on a page is the
-    real rule's. `ilex-installer --simulate [SCENARIO]` runs the application on
+    real rule's, and its `Apply`, `State` and `Finish` apply the helper's rules
+    too (the plan and the confirming disk id, the password set first,
+    `check_log_device`). A name may carry modifiers (`generic+fail-image+sticks`)
+    that say how the installation `Apply` starts goes (`success`, `stalled`,
+    `early`, `fail-image`, `fail-partition`, `helper-stopped`, `lost`), what the
+    helper is in when the interface starts (`attach-installing`, `attach-done`,
+    `attach-failed`), how `Apply` answers (`apply-refused`, `apply-lost`), which
+    sticks are plugged in (`sticks`, `bare`), and whether a log write or a
+    restart fails (`log-fails`, `finish-fails`): they are how the self-check and
+    the screenshots reach every page and every error state. `ilex-installer --simulate [SCENARIO]` runs the application on
     them, and is refused unless the kernel command line carries
     `ilex.installer.simulate` (optionally `=<scenario>`, which the session then
     runs without a flag) or `ILEX_INSTALLER_SIMULATE_ALLOW` is set (the
@@ -4097,8 +4224,8 @@ installed, and no page writes to a disk.
     `markers` the serial-console lines the trials assert on (below);
     `machine::MachineView` is the machine page's content made from the probe;
     `account` the administrator page's rules; `progress::Progress` the stages
-    of an installation as rows (`for_plan`, `apply(&State)`, `overall`) for the
-    progress page of a later change; `keyboard` and `language` the catalogues.
+    of an installation as rows (`for_plan`, `from_state(&State)` for an interface
+    that restarted, `apply(&State)`, `overall`) for the installing page; `keyboard` and `language` the catalogues.
     The model stays the one definition of every rule the helper also applies:
     names (`is_user_name`, `is_reserved_user`, the catalogue's public profile
     names), tags, detection and `check_request`.
@@ -4114,7 +4241,14 @@ installed, and no page writes to a disk.
     Try again looking first and keeping the configuration, no Try again for a
     BIOS boot, a BIOS answer after the first page, every marker line the flow
     queues in order with the test field's gate, and how each D-Bus error name
-    is classified)
+    is classified; the disk page's listing, choice and defaults, the review's
+    content, the dialog and its cancellation, what is given to the helper and
+    when, every refusal of `Apply`, a lost answer to it in each way it can end,
+    the installation followed to the done page, a failed image stage, a stage
+    that fails before the disk was written, a helper that stopped, a helper that
+    never answers, re-attaching in each state, Restart and Power off, the log
+    dialog's states and the helper's rules as the simulation applies them, and
+    the installation's marker lines in order)
     and `selfcheck::system` reads the live image's keyboard catalogue.
 - **The pages.** `AdwNavigationView`, a header bar with the automatic Back
   button (and Escape), Continue at the bottom right of every page. Every control
@@ -4181,27 +4315,67 @@ installed, and no page writes to a disk.
     `LimitCORE=0` (the compositor sees the keystrokes too): no core file of
     either, and no other process of the same user can attach to the interface.
     Computer name and time zone are not asked yet (the model's defaults apply).
-  - *Ready.* Continue on the administrator page calls `Plan` with the choices
-    so far on the first disk the installer could use (not the medium it started
-    from, not in use, at least the helper's minimum size): the disk page of a
-    later change replaces that provisional choice. The page shows the answer,
-    the checked image's version, download size and digest, or why nothing can
+  - *Disk.* A radio row per disk that can be installed to (model, then size,
+    bus and serial, what is on it and a warning for a removable disk), the
+    ones that cannot in a group of their own, greyed, each with its reason, and
+    the way of installing (whole disk, the other greyed). Continue is focused
+    (Enter takes the default disk); nothing is written. Without a disk, the
+    page says why of every disk with Try again.
+  - *Review.* Continue on the administrator page calls `Plan` with the choices
+    on the chosen disk. The page shows the answer in groups (the choices, the
+    disk, the partitions that will be created, the image's tag, version, digest
+    and download size, what else is on the disk and any warning of the helper),
+    the sentence `Everything on <model> <serial> will be erased…` in the error
+    colour and the destructive button `Erase <model> and install`, which has the
+    focus (Enter opens the dialog; nothing is written by it). Or why nothing can
     be installed (every disk's reason, a registry that does not answer, the
-    helper's refusal) with Try again, which looks at the computer again before
-    it checks (a disk that was unplugged, a medium that was ejected) and keeps
-    the person's configuration while it is still offered. Nothing is written.
+    helper's refusal, a refused `Apply`) with Try again, which looks at the
+    computer again before it checks (a disk that was unplugged, a medium that was
+    ejected) and keeps the person's configuration while it is still offered. The
+    dialog (`AdwAlertDialog`) names the disk, says that it cannot be undone and
+    that the image downloads about N GiB; **its default and close response is
+    Cancel** (Escape cancels), the destructive response is the other button: a
+    keyboard install Tabs to it and presses Enter.
+  - *Installing.* The heading names the edition, an overall bar, the helper's
+    sentence, a row per stage with an icon (pending, a spinner, a check, an
+    error) and a bar for the running one, and an expander that opens the last
+    lines of the log. A helper that does not answer for a few requests is said
+    in a banner. There is no Back and no Cancel.
+  - *Done.* What was installed (edition, configuration, version, the disk),
+    Restart (focused) and Power off; the machine is going down once the helper
+    has accepted, and a refusal is said under the buttons.
+  - *Problem.* The stage that failed and the helper's reason in a sentence, what
+    it means for the disk (nothing was written, or the disk was changed and what
+    was on it is gone), the last lines of the log, Try again (focused), **Save the
+    log to a USB stick** and Restart. The dialog lists the sticks (the ones the
+    log cannot go to are greyed with the helper's sentence), puts the focus on
+    the first stick that can take it (Enter writes), says where the file went
+    (or why not) and closes with Enter. After a helper that stopped, the page is
+    the one its successor's record makes; when the helper stays silent, the page
+    says so, with Try again (which asks again) and Restart.
 - **Markers.** The formats are `ilex_installer_flow::markers`'s, so every
   interface prints the ones the trials read. Every page prints
   `ILEX-INSTALLER page=<id> edition=…` plus its own words when it is shown
   (`language=` and `keyboard=` on the welcome page; `selected=`, `origin=`
   (`detected`, `not-recognised`, `conflict`, `no-composition`, `chosen`,
   `bad-override`), `detected=`, `offered=` and `choices=<the rows shown, in
-  order>` on the machine page; `check=` on the last), and `ILEX-INSTALLER
+  order>` on the machine page; `disk=`, `offered=` and `unavailable=` on the disk
+  page; `check=` on the review page; `stage=`, `progress=` (percent of the
+  whole) and `reattached=` on the installing page; `composition=` and
+  `reattached=` on the done page; `kind=` (`failed`, `lost`), `stage=`, `retry=`
+  and `reattached=` on the problem page), and `ILEX-INSTALLER
   event=…` lines: `probe result=ok|failed|stale`, `language`, `layout
   layout=<id> applied=true|false`, `notice severity=… text=<the machine page's
-  notice>` and `plan result=ok|refused|failed|stale` (`stale`, also on a layout
+  notice>`, `plan result=ok|refused|failed|stale` (`stale`, also on a layout
   answer: the answer to a request that is not the one in flight, which changed
-  nothing). **No field's content is
+  nothing), `disk disk=<id>`, `attach result=idle|installing|done|failed|
+  unavailable` (where the interface found the installation when it started),
+  `confirm state=shown|cancelled|accepted`, `install result=started|refused
+  code=<code>|unknown|not-started`, `stage stage=<name> status=running|done|
+  failed` (only a change), `outcome result=success|failed [stage=<name>]`, `lost
+  failures=<n>`, `finish action=restart|poweroff|save-log result=ok|refused
+  code=…|failed` and `log state=looking|choosing|saving|saved|failed offered=<n>
+  usable=<n>` (never a device's id, a password or a field's text). **No field's content is
   ever printed.** The one exception is only for a test: `try layout=<id>
   text=<what was typed in the layout test field>` is printed, and the field is
   read at all, only when the fixed public test credential
@@ -4211,11 +4385,20 @@ installed, and no page writes to a disk.
   mirror and its faults are unchanged.
 - **`--self-check --render DIR [--dark]`** draws every page and error state to
   PNG files with GTK's renderer from the window's widget tree at the surface's
-  own scale (`<state>-<light|dark>-<scale>x.png`, 27 states): the welcome page
+  own scale (`<state>-<light|dark>-<scale>x.png`, 56 states): the welcome page
   in German, BIOS, without a helper and with a layout the compositor did not
   take; the machine page for every kind of detection result and for a BIOS
-  boot found there; the administrator page empty, with each refusal and valid;
-  the last page checked, without a disk, without a registry and after Back. It
+  boot found there; the disk page with the default and another disk chosen,
+  with no disk, without a helper and on a BIOS boot; the administrator page
+  empty, with each refusal and valid; the review page (another machine, another
+  disk, no disk, no registry, after Back, with the erase dialog open, after the
+  dialog was cancelled, after a refused `Apply` and after one whose answer was
+  lost and nothing began); the installing page early, stalled in the image
+  stage, with the log open and re-attached; the done page, restarting, with a
+  refused restart and re-attached; the problem page for a failed image stage, a
+  failure before the disk was written, a helper that stopped, a helper that is
+  lost, a refused restart, re-attached, after Try again, and the log dialog with
+  sticks, with none, after a write and after a failed write. It
   runs the application's own pages with the same messages the person's input
   sends (the passwords are typed into the fields themselves), against the
   fixtures. Each shot is taken only when the application reports the page and
@@ -4227,7 +4410,7 @@ installed, and no page writes to a disk.
   `--headless --virtual-monitor 1920x1200` is enough, with the scale from a
   `monitors.xml` for the virtual monitor (`MetaVendor` / `MetaVirtualMonitor`,
   connector `Meta-0`, serial `0x00`). `installer::ui` does that in the live
-  image's VM: the flow's rules, `--simulate` refused on a real boot, and 81
+  image's VM: the flow's rules, `--simulate` refused on a real boot, and 168
   images (light and dark at 1x, light at 1.5x, 1280x800 and 1920x1200) that
   must all be PNGs of their size, drawn and mostly different, kept under
   `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
@@ -4249,18 +4432,54 @@ installed, and no page writes to a disk.
   GRUB's editor and requires the last to win, `chosen`, and the model's own
   serial line; `iso::next_kernel_argument_unknown` an unoffered tag: `bad-override`
   with the detection's choice kept, the two rows of the edition's offers shown
-  and the notice naming both offered tags. `iso::next_account` types the administrator
-  page with the keyboard on a VM with a 40 GiB disk, presses Enter in the last
-  field and requires the real helper's `Plan` (the image's manifest is read from
-  the registry, so the guest needs `ghcr.io`) to succeed, the closing page to
+  and the notice naming both offered tags. `iso::next_account` types the disk and
+  administrator pages with the keyboard on a VM with a 40 GiB disk, presses Enter
+  in the last field and requires the real helper's `Plan` (the image's manifest is
+  read from the registry, so the guest needs `ghcr.io`) to succeed, the review page to
   report `check=ok`, and the password to be nowhere on the serial console or in
   the guest's journal (read over SSH, with patterns that do not match their own
   command line). Screenshots of each are kept in the artifacts.
+  - `iso::next_keyboard_install` is a **complete interactive installation by
+    keyboard alone** (QMP key events, 6 GiB of RAM in the guest, with
+    the real helper, the real registry and the signature policy): every page to
+    the review, the erase dialog cancelled with Escape (the helper has applied
+    nothing), then confirmed (Tab to the destructive answer, Enter), the
+    installing page to the success of every stage, the done page, Power off; the
+    password is typed with its spaces, colon and quotes, and is on neither the
+    serial console nor in the journal. The disk it installed boots on its own and
+    every `installer::install` assertion holds (`check_installed`: the digest the
+    helper recorded, the origin that enforces the signature policy, the
+    administrator's password and `sudo`, the defaults, the system `running`, no
+    failed unit, GDM). A screenshot of each page is kept.
+  - `iso::next_reattach` kills the interface in the image stage, then the
+    compositor: each time the first page the session shows is the installing page
+    (`reattached=true`, never the welcome page), the helper's installation is the
+    same plan and keeps going, and the done page follows with the helper's
+    `success`.
+  - `iso::next_problem` boots the ISO as a USB stick beside the target, a fixed
+    spare disk, a FAT stick and an empty stick, with the fixed credential
+    `ilex.installer.fault=image` (the image stage fails before `bootc` runs: the
+    disk was wiped, nothing deployed). The problem page names the image stage;
+    the helper refuses `Finish(save-log:…)` for the installation's disk
+    (`install-target`), the live medium (`live-medium`), the fixed disk
+    (`not-removable`), the empty stick (`no-file-system`) and a name that is not a
+    device (`unknown-disk`), a malformed action (`invalid-field`) and any other
+    user (the bus), and none of those writes anything (the heads of the disks are
+    hashed before and after). By keyboard the log is saved to the FAT stick (the
+    dialog offers both sticks and lists only the FAT one as usable); the file is
+    read back from the stick's image, holds the stage logs, `plan.json`,
+    `state.json` and `lsblk.txt` and none of the password. Try again returns to
+    the review (a new plan), the erase is confirmed and the stage fails again; a
+    third attempt has the helper killed as it begins to partition, and the problem
+    page is what its successor recorded.
+  - `installer::finish` (no ISO) drives `Finish`'s refusals through the bus.
 - **Not done here.** Strings are English constants (no gettext catalogue); the
-  installed system's computer name and time zone, the display's scale and the
-  network, disk, encryption, review, progress, done and problem pages, the
-  daily profile page, and a screen reader's walk of the pages are later
-  changes. No new polkit action and no change to the bus policy was needed.
+  installed system's computer name and time zone, the display's scale, the
+  network, encryption and recovery-key pages, the free-space mode, the daily
+  profile page, Cancel during the image stage and a screen reader's walk of the
+  pages are later changes. No new polkit action and no change to the bus policy
+  was needed: Restart and Power off are the root helper's, and the helper's
+  methods are all the installer's user's.
 
 ## Conventions
 
