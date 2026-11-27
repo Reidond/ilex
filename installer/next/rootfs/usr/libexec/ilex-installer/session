@@ -1,7 +1,12 @@
 #!/bin/bash
-# The GNOME edition's session: GNOME Kiosk as the compositor and ilex-installer
-# as its only window. Runs as the unprivileged ilex-installer user inside the
+# The live installer's session: the edition's compositor with ilex-installer as
+# its only window. Runs as the unprivileged ilex-installer user inside the
 # logind session ilex-installer-session.service opened on tty1.
+#
+# What differs per edition (GNOME Kiosk or KWin, the toolkit's environment, how
+# each starts) lives in the edition's own file, `edition-session`, which this
+# script sources; everything else is shared, so the editions cannot drift apart
+# in how they start, wait, report and fail.
 #
 # Neither process may end while the session lives. Whichever does, for any
 # reason and with any status (a window closed by the compositor exits 0), the
@@ -29,12 +34,11 @@ fi
 timeout 20 ilex-installer --self-check || { marker "ILEX-INSTALLER-SESSION self-check failed"; exit 1; }
 
 # Basic graphics: the boot entry's nomodeset leaves the display on the
-# firmware's framebuffer, so GTK draws on the CPU too.
+# firmware's framebuffer, so the toolkit draws on the CPU too (the edition's
+# environment says how).
 graphics=default
 if grep -qw nomodeset /proc/cmdline; then
     graphics=basic
-    export GSK_RENDERER=cairo
-    export LIBGL_ALWAYS_SOFTWARE=1
 fi
 
 # Did the firmware verify the boot chain? (efivarfs: 4 attribute bytes, then
@@ -46,17 +50,24 @@ if [ -r "$sb_var" ]; then
 fi
 
 export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP=GNOME
-export GSETTINGS_BACKEND=dconf
 runtime=${XDG_RUNTIME_DIR:?}
 # The session bus pam_systemd's user manager provides.
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"
+
+# The edition's part: `compositor_name`, `edition_environment` (exports what its
+# compositor and toolkit read, given `$graphics`), `start_compositor` and
+# `start_installer` (each starts its process in the background, so that `$!`
+# names it afterwards; the interface connects to `$wayland_display`).
+wayland_display=wayland-0
+# shellcheck source=/dev/null
+. /usr/libexec/ilex-installer/edition-session
+edition_environment
 
 # logind keeps the user's runtime directory for a few seconds after a session
 # ends, which is the time between two attempts: a compositor that died leaves
 # its socket (and lock) behind, and a client would find it "ready" and connect
 # to nobody. Whatever is here now is stale: nothing of this user runs yet.
-socket=$runtime/wayland-0
+socket=$runtime/$wayland_display
 rm -f "$socket" "$socket.lock"
 
 # A listening socket, not merely a socket file: the compositor creates the
@@ -65,12 +76,9 @@ socket_listening() {
     [ -S "$socket" ] && ss -xlH 2>/dev/null | grep -qF -- " $socket "
 }
 
-marker "ILEX-INSTALLER-SESSION compositor=gnome-kiosk graphics=$graphics secure-boot=$secure_boot"
+marker "ILEX-INSTALLER-SESSION compositor=$compositor_name graphics=$graphics secure-boot=$secure_boot"
 
-# GNOME Kiosk turns VT switching off unless asked: with it off, Ctrl+Alt+F2
-# never reaches logind and the root shell on tty2 is out of reach from the page.
-# The polkit rule lets logind accept the compositor's request (and only that).
-gnome-kiosk --wayland --no-x11 --enable-vt-switch &
+start_compositor
 compositor=$!
 installer=
 # Whatever is left is stopped with the script (and, failing that, by the unit's
@@ -86,7 +94,7 @@ for _ in $(seq 600); do
 done
 socket_listening || { marker "ILEX-INSTALLER-SESSION compositor is not listening after a minute"; exit 1; }
 
-WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland ilex-installer &
+start_installer
 installer=$!
 
 wait -n -p ended "$compositor" "$installer"

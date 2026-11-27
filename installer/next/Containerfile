@@ -5,15 +5,18 @@
 # RAM overlay. Follows osbuild's example for a non-Anaconda container ISO:
 # https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/
 #
-# One image stage per edition (`--build-arg EDITION=gnome`): the edition's
-# package lists, build tools and overlay live in `editions/<EDITION>/`; what is
-# shared (the session unit, the user, the tty2 shell) lives in `rootfs/`.
+# One image stage per edition (`--build-arg EDITION=gnome|kde`): the edition's
+# package lists, build tools, interface feature, setup step and overlay live in
+# `editions/<EDITION>/`; what is shared (the session unit and script, the user,
+# the tty2 shell, the root helper) lives in `rootfs/`.
 
 # Builder: the interface is compiled on Fedora 45 against the libraries the
-# image ships. gtk4-devel and libadwaita-devel stay in this stage only.
+# image ships (GTK 4 + libadwaita for GNOME, Qt 6 for KDE). The development
+# packages stay in this stage only.
 FROM quay.io/fedora/fedora:45 AS ui-build
 ARG EDITION=gnome
 COPY editions/${EDITION}/build-packages.txt /tmp/build-packages.txt
+COPY editions/${EDITION}/interface-feature /tmp/interface-feature
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
     dnf -y install --setopt=keepcache=1 cargo gcc \
         $(sed -e 's/#.*//' /tmp/build-packages.txt)
@@ -37,7 +40,7 @@ RUN --mount=type=cache,id=ilex-cargo,target=/root/.cargo/registry \
     --mount=type=cache,id=ilex-kache,target=/root/.cache/kache,sharing=locked <<'BUILD'
 set -euo pipefail
 export RUSTC_WRAPPER=kache
-cargo build --release --locked -p ilex-installer --features gui
+cargo build --release --locked -p ilex-installer --features "$(cat /tmp/interface-feature)"
 cargo build --release --locked -p ilex-installerd -p ilex-enroll
 kache daemon stop || true
 kache stats --last-build --root /src
@@ -133,9 +136,12 @@ COPY --from=generated iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 COPY --from=generated ilex.yaml /etc/containers/registries.d/ilex.yaml
 COPY --from=generated ilex.pub /etc/pki/containers/ilex.pub
 COPY --from=ui-build /out/ /
-# image-builder omits the live ISO's RPM database: bind the tool versions the
-# helper's eligibility probe compares to the files actually shipped.
-RUN dconf update && \
+# The edition's own setup of what it installed (GNOME's dconf database), then
+# the installer's SELinux module and the units. image-builder omits the live
+# ISO's RPM database: bind the tool versions the helper's eligibility probe
+# compares to the files actually shipped.
+COPY editions/${EDITION}/image-setup /tmp/ilex-image-setup
+RUN sh /tmp/ilex-image-setup && rm /tmp/ilex-image-setup && \
     semodule -n -i /usr/share/selinux/packages/ilex-installer.cil && \
     systemctl enable ilex-installer-session.service ilex-installer-fallback.service ilex-installerd.service ilex-installer-answers-gate.service ilex-installer-answers.service && \
     ilex-installer --version && \

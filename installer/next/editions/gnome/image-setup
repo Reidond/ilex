@@ -1,0 +1,2 @@
+# Run by installer/next/Containerfile after the edition's files are in place.
+dconf update

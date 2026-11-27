@@ -1,0 +1,26 @@
+# The GNOME edition's part of the session (sourced by ../session, not run):
+# GNOME Kiosk (mutter) as the compositor, GTK 4 + libadwaita as its only window.
+
+compositor_name=gnome-kiosk
+
+edition_environment() {
+    if [ "$graphics" = basic ]; then
+        # nomodeset leaves the display on the firmware's framebuffer: GTK draws
+        # on the CPU too.
+        export GSK_RENDERER=cairo
+        export LIBGL_ALWAYS_SOFTWARE=1
+    fi
+    export XDG_CURRENT_DESKTOP=GNOME
+    export GSETTINGS_BACKEND=dconf
+}
+
+# GNOME Kiosk turns VT switching off unless asked: with it off, Ctrl+Alt+F2
+# never reaches logind and the root shell on tty2 is out of reach from the page.
+# The polkit rule lets logind accept the compositor's request (and only that).
+start_compositor() {
+    gnome-kiosk --wayland --no-x11 --enable-vt-switch &
+}
+
+start_installer() {
+    WAYLAND_DISPLAY=$wayland_display GDK_BACKEND=wayland ilex-installer &
+}
