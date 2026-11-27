@@ -3448,7 +3448,7 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     `summary` (the edition's name, the composition, the image's version and
     digest and the target disk's id and name, from the plan: what an interface
     that restarted says on its closing pages, and which disk is the
-    installation's), `starting` and `outcome`; documents from before `Apply` still parse. **`starting`
+    installation's), `starting`, `refusal` and `outcome`; documents from before `Apply` still parse. **`starting`
     is the plan id of an `Apply` that has taken the work lock and is checking**
     (the image's signature is verified over the network, the disk is probed,
     claimed and probed again, which takes as long as the registry does): it is
@@ -3457,8 +3457,14 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     that finds it in the file a crashed one left reads it as not set. For that
     window every other field is still the previous installation's (its outcome
     included), so an interface that asks must treat `starting` like `active`
-    and not read the rest (`State::busy()`). The `iso::next_reattach` trial
-    holds the window open with the fixed credential
+    and not read the rest (`State::busy()`). **`refusal`** is the latest `Apply`
+    that took the lock and was refused (`{plan, error}`: the plan's id and the
+    refusal the caller got, with nothing written): recorded before `starting`
+    is cleared, cleared when the next `Apply` takes the lock and by `begin`,
+    never recorded for an installation that began, and kept by a successor
+    helper (it says which plan was refused and why, and claims nothing runs). An
+    interface that waited for the plan in `starting` finds it there. The
+    `iso::next_reattach` trial holds the window open with the fixed credential
     `ilex.installer.fault=slow-apply` (a minute, after the lock and before any
     check; it can only make the installer slower). The pull's bar is the
     bytes in use on the target against 2.6 times the download size (measured:
@@ -4158,8 +4164,11 @@ the erase on the review page.
       the installation began) the flow asks `State` before it says anything: what
       the helper says is what happened (`not-started` goes back to the review,
       under way continues, silence is the lost page); while `State` says
-      `starting` the helper has neither begun nor refused, so the flow keeps
-      asking and says nothing yet. Then the interface asks
+      `starting` for this plan the helper has neither begun nor refused, so the
+      flow keeps asking and says nothing yet. **Another plan's installation**
+      (`active`, or `starting`, for a plan this interface did not apply) is
+      followed on the installing page (`reattached`): "did not start" would send
+      the person back to the review while a disk is written. Then the interface asks
       `State` about every second (`RunState`; `Progress` and `Finished` are not
       subscribed to: `State` is the one call that carries the last log lines and
       the one a restarted interface re-attaches with), and the flow follows the
@@ -4177,7 +4186,19 @@ the erase on the review page.
       running, or whose `Apply` is still checking (`starting`: the installing page
       with every stage waiting, `Starting the installation` and no log, never the
       previous installation's outcome that the rest of the record still holds),
-      puts the flow on `installing`, one that ended while the interface
+      puts the flow on `installing`; **the plan whose installation the flow has
+      not seen begin** (`starting`, or the plan whose `Apply` answer was lost
+      when the helper then fell silent) is remembered, and a `State` that is not
+      busy and whose record is not that plan's (`applied`) means its `Apply`
+      ended without beginning (refused, or the helper stopped while it checked:
+      a successor reads `starting` as unset): nothing was written, and the
+      record under it (an earlier failure or success, or an idle helper) is
+      **never** taken for its outcome and never the lost-helper page. An
+      interface that has its choices goes back to the review (the sentence, the
+      refusal the helper recorded for that plan when it has one, and Try again);
+      a restarted one has none, and starts from the welcome page with the sentence
+      in its banner (`notice=not-started` on the page marker, until Continue) and
+      a look at the computer. One that ended while the interface
       was away on `done` or `problem` (the pages are drawn from the state alone,
       whose `summary` names the edition, composition, version and disk); an idle
       helper begins the first look at the computer. **A helper that cannot be
@@ -4187,7 +4208,11 @@ the erase on the review page.
       `State` again until it has been answered once, and only then looks at the
       computer. A refusal of `Probe`, `Plan` or `Apply` that says
       `installation-active` asks `State` the same way, on whichever page the
-      person is. Until the answer arrives nothing of the pages is shown and the
+      person is; from the review page an answer of an idle helper resumes the check
+      that was interrupted (a spinner is never left), and a `State` that cannot be
+      asked puts the problem on the review page itself, with a Try again that asks
+      `State` first and then checks (the Erase button is never left grey with
+      nothing said). Until the answer arrives nothing of the pages is shown and the
       first page's marker (with the toolkit's words) is held for it. Try again on a
       re-attached problem page starts again from the welcome page: the password
       and the choices went with the old interface.
@@ -4261,12 +4286,19 @@ the erase on the review page.
     that say how the installation `Apply` starts goes (`success`, `stalled`,
     `early`, `fail-image`, `fail-partition`, `helper-stopped`, `lost`), what the
     helper is in when the interface starts (`attach-installing`, `attach-done`,
-    `attach-failed`, `attach-starting`: an `Apply` that is checking over the
-    previous failure), how `Apply` answers (`apply-refused`, `apply-lost`,
-    `apply-slow`: the answer is lost and the helper says `starting` for a few
-    questions, then installs), whether the helper is silent for a while and then
-    back (`lost-then-done`, `lost-then-running`), whether the first `State`
-    fails (`state-down`), whether the disk a plan was made for is gone from
+    `attach-failed`, `attach-starting`: an `Apply` that is checking over an
+    earlier plan's failure; `attach-starting-refused` and
+    `attach-starting-refused-idle`: the same for three questions, after which
+    that `Apply` was refused, over the failure with the refusal recorded, or
+    over an idle first installation with none), how `Apply` answers
+    (`apply-refused`, `apply-lost`, `apply-slow`: the answer is lost and the
+    helper says `starting` for a few questions, then installs; `apply-lost-other`:
+    the answer is lost and the helper installs another plan; `apply-active`: it
+    refuses because an installation is active), whether the helper is silent for
+    a while and then back (`lost-then-done`, `lost-then-running`), whether the
+    first (`state-down`) or the second (`state-down-second`) `State` fails,
+    whether the second look at the computer is refused as active
+    (`probe-active`), whether the disk a plan was made for is gone from
     every later probe (`vanish`), which
     sticks are plugged in (`sticks`, `bare`), and whether a log write or a
     restart fails (`log-fails`, `finish-fails`): they are how the self-check and
@@ -4449,7 +4481,7 @@ the erase on the review page.
   mirror and its faults are unchanged.
 - **`--self-check --render DIR [--dark]`** draws every page and error state to
   PNG files with GTK's renderer from the window's widget tree at the surface's
-  own scale (`<state>-<light|dark>-<scale>x.png`, 64 states): the welcome page
+  own scale (`<state>-<light|dark>-<scale>x.png`, 71 states): the welcome page
   in German, BIOS, without a helper and with a layout the compositor did not
   take; the machine page for every kind of detection result and for a BIOS
   boot found there; the disk page with the default and another disk chosen,
@@ -4468,7 +4500,13 @@ the erase on the review page.
   page (to the installing page and to the done page), the installing page
   re-attached while `Apply` was checking and after a lost answer to it, the
   welcome page of a helper that could not be asked at start-up and after Try
-  again found a failure, and the disk page after the chosen disk vanished. It
+  again found a failure, the welcome page of a restarted interface whose
+  `Apply` was refused (over an earlier failure, and on a first installation),
+  the installing page that follows another plan's installation after a lost
+  answer, the review page after an `installation-active` refusal (checked again,
+  with a `State` that fails, and after Try again; and after an `Apply` refused
+  as active with a `State` that fails), and the disk page after the chosen disk
+  vanished. It
   runs the application's own pages with the same messages the person's input
   sends (the passwords are typed into the fields themselves), against the
   fixtures. Each shot is taken only when the application reports the page and
@@ -4480,7 +4518,7 @@ the erase on the review page.
   `--headless --virtual-monitor 1920x1200` is enough, with the scale from a
   `monitors.xml` for the virtual monitor (`MetaVendor` / `MetaVirtualMonitor`,
   connector `Meta-0`, serial `0x00`). `installer::ui` does that in the live
-  image's VM: the flow's rules, `--simulate` refused on a real boot, and 192
+  image's VM: the flow's rules, `--simulate` refused on a real boot, and 213
   images (light and dark at 1x, light at 1.5x, 1280x800 and 1920x1200) that
   must all be PNGs of their size, drawn and mostly different, kept under
   `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
@@ -4521,16 +4559,27 @@ the erase on the review page.
     helper recorded, the origin that enforces the signature policy, the
     administrator's password and `sudo`, the defaults, the system `running`, no
     failed unit, GDM). A screenshot of each page is kept.
-  - `iso::next_reattach` (booted with `ilex.installer.fault=slow-apply`) kills
-    the interface while the helper's `Apply` is checking (the harness reads
-    `State` over SSH until it says `starting` over the previous record, the old
-    interface is still on the review page, waiting for an answer it will never
-    read), then the compositor in the image stage (the session unit allows
-    three starts in five minutes, so two kills): each time the first
-    page the session shows is the installing page (`reattached=true`, never the
-    welcome page; the first time `stage=starting progress=0`, every stage
-    waiting), the helper's installation is the plan that was being checked and
-    keeps going, and the done page follows with the helper's `success`.
+  - `iso::next_reattach` (booted with `ilex.installer.fault=slow-apply`): the
+    harness reads `State` over SSH until it says `starting` over the previous
+    record (the interface that asked is still on the review page, waiting for an
+    answer it will never read). First the disk is changed behind that `Apply`
+    (`sfdisk` writes a partition table to the target from the guest, and the
+    start limit is reset) and the interface is killed: the session's first page
+    is the installing page (`reattached=true`, `stage=starting progress=0`, every
+    stage waiting, never the welcome page). When the minute is over the helper
+    refuses the `Apply` (`DiskChanged`, recorded in `State.refusal` under the
+    plan's id, nothing begun, nothing written: the disk's head is hashed before
+    and after), and the restarted interface goes to the welcome page with the
+    sentence (`page=welcome … notice=not-started` and `event=install
+    result=not-started`; no problem page, no lost page, no outcome, no stage
+    marker) and looks at the computer; the next walk-through (the second
+    `from_welcome`) is confirmed, and a new plan's `Apply` checks. That window the
+    interface is killed in once more, then the compositor in the image stage (the
+    session unit allows three starts in five minutes, and `systemctl
+    reset-failed` before each kill clears that counter): each time the first page
+    the session shows is the installing page (`reattached=true`), the helper's
+    installation is the plan that was being checked and keeps going, and the done
+    page follows with the helper's `success`.
   - `iso::next_problem` boots the ISO as a USB stick beside the target, a fixed
     spare disk, a FAT stick and an empty stick, with the fixed credential
     `ilex.installer.fault=image` (the image stage fails before `bootc` runs: the

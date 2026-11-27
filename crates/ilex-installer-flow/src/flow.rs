@@ -367,6 +367,10 @@ pub struct Flow {
     /// installation that may be under way: the first look at the computer
     /// waits, and Try again asks `State` again.
     attach_failed: bool,
+    /// The welcome page says that an installation did not start: this interface
+    /// was restarted while the helper's `Apply` checked, and the helper then
+    /// did not begin (it refused, or it stopped). Said until Continue.
+    start_notice: Option<Message>,
     /// The person's disk is gone (unplugged, in use now) and the flow went to
     /// the disk page: said there until a disk is chosen.
     disk_notice: Option<Message>,
@@ -413,6 +417,7 @@ impl Flow {
             disk_chosen: false,
             disk_view: None,
             attach_failed: false,
+            start_notice: None,
             disk_notice: None,
             secrets_wiped: 0,
             inst: installation::Installation::default(),
@@ -829,6 +834,9 @@ impl Flow {
         }
         match self.page {
             PageId::Welcome | PageId::Machine | PageId::Disk => {
+                if self.page == PageId::Welcome {
+                    self.start_notice = None;
+                }
                 if self.page == PageId::Disk {
                     // Continuing is accepting the disk that is selected,
                     // whether the person picked it or it was preselected: a
@@ -857,6 +865,14 @@ impl Flow {
     pub fn retry(&mut self) -> Step {
         if !self.can_retry() {
             return Step::Stay;
+        }
+        if self.attach_failed {
+            // The helper could not say where an installation is (see
+            // `start_probe`): that is asked first, and the check follows its
+            // answer, as the look at the computer does.
+            self.check = PlanCheck::Running;
+            self.resume_check = true;
+            return self.attach_again();
         }
         self.look_again_then_check()
     }
@@ -1067,6 +1083,13 @@ impl Flow {
             self.say(markers::disk(id));
         }
         true
+    }
+
+    /// What the welcome page says after an installation that this interface was
+    /// waiting to see begin did not (nothing was written): said until
+    /// Continue.
+    pub fn start_notice(&self) -> Option<Message> {
+        self.start_notice.clone()
     }
 
     /// Why the disk page is showing again: the disk the person chose is gone
@@ -1394,8 +1417,14 @@ impl Flow {
     pub fn marker_fields(&self) -> String {
         match self.page {
             PageId::Welcome => format!(
-                "language={} keyboard={}",
-                self.language, self.keyboard.requested
+                "language={} keyboard={}{}",
+                self.language,
+                self.keyboard.requested,
+                if self.start_notice.is_some() {
+                    " notice=not-started"
+                } else {
+                    ""
+                }
             ),
             PageId::Machine => match (&self.view, self.probe()) {
                 (Some(view), Some(probe)) => format!(

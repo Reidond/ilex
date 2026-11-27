@@ -2714,12 +2714,12 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         }
     }
     ensure!(
-        seen.len() == 192,
-        "{} images came back, expected 192 (64 states in three configurations)",
+        seen.len() == 213,
+        "{} images came back, expected 213 (71 states in three configurations)",
         seen.len()
     );
     ensure!(
-        distinct.len() >= 150,
+        distinct.len() >= 165,
         "only {} of {} images differ: pages are not drawing their own states",
         distinct.len(),
         seen.len()

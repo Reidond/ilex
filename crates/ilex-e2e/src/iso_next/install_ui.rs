@@ -16,11 +16,18 @@
 //! * `iso::next_reattach`: the interface is killed while the helper's `Apply` is
 //!   still checking (a fixed test credential holds it for a minute after it took
 //!   its lock, as a slow registry would: `State` then says `starting` over the
-//!   previous record), and then the compositor in the middle of the image stage:
-//!   each time the session comes back on the installing page (not on the welcome
-//!   page; the first time with every stage waiting), the installation goes on
-//!   undisturbed and the done page follows. (The session unit allows three
-//!   starts in five minutes: two kills.)
+//!   previous record). First that `Apply` is refused: the target disk's partition
+//!   table is changed from the guest in the window, so the helper refuses it
+//!   (`DiskChanged`, recorded in `State` with the plan's id) and writes nothing; the
+//!   restarted interface, which found the installing page with every stage
+//!   waiting, goes back to the welcome page with the "did not start" sentence (not
+//!   the problem page, and never an earlier attempt's outcome), and its next
+//!   walk-through is confirmed. Then the interface is killed in that second
+//!   window, and the compositor in the middle of the image stage: each time the
+//!   session comes back on the installing page (not on the welcome page; the first
+//!   time with every stage waiting), the installation goes on undisturbed and the
+//!   done page follows. (The session unit allows three starts in five minutes: the
+//!   start-limit counter is reset before each kill.)
 //! * `iso::next_problem`: the image stage fails (a fixed test credential makes
 //!   it fail before `bootc` runs, as a pull that fails does) and the problem
 //!   page says so; the log is saved to a USB stick by keyboard and the file is
@@ -40,6 +47,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use ilex_devkit::cmd;
 use ilex_devkit::core::{Capability, Requirement, SecurityLaunch, VmProvider};
+use ilex_devkit::installer_model::plan::ErrorCode;
 use ilex_devkit::installer_model::probe::Probe;
 use ilex_devkit::installer_model::state::{Outcome, State};
 use ilex_devkit::provider::LinuxProvider;
@@ -47,7 +55,7 @@ use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
 
-use super::ui::{EVENT_TIMEOUT, continue_to_machine, no_try_text, wait_page_marker, welcome_up};
+use super::ui::{EVENT_TIMEOUT, continue_to_machine, no_try_text, welcome_up};
 use super::{
     Guest, KILL_COMPOSITOR, KILL_INSTALLER, PAGE_TIMEOUT, complete_lines, console, diagnostics,
     field, is_marker, iso_path, trial, wait_firmware_output, wait_page, words,
@@ -285,11 +293,45 @@ fn to_review(
     unavailable: &str,
 ) -> Result<()> {
     welcome_up(vm, ctl, serial, artifacts, name)?;
+    from_welcome(vm, ctl, serial, artifacts, name, unavailable)
+}
+
+/// The same from a welcome page that is up (a walk-through's second round: the
+/// pages' markers that came before are not the ones waited for).
+fn from_welcome(
+    vm: &mut Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+    unavailable: &str,
+) -> Result<()> {
+    let before = |page: &'static str| count(serial, is_page(page));
+    let (machines, disks, accounts, reviews) = (
+        before("machine")?,
+        before("disk")?,
+        before("account")?,
+        before("review")?,
+    );
     continue_to_machine(ctl)?;
-    wait_page_marker(vm, serial, "machine", EVENT_TIMEOUT)?;
+    nth_marker(
+        vm,
+        serial,
+        "the machine page",
+        machines + 1,
+        EVENT_TIMEOUT,
+        is_page("machine"),
+    )?;
     wait_page(vm, ctl, artifacts, &format!("{name}-machine"))?;
     ctl.key("Return")?;
-    let disk = wait_page_marker(vm, serial, "disk", EVENT_TIMEOUT)?;
+    let disk = nth_marker(
+        vm,
+        serial,
+        "the disk page",
+        disks + 1,
+        EVENT_TIMEOUT,
+        is_page("disk"),
+    )?;
     ensure!(
         field(&disk, "offered")? == "1" && field(&disk, "unavailable")? == unavailable,
         "the disk page of a VM with one disk that can be installed to and {unavailable} that \
@@ -302,7 +344,14 @@ fn to_review(
     wait_page(vm, ctl, artifacts, &format!("{name}-disk"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-disk.png")))?;
     ctl.key("Return")?;
-    wait_page_marker(vm, serial, "account", EVENT_TIMEOUT)?;
+    nth_marker(
+        vm,
+        serial,
+        "the administrator page",
+        accounts + 1,
+        EVENT_TIMEOUT,
+        is_page("account"),
+    )?;
     wait_page(vm, ctl, artifacts, &format!("{name}-account"))?;
     // The name has the focus. A password row has two stops: its text and the
     // button that shows what was typed.
@@ -318,7 +367,7 @@ fn to_review(
         vm,
         serial,
         "the review page",
-        1,
+        reviews + 1,
         Duration::from_secs(240),
         is_page("review"),
     )?;
@@ -678,23 +727,31 @@ fn reattach() -> Result<()> {
     let mut rig = boot(&Setup {
         name: "iso-next-reattach",
         purpose: "iso-next-reat",
-        // `Apply` waits after it took the helper's lock: the window the first
-        // restart is made in.
+        // `Apply` waits after it took the helper's lock: the window the
+        // restarts are made in.
         fault: Some("slow-apply"),
         usb_medium: false,
         spares: false,
     })?;
     let artifacts = rig.artifacts.clone();
+    let target = rig.target.clone();
     let vm = rig.guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let outcome = observe_reattach(vm, &serial, &artifacts);
+    let outcome = observe_reattach(vm, &serial, &artifacts, &target);
     if outcome.is_err() {
         diagnostics(vm, &artifacts, "reattach");
     }
     outcome
 }
 
-fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> {
+/// The session unit gives up after three starts in five minutes: this resets
+/// that counter (and only that), so that each kill is a restart of its own.
+const RESET_START_LIMIT: &str = "systemctl reset-failed ilex-installer-session.service";
+
+/// What the target looks like to the guest, as the helper names it.
+const TARGET_DEVICE: &str = "/dev/disk/by-id/virtio-ilex-disk-0";
+
+fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path, target: &Path) -> Result<()> {
     let ctl = Vmctl::from_info(vm.info.clone());
     to_review(vm, &ctl, serial, artifacts, "reattach", "0")?;
     confirm_erase_with(vm, &ctl, serial, artifacts, "reattach", false)?;
@@ -708,25 +765,30 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
         |s| s.starting.is_some(),
     )?;
     ensure!(
-        !checking.active && checking.applied.is_none(),
+        !checking.active && checking.applied.is_none() && checking.refusal.is_none(),
         "State in the window of Apply is not the one before it: {checking:?}"
     );
-    let plan = checking.starting.clone().context("no starting plan")?;
+    let refused_plan = checking.starting.clone().context("no starting plan")?;
     ensure!(
         count(serial, is_event("install", "result", "started"))? == 0
             && count(serial, is_page("installing"))? == 0,
         "the interface moved on before the helper answered"
     );
     ctl.save_screenshot(&artifacts.join("next-reattach-starting-review.png"))?;
+
+    // 1. This `Apply` is going to be refused: the disk is changed behind its
+    //    back, as a stick or a spare disk plugged in and formatted would be. A
+    //    partition table where the plan found none is not "the disk that was
+    //    checked", and the helper refuses it once its minute is over (after the
+    //    signature, which needs the registry). Nothing of its own is written.
+    vm.ssh_ok(&format!(
+        "printf 'label: gpt\\n,64M\\n' | sfdisk --quiet {TARGET_DEVICE} && sync"
+    ))?;
+    let changed_by_the_test = head_hash(target)?;
     let welcomes = count(serial, is_page("welcome"))?;
-    // The interface is killed in that window, then (in the image stage) the
-    // compositor: each time the session comes back on the installing page (the
-    // first page it shows says so), not on the welcome page, and the
-    // installation is the one the helper took. (The session unit's start limit
-    // is three in five minutes, the first start included: a third kill would
-    // end the session.)
+    let probes = count(serial, is_event("probe", "result", "ok"))?;
     let mut round = 0;
-    vm.ssh_ok(KILL_INSTALLER)?;
+    vm.ssh_ok(&format!("{RESET_START_LIMIT}; {KILL_INSTALLER}"))?;
     round += 1;
     let page = nth_marker(
         vm,
@@ -746,8 +808,104 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
     );
     wait_page(vm, &ctl, artifacts, "reattach-starting")?;
     ctl.save_screenshot(&artifacts.join("next-reattach-starting.png"))?;
-    // The installation the helper then began is the one that was confirmed,
-    // and the new interface follows it (the old one never saw its answer).
+    // The helper says which plan it refused, and why, and that nothing began.
+    let refused = wait_state(vm, "the refusal of Apply", Duration::from_secs(240), |s| {
+        s.refusal.is_some()
+    })?;
+    let refusal = refused.refusal.clone().context("no refusal")?;
+    ensure!(
+        refusal.plan == refused_plan
+            && refusal.error.code == ErrorCode::DiskChanged
+            && !refusal.error.message.contains(PASSWORD)
+            && !refused.active
+            && refused.starting.is_none()
+            && refused.applied.is_none()
+            && refused.outcome.is_none()
+            && !refused.disk_changed,
+        "the helper's record of the refused Apply: {refused:?}"
+    );
+    // The interface that was restarted in the window knows no choices to go
+    // back to: the welcome page, with the sentence. Not the problem page, not
+    // the lost-helper page, and no outcome of an earlier attempt.
+    let again = nth_marker(
+        vm,
+        serial,
+        "the welcome page after the Apply was refused",
+        1,
+        Duration::from_secs(240),
+        |w| is_page("welcome")(w) && w.get("notice").is_some_and(|n| n == "not-started"),
+    )?;
+    ensure!(
+        field(&again, "edition")? == "gnome",
+        "the welcome page after the refusal: {again:?}"
+    );
+    ensure!(
+        count(serial, is_event("install", "result", "not-started"))? >= 1
+            && count(serial, is_page("problem"))? == 0
+            && count(serial, is_event("lost", "", ""))? == 0
+            && count(serial, is_event("outcome", "", ""))? == 0
+            && count(serial, is_event("stage", "", ""))? == 0,
+        "the restarted interface read something else as the outcome: {}",
+        console(serial)?
+    );
+    ensure!(
+        head_hash(target)? == changed_by_the_test && !helper_state(vm)?.disk_changed,
+        "the refused Apply wrote to the disk"
+    );
+    // The first look at the computer, the restarted interface's own.
+    nth_marker(
+        vm,
+        serial,
+        "the look at the computer after the refusal",
+        probes + 1,
+        EVENT_TIMEOUT,
+        is_event("probe", "result", "ok"),
+    )?;
+    wait_page(vm, &ctl, artifacts, "reattach-not-started")?;
+    ctl.save_screenshot(&artifacts.join("next-reattach-not-started.png"))?;
+    let welcomes_now = count(serial, is_page("welcome"))?;
+    ensure!(
+        welcomes_now == welcomes + 1,
+        "the welcome page was announced {} times after the refusal, expected once",
+        welcomes_now - welcomes
+    );
+
+    // 2. The next walk-through is the person's, and installs: the same session,
+    //    the same helper, the disk now carrying the partition table that was
+    //    written. The window is open again, and the interface is killed in it
+    //    once more.
+    from_welcome(vm, &ctl, serial, artifacts, "reattach-again", "0")?;
+    confirm_erase_with(vm, &ctl, serial, artifacts, "reattach-again", false)?;
+    let checking = wait_state(
+        vm,
+        "the second Apply that is checking",
+        Duration::from_secs(60),
+        |s| s.starting.is_some(),
+    )?;
+    let plan = checking.starting.clone().context("no starting plan")?;
+    ensure!(
+        plan != refused_plan && checking.refusal.is_none() && checking.applied.is_none(),
+        "State in the second window is not a new Apply's: {checking:?}"
+    );
+    vm.ssh_ok(&format!("{RESET_START_LIMIT}; {KILL_INSTALLER}"))?;
+    round += 1;
+    let page = nth_marker(
+        vm,
+        serial,
+        "the installing page after the interface was killed in the second window",
+        round,
+        Duration::from_secs(180),
+        |w| is_page("installing")(w) && w.get("reattached").is_some_and(|r| r == "true"),
+    )?;
+    ensure!(
+        field(&page, "stage")? == "starting" && field(&page, "progress")? == "0",
+        "the installing page found the second Apply checking, with every stage waiting: {page:?}"
+    );
+    wait_page(vm, &ctl, artifacts, "reattach-starting-again")?;
+    ctl.save_screenshot(&artifacts.join("next-reattach-starting-again.png"))?;
+    // The installation the helper then began is the one that was confirmed
+    // the second time, and the new interface follows it (the old one never saw
+    // its answer).
     nth_marker(
         vm,
         serial,
@@ -764,34 +922,33 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
         first.active && first.starting.is_none() && first.applied.as_deref() == Some(plan.as_str()),
         "the installation is not the one Apply was checking: {first:?}"
     );
-    for (what, kill) in [("compositor", KILL_COMPOSITOR)] {
-        vm.ssh_ok(kill)?;
-        round += 1;
-        // The first page the new interface shows says it found the
-        // installation under way.
-        let page = nth_marker(
-            vm,
-            serial,
-            &format!("the installing page after the {what} was killed"),
-            round,
-            Duration::from_secs(180),
-            |w| is_page("installing")(w) && w.get("reattached").is_some_and(|r| r == "true"),
-        )?;
-        ensure!(
-            count(serial, is_event("attach", "result", "installing"))? >= round,
-            "no attach marker after the {what} was killed: {page:?}"
-        );
-        std::thread::sleep(Duration::from_secs(5));
-        let state = helper_state(vm)?;
-        ensure!(
-            state.applied.as_deref() == Some(plan.as_str())
-                && (state.active || state.outcome.is_some()),
-            "the helper's installation changed when the {what} was killed: {state:?}"
-        );
-        ctl.save_screenshot(&artifacts.join(format!("next-reattach-{what}.png")))?;
-    }
+    // The compositor, in the image stage.
+    vm.ssh_ok(&format!("{RESET_START_LIMIT}; {KILL_COMPOSITOR}"))?;
+    round += 1;
+    // The first page the new interface shows says it found the installation
+    // under way.
+    let page = nth_marker(
+        vm,
+        serial,
+        "the installing page after the compositor was killed",
+        round,
+        Duration::from_secs(180),
+        |w| is_page("installing")(w) && w.get("reattached").is_some_and(|r| r == "true"),
+    )?;
     ensure!(
-        count(serial, is_page("welcome"))? == welcomes,
+        count(serial, is_event("attach", "result", "installing"))? >= round,
+        "no attach marker after the compositor was killed: {page:?}"
+    );
+    std::thread::sleep(Duration::from_secs(5));
+    let state = helper_state(vm)?;
+    ensure!(
+        state.applied.as_deref() == Some(plan.as_str())
+            && (state.active || state.outcome.is_some()),
+        "the helper's installation changed when the compositor was killed: {state:?}"
+    );
+    ctl.save_screenshot(&artifacts.join("next-reattach-compositor.png"))?;
+    ensure!(
+        count(serial, is_page("welcome"))? == welcomes_now,
         "the interface showed the welcome page after it was killed during an installation"
     );
     let outcome = nth_marker(
@@ -820,7 +977,8 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
     ensure!(
         matches!(state.outcome, Some(Outcome::Success))
             && state.applied.as_deref() == Some(plan.as_str())
-            && state.starting.is_none(),
+            && state.starting.is_none()
+            && state.refusal.is_none(),
         "the helper's record after the restarts: {state:?}"
     );
     no_password(vm, serial)?;

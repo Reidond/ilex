@@ -1078,6 +1078,16 @@ impl Widgets {
     fn sync_welcome(&mut self, flow: &Flow) {
         let w = &self.welcome;
         sync_banner(&w.banner, flow);
+        // An installation this interface was waiting to see begin did not: the
+        // banner says so until Continue (a problem that stops the installation
+        // comes first).
+        if flow.blocking_problem().is_none()
+            && let Some(notice) = flow.start_notice()
+        {
+            w.banner.set_title(&sentence(&notice));
+            w.banner.set_button_label(None);
+            w.banner.set_revealed(true);
+        }
         if let Some(index) = language::index_of(flow.language())
             && w.language.selected() != index as u32
         {

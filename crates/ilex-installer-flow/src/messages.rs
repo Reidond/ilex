@@ -340,6 +340,23 @@ pub fn not_started(cause: &ClientError) -> Message {
     )
 }
 
+/// A restarted interface found `Apply` checking and then found that the helper
+/// did not begin: it refused (`why` is the refusal it recorded for that plan), or
+/// it stopped while it checked. The interface has no choices to go back to: it
+/// starts again from the welcome page.
+pub fn not_begun(why: Option<&PlanError>) -> Message {
+    let cause = match why {
+        Some(error) => sentence_of(&ClientError::Refused(error.clone()).to_string()),
+        None => "The installer's helper did not begin it: it refused it, or it stopped while it checked.".to_owned(),
+    };
+    Message::new(
+        "The installation did not start",
+        format!(
+            "{cause} Nothing was written to the disk. The installer started again, so its choices are gone: go through the pages again."
+        ),
+    )
+}
+
 /// What the closing page says once Restart or Power off was accepted.
 pub const RESTARTING: &str = "Restarting…";
 pub const POWERING_OFF: &str = "Powering off…";

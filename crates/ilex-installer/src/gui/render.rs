@@ -151,6 +151,13 @@ const SHOTS: &[Shot] = shots![
     "installing-after-lost-answer", "generic+apply-slow+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "welcome-state-down", "generic+state-down", Welcome, "", "", [];
     "welcome-state-down-retried", "generic+state-down+attach-failed", Problem, "", "", [Do::LookAgain];
+    "welcome-not-started", "generic+attach-starting-refused", Welcome, "", "", [];
+    "welcome-not-started-idle", "generic+attach-starting-refused-idle", Welcome, "", "", [];
+    "installing-other-installation", "generic+apply-lost-other", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "review-active-rechecked", "generic+probe-active", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
+    "review-active-state-down", "generic+probe-active+state-down-second", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
+    "review-active-state-down-retried", "generic+probe-active+state-down-second", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry, Do::Retry];
+    "review-apply-active-state-down", "generic+apply-active+state-down-second", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "disk-chosen-gone", "generic+vanish", Disk, "", "", [Do::Continue, Do::Continue, Do::Disk("ata-WDC_WDS500G2B0A_214512800345"), Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
     "problem-lost-then-installing", "generic+lost-then-running", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem)];
     "problem-lost-then-done", "generic+lost-then-done", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem)];

@@ -218,6 +218,9 @@ pub fn run() -> Result<String> {
     attaching()?;
     log_dialog()?;
     starting_window()?;
+    refused_window()?;
+    other_installation()?;
+    interrupted_attach()?;
     unreachable_helper()?;
     chosen_disk()?;
     wiped_secrets()?;
@@ -2640,6 +2643,407 @@ fn starting_window() -> Result<()> {
     ensure!(
         matches!(step, Step::RunState { delay_ms: 0, .. }) && flow.is_attaching(),
         "an Apply refused as active does not ask where it is: {step:?}"
+    );
+    Ok(())
+}
+
+fn helper_down() -> ClientError {
+    ClientError::HelperUnavailable(
+        "org.freedesktop.DBus.Error.NoReply: the helper did not answer".into(),
+    )
+}
+
+/// The first page a restarted interface shows: the one `State` puts it on, with
+/// the markers it printed (the window was shown first).
+fn restarted(sim: &Simulated) -> Result<(Flow, Step)> {
+    let mut flow = Flow::new(sample_layouts()?).with_markers(config(true, false));
+    flow.window_shown("renderer=test scale=1");
+    flow.drain_markers();
+    let Step::RunState { generation, .. } = flow.start() else {
+        bail!("a restarted interface does not ask where the installation is");
+    };
+    let step = flow.state_finished(generation, sim.state());
+    Ok((flow, step))
+}
+
+/// The helper's `Apply` was checking when the interface was restarted, and it
+/// then ended without beginning (the plan expired, the disk changed, the
+/// signature; or the helper stopped while it checked). The record under `State`
+/// is an earlier installation's failure, or none: it is not this attempt's
+/// outcome and the helper is not lost. The welcome page says nothing was
+/// written, and the next walk-through installs.
+fn refused_window() -> Result<()> {
+    for (name, recorded) in [
+        ("generic+attach-starting-refused", true),
+        ("generic+attach-starting-refused-idle", false),
+    ] {
+        let sim = Simulated::load(name)?;
+        let (mut flow, mut step) = restarted(&sim)?;
+        // While `State` says `starting`: the installing page, every stage waiting.
+        let view = flow.installing_view().context("no installing view")?;
+        ensure!(
+            flow.page() == PageId::Installing
+                && flow.phase() == Phase::Running
+                && view.rows.iter().all(|r| r.status == Status::Pending)
+                && view.message == "Starting the installation"
+                && flow.problem_view().is_none(),
+            "{name}: a restarted interface in the window: {:?} {:?}",
+            flow.page(),
+            flow.phase()
+        );
+        let mut asked = 1;
+        while let Step::RunState { generation, .. } = step {
+            step = flow.state_finished(generation, sim.state());
+            asked += 1;
+            ensure!(asked < 20, "{name}: the flow keeps asking State");
+        }
+        ensure!(
+            matches!(step, Step::RunProbe { .. })
+                && flow.page() == PageId::Welcome
+                && flow.phase() == Phase::Idle
+                && !flow.is_attaching()
+                && flow.problem_view().is_none()
+                && flow.done_view().is_none()
+                && flow.installing_view().is_none(),
+            "{name}: after the Apply ended without beginning the flow is on {:?} ({:?}): {step:?}",
+            flow.page(),
+            flow.phase()
+        );
+        let notice = flow
+            .start_notice()
+            .context("no notice on the welcome page")?;
+        ensure!(
+            notice.title == "The installation did not start"
+                && notice.detail.contains("Nothing was written to the disk")
+                && notice.detail.contains("go through the pages again")
+                && notice.detail.contains("16 minutes old") == recorded
+                && (recorded || notice.detail.contains("stopped while it checked")),
+            "{name}: the notice: {notice:?}"
+        );
+        let lines = flow.drain_markers();
+        ensure!(
+            lines
+                .iter()
+                .any(|l| l == "ILEX-INSTALLER event=install result=not-started")
+                && lines.iter().any(
+                    |l| l.starts_with("ILEX-INSTALLER page=welcome edition=gnome")
+                        && l.ends_with("notice=not-started")
+                )
+                && !lines.iter().any(|l| l.contains("event=outcome")
+                    || l.contains("page=problem")
+                    || l.contains("event=lost")
+                    || l.contains("page=done")),
+            "{name}: the markers: {lines:?}"
+        );
+        // The first look at the computer follows, and Continue is the person's.
+        let step = settle(&mut flow, &sim, step)?;
+        ensure!(
+            step == Step::Stay
+                && flow.probe().is_some()
+                && flow.can_continue()
+                && flow.start_notice().is_some(),
+            "{name}: the welcome page after the look: {step:?}"
+        );
+        // The next walk-through installs: the earlier failure under it is not
+        // in its way and not its outcome.
+        ensure!(
+            flow.advance() == Step::Goto(PageId::Machine) && flow.start_notice().is_none(),
+            "{name}: Continue does not dismiss the notice"
+        );
+        ensure!(
+            flow.advance() == Step::Goto(PageId::Disk)
+                && flow.advance() == Step::Goto(PageId::Account),
+            "{name}: machine and disk do not continue"
+        );
+        fill_account(&mut flow, name)?;
+        let (generation, request) = run_plan(&mut flow)?;
+        ensure!(
+            flow.plan_finished(generation, sim.plan(&request)) == Step::Goto(PageId::Review)
+                && flow.can_install(),
+            "{name}: the check after the refusal"
+        );
+        let step = start_install(&mut flow, &sim)?;
+        let step = settle(&mut flow, &sim, step)?;
+        ensure!(
+            step == Step::Goto(PageId::Done)
+                && flow.page() == PageId::Done
+                && flow.phase() == Phase::Succeeded,
+            "{name}: the next installation did not finish: {step:?} {:?}",
+            flow.page()
+        );
+    }
+
+    // The installation did begin and ended before the interface looked again:
+    // that record is this plan's, and is its outcome.
+    let sim = Simulated::load("generic+attach-starting")?;
+    let (mut flow, step) = restarted(&sim)?;
+    let Step::RunState { generation, .. } = step else {
+        bail!("no state request in the window");
+    };
+    let ended = Simulated::load("generic+attach-failed")?.state()?;
+    let step = flow.state_finished(generation, Ok(ended));
+    ensure!(
+        step == Step::Goto(PageId::Problem)
+            && flow.phase() == Phase::Failed
+            && flow.problem_view().is_some_and(|p| p.kind
+                == ProblemKind::Failed {
+                    stage: Stage::Image
+                })
+            && flow.start_notice().is_none(),
+        "an installation that began and failed is not its outcome: {step:?} {:?}",
+        flow.page()
+    );
+
+    // A helper that stopped answering after this interface asked `Apply`
+    // (the problem page for it) and then answers with no installation begun:
+    // not the problem page for ever. The interface has its choices, so it is
+    // the review page, with the sentence and Try again.
+    let (mut flow, sim) = at_review("generic+apply-lost")?;
+    let Step::Confirm(_) = flow.install() else {
+        bail!("no dialog");
+    };
+    let Step::RunApply {
+        generation,
+        plan,
+        erase_disk,
+        password,
+    } = flow.confirm_install()
+    else {
+        bail!("no apply");
+    };
+    let lost = sim.start_installation(&plan, &erase_disk, &password);
+    ensure!(lost.is_err(), "the simulated Apply answered");
+    let mut step = flow.apply_finished(generation, lost);
+    for round in 0..8 {
+        let Step::RunState { generation, .. } = step else {
+            bail!("round {round}: no state request: {step:?}");
+        };
+        step = flow.state_finished(generation, Err(helper_down()));
+    }
+    ensure!(
+        flow.phase() == Phase::Lost && flow.page() == PageId::Problem,
+        "eight silent answers: {:?} {:?}",
+        flow.phase(),
+        flow.page()
+    );
+    let Step::RunState { generation, .. } = step else {
+        bail!("the lost helper is not asked again: {step:?}");
+    };
+    let step = flow.state_finished(generation, sim.state());
+    ensure!(
+        step == Step::Goto(PageId::Review)
+            && flow.phase() == Phase::Idle
+            && flow.page() == PageId::Review
+            && flow.problem_view().is_none()
+            && flow
+                .check_problem()
+                .is_some_and(|m| m.title == "The installation did not start")
+            && flow.can_retry(),
+        "a helper that came back with nothing begun: {step:?} {:?} {:?}",
+        flow.page(),
+        flow.phase()
+    );
+    Ok(())
+}
+
+/// After a lost answer to `Apply`, `State` says another plan's installation is
+/// active or being checked: the interface follows it on the installing page and
+/// does not send the person back to the review while a disk is written.
+fn other_installation() -> Result<()> {
+    let lose_apply = |name: &str| -> Result<(Flow, Simulated, Step)> {
+        let (mut flow, sim) = at_review(name)?;
+        let Step::Confirm(_) = flow.install() else {
+            bail!("no dialog");
+        };
+        let Step::RunApply {
+            generation,
+            plan,
+            erase_disk,
+            password,
+        } = flow.confirm_install()
+        else {
+            bail!("no apply");
+        };
+        let lost = sim.start_installation(&plan, &erase_disk, &password);
+        ensure!(lost.is_err(), "{name}: the simulated Apply answered");
+        let step = flow.apply_finished(generation, lost);
+        ensure!(
+            matches!(step, Step::RunState { delay_ms: 400, .. }) && flow.phase() == Phase::Starting,
+            "{name}: a lost answer: {step:?}"
+        );
+        Ok((flow, sim, step))
+    };
+    // Another plan is active.
+    let (mut flow, sim, step) = lose_apply("generic+apply-lost-other")?;
+    let Step::RunState { generation, .. } = step else {
+        bail!("no state request");
+    };
+    let state = sim.state()?;
+    ensure!(
+        state.active && state.applied.as_deref() == Some("fedcba9876543210fedcba9876543210"),
+        "the simulated helper is not installing another plan: {state:?}"
+    );
+    let step = flow.state_finished(generation, Ok(state));
+    let view = flow.installing_view().context("no installing view")?;
+    ensure!(
+        flow.page() == PageId::Installing
+            && flow.phase() == Phase::Running
+            && matches!(step, Step::RunState { delay_ms: 1000, .. })
+            && flow.check_problem().is_none()
+            && view.rows.len() == 6
+            && view.rows[2].status == Status::Running,
+        "another plan is active and the flow is on {:?} ({:?}): {step:?}",
+        flow.page(),
+        flow.phase()
+    );
+    // Another plan's `Apply` is checking.
+    let (mut flow, _sim, step) = lose_apply("generic+apply-lost")?;
+    let Step::RunState { generation, .. } = step else {
+        bail!("no state request");
+    };
+    let mut checking = State::idle(1);
+    checking.starting = Some("f".repeat(32));
+    let step = flow.state_finished(generation, Ok(checking));
+    let view = flow.installing_view().context("no installing view")?;
+    ensure!(
+        flow.page() == PageId::Installing
+            && flow.phase() == Phase::Running
+            && matches!(step, Step::RunState { delay_ms: 1000, .. })
+            && view.rows.iter().all(|r| r.status == Status::Pending)
+            && view.message == "Starting the installation",
+        "another plan's Apply is checking and the flow is on {:?} ({:?})",
+        flow.page(),
+        flow.phase()
+    );
+    // That `Apply` is then refused: nothing began. The interface has its
+    // choices, so it is the review page with the sentence and Try again (not
+    // the lost-helper page, and never the previous installation's outcome).
+    let Step::RunState { generation, .. } = step else {
+        bail!("no state request");
+    };
+    let mut old = Simulated::load("generic+attach-failed")?.state()?;
+    old.refusal = None;
+    let step = flow.state_finished(generation, Ok(old));
+    ensure!(
+        step == Step::Goto(PageId::Review)
+            && flow.phase() == Phase::Idle
+            && flow
+                .check_problem()
+                .is_some_and(|m| m.title == "The installation did not start")
+            && flow.can_retry()
+            && flow.problem_view().is_none(),
+        "another plan's Apply was refused: {step:?} {:?} {:?}",
+        flow.page(),
+        flow.phase()
+    );
+    Ok(())
+}
+
+/// A refusal that says an installation is active sends the flow to ask `State`
+/// from the review page. Whatever it answers, the page is not left on an
+/// endless "Checking your choices" or on a grey button with nothing said.
+fn interrupted_attach() -> Result<()> {
+    let active = || {
+        ClientError::Refused(PlanError::new(
+            ErrorCode::InstallationActive,
+            None,
+            "an installation is running; wait for it to finish",
+        ))
+    };
+    // The look at the computer that Try again makes is refused as active and
+    // nothing is: the check is made again (it is not left unrun).
+    let (mut flow, sim) = at_review("generic+probe-active")?;
+    let Step::RunProbe { generation } = flow.retry() else {
+        bail!("Try again does not look at the computer");
+    };
+    let step = flow.probe_finished(generation, sim.probe());
+    ensure!(
+        matches!(step, Step::RunState { delay_ms: 0, .. }) && flow.is_attaching(),
+        "a look refused as active does not ask where it is: {step:?}"
+    );
+    let Step::RunState { generation, .. } = step else {
+        bail!("no state request");
+    };
+    let step = flow.state_finished(generation, sim.state());
+    ensure!(
+        matches!(step, Step::RunProbe { .. })
+            && flow.is_checking()
+            && flow.page() == PageId::Review,
+        "an idle helper does not resume the check: {step:?} {:?}",
+        flow.plan_check()
+    );
+    let step = settle(&mut flow, &sim, step)?;
+    ensure!(
+        step == Step::Stay
+            && flow.can_install()
+            && matches!(flow.review_page().body, ReviewBody::Checked(_)),
+        "the check after an idle answer: {step:?} {:?}",
+        flow.plan_check()
+    );
+    // The same, and the helper cannot be asked: the review page says so, with
+    // Try again, and Try again asks `State` first and then checks.
+    let (mut flow, sim) = at_review("generic+probe-active+state-down")?;
+    let Step::RunProbe { generation } = flow.retry() else {
+        bail!("Try again does not look at the computer");
+    };
+    let Step::RunState { generation, .. } = flow.probe_finished(generation, sim.probe()) else {
+        bail!("no state request");
+    };
+    let step = flow.state_finished(generation, sim.state());
+    ensure!(
+        step == Step::Stay
+            && flow.page() == PageId::Review
+            && flow.check_word() == "failed"
+            && !flow.is_checking()
+            && !flow.can_install()
+            && matches!(
+                flow.review_page().body,
+                ReviewBody::Problem { retry, .. } if retry.enabled
+            ),
+        "a State that fails leaves the review page with no word: {step:?} {:?}",
+        flow.review_page().body
+    );
+    let step = flow.retry();
+    ensure!(
+        matches!(step, Step::RunState { delay_ms: 0, .. }) && flow.is_attaching(),
+        "Try again after the helper could not be asked does not ask State: {step:?}"
+    );
+    let step = settle(&mut flow, &sim, step)?;
+    ensure!(
+        step == Step::Stay && flow.can_install(),
+        "the check after Try again: {step:?} {:?}",
+        flow.plan_check()
+    );
+    // `Apply` itself refused as active, and the helper cannot be asked: the
+    // Erase button is not left grey with nothing said.
+    let (mut flow, sim) = at_review("generic+state-down")?;
+    let Step::Confirm(_) = flow.install() else {
+        bail!("no dialog");
+    };
+    let Step::RunApply { generation, .. } = flow.confirm_install() else {
+        bail!("no apply");
+    };
+    let Step::RunState { generation, .. } = flow.apply_finished(generation, Err(active())) else {
+        bail!("an Apply refused as active does not ask where it is");
+    };
+    let step = flow.state_finished(generation, sim.state());
+    ensure!(
+        step == Step::Stay
+            && flow.check_word() == "failed"
+            && !flow.can_install()
+            && matches!(
+                flow.review_page().body,
+                ReviewBody::Problem { retry, .. } if retry.enabled
+            ),
+        "an Apply refused as active and a State that fails: {step:?} {:?}",
+        flow.review_page().body
+    );
+    let retried = flow.retry();
+    let step = settle(&mut flow, &sim, retried)?;
+    ensure!(
+        step == Step::Stay && flow.can_install(),
+        "Try again after the refusal: {step:?} {:?}",
+        flow.plan_check()
     );
     Ok(())
 }

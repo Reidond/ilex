@@ -186,8 +186,12 @@ pub(super) struct Installation {
     state: Option<State>,
     progress: Option<Progress>,
     summary: Option<Summary>,
-    /// The plan the helper says it is checking (`State.starting`): the record
-    /// in `state` is not this installation's yet, and is not shown.
+    /// The plan whose installation this interface has not seen begin: the one
+    /// the helper says it is checking (`State.starting`; the record in `state`
+    /// is not this installation's yet, and is not shown), or the one this
+    /// interface applied and then lost the helper's answer for. A `State` that
+    /// is not busy and whose record is not this plan's (`applied`) means that
+    /// its `Apply` ended without beginning.
     starting: Option<String>,
     /// What the problem page says when the helper has not answered for long.
     lost: Option<Message>,
@@ -377,6 +381,14 @@ impl Flow {
             }
             Ok(_) => {
                 self.say(markers::attach("idle"));
+                if self.page == PageId::Review && matches!(self.check, PlanCheck::NotRun) {
+                    // A refusal that said an installation was active sent the
+                    // flow here from the review page, and nothing is active:
+                    // the check that was interrupted is made again, after the
+                    // look at the computer (it is not left as a spinner).
+                    self.check = PlanCheck::Running;
+                    self.resume_check = true;
+                }
                 self.announce_page(None);
                 self.begin_probe()
             }
@@ -391,6 +403,14 @@ impl Flow {
                 self.probe = ProbeState::Failed(error.message());
                 self.view = None;
                 self.disk_view = None;
+                if self.page == PageId::Review {
+                    // The review page has no banner: it says it itself, with a
+                    // Try again that asks `State` again (see `Flow::retry`),
+                    // not a spinner and not a button that is simply grey.
+                    self.resume_check = false;
+                    self.stale_probe = true;
+                    self.check = PlanCheck::Failed(error.message());
+                }
                 self.announce_page(None);
                 Step::Stay
             }
@@ -427,6 +447,12 @@ impl Flow {
                         self.go(PageId::Installing);
                     }
                     self.begin_state(POLL_MS)
+                } else if self.did_not_begin(&state) {
+                    // The `Apply` this interface waited to see begin ended
+                    // without beginning (a refusal, or the helper stopped while
+                    // it checked): the record under `State` is an older one,
+                    // or none. It is not this attempt's outcome.
+                    self.did_not_start(&state)
                 } else if state.ended() {
                     self.take_state(state);
                     self.conclude_installation()
@@ -451,6 +477,76 @@ impl Flow {
                     self.begin_state(POLL_MS)
                 }
             }
+        }
+    }
+
+    /// Was the `Apply` this interface was waiting to see begin (`inst.starting`)
+    /// not the installation this not-busy `State` describes? Then it ended
+    /// without beginning.
+    fn did_not_begin(&self, state: &State) -> bool {
+        self.inst
+            .starting
+            .as_ref()
+            .is_some_and(|plan| state.applied.as_ref() != Some(plan))
+    }
+
+    /// Start the first walk-through again from the welcome page, as a restarted
+    /// interface does (it has no choices to go back to): everything the person
+    /// chose is forgotten, the passwords are wiped, and the computer is looked at
+    /// again.
+    fn start_over(&mut self) -> Step {
+        self.administrator.clear();
+        self.wipe_secrets();
+        self.name_refusal = None;
+        self.machine_chosen = false;
+        self.disk_chosen = false;
+        self.check = PlanCheck::NotRun;
+        self.stale_probe = false;
+        self.resume_check = false;
+        self.page = PageId::Welcome;
+        self.announce_page(None);
+        self.begin_probe()
+    }
+
+    /// The installation's own state is forgotten (the request counters stay, so
+    /// that an answer to an earlier request is never taken for a later one).
+    fn reset_installation(&mut self) {
+        self.inst = Installation {
+            apply_generation: self.inst.apply_generation,
+            state_generation: self.inst.state_generation,
+            finish_generation: self.inst.finish_generation,
+            log_probe_generation: self.inst.log_probe_generation,
+            ..Installation::default()
+        };
+    }
+
+    /// The `Apply` the interface waited to see begin ended without beginning:
+    /// nothing was written. The helper's record of the refusal for that plan, if
+    /// it has one, says why. An interface that has its choices (it applied
+    /// itself) goes back to the review page, where the sentence and Try again
+    /// are; a restarted one has none, and starts again from the welcome page
+    /// with the sentence on it.
+    fn did_not_start(&mut self, state: &State) -> Step {
+        let plan = self.inst.starting.clone();
+        let refusal = state
+            .refusal
+            .as_ref()
+            .filter(|r| Some(&r.plan) == plan.as_ref())
+            .map(|r| r.error.clone());
+        self.say(markers::install("not-started"));
+        let have_choices = !self.administrator.is_empty() && !self.password.is_empty();
+        self.reset_installation();
+        if have_choices {
+            self.stale_probe = true;
+            self.resume_check = false;
+            self.check = PlanCheck::Failed(match &refusal {
+                Some(error) => messages::not_started(&ClientError::Refused(error.clone())),
+                None => messages::not_begun(None),
+            });
+            self.go(PageId::Review)
+        } else {
+            self.start_notice = Some(messages::not_begun(refusal.as_ref()));
+            self.start_over()
         }
     }
 
@@ -737,10 +833,10 @@ impl Flow {
     fn after_lost_answer(&mut self, result: Result<State, ClientError>) -> Step {
         let applying = self.inst.applying.as_ref().map(|(_, plan)| plan.clone());
         match result {
-            // The helper took the `Apply` and is still checking (the image's
+            // The helper took this `Apply` and is still checking (the image's
             // signature is checked over the network): it has neither begun nor
             // refused, so nothing is said yet.
-            Ok(state) if state.starting.is_some() => {
+            Ok(state) if state.starting.is_some() && state.starting == applying => {
                 self.inst.failures = 0;
                 self.begin_state(POLL_MS)
             }
@@ -755,12 +851,36 @@ impl Flow {
                 }
                 self.followed(Ok(state))
             }
-            Ok(_) => {
-                let cause = self
-                    .inst
-                    .unanswered
-                    .take()
-                    .unwrap_or_else(|| ClientError::Other("the helper did not answer".into()));
+            // An installation of another plan is under way, or being checked
+            // (another `Apply` took the helper's lock): this interface's own
+            // `Apply` was not what ran, and the disk is being written. The
+            // installing page follows that installation; "did not start" would
+            // send the person back to Review while it goes on.
+            Ok(state) if state.busy() => {
+                self.say(markers::attach("installing"));
+                self.inst.applying = None;
+                self.inst.unanswered = None;
+                self.inst.reattached = true;
+                self.inst.phase = Phase::Running;
+                self.inst.failures = 0;
+                self.take_busy(state);
+                self.go(PageId::Installing);
+                self.begin_state(POLL_MS)
+            }
+            Ok(state) => {
+                let cause =
+                    match state
+                        .refusal
+                        .as_ref()
+                        .filter(|r| Some(&r.plan) == applying.as_ref())
+                    {
+                        // The helper says why it refused, though its answer to
+                        // `Apply` never came.
+                        Some(refusal) => ClientError::Refused(refusal.error.clone()),
+                        None => self.inst.unanswered.take().unwrap_or_else(|| {
+                            ClientError::Other("the helper did not answer".into())
+                        }),
+                    };
                 self.say(markers::install("not-started"));
                 self.inst.applying = None;
                 self.inst.phase = Phase::Idle;
@@ -771,7 +891,9 @@ impl Flow {
             Err(error) => {
                 self.inst.failures += 1;
                 if self.inst.failures >= LOST_AFTER {
-                    self.inst.applying = None;
+                    // Whether that `Apply` began is not known: the answer that
+                    // comes when the helper is back is read against its plan.
+                    self.inst.starting = self.inst.applying.take().map(|(_, plan)| plan);
                     self.lose(&error)
                 } else {
                     self.begin_state(POLL_MS)
@@ -961,7 +1083,7 @@ impl Flow {
             return self.begin_state(0);
         }
         let have_choices = !self.administrator.is_empty() && !self.password.is_empty();
-        self.inst = Installation::default();
+        self.reset_installation();
         if have_choices {
             self.check = super::PlanCheck::Running;
             self.resume_check = true;
@@ -969,17 +1091,7 @@ impl Flow {
             self.announce_page(None);
             self.begin_probe()
         } else {
-            self.administrator.clear();
-            self.wipe_secrets();
-            self.name_refusal = None;
-            self.machine_chosen = false;
-            self.disk_chosen = false;
-            self.check = super::PlanCheck::NotRun;
-            self.stale_probe = false;
-            self.resume_check = false;
-            self.page = PageId::Welcome;
-            self.announce_page(None);
-            self.begin_probe()
+            self.start_over()
         }
     }
 

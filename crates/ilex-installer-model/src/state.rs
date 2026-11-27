@@ -1,6 +1,7 @@
 //! `State()`: where an installation is, for a restarted interface to re-attach.
 //! The helper keeps the same document at `/run/ilex-installer/state.json`.
 
+use crate::plan::PlanError;
 use serde::{Deserialize, Serialize};
 
 pub const STATE_SCHEMA: u32 = 1;
@@ -102,6 +103,19 @@ pub struct Summary {
     pub disk_label: String,
 }
 
+/// An `Apply` the helper took the work lock for and then refused (the plan
+/// expired, the disk changed, the signature, the disk in use, an internal
+/// error): nothing was written. The helper keeps the latest one so that an
+/// interface that was restarted while it checked can say why its installation
+/// did not start, with the plan's id to tell it from an older one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    /// The plan that was applied.
+    pub plan: String,
+    /// What the helper answered.
+    pub error: PlanError,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub schema: u32,
@@ -147,6 +161,12 @@ pub struct State {
     /// crashed helper leaves it in is read as not set.
     #[serde(default)]
     pub starting: Option<String>,
+    /// The latest `Apply` that ended in a refusal, over whatever else the
+    /// record holds (it is cleared when an `Apply` takes the lock again). An
+    /// interface that waited for the plan in `starting` and finds it here, or
+    /// finds a record that is not that plan's, knows nothing was written.
+    #[serde(default)]
+    pub refusal: Option<Refusal>,
 }
 
 impl State {
@@ -167,6 +187,7 @@ impl State {
             started: None,
             summary: None,
             starting: None,
+            refusal: None,
         }
     }
 

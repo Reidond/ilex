@@ -6,8 +6,9 @@
 
 use crate::sys;
 use anyhow::{Context, Result};
+use ilex_installer_model::plan::PlanError;
 use ilex_installer_model::state::{
-    LOG_TAIL_LINES, Outcome, STATE_SCHEMA, Stage, StageRecord, StageStatus, State, Summary,
+    LOG_TAIL_LINES, Outcome, Refusal, STATE_SCHEMA, Stage, StageRecord, StageStatus, State, Summary,
 };
 use std::{
     fs,
@@ -160,8 +161,29 @@ impl Tracker {
     /// so, so that an interface that asks in that window does not read the
     /// previous installation's record as the answer.
     pub fn starting(&self, plan: &str) -> Starting<'_> {
-        self.update(|state| state.starting = Some(plan.to_owned()));
+        self.update(|state| {
+            state.starting = Some(plan.to_owned());
+            // The refusal of an earlier `Apply` is not this one's.
+            state.refusal = None;
+        });
         Starting { tracker: self }
+    }
+
+    /// The `Apply` for this plan was refused: nothing was written. Recorded in
+    /// `State()` (and its file) with the plan's id, so that an interface that
+    /// asks afterwards can tell this answer from an older one and say why.
+    /// Does nothing for an installation that began (it has an outcome of its
+    /// own).
+    pub fn refused(&self, plan: &str, error: &PlanError) {
+        if locked(&self.state).applied.as_deref() == Some(plan) {
+            return;
+        }
+        self.update(|state| {
+            state.refusal = Some(Refusal {
+                plan: plan.to_owned(),
+                error: error.clone(),
+            });
+        });
     }
 
     fn clear_starting(&self) {
@@ -181,6 +203,7 @@ impl Tracker {
         next.active = true;
         // Atomically with `active`: there is no moment with neither.
         next.starting = None;
+        next.refusal = None;
         next.applied = Some(plan.to_owned());
         next.stage = Stage::Idle;
         next.progress = 0.0;

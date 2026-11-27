@@ -3785,20 +3785,71 @@ fn check_state(parent: &Path) -> Result<()> {
         );
         // `new` rewrote the file as it reads it; this helper's record is its own.
         tracker.set_plan(&plan);
+        // The refusal is recorded with the plan's id before the guard says
+        // nothing is being checked any more.
+        let expired = ilex_installer_model::plan::PlanError::new(
+            ilex_installer_model::plan::ErrorCode::PlanExpired,
+            Some("plan"),
+            "the plan is 16 minutes old and is valid for 15 minutes: plan again",
+        );
+        tracker.refused(&plan, &expired);
+        let both = tracker.state();
+        ensure!(
+            both.busy()
+                && both
+                    .refusal
+                    .as_ref()
+                    .is_some_and(|r| r.plan == plan && r.error == expired),
+            "a refusal is not recorded with its plan while the guard is held: {both:?}"
+        );
         drop(refused);
         ensure!(
             tracker.state().starting.is_none() && !tracker.state().busy(),
             "a refused Apply left its starting mark: {:?}",
             tracker.state()
         );
+        let in_file: State = serde_json::from_slice(&fs::read(dir.0.join("state.json"))?)?;
+        ensure!(
+            in_file.refusal == tracker.state().refusal && in_file.refusal.is_some(),
+            "the refusal is not in the state file: {in_file:?}"
+        );
+        // A successor keeps it (it says which plan was refused and why, and is
+        // no claim that anything is running).
+        ensure!(
+            progress::Tracker::new(&dir.0).state().refusal == tracker.state().refusal,
+            "a successor lost the refusal"
+        );
     }
     {
+        // The next `Apply` that takes the lock clears the earlier refusal, and
+        // `begin` leaves none.
         let _checking = tracker.starting(&plan);
+        ensure!(
+            tracker.state().refusal.is_none(),
+            "a new Apply kept the earlier refusal: {:?}",
+            tracker.state()
+        );
         tracker.begin(&plan, &Stage::UNENCRYPTED, test_summary())?;
         ensure!(
-            tracker.state().starting.is_none() && tracker.state().active,
+            tracker.state().starting.is_none()
+                && tracker.state().active
+                && tracker.state().refusal.is_none(),
             "begin did not replace the starting mark with the active flag: {:?}",
             tracker.state()
+        );
+        // An installation that began is not a refusal, whatever `Apply` then
+        // returns.
+        tracker.refused(
+            &plan,
+            &ilex_installer_model::plan::PlanError::new(
+                ilex_installer_model::plan::ErrorCode::Internal,
+                None,
+                "the installation thread did not start",
+            ),
+        );
+        ensure!(
+            tracker.state().refusal.is_none(),
+            "an installation that began was recorded as refused"
         );
     }
     ensure!(

@@ -145,8 +145,6 @@ impl Helper {
     /// and start the installation. Returns the state as the installation
     /// begins; `State()` and the `Progress` and `Finished` signals follow it.
     pub fn apply(self: &Arc<Self>, plan_id: &str, erase_disk: &str) -> Result<State, PlanError> {
-        let internal =
-            |e: anyhow::Error| PlanError::new(ErrorCode::Internal, None, format!("{e:#}"));
         let _busy = locked(&self.work);
         if self.tracker.active() {
             return Err(PlanError::new(
@@ -164,6 +162,25 @@ impl Helper {
         // can only make the installer slower): hold the window open long
         // enough for the interface to be killed and started again in it.
         fault::delay("slow-apply");
+        let result = self.apply_checked(plan_id, erase_disk);
+        if let Err(error) = &result {
+            // `State()` says which plan was refused and why, before the guard
+            // above says that nothing is being checked any more: an interface
+            // that was restarted while `Apply` checked finds the reason.
+            self.tracker.refused(plan_id, error);
+        }
+        result
+    }
+
+    /// What `Apply` does with the work lock held and `State()` saying it is
+    /// checking: every check, then the start.
+    fn apply_checked(
+        self: &Arc<Self>,
+        plan_id: &str,
+        erase_disk: &str,
+    ) -> Result<State, PlanError> {
+        let internal =
+            |e: anyhow::Error| PlanError::new(ErrorCode::Internal, None, format!("{e:#}"));
         // 1. The plan.
         let Recorded {
             plan,

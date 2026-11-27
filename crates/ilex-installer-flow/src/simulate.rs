@@ -12,13 +12,21 @@
 //! while and then answers again), the
 //! state the helper is in when the interface starts (`attach-installing`,
 //! `attach-done`, `attach-failed`, `attach-starting`: an `Apply` that is still
-//! checking, with the previous installation's failure as the rest of its
-//! record), whether USB sticks are plugged in
+//! checking, with an earlier installation's failure (another plan's) as the
+//! rest of its record; `attach-starting-refused`: the same for three
+//! questions, after which that `Apply` has been refused and the record is the
+//! earlier failure again, with the refusal; `attach-starting-refused-idle`: the
+//! same on a first installation, where the record is then idle and says
+//! nothing of the refusal), whether USB sticks are plugged in
 //! (`sticks`, or `bare` for none), whether writing a log to one fails
 //! (`log-fails`), how `Apply` answers (`apply-refused`, `apply-lost`, and
 //! `apply-slow`: the answer is lost and the helper goes on, saying `starting`
-//! for a few questions and then installing), whether `State` fails the first
-//! time it is asked (`state-down`: a helper that is restarting), whether the
+//! for a few questions and then installing; `apply-lost-other`: the answer is
+//! lost and the helper is installing another plan; `apply-active`: it refuses
+//! because an installation is active), whether `State` fails the first time it
+//! is asked (`state-down`: a helper that is restarting) or the second
+//! (`state-down-second`), whether the second look at the computer is refused
+//! because an installation is active (`probe-active`), whether the
 //! disk a plan was made for vanishes afterwards (`vanish`) and
 //! whether Restart and Power off fail (`finish-fails`); `early` holds an
 //! installation in its first stage. They are
@@ -42,7 +50,9 @@ use ilex_installer_model::plan::{
     SecretKind, TpmMode, check_request,
 };
 use ilex_installer_model::probe::{Disk, Partition, Probe};
-use ilex_installer_model::state::{Outcome, Stage, StageRecord, StageStatus, State, Summary};
+use ilex_installer_model::state::{
+    Outcome, Refusal, Stage, StageRecord, StageStatus, State, Summary,
+};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fs;
@@ -172,10 +182,21 @@ enum ApplyMode {
     /// Its answer is lost, and the helper goes on: `State` says `starting` for
     /// a few questions, then the installation is running.
     Slow,
+    /// Its answer is lost, and the helper is installing another plan.
+    LostOther,
+    /// It refuses: an installation is active already.
+    Active,
 }
 
 /// How many `State` requests answer `starting` after an `apply-slow`.
 const STARTING_POLLS: usize = 3;
+
+/// The plan of the earlier installation whose failure the `attach-starting*`
+/// scenarios keep under the `Apply` that is checking.
+const EARLIER_PLAN: &str = "0123456789abcdef0123456789abcdef";
+
+/// The plan of the installation another interface started (`apply-lost-other`).
+const OTHER_PLAN: &str = "fedcba9876543210fedcba9876543210";
 
 /// The state the helper is in when the interface starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,8 +205,16 @@ enum Attach {
     Installing,
     Done,
     Failed,
-    /// An `Apply` that is still checking, over the previous failure.
+    /// An `Apply` that is still checking, over an earlier installation's
+    /// failure.
     Starting,
+    /// The same for [`STARTING_POLLS`] questions, then the `Apply` has been
+    /// refused (with the reason the helper records) and the earlier failure is
+    /// all there is.
+    StartingRefused,
+    /// The same on a first installation: then the helper has recorded nothing
+    /// and its state is idle.
+    StartingRefusedIdle,
 }
 
 /// What a scenario's modifiers say.
@@ -200,8 +229,11 @@ struct Modifiers {
     log_fails: bool,
     /// Restart and Power off fail.
     finish_fails: bool,
-    /// The first `State` request fails (a helper that is restarting).
-    state_down: bool,
+    /// The `State` request that fails, counting from zero (a helper that is
+    /// restarting): the first at start-up, or the second.
+    state_down: Option<usize>,
+    /// The second look at the computer is refused: an installation is active.
+    probe_active: bool,
     /// The disk a plan was made for is gone from every later probe.
     vanish: bool,
 }
@@ -216,7 +248,8 @@ impl Modifiers {
             bare: false,
             log_fails: false,
             finish_fails: false,
-            state_down: false,
+            state_down: None,
+            probe_active: false,
             vanish: false,
         };
         for word in words {
@@ -229,17 +262,23 @@ impl Modifiers {
                 "early" => modifiers.script = Script::Early,
                 "lost-then-done" => modifiers.script = Script::LostThenDone,
                 "lost-then-running" => modifiers.script = Script::LostThenRunning,
-                "state-down" => modifiers.state_down = true,
+                "state-down" => modifiers.state_down = Some(0),
+                "state-down-second" => modifiers.state_down = Some(1),
+                "probe-active" => modifiers.probe_active = true,
                 "vanish" => modifiers.vanish = true,
                 "apply-refused" => modifiers.apply = ApplyMode::Refuses,
                 "apply-lost" => modifiers.apply = ApplyMode::Lost,
                 "apply-slow" => modifiers.apply = ApplyMode::Slow,
+                "apply-lost-other" => modifiers.apply = ApplyMode::LostOther,
+                "apply-active" => modifiers.apply = ApplyMode::Active,
                 "bare" => modifiers.bare = true,
                 "finish-fails" => modifiers.finish_fails = true,
                 "attach-installing" => modifiers.attach = Attach::Installing,
                 "attach-done" => modifiers.attach = Attach::Done,
                 "attach-failed" => modifiers.attach = Attach::Failed,
                 "attach-starting" => modifiers.attach = Attach::Starting,
+                "attach-starting-refused" => modifiers.attach = Attach::StartingRefused,
+                "attach-starting-refused-idle" => modifiers.attach = Attach::StartingRefusedIdle,
                 "sticks" => modifiers.sticks = true,
                 "log-fails" => modifiers.log_fails = true,
                 other => bail!("no simulation modifier '{other}'"),
@@ -260,10 +299,19 @@ struct Session {
     summary: Option<Summary>,
     applied: Option<String>,
     /// How many more `State` requests say that an `Apply` is checking (the
-    /// plan it names), after which the installation runs.
+    /// plan it names), after which the installation runs, or (when `refused`
+    /// is set) it was refused and the record is what `Simulated::state` holds.
     starting: Option<(String, usize)>,
-    /// `State` has been asked (the `state-down` modifier fails the first).
-    asked: bool,
+    /// The `Apply` that is checking is refused when its questions are over, and
+    /// the helper records why (for the plan in `refused_plan`).
+    refused: Option<PlanError>,
+    refused_plan: Option<String>,
+    /// The helper is installing this other plan (the answer to `Apply` was
+    /// lost, and it was not this interface's).
+    other: Option<(Plan, Summary)>,
+    /// How many times `State` and `Probe` have been asked.
+    asked: usize,
+    probes: usize,
 }
 
 pub struct Simulated {
@@ -391,13 +439,38 @@ impl Simulated {
             Attach::Done => 99,
             _ => 3,
         };
-        if let Ok(mut state) = script_state(script, step, &plan, &summary) {
-            if attach == Attach::Starting {
-                // The rest of the record is the previous installation's
-                // failure: what an interface must not show.
-                state.starting = Some(plan.id.clone());
+        let starting = matches!(
+            attach,
+            Attach::Starting | Attach::StartingRefused | Attach::StartingRefusedIdle
+        );
+        if attach == Attach::StartingRefusedIdle {
+            // A first installation: there is no earlier record under it.
+            self.state = None;
+        } else if let Ok(mut state) = script_state(script, step, &plan, &summary) {
+            if starting {
+                // The rest of the record is an earlier installation's failure
+                // (another plan's): what an interface must not show, and must
+                // not take for the outcome of the one being checked.
+                state.applied = Some(EARLIER_PLAN.to_owned());
             }
             self.state = Some(state);
+        }
+        if starting {
+            let session = self.session.get_mut().unwrap_or_else(|e| e.into_inner());
+            if attach == Attach::Starting {
+                // For ever (a screenshot): the mark is part of the fixture's
+                // record.
+                let state = self.state.get_or_insert_with(|| State::idle(0));
+                state.starting = Some(plan.id.clone());
+            } else {
+                session.starting = Some((plan.id.clone(), STARTING_POLLS));
+                session.refused = Some(PlanError::new(
+                    ErrorCode::PlanExpired,
+                    Some("plan"),
+                    "the plan is 16 minutes old and is valid for 15 minutes: plan again",
+                ));
+                session.refused_plan = Some(plan.id.clone());
+            }
         }
     }
 
@@ -598,8 +671,10 @@ fn script_state(
     Ok(state)
 }
 
-impl Backend for Simulated {
-    fn probe(&self) -> Result<Probe, ClientError> {
+impl Simulated {
+    /// The look at the computer, as `Probe` and `Plan` (which makes its own)
+    /// answer it.
+    fn read_probe(&self) -> Result<Probe, ClientError> {
         if let Some(why) = &self.probe_error {
             return Err(ClientError::HelperUnavailable(why.clone()));
         }
@@ -615,9 +690,28 @@ impl Backend for Simulated {
         }
         Ok(probe)
     }
+}
+
+impl Backend for Simulated {
+    fn probe(&self) -> Result<Probe, ClientError> {
+        if self.modifiers.probe_active {
+            let mut session = self.session();
+            session.probes += 1;
+            if session.probes == 2 {
+                // The second look is refused: an installation is active (the
+                // `State` that follows says whether it is).
+                return Err(Self::refuse(PlanError::new(
+                    ErrorCode::InstallationActive,
+                    None,
+                    "an installation is running; wait for it to finish",
+                )));
+            }
+        }
+        self.read_probe()
+    }
 
     fn plan(&self, request: &PlanRequest) -> Result<Plan, ClientError> {
-        let probe = self.probe()?;
+        let probe = self.read_probe()?;
         let checked = check_request(request, &probe).map_err(Self::refuse)?;
         if LIVE_IMAGE_NAMES.contains(&request.administrator.as_str()) {
             return Err(Self::refuse(PlanError::new(
@@ -699,12 +793,13 @@ impl Backend for Simulated {
 
     fn state(&self) -> Result<State, ClientError> {
         let mut session = self.session();
-        if self.modifiers.state_down && !std::mem::replace(&mut session.asked, true) {
+        let call = session.asked;
+        session.asked += 1;
+        if self.modifiers.state_down == Some(call) {
             return Err(ClientError::HelperUnavailable(
                 "org.freedesktop.DBus.Error.ServiceUnknown: the helper is starting".into(),
             ));
         }
-        session.asked = true;
         if let Some((plan, polls)) = session.starting.clone() {
             // `Apply` is still checking: the rest of the record is the one
             // before it, with the mark that it is not this installation's.
@@ -715,7 +810,24 @@ impl Backend for Simulated {
                 return Ok(state);
             }
             session.starting = None;
+            if let Some(error) = session.refused.take() {
+                // It was refused, and nothing began: the record is the one
+                // before it. A first installation's helper (restarted, or
+                // one that records nothing) says nothing of why.
+                let mut state = self.state.clone().unwrap_or_else(|| State::idle(0));
+                if self.modifiers.attach == Attach::StartingRefused {
+                    state.refusal = session
+                        .refused_plan
+                        .clone()
+                        .map(|plan| Refusal { plan, error });
+                }
+                return Ok(state);
+            }
             session.step = Some(0);
+        }
+        if let Some((plan, summary)) = session.other.clone() {
+            // Another interface's installation is running.
+            return script_state(Script::Stalled, 3, &plan, &summary);
         }
         if let (Some(step), Some(plan), Some(summary)) =
             (session.step, session.plan.clone(), session.summary.clone())
@@ -759,6 +871,30 @@ impl Backend for Simulated {
                 )));
             }
             ApplyMode::Lost => {
+                return Err(ClientError::HelperUnavailable(
+                    "org.freedesktop.DBus.Error.NoReply: the helper did not answer".into(),
+                ));
+            }
+            ApplyMode::Active => {
+                return Err(Self::refuse(PlanError::new(
+                    ErrorCode::InstallationActive,
+                    None,
+                    "an installation is already running",
+                )));
+            }
+            ApplyMode::LostOther => {
+                // Another `Apply` (another plan) took the helper's lock first
+                // and is installing; this one never got its answer.
+                let mut session = self.session();
+                if let Some(mut other) = session.plan.clone() {
+                    other.id = OTHER_PLAN.to_owned();
+                    let edition = self
+                        .probe
+                        .as_ref()
+                        .map_or("ilex", |p| p.edition.name.as_str());
+                    let summary = summary_of(&other, edition);
+                    session.other = Some((other, summary));
+                }
                 return Err(ClientError::HelperUnavailable(
                     "org.freedesktop.DBus.Error.NoReply: the helper did not answer".into(),
                 ));
@@ -818,7 +954,7 @@ impl Backend for Simulated {
             }
             FinishAction::Restart | FinishAction::PowerOff => Ok(None),
             FinishAction::SaveLog { device } => {
-                let probe = self.probe()?;
+                let probe = self.read_probe()?;
                 let target = self.session().summary.as_ref().map(|s| s.disk.clone());
                 let (disk, _) =
                     check_log_device(&probe, device, target.as_deref()).map_err(Self::refuse)?;
