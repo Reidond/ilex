@@ -21,3 +21,13 @@
 ; compositor stay as Fedora runs a service without a policy of its own.
 (filecon "/usr/libexec/ilex-installer/ilex-installerd" file
     (system_u object_r install_exec_t ((s0) (s0))))
+
+; systemd-repart makes each file system in a child ("(mkfs)") that mounts over
+; its own /proc/<pid>/mounts, so that mkfs does not mistake the host's mounts
+; for the new file system's. The inode takes the process's own label, and
+; Fedora's targeted policy gives unconfined_t the right to mount on its own
+; /proc files (`allow unconfined_t unconfined_t:file mounton`), but not its
+; unconfined siblings: iso::next_unattended recorded
+; `{ mounton } comm="(mkfs)" path="/proc/<pid>/mounts" scontext=install_t
+; tcontext=install_t tclass=file`. The same grant, for the same domain.
+(allow install_t install_t (file (mounton)))
