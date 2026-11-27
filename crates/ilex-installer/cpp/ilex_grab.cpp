@@ -23,3 +23,15 @@ QString ilexGrabWindow(const QString &path)
     }
     return QStringLiteral("no visible Qt Quick window");
 }
+
+QString ilexItemText(QObject *item)
+{
+    return item ? item->property("text").toString() : QString();
+}
+
+void ilexSetItemText(QObject *item, const QString &text)
+{
+    if (item) {
+        item->setProperty("text", text);
+    }
+}

@@ -40,12 +40,10 @@ Kirigami.ApplicationWindow {
             "success": "dialog-ok-apply"
         })
 
-    // What is typed into the administrator's password fields lives here, not in
-    // the page (which comes and goes with the stack): the flow says when it is
-    // wiped (`account.wiped`, and a new flow), and then it is cleared here and
-    // in the fields.
-    property string passwordText: ""
-    property string confirmationText: ""
+    // The administrator's passwords are the flow's, not the window's (it reads
+    // the fields from Rust, `sendField`, and a page that comes back is filled
+    // from the flow, `restoreField`): when the flow says it wiped them
+    // (`account.wiped`, and a new flow) the page's fields are cleared.
     property var wipeMark: null
     signal wipe
 
@@ -56,6 +54,14 @@ Kirigami.ApplicationWindow {
 
     function send(name, argument) {
         installer.send(name, argument === undefined ? "" : argument);
+    }
+
+    // An input whose text is read from the field itself, in Rust.
+    function sendField(name, field) {
+        installer.sendField(name, field);
+    }
+    function restoreField(name, field) {
+        installer.restoreField(name, field);
     }
 
     // What the first frame says is on screen, once.
@@ -131,6 +137,10 @@ Kirigami.ApplicationWindow {
         const want = view.stack;
         const have = heldPages();
         if (want.join() === have.join()) {
+            // The row itself can have moved off the flow's page (its own Back
+            // shortcut, Alt+Left, lowers the current index even while the flow
+            // refuses to go back): the flow's page is the one shown.
+            putBack();
             return;
         }
         syncing = true;
@@ -146,6 +156,20 @@ Kirigami.ApplicationWindow {
             }
         }
         syncing = false;
+        putBack();
+    }
+
+    // The row shows the last page of the flow's stack: the flow's page.
+    function putBack() {
+        const last = view.stack.length - 1;
+        if (pageStack.currentIndex === last) {
+            return;
+        }
+        const shown = pageStack.currentItem;
+        logLine("the page row showed " + (shown ? shown.pageId : "nothing") + " while the flow is on " + view.page + ": put back");
+        syncing = true;
+        pageStack.currentIndex = last;
+        syncing = false;
     }
 
     onViewChanged: {
@@ -153,8 +177,6 @@ Kirigami.ApplicationWindow {
         if (ready) {
             const mark = view.epoch + "/" + view.account.wiped;
             if (wipeMark !== null && wipeMark !== mark) {
-                passwordText = "";
-                confirmationText = "";
                 wipe();
             }
             wipeMark = mark;
@@ -318,10 +340,11 @@ Kirigami.ApplicationWindow {
             break;
         case "fields":
             {
-                // What is held: here, and in the page's fields while it exists.
+                // What the page's fields hold while the page exists (the flow's
+                // own copies are wiped by the flow).
                 const page = pageStack.currentItem;
                 const live = name => page && page.field && page.field(name) ? page.field(name).text.length : 0;
-                installer.renderReport("fields", [passwordText.length + live("password"), confirmationText.length + live("confirmation")].join(","));
+                installer.renderReport("fields", [live("password"), live("confirmation")].join(","));
             }
             break;
         case "expand-log":

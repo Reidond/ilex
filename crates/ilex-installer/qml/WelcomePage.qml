@@ -132,7 +132,13 @@ Kirigami.ScrollablePage {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 28
                     placeholderText: page.v.try_label
                     inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
-                    onTextEdited: page.host.send("try-text", text)
+                    // The flow reads this field only when it may print what
+                    // is typed (`echo_try`): people type their passwords here.
+                    onTextEdited: {
+                        if (page.v.echo_try) {
+                            page.host.sendField("try-text", tryField);
+                        }
+                    }
                     onAccepted: page.host.send("continue")
                 }
                 QQC2.Label {

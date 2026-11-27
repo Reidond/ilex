@@ -1,7 +1,9 @@
 // The administrator: a name and a password, with the refusals beside the
 // fields. What each field says and when it is editable is the flow's
-// (`view.account`); what is typed into the password fields is kept by the
-// window (`passwordText`, `confirmationText`) until the flow says it is wiped.
+// (`view.account`). The password fields are read from Rust (`sendField`: the
+// text is not passed through a JavaScript string), and a page that comes back
+// has them filled from what the flow holds (`restoreField`) until it says it is
+// wiped.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as QQC2
@@ -61,8 +63,8 @@ Kirigami.ScrollablePage {
     Component.onCompleted: {
         Qt.callLater(takeFocus);
         nameField.text = nameValue;
-        passwordField.text = host.passwordText;
-        confirmationField.text = host.confirmationText;
+        host.restoreField("password", passwordField);
+        host.restoreField("confirmation", confirmationField);
     }
     Connections {
         target: page.host
@@ -116,10 +118,7 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 24
                     inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
-                    onTextEdited: {
-                        page.host.passwordText = text;
-                        page.host.send("password", text);
-                    }
+                    onTextEdited: page.host.sendField("password", passwordField)
                     onAccepted: page.host.send("continue")
                 }
             }
@@ -132,10 +131,7 @@ Kirigami.ScrollablePage {
                     Layout.fillWidth: true
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 24
                     inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
-                    onTextEdited: {
-                        page.host.confirmationText = text;
-                        page.host.send("confirmation", text);
-                    }
+                    onTextEdited: page.host.sendField("confirmation", confirmationField)
                     onAccepted: page.host.send("continue")
                 }
                 Note {

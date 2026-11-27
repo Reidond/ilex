@@ -29,6 +29,19 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+
+        include!(<QtCore/QObject>);
+        /// A QML text field, which the window hands over by reference.
+        type QObject;
+
+        include!("ilex_grab.h");
+        /// The `text` of a QML text field: read here, so the text does not
+        /// pass through a JavaScript string for every keystroke.
+        #[rust_name = "item_text"]
+        unsafe fn ilexItemText(item: *mut QObject) -> QString;
+        /// Put `text` in a QML text field (a page that comes back).
+        #[rust_name = "set_item_text"]
+        unsafe fn ilexSetItemText(item: *mut QObject, text: &QString);
     }
 
     extern "RustQt" {
@@ -55,6 +68,25 @@ pub mod qobject {
         /// (`ilex_installer_flow::events::Event::parse`).
         #[qinvokable]
         fn send(self: Pin<&mut Installer>, name: &QString, argument: &QString);
+
+        /// One input from a text field: the event's name, and the field itself,
+        /// whose text is read here rather than passed as a JavaScript string.
+        /// The text is wiped once the event is parsed.
+        ///
+        /// # Safety
+        /// `item` is a live QML text field (it is read on the Qt thread).
+        #[qinvokable]
+        #[cxx_name = "sendField"]
+        unsafe fn send_field(self: Pin<&mut Installer>, name: &QString, item: *mut QObject);
+
+        /// A page that comes back puts what the flow holds of a password in its
+        /// field (`password` or `confirmation`).
+        ///
+        /// # Safety
+        /// `item` is a live QML text field (it is written on the Qt thread).
+        #[qinvokable]
+        #[cxx_name = "restoreField"]
+        unsafe fn restore_field(self: Pin<&mut Installer>, name: &QString, item: *mut QObject);
 
         /// The window is on screen: the flow queues the first page's marker,
         /// with Qt's own words (the renderer, the scale, the sizes), and it is
@@ -210,10 +242,39 @@ impl qobject::Installer {
     }
 
     pub fn send(self: Pin<&mut Self>, name: &QString, argument: &QString) {
-        let mut text = String::from(argument);
-        let parsed = Event::parse(&String::from(name), &text);
-        // A password was one of the arguments: the copy made on the way in is
-        // wiped; the event holds a `Secret` of its own.
+        self.deliver(&String::from(name), String::from(argument));
+    }
+
+    /// # Safety
+    /// `item` is a live QML text field.
+    pub unsafe fn send_field(self: Pin<&mut Self>, name: &QString, item: *mut qobject::QObject) {
+        // SAFETY: the caller's.
+        let text = String::from(&unsafe { qobject::item_text(item) });
+        self.deliver(&String::from(name), text);
+    }
+
+    /// # Safety
+    /// `item` is a live QML text field.
+    pub unsafe fn restore_field(self: Pin<&mut Self>, name: &QString, item: *mut qobject::QObject) {
+        let text = self.rust().running.as_ref().and_then(|running| {
+            let secret = match String::from(name).as_str() {
+                "password" => running.flow.password(),
+                "confirmation" => running.flow.confirmation(),
+                _ => return None,
+            };
+            (!secret.is_empty()).then(|| QString::from(secret.expose()))
+        });
+        if let Some(text) = text {
+            // SAFETY: the caller's.
+            unsafe { qobject::set_item_text(item, &text) };
+        }
+    }
+
+    /// Parse an input and do what it means. `text` may be a password: the copy
+    /// made on the way in is wiped after parsing (the event holds a `Secret`
+    /// of its own).
+    fn deliver(self: Pin<&mut Self>, name: &str, mut text: String) {
+        let parsed = Event::parse(name, &text);
         text.zeroize();
         match parsed {
             Ok(event) => self.dispatch(event),
