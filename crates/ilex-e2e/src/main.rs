@@ -146,12 +146,13 @@ fn main() {
     apps::expect(will_run("apps::"));
     // `tool::installed_system` boots a disk of its own, not the tier's VM.
     tool::expect(will_run("tool::") - will_run("tool::installed_system"));
-    // `installer::policy`, `::install` and `::interrupted` write disks in VMs of
-    // their own.
+    // `installer::policy`, `::install`, `::encrypted`, `::encrypted_german` and
+    // `::interrupted` write disks in VMs of their own.
     installer::expect(
         will_run("installer::")
             - will_run("installer::policy")
             - will_run("installer::install")
+            - will_run("installer::encrypted")
             - will_run("installer::interrupted"),
     );
 

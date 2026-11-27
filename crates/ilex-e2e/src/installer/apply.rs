@@ -46,6 +46,8 @@ use serde_json::{Value, json};
 use crate::common;
 use crate::selinux;
 
+mod encrypted;
+
 const GIB: u64 = 1 << 30;
 /// The disk that is installed to: sparse, larger than the least a plan wants.
 const TARGET_BYTES: u64 = 41 * GIB;
@@ -83,6 +85,10 @@ pub fn trials() -> Vec<Trial> {
     vec![
         run("installer::policy", policy),
         run("installer::install", install),
+        run("installer::encrypted", || encrypted::run(&encrypted::US)),
+        run("installer::encrypted_german", || {
+            encrypted::run(&encrypted::GERMAN)
+        }),
         run("installer::interrupted", interrupted),
     ]
 }
@@ -101,10 +107,15 @@ fn raw_disk(path: &Path, bytes: u64) -> Result<()> {
 /// and the two disks it gets.
 struct Bench {
     ws: Workspace,
+    /// The trial's private directory.
+    dir: PathBuf,
     live: PathBuf,
     target: PathBuf,
     sentinel: PathBuf,
     bare: PathBuf,
+    /// Images attached to the live VM as removable USB sticks (where a log is
+    /// saved), when the trial has any.
+    sticks: Vec<PathBuf>,
     artifacts: PathBuf,
     name: &'static str,
 }
@@ -128,10 +139,12 @@ impl Bench {
         let artifacts = qemu::artifact_dir(&ws, "installer-apply")?;
         Ok(Self {
             ws,
+            dir,
             live,
             target,
             sentinel,
             bare,
+            sticks: Vec::new(),
             artifacts,
             name,
         })
@@ -152,6 +165,7 @@ impl Bench {
         // none.
         config.disk_serials = true;
         config.bare_disks = 1;
+        config.extra_usb_disks = self.sticks.clone();
         let mut vm = Vm::boot(&self.ws, &config)?;
         vm.wait_ssh(Duration::from_secs(420))
             .context("the live image did not accept the harness's SSH key")?;
