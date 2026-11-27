@@ -72,8 +72,8 @@ use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
 
 use super::{
-    Guest, PAGE_TIMEOUT, count_markers, diagnostics, fields, iso_path, loop_file, wait_firmware_output,
-    wait_for_marker,
+    Guest, PAGE_TIMEOUT, count_markers, diagnostics, fields, iso_path, loop_file,
+    wait_firmware_output, wait_for_marker,
 };
 use crate::common;
 use crate::installer::apply::{ADMIN, Expected, PASSWORD, check_installed, gdm_screenshot};
