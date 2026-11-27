@@ -11,6 +11,7 @@ use ilex_installer_flow::simulate::Simulated;
 use relm4::prelude::*;
 
 pub mod app;
+pub mod install;
 pub mod kiosk;
 pub mod render;
 
@@ -46,6 +47,7 @@ pub fn run(launch: Launch) -> Result<()> {
         fullscreen: launch.fullscreen,
         stats: true,
         observer: None,
+        poll_ms: None,
     };
     // The command line is ours, not GTK's.
     RelmApp::new(APP_ID)

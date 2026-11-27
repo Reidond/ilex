@@ -1,5 +1,6 @@
-//! The application: an `AdwNavigationView` with the welcome, machine, account
-//! and ready pages, each drawn from the flow's state. The flow decides which
+//! The application: an `AdwNavigationView` with the welcome, machine, disk,
+//! account, review, installing, done and problem pages, each drawn from the
+//! flow's state. The flow decides which
 //! page is next and whether Continue works; this file turns its state into
 //! widgets and the person's input into flow calls. Nothing here talks to the
 //! helper except through the flow's `Backend`, on a worker thread.
@@ -11,21 +12,24 @@ use std::time::Duration;
 
 use ilex_installer_flow::Message;
 use ilex_installer_flow::backend::Backend;
-use ilex_installer_flow::flow::{
-    Flow, KeyboardStatus, PageId, PlanCheck, ProbeState, Step, human_bytes,
-};
+use ilex_installer_flow::flow::{Flow, KeyboardStatus, LogSave, PageId, ProbeState, Step};
 use ilex_installer_flow::keyboard::SessionKeyboard;
 use ilex_installer_flow::language::{self, LANGUAGES};
 use ilex_installer_flow::machine::{MachineView, Severity};
 use ilex_installer_flow::messages::{self, ClientError};
 use ilex_installer_flow::secret::Secret;
+use ilex_installer_model::finish::Saved;
 use ilex_installer_model::plan::Plan;
 use ilex_installer_model::probe::Probe;
+use ilex_installer_model::state::State;
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::glib::translate::ToGlibPtr;
 use relm4::gtk::{self, glib};
 use relm4::prelude::*;
 
+use super::install::{
+    DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, ReviewPage, confirmation,
+};
 use crate::serial;
 
 /// Memory is sampled this long after the page is shown, once the session has
@@ -45,6 +49,10 @@ pub struct Init {
     /// Where the application reports what it shows, for the renderer to wait
     /// on instead of a fixed time.
     pub observer: Option<Arc<Mutex<Observed>>>,
+    /// How long the helper is left between two questions about the
+    /// installation, instead of what the flow asks (the renderer, so that a
+    /// simulated installation does not take its seconds).
+    pub poll_ms: Option<u64>,
 }
 
 /// What the application is showing, in the flow's words.
@@ -55,12 +63,20 @@ pub struct Observed {
     pub check: &'static str,
     pub probe_pending: bool,
     pub keyboard_switching: bool,
+    /// The first question to the helper (where an installation is) has not
+    /// been answered.
+    pub attaching: bool,
+    /// The dialog the flow says is open: `confirm`, `log` or `` for none.
+    pub dialog: &'static str,
 }
 
 impl Observed {
     /// Nothing is under way: no probe, no check, no layout switch.
     pub fn settled(&self) -> bool {
-        self.check != "running" && !self.probe_pending && !self.keyboard_switching
+        self.check != "running"
+            && !self.probe_pending
+            && !self.keyboard_switching
+            && !self.attaching
     }
 }
 
@@ -70,6 +86,7 @@ pub struct App {
     keyboard: Arc<dyn SessionKeyboard + Send + Sync>,
     stats: bool,
     observer: Option<Arc<Mutex<Observed>>>,
+    poll_ms: Option<u64>,
     mapped: bool,
 }
 
@@ -89,8 +106,22 @@ pub enum Msg {
     Password(Secret),
     Confirmation(Secret),
     Continue,
-    /// The closing page's Try again: look again, then check the choices.
+    /// A disk row was chosen.
+    Disk(String),
+    /// The review page's Try again: look again, then check the choices.
     Retry,
+    /// The review page's destructive button.
+    Install,
+    /// The erase dialog's answer.
+    Confirmed(bool),
+    /// The problem page's Try again.
+    RetryInstall,
+    Restart,
+    PowerOff,
+    /// The log dialog: look for sticks, write to one, close.
+    ChooseLog,
+    SaveLog(String),
+    CloseLog,
     /// The navigation view now shows this page (the person went back).
     Visible(PageId),
     /// The window is on screen.
@@ -118,6 +149,22 @@ pub enum Cmd {
         generation: u64,
         layout: String,
         result: Result<(), String>,
+    },
+    Applied {
+        generation: u64,
+        result: Result<State, ClientError>,
+    },
+    Stated {
+        generation: u64,
+        result: Result<State, ClientError>,
+    },
+    LogProbed {
+        generation: u64,
+        result: Result<Probe, ClientError>,
+    },
+    Finished {
+        generation: u64,
+        result: Result<Option<Saved>, ClientError>,
     },
 }
 
@@ -163,8 +210,50 @@ impl App {
                     result: keyboard.switch(&layout).map_err(|e| format!("{e:#}")),
                 });
             }
-            // The widgets follow the flow's page.
-            Step::Goto(_) | Step::Stay => {}
+            Step::RunApply {
+                generation,
+                plan,
+                erase_disk,
+                password,
+            } => {
+                let backend = Arc::clone(&self.backend);
+                sender.spawn_oneshot_command(move || Cmd::Applied {
+                    generation,
+                    result: backend.start_installation(&plan, &erase_disk, &password),
+                });
+            }
+            Step::RunState {
+                generation,
+                delay_ms,
+            } => {
+                let backend = Arc::clone(&self.backend);
+                let delay = self.poll_ms.map_or(delay_ms, |fast| delay_ms.min(fast));
+                sender.spawn_oneshot_command(move || {
+                    if delay > 0 {
+                        std::thread::sleep(Duration::from_millis(delay));
+                    }
+                    Cmd::Stated {
+                        generation,
+                        result: backend.state(),
+                    }
+                });
+            }
+            Step::RunLogProbe { generation } => {
+                let backend = Arc::clone(&self.backend);
+                sender.spawn_oneshot_command(move || Cmd::LogProbed {
+                    generation,
+                    result: backend.probe(),
+                });
+            }
+            Step::RunFinish { generation, action } => {
+                let backend = Arc::clone(&self.backend);
+                sender.spawn_oneshot_command(move || Cmd::Finished {
+                    generation,
+                    result: backend.finish(&action),
+                });
+            }
+            // The widgets follow the flow's page and its dialog.
+            Step::Goto(_) | Step::Confirm(_) | Step::Stay => {}
         }
     }
 
@@ -174,8 +263,16 @@ impl App {
             let now = Observed {
                 page: self.flow.page(),
                 check: self.flow.check_word(),
-                probe_pending: matches!(self.flow.probe_state(), ProbeState::Pending),
+                probe_pending: self.flow.is_probing(),
                 keyboard_switching: self.flow.keyboard_status() == KeyboardStatus::Switching,
+                attaching: self.flow.is_attaching(),
+                dialog: if self.flow.confirm_dialog().is_some() {
+                    "confirm"
+                } else if *self.flow.log_state() != LogSave::Closed {
+                    "log"
+                } else {
+                    ""
+                },
             };
             *observer.lock().unwrap_or_else(|e| e.into_inner()) = now;
         }
@@ -217,9 +314,13 @@ impl Component for App {
             keyboard: init.keyboard,
             stats: init.stats,
             observer: init.observer,
+            poll_ms: init.poll_ms,
             mapped: false,
         };
-        let step = model.flow.start_probe();
+        // Where an installation is comes first: an interface that restarted
+        // during one comes back on its page. Otherwise the first look at the
+        // computer follows.
+        let step = model.flow.start();
         model.carry_out(step, &sender);
         model.print_markers();
         model.observe();
@@ -291,10 +392,46 @@ impl Component for App {
                 let step = self.flow.advance();
                 self.carry_out(step, &sender);
             }
+            Msg::Disk(id) => {
+                self.flow.set_disk(&id);
+            }
             Msg::Retry => {
                 let step = self.flow.retry();
                 self.carry_out(step, &sender);
             }
+            Msg::Install => {
+                let step = self.flow.install();
+                self.carry_out(step, &sender);
+            }
+            Msg::Confirmed(yes) => {
+                if yes {
+                    let step = self.flow.confirm_install();
+                    self.carry_out(step, &sender);
+                } else {
+                    self.flow.cancel_install();
+                }
+            }
+            Msg::RetryInstall => {
+                let step = self.flow.retry_install();
+                self.carry_out(step, &sender);
+            }
+            Msg::Restart => {
+                let step = self.flow.restart();
+                self.carry_out(step, &sender);
+            }
+            Msg::PowerOff => {
+                let step = self.flow.power_off();
+                self.carry_out(step, &sender);
+            }
+            Msg::ChooseLog => {
+                let step = self.flow.choose_log_device();
+                self.carry_out(step, &sender);
+            }
+            Msg::SaveLog(device) => {
+                let step = self.flow.save_log(&device);
+                self.carry_out(step, &sender);
+            }
+            Msg::CloseLog => self.flow.close_log(),
             Msg::Visible(page) => {
                 // The view popped to `page` (Back, Escape): the flow steps
                 // back to it, and refuses while the helper is asked (the view
@@ -330,6 +467,22 @@ impl Component for App {
                 let step = self.flow.keyboard_switched(generation, result);
                 self.carry_out(step, &sender);
             }
+            Cmd::Applied { generation, result } => {
+                let step = self.flow.apply_finished(generation, result);
+                self.carry_out(step, &sender);
+            }
+            Cmd::Stated { generation, result } => {
+                let step = self.flow.state_finished(generation, result);
+                self.carry_out(step, &sender);
+            }
+            Cmd::LogProbed { generation, result } => {
+                let step = self.flow.log_probe_finished(generation, result);
+                self.carry_out(step, &sender);
+            }
+            Cmd::Finished { generation, result } => {
+                let step = self.flow.finish_finished(generation, result);
+                self.carry_out(step, &sender);
+            }
         }
         self.print_markers();
         self.observe();
@@ -343,11 +496,22 @@ impl Component for App {
 // --- widgets ------------------------------------------------------------------
 
 pub struct Widgets {
+    root: adw::ApplicationWindow,
+    /// A placeholder while the helper has not said where an installation is,
+    /// then the pages.
+    pages: gtk::Stack,
     nav: adw::NavigationView,
     welcome: Welcome,
     machine: Machine,
+    disk: DiskPage,
     account: Account,
-    ready: Ready,
+    review: ReviewPage,
+    installing: InstallingPage,
+    done: DonePage,
+    problem: ProblemPage,
+    /// The erase dialog, while the flow has one open.
+    confirm: Option<adw::Dialog>,
+    log: LogDialog,
 }
 
 struct Welcome {
@@ -385,15 +549,7 @@ struct Account {
     button: gtk::Button,
 }
 
-struct Ready {
-    page: adw::NavigationPage,
-    stack: gtk::Stack,
-    problem: adw::StatusPage,
-    retry: gtk::Button,
-    rows: Vec<(&'static str, adw::ActionRow)>,
-}
-
-fn sentence(message: &Message) -> String {
+pub(super) fn sentence(message: &Message) -> String {
     if message.detail.is_empty() {
         message.title.clone()
     } else {
@@ -403,7 +559,7 @@ fn sentence(message: &Message) -> String {
 
 /// A form page's body: a heading and a paragraph, then the controls, centred
 /// and scrollable.
-fn form(heading: &str, text: &str, controls: &[&gtk::Widget]) -> gtk::ScrolledWindow {
+pub(super) fn form(heading: &str, text: &str, controls: &[&gtk::Widget]) -> gtk::ScrolledWindow {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
     let title = gtk::Label::builder()
         .label(heading)
@@ -438,7 +594,7 @@ fn form(heading: &str, text: &str, controls: &[&gtk::Widget]) -> gtk::ScrolledWi
         .build()
 }
 
-fn page(
+pub(super) fn page(
     title: &str,
     tag: &str,
     banner: Option<&adw::Banner>,
@@ -468,7 +624,7 @@ fn page(
         .build()
 }
 
-fn continue_button(label: &str) -> gtk::Button {
+pub(super) fn continue_button(label: &str) -> gtk::Button {
     let button = gtk::Button::with_label(label);
     button.add_css_class("suggested-action");
     button.set_margin_top(6);
@@ -476,13 +632,13 @@ fn continue_button(label: &str) -> gtk::Button {
     button
 }
 
-fn banner(button: Option<&str>) -> adw::Banner {
+pub(super) fn banner(button: Option<&str>) -> adw::Banner {
     let banner = adw::Banner::new("");
     banner.set_button_label(button);
     banner
 }
 
-fn group(title: &str, description: &str) -> adw::PreferencesGroup {
+pub(super) fn group(title: &str, description: &str) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     if !title.is_empty() {
         group.set_title(title);
@@ -493,7 +649,7 @@ fn group(title: &str, description: &str) -> adw::PreferencesGroup {
     group
 }
 
-fn message_label() -> gtk::Label {
+pub(super) fn message_label() -> gtk::Label {
     gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
@@ -517,7 +673,7 @@ fn combo(title: &str, items: &[String]) -> adw::ComboRow {
     row
 }
 
-fn property_row(title: &str) -> adw::ActionRow {
+pub(super) fn property_row(title: &str) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(title)
         .subtitle_selectable(true)
@@ -529,7 +685,14 @@ fn property_row(title: &str) -> adw::ActionRow {
 impl Widgets {
     fn build(root: &adw::ApplicationWindow, flow: &Flow, sender: &ComponentSender<App>) -> Self {
         let nav = adw::NavigationView::new();
-        root.set_content(Some(&nav));
+        let starting = adw::StatusPage::builder()
+            .title("Starting the installer")
+            .child(&adw::Spinner::new())
+            .build();
+        let pages = gtk::Stack::new();
+        pages.add_named(&starting, Some("starting"));
+        pages.add_named(&nav, Some("pages"));
+        root.set_content(Some(&pages));
 
         // --- welcome ---
         let language = combo(
@@ -675,52 +838,24 @@ impl Widgets {
             Some(&account_button),
         );
 
-        // --- ready ---
-        let ready_problem = adw::StatusPage::builder().build();
-        let ready_retry = gtk::Button::with_label("Try again");
-        ready_retry.add_css_class("pill");
-        ready_retry.set_halign(gtk::Align::Center);
-        ready_problem.set_child(Some(&ready_retry));
-        let ready_running = adw::StatusPage::builder()
-            .title(messages::CHECKING_TITLE)
-            .description(messages::CHECKING_DETAIL)
-            .child(&adw::Spinner::new())
-            .build();
-        let summary = group("Your choices", "");
-        let image = group("The image", "");
-        let mut rows = Vec::new();
-        for (key, title, target) in [
-            ("edition", "Edition", &summary),
-            ("configuration", "Configuration", &summary),
-            ("language", "Language", &summary),
-            ("keyboard", "Keyboard layout", &summary),
-            ("administrator", "Administrator", &summary),
-            ("version", "Version", &image),
-            ("download", "Download", &image),
-            ("digest", "Digest", &image),
-        ] {
-            let row = property_row(title);
-            target.add(&row);
-            rows.push((key, row));
-        }
-        let end = gtk::Label::builder()
-            .label("The choices are checked and nothing has been written to any disk. Choosing the disk, reviewing and installing come with the next version of the installer.")
-            .xalign(0.0)
-            .wrap(true)
-            .css_classes(["dim-label"])
-            .build();
-        let checked = form(
-            "Ready to continue",
-            "The installer's helper checked these choices and the image they install.",
-            &[summary.upcast_ref(), image.upcast_ref(), end.upcast_ref()],
-        );
-        let ready_stack = gtk::Stack::new();
-        ready_stack.add_named(&ready_running, Some("running"));
-        ready_stack.add_named(&ready_problem, Some("problem"));
-        ready_stack.add_named(&checked, Some("checked"));
-        let ready_page = page("Ready", PageId::Ready.id(), None, &ready_stack, None);
+        // --- disk, review, installing, done, problem ---
+        let disk = DiskPage::build(sender);
+        let review = ReviewPage::build(sender);
+        let installing = InstallingPage::build();
+        let done = DonePage::build(sender);
+        let problem_page = ProblemPage::build(sender);
+        let log = LogDialog::build(sender);
 
-        for page in [&welcome_page, &machine_page, &account_page, &ready_page] {
+        for page in [
+            &welcome_page,
+            &machine_page,
+            &disk.page,
+            &account_page,
+            &review.page,
+            &installing.page,
+            &done.page,
+            &problem_page.page,
+        ] {
             nav.add(page);
         }
         nav.set_pop_on_escape(true);
@@ -771,10 +906,6 @@ impl Widgets {
                 move |_| input.emit(Msg::Continue)
             });
         }
-        ready_retry.connect_clicked({
-            let input = input.clone();
-            move |_| input.emit(Msg::Retry)
-        });
         // Back (the header bar's button or Escape) pops the page: the flow
         // follows the view.
         nav.connect_popped({
@@ -808,17 +939,35 @@ impl Widgets {
         for (page, focus) in [
             (&welcome_page, language.clone().upcast::<gtk::Widget>()),
             (&machine_page, machine_button.clone().upcast()),
+            (&disk.page, disk.button.clone().upcast()),
             (&account_page, name.clone().upcast()),
+            (&review.page, review.button.clone().upcast()),
+            (&done.page, done.restart.clone().upcast()),
         ] {
             page.connect_shown(move |_| {
                 focus.grab_focus();
             });
         }
 
+        // The problem page starts on Try again when it has one, else on Restart.
+        problem_page.page.connect_shown({
+            let retry = problem_page.retry.clone();
+            let restart = problem_page.restart.clone();
+            move |_| {
+                if retry.is_visible() {
+                    retry.grab_focus();
+                } else {
+                    restart.grab_focus();
+                }
+            }
+        });
+
         // `add` shows the first page of an empty view before the handler above
         // exists: GTK's own first focus (the first row) stays.
 
         Self {
+            root: root.clone(),
+            pages,
             nav,
             welcome: Welcome {
                 banner: welcome_banner,
@@ -850,18 +999,25 @@ impl Widgets {
                 password_message,
                 button: account_button,
             },
-            ready: Ready {
-                page: ready_page,
-                stack: ready_stack,
-                problem: ready_problem,
-                retry: ready_retry,
-                rows,
-            },
+            disk,
+            review,
+            installing,
+            done,
+            problem: problem_page,
+            confirm: None,
+            log,
         }
     }
 
     /// Make every widget say what the flow says.
     fn sync(&mut self, flow: &Flow, sender: &ComponentSender<App>) {
+        // Nothing of the pages until the helper has said where an
+        // installation is (the answer takes a moment at start-up).
+        self.pages.set_visible_child_name(if flow.is_attaching() {
+            "starting"
+        } else {
+            "pages"
+        });
         // Which page: the navigation view follows the flow (a page pushed by
         // Continue), and the flow follows the view when the person goes back.
         let wanted = flow.page();
@@ -870,9 +1026,8 @@ impl Widgets {
             .visible_page()
             .and_then(|p| p.tag())
             .and_then(|t| PageId::from_id(&t));
-        if shown != Some(wanted) {
-            let index = |p: PageId| PageId::ORDER.iter().position(|q| *q == p);
-            if shown.and_then(index) < index(wanted) {
+        if shown != Some(wanted) && !flow.is_attaching() {
+            if shown.map(PageId::index) < Some(wanted.index()) {
                 self.nav.push_by_tag(wanted.id());
             } else {
                 self.nav.pop_to_tag(wanted.id());
@@ -880,13 +1035,55 @@ impl Widgets {
         }
         self.sync_welcome(flow);
         self.sync_machine(flow, sender);
+        self.disk.sync(flow, sender);
         self.sync_account(flow);
-        self.sync_ready(flow);
-        // No way back while the helper is asked.
-        let free = !flow.is_checking();
+        self.review.sync(flow);
+        self.installing.sync(flow);
+        self.done.sync(flow);
+        self.problem.sync(flow);
+        // No way back while the helper is asked, or once the erase was
+        // confirmed; and none from the pages an installation ends on.
+        let free = !flow.is_frozen();
         self.machine.page.set_can_pop(free);
+        self.disk.page.set_can_pop(free);
         self.account.page.set_can_pop(free);
-        self.ready.page.set_can_pop(free);
+        self.review.page.set_can_pop(free);
+        for page in [
+            &self.installing.page,
+            &self.done.page,
+            &self.problem.page,
+        ] {
+            page.set_can_pop(false);
+        }
+        // The dialogs are open exactly while the flow says so.
+        match (flow.confirm_dialog(), &self.confirm) {
+            (Some(dialog), None) => {
+                let alert = confirmation(&dialog, sender);
+                alert.present(Some(&self.root));
+                self.confirm = Some(alert);
+            }
+            (None, Some(_)) => {
+                if let Some(alert) = self.confirm.take() {
+                    alert.force_close();
+                }
+                // The destructive button has the focus again (a cancelled
+                // dialog leaves the page as it was).
+                if flow.page() == PageId::Review {
+                    self.review.button.grab_focus();
+                }
+            }
+            _ => {}
+        }
+        if *flow.log_state() == LogSave::Closed {
+            if self.log.is_open() {
+                self.log.close();
+                // Back on the button that opened it.
+                self.problem.save.grab_focus();
+            }
+        } else {
+            self.log.sync(flow, sender);
+            self.log.present(&self.root);
+        }
     }
 
     fn sync_welcome(&mut self, flow: &Flow) {
@@ -1031,63 +1228,6 @@ impl Widgets {
         a.button
             .set_sensitive(flow.page() != PageId::Account || flow.can_continue());
     }
-
-    fn sync_ready(&mut self, flow: &Flow) {
-        let r = &self.ready;
-        match flow.plan_check() {
-            PlanCheck::NotRun | PlanCheck::Running => r.stack.set_visible_child_name("running"),
-            PlanCheck::Checked(plan) => {
-                self.fill_summary(flow, plan);
-                self.ready.stack.set_visible_child_name("checked");
-            }
-            PlanCheck::NoDisk(_) | PlanCheck::Failed(_) => {
-                if let Some(message) = flow.check_problem() {
-                    let icon = if matches!(flow.plan_check(), PlanCheck::NoDisk(_)) {
-                        "drive-harddisk-symbolic"
-                    } else {
-                        "dialog-error-symbolic"
-                    };
-                    r.problem.set_icon_name(Some(icon));
-                    r.problem.set_title(&message.title);
-                    r.problem.set_description(Some(&message.detail));
-                    // Not when only a restart helps (a BIOS boot).
-                    r.retry.set_visible(flow.can_retry());
-                    r.stack.set_visible_child_name("problem");
-                }
-            }
-        }
-    }
-
-    fn fill_summary(&self, flow: &Flow, plan: &Plan) {
-        let set = |key: &str, text: &str| {
-            if let Some((_, row)) = self.ready.rows.iter().find(|(k, _)| *k == key) {
-                row.set_subtitle(text);
-            }
-        };
-        set("edition", flow.edition_name());
-        set(
-            "configuration",
-            flow.machine_choice()
-                .map_or(plan.composition.tag.as_str(), |c| c.title.as_str()),
-        );
-        set(
-            "language",
-            &language::find(flow.language())
-                .map_or_else(|| flow.language().to_owned(), |l| l.label()),
-        );
-        set(
-            "keyboard",
-            flow.keyboard_layout()
-                .map_or(flow.keyboard(), |l| l.name.as_str()),
-        );
-        set("administrator", flow.administrator());
-        set(
-            "version",
-            plan.image.version.as_deref().unwrap_or("not reported"),
-        );
-        set("download", &human_bytes(plan.image.download_bytes));
-        set("digest", &plan.image.digest);
-    }
 }
 
 /// Show a refusal beside its field, or hide the label, and mark the rows to
@@ -1124,7 +1264,7 @@ fn show_message(label: &gtk::Label, refusal: Option<&Message>, rows: &[&gtk::Wid
 
 /// A page's banner: the problem that stops the installation, with Try again
 /// when asking the helper again can mend it, whichever page the person is on.
-fn sync_banner(banner: &adw::Banner, flow: &Flow) {
+pub(super) fn sync_banner(banner: &adw::Banner, flow: &Flow) {
     let problem = flow.blocking_problem();
     banner.set_revealed(problem.is_some());
     if let Some(problem) = &problem {

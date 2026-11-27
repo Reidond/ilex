@@ -35,7 +35,8 @@ use relm4::prelude::*;
 use super::app::{App, Init, Msg, Observed};
 use crate::serial;
 
-/// What a shot does after its window is up and the probe answered.
+/// What a shot does after its window is up and the helper has said where an
+/// installation is.
 #[derive(Clone, Copy)]
 enum Do {
     Continue,
@@ -49,6 +50,20 @@ enum Do {
     Name(&'static str),
     Password(&'static str),
     Confirm(&'static str),
+    /// A disk row (its id).
+    Disk(&'static str),
+    /// The review page's destructive button, and the dialog's two answers.
+    Install,
+    Accept,
+    Dismiss,
+    /// The installing page's log, opened.
+    ExpandLog,
+    /// Until the installation (which goes on by itself) has reached this page.
+    Wait(PageId),
+    Restart,
+    RetryInstall,
+    ChooseLog,
+    SaveLog(&'static str),
 }
 
 struct Shot {
@@ -58,46 +73,77 @@ struct Shot {
     /// when it is the point of the shot (`""`: any, as long as none is running).
     page: PageId,
     check: &'static str,
+    /// The dialog the shot ends with open (`confirm`, `log`), if any.
+    dialog: &'static str,
     steps: &'static [Do],
 }
 
 const PASSWORD: &str = "correct horse battery";
 
 macro_rules! shots {
-    ($( $name:literal, $scenario:literal, $page:ident, $check:literal, [ $($step:expr),* $(,)? ] );* $(;)?) => {
-        &[ $( Shot { name: $name, scenario: $scenario, page: PageId::$page, check: $check, steps: &[ $($step),* ] } ),* ]
+    ($( $name:literal, $scenario:literal, $page:ident, $check:literal, $dialog:literal, [ $($step:expr),* $(,)? ] );* $(;)?) => {
+        &[ $( Shot { name: $name, scenario: $scenario, page: PageId::$page, check: $check, dialog: $dialog, steps: &[ $($step),* ] } ),* ]
     };
 }
 
 #[rustfmt::skip]
 const SHOTS: &[Shot] = shots![
-    "welcome", "generic", Welcome, "", [];
-    "welcome-german", "generic", Welcome, "", [Do::Keyboard("de-nodeadkeys"), Do::Language("de_DE.UTF-8")];
-    "welcome-bios", "bios", Welcome, "", [];
-    "welcome-helper-down", "helper-down", Welcome, "", [];
-    "welcome-keyboard-failed", "generic", Welcome, "", [Do::FailSwitches, Do::Keyboard("de-nodeadkeys")];
-    "machine-not-recognised", "generic", Machine, "", [Do::Continue];
-    "machine-detected", "ms-7c35", Machine, "", [Do::Continue];
-    "machine-detected-board", "ms-7c35-board", Machine, "", [Do::Continue];
-    "machine-chosen", "ms-7c35", Machine, "", [Do::Continue, Do::Machine("generic.gnome")];
-    "machine-conflict", "conflict", Machine, "", [Do::Continue];
-    "machine-no-composition", "no-composition", Machine, "", [Do::Continue];
-    "machine-boot-argument", "boot-override", Machine, "", [Do::Continue];
-    "machine-boot-argument-unknown", "bad-override", Machine, "", [Do::Continue];
-    "machine-helper-down", "helper-down", Machine, "", [Do::Jump(PageId::Machine)];
-    "machine-bios", "bios", Machine, "", [Do::Jump(PageId::Machine)];
-    "account-empty", "generic", Account, "not-run", [Do::Continue, Do::Continue];
-    "account-name-invalid", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("Ilex Maint")];
-    "account-name-reserved", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("root")];
-    "account-password-short", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password("abc"), Do::Confirm("abc")];
-    "account-password-mismatch", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm("correct horse batter")];
-    "account-valid", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD)];
-    "account-refused-by-helper", "generic", Account, "not-run", [Do::Continue, Do::Continue, Do::Name("rpcuser"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready", "generic", Ready, "ok", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready-machine", "ms-7c35", Ready, "ok", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready-no-disk", "no-disk", Ready, "no-disk", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready-registry-down", "registry-down", Ready, "failed", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "ready-back-to-account", "generic", Account, "ok", [Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Back];
+    "welcome", "generic", Welcome, "", "", [];
+    "welcome-german", "generic", Welcome, "", "", [Do::Keyboard("de-nodeadkeys"), Do::Language("de_DE.UTF-8")];
+    "welcome-bios", "bios", Welcome, "", "", [];
+    "welcome-helper-down", "helper-down", Welcome, "", "", [];
+    "welcome-keyboard-failed", "generic", Welcome, "", "", [Do::FailSwitches, Do::Keyboard("de-nodeadkeys")];
+    "machine-not-recognised", "generic", Machine, "", "", [Do::Continue];
+    "machine-detected", "ms-7c35", Machine, "", "", [Do::Continue];
+    "machine-detected-board", "ms-7c35-board", Machine, "", "", [Do::Continue];
+    "machine-chosen", "ms-7c35", Machine, "", "", [Do::Continue, Do::Machine("generic.gnome")];
+    "machine-conflict", "conflict", Machine, "", "", [Do::Continue];
+    "machine-no-composition", "no-composition", Machine, "", "", [Do::Continue];
+    "machine-boot-argument", "boot-override", Machine, "", "", [Do::Continue];
+    "machine-boot-argument-unknown", "bad-override", Machine, "", "", [Do::Continue];
+    "machine-helper-down", "helper-down", Machine, "", "", [Do::Jump(PageId::Machine)];
+    "machine-bios", "bios", Machine, "", "", [Do::Jump(PageId::Machine)];
+    "disk", "generic", Disk, "", "", [Do::Continue, Do::Continue];
+    "disk-chosen", "generic", Disk, "", "", [Do::Continue, Do::Continue, Do::Disk("ata-WDC_WDS500G2B0A_214512800345")];
+    "disk-none", "no-disk", Disk, "", "", [Do::Continue, Do::Continue];
+    "disk-helper-down", "helper-down", Disk, "", "", [Do::Jump(PageId::Disk)];
+    "disk-bios", "bios", Disk, "", "", [Do::Jump(PageId::Disk)];
+    "account-empty", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue];
+    "account-name-invalid", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("Ilex Maint")];
+    "account-name-reserved", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("root")];
+    "account-password-short", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password("abc"), Do::Confirm("abc")];
+    "account-password-mismatch", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm("correct horse batter")];
+    "account-valid", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD)];
+    "account-refused-by-helper", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("rpcuser"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-machine", "ms-7c35", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-other-disk", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Disk("ata-WDC_WDS500G2B0A_214512800345"), Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-no-disk", "no-disk", Review, "no-disk", "", [Do::Continue, Do::Continue, Do::Jump(PageId::Account), Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-registry-down", "registry-down", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-back-to-account", "generic", Account, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Back];
+    "review-erase-dialog", "generic", Review, "ok", "confirm", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install];
+    "review-erase-cancelled", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Dismiss];
+    "review-apply-refused", "generic+apply-refused", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "review-apply-not-started", "generic+apply-lost", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "installing-early", "generic+early", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "installing", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "installing-log", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::ExpandLog];
+    "installing-reattached", "generic+attach-installing", Installing, "", "", [];
+    "done", "generic", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "done-restarting", "generic", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Done), Do::Restart];
+    "done-restart-refused", "generic+finish-fails", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Done), Do::Restart];
+    "done-reattached", "generic+attach-done", Done, "", "", [];
+    "problem-image", "generic+fail-image", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "problem-partition", "generic+fail-partition", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "problem-helper-stopped", "generic+helper-stopped", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "problem-lost", "generic+lost", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "problem-reattached", "generic+attach-failed", Problem, "", "", [];
+    "problem-restart-refused", "generic+fail-image+finish-fails", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::Restart];
+    "problem-retry", "generic+fail-image", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::RetryInstall];
+    "problem-save-log", "generic+fail-image+sticks", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog];
+    "problem-save-log-no-stick", "generic+fail-image+bare", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog];
+    "problem-save-log-saved", "generic+fail-image+sticks", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog, Do::SaveLog("usb-SanDisk_Cruzer_Blade_4C530001-0:0")];
+    "problem-save-log-failed", "generic+fail-image+sticks+log-fails", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog, Do::SaveLog("usb-SanDisk_Cruzer_Blade_4C530001-0:0")];
 ];
 
 /// How often the application's state is looked at while a shot waits for it.
@@ -304,13 +350,18 @@ async fn shoot(job: &Job) -> Result<Summary> {
     let scheme = if job.dark { "dark" } else { "light" };
     let mut files = 0;
     let mut scale = 1.0;
-    for shot in SHOTS {
+    // `ILEX_RENDER_ONLY=<text>` draws only the shots whose name has it (a
+    // development aid: the self-check always draws them all).
+    let only = std::env::var("ILEX_RENDER_ONLY").unwrap_or_default();
+    for shot in SHOTS.iter().filter(|s| s.name.contains(&only)) {
         let backend: Arc<dyn Backend> = Arc::new(Simulated::load(shot.scenario)?);
         let observer = Arc::new(Mutex::new(Observed {
             page: PageId::Welcome,
             check: "not-run",
             probe_pending: true,
             keyboard_switching: false,
+            attaching: true,
+            dialog: "",
         }));
         let failing = Arc::new(AtomicBool::new(false));
         let controller = App::builder()
@@ -322,18 +373,22 @@ async fn shoot(job: &Job) -> Result<Summary> {
                 fullscreen: false,
                 stats: false,
                 observer: Some(Arc::clone(&observer)),
+                // A simulated installation does not take its seconds.
+                poll_ms: Some(20),
             })
             .detach();
         let window = controller.widget().clone();
         window.set_default_size(1280, 800);
         window.present();
-        // Every step starts from a settled page: the probe answered, no check
-        // and no layout switch under way, and the first page shown.
+        // Every step starts from a settled page: the helper has said where an
+        // installation is, the probe answered, no check and no layout switch
+        // under way. (An installation that is under way, or ended, is the page
+        // the flow starts on.)
         until(
             &format!("{}: the first page", shot.name),
             &window,
             &observer,
-            Some(PageId::Welcome),
+            None,
             |_| true,
         )
         .await?;
@@ -371,6 +426,40 @@ async fn shoot(job: &Job) -> Result<Summary> {
                         as u32,
                 ),
                 Do::Machine(tag) => Msg::Machine(tag.to_owned()),
+                Do::Disk(id) => Msg::Disk(id.to_owned()),
+                Do::Install => Msg::Install,
+                Do::Accept => Msg::Confirmed(true),
+                Do::Dismiss => Msg::Confirmed(false),
+                Do::Restart => Msg::Restart,
+                Do::RetryInstall => Msg::RetryInstall,
+                Do::ChooseLog => Msg::ChooseLog,
+                Do::SaveLog(id) => Msg::SaveLog(id.to_owned()),
+                Do::Wait(page) => {
+                    until(
+                        &format!("{}: waiting for the {} page", shot.name, page.id()),
+                        &window,
+                        &observer,
+                        Some(page),
+                        |_| true,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::ExpandLog => {
+                    // The expander is the page's own widget: opened the way a
+                    // person does (the flow knows nothing of it).
+                    let expander = find_expander(window.upcast_ref())
+                        .with_context(|| format!("{}: no log expander", shot.name))?;
+                    expander.set_expanded(true);
+                    flush(
+                        &format!("{}: the log", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
                 Do::Name(text) => Msg::Name(text.to_owned()),
                 Do::Password(text) => {
                     type_into(&window, "password", text)?;
@@ -412,7 +501,7 @@ async fn shoot(job: &Job) -> Result<Summary> {
             &window,
             &observer,
             Some(shot.page),
-            |seen| shot.check.is_empty() || seen.check == shot.check,
+            |seen| (shot.check.is_empty() || seen.check == shot.check) && seen.dialog == shot.dialog,
         )
         .await?;
         for _ in 0..FRAMES {
@@ -425,13 +514,34 @@ async fn shoot(job: &Job) -> Result<Summary> {
             &window,
             &observer,
             Some(shot.page),
-            |seen| shot.check.is_empty() || seen.check == shot.check,
+            |seen| (shot.check.is_empty() || seen.check == shot.check) && seen.dialog == shot.dialog,
         )
         .await?;
         let path = job
             .directory
             .join(format!("{}-{scheme}-pending.png", shot.name));
-        scale = capture(&window, &path)?;
+        // A page that was just shown can have nothing to draw for a frame or
+        // two (the frame clock has not run since it changed): ask again.
+        let mut tries = 0;
+        scale = loop {
+            if let Some(scale) = capture(&window, &path)
+                .with_context(|| format!("{}: drawing the page", shot.name))?
+            {
+                break scale;
+            }
+            tries += 1;
+            if tries > 40 {
+                bail!(
+                    "{}: the window drew nothing in 40 tries (mapped {}, visible {}, {}x{})",
+                    shot.name,
+                    window.is_mapped(),
+                    window.is_visible(),
+                    window.width(),
+                    window.height()
+                );
+            }
+            pause(Duration::from_millis(50)).await;
+        };
         let named = job
             .directory
             .join(format!("{}-{scheme}-{scale}x.png", shot.name));
@@ -444,6 +554,24 @@ async fn shoot(job: &Job) -> Result<Summary> {
         bail!("no shots");
     }
     Ok(Summary { files, scale })
+}
+
+/// The installing page's log expander.
+fn find_expander(widget: &gtk::Widget) -> Option<gtk::Expander> {
+    if let Some(expander) = widget.downcast_ref::<gtk::Expander>() {
+        return Some(expander.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Some(found) = find_expander(&c) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    widget
+        .downcast_ref::<adw::ApplicationWindow>()
+        .and_then(|w| w.content())
+        .and_then(|content| find_expander(&content))
 }
 
 /// The window's navigation view, to go back the way the person does.
@@ -466,8 +594,8 @@ fn find_navigation(widget: &gtk::Widget) -> Option<adw::NavigationView> {
 }
 
 /// Draw the window's widget tree to a PNG at the surface's scale; returns the
-/// scale (`1`, `1.5`).
-fn capture(window: &adw::ApplicationWindow, path: &Path) -> Result<f64> {
+/// scale (`1`, `1.5`), or `None` when the tree has nothing to draw yet.
+fn capture(window: &adw::ApplicationWindow, path: &Path) -> Result<Option<f64>> {
     let native = window.native().context("the window has no native")?;
     let surface = native.surface().context("the window has no surface")?;
     let renderer = native.renderer().context("the window has no renderer")?;
@@ -485,7 +613,9 @@ fn capture(window: &adw::ApplicationWindow, path: &Path) -> Result<f64> {
         f64::from(width),
         f64::from(height),
     );
-    let node = snapshot.to_node().context("the window drew nothing")?;
+    let Some(node) = snapshot.to_node() else {
+        return Ok(None);
+    };
     let viewport = graphene::Rect::new(
         0.0,
         0.0,
@@ -496,5 +626,5 @@ fn capture(window: &adw::ApplicationWindow, path: &Path) -> Result<f64> {
     texture
         .save_to_png(path)
         .with_context(|| format!("writing {}", path.display()))?;
-    Ok(scale)
+    Ok(Some(scale))
 }
