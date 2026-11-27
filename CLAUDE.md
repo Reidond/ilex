@@ -4152,7 +4152,9 @@ the erase on the review page.
       helper's record alone: `installing_view` (the stages as rows with their
       status and fraction, the overall bar weighted by how long each stage takes,
       the helper's last sentence, the last lines of the log), then an outcome puts
-      the flow on `done` or `problem`. A helper that does not answer `State` is
+      the flow on `done` (which wipes the password the flow held: nothing needs it
+      again) or `problem` (which keeps it, for Try again). A helper that does not
+      answer `State` is
       waited for (8 requests: systemd starts it again within a second or two and
       the new one reports the installation as failed in the stage it was in);
       only longer silence is the problem page's `lost` kind, which keeps asking
