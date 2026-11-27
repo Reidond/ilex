@@ -2680,7 +2680,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
             .lines()
             .find(|l| l.starts_with(want) && l.contains(&format!("scheme={scheme} scale={scale} ")))
             .with_context(|| format!("no render report for {scheme} at {scale}x:\n{log}"))?;
-        ensure!(line.contains("shots=64 "), "{line}");
+        ensure!(line.contains("shots=71 "), "{line}");
     }
     ensure!(
         !log.contains("render status 1") && log.matches("render status 0").count() == 3,
