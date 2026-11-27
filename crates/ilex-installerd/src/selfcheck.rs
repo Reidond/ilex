@@ -3621,9 +3621,7 @@ fn check_luks() -> Result<()> {
         path == format!("/proc/self/fd/{}", key.raw()),
         "the key file's path"
     );
-    let run = |inherit: &[std::os::fd::RawFd],
-               script: &str|
-     -> Result<(exec::Exit, Vec<String>)> {
+    let run = |inherit: &[std::os::fd::RawFd], script: &str| -> Result<(exec::Exit, Vec<String>)> {
         let mut lines = Vec::new();
         let exit = exec::run_job(
             &exec::Job {
@@ -4235,8 +4233,8 @@ fn check_target(parent: &Path) -> Result<()> {
     );
     encrypted.request.tpm = Some(ilex_installer_model::plan::TpmMode::Off);
     ensure!(
-        serde_json::from_str::<serde_json::Value>(&target::setup_record(&encrypted))?["security"]
-            ["tpm"]["requested"]
+        serde_json::from_str::<serde_json::Value>(&target::setup_record(&encrypted))?["security"]["tpm"]
+            ["requested"]
             == "off",
         "the TPM mode the person turned off is not recorded"
     );

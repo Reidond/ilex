@@ -893,9 +893,7 @@ impl Backend for Simulated {
         }
         let text = secret.expose();
         let usable = match kind {
-            SecretKind::AdminPassword => {
-                !text.is_empty() && !text.contains(['\n', '\r', '\0'])
-            }
+            SecretKind::AdminPassword => !text.is_empty() && !text.contains(['\n', '\r', '\0']),
             SecretKind::DiskPassphrase => passphrase_problem(text).is_none(),
         };
         if !usable {

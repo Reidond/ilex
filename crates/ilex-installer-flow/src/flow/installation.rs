@@ -986,7 +986,6 @@ impl Flow {
                 title: "Installed on",
                 value: summary.disk_label.clone(),
             });
-
         }
         let encrypted = summary.is_some_and(|s| s.encrypted);
         Some(DoneView {

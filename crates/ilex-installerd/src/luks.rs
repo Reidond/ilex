@@ -115,7 +115,10 @@ pub fn check_header(json: &str) -> Result<Header> {
     );
     let slot = slots.values().next().context("no keyslot")?;
     ensure!(slot["type"] == "luks2", "the keyslot is not a LUKS2 one");
-    let key_bits = slot["key_size"].as_u64().context("the keyslot has no size")? * 8;
+    let key_bits = slot["key_size"]
+        .as_u64()
+        .context("the keyslot has no size")?
+        * 8;
     ensure!(
         key_bits == KEY_BITS,
         "the payload key is {key_bits} bits, not {KEY_BITS}"
@@ -124,7 +127,10 @@ pub fn check_header(json: &str) -> Result<Header> {
         .as_str()
         .context("the keyslot has no key derivation")?
         .to_owned();
-    ensure!(kdf == KDF, "the keyslot's key derivation is {kdf}, not {KDF}");
+    ensure!(
+        kdf == KDF,
+        "the keyslot's key derivation is {kdf}, not {KDF}"
+    );
     ensure!(
         header["tokens"].as_object().is_none_or(|t| t.is_empty()),
         "the new volume already has tokens"

@@ -470,8 +470,13 @@ pub(super) fn run_encrypted() -> Result<()> {
     config.snapshot = true;
     config.memory = "4G".into();
     let mut installed = Vm::boot(&ws, &config)?;
-    encrypted::unlock(&mut installed, GERMAN.keys, &artifacts, "next-unattended-encrypted")
-        .context("unlocking the installed disk at its prompt")?;
+    encrypted::unlock(
+        &mut installed,
+        GERMAN.keys,
+        &artifacts,
+        "next-unattended-encrypted",
+    )
+    .context("unlocking the installed disk at its prompt")?;
     installed
         .wait_ssh(PAGE_TIMEOUT)
         .context("the unlocked disk did not come up")?;

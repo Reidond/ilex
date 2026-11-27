@@ -384,7 +384,9 @@ fn walk() -> Result<()> {
         flow.encrypt()
             && !flow.can_continue()
             && flow.advance() == Step::Stay
-            && flow.passphrase_layout_line().contains("German (no dead keys)"),
+            && flow
+                .passphrase_layout_line()
+                .contains("German (no dead keys)"),
         "encryption is on by default and waits for a passphrase"
     );
     ensure!(
@@ -1543,7 +1545,11 @@ fn encryption() -> Result<()> {
                 == ["root"],
         "the plan of an encrypted installation: {plan:?}"
     );
-    let rows: Vec<Stage> = Progress::for_plan(&plan).rows.iter().map(|r| r.stage).collect();
+    let rows: Vec<Stage> = Progress::for_plan(&plan)
+        .rows
+        .iter()
+        .map(|r| r.stage)
+        .collect();
     ensure!(
         rows == Stage::ENCRYPTED,
         "the stages of an encrypted plan: {rows:?}"
@@ -1559,7 +1565,10 @@ fn encryption() -> Result<()> {
         review.choices
     );
     ensure!(
-        review.partitions.iter().any(|p| p.detail.ends_with("btrfs, encrypted")),
+        review
+            .partitions
+            .iter()
+            .any(|p| p.detail.ends_with("btrfs, encrypted")),
         "the review page's partitions: {:?}",
         review.partitions
     );
@@ -1568,7 +1577,12 @@ fn encryption() -> Result<()> {
     let Step::Confirm(_) = flow.install() else {
         bail!("no dialog");
     };
-    let Step::RunApply { passphrase, password, .. } = flow.confirm_install() else {
+    let Step::RunApply {
+        passphrase,
+        password,
+        ..
+    } = flow.confirm_install()
+    else {
         bail!("the confirmation does not apply");
     };
     ensure!(
@@ -1590,7 +1604,9 @@ fn encryption() -> Result<()> {
     flow.show(PageId::Account);
     let (generation, request) = run_plan(&mut flow)?;
     ensure!(
-        !request.encrypt && request.tpm.is_none() && !serde_json::to_string(&*request)?.contains("typed"),
+        !request.encrypt
+            && request.tpm.is_none()
+            && !serde_json::to_string(&*request)?.contains("typed"),
         "the request of an unencrypted installation: {request:?}"
     );
     flow.plan_finished(generation, sim.plan(&request));
@@ -1600,7 +1616,10 @@ fn encryption() -> Result<()> {
     let Step::RunApply { passphrase, .. } = flow.confirm_install() else {
         bail!("the confirmation does not apply");
     };
-    ensure!(passphrase.is_none(), "a passphrase went to an unencrypted plan");
+    ensure!(
+        passphrase.is_none(),
+        "a passphrase went to an unencrypted plan"
+    );
     flow.cancel_install();
 
     // The simulated helper refuses what the real one does: a passphrase for a
@@ -1631,12 +1650,17 @@ fn encryption() -> Result<()> {
     )?;
     ensure!(
         matches!(
-            sim.set_secret(&plan, ilex_installer_model::plan::SecretKind::DiskPassphrase, &Secret::new("a\nb")),
+            sim.set_secret(
+                &plan,
+                ilex_installer_model::plan::SecretKind::DiskPassphrase,
+                &Secret::new("a\nb")
+            ),
             Err(ClientError::Refused(_))
         ),
         "a passphrase with a line break was taken"
     );
-    let began = sim.start_installation(&plan, "nvme-eui.0025385c1140a2b3", &secret, Some(&secret))?;
+    let began =
+        sim.start_installation(&plan, "nvme-eui.0025385c1140a2b3", &secret, Some(&secret))?;
     ensure!(
         began.active
             && began.stages.iter().map(|r| r.stage).collect::<Vec<_>>() == Stage::ENCRYPTED
@@ -1676,8 +1700,9 @@ fn encryption() -> Result<()> {
     );
     let done = flow.done_view().context("no done page")?;
     ensure!(
-        done.detail.contains("The disk is encrypted: the computer asks for its passphrase every time it starts")
-            && flow.passphrase().is_empty()
+        done.detail.contains(
+            "The disk is encrypted: the computer asks for its passphrase every time it starts"
+        ) && flow.passphrase().is_empty()
             && flow.passphrase_confirmation().is_empty()
             && flow.password().is_empty()
             && flow.secrets_wiped() == 1,
@@ -1777,7 +1802,10 @@ fn disk_page() -> Result<()> {
     );
     // ...and goes into the request, whole-disk (unencrypted here: the
     // encryption page is turned off).
-    ensure!(through_encryption(&mut flow), "disk -> encryption -> account");
+    ensure!(
+        through_encryption(&mut flow),
+        "disk -> encryption -> account"
+    );
     fill_account(&mut flow, "generic")?;
     let (generation, request) = run_plan(&mut flow)?;
     ensure!(

@@ -3370,7 +3370,12 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   Secrets never print (and each one's text is zeroed when it is dropped), and a
   TOML error names the line and column but never the
   text (toml's own message quotes the line). The administrator's password may not
-  contain a line break or NUL, the passphrase no NUL.
+  contain a line break or NUL; the passphrase is refused by the same rule as every
+  passphrase (empty, over 512 bytes, a control character: what the boot prompt
+  cannot take). Answers that encrypt (the default) need `[encryption] passphrase`;
+  answers mode hands it to the helper as a sealed memfd with `SetSecret`, as the
+  interface does, and `tpm` left at its default (`auto`) gets the plan's note that
+  the security chip is not used yet.
   The volume is read and the answers applied by **answers mode** below.
 - **Apply** (`SetSecret(plan, kind, fd)`, `Apply(plan, erase_disk)`, `State()`
   and the signals `Progress(stage, fraction, message)` and `Finished(outcome)`,
@@ -3517,6 +3522,54 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     fails if a mount is left. Each tool runs with a clean environment in its own
     process group under a deadline and `PR_SET_PDEATHSIG`, so a helper that dies
     takes the tool that writes to the disk with it.
+  - **Encryption** (`crates/ilex-installerd/src/luks.rs`, the `encrypt` stage of
+    `install.rs`; `SetSecret(plan, "disk-passphrase", fd)`). A plan with `encrypt:
+    true` uses the shipped `whole-disk-encrypted` layout and needs the passphrase
+    as well as the password (`missing-secret` naming `disk-passphrase` without
+    it). `SetSecret` takes it as it takes the password (a sealed memfd, read once
+    into memory of its own) and refuses what the boot prompt cannot take
+    (`invalid-secret`, field `fd`: empty, over 512 bytes, a control character, so
+    no line break or tab, not UTF-8, or a plan that does not encrypt); the model's
+    `passphrase_problem` states that rule once for the helper, the interface and
+    the answers file. **The passphrase reaches the tools as a descriptor, never an
+    argument.** `luks::KeyFile` copies it into a memfd of its own (mode 0600, the
+    bytes exactly, no newline, close-on-exec) and `Job::inherit` makes that one
+    descriptor survive `exec` in the child alone, so `systemd-repart` gets
+    `--key-file=/proc/self/fd/N` and `cryptsetup` `--key-file /proc/self/fd/N`; the
+    file is overwritten with zeros and emptied, and the secret's pages are wiped,
+    as soon as the encrypt stage is over (or the installation fails). `partition`
+    makes the volume (`Encrypt=key-file`: repart formats the root inside it).
+    `encrypt` reads its UUID (`cryptsetup luksUUID`), **checks the header the
+    installed system's unlock stack was qualified against** (`luks::check_header`
+    on `cryptsetup luksDump --dump-json-metadata`: LUKS2, one `crypt` segment of
+    `aes-xts-plain64`, one keyslot with a 512-bit payload key derived with
+    `argon2id`, no token; the output of a job is cut at 300 characters a line, so
+    the JSON is read with `exec::run`), opens it `--type luks2 --allow-discards`
+    as `luks-<uuid>` (the name the initramfs gives it and `ilex-enroll` expects)
+    and checks that it holds the planned file system. `mount` mounts that device,
+    not the partition. `bootc install to-filesystem` gets `--karg=rd.luks.uuid=<uuid>`
+    and `--karg=vconsole.keymap=<keymap>`: the image's initramfs is generic and
+    carries no crypttab, so without the first it would never ask; the second is
+    systemd's own `vconsole.keymap=`, which `systemd-vconsole-setup` in the
+    initramfs applies before `systemd-ask-password` asks, so that **the prompt is
+    in the layout the passphrase was typed in** (the image's initramfs has every
+    kbd keymap and no Plymouth: the prompt is text on the console, not a splash).
+    Measured: bootc adds no LUKS argument of its own to the boot entry, which
+    reads `root=UUID=<btrfs> rootflags=subvol=/ rw boot=UUID=<boot> rhgb quiet
+    rd.luks.options=tpm2-device=auto rd.luks.uuid=<luks uuid>
+    vconsole.keymap=<keymap> ostree=...` (the fourth is the image's, from
+    `kargs.d`). `configure` writes `/etc/crypttab` (`luks-<uuid> UUID=<uuid> none
+    discard`, mode 0600: the shape Anaconda writes, with no key file, which
+    `ilex-enroll`'s layout check requires) next to `vconsole.conf`. `/var` is the
+    stateroot's directory in the root file system, so it is inside the volume; the
+    layout has no swap (the live system's zram is not the target's). `finalise`
+    closes the volume after everything is unmounted, and a failure closes it too
+    (`cleanup`). `/etc/ilex/setup.json` says what phase 0's completion says of a
+    disk that unlocks with its passphrase alone: `security.tpm` is `{requested,
+    capability: "unknown", reason: "not-attempted", status: "passphrase-only"}`.
+    The security chip and the recovery key are not part of this change: the
+    interface asks with `tpm: "off"`, and an answers file that leaves `tpm` at its
+    default (`auto`) gets a plan warning that the chip is not used yet.
   - **State, progress, logs.** Each stage is recorded in
     `/run/ilex-installer/state.json` (mode 0600, written to a file of its own and
     renamed) **before it writes anything**, and a stage whose record cannot be
@@ -3991,6 +4044,52 @@ helper); **the live system is then stopped without a shutdown and booted again**
 reads it, still names both digests); and the retried installation, in that new
 boot, leaves a stamp on the booted disk that is exactly the two old digests and
 its own.
+`installer::encrypted` and `installer::encrypted_german` (each a VM of its own,
+the live image booted as a disk with the target, a sentinel and a USB stick for
+the log) install `generic.gnome` onto a whole disk with LUKS2 and unlock it at
+its real boot prompt. The plan (a request that leaves the security chip at
+`auto`) names the encrypted root partition alone and warns that the chip is not
+used yet; then, before the first write and with every disk byte for byte as it
+was: no passphrase (`missing-secret`, field `disk-passphrase`), a passphrase with
+a line break, a tab or 513 bytes, an unsealed one and one for a plan that does not
+encrypt (`invalid-secret`, field `fd`). The installation's stages are
+`partition, encrypt, mount, image, configure, account, finalise`, each announced
+on the bus. From the live system the trial reads the disk: LUKS2 with one keyslot
+derived with `argon2id`, a 512-bit `aes-xts-plain64` payload key and no token, the
+passphrase opens it (`--test-passphrase`) and a wrong or empty one does not, a
+btrfs inside, exactly three partitions (ESP, `/boot`, the volume: no swap) and no
+swap, `/var` inside the volume and none on `/boot`, the deployment's
+`/etc/crypttab` (`luks-<uuid> UUID=<uuid> none discard`, mode 0600),
+`vconsole.conf`, `setup.json` (`passphrase-only`, `not-attempted`) and the boot
+entry's arguments (`rd.luks.uuid=`, `vconsole.keymap=`, the image's
+`rd.luks.options=tpm2-device=auto`, a `root=UUID=`), nothing left open or mounted,
+and that **the passphrase is nowhere it must not be**: not in the helper's
+`/run/ilex-installer` (state, logs, the plan), the journal, `dmesg`, any process's
+arguments, the log the helper saves to the stick through `Finish(save-log:…)` (its
+eleven files, the tarball scanned as files and as raw bytes), the target's
+`/var/log/ilex-installer` or `/etc`. The disk is then booted, the prompt is
+found as a person finds it (the screen has text on it that stopped changing but
+for the cursor, after GRUB's `Booting` line on the serial console: the installed
+system's kernel is quiet and has no serial console) and the passphrase is typed
+through QMP, in the keys of the layout it was typed in. The US run's passphrase
+has spaces, quotes, a colon and an ampersand; **the German run's, `Süß-Zebra-yoga-2026`,
+is made of keys that are other keys on a US keyboard** (`y` and `z`, `ü`, `ß` and
+the hyphen are `z` and `y`, `[`, `-` and `/`), so a prompt that was not in the
+layout (`vconsole.keymap=de-nodeadkeys`) could not open the volume. The booted
+system must pass every `installer::install` assertion and show the root, `/var`
+and `/sysroot` on `/dev/mapper/luks-<uuid>` over the partition of the disk, no
+swap, the same header, `discards` in effect, the keymap loaded, no failed unit,
+the image's unlock stack's own record that it opened the volume
+(`/run/ilex/root-unlock.json`: `method` `fallback`, the volume's UUID, no token
+or slot), the keymap in the initramfs it came from, and the passphrase in no log
+of the installed system. The helper's `--self-check` (`check_luks`) covers what
+needs no disk: the header rules (a second keyslot, PBKDF2, another cipher, a
+256-bit key, a token, a fixed-size or second segment each refused), the UUID, the
+`crypttab` line and kernel arguments, the key file read by a child through its
+inherited descriptor and not by one that was not given it, mode 0600, emptied when
+dropped, and the passphrase rules. Measured on a 16-vCPU Boat sandbox (2026-11-27):
+the installation 320 to 370 s, each trial about 12 minutes from the live image's
+disk.
 Measured on a 16-vCPU Boat sandbox (2026-11-27, each trial run on its own): the
 five `installer::` trials together 1,420 s with the live image's disk built in that
 run (`installer::install` alone about 250 s: the pull and deployment 3 to 4.3
@@ -4077,6 +4176,13 @@ sticks boot again with no fault: they are not refused as already installed, eras
 the failed installation's partitions (`reinstall=true erases:`), install and
 power off; the installed disk boots on the planned digest and its stamp is one
 digest, its own.
+`iso::next_unattended_encrypted` installs from answers that encrypt (a German
+keyboard, a passphrase whose keys differ from a US keyboard's, in plaintext in
+the file as the documentation says) with no interface: the helper's `SetSecret`
+of the passphrase, the plan's note that the security chip is not used yet on the
+console, no secret of the answers on the console, the answers volume unchanged;
+the disk is then booted, its prompt answered with the German keys through QMP, and
+the installed system must pass the assertions of `installer::encrypted_german`.
 `iso::next_unattended_handover` boots with the fixed
 credential `ilex.installer.fault=helper` (the helper exits before it takes its bus
 name) and then `=answers` (the unattended process kills itself with `SIGKILL`
@@ -4643,25 +4749,34 @@ disk before the person has confirmed the erase on the review page.
   GRUB's editor and requires the last to win, `chosen`, and the model's own
   serial line; `iso::next_kernel_argument_unknown` an unoffered tag: `bad-override`
   with the detection's choice kept, the two rows of the edition's offers shown
-  and the notice naming both offered tags. `iso::next_account` types the disk and
-  administrator pages with the keyboard on a VM with a 40 GiB disk, presses Enter
+  and the notice naming both offered tags. `iso::next_account` types the disk,
+  encryption and administrator pages with the keyboard on a VM with a 40 GiB disk
+  (the encryption page: encryption `on` and the layout in its marker, Enter on an
+  empty passphrase and on a mismatched confirmation do not continue, then the
+  passphrase typed twice), presses Enter
   in the last field and requires the real helper's `Plan` (the image's manifest is
   read from the registry, so the guest needs `ghcr.io`) to succeed, the review page to
-  report `check=ok`, and the password to be nowhere on the serial console or in
-  the guest's journal (read over SSH, with patterns that do not match their own
-  command line). Screenshots of each are kept in the artifacts.
+  report `check=ok`, and the password and the passphrase to be nowhere on the
+  serial console or in the guest's journal (read over SSH, with patterns that do
+  not match their own command line). Screenshots of each are kept in the artifacts.
   - `iso::next_keyboard_install` is a **complete interactive installation by
     keyboard alone** (QMP key events, 6 GiB of RAM in the guest, with
     the real helper, the real registry and the signature policy): every page to
-    the review, the erase dialog cancelled with Escape (the helper has applied
+    the review (the encryption page with its passphrase typed twice), the erase
+    dialog cancelled with Escape (the helper has applied
     nothing), then confirmed (Tab to the destructive answer, Enter), the
     installing page to the success of every stage, the done page, Power off; the
-    password is typed with its spaces, colon and quotes, and is on neither the
-    serial console nor in the journal. The disk it installed boots on its own and
-    every `installer::install` assertion holds (`check_installed`: the digest the
+    password is typed with its spaces, colon and quotes, and neither it nor the
+    passphrase is on the serial console or in the journal. The disk it installed
+    asks for the passphrase at its boot prompt (typed through QMP) and then boots
+    on its own with the root on the LUKS2 volume, and every `installer::install`
+    assertion holds (`check_installed`: the digest the
     helper recorded, the origin that enforces the signature policy, the
     administrator's password and `sudo`, the defaults, the system `running`, no
-    failed unit, GDM). A screenshot of each page is kept.
+    failed unit, GDM) beside the encrypted-root assertions of
+    `installer::encrypted`. A screenshot of each page is kept. (`iso::next_reattach`
+    and `iso::next_problem` also walk the encryption page with a passphrase: their
+    installations are encrypted.)
   - `iso::next_reattach` (booted with `ilex.installer.fault=slow-apply`): the
     harness reads `State` over SSH until it says `starting` over the previous
     record (the interface that asked is still on the review page, waiting for an

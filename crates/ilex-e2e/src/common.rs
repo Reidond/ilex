@@ -81,8 +81,8 @@ pub fn manifest(directory: &str, name: &str, file: &str) -> Result<toml::Table> 
 }
 
 /// The layout of an installed system, as the parity record keeps it: the file
-/// systems, the kernel command line, `fstab` and `crypttab`, what is mounted
-/// and swapped, the subvolumes, `bootc status`, the boot entries and the
+/// systems (through the volume of an encrypted root), the kernel command line,
+/// `fstab` and `crypttab`, what is mounted and swapped, the subvolumes, `bootc status`, the boot entries and the
 /// partition table. The Anaconda installer's install and the next installer's
 /// are each recorded with it, and their differences are listed in the pull
 /// request that adds the second.
@@ -98,7 +98,9 @@ echo '=== bootc status'; bootc status
 echo '=== efibootmgr'; efibootmgr -v 2>&1 | head -20
 echo '=== partition table'
 source=$(findmnt -no SOURCE /sysroot | sed 's/\[.*//')
-disk=$(lsblk -no PKNAME "$source" | head -1)
+# The whole disk below the root, through a partition and, when the root is
+# encrypted, a device-mapper volume.
+disk=$(lsblk -srn -o NAME,TYPE "$source" | awk '$2 == "disk" { print $1; exit }')
 sfdisk -d "/dev/$disk" 2>&1
 "#;
 

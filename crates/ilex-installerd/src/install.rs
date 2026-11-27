@@ -487,7 +487,8 @@ impl Install {
             root.encrypted,
             "the root partition {node} was not planned as an encrypted one"
         );
-        let uuid = luks::parse_uuid(&self.checked(&mut log, "cryptsetup", &["luksUUID", node], TOOL)?)?;
+        let uuid =
+            luks::parse_uuid(&self.checked(&mut log, "cryptsetup", &["luksUUID", node], TOOL)?)?;
         // The header, whole: its JSON is one long line, which the output of a
         // job (cut at 300 characters a line) cannot carry.
         log.command("cryptsetup", &["luksDump", "--dump-json-metadata", node]);
@@ -551,14 +552,22 @@ impl Install {
             &mut || {},
         );
         ensure!(
-            fs::metadata(&mapper).is_ok_and(|m| std::os::unix::fs::FileTypeExt::is_block_device(&m.file_type())),
+            fs::metadata(&mapper)
+                .is_ok_and(|m| std::os::unix::fs::FileTypeExt::is_block_device(&m.file_type())),
             "{mapper} is not a block device after the volume was opened"
         );
         // Whatever repart formatted inside is the planned root file system.
         let lines = self.checked(
             &mut log,
             "blkid",
-            &["--probe", "--output", "value", "--match-tag", "TYPE", &mapper],
+            &[
+                "--probe",
+                "--output",
+                "value",
+                "--match-tag",
+                "TYPE",
+                &mapper,
+            ],
             TOOL,
         )?;
         ensure!(
@@ -1344,7 +1353,9 @@ impl Install {
                 "some mounts of the target could not be removed"
             });
             if ended && let Err(why) = self.close_volume(&mut log) {
-                log.line(&format!("the encrypted volume could not be closed: {why:#}"));
+                log.line(&format!(
+                    "the encrypted volume could not be closed: {why:#}"
+                ));
             }
         }
     }

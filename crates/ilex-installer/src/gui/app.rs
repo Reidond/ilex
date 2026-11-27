@@ -882,7 +882,9 @@ impl Widgets {
         // --- encryption ---
         let switch = adw::SwitchRow::builder()
             .title("Encrypt this disk")
-            .subtitle("Recommended. The disk asks for its passphrase every time the computer starts.")
+            .subtitle(
+                "Recommended. The disk asks for its passphrase every time the computer starts.",
+            )
             .name("encrypt")
             .active(flow.encrypt())
             .build();

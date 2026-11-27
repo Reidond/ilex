@@ -138,12 +138,7 @@ pub(super) fn run(variant: &'static Variant) -> Result<()> {
         .map(|p| (p.kind.as_str(), p.encrypted))
         .collect();
     ensure!(
-        encrypted_partitions
-            == [
-                ("esp", false),
-                ("xbootldr", false),
-                ("root-x86-64", true)
-            ],
+        encrypted_partitions == [("esp", false), ("xbootldr", false), ("root-x86-64", true)],
         "which partitions are encrypted: {encrypted_partitions:?}"
     );
     // What the interface asks: the chip off, so the plan has nothing to warn of.
@@ -159,7 +154,14 @@ pub(super) fn run(variant: &'static Variant) -> Result<()> {
 
     // --- what Apply and SetSecret refuse --------------------------------------
     // No passphrase: nothing begins and the disks are as they were.
-    let ran = set_secret(&vm, "ilex-installer", &plan.id, "admin-password", PASSWORD, true)?;
+    let ran = set_secret(
+        &vm,
+        "ilex-installer",
+        &plan.id,
+        "admin-password",
+        PASSWORD,
+        true,
+    )?;
     ensure!(ran.code == Some(0), "SetSecret: {}", ran.text);
     refused(
         &apply(&vm, "ilex-installer", &plan.id, &target.id)?,
@@ -174,7 +176,14 @@ pub(super) fn run(variant: &'static Variant) -> Result<()> {
         ("513 bytes", "x".repeat(513)),
     ] {
         refused(
-            &set_secret(&vm, "ilex-installer", &plan.id, "disk-passphrase", &bad, true)?,
+            &set_secret(
+                &vm,
+                "ilex-installer",
+                &plan.id,
+                "disk-passphrase",
+                &bad,
+                true,
+            )?,
             ErrorCode::InvalidSecret,
             Some("fd"),
         )
@@ -182,21 +191,37 @@ pub(super) fn run(variant: &'static Variant) -> Result<()> {
     }
     // Not sealed: refused like the password's.
     refused(
-        &set_secret(&vm, "ilex-installer", &plan.id, "disk-passphrase", variant.passphrase, false)?,
+        &set_secret(
+            &vm,
+            "ilex-installer",
+            &plan.id,
+            "disk-passphrase",
+            variant.passphrase,
+            false,
+        )?,
         ErrorCode::InvalidSecret,
         Some("fd"),
     )?;
     // A passphrase for a plan that does not encrypt.
     let plain = self::plan(&vm, &request(&target.id, |_| {}))?;
     refused(
-        &set_secret(&vm, "ilex-installer", &plain.id, "disk-passphrase", variant.passphrase, true)?,
+        &set_secret(
+            &vm,
+            "ilex-installer",
+            &plain.id,
+            "disk-passphrase",
+            variant.passphrase,
+            true,
+        )?,
         ErrorCode::InvalidSecret,
         Some("fd"),
     )?;
     // The plan that is applied is the encrypted one again (a plan is the
     // latest of its request; the earlier ones are still valid).
     nothing_happened(&vm, &before, &[&target, &sentinel], &plan.id)?;
-    println!("     refused: no passphrase, a line break, a tab, 513 bytes, unsealed, an unencrypted plan's");
+    println!(
+        "     refused: no passphrase, a line break, a tab, 513 bytes, unsealed, an unencrypted plan's"
+    );
 
     // --- the installation ----------------------------------------------------
     ok(
@@ -236,10 +261,9 @@ pub(super) fn run(variant: &'static Variant) -> Result<()> {
     bench.save("state.json", &serde_json::to_string_pretty(&finished)?);
     ensure!(
         finished.outcome == Some(Outcome::Success)
-            && finished
-                .stages
-                .iter()
-                .all(|r| r.status == StageStatus::Done && r.started.is_some() && r.finished.is_some()),
+            && finished.stages.iter().all(|r| r.status == StageStatus::Done
+                && r.started.is_some()
+                && r.finished.is_some()),
         "the installation ended: {:?}\n{}",
         finished.outcome,
         finished.log.join("\n")
@@ -255,19 +279,27 @@ pub(super) fn run(variant: &'static Variant) -> Result<()> {
         order.windows(2).all(|w| w[0] <= w[1]),
         "the stages went backwards: {order:?}"
     );
-    let signals = ok(&vm, "kill $(cat /run/monitor.pid) || true; sleep 1; cat /run/signals.json")?;
+    let signals = ok(
+        &vm,
+        "kill $(cat /run/monitor.pid) || true; sleep 1; cat /run/signals.json",
+    )?;
     ensure!(
-        ["partition", "encrypt", "mount", "image", "configure", "account", "finalise"]
-            .iter()
-            .all(|stage| signals.contains(&format!("\"{stage}\""))),
+        [
+            "partition",
+            "encrypt",
+            "mount",
+            "image",
+            "configure",
+            "account",
+            "finalise"
+        ]
+        .iter()
+        .all(|stage| signals.contains(&format!("\"{stage}\""))),
         "a stage was not announced on the bus"
     );
 
     // --- what is on the disk -------------------------------------------------
-    let inspect = ok(
-        &vm,
-        &with_passphrase(variant.passphrase, ENCRYPTED_INSPECT),
-    )?;
+    let inspect = ok(&vm, &with_passphrase(variant.passphrase, ENCRYPTED_INSPECT))?;
     bench.save("inspect.txt", &redact(&inspect, variant));
     println!(
         "{}",
@@ -319,10 +351,11 @@ mkdir -p /run/stickscan /run/stick
 for p in /dev/disk/by-id/*ILEXSTICK0*-part1; do mount -o ro "$p" /run/stick; done
 ls /run/stick
 tar -C /run/stickscan -xf /run/stick/{file}
-echo "tarball_files=$(ls /run/stickscan | wc -l)"
+echo "tarball_files=$(find /run/stickscan -type f | wc -l)"
 echo "tarball=$(count /run/stickscan)"
 echo "tarball_raw=$(grep -caF -e "$PASS" /run/stick/{file} || true)"
-echo "tarball_has_state=$(ls /run/stickscan | grep -c state || true)"
+echo "tarball_names=$(cd /run/stickscan && find . -type f | sed 's|^\./||' | tr '\n' ' ')"
+echo "tarball_has_state=$(find /run/stickscan -type f -name 'state*' | wc -l)"
 umount /run/stick
 "#,
                 file = saved["file"].as_str().unwrap_or_default()
@@ -374,7 +407,9 @@ umount /run/stick
     })?;
     gdm_screenshot(
         &mut installed,
-        &bench.artifacts.join(format!("installer-{}-gdm.png", variant.name)),
+        &bench
+            .artifacts
+            .join(format!("installer-{}-gdm.png", variant.name)),
     )?;
     Ok(())
 }
@@ -464,10 +499,7 @@ fn encrypted_inspected(text: &str, plan: &Plan, variant: &Variant) -> Result<Fou
     );
     want("inner_type", "btrfs")?;
     let uuid = field(text, "uuid")?.to_owned();
-    ensure!(
-        uuid.len() == 36,
-        "the LUKS UUID: {uuid:?}"
-    );
+    ensure!(uuid.len() == 36, "the LUKS UUID: {uuid:?}");
     // What the installed system finds the volume by.
     want("crypttab", &format!("luks-{uuid} UUID={uuid} none discard"))?;
     want("crypttab_mode", "600")?;
@@ -504,13 +536,9 @@ fn encrypted_inspected(text: &str, plan: &Plan, variant: &Variant) -> Result<Fou
         .collect();
     ensure!(
         partitions
-            == [
-                "ilex-esp vfat",
-                "ilex-boot ext4",
-                "ilex-root crypto_LUKS"
-            ]
-            .into_iter()
-            .collect(),
+            == ["ilex-esp vfat", "ilex-boot ext4", "ilex-root crypto_LUKS"]
+                .into_iter()
+                .collect(),
         "the partitions: {partitions:?}"
     );
     // The record the first boot reads: passphrase only, nothing enrolled.
@@ -533,7 +561,8 @@ fn encrypted_inspected(text: &str, plan: &Plan, variant: &Variant) -> Result<Fou
     want("log_leak", "0")?;
     want("etc_leak", "0")?;
     ensure!(
-        field(text, "logs")?.contains("02-encrypt.log") && field(text, "logs")?.contains("plan.json"),
+        field(text, "logs")?.contains("02-encrypt.log")
+            && field(text, "logs")?.contains("plan.json"),
         "the logs on the target: {}",
         field(text, "logs")?
     );
@@ -575,19 +604,19 @@ impl Bench {
 }
 
 /// Wait for the prompt of the volume's passphrase and type `keys` into it, as a
-/// person at the keyboard does. The prompt is found on the screen (the
-/// installed system has no serial console of its own): the picture has stopped
-/// changing and is not blank; its first such state is kept as evidence. A
-/// passphrase typed before the prompt exists would be typed into the boot
-/// loader or lost.
+/// person at the keyboard does. The installed system has no serial console of
+/// its own (its kernel is quiet and has no `console=ttyS0`), so the prompt is
+/// found as a person finds it: GRUB's menu has run out (its `Booting` line is on
+/// the serial console, which GRUB does write to), and the screen then has text
+/// on it that has stopped changing but for the blinking cursor. A passphrase
+/// typed before the prompt exists would be typed into the boot loader or lost.
+/// The first such screen is kept as evidence.
 pub(crate) fn unlock(vm: &mut Vm, keys: &str, artifacts: &Path, name: &str) -> Result<()> {
-    // (The VM may not be ours to wait on for ever: a prompt that never comes is
-    // an error with a screenshot, never a hang.)
     let ctl = Vmctl::from_info(vm.info.clone());
     let serial = vm.info.dir.join("serial.log");
     let started = Instant::now();
     let discover = std::env::var_os("ILEX_ENCRYPTED_DISCOVER").is_some();
-    let mut previous = None;
+    let mut previous: Option<Vec<u8>> = None;
     let mut still = 0u32;
     let mut taken = 0u32;
     loop {
@@ -595,27 +624,30 @@ pub(crate) fn unlock(vm: &mut Vm, keys: &str, artifacts: &Path, name: &str) -> R
             bail!("the VM exited with {status} before its prompt");
         }
         if let Ok(frame) = ctl.screenshot() {
-            let fingerprint = frame.fingerprint();
             if discover {
                 taken += 1;
                 let _ = ctl.save_screenshot(&artifacts.join(format!("{name}-boot-{taken:03}.png")));
             }
-            if previous == Some(fingerprint) {
+            // A blinking cursor is a few dozen pixels (a character cell is
+            // 8 by 16): the screen is the same with up to a few hundred.
+            if previous
+                .as_ref()
+                .is_some_and(|before| differing_pixels(before, &frame.rgb) <= 400)
+            {
                 still += 1;
             } else {
                 still = 0;
             }
-            previous = Some(fingerprint);
-            let console = fs::read_to_string(&serial)
+            previous = Some(frame.rgb.clone());
+            let booted = fs::read_to_string(&serial)
                 .unwrap_or_default()
-                .to_ascii_lowercase();
-            let asked = console.contains("passphrase") || console.contains("please enter");
-            if !discover && (asked || (still >= 3 && started.elapsed() > Duration::from_secs(20))) {
+                .contains("Booting `");
+            if !discover && booted && still >= 3 && light_pixels(&frame.rgb) > 200 {
                 ctl.save_screenshot(&artifacts.join(format!("{name}-prompt.png")))?;
                 break;
             }
         }
-        if started.elapsed() >= Duration::from_secs(if discover { 150 } else { 360 }) {
+        if started.elapsed() >= Duration::from_secs(if discover { 150 } else { 420 }) {
             let _ = ctl.save_screenshot(&artifacts.join(format!("{name}-no-prompt.png")));
             if let Ok(serial) = fs::read(&serial) {
                 let _ = fs::write(
@@ -634,6 +666,28 @@ pub(crate) fn unlock(vm: &mut Vm, keys: &str, artifacts: &Path, name: &str) -> R
     ctl.type_text(keys)?;
     ctl.key("Return")?;
     Ok(())
+}
+
+/// How many pixels differ between two frames of a screen.
+fn differing_pixels(a: &[u8], b: &[u8]) -> usize {
+    if a.len() != b.len() {
+        return usize::MAX;
+    }
+    a.as_chunks::<3>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<3>().0)
+        .filter(|(x, y)| x != y)
+        .count()
+}
+
+/// How many pixels are light (text on a dark screen).
+fn light_pixels(rgb: &[u8]) -> usize {
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|p| (u32::from(p[0]) * 3 + u32::from(p[1]) * 6 + u32::from(p[2])) / 10 > 150)
+        .count()
 }
 
 /// What the unlocked, booted system says of its encryption. `uuid` is the
@@ -672,10 +726,15 @@ echo "failed=$(systemctl --failed --no-legend --plain | wc -l)"
 echo "cryptsetup_unit=$(systemctl is-active systemd-cryptsetup@luks-{uuid}.service 2>&1 | head -1)"
 echo "unlock_record=$(cat /run/ilex/root-unlock.json 2>/dev/null | tr -d '\n ')"
 echo "initrd_vconsole=$(journalctl -b --no-pager -g 'vconsole' 2>/dev/null | grep -ci -e 'failed' || true)"
+# The keymap the prompt was in is in the initramfs it came from (the image's
+# generic initramfs carries every kbd keymap).
+initrd=$(ls /boot/ostree/*/initramfs-*.img | head -1)
+echo "initrd_keymap=$(lsinitrd "$initrd" 2>/dev/null | grep -c -e "kbd/keymaps/xkb/{keymap}.map" || true)"
 echo "leak_var_log=$(grep -rlaF -e "$(printf %s {pass} | base64 -d)" /var/log/ilex-installer /etc /var/lib/ilex 2>/dev/null | wc -l)"
 echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} | base64 -d)" || true)"
 "#,
-            pass = base64(variant.passphrase.as_bytes())
+            pass = base64(variant.passphrase.as_bytes()),
+            keymap = variant.keymap
         ),
     )?;
     save("booted-encryption.txt", &redact(&out, variant));
@@ -710,8 +769,12 @@ echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} 
     want("sysroot_source", &format!("/dev/mapper/luks-{uuid}"))?;
     want("var_source", &format!("/dev/mapper/luks-{uuid}"))?;
     want("root_type", "crypt")?;
+    // The root is a crypt device on a partition of a disk (`lsblk -s` lists
+    // them in no order a test should depend on).
+    let mut made_of: Vec<&str> = field(&out, "parent_type")?.split_whitespace().collect();
+    made_of.sort_unstable();
     ensure!(
-        field(&out, "parent_type")?.starts_with("crypt part")
+        made_of == ["crypt", "disk", "part"]
             && field(&out, "parent_fstype")?.contains("crypto_LUKS"),
         "what the root is made of: {out}"
     );
@@ -720,7 +783,8 @@ echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} 
     want("vconsole", &format!("KEYMAP={}", variant.keymap))?;
     want("keymap_loaded", variant.keymap)?;
     ensure!(
-        field(&out, "boot_source")?.contains("/dev/") && !field(&out, "boot_source")?.contains("mapper"),
+        field(&out, "boot_source")?.contains("/dev/")
+            && !field(&out, "boot_source")?.contains("mapper"),
         "/boot is on the encrypted volume: {}",
         field(&out, "boot_source")?
     );
@@ -733,7 +797,26 @@ echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} 
     // The unlock stack's own evidence: the image's initramfs wrapper met a
     // volume it could classify (a password-only one: fallback, not a TPM
     // unlock) and recorded how this boot opened it.
-    let record = field(&out, "unlock_record")?;
-    println!("     unlock record: {record:?}");
+    let record: Value = serde_json::from_str(field(&out, "unlock_record")?)
+        .with_context(|| format!("the unlock record: {out}"))?;
+    ensure!(
+        record["schema"] == 1
+            && record["method"] == "fallback"
+            && record["uuid"] == uuid.as_str()
+            && record["token"].is_null()
+            && record["slot"].is_null(),
+        "the unlock stack's record of how this boot opened the volume: {record}"
+    );
+    ensure!(
+        field(&out, "cryptsetup_unit")? != "failed" && field(&out, "failed")? == "0",
+        "a unit failed: {out}"
+    );
+    want("discard", "1")?;
+    want("initrd_vconsole", "0")?;
+    ensure!(
+        field(&out, "initrd_keymap")? != "0",
+        "the initramfs the prompt came from has no {} keymap: {out}",
+        variant.keymap
+    );
     Ok(())
 }

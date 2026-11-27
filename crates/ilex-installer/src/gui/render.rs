@@ -367,11 +367,7 @@ async fn flush(
 /// A widget of a page, by its widget name. The pages are not in the navigation
 /// stack once an installation has begun (the stack then holds only the page it
 /// ends on), so a page is found by its tag, not by walking the window.
-fn page_widget(
-    window: &adw::ApplicationWindow,
-    page: PageId,
-    name: &str,
-) -> Result<gtk::Widget> {
+fn page_widget(window: &adw::ApplicationWindow, page: PageId, name: &str) -> Result<gtk::Widget> {
     fn find(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
         if widget.widget_name() == name {
             return Some(widget.clone());
