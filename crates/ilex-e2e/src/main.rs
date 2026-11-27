@@ -107,6 +107,11 @@ fn main() {
     if filters.iter().any(|f| f.contains("iso::next")) {
         trials.extend(iso_next::trials());
     }
+    // The KDE edition's live ISO (a second ISO, `ILEX_ISO_NEXT_KDE`): only a
+    // filter that names `iso::next_kde` boots it.
+    if filters.iter().any(|f| f.contains("iso::next_kde")) {
+        trials.extend(iso_next::kde_trials());
+    }
     // The ISO as a file on another disk needs a host tool or two more and a
     // second copy of the ISO: only a filter that names it asks for it.
     if filters.iter().any(|f| f.contains("next_helper_loop")) {

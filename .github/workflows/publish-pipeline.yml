@@ -48,9 +48,10 @@
 # fixes). A manual run with `iso` checked builds it regardless.
 #
 # The next installer (installer/next, no Anaconda) has its own job, on request
-# only: a manual run with `iso_next` checked builds its live ISO, boots it with
-# Secure Boot and keeps it as the `installer-next-iso` artifact. That run does
-# nothing else, and no run ever releases or publishes this ISO. publish.yml
+# only: a manual run with `iso_next` checked builds its live ISOs (the GNOME
+# edition's and the KDE edition's), boots them with Secure Boot and keeps them
+# as the `installer-next-iso` and `installer-next-kde-iso` artifacts. That run
+# does nothing else, and no run ever releases or publishes these ISOs. publish.yml
 # gives it a concurrency group of its own (`iso-next-<ref hash>`, on main too:
 # it neither waits for nor replaces a real publish), treats it as not-main and
 # passes it no signing secrets, since it signs nothing.
@@ -74,7 +75,7 @@ on:
         type: boolean
         default: false
       iso_next:
-        description: Only build the next installer's live ISO and boot-test it (kept as an artifact, never released; the image pipeline is skipped)
+        description: Only build the next installer's live ISOs (GNOME and KDE editions) and boot-test them (kept as artifacts, never released; the image pipeline is skipped)
         type: boolean
         default: false
       test:
@@ -1230,17 +1231,18 @@ jobs:
           compression-level: 0
           retention-days: 3
 
-  # The next installer's live ISO (installer/next; no Anaconda), built and
-  # boot-tested on request only (`iso_next`). Never released or published: the
-  # ISO is a workflow artifact, and the job has no write permission. The image
-  # pipeline does not run beside it.
+  # The next installer's live ISOs (installer/next; no Anaconda), one per
+  # edition (GNOME's and KDE's), built and boot-tested on request only
+  # (`iso_next`). Never released or published: each ISO is a workflow artifact,
+  # and the job has no write permission. The image pipeline does not run beside
+  # it.
   installer-next:
     # A manual run only (inputs exist for no other event); the workflow has no
     # pull_request trigger, so no PR or fork reaches this job or the repository's
     # secrets, and this job reads none.
     if: ${{ inputs.iso_next && !inputs.v1_disk && github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 90
+    timeout-minutes: 150
     permissions:
       contents: read
     steps:
@@ -1268,8 +1270,10 @@ jobs:
 
       # The same rootful, privileged Fedora 45 container as the `iso` job (see
       # there for why bubblewrap's AppArmor profile is unloaded), building
-      # installer/next/Containerfile and its ISO.
-      - name: Build the live installer ISO
+      # installer/next/Containerfile and its ISO: the GNOME edition's, then the
+      # KDE edition's (each with an output directory of its own: they share no
+      # generated files or package list).
+      - name: Build the live installer ISOs
         run: |
           if [ -e /etc/apparmor.d/bwrap-userns-restrict ]; then
             sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
@@ -1293,18 +1297,23 @@ jobs:
                 image-builder version
                 git config --global --add safe.directory /src
                 cargo ilexctl iso --next --output-dir /mnt/ilex-state/iso-next
+                cargo ilexctl iso --next --edition kde --output-dir /mnt/ilex-state/iso-next-kde
               '
-          ls -l /mnt/ilex/state/iso-next/
-          cat /mnt/ilex/state/iso-next/largest-packages.txt || true
-          size=$(stat -c %s /mnt/ilex/state/iso-next/ilex-installer-gnome.iso)
-          {
-            echo "next installer ISO (gnome): $size bytes ($((size / 1048576)) MiB; the Anaconda network installer measured 1863 MiB; a release asset has to be under 2048 MiB)"
-            echo '```'
-            cat /mnt/ilex/state/iso-next/largest-packages.txt || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          for edition in gnome kde; do
+            dir=/mnt/ilex/state/iso-next
+            [ "$edition" = kde ] && dir=/mnt/ilex/state/iso-next-kde
+            ls -l "$dir"
+            cat "$dir/largest-packages.txt" || true
+            size=$(stat -c %s "$dir/ilex-installer-$edition.iso")
+            {
+              echo "next installer ISO ($edition): $size bytes ($((size / 1048576)) MiB; the Anaconda network installer measured 1863 MiB; a release asset has to be under 2048 MiB)"
+              echo '```'
+              cat "$dir/largest-packages.txt" || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
 
-      - name: Keep the ISO (not a release)
+      - name: Keep the GNOME edition's ISO (not a release)
         uses: actions/upload-artifact@v4
         with:
           name: installer-next-iso
@@ -1312,6 +1321,17 @@ jobs:
             /mnt/ilex/state/iso-next/ilex-installer-gnome.iso
             /mnt/ilex/state/iso-next/ilex-installer-gnome.iso.sha256
             /mnt/ilex/state/iso-next/largest-packages.txt
+          compression-level: 0
+          retention-days: 3
+
+      - name: Keep the KDE edition's ISO (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-next-kde-iso
+          path: |
+            /mnt/ilex/state/iso-next-kde/ilex-installer-kde.iso
+            /mnt/ilex/state/iso-next-kde/ilex-installer-kde.iso.sha256
+            /mnt/ilex/state/iso-next-kde/largest-packages.txt
           compression-level: 0
           retention-days: 3
 
@@ -1325,13 +1345,25 @@ jobs:
           bash .github/vm-prep.sh ephemeral
           bash .github/vm-prep.sh wait vm-stack
 
-      - name: Boot the ISO with Secure Boot (both boot entries), the fallback, restarts and serial faults
+      - name: Boot the GNOME edition's ISO with Secure Boot (both boot entries), the fallback, restarts and serial faults
         env:
           ILEX_ISO_NEXT: /mnt/ilex/state/iso-next/ilex-installer-gnome.iso
         run: |
           (cd /mnt/ilex/state/iso-next && sha256sum --check ilex-installer-gnome.iso.sha256)
           sg libvirt -c 'cargo ilexctl test iso::next -- --test-threads 1'
           cat "$ILEX_ARTIFACTS"/iso-next/next-*.json
+
+      # The KDE edition's trials (`iso::next_kde`): both boot entries with
+      # Secure Boot, KWin's session with the installer as its only client, and a
+      # compositor or client that dies.
+      - name: Boot the KDE edition's ISO with Secure Boot (both boot entries) and restarts
+        if: ${{ !cancelled() }}
+        env:
+          ILEX_ISO_NEXT_KDE: /mnt/ilex/state/iso-next-kde/ilex-installer-kde.iso
+        run: |
+          (cd /mnt/ilex/state/iso-next-kde && sha256sum --check ilex-installer-kde.iso.sha256)
+          sg libvirt -c 'cargo ilexctl test iso::next_kde -- --test-threads 1'
+          cat "$ILEX_ARTIFACTS"/iso-next/next-kde-*.json
 
       - name: Keep the boot evidence
         if: ${{ !cancelled() }}

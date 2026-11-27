@@ -81,12 +81,30 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     }) {
         prepare_iso(ws, &mut test)?;
     }
+    // Each edition's ISO is built only when a filter asks for its trials.
     if args
         .filters
         .iter()
-        .any(|f| crate::iso_next::is_next_filter(f))
+        .any(|f| crate::iso_next::is_next_filter(f) && !crate::iso_next::is_kde_filter(f))
     {
-        prepare_iso_next(ws, &mut test)?;
+        prepare_iso_next(
+            ws,
+            &mut test,
+            crate::iso_next::DEFAULT_EDITION,
+            "ILEX_ISO_NEXT",
+        )?;
+    }
+    if args
+        .filters
+        .iter()
+        .any(|f| crate::iso_next::is_kde_filter(f))
+    {
+        prepare_iso_next(
+            ws,
+            &mut test,
+            crate::iso_next::KDE_EDITION,
+            "ILEX_ISO_NEXT_KDE",
+        )?;
     }
     if args.filters.iter().any(|f| f.contains("installer::")) {
         prepare_installer_image(ws, &mut test)?;
@@ -111,20 +129,26 @@ fn prepare_installer_image(ws: &Workspace, test: &mut Command) -> Result<()> {
     Ok(())
 }
 
-/// Build the next installer's live ISO (unless `ILEX_ISO_NEXT` names one
-/// already) for `iso::next…`.
-fn prepare_iso_next(ws: &Workspace, test: &mut Command) -> Result<()> {
-    if std::env::var_os("ILEX_ISO_NEXT").is_some_and(|p| !p.is_empty()) {
+/// Build an edition's live ISO of the next installer (unless `variable`,
+/// `ILEX_ISO_NEXT` for the GNOME edition and `ILEX_ISO_NEXT_KDE` for the KDE
+/// one, names one already) for its `iso::next…` trials.
+fn prepare_iso_next(
+    ws: &Workspace,
+    test: &mut Command,
+    edition: &str,
+    variable: &str,
+) -> Result<()> {
+    if std::env::var_os(variable).is_some_and(|p| !p.is_empty()) {
         return Ok(());
     }
     let iso = crate::iso_next::build(
         ws,
         &crate::iso_next::Build {
-            edition: crate::iso_next::DEFAULT_EDITION,
+            edition,
             output_dir: None,
         },
     )?;
-    test.env("ILEX_ISO_NEXT", iso);
+    test.env(variable, iso);
     Ok(())
 }
 

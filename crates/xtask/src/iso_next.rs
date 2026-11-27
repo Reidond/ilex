@@ -31,6 +31,8 @@ const OSBUILD: Osbuild = Osbuild {
 
 /// The edition built when none is named.
 pub const DEFAULT_EDITION: &str = "gnome";
+/// The KDE edition (`ilex Kingiana`): its `iso::next_kde…` trials boot its ISO.
+pub const KDE_EDITION: &str = "kde";
 /// The Network installer's ISO has to stay under GitHub's limit for a release
 /// asset; the next one is held to the same budget.
 const ISO_LIMIT: u64 = 2 << 30;
@@ -61,6 +63,13 @@ struct Edition {
 /// trials (which boot its ISO) rather than the Anaconda installer's `iso::`?
 pub fn is_next_filter(filter: &str) -> bool {
     filter.contains("iso::next")
+}
+
+/// Does it select the KDE edition's `iso::next_kde…` trials (which boot the KDE
+/// ISO, `ILEX_ISO_NEXT_KDE`)? Every other `iso::next…` filter boots the GNOME
+/// edition's.
+pub fn is_kde_filter(filter: &str) -> bool {
+    filter.contains("iso::next_kde")
 }
 
 /// Why the remote (native Windows) path refuses `iso --next` and `test

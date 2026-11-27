@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       iso_next:
-        description: Only build the next installer's live ISO and boot-test it (kept as an artifact, never released; the image pipeline is skipped)
+        description: Only build the next installer's live ISOs (GNOME and KDE editions) and boot-test them (kept as artifacts, never released; the image pipeline is skipped)
         type: boolean
         default: false
       test:

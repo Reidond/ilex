@@ -106,9 +106,11 @@ use libtest_mimic::{Failed, Trial};
 use crate::common;
 use crate::iso::grub_key;
 use crate::selinux;
+use kde::{kde_session, kwin_close_windows};
 
 mod helper;
 mod install_ui;
+mod kde;
 mod loop_file;
 mod security;
 mod ui;
@@ -139,10 +141,12 @@ const POLKIT_ALLOWED: &[&str] = &["org.freedesktop.login1.chvt"];
 
 pub fn trials() -> Vec<Trial> {
     let mut trials = vec![
-        trial("iso::next_boot", || boot(Entry::Normal)),
-        trial("iso::next_basic_graphics", || boot(Entry::BasicGraphics)),
+        trial("iso::next_boot", || boot(Entry::Normal, Edition::Gnome)),
+        trial("iso::next_basic_graphics", || {
+            boot(Entry::BasicGraphics, Edition::Gnome)
+        }),
         trial("iso::next_fallback", fallback),
-        trial("iso::next_restart", restart),
+        trial("iso::next_restart", || restart(Edition::Gnome)),
         trial("iso::next_serial_backpressure", || serial("backpressure")),
         trial("iso::next_serial_unavailable", || serial("unavailable")),
         trial("iso::next_serial_stall", || serial("stall")),
@@ -170,6 +174,19 @@ pub fn trials() -> Vec<Trial> {
     trials.extend(ui::trials());
     trials.extend(install_ui::trials());
     trials
+}
+
+/// The KDE edition's trials (`iso::next_kde…`): registered only when a filter
+/// names them, because they boot a second ISO (`ILEX_ISO_NEXT_KDE`) that the
+/// GNOME edition's runs do not build.
+pub fn kde_trials() -> Vec<Trial> {
+    vec![
+        trial("iso::next_kde_boot", || boot(Entry::Normal, Edition::Kde)),
+        trial("iso::next_kde_basic_graphics", || {
+            boot(Entry::BasicGraphics, Edition::Kde)
+        }),
+        trial("iso::next_kde_restart", || restart(Edition::Kde)),
+    ]
 }
 
 /// `iso::next_helper_loop`: the ISO as a file on another disk. It needs host
@@ -214,13 +231,6 @@ impl Entry {
             Entry::BasicGraphics => "basic-graphics",
         }
     }
-    /// VM purposes stay short: they name Unix socket paths.
-    fn purpose(self) -> &'static str {
-        match self {
-            Entry::Normal => "iso-next",
-            Entry::BasicGraphics => "iso-next-basic",
-        }
-    }
     /// What the session script reports for it.
     fn graphics(self) -> &'static str {
         match self {
@@ -230,16 +240,82 @@ impl Entry {
     }
 }
 
+/// Which live ISO a trial boots. The GNOME edition's trials are `iso::next…`;
+/// the KDE edition's `iso::next_kde…` run the same checks where they apply to
+/// both (the boot, the basic graphics entry, a compositor that dies) and some
+/// of their own (KWin's session has the installer as its only client).
+#[derive(Clone, Copy, PartialEq)]
+enum Edition {
+    Gnome,
+    Kde,
+}
+
+impl Edition {
+    /// The edition identifier the page's marker carries.
+    fn id(self) -> &'static str {
+        match self {
+            Edition::Gnome => "gnome",
+            Edition::Kde => "kde",
+        }
+    }
+    /// The environment variable naming this edition's ISO.
+    fn iso_variable(self) -> &'static str {
+        match self {
+            Edition::Gnome => "ILEX_ISO_NEXT",
+            Edition::Kde => "ILEX_ISO_NEXT_KDE",
+        }
+    }
+    /// What the session script reports as its compositor.
+    fn compositor(self) -> &'static str {
+        match self {
+            Edition::Gnome => "gnome-kiosk",
+            Edition::Kde => "kwin",
+        }
+    }
+    /// The compositor's process name (`/proc/<pid>/comm`).
+    fn compositor_process(self) -> &'static str {
+        match self {
+            Edition::Gnome => "gnome-kiosk",
+            Edition::Kde => "kwin_wayland",
+        }
+    }
+    /// Names an artifact: the GNOME edition's keep their names.
+    fn artifact(self, name: &str) -> String {
+        match self {
+            Edition::Gnome => name.to_owned(),
+            Edition::Kde => format!("kde-{name}"),
+        }
+    }
+    /// A VM purpose (short: it names Unix socket paths).
+    fn purpose(self, entry: Entry) -> &'static str {
+        match (self, entry) {
+            (Edition::Gnome, Entry::Normal) => "iso-next",
+            (Edition::Gnome, Entry::BasicGraphics) => "iso-next-basic",
+            (Edition::Kde, Entry::Normal) => "iso-next-kde",
+            (Edition::Kde, Entry::BasicGraphics) => "iso-next-kde-basic",
+        }
+    }
+}
+
 fn iso_path() -> Result<PathBuf> {
-    let Some(path) = std::env::var_os("ILEX_ISO_NEXT").filter(|p| !p.is_empty()) else {
+    iso_path_of(Edition::Gnome)
+}
+
+fn iso_path_of(edition: Edition) -> Result<PathBuf> {
+    let variable = edition.iso_variable();
+    let Some(path) = std::env::var_os(variable).filter(|p| !p.is_empty()) else {
         bail!(
-            "ILEX_ISO_NEXT is not set: run `cargo ilexctl test iso::next`, which builds the ISO first"
+            "{variable} is not set: run `cargo ilexctl test {}`, which builds the ISO first",
+            match edition {
+                Edition::Gnome => "iso::next",
+                Edition::Kde => "iso::next_kde",
+            }
         );
     };
     let path = PathBuf::from(path);
     ensure!(
         path.is_file(),
-        "ILEX_ISO_NEXT={} is not a file",
+        "{variable}={} is not a file",
         path.display()
     );
     Ok(path)
@@ -283,21 +359,22 @@ impl Drop for Guest {
     }
 }
 
-fn boot(entry: Entry) -> Result<()> {
+fn boot(entry: Entry, edition: Edition) -> Result<()> {
     let ws = common::workspace()?;
-    let iso = iso_path()?;
+    let iso = iso_path_of(edition)?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let name = edition.artifact(entry.name());
     let root = ws
         .state_dir()
         .join("iso-next-fixtures")
-        .join(entry.purpose());
+        .join(edition.purpose(entry));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root)?;
     let disk = root.join("blank.qcow2");
     blank_disk(&disk)?;
 
     let memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| MEMORY.into());
-    let mut config = VmConfig::new(entry.purpose(), &disk);
+    let mut config = VmConfig::new(edition.purpose(entry), &disk);
     config.snapshot = false;
     config.memory = memory.clone();
     config.cdrom = Some(iso.clone());
@@ -312,7 +389,7 @@ fn boot(entry: Entry) -> Result<()> {
     let provider = LinuxProvider::new(ws.clone())?.with_usb_keyboard(entry == Entry::BasicGraphics);
     let caps = provider.probe(&spec)?;
     fs::write(
-        artifacts.join(format!("next-{}-backend.json", entry.name())),
+        artifacts.join(format!("next-{name}-backend.json")),
         serde_json::to_vec_pretty(&caps)?,
     )?;
     caps.require_provisioning(Capability::FirmwareEnforcement)?;
@@ -327,9 +404,9 @@ fn boot(entry: Entry) -> Result<()> {
         vm.info.secure_boot,
         "the VM was not started with Secure Boot"
     );
-    let outcome = observe(vm, entry, &iso, &memory, started, &artifacts);
+    let outcome = observe(vm, entry, edition, &iso, &memory, started, &artifacts);
     if outcome.is_err() {
-        diagnostics(vm, &artifacts, entry.name());
+        diagnostics(vm, &artifacts, &name);
     }
     outcome
 }
@@ -338,6 +415,7 @@ fn boot(entry: Entry) -> Result<()> {
 fn observe(
     vm: &mut Vm,
     entry: Entry,
+    edition: Edition,
     iso: &Path,
     memory: &str,
     started: Instant,
@@ -345,6 +423,7 @@ fn observe(
 ) -> Result<()> {
     let serial = vm.info.dir.join("serial.log");
     let ctl = Vmctl::from_info(vm.info.clone());
+    let name = edition.artifact(entry.name());
 
     if entry == Entry::BasicGraphics {
         // The countdown is the point at which GRUB accepts keys. Moving down
@@ -352,7 +431,7 @@ fn observe(
         // cursor movements, not lines: this one is a substring match.
         wait_for_text(vm, &serial, GRUB_COUNTDOWN, PAGE_TIMEOUT)?;
         grub_key(&ctl, "down")?;
-        ctl.save_screenshot(&artifacts.join("next-basic-graphics-grub.png"))?;
+        ctl.save_screenshot(&artifacts.join(format!("next-{name}-grub.png")))?;
         grub_key(&ctl, "Return")?;
     }
 
@@ -363,8 +442,13 @@ fn observe(
     let graphics = field(&session, "graphics")?;
     ensure!(
         graphics == entry.graphics(),
-        "booted graphics={graphics} but the {} entry was chosen",
-        entry.name()
+        "booted graphics={graphics} but the {name} entry was chosen"
+    );
+    ensure!(
+        field(&session, "compositor")? == edition.compositor(),
+        "the session started {:?}, expected {}: {session:?}",
+        session.get("compositor"),
+        edition.compositor()
     );
     ensure!(
         field(&session, "secure-boot")? == "1",
@@ -375,14 +459,34 @@ fn observe(
         "unexpected page: {page:?}"
     );
     ensure!(
-        field(&page, "edition")? == "gnome",
+        field(&page, "edition")? == edition.id(),
         "unexpected edition: {page:?}"
     );
     let renderer = field(&page, "renderer")?;
-    if entry == Entry::BasicGraphics {
-        ensure!(
+    match edition {
+        Edition::Gnome if entry == Entry::BasicGraphics => ensure!(
             renderer == "GskCairoRenderer",
             "basic graphics must draw with cairo, GTK chose {renderer}"
+        ),
+        Edition::Gnome => {}
+        // Qt Quick: the software renderer on the basic entry (the session sets
+        // QT_QUICK_BACKEND=software); on the default entry whatever the guest's
+        // GPU gives (OpenGL on llvmpipe or the VM's virtio GPU), never an
+        // unknown API.
+        Edition::Kde if entry == Entry::BasicGraphics => ensure!(
+            renderer == "software",
+            "basic graphics must draw with Qt Quick's software renderer, it chose {renderer}"
+        ),
+        Edition::Kde => ensure!(
+            renderer == "opengl" || renderer == "software",
+            "Qt Quick drew with an unexpected renderer: {renderer}"
+        ),
+    }
+    if edition == Edition::Kde {
+        // The window fills the screen: its size is the screen's.
+        ensure!(
+            field(&page, "window")? == field(&page, "screen")?,
+            "the window is not the size of the screen: {page:?}"
         );
     }
     ensure!(
@@ -391,9 +495,16 @@ fn observe(
     );
 
     // What was actually drawn: a settled frame that is the libadwaita page.
-    let frame = wait_page(vm, &ctl, artifacts, entry.name())?;
-    let shot = artifacts.join(format!("next-{}.png", entry.name()));
+    let frame = wait_page(vm, &ctl, artifacts, &name)?;
+    let shot = artifacts.join(format!("next-{name}.png"));
     ctl.save_screenshot(&shot)?;
+    if edition == Edition::Kde {
+        ensure!(
+            frame_filled(&frame),
+            "the page does not fill the screen: a corner or an edge of {} is dark (the window is smaller than the screen, or something else is behind it)",
+            shot.display()
+        );
+    }
 
     let console = wait_for_marker(
         vm,
@@ -412,7 +523,8 @@ fn observe(
     };
     let (total, available) = (kib("mem_total_kib")?, kib("mem_available_kib")?);
     let report = serde_json::json!({
-        "entry": entry.name(),
+        "entry": name,
+        "edition": edition.id(),
         "secure_boot": true,
         "vcpus": 2,
         "memory": memory,
@@ -430,14 +542,14 @@ fn observe(
         "screenshot": shot,
     });
     fs::write(
-        artifacts.join(format!("next-{}.json", entry.name())),
+        artifacts.join(format!("next-{name}.json")),
         serde_json::to_vec_pretty(&report)?,
     )?;
     fs::write(
-        artifacts.join(format!("next-{}-serial.txt", entry.name())),
+        artifacts.join(format!("next-{name}-serial.txt")),
         fs::read(&serial)?,
     )?;
-    println!("iso::next {}: {report}", entry.name());
+    println!("iso::next {name}: {report}");
 
     if entry == Entry::Normal {
         vm.wait_ssh(Duration::from_secs(180))
@@ -445,27 +557,31 @@ fn observe(
         // What a person does: Ctrl+Alt+F2 from the page reaches tty2's root
         // shell and Ctrl+Alt+F1 returns. The compositor asks logind to change
         // VT, which the polkit rule allows this session (and nothing else).
-        keyboard_round_trip(vm, &ctl, artifacts)?;
+        keyboard_round_trip(vm, &ctl, artifacts, edition)?;
         // The session still owns tty1 after root looks at the other VT: the
         // compositor gives the VT up and takes it back, with no getty between.
         vt_round_trip(vm, &Switch::Chvt)?;
         wait_page(vm, &ctl, artifacts, "after-vt-switch")?;
-        ctl.save_screenshot(&artifacts.join("next-normal-after-vt-switch.png"))?;
+        ctl.save_screenshot(&artifacts.join(format!("next-{name}-after-vt-switch.png")))?;
         let session = vm.ssh_ok("systemctl is-active ilex-installer-session.service")?;
         ensure!(
             session == "active",
             "the session is {session} after a VT round trip"
         );
-        surface(vm, artifacts)?;
+        surface(vm, artifacts, edition)?;
+        if edition == Edition::Kde {
+            kde_session(vm, artifacts)?;
+        }
     } else {
         vm.wait_ssh(Duration::from_secs(180))
             .context("the harness's SSH key did not give a login to the live ISO")?;
     }
     // Enforcing and clean at the end of the trial, with a control that the
-    // check would have seen a denial.
-    selinux::check(vm, artifacts, &format!("next-{}", entry.name()))?;
+    // check would have seen a denial. Both editions: the KDE ISO boots the
+    // same labelled squashfs and the same policy.
+    selinux::check(vm, artifacts, &format!("next-{name}"))?;
     if entry == Entry::Normal {
-        selinux::control(vm, artifacts, "next-normal-control")?;
+        selinux::control(vm, artifacts, &format!("next-{name}-control"))?;
     }
     Ok(())
 }
@@ -474,7 +590,8 @@ fn observe(
 /// actions authorized for it without a password (each one is checked with
 /// `pkcheck` against the session's own process), the names on the system bus,
 /// the listening sockets. The authorized set must be exactly [`POLKIT_ALLOWED`].
-fn surface(vm: &mut Vm, artifacts: &Path) -> Result<()> {
+fn surface(vm: &mut Vm, artifacts: &Path, edition: Edition) -> Result<()> {
+    let file = format!("next-{}.txt", edition.artifact("surface"));
     const SCRIPT: &str = r#"set -u
 pid=$(systemctl show ilex-installer-session.service -p MainPID --value)
 rule=/usr/share/polkit-1/rules.d/00-ilex-installer.rules
@@ -525,7 +642,7 @@ ls -dZ /usr/libexec/ilex-installer/* /run/ilex-installer /var/lib/ilex-installer
     vm.wait_ssh(Duration::from_secs(180))
         .context("the harness's SSH key did not give a login to the live ISO")?;
     let report = vm.ssh_ok(SCRIPT).context("collecting the polkit surface")?;
-    fs::write(artifacts.join("next-surface.txt"), &report)?;
+    fs::write(artifacts.join(&file), &report)?;
     // The report is about the installer's own session, not the user manager's.
     for expected in [
         "Seat=seat0",
@@ -536,7 +653,7 @@ ls -dZ /usr/libexec/ilex-installer/* /run/ilex-installer /var/lib/ilex-installer
     ] {
         ensure!(
             report.lines().any(|line| line == expected),
-            "the seat0 session of ilex-installer lacks {expected} (full report: next-surface.txt)"
+            "the seat0 session of ilex-installer lacks {expected} (full report: {file})"
         );
     }
     // Nothing needs location services or a getty on tty1 in the live image.
@@ -545,7 +662,7 @@ ls -dZ /usr/libexec/ilex-installer/* /run/ilex-installer /var/lib/ilex-installer
             report
                 .lines()
                 .any(|line| line == format!("UNIT {unit} masked")),
-            "{unit} is not masked (full report: next-surface.txt)"
+            "{unit} is not masked (full report: {file})"
         );
     }
     ensure!(
@@ -553,7 +670,7 @@ ls -dZ /usr/libexec/ilex-installer/* /run/ilex-installer /var/lib/ilex-installer
             .split("=== units running\n")
             .nth(1)
             .is_some_and(|running| running.contains("geoclue")),
-        "geoclue is running (full report: next-surface.txt)"
+        "geoclue is running (full report: {file})"
     );
     let mut authorized: Vec<&str> = report
         .lines()
@@ -564,7 +681,7 @@ ls -dZ /usr/libexec/ilex-installer/* /run/ilex-installer /var/lib/ilex-installer
     allowed.sort_unstable();
     ensure!(
         authorized == allowed,
-        "polkit authorizes {authorized:?} for the installer's session without a password, expected {allowed:?} (full report: next-surface.txt)"
+        "polkit authorizes {authorized:?} for the installer's session without a password, expected {allowed:?} (full report: {file})"
     );
     // The rule is what denies: without it the defaults authorize the controls.
     let controls = |phase: &str| -> Vec<&str> {
@@ -586,7 +703,7 @@ ls -dZ /usr/libexec/ilex-installer/* /run/ilex-installer /var/lib/ilex-installer
         let seen = controls(phase);
         ensure!(
             seen.len() == 2 && seen.iter().all(|result| *result == expected),
-            "polkit control {phase}: expected both actions {expected}, saw {seen:?} (full report: next-surface.txt)"
+            "polkit control {phase}: expected both actions {expected}, saw {seen:?} (full report: {file})"
         );
     }
     // Nothing but the harness's own SSH server listens beyond loopback.
@@ -609,7 +726,7 @@ ls -dZ /usr/libexec/ilex-installer/* /run/ilex-installer /var/lib/ilex-installer
         .collect();
     ensure!(
         exposed.is_empty(),
-        "the live image listens beyond loopback on {exposed:?} (full report: next-surface.txt)"
+        "the live image listens beyond loopback on {exposed:?} (full report: {file})"
     );
     Ok(())
 }
@@ -893,6 +1010,34 @@ fn text_drawn(frame: &Frame) -> bool {
     total > 0 && dark * 100 > total * 60 && light * 2000 > total
 }
 
+/// The page reaches every edge of the screen: the pixels at the four corners
+/// and the middle of each edge are light, as the page is (a window smaller than
+/// the screen leaves the compositor's background, which is dark, around it).
+fn frame_filled(frame: &Frame) -> bool {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if w < 4 || h < 4 || frame.rgb.len() < w * h * 3 {
+        return false;
+    }
+    let at = |x: usize, y: usize| {
+        let i = (y * w + x) * 3;
+        let p = &frame.rgb[i..i + 3];
+        (u32::from(p[0]) * 3 + u32::from(p[1]) * 6 + u32::from(p[2])) / 10
+    };
+    let (x1, y1) = (w - 1, h - 1);
+    [
+        (0, 0),
+        (x1, 0),
+        (0, y1),
+        (x1, y1),
+        (w / 2, 0),
+        (w / 2, y1),
+        (0, h / 2),
+        (x1, h / 2),
+    ]
+    .into_iter()
+    .all(|(x, y)| at(x, y) > 200)
+}
+
 /// The VT the kernel has in front, read from the guest: a key chord that did
 /// nothing cannot pass for a VT switch.
 fn active_vt(vm: &Vm) -> Result<String> {
@@ -959,7 +1104,8 @@ fn vt_round_trip(vm: &Vm, how: &Switch) -> Result<()> {
 /// into it and presses Ctrl+Alt+F1 to return to the page. The switch is read
 /// from the kernel's active VT and the shell's answer from tty2's own text
 /// (`/dev/vcs2`), so neither a dead chord nor a blank VT can pass.
-fn keyboard_round_trip(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
+fn keyboard_round_trip(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, edition: Edition) -> Result<()> {
+    let name = edition.artifact("normal");
     ensure!(
         active_vt(vm)? == "tty1",
         "tty1 is not in front before Ctrl+Alt+F2"
@@ -990,7 +1136,7 @@ fn keyboard_round_trip(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()>
     );
     ctl.key("ctrl+alt+F2")?;
     wait_vt(vm, "tty2").context(
-        "Ctrl+Alt+F2 did not leave the installer's page: gnome-kiosk needs --enable-vt-switch and polkit the login1.chvt rule",
+        "Ctrl+Alt+F2 did not leave the installer's page: the compositor must change VT (GNOME Kiosk needs --enable-vt-switch) and polkit must allow the login1.chvt rule",
     )?;
     // The shell is agetty's autologin on tty2: root, started when the VT was
     // first visited. Ask it a question only it can answer.
@@ -1010,16 +1156,16 @@ fn keyboard_round_trip(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()>
         );
         std::thread::sleep(Duration::from_secs(1));
     };
-    fs::write(artifacts.join("next-normal-tty2-vcs2.txt"), &text)?;
-    let frame = ctl.save_screenshot(&artifacts.join("next-normal-tty2.png"))?;
+    fs::write(artifacts.join(format!("next-{name}-tty2-vcs2.txt")), &text)?;
+    let frame = ctl.save_screenshot(&artifacts.join(format!("next-{name}-tty2.png")))?;
     ensure!(
         text_drawn(&frame),
-        "tty2 shows no light text on a dark screen (next-normal-tty2.png)"
+        "tty2 shows no light text on a dark screen (next-{name}-tty2.png)"
     );
     ctl.key("ctrl+alt+F1")?;
     wait_vt(vm, "tty1").context("Ctrl+Alt+F1 did not return from tty2")?;
     wait_page(vm, ctl, artifacts, "after-keys-vt-switch")?;
-    ctl.save_screenshot(&artifacts.join("next-normal-after-keys-vt-switch.png"))?;
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-after-keys-vt-switch.png")))?;
     // Past the time logind needs to start autovt@tty1, were it to.
     std::thread::sleep(Duration::from_secs(4));
     let states = vm.ssh_ok("systemctl is-active getty@tty1.service autovt@tty1.service || true")?;
@@ -1041,7 +1187,17 @@ fn plain_vm(
     purpose: &str,
     configure: impl FnOnce(&mut VmConfig),
 ) -> Result<(Vm, PathBuf)> {
-    let iso = iso_path()?;
+    plain_vm_of(Edition::Gnome, ws, purpose, configure)
+}
+
+/// The same, from `edition`'s ISO.
+fn plain_vm_of(
+    edition: Edition,
+    ws: &ilex_devkit::Workspace,
+    purpose: &str,
+    configure: impl FnOnce(&mut VmConfig),
+) -> Result<(Vm, PathBuf)> {
+    let iso = iso_path_of(edition)?;
     let work = ws.state_dir().join(format!("{purpose}-fixture"));
     fs::create_dir_all(&work)?;
     let disk = work.join("blank.qcow2");
@@ -1161,24 +1317,29 @@ fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
 /// is refused by the window, and a compositor or a client that dies is replaced
 /// by a session that comes up (the compositor's socket survives a hard kill and
 /// must not be mistaken for the next compositor's).
-fn restart() -> Result<()> {
+fn restart(edition: Edition) -> Result<()> {
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
-    let (mut vm, _) = plain_vm(&ws, "iso-next-restart", |config| {
+    let purpose = match edition {
+        Edition::Gnome => "iso-next-restart",
+        Edition::Kde => "iso-next-kde-restart",
+    };
+    let (mut vm, _) = plain_vm_of(edition, &ws, purpose, |config| {
         config.memory = "3G".into();
     })?;
-    let outcome = observe_restart(&mut vm, &artifacts);
+    let name = edition.artifact("restart");
+    let outcome = observe_restart(&mut vm, &artifacts, edition, &name);
     if outcome.is_err() {
-        diagnostics(&mut vm, &artifacts, "restart");
+        diagnostics(&mut vm, &artifacts, &name);
     }
     outcome
 }
 
-fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
+fn observe_restart(vm: &mut Vm, artifacts: &Path, edition: Edition, name: &str) -> Result<()> {
     let serial = vm.info.dir.join("serial.log");
     let ctl = Vmctl::from_info(vm.info.clone());
     wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 1, PAGE_TIMEOUT)?;
-    wait_page(vm, &ctl, artifacts, "restart")?;
+    wait_page(vm, &ctl, artifacts, name)?;
     vm.wait_ssh(Duration::from_secs(180))
         .context("the harness's SSH key did not give a login to the live ISO")?;
     let restarts = |vm: &Vm| -> Result<u32> {
@@ -1193,8 +1354,14 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         "the session restarted before anything was done to it"
     );
 
-    // 1. The compositor asks the window to close (Alt+F4): the installer stays.
-    ctl.key("alt+F4")?;
+    // 1. The compositor asks the window to close: the installer stays. GNOME
+    //    Kiosk does so on Alt+F4. KWin's close shortcut belongs to Plasma's
+    //    kglobalacceld, which this session does not run (and Alt+F4 does nothing
+    //    there), so the request comes from a KWin script closing every window.
+    match edition {
+        Edition::Gnome => ctl.key("alt+F4")?,
+        Edition::Kde => kwin_close_windows(vm)?,
+    }
     std::thread::sleep(Duration::from_secs(6));
     let console = console(&serial)?;
     ensure!(
@@ -1203,20 +1370,25 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         "a close request ended the session: {console}"
     );
     ensure!(
-        page_drawn(&ctl.save_screenshot(&artifacts.join("next-restart-after-close.png"))?),
+        page_drawn(&ctl.save_screenshot(&artifacts.join(format!("next-{name}-after-close.png")))?),
         "the page is gone after a close request"
     );
     ensure!(restarts(vm)? == 0, "a close request restarted the session");
 
     // 2. The compositor is killed hard: its socket stays in the kept runtime
     //    directory, and the next attempt must come up on the first try.
-    vm.ssh_ok(KILL_COMPOSITOR)?;
+    vm.ssh_ok(&kill_process(edition.compositor_process()))?;
     let console = wait_for_marker(vm, &serial, "ILEX-INSTALLER", "page", 2, PAGE_TIMEOUT)?;
     // The script reports whichever child it sees end first: the killed
-    // compositor (137), or the client that lost its display and exited (1).
+    // compositor (137), or the client that lost its display and exited (GTK
+    // exits 1; Qt, which treats a broken Wayland connection as fatal, 255).
+    let lost_display = match edition {
+        Edition::Gnome => "1",
+        Edition::Kde => "255",
+    };
     ensure!(
         session_ended(&console, "compositor", Some("137"))
-            || session_ended(&console, "installer", Some("1")),
+            || session_ended(&console, "installer", Some(lost_display)),
         "the session did not report the compositor's death: {console}"
     );
     ensure!(
@@ -1225,7 +1397,7 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
                 || line.contains("compositor is not listening"))),
         "the second attempt was spent on a stale socket: {console}"
     );
-    wait_page(vm, &ctl, artifacts, "restart")?;
+    wait_page(vm, &ctl, artifacts, name)?;
     ensure!(
         restarts(vm)? == 1,
         "expected one restart after the compositor died"
@@ -1239,7 +1411,7 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         session_ended(&console, "installer", Some("137")),
         "the session did not report the installer's death: {console}"
     );
-    wait_page(vm, &ctl, artifacts, "restart")?;
+    wait_page(vm, &ctl, artifacts, name)?;
     ensure!(
         restarts(vm)? == 2,
         "expected two restarts after the client died"
@@ -1248,15 +1420,23 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         !has_marker(&console, "ILEX-INSTALLER-FALLBACK", None),
         "the fallback fired after two recoverable failures: {console}"
     );
-    fs::write(artifacts.join("next-restart-serial.txt"), console)?;
-    selinux::check(vm, artifacts, "next-restart")?;
-    println!("iso::next restart: close refused, compositor and client deaths recovered");
+    fs::write(artifacts.join(format!("next-{name}-serial.txt")), console)?;
+    selinux::check(vm, artifacts, &format!("next-{name}"))?;
+    println!("iso::next {name}: close refused, compositor and client deaths recovered");
     Ok(())
 }
 
-/// A hard kill of the compositor, by process name (procps need not be in the image).
+/// A hard kill of the GNOME edition's compositor, by process name (procps need
+/// not be in the image).
 const KILL_COMPOSITOR: &str = "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = gnome-kiosk ] && kill -KILL ${p#/proc/}; done; true";
 const KILL_INSTALLER: &str = "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = ilex-installer ] && kill -KILL ${p#/proc/}; done; true";
+
+/// The same for any process (the KDE edition's compositor is `kwin_wayland`).
+fn kill_process(comm: &str) -> String {
+    format!(
+        "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = {comm} ] && kill -KILL ${{p#/proc/}}; done; true"
+    )
+}
 
 /// The serial mirror of the markers fails on purpose; the interface must not
 /// notice, and every failed write must be reported on the second UART. The
