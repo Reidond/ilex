@@ -1048,11 +1048,7 @@ impl Widgets {
         self.disk.page.set_can_pop(free);
         self.account.page.set_can_pop(free);
         self.review.page.set_can_pop(free);
-        for page in [
-            &self.installing.page,
-            &self.done.page,
-            &self.problem.page,
-        ] {
+        for page in [&self.installing.page, &self.done.page, &self.problem.page] {
             page.set_can_pop(false);
         }
         // The dialogs are open exactly while the flow says so.

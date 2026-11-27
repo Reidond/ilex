@@ -2894,7 +2894,11 @@ fn check_finish(parent: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     // The archive: names, contents, padding, checksums.
     let mut tar = finish::Tar::default();
-    tar.add("ilex-installer-log/state.json", b"{\"stage\": \"image\"}", 7)?;
+    tar.add(
+        "ilex-installer-log/state.json",
+        b"{\"stage\": \"image\"}",
+        7,
+    )?;
     tar.add("ilex-installer-log/empty", b"", 7)?;
     tar.add("ilex-installer-log/big", &[b'x'; 1500], 7)?;
     let bytes = tar.finish()?;
@@ -2902,7 +2906,11 @@ fn check_finish(parent: &Path) -> Result<()> {
     let members = finish::untar(&bytes)?;
     ensure!(
         members.len() == 3
-            && members[0] == ("ilex-installer-log/state.json".into(), b"{\"stage\": \"image\"}".to_vec())
+            && members[0]
+                == (
+                    "ilex-installer-log/state.json".into(),
+                    b"{\"stage\": \"image\"}".to_vec()
+                )
             && members[1].1.is_empty()
             && members[2].1.len() == 1500,
         "a tar does not read back as it was written: {} members",
@@ -2912,8 +2920,12 @@ fn check_finish(parent: &Path) -> Result<()> {
     let dir = TestDir::new(parent, "finish")?;
     let archive = dir.0.join("log.tar");
     fs::write(&archive, &bytes)?;
-    let listed = exec::run_ok("tar", &["-tvf", &archive.to_string_lossy()], Duration::from_secs(30))?
-        .stdout_text();
+    let listed = exec::run_ok(
+        "tar",
+        &["-tvf", &archive.to_string_lossy()],
+        Duration::from_secs(30),
+    )?
+    .stdout_text();
     ensure!(
         listed.contains("ilex-installer-log/state.json") && listed.contains("1500"),
         "tar does not list the archive: {listed}"
@@ -2990,12 +3002,14 @@ fn check_finish(parent: &Path) -> Result<()> {
                 .is_some_and(|e| e.contains("not the partition that was checked")),
             "{fs_name}: a device number that is not the device's was accepted"
         );
-        let first = finish::write_log_child(&device.0, fs_name, &mountpoint, &archive, "a.tar", &expect);
+        let first =
+            finish::write_log_child(&device.0, fs_name, &mountpoint, &archive, "a.tar", &expect);
         ensure!(
             first.error.is_none() && first.file == "a.tar" && first.bytes == bytes.len() as u64,
             "{fs_name}: the first write: {first:?}"
         );
-        let second = finish::write_log_child(&device.0, fs_name, &mountpoint, &archive, "a.tar", &expect);
+        let second =
+            finish::write_log_child(&device.0, fs_name, &mountpoint, &archive, "a.tar", &expect);
         ensure!(
             second.error.is_none() && second.file == "a-1.tar",
             "{fs_name}: a file that exists was written over, or the name did not move on: {second:?}"
@@ -3005,7 +3019,12 @@ fn check_finish(parent: &Path) -> Result<()> {
         fs::create_dir(&look)?;
         exec::run_ok(
             "mount",
-            &["-o", "ro,nodev,nosuid,noexec", &device.0, &look.to_string_lossy()],
+            &[
+                "-o",
+                "ro,nodev,nosuid,noexec",
+                &device.0,
+                &look.to_string_lossy(),
+            ],
             Duration::from_secs(30),
         )?;
         let on_stick = fs::read(look.join("a.tar"));
@@ -3013,7 +3032,11 @@ fn check_finish(parent: &Path) -> Result<()> {
         let mode = fs::metadata(look.join("a.tar"))
             .map(|m| m.mode() & 0o777)
             .ok();
-        let _ = exec::run("umount", &[&look.to_string_lossy()], Duration::from_secs(30));
+        let _ = exec::run(
+            "umount",
+            &[&look.to_string_lossy()],
+            Duration::from_secs(30),
+        );
         ensure!(
             on_stick.as_ref().is_ok_and(|b| *b == bytes)
                 && second_on_stick.as_ref().is_ok_and(|b| *b == bytes),

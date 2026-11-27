@@ -225,7 +225,13 @@ pub(super) fn wait_event(
 
 /// The welcome page is up and the helper answered the probe: the page is
 /// drawn, with its marker and the probe's result.
-pub(super) fn welcome_up(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &str) -> Result<()> {
+pub(super) fn welcome_up(
+    vm: &mut Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+) -> Result<()> {
     let page = wait_page_marker(vm, serial, "welcome", PAGE_TIMEOUT)?;
     ensure!(
         field(&page, "edition")? == "gnome"

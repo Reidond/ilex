@@ -236,11 +236,7 @@ pub fn stage_phrase(stage: ilex_installer_model::state::Stage) -> &'static str {
 /// read: its first line, no control characters, ended with a full stop.
 pub fn sentence_of(reason: &str) -> String {
     let line = reason.lines().next().unwrap_or("").trim();
-    let mut text: String = line
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(400)
-        .collect();
+    let mut text: String = line.chars().filter(|c| !c.is_control()).take(400).collect();
     if line.chars().count() > 400 {
         text.push('…');
     }
@@ -269,7 +265,8 @@ pub fn install_failed(
 ) -> Message {
     // The helper's own reason may already say what became of the disk (a
     // helper that stopped does): then only the way forward is added.
-    let says_so = reason.contains("disk was already changed") || reason.contains("disk was not changed");
+    let says_so =
+        reason.contains("disk was already changed") || reason.contains("disk was not changed");
     let consequence = match (disk_changed, disk) {
         _ if says_so && disk_changed => {
             "Try again to install from the start, or save the log and restart.".to_owned()

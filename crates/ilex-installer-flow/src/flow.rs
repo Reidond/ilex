@@ -1339,7 +1339,11 @@ pub fn disk_report(probe: &Probe) -> Vec<String> {
         .iter()
         .filter_map(|d| {
             disks::unavailable_reason(d).map(|why| {
-                format!("{} ({}): {why}.", disks::title_of(d), human_bytes(d.size_bytes))
+                format!(
+                    "{} ({}): {why}.",
+                    disks::title_of(d),
+                    human_bytes(d.size_bytes)
+                )
             })
         })
         .collect()

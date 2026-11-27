@@ -93,7 +93,9 @@ pub enum LogSave {
     /// The removable disks the probe found (none when nothing is plugged in).
     Choosing(Vec<LogChoice>),
     /// Writing to this device.
-    Saving { device: String },
+    Saving {
+        device: String,
+    },
     Saved(Saved),
     Failed(Message),
 }
@@ -604,9 +606,7 @@ impl Flow {
             rows: progress.rows.clone(),
             overall: progress.overall(),
             message: state.map(|s| s.message.clone()).unwrap_or_default(),
-            log: state
-                .map(|s| tail(&s.log, LOG_LINES))
-                .unwrap_or_default(),
+            log: state.map(|s| tail(&s.log, LOG_LINES)).unwrap_or_default(),
             waiting: (self.inst.failures > 0 && self.inst.phase == Phase::Running)
                 .then(|| self.inst.lost.clone())
                 .flatten(),
@@ -656,8 +656,7 @@ impl Flow {
         let state = self.inst.state.as_ref();
         let (kind, message) = match self.inst.phase {
             Phase::Failed => {
-                let Some(Outcome::Failed { stage, reason }) =
-                    state.and_then(|s| s.outcome.clone())
+                let Some(Outcome::Failed { stage, reason }) = state.and_then(|s| s.outcome.clone())
                 else {
                     return None;
                 };
@@ -859,9 +858,8 @@ impl Flow {
             }
             (FinishAction::SaveLog { .. }, Ok(None)) => {
                 self.say(markers::log("failed", 0, 0));
-                self.inst.log = LogSave::Failed(Message::title(
-                    "The helper did not say where the log went",
-                ));
+                self.inst.log =
+                    LogSave::Failed(Message::title("The helper did not say where the log went"));
             }
             (FinishAction::SaveLog { .. }, Err(error)) => {
                 self.say(markers::log("failed", 0, 0));
@@ -888,10 +886,7 @@ impl Flow {
             && matches!(self.inst.phase, Phase::Failed)
             && self.inst.finishing.is_none()
             && self.inst.finish_in_flight.is_none()
-            && !matches!(
-                self.inst.log,
-                LogSave::Looking | LogSave::Saving { .. }
-            )
+            && !matches!(self.inst.log, LogSave::Looking | LogSave::Saving { .. })
     }
 
     pub fn log_state(&self) -> &LogSave {

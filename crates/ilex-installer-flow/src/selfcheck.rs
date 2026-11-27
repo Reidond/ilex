@@ -6,8 +6,8 @@
 use crate::account::{self, Check};
 use crate::backend::Backend;
 use crate::flow::{
-    Flow, KeyboardStatus, LogSave, MarkerConfig, PageId, Phase, PlanCheck, ProbeState,
-    ProblemKind, Step, usable_disks,
+    Flow, KeyboardStatus, LogSave, MarkerConfig, PageId, Phase, PlanCheck, ProbeState, ProblemKind,
+    Step, usable_disks,
 };
 use crate::keyboard::{self, Layouts, Sources};
 use crate::language;
@@ -710,8 +710,7 @@ fn retries() -> Result<()> {
     );
     ensure!(flow.select_machine("ms-7c35.gnome"), "machine choice");
     ensure!(
-        flow.advance() == Step::Goto(PageId::Disk)
-            && flow.advance() == Step::Goto(PageId::Account),
+        flow.advance() == Step::Goto(PageId::Disk) && flow.advance() == Step::Goto(PageId::Account),
         "machine -> disk -> account"
     );
     let (generation, request) = run_plan(&mut flow)?;
@@ -1366,8 +1365,7 @@ fn start_install(flow: &mut Flow, sim: &Simulated) -> Result<Step> {
 fn disk_page() -> Result<()> {
     let (mut flow, sim) = flow_on("generic")?;
     ensure!(
-        flow.advance() == Step::Goto(PageId::Machine)
-            && flow.advance() == Step::Goto(PageId::Disk),
+        flow.advance() == Step::Goto(PageId::Machine) && flow.advance() == Step::Goto(PageId::Disk),
         "welcome and machine do not continue"
     );
     let view = flow.disk_view().context("no disk view")?.clone();
@@ -1417,7 +1415,9 @@ fn disk_page() -> Result<()> {
     ensure!(
         flow.disk() == Some("nvme-eui.0025385c1140a2b3")
             && flow.can_continue()
-            && flow.marker_fields().starts_with("disk=nvme-eui.0025385c1140a2b3 offered=2 unavailable=2"),
+            && flow
+                .marker_fields()
+                .starts_with("disk=nvme-eui.0025385c1140a2b3 offered=2 unavailable=2"),
         "the default disk: {:?}",
         flow.marker_fields()
     );
@@ -1431,7 +1431,9 @@ fn disk_page() -> Result<()> {
     ensure!(
         flow.set_disk("ata-WDC_WDS500G2B0A_214512800345")
             && flow.disk() == Some("ata-WDC_WDS500G2B0A_214512800345")
-            && flow.disk_choice().is_some_and(|c| c.title == "WDC WDS500G2B0A"),
+            && flow
+                .disk_choice()
+                .is_some_and(|c| c.title == "WDC WDS500G2B0A"),
         "the person's choice"
     );
     // The choice survives another look while the disk is still offered...
@@ -1471,7 +1473,8 @@ fn disk_page() -> Result<()> {
         "going back dropped the check"
     );
     ensure!(
-        flow.set_disk("nvme-eui.0025385c1140a2b3") && matches!(flow.plan_check(), PlanCheck::NotRun),
+        flow.set_disk("nvme-eui.0025385c1140a2b3")
+            && matches!(flow.plan_check(), PlanCheck::NotRun),
         "choosing another disk leaves the earlier check standing"
     );
     ensure!(
@@ -1504,7 +1507,8 @@ fn disk_page() -> Result<()> {
 
     // Markers: the page, and the choice.
     let (mut flow, _sim) = flow_on("generic")?;
-    let mut flow = std::mem::replace(&mut flow, Flow::new(sample_layouts()?)).with_markers(config(true, false));
+    let mut flow = std::mem::replace(&mut flow, Flow::new(sample_layouts()?))
+        .with_markers(config(true, false));
     flow.window_shown("renderer=test scale=1");
     flow.drain_markers();
     flow.advance();
@@ -1538,11 +1542,26 @@ fn installation() -> Result<()> {
             && review.partitions[0].title == "EFI system partition"
             && review.partitions[0].detail == "512 MiB · vfat"
             && review.partitions[2].detail.ends_with("btrfs")
-            && review.image.iter().any(|r| r.title == "Version" && r.value == "45.20261126.0")
-            && review.image.iter().any(|r| r.title == "Download" && r.value == "2.2 GiB")
-            && review.image.iter().any(|r| r.title == "Digest" && r.value.starts_with("sha256:9f2c"))
-            && review.choices.iter().any(|r| r.title == "Administrator" && r.value == "ilexmaint")
-            && review.choices.iter().any(|r| r.title == "Edition" && r.value == "ilex Glabra")
+            && review
+                .image
+                .iter()
+                .any(|r| r.title == "Version" && r.value == "45.20261126.0")
+            && review
+                .image
+                .iter()
+                .any(|r| r.title == "Download" && r.value == "2.2 GiB")
+            && review
+                .image
+                .iter()
+                .any(|r| r.title == "Digest" && r.value.starts_with("sha256:9f2c"))
+            && review
+                .choices
+                .iter()
+                .any(|r| r.title == "Administrator" && r.value == "ilexmaint")
+            && review
+                .choices
+                .iter()
+                .any(|r| r.title == "Edition" && r.value == "ilex Glabra")
             && review.warnings.is_empty(),
         "the review: {review:#?}"
     );
@@ -1557,7 +1576,9 @@ fn installation() -> Result<()> {
     };
     ensure!(
         dialog.title == "Erase Samsung SSD 990 PRO 2TB S73VNJ0W412345X?"
-            && dialog.body.contains("will be erased, including 1 other system")
+            && dialog
+                .body
+                .contains("will be erased, including 1 other system")
             && dialog.body.contains("cannot be undone")
             && dialog.cancel == "Cancel"
             && dialog.confirm == "Erase and install"
@@ -1610,8 +1631,10 @@ fn installation() -> Result<()> {
     );
     // The answer to a request that is not the one in flight changes nothing.
     ensure!(
-        flow.apply_finished(generation + 1, sim.start_installation(&plan, &erase_disk, &password))
-            == Step::Stay
+        flow.apply_finished(
+            generation + 1,
+            sim.start_installation(&plan, &erase_disk, &password)
+        ) == Step::Stay
             && flow.is_starting(),
         "a stale answer to Apply"
     );
@@ -1656,18 +1679,25 @@ fn installation() -> Result<()> {
         }
     }
     ensure!(
-        flow.page() == PageId::Done
-            && flow.phase() == Phase::Succeeded
-            && seen.len() >= 4,
+        flow.page() == PageId::Done && flow.phase() == Phase::Succeeded && seen.len() >= 4,
         "the installation did not end on the done page after seeing its stages ({seen:?}, page {:?})",
         flow.page()
     );
     let done = flow.done_view().context("no done view")?;
     ensure!(
         done.heading == "ilex Glabra is installed"
-            && done.rows.iter().any(|r| r.title == "Version" && r.value == "45.20261126.0")
-            && done.rows.iter().any(|r| r.title == "Configuration" && r.value == "generic.gnome")
-            && done.rows.iter().any(|r| r.title == "Installed on" && r.value.contains("Samsung"))
+            && done
+                .rows
+                .iter()
+                .any(|r| r.title == "Version" && r.value == "45.20261126.0")
+            && done
+                .rows
+                .iter()
+                .any(|r| r.title == "Configuration" && r.value == "generic.gnome")
+            && done
+                .rows
+                .iter()
+                .any(|r| r.title == "Installed on" && r.value.contains("Samsung"))
             && done.can_finish
             && done.finishing.is_none()
             && !flow.can_go_back()
@@ -1718,7 +1748,6 @@ fn installation() -> Result<()> {
     Ok(())
 }
 
-
 /// Every way an installation or its start can go wrong, and what the flow
 /// shows for each.
 fn failures() -> Result<()> {
@@ -1733,14 +1762,21 @@ fn failures() -> Result<()> {
     );
     let problem = flow.problem_view().context("no problem view")?;
     ensure!(
-        problem.kind == ProblemKind::Failed { stage: Stage::Image }
-            && problem.message.title == "The installation failed while downloading and installing ilex"
+        problem.kind
+            == ProblemKind::Failed {
+                stage: Stage::Image
+            }
+            && problem.message.title
+                == "The installation failed while downloading and installing ilex"
             && problem.message.detail.contains("connection reset by peer.")
             && problem
                 .message
                 .detail
                 .contains("Samsung SSD 990 PRO 2TB S73VNJ0W412345X has been changed")
-            && problem.log.last().is_some_and(|l| l.starts_with("error: Pulling image"))
+            && problem
+                .log
+                .last()
+                .is_some_and(|l| l.starts_with("error: Pulling image"))
             && problem.can_retry
             && problem.can_save_log
             && problem.can_restart
@@ -1780,9 +1816,15 @@ fn failures() -> Result<()> {
     settle(&mut flow, &sim, step)?;
     let problem = flow.problem_view().context("no problem view")?;
     ensure!(
-        problem.kind == ProblemKind::Failed { stage: Stage::Partition }
+        problem.kind
+            == ProblemKind::Failed {
+                stage: Stage::Partition
+            }
             && problem.message.title == "The installation failed while preparing the disk"
-            && problem.message.detail.ends_with("Nothing was written to the disk.")
+            && problem
+                .message
+                .detail
+                .ends_with("Nothing was written to the disk.")
             && problem.can_retry,
         "a failure before the disk was written: {problem:?}"
     );
@@ -1793,7 +1835,10 @@ fn failures() -> Result<()> {
     settle(&mut flow, &sim, step)?;
     let problem = flow.problem_view().context("no problem view")?;
     ensure!(
-        problem.kind == ProblemKind::Failed { stage: Stage::Image }
+        problem.kind
+            == ProblemKind::Failed {
+                stage: Stage::Image
+            }
             && problem.message.detail.contains("helper stopped")
             && problem.message.detail.matches("changed").count() == 1
             && problem
@@ -1809,7 +1854,11 @@ fn failures() -> Result<()> {
     let step = start_install(&mut flow, &sim)?;
     let mut step = step;
     let mut polls = 0;
-    while let Step::RunState { generation, delay_ms } = step {
+    while let Step::RunState {
+        generation,
+        delay_ms,
+    } = step
+    {
         polls += 1;
         ensure!(polls < 60, "the helper is never given up on");
         if flow.page() == PageId::Problem {
@@ -1856,7 +1905,9 @@ fn failures() -> Result<()> {
         step == Step::Stay
             && flow.page() == PageId::Review
             && flow.phase() == Phase::Idle
-            && flow.check_problem().is_some_and(|m| m.title.contains("no longer valid"))
+            && flow
+                .check_problem()
+                .is_some_and(|m| m.title.contains("no longer valid"))
             && flow.can_retry()
             && !flow.can_install()
             && flow.administrator() == "ilexmaint",
@@ -1882,10 +1933,14 @@ fn failures() -> Result<()> {
     let Step::RunApply { generation, .. } = flow.confirm_install() else {
         bail!("no apply");
     };
-    let Step::RunState { generation: asked, delay_ms } = flow.apply_finished(
+    let Step::RunState {
+        generation: asked,
+        delay_ms,
+    } = flow.apply_finished(
         generation,
         Err(ClientError::HelperUnavailable("the answer was lost".into())),
-    ) else {
+    )
+    else {
         bail!("a lost answer to Apply does not ask the helper");
     };
     ensure!(
@@ -1901,8 +1956,10 @@ fn failures() -> Result<()> {
         step == Step::Stay
             && flow.page() == PageId::Review
             && flow.phase() == Phase::Idle
-            && flow.check_problem().is_some_and(|m| m.title == "The installation did not start"
-                && m.detail.contains("Nothing was written")),
+            && flow
+                .check_problem()
+                .is_some_and(|m| m.title == "The installation did not start"
+                    && m.detail.contains("Nothing was written")),
         "the helper says nothing began: {step:?}"
     );
     // The same loss, and this time the helper did begin.
@@ -1920,10 +1977,13 @@ fn failures() -> Result<()> {
         bail!("no apply");
     };
     let began = sim.start_installation(&plan, &erase_disk, &password)?;
-    let Step::RunState { generation: asked, .. } = flow.apply_finished(
+    let Step::RunState {
+        generation: asked, ..
+    } = flow.apply_finished(
         generation,
         Err(ClientError::HelperUnavailable("the answer was lost".into())),
-    ) else {
+    )
+    else {
         bail!("no state request");
     };
     let step = flow.state_finished(asked, Ok(began));
@@ -1950,7 +2010,10 @@ fn failures() -> Result<()> {
     while let Step::RunState { generation, .. } = step {
         polls += 1;
         ensure!(polls < 40, "never given up on");
-        step = flow.state_finished(generation, Err(ClientError::HelperUnavailable("gone".into())));
+        step = flow.state_finished(
+            generation,
+            Err(ClientError::HelperUnavailable("gone".into())),
+        );
         if flow.phase() == Phase::Lost {
             break;
         }
@@ -1968,15 +2031,34 @@ fn failures() -> Result<()> {
 /// it was away, comes back on that page.
 fn attaching() -> Result<()> {
     for (name, page, phase, marker) in [
-        ("generic+attach-installing", PageId::Installing, Phase::Running, "installing"),
-        ("generic+attach-done", PageId::Done, Phase::Succeeded, "done"),
-        ("generic+attach-failed", PageId::Problem, Phase::Failed, "failed"),
+        (
+            "generic+attach-installing",
+            PageId::Installing,
+            Phase::Running,
+            "installing",
+        ),
+        (
+            "generic+attach-done",
+            PageId::Done,
+            Phase::Succeeded,
+            "done",
+        ),
+        (
+            "generic+attach-failed",
+            PageId::Problem,
+            Phase::Failed,
+            "failed",
+        ),
     ] {
         let sim = Simulated::load(name)?;
         let mut flow = Flow::new(sample_layouts()?).with_markers(config(true, false));
         flow.window_shown("renderer=test scale=1");
         flow.drain_markers();
-        let Step::RunState { generation, delay_ms } = flow.start() else {
+        let Step::RunState {
+            generation,
+            delay_ms,
+        } = flow.start()
+        else {
             bail!("{name}: start does not ask where the installation is");
         };
         ensure!(
@@ -1987,7 +2069,8 @@ fn attaching() -> Result<()> {
         ensure!(
             flow.page() == page
                 && flow.phase() == phase
-                && (page != PageId::Installing || matches!(step, Step::RunState { delay_ms: 1000, .. }))
+                && (page != PageId::Installing
+                    || matches!(step, Step::RunState { delay_ms: 1000, .. }))
                 && (page == PageId::Installing || step == Step::Goto(page)),
             "{name}: the flow is on {:?} ({:?}), asked {step:?}",
             flow.page(),
@@ -1996,10 +2079,9 @@ fn attaching() -> Result<()> {
         let lines = flow.drain_markers();
         ensure!(
             lines[0] == format!("ILEX-INSTALLER event=attach result={marker}")
-                && lines
-                    .iter()
-                    .any(|l| l.starts_with(&format!("ILEX-INSTALLER page={} edition=gnome", page.id()))
-                        && l.contains("reattached=true")),
+                && lines.iter().any(|l| l
+                    .starts_with(&format!("ILEX-INSTALLER page={} edition=gnome", page.id()))
+                    && l.contains("reattached=true")),
             "{name}: the markers: {lines:?}"
         );
         match page {
@@ -2014,12 +2096,19 @@ fn attaching() -> Result<()> {
             }
             PageId::Done => {
                 let done = flow.done_view().context("no done view")?;
-                ensure!(done.heading == "ilex Glabra is installed", "{name}: {done:?}");
+                ensure!(
+                    done.heading == "ilex Glabra is installed",
+                    "{name}: {done:?}"
+                );
             }
             _ => {
                 let problem = flow.problem_view().context("no problem view")?;
                 ensure!(
-                    problem.kind == ProblemKind::Failed { stage: Stage::Image } && problem.can_retry,
+                    problem.kind
+                        == ProblemKind::Failed {
+                            stage: Stage::Image
+                        }
+                        && problem.can_retry,
                     "{name}: {problem:?}"
                 );
                 // The password and the choices are gone with the old
@@ -2037,7 +2126,10 @@ fn attaching() -> Result<()> {
     }
     // The window can be shown before the helper has answered: the first page's
     // marker, with the toolkit's words, comes with the answer.
-    for (name, page) in [("generic", "welcome"), ("generic+attach-installing", "installing")] {
+    for (name, page) in [
+        ("generic", "welcome"),
+        ("generic+attach-installing", "installing"),
+    ] {
         let sim = Simulated::load(name)?;
         let mut flow = Flow::new(sample_layouts()?).with_markers(config(true, false));
         let Step::RunState { generation, .. } = flow.start() else {
@@ -2081,8 +2173,10 @@ fn attaching() -> Result<()> {
     };
     ensure!(
         flow.state_finished(generation + 1, sim.state()) == Step::Stay
-            && flow.state_finished(generation, Err(ClientError::HelperUnavailable("not up".into())))
-                != Step::Stay,
+            && flow.state_finished(
+                generation,
+                Err(ClientError::HelperUnavailable("not up".into()))
+            ) != Step::Stay,
         "the start-up answer"
     );
     Ok(())
@@ -2126,7 +2220,10 @@ fn log_dialog() -> Result<()> {
         "the sticks offered: {ids:?}"
     );
     ensure!(
-        choices[0].problem.as_ref().is_some_and(|m| m.title.contains("cannot write"))
+        choices[0]
+            .problem
+            .as_ref()
+            .is_some_and(|m| m.title.contains("cannot write"))
             && choices[1].problem.is_none()
             && choices[2].problem.is_some(),
         "which of them the log can go to: {choices:?}"
@@ -2138,7 +2235,9 @@ fn log_dialog() -> Result<()> {
             && flow.log_state() == &LogSave::Choosing(choices.clone()),
         "a device that cannot take the log was written to"
     );
-    let Step::RunFinish { generation, action } = flow.save_log("usb-SanDisk_Cruzer_Blade_4C530001-0:0") else {
+    let Step::RunFinish { generation, action } =
+        flow.save_log("usb-SanDisk_Cruzer_Blade_4C530001-0:0")
+    else {
         bail!("no write");
     };
     ensure!(
@@ -2170,7 +2269,10 @@ fn log_dialog() -> Result<()> {
         "the saved log: {saved:?}"
     );
     flow.close_log();
-    ensure!(flow.log_state() == &LogSave::Closed, "the dialog stays open");
+    ensure!(
+        flow.log_state() == &LogSave::Closed,
+        "the dialog stays open"
+    );
 
     // The helper's own rules, as the simulation applies the model's.
     for (device, code) in [
@@ -2180,7 +2282,10 @@ fn log_dialog() -> Result<()> {
             "usb-SanDisk_Ultra_Fit_4C530001230815113423-0:0",
             ErrorCode::LiveMedium,
         ),
-        ("usb-Kingston_DataTraveler_0123-0:0", ErrorCode::NoFileSystem),
+        (
+            "usb-Kingston_DataTraveler_0123-0:0",
+            ErrorCode::NoFileSystem,
+        ),
         ("usb-nothing-0:0", ErrorCode::UnknownDisk),
     ] {
         let Err(ClientError::Refused(error)) = sim.finish(&FinishAction::SaveLog {
@@ -2188,7 +2293,11 @@ fn log_dialog() -> Result<()> {
         }) else {
             bail!("{device} is accepted as a place for the log");
         };
-        ensure!(error.code == code, "{device}: {:?}, expected {code:?}", error.code);
+        ensure!(
+            error.code == code,
+            "{device}: {:?}, expected {code:?}",
+            error.code
+        );
     }
 
     // A write that fails says so and leaves the dialog to try again.
@@ -2198,7 +2307,9 @@ fn log_dialog() -> Result<()> {
     let step = flow.choose_log_device();
     let step = settle(&mut flow, &sim, step)?;
     ensure!(step == Step::Stay, "the dialog's look");
-    let Step::RunFinish { generation, action } = flow.save_log("usb-SanDisk_Cruzer_Blade_4C530001-0:0") else {
+    let Step::RunFinish { generation, action } =
+        flow.save_log("usb-SanDisk_Cruzer_Blade_4C530001-0:0")
+    else {
         bail!("no write");
     };
     flow.finish_finished(generation, sim.finish(&action));
@@ -2212,7 +2323,6 @@ fn log_dialog() -> Result<()> {
     };
     Ok(())
 }
-
 
 /// The serial-console lines of an installation, in the order their causes are
 /// accepted.

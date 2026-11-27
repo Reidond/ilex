@@ -196,10 +196,7 @@ impl DiskPage {
         let banner = banner(None);
         let button = continue_button("Continue");
         let group = group("Disk", "");
-        let away = group_titled(
-            "Not available",
-            "ilex cannot be installed to these disks.",
-        );
+        let away = group_titled("Not available", "ilex cannot be installed to these disks.");
         let modes = adw::PreferencesGroup::builder().title("How").build();
         let mut first: Option<gtk::CheckButton> = None;
         for mode in flow_disks::modes() {
@@ -378,13 +375,16 @@ impl ReviewPage {
         problem.set_child(Some(&retry));
         let mut choices = Rows::new("Your choices", "");
         let mut disk = Rows::new("The disk", "");
-        let mut partitions = Rows::new(
-            "What is created",
-            "These partitions are made on the disk.",
-        );
+        let mut partitions = Rows::new("What is created", "These partitions are made on the disk.");
         let mut image = Rows::new("The image", "");
         let mut notes = Rows::new("Worth knowing", "");
-        for rows in [&mut choices, &mut disk, &mut partitions, &mut image, &mut notes] {
+        for rows in [
+            &mut choices,
+            &mut disk,
+            &mut partitions,
+            &mut image,
+            &mut notes,
+        ] {
             rows.group.set_visible(false);
         }
         let erase = gtk::Label::builder()
@@ -462,9 +462,10 @@ impl ReviewPage {
             }
             PlanCheck::Checked(_) => {
                 if let Some(review) = flow.review() {
-                    let items = |rows: &[ilex_installer_flow::review::Row]| -> Vec<(String, String)> {
-                        rows.iter().map(|r| pair(r.title, &r.value)).collect()
-                    };
+                    let items =
+                        |rows: &[ilex_installer_flow::review::Row]| -> Vec<(String, String)> {
+                            rows.iter().map(|r| pair(r.title, &r.value)).collect()
+                        };
                     self.choices.set(&items(&review.choices));
                     self.disk.set(&items(&review.disk));
                     let partitions: Vec<(String, String)> = review
@@ -487,7 +488,8 @@ impl ReviewPage {
                 self.button.set_visible(true);
                 // Not insensitive while its dialog is open: the focus stays put.
                 self.button.set_sensitive(
-                    flow.can_install() || flow.phase() == ilex_installer_flow::flow::Phase::Confirming,
+                    flow.can_install()
+                        || flow.phase() == ilex_installer_flow::flow::Phase::Confirming,
                 );
                 self.stack.set_visible_child_name("checked");
                 self.checked = true;

@@ -91,9 +91,8 @@ impl Helper {
     fn save_log(&self, device: &str) -> Result<Saved, PlanError> {
         let internal =
             |e: anyhow::Error| PlanError::new(ErrorCode::Internal, None, format!("{e:#}"));
-        let refuse = |code: ErrorCode, message: String| {
-            PlanError::new(code, Some("device"), message)
-        };
+        let refuse =
+            |code: ErrorCode, message: String| PlanError::new(code, Some("device"), message);
         let probe = self.probe_locked().map_err(internal)?;
         let state = self.state();
         let target = state.summary.as_ref().map(|s| s.disk.as_str());
@@ -144,7 +143,9 @@ impl Helper {
             }
         }
 
-        let (name, tarball) = self.log_tarball(&state, &probe_disks_text()).map_err(internal)?;
+        let (name, tarball) = self
+            .log_tarball(&state, &probe_disks_text())
+            .map_err(internal)?;
         let mut scratch = Scratch::new(&self.config.run_dir, "savelog").map_err(internal)?;
         let source = scratch.path().join("log.tar");
         crate::install::write_file(&source, &tarball, 0o600).map_err(internal)?;
@@ -408,7 +409,15 @@ pub fn write_log_child(
     expect: &str,
 ) -> LogWrite {
     let mut result = LogWrite::default();
-    if let Err(e) = write_log(device, fstype, mountpoint, source, name, expect, &mut result) {
+    if let Err(e) = write_log(
+        device,
+        fstype,
+        mountpoint,
+        source,
+        name,
+        expect,
+        &mut result,
+    ) {
         result.error = Some(format!("{e:#}"));
     }
     result
@@ -448,14 +457,7 @@ fn write_log(
     let at = mountpoint.to_string_lossy().into_owned();
     let mount = exec::run(
         "mount",
-        &[
-            "-t",
-            kind,
-            "-o",
-            "rw,nodev,nosuid,noexec,sync",
-            device,
-            &at,
-        ],
+        &["-t", kind, "-o", "rw,nodev,nosuid,noexec,sync", device, &at],
         TOOL,
     )?;
     ensure!(
@@ -555,7 +557,11 @@ impl Tar {
         put(&mut header, 100, b"0000644\0");
         put(&mut header, 108, b"0000000\0");
         put(&mut header, 116, b"0000000\0");
-        put(&mut header, 124, format!("{:011o}\0", data.len()).as_bytes());
+        put(
+            &mut header,
+            124,
+            format!("{:011o}\0", data.len()).as_bytes(),
+        );
         put(&mut header, 136, format!("{mtime:011o}\0").as_bytes());
         put(&mut header, 148, b"        ");
         header[156] = b'0';

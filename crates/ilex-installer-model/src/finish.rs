@@ -95,9 +95,9 @@ pub struct Saved {
 /// The partition of `disk` a log is written into: the first one, in table
 /// order, whose file system is one the helper writes and that is big enough.
 pub fn log_partition(disk: &Disk) -> Option<&Partition> {
-    disk.partitions.iter().find(|p| {
-        LOG_FILESYSTEMS.contains(&p.filesystem.as_str()) && p.size_bytes >= LOG_MIN_BYTES
-    })
+    disk.partitions
+        .iter()
+        .find(|p| LOG_FILESYSTEMS.contains(&p.filesystem.as_str()) && p.size_bytes >= LOG_MIN_BYTES)
 }
 
 /// May a log be written to the disk `id`? It must be in the probe, a removable

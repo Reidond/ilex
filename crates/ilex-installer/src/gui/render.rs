@@ -501,7 +501,9 @@ async fn shoot(job: &Job) -> Result<Summary> {
             &window,
             &observer,
             Some(shot.page),
-            |seen| (shot.check.is_empty() || seen.check == shot.check) && seen.dialog == shot.dialog,
+            |seen| {
+                (shot.check.is_empty() || seen.check == shot.check) && seen.dialog == shot.dialog
+            },
         )
         .await?;
         for _ in 0..FRAMES {
@@ -514,7 +516,9 @@ async fn shoot(job: &Job) -> Result<Summary> {
             &window,
             &observer,
             Some(shot.page),
-            |seen| (shot.check.is_empty() || seen.check == shot.check) && seen.dialog == shot.dialog,
+            |seen| {
+                (shot.check.is_empty() || seen.check == shot.check) && seen.dialog == shot.dialog
+            },
         )
         .await?;
         let path = job

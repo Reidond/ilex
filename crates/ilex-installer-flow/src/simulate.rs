@@ -30,13 +30,11 @@ use crate::secret::Secret;
 use anyhow::{Context, Result, bail};
 use ilex_installer_model::finish::{FinishAction, Saved, check_log_device};
 use ilex_installer_model::plan::{
-    ErrorCode, Erase, Plan, PlanError, PlanRequest, PlannedDisk, PlannedEncryption, PlannedTpm,
+    Erase, ErrorCode, Plan, PlanError, PlanRequest, PlannedDisk, PlannedEncryption, PlannedTpm,
     SecretKind, TpmMode, check_request,
 };
 use ilex_installer_model::probe::{Disk, Partition, Probe};
-use ilex_installer_model::state::{
-    Outcome, Stage, StageRecord, StageStatus, State, Summary,
-};
+use ilex_installer_model::state::{Outcome, Stage, StageRecord, StageStatus, State, Summary};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fs;
@@ -520,7 +518,9 @@ fn script_state(
         }
         Script::HelperStopped if step >= 3 => {
             state.active = false;
-            state.message = "The installer's helper stopped during the image stage; nothing resumes by itself.".into();
+            state.message =
+                "The installer's helper stopped during the image stage; nothing resumes by itself."
+                    .into();
             state.outcome = Some(Outcome::Failed {
                 stage: Stage::Image,
                 reason: "the installer's helper stopped (it crashed or was stopped) during the image stage; the disk was already changed, so install again from the start".into(),
@@ -643,12 +643,7 @@ impl Backend for Simulated {
         Ok(self.state.clone().unwrap_or_else(|| State::idle(0)))
     }
 
-    fn set_secret(
-        &self,
-        plan: &str,
-        kind: SecretKind,
-        secret: &Secret,
-    ) -> Result<(), ClientError> {
+    fn set_secret(&self, plan: &str, kind: SecretKind, secret: &Secret) -> Result<(), ClientError> {
         let mut session = self.session();
         if session.plan.as_ref().map(|p| p.id.as_str()) != Some(plan) {
             return Err(Self::refuse(PlanError::new(
@@ -658,9 +653,7 @@ impl Backend for Simulated {
             )));
         }
         let text = secret.expose();
-        if kind != SecretKind::AdminPassword
-            || text.is_empty()
-            || text.contains(['\n', '\r', '\0'])
+        if kind != SecretKind::AdminPassword || text.is_empty() || text.contains(['\n', '\r', '\0'])
         {
             return Err(Self::refuse(PlanError::new(
                 ErrorCode::InvalidSecret,

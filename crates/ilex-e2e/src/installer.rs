@@ -2023,7 +2023,11 @@ fn finish(vm: &EphemeralVm) -> Result<()> {
         );
         // Not a word of what was asked comes back in the refusal.
         ensure!(
-            action.len() <= 9 || !document["message"].as_str().unwrap_or_default().contains(action),
+            action.len() <= 9
+                || !document["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(action),
             "the refusal of {action:?} quotes it: {document}"
         );
     }

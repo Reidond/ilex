@@ -683,7 +683,10 @@ password = "hunter2"
         "the outcome's wire form"
     );
     finish_rules()?;
-    Ok("table rules, editions, detection, selection, requests, answers, secrets, stages, finish".into())
+    Ok(
+        "table rules, editions, detection, selection, requests, answers, secrets, stages, finish"
+            .into(),
+    )
 }
 
 /// A partition of a stick: `fs` is what `lsblk` calls its file system.

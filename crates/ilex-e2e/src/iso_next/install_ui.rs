@@ -43,9 +43,7 @@ use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
 
-use super::ui::{
-    EVENT_TIMEOUT, continue_to_machine, no_try_text, wait_page_marker, welcome_up,
-};
+use super::ui::{EVENT_TIMEOUT, continue_to_machine, no_try_text, wait_page_marker, welcome_up};
 use super::{
     Guest, KILL_COMPOSITOR, KILL_INSTALLER, PAGE_TIMEOUT, complete_lines, console, diagnostics,
     field, is_marker, iso_path, trial, wait_firmware_output, wait_page, words,
@@ -246,7 +244,11 @@ fn is_page(page: &'static str) -> impl Fn(&BTreeMap<String, String>) -> bool {
     move |w| w.get("page").is_some_and(|p| p == page)
 }
 
-fn is_event(event: &'static str, key: &'static str, value: &'static str) -> impl Fn(&BTreeMap<String, String>) -> bool {
+fn is_event(
+    event: &'static str,
+    key: &'static str,
+    value: &'static str,
+) -> impl Fn(&BTreeMap<String, String>) -> bool {
     move |w| {
         w.get("event").is_some_and(|e| e == event)
             && (key.is_empty() || w.get(key).is_some_and(|v| v == value))
@@ -308,7 +310,14 @@ fn to_review(
     ctl.type_text(PASSWORD)?;
     std::thread::sleep(Duration::from_secs(1));
     ctl.key("Return")?;
-    let review = nth_marker(vm, serial, "the review page", 1, Duration::from_secs(240), is_page("review"))?;
+    let review = nth_marker(
+        vm,
+        serial,
+        "the review page",
+        1,
+        Duration::from_secs(240),
+        is_page("review"),
+    )?;
     ensure!(
         field(&review, "check")? == "ok",
         "the plan was not checked: {review:?}"
@@ -441,7 +450,14 @@ fn no_password(vm: &mut Vm, serial: &Path) -> Result<()> {
 /// Wait for the installation to end and the done page: the stages' markers say
 /// how it went. On the way, once the image is being written, the screen is saved.
 fn wait_done(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &str) -> Result<()> {
-    nth_marker(vm, serial, "the installing page", 1, EVENT_TIMEOUT, is_page("installing"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the installing page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("installing"),
+    )?;
     std::thread::sleep(Duration::from_secs(3));
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-installing.png")))?;
     nth_marker(
@@ -450,7 +466,10 @@ fn wait_done(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &s
         "the image stage",
         1,
         Duration::from_secs(600),
-        |w| is_event("stage", "stage", "image")(w) && w.get("status").is_some_and(|s| s == "running"),
+        |w| {
+            is_event("stage", "stage", "image")(w)
+                && w.get("status").is_some_and(|s| s == "running")
+        },
     )?;
     std::thread::sleep(Duration::from_secs(45));
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-installing-image.png")))?;
@@ -467,7 +486,14 @@ fn wait_done(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &s
         "the installation did not succeed: {outcome:?}; serial: {}",
         console(serial)?
     );
-    nth_marker(vm, serial, "the done page", 1, EVENT_TIMEOUT, is_page("done"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the done page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("done"),
+    )?;
     wait_page(vm, ctl, artifacts, &format!("{name}-done"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-done.png")))?;
     Ok(())
@@ -496,7 +522,10 @@ fn keyboard_install() -> Result<()> {
             return Err(error);
         }
     };
-    println!("iso::next keyboard install: installed and powered off in {:?}", started.elapsed());
+    println!(
+        "iso::next keyboard install: installed and powered off in {:?}",
+        started.elapsed()
+    );
     // The machine is off; the disk it installed boots on its own.
     drop(rig);
     let ws = common::workspace()?;
@@ -509,7 +538,8 @@ fn keyboard_install() -> Result<()> {
         .context("the installed disk did not come up")?;
     check_installed(
         &|file, text| {
-            let _ = qemu::write_artifact(&artifacts, &format!("next-keyboard-install-{file}"), text);
+            let _ =
+                qemu::write_artifact(&artifacts, &format!("next-keyboard-install-{file}"), text);
         },
         &installed,
         &Expected {
@@ -525,7 +555,10 @@ fn keyboard_install() -> Result<()> {
             stamp: &[],
         },
     )?;
-    gdm_screenshot(&mut installed, &artifacts.join("next-keyboard-install-gdm.png"))?;
+    gdm_screenshot(
+        &mut installed,
+        &artifacts.join("next-keyboard-install-gdm.png"),
+    )?;
     Ok(())
 }
 
@@ -535,12 +568,26 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<Strin
     to_review(vm, &ctl, serial, artifacts, "keyboard-install", "0")?;
     // Escape closes the dialog: nothing is asked of the helper.
     ctl.key("Return")?;
-    nth_marker(vm, serial, "the erase dialog", 1, EVENT_TIMEOUT, is_event("confirm", "state", "shown"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the erase dialog",
+        1,
+        EVENT_TIMEOUT,
+        is_event("confirm", "state", "shown"),
+    )?;
     // The dialog is on screen once it has finished opening.
     std::thread::sleep(Duration::from_secs(2));
     ctl.save_screenshot(&artifacts.join("next-keyboard-install-erase-dialog.png"))?;
     ctl.key("Escape")?;
-    nth_marker(vm, serial, "the cancelled dialog", 1, EVENT_TIMEOUT, is_event("confirm", "state", "cancelled"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the cancelled dialog",
+        1,
+        EVENT_TIMEOUT,
+        is_event("confirm", "state", "cancelled"),
+    )?;
     ensure!(
         helper_state(vm)?.applied.is_none(),
         "the helper began after the dialog was cancelled"
@@ -553,7 +600,9 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<Strin
     confirm_erase(vm, &ctl, serial, artifacts, "keyboard-install")?;
     wait_done(vm, &ctl, serial, artifacts, "keyboard-install")?;
     let state = helper_state(vm)?;
-    let summary = state.summary.context("the helper has no summary of what it installed")?;
+    let summary = state
+        .summary
+        .context("the helper has no summary of what it installed")?;
     ensure!(
         matches!(state.outcome, Some(Outcome::Success))
             && summary.digest.starts_with("sha256:")
@@ -606,14 +655,24 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
     let ctl = Vmctl::from_info(vm.info.clone());
     to_review(vm, &ctl, serial, artifacts, "reattach", "0")?;
     confirm_erase(vm, &ctl, serial, artifacts, "reattach")?;
-    nth_marker(vm, serial, "the installing page", 1, EVENT_TIMEOUT, is_page("installing"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the installing page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("installing"),
+    )?;
     nth_marker(
         vm,
         serial,
         "the image stage",
         1,
         Duration::from_secs(600),
-        |w| is_event("stage", "stage", "image")(w) && w.get("status").is_some_and(|s| s == "running"),
+        |w| {
+            is_event("stage", "stage", "image")(w)
+                && w.get("status").is_some_and(|s| s == "running")
+        },
     )?;
     let first = helper_state(vm)?;
     ensure!(first.active, "the installation is not under way: {first:?}");
@@ -622,9 +681,12 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
     // The interface is killed, then the compositor: each time the session
     // comes back on the installing page (the first page it shows says so), not
     // on the welcome page, and the installation is the same one.
-    for (round, (what, kill)) in [("interface", KILL_INSTALLER), ("compositor", KILL_COMPOSITOR)]
-        .into_iter()
-        .enumerate()
+    for (round, (what, kill)) in [
+        ("interface", KILL_INSTALLER),
+        ("compositor", KILL_COMPOSITOR),
+    ]
+    .into_iter()
+    .enumerate()
     {
         vm.ssh_ok(kill)?;
         // The first page the new interface shows says it found the
@@ -667,14 +729,9 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
         "the installation did not succeed after the restarts: {outcome:?}; serial: {}",
         console(serial)?
     );
-    let done = nth_marker(
-        vm,
-        serial,
-        "the done page",
-        1,
-        EVENT_TIMEOUT,
-        |w| is_page("done")(w) && w.get("reattached").is_some_and(|r| r == "true"),
-    )?;
+    let done = nth_marker(vm, serial, "the done page", 1, EVENT_TIMEOUT, |w| {
+        is_page("done")(w) && w.get("reattached").is_some_and(|r| r == "true")
+    })?;
     ensure!(
         field(&done, "composition")? == "generic.gnome",
         "the done page after a restart: {done:?}"
@@ -683,7 +740,8 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
     ctl.save_screenshot(&artifacts.join("next-reattach-done.png"))?;
     let state = helper_state(vm)?;
     ensure!(
-        matches!(state.outcome, Some(Outcome::Success)) && state.applied.as_deref() == Some(plan.as_str()),
+        matches!(state.outcome, Some(Outcome::Success))
+            && state.applied.as_deref() == Some(plan.as_str()),
         "the helper's record after the restarts: {state:?}"
     );
     no_password(vm, serial)?;
@@ -695,7 +753,10 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<()> 
 /// A device the helper is asked to write the log to, and the code of the
 /// refusal that must come back.
 fn refuses(vm: &Vm, device: &str, code: &str) -> Result<()> {
-    let ran = ssh(vm, &busctl("ilex-installer", "Finish", &[&format!("save-log:{device}")]))?;
+    let ran = ssh(
+        vm,
+        &busctl("ilex-installer", "Finish", &[&format!("save-log:{device}")]),
+    )?;
     let refused = refusal(&ran).with_context(|| format!("save-log:{device}"))?;
     ensure!(
         format!("{:?}", refused.code).to_lowercase() == code.replace('-', ""),
@@ -718,7 +779,11 @@ fn head_hash(path: &Path) -> Result<String> {
         .arg(path)
         .output()
         .context("hashing the head of a disk image")?;
-    ensure!(out.status.success(), "sha256sum of {} failed", path.display());
+    ensure!(
+        out.status.success(),
+        "sha256sum of {} failed",
+        path.display()
+    );
     Ok(String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .next()
@@ -805,8 +870,16 @@ fn observe_problem(
         .map(|d| d.id.clone())
         .context("the ISO's stick is not the live medium")?;
     ensure!(
-        probe.disks.iter().find(|d| d.id == fat_id).is_some_and(|d| d.removable)
-            && probe.disks.iter().find(|d| d.id == live_id).is_some_and(|d| d.removable),
+        probe
+            .disks
+            .iter()
+            .find(|d| d.id == fat_id)
+            .is_some_and(|d| d.removable)
+            && probe
+                .disks
+                .iter()
+                .find(|d| d.id == live_id)
+                .is_some_and(|d| d.removable),
         "the sticks are not removable disks in the probe"
     );
     let (target_head, blank_before, spare_before) = (
@@ -878,14 +951,23 @@ fn observe_problem(
         ensure!(field(&w, "result")? == "ok", "the log was not saved: {w:?}");
         Ok(w)
     })?;
-    nth_marker(vm, serial, "the saved dialog", 1, EVENT_TIMEOUT, is_event("log", "state", "saved"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the saved dialog",
+        1,
+        EVENT_TIMEOUT,
+        is_event("log", "state", "saved"),
+    )?;
     std::thread::sleep(Duration::from_secs(2));
     ctl.save_screenshot(&artifacts.join("next-problem-log-saved.png"))?;
 
     // The file is on the stick, and is what the helper kept.
     let files = stick_files(&sticks[0])?;
     ensure!(
-        files.len() == 1 && files[0].starts_with("ilex-installer-log-") && files[0].ends_with(".tar"),
+        files.len() == 1
+            && files[0].starts_with("ilex-installer-log-")
+            && files[0].ends_with(".tar"),
         "the stick holds {files:?}"
     );
     let tarball = root.join("saved-log.tar");
@@ -900,7 +982,11 @@ fn observe_problem(
         "mcopy could not read the log"
     );
     let listing = String::from_utf8_lossy(
-        &Command::new("tar").arg("-tf").arg(&tarball).output()?.stdout,
+        &Command::new("tar")
+            .arg("-tf")
+            .arg(&tarball)
+            .output()?
+            .stdout,
     )
     .into_owned();
     for member in [
@@ -913,14 +999,22 @@ fn observe_problem(
         "04-image.log",
     ] {
         ensure!(
-            listing.lines().any(|l| l == format!("ilex-installer-log/{member}")),
+            listing
+                .lines()
+                .any(|l| l == format!("ilex-installer-log/{member}")),
             "the log has no {member}: {listing}"
         );
     }
     let unpacked = root.join("saved-log");
     fs::create_dir_all(&unpacked)?;
     ensure!(
-        Command::new("tar").arg("-xf").arg(&tarball).arg("-C").arg(&unpacked).status()?.success(),
+        Command::new("tar")
+            .arg("-xf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(&unpacked)
+            .status()?
+            .success(),
         "tar could not unpack the log"
     );
     let grep = Command::new("grep")
@@ -932,7 +1026,8 @@ fn observe_problem(
         "the saved log holds the password: {}",
         String::from_utf8_lossy(&grep.stdout)
     );
-    let saved_state: State = serde_json::from_slice(&fs::read(unpacked.join("ilex-installer-log/state.json"))?)?;
+    let saved_state: State =
+        serde_json::from_slice(&fs::read(unpacked.join("ilex-installer-log/state.json"))?)?;
     ensure!(
         matches!(saved_state.outcome, Some(Outcome::Failed { .. })),
         "the saved state is not the failure: {saved_state:?}"
@@ -965,7 +1060,14 @@ fn observe_problem(
     )?;
     wait_page(vm, &ctl, artifacts, "problem-review-again")?;
     confirm_erase(vm, &ctl, serial, artifacts, "problem-again")?;
-    nth_marker(vm, serial, "the problem page again", 2, Duration::from_secs(900), is_page("problem"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the problem page again",
+        2,
+        Duration::from_secs(900),
+        is_page("problem"),
+    )?;
     wait_page(vm, &ctl, artifacts, "problem-problem-again")?;
     ctl.save_screenshot(&artifacts.join("next-problem-again.png"))?;
 
@@ -1018,4 +1120,3 @@ fn observe_problem(
     no_password(vm, serial)?;
     Ok(())
 }
-
