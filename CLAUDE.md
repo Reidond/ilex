@@ -3232,7 +3232,17 @@ the Windows paths of this change: no Windows host was available.
     there. `iso::next_fallback` (its fault credential makes the shared script
     fail before it reads the edition's file) and the serial-fault trials (the
     serial mirror is the interface's shared `serial.rs`) are not repeated for
-    KDE.
+    KDE. **KWin's own keys.** `iso::next_kde_restart` also sends Alt+F4,
+    Meta+PgDown, Ctrl+Alt+Esc, Alt+F3, Alt+Tab and Meta from QMP and requires,
+    after each, KWin's window list to be exactly what it was (one fullscreen,
+    active, unminimized installer window, one virtual desktop; the list now also
+    carries `active=`, `minimized=`, `desktops=` and `current=`), the page on the
+    screen, the installer user's processes (the probe's own `busctl` left out)
+    and the session's restart count unchanged and no new page marker: with
+    `kglobalacceld` not running and `--no-global-shortcuts`, none of them does
+    anything (`next-kde-restart-keys.txt`, one screenshot per key), so nothing
+    needed disabling. The KDE ISO also boots enforcing with zero denials: every
+    `iso::next_kde_*` trial ends with the same `selinux::check` as GNOME's.
 - **SELinux: the live ISO boots enforcing, with labels.** `getenforce` says
   `Enforcing`, PID 1 is `init_t`, the policy is Fedora's `targeted` (the
   image's own `/etc/selinux/config`) and the kernel command line has no
