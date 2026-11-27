@@ -2955,8 +2955,9 @@ installer above is unchanged and stays the released one: `installer/next` is
 excluded from its fingerprint (`ilexctl iso --due`).
 
 ```sh
-ilexctl iso --next [--edition gnome] [--output-dir D]  # <state dir>/iso-next/ilex-installer-gnome.iso
-ilexctl test iso::next                                  # boots it: Secure Boot, both boot entries, fallback, restarts, serial faults
+ilexctl iso --next [--edition gnome|kde] [--output-dir D]  # <state dir>/iso-next/ilex-installer-<edition>.iso
+ilexctl test iso::next                                  # boots the GNOME edition's: Secure Boot, both boot entries, fallback, restarts, serial faults
+ilexctl test iso::next_kde                              # boots the KDE edition's: both boot entries, KWin's session, restarts
 ```
 
 **Linux only for now.** From native Windows, `ilexctl iso --next` and
@@ -2969,13 +2970,20 @@ ISO. Run these two on a Linux host (or in the builder's shell). Nobody has run
 the Windows paths of this change: no Windows host was available.
 
 - **Editions.** One ISO per edition, as Fedora ships Silverblue (GNOME) and
-  Kinoite (KDE). The identifier (`gnome`) names the image stage, the files
-  below `installer/next/editions/<id>/` (package lists, the session script and
-  other overlay files) and the ISO. What a person reads as its name is the
+  Kinoite (KDE). The identifier (`gnome`, `kde`) names the image stage, the files
+  below `installer/next/editions/<id>/` (package lists, the interface's cargo
+  feature, the image setup step and the overlay with the edition's part of the
+  session) and the ISO. What a person reads as its name is the
   `display-name` in `installer/next/editions.toml`, the only place it lives;
   the build writes it into the image as `/usr/share/ilex-installer/edition.json`.
   The owner chose **ilex Glabra** for the GNOME edition (identifier `gnome`) and
-  **ilex Kingiana** for the future KDE edition (identifier `kde`), both holly species.
+  **ilex Kingiana** for the KDE edition (identifier `kde`), both holly species.
+  Everything below the interface is shared, and the edition's directory holds
+  only what differs: `build-packages.txt` (what compiles its interface, builder
+  stage only), `packages.txt`, `interface-feature` (the `ilex-installer` cargo
+  feature, `gui` or `kde`), `image-setup` (a shell step run once its files are in
+  place: GNOME's `dconf update`, nothing for KDE) and `rootfs/`, which carries
+  `usr/libexec/ilex-installer/edition-session` (see Session).
 - **Build.** `installer/next/Containerfile` is `fedora-bootc:45`, the shared
   live-boot packages (`packages.txt`: dracut's `dmsquash-live`, and what
   image-builder's `generic-iso` needs inside the container) and the edition's,
@@ -2983,18 +2991,24 @@ the Windows paths of this change: no Windows host was available.
   Vulkan removals as the Anaconda installer's image (in the install layer,
   ended by `rpm --verifydb`: removing in a later layer left rpm's database
   corrupt on one build host). `rootfs/` and the
-  edition's `rootfs/` are copied over it (ordinary `COPY`), then the initramfs
+  edition's `rootfs/` are copied over it (ordinary `COPY`; the edition's
+  `image-setup` runs after them), then the initramfs
   is rebuilt generic with `dmsquash-live`. The same `image-builder … generic-iso`
   path as the Anaconda ISO builds it (`localhost/ilex-installer-next:<slug>.<edition>`
   is the image; the helper container, osbuild cache and 2 GiB check are shared).
   `bootloader-update.service` and the sleep targets are masked.
 - **Interface.** `crates/ilex-installer` is built by the Containerfile's builder
   stage with kache, exactly like the OS image's crates (the pinned kache
-  release must be bumped in both Containerfiles). Its GTK 4 + libadwaita
+  release must be bumped in both Containerfiles), with the edition's
+  `interface-feature`. Its GTK 4 + libadwaita
   interface (relm4) sits behind the `gui` cargo feature, off by default, so
   `cargo clippy --workspace` needs no `gtk4-devel`: lint it with
   `cargo clippy -p ilex-installer --features gui --all-targets` where
-  `gtk4-devel` and `libadwaita-devel` are installed. `ilex-installer
+  `gtk4-devel` and `libadwaita-devel` are installed. The KDE edition's Qt Quick +
+  Kirigami interface is behind the `kde` feature, off by default for the same
+  reason (`cargo clippy -p ilex-installer --features kde --all-targets` needs
+  `qt6-qtbase-devel`, `qt6-qtdeclarative-devel` and a C++ compiler); the image
+  carries one of the two, and the edition record says which starts. `ilex-installer
   --self-check` needs no display: it runs the flow's rules on the simulation's
   fixtures, reads the edition record and the image's keyboard catalogue and
   fails when the live image is incomplete; the session unit runs it first.
@@ -3002,11 +3016,13 @@ the Windows paths of this change: no Windows host was available.
   unprivileged `ilex-installer` user (sysusers.d, PAM service `ilex-installer`
   on tty1), so GNOME Kiosk (mutter) gets seat0's DRM and input devices without
   root. The PAM service admits only that user and requires `pam_systemd`: a
-  session without logind would half-work, so its start must fail. The edition's
-  `session` script runs `ilex-installer --self-check`, removes any Wayland
+  session without logind would half-work, so its start must fail. The `session`
+  script, shared by the editions (the edition's own part is its sourced
+  `edition-session`: the compositor's name, the toolkit's environment and how
+  the compositor and the interface start), runs `ilex-installer --self-check`, removes any Wayland
   socket left by an earlier attempt (logind keeps the runtime directory for a
   few seconds, so a compositor that died leaves `wayland-0` behind), starts
-  `gnome-kiosk`, waits until the socket has a listener (`ss -xl`, not merely a
+  the compositor (`gnome-kiosk`; `kwin_wayland` for the KDE edition), waits until the socket has a listener (`ss -xl`, not merely a
   file; up to a minute), then starts `ilex-installer` as its only window.
   Nothing may end the session: whichever process ends, with any status (a window
   closed by the compositor exits 0), the script stops the other and exits
@@ -3100,11 +3116,105 @@ the Windows paths of this change: no Windows host was available.
   nothing to the session and stay as fedora-bootc ships them.
 - **Boot entries.** "Install ilex" and "Install ilex (basic graphics)"
   (`nomodeset`); the second makes the session set `GSK_RENDERER=cairo` and
-  `LIBGL_ALWAYS_SOFTWARE=1`. Both carry `rd.lvm=0 rd.md=0 rd.luks=0 rd.dm=0` (also
+  `LIBGL_ALWAYS_SOFTWARE=1` (GNOME) or `QT_QUICK_BACKEND=software` and
+  `LIBGL_ALWAYS_SOFTWARE=1` (KDE, below). Both carry `rd.lvm=0 rd.md=0 rd.luks=0 rd.dm=0` (also
   baked into the initramfs): the live system activates no LVM volume group,
   assembles no MD array, opens no LUKS volume and sets up no DM RAID set, so a
   disk with an old installation is offered. The ISO's volume label is
   `ilex-installer-<edition>`.
+- **The KDE edition (ilex Kingiana).** `ilexctl iso --next --edition kde` builds
+  `ilex-installer-kde.iso` through the same image-builder path, from the
+  edition's own stage (`installer/next/editions/kde/`). Everything below the
+  compositor is shared with the GNOME edition and nothing of `rootfs/` is
+  copied: the session unit, the PAM service, the polkit rule, the user, the
+  tty2 shell, the fallback, the helper and answers units and the `session`
+  script. The KDE edition adds three lists, its part of the session
+  (`edition-session`) and the Qt interface.
+  - **Packages** (`packages.txt`, no weak dependencies): `kwin` (Fedora 45's
+    KWin is the Wayland one; `kwin-x11` is the other package), `qt6-qtwayland`,
+    `qt6-qtdeclarative`, `kf6-kirigami`, `qqc2-breeze-style`,
+    `breeze-icon-theme`, `breeze-cursor-theme`, `xkeyboard-config`,
+    `mesa-dri-drivers`, `libglvnd-gles`, `hwdata` and the default fonts.
+    `kwin` pulls its KDE Frameworks, `kscreenlocker`, `kglobalacceld`,
+    `libplasma` and Xwayland as dependencies; none of them is started. No Plasma
+    shell or session, no Plasma platform theme (`plasma-integration`), no portal.
+    KWin loads `libGLESv2.so.2` at run time and no package requires it: without
+    `libglvnd-gles`, `kwin_wayland` aborts (SIGABRT, status 134) right after it
+    has chosen its DRM backend, and the session fails three times into the
+    fallback. `kwin_wayland` carries the file capability `cap_sys_nice=ep`: a
+    container without `CAP_SYS_NICE` cannot execute it.
+  - **Session.** `edition-session` starts `kwin_wayland --socket wayland-0
+    --no-lockscreen --no-global-shortcuts` (no screen locker and no global
+    shortcut daemon, which are Plasma's; no `--xwayland`; no application
+    argument: the shared script starts the client once the socket listens, as for
+    GNOME), then `ilex-installer` with `QT_QPA_PLATFORM=wayland`, and
+    `XCURSOR_THEME=breeze_cursors` for KWin's cursor. The basic graphics entry
+    adds `QT_QUICK_BACKEND=software` and `LIBGL_ALWAYS_SOFTWARE=1`; KWin needs
+    nothing else on simpledrm (it composes the page and the Qt client reports
+    `renderer=software`). KWin switches VT itself: Ctrl+Alt+F2 reaches the tty2
+    shell and Ctrl+Alt+F1 returns, under the same polkit rule as GNOME's
+    (`org.freedesktop.login1.chvt` is the only action authorized). KWin owns
+    `org.kde.keyboard` (`/Layouts`) on the session bus, which is what the layout
+    switch of a later page talks to (there is no `org.gnome.Kiosk.InputSources`).
+  - **The interface.** `ilex-installer --features kde` (the `interface-feature` of
+    the edition): `src/kde/` (cxx-qt `Installer` QObject with the edition record's
+    names, the flow, and the two calls that print the markers) and `qml/Main.qml`
+    (`Kirigami.ApplicationWindow` with one page and a
+    `Kirigami.PlaceholderMessage`: "Welcome to ilex Kingiana", from the edition
+    record). The style is `org.kde.breeze` (qqc2-breeze-style, set with
+    `QQuickStyle` unless `QT_QUICK_CONTROLS_STYLE` says otherwise) and the icon
+    theme `breeze`, since the image has no KDE platform theme. The window is
+    fullscreen, refuses a close request (`--windowed`, for development, closes
+    normally) and, on its first frame, prints the page marker through the flow
+    (`ILEX-INSTALLER page=welcome edition=kde language=… keyboard=…
+    renderer=opengl|software scale=1 window=WxH screen=WxH uptime=…`: the same
+    words as GNOME's, plus the two sizes), then `ILEX-INSTALLER-STATS` fifteen
+    seconds later. `ILEX-INSTALLER-SESSION compositor=kwin …` names the
+    compositor. Qt exits with status 255 when its display dies (GTK exits 1). The
+    flow's pages are not rendered yet; the KDE edition's next change drives them.
+    The Rust side is cxx-qt 0.10.0 with `cxx` 1.0.205, pinned (`=`) in
+    `crates/ilex-installer/Cargo.toml`: Fedora 45 does not package cxx-qt, so
+    the builder stage compiles it from crates.io against Fedora's Qt 6 devel
+    packages (`qt6-qtbase-devel`, `qt6-qtdeclarative-devel`, `gcc-c++`), and
+    `cxx-qt-build` warns that GNU ld.bfd "will likely fail" without mold, lld or
+    gold: the link works with ld.bfd here. The C++ it generates is not cached by
+    kache (only rustc is).
+  - **Fingerprints.** The root images' key and content fingerprint do not
+    include `ilex-installer` or any of its dependencies (the closure of the
+    declared packages is `ilexctl`, `drupe` and `ilex-enroll`; the declaration
+    and the guards are unchanged). The 28 new packages of `Cargo.lock` (+300
+    lines: cxx, cxx-qt and its generators, `qt-build-utils`, `clang-format`,
+    `codespan-reporting`, a second `thiserror`) do change it, because
+    `Cargo.lock` is hashed whole: every root and the Anaconda ISO are due once
+    when this lands, as when `ilex-installer` was added. `installer/next` itself
+    stays out of both.
+  - **Trials.** `iso::next_kde_boot`, `iso::next_kde_basic_graphics` and
+    `iso::next_kde_restart` are registered only when a filter names
+    `iso::next_kde`, boot `ILEX_ISO_NEXT_KDE=<path>` (built by `ilexctl test`
+    when unset) and never build or boot the GNOME ISO; a plain `iso::next` run
+    builds and boots only the GNOME one. They assert what the GNOME trials
+    assert of the boot (Secure Boot on KVM, the markers, a settled frame of the
+    light page, memory and timing in `next-kde-<entry>.json`, the VT round
+    trips, the polkit surface in `next-kde-surface.txt`, a crashed compositor or
+    client restarting) with Qt's renderer words, and for KWin's session: the
+    page marker's window and screen sizes are equal and the screenshot reaches
+    all four corners and the middle of each edge; the processes of the
+    installer's user are `kwin_wayland`, `ilex-installer` and the user manager,
+    with none of Plasma's shell, daemons or portals, and no Xwayland; the peers
+    of KWin's accepted connections on the socket are exactly one process,
+    `ilex-installer` (found by socket inode in every process's descriptors:
+    `ss -p` cannot name the client, which is not dumpable); every name on the
+    session bus belongs to KWin, the installer or the user manager; and KWin's
+    own window list, read by a KWin script that reports through a D-Bus call
+    `busctl monitor` captures (a script's console output is kept nowhere), is one
+    window of class `org.ilex.Installer`, fullscreen, as large as the one output.
+    All of it is written to `next-kde-session.txt`. The close request comes from
+    that kind of script too: KWin's own close shortcut belongs to
+    `kglobalacceld`, which this session does not run, so Alt+F4 would do nothing
+    there. `iso::next_fallback` (its fault credential makes the shared script
+    fail before it reads the edition's file) and the serial-fault trials (the
+    serial mirror is the interface's shared `serial.rs`) are not repeated for
+    KDE.
 - **SELinux: the live ISO boots enforcing, with labels.** `getenforce` says
   `Enforcing`, PID 1 is `init_t`, the policy is Fedora's `targeted` (the
   image's own `/etc/selinux/config`) and the kernel command line has no
@@ -3241,7 +3351,8 @@ the Windows paths of this change: no Windows host was available.
   `iso::next_detect_generic`, `iso::next_kernel_argument`,
   `iso::next_kernel_argument_unknown` and `iso::next_account` are registered
   only when a filter names
-  `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO);
+  `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO;
+  the KDE edition's `iso::next_kde…` only when a filter names that, see above);
   `iso::next_helper_loop` and `iso::next_unattended_loop` only when a filter
   names `next_helper_loop` or `next_unattended_loop` (they need `mke2fs`,
   `sfdisk` and a second copy of the ISO on the host, which no other trial
@@ -3384,11 +3495,15 @@ the Windows paths of this change: no Windows host was available.
   neither `iso_next` nor `v1_disk`). The workflow has no `pull_request` trigger,
   and the job additionally requires `workflow_dispatch`, has `contents: read`
   and reads no secret, so PRs and forks reach neither it nor the key. It builds
-  the ISO in the same privileged Fedora 45 container as the `iso` job, keeps it
-  as the `installer-next-iso` artifact, boots it with Secure Boot (the `iso::next`
+  the GNOME edition's ISO in the same privileged Fedora 45 container as the `iso`
+  job, then the KDE edition's (an output directory each), keeps them as the
+  `installer-next-iso` and `installer-next-kde-iso` artifacts, boots the first
+  with Secure Boot (the `iso::next`
   trials, with the same provisioning-only requirement as locally:
-  a runner without KVM SMM fails them) and keeps `installer-next-evidence`.
-  Nothing releases or publishes it. Runs without `iso_next` are unchanged.
+  a runner without KVM SMM fails them) and then the second (`iso::next_kde`; it
+  runs even when the first step failed) and keeps `installer-next-evidence`. The job's
+  limit is 150 minutes. Nothing releases or publishes either. Runs without
+  `iso_next` are unchanged.
 - **Fingerprints.** The root image's fingerprint (the early `ilex.root-inputs`
   key and the content fingerprint, `ilex_tooling_linux::fingerprint`) hashes
   the crates in the dependency closure of the packages the root image builds,
@@ -3418,7 +3533,8 @@ the Windows paths of this change: no Windows host was available.
   root's key. A crate added in a dirty working tree (not at HEAD yet) is covered
   by the dirty entries. **`Cargo.toml` and `Cargo.lock` stay hashed whole**:
   any dependency change in any workspace crate (adding `ilex-installer` added
-  708 lines, a GTK bump would again) edits `Cargo.lock` and therefore changes
+  708 lines, the KDE edition's cxx-qt 300 more, a GTK bump would again) edits
+  `Cargo.lock` and therefore changes
   every root's fingerprint once, although the shipped binaries are unchanged.
   The Anaconda ISO fingerprint (`INSTALLER_INPUTS` in `xtask/src/iso.rs`) also
   hashes `Cargo.lock`, `Cargo.toml` and `crates/xtask/src/iso.rs`, so those
@@ -4915,8 +5031,9 @@ installed disk boots alone and every `installer::install` assertion holds.
 
 `crates/ilex-installer-flow` is the installer's flow, shared by every interface;
 `crates/ilex-installer` is the GNOME edition's GTK 4 + libadwaita (relm4)
-application over it. The KDE edition's Kirigami interface (Qt Quick through
-cxx-qt, a later change) drives the same flow crate: nothing in it knows a
+application over it (the `gui` feature) and holds the KDE edition's Qt Quick +
+Kirigami one (the `kde` feature, today one placeholder page; see "The KDE
+edition" above). Both drive the same flow crate: nothing in it knows a
 toolkit, a compositor or a thread. This version installs a whole disk, encrypted
 unless the person turns that off: the welcome, machine, disk, encryption and
 administrator pages, the review with its confirmation, the installing page and
