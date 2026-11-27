@@ -391,6 +391,10 @@ impl Flow {
             Some(Outcome::Success) => {
                 self.say(markers::outcome(&Outcome::Success));
                 self.inst.phase = Phase::Succeeded;
+                // Nothing needs the password again (Try again is for a failure):
+                // it is wiped now, not when the process ends.
+                self.password = Secret::default();
+                self.confirmation = Secret::default();
                 self.go(PageId::Done)
             }
             Some(failed @ Outcome::Failed { .. }) => {

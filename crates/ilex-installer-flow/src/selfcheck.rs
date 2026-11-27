@@ -1683,6 +1683,10 @@ fn installation() -> Result<()> {
         "the installation did not end on the done page after seeing its stages ({seen:?}, page {:?})",
         flow.page()
     );
+    ensure!(
+        flow.password().is_empty() && flow.confirmation().is_empty(),
+        "the password is still held after the installation succeeded"
+    );
     let done = flow.done_view().context("no done view")?;
     ensure!(
         done.heading == "ilex Glabra is installed"
