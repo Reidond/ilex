@@ -61,6 +61,7 @@ use super::{
     field, is_marker, iso_path, trial, wait_firmware_output, wait_page, words,
 };
 use crate::common;
+use crate::selinux;
 use crate::installer::apply::{
     ADMIN, Expected, PASSWORD, busctl, check_installed, document, gdm_screenshot, refusal, ssh,
 };
@@ -702,6 +703,9 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<Strin
         state.outcome
     );
     no_password(vm, serial)?;
+    // Enforcing and not one denial through the whole installation, asked before
+    // the machine goes down.
+    selinux::check(vm, artifacts, "next-keyboard-install")?;
     // The done page's Restart has the focus; Tab reaches Power off. The
     // machine going down is the proof (a Restart would leave QEMU running): its
     // last serial lines may not reach the log before the VM is gone.
@@ -982,6 +986,7 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path, target: &Path)
         "the helper's record after the restarts: {state:?}"
     );
     no_password(vm, serial)?;
+    selinux::check(vm, artifacts, "next-reattach")?;
     Ok(())
 }
 
@@ -1355,5 +1360,6 @@ fn observe_problem(
         "the helper's successor did not record the stop: {recorded:?}"
     );
     no_password(vm, serial)?;
+    selinux::check(vm, artifacts, "next-problem")?;
     Ok(())
 }
