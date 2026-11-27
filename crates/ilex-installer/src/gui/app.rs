@@ -1,5 +1,5 @@
 //! The application: an `AdwNavigationView` with the welcome, machine, disk,
-//! encryption, account, review, installing, done and problem pages, each drawn from the
+//! account, review, installing, done and problem pages, each drawn from the
 //! flow's state. The flow decides which
 //! page is next and whether Continue works; this file turns its state into
 //! widgets and the person's input into flow calls. Nothing here talks to the
@@ -10,26 +10,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ilex_installer_flow::Message;
 use ilex_installer_flow::backend::Backend;
-use ilex_installer_flow::flow::{Flow, KeyboardStatus, LogSave, PageId, ProbeState, Step};
+use ilex_installer_flow::events::Event;
+pub use ilex_installer_flow::events::Observed;
+use ilex_installer_flow::flow::{Flow, PageId, Step};
+use ilex_installer_flow::messages;
 use ilex_installer_flow::keyboard::SessionKeyboard;
-use ilex_installer_flow::language::{self, LANGUAGES};
-use ilex_installer_flow::machine::{MachineView, Severity};
-use ilex_installer_flow::messages::{self, ClientError};
+use ilex_installer_flow::runner::{Answer, Services};
 use ilex_installer_flow::secret::Secret;
-use ilex_installer_model::finish::Saved;
-use ilex_installer_model::plan::Plan;
-use ilex_installer_model::probe::Probe;
-use ilex_installer_model::state::State;
+use ilex_installer_flow::view::{self, View};
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::glib::translate::ToGlibPtr;
 use relm4::gtk::{self, glib};
 use relm4::prelude::*;
 
 use super::install::{
-    DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, RecoveryPage, ReviewPage,
-    confirmation,
+    DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, ReviewPage, confirmation,
 };
 use crate::serial;
 
@@ -56,144 +52,28 @@ pub struct Init {
     pub poll_ms: Option<u64>,
 }
 
-/// What the application is showing, in the flow's words.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Observed {
-    pub page: PageId,
-    /// `Flow::check_word`: `not-run`, `running`, `ok`, `no-disk`, `failed`.
-    pub check: &'static str,
-    pub probe_pending: bool,
-    pub keyboard_switching: bool,
-    /// The first question to the helper (where an installation is) has not
-    /// been answered.
-    pub attaching: bool,
-    /// The dialog the flow says is open: `confirm`, `log` or `` for none.
-    pub dialog: &'static str,
-}
-
-impl Observed {
-    /// Nothing is under way: no probe, no check, no layout switch.
-    pub fn settled(&self) -> bool {
-        self.check != "running"
-            && !self.probe_pending
-            && !self.keyboard_switching
-            && !self.attaching
-    }
-}
-
 pub struct App {
     flow: Flow,
-    backend: Arc<dyn Backend>,
-    keyboard: Arc<dyn SessionKeyboard + Send + Sync>,
+    services: Services,
     stats: bool,
     observer: Option<Arc<Mutex<Observed>>>,
-    poll_ms: Option<u64>,
     mapped: bool,
 }
 
-/// Secrets travel as `Secret`s: their `Debug` is redacted, so this derived
-/// `Debug` prints nothing of a password, and they are wiped when dropped.
+/// What the application is told: an input in the flow's own vocabulary
+/// (`ilex_installer_flow::events::Event`: the flow decides what it means), the
+/// window being on screen, or (the renderer only) a request to say when
+/// everything sent before it has been handled. Secrets travel as `Secret`s:
+/// their `Debug` is redacted, so this derived `Debug` prints nothing of a
+/// password, and they are wiped when dropped.
 #[derive(Debug)]
 pub enum Msg {
-    /// Ask the helper about this computer (again).
-    Probe,
-    Language(u32),
-    Layout(u32),
-    /// Try the layout again after the compositor did not take it.
-    RetryLayout,
-    TryText(Secret),
-    Machine(String),
-    Name(String),
-    Password(Secret),
-    Confirmation(Secret),
-    /// The encryption switch.
-    Encrypt(bool),
-    /// The security chip's switch.
-    Chip(bool),
-    /// What is typed in the recovery page's field: the whole key.
-    RecoveryKey(Secret),
-    /// The recovery page's Confirm.
-    ConfirmRecovery,
-    /// The recovery page's "Continue without a recovery key".
-    ContinueWithoutKey,
-    Passphrase(Secret),
-    PassphraseConfirmation(Secret),
-    Continue,
-    /// A disk row was chosen.
-    Disk(String),
-    /// The review page's Try again: look again, then check the choices.
-    Retry,
-    /// The review page's destructive button.
-    Install,
-    /// The erase dialog's answer.
-    Confirmed(bool),
-    /// The problem page's Try again.
-    RetryInstall,
-    Restart,
-    PowerOff,
-    /// The log dialog: look for sticks, write to one, close.
-    ChooseLog,
-    SaveLog(String),
-    CloseLog,
-    /// The navigation view now shows this page (the person went back).
-    Visible(PageId),
+    Event(Event),
     /// The window is on screen.
     Mapped,
-    /// Show a page directly (the renderer only).
-    Jump(PageId),
-    /// The session has settled: report memory.
-    Stats,
     /// Everything sent before this has been handled when the flag is set
     /// (the renderer only).
     Ping(Arc<AtomicBool>),
-}
-
-#[derive(Debug)]
-pub enum Cmd {
-    Probed {
-        generation: u64,
-        result: Result<Probe, ClientError>,
-    },
-    Planned {
-        generation: u64,
-        result: Result<Plan, ClientError>,
-    },
-    Switched {
-        generation: u64,
-        layout: String,
-        result: Result<(), String>,
-    },
-    Applied {
-        generation: u64,
-        result: Result<State, ClientError>,
-    },
-    Stated {
-        generation: u64,
-        result: Result<State, ClientError>,
-    },
-    LogProbed {
-        generation: u64,
-        result: Result<Probe, ClientError>,
-    },
-    /// The helper answered `TakeRecoveryKey`: the key is a `Secret`.
-    KeyTaken {
-        generation: u64,
-        result: Result<Secret, ClientError>,
-    },
-    /// The helper compared the key (and opened its keyslot with it).
-    KeyConfirmed {
-        generation: u64,
-        result: Result<(), ClientError>,
-    },
-    /// The helper answered `ContinueWithoutRecoveryKey`.
-    KeySkipped {
-        generation: u64,
-        result: Result<(), ClientError>,
-    },
-    Finished {
-        generation: u64,
-        result: Result<Option<Saved>, ClientError>,
-    },
 }
 
 impl App {
@@ -209,147 +89,15 @@ impl App {
     /// as a command output carrying the request's generation, and the flow
     /// ignores it if a later request replaced it.
     fn carry_out(&self, step: Step, sender: &ComponentSender<Self>) {
-        match step {
-            Step::RunProbe { generation } => {
-                let backend = Arc::clone(&self.backend);
-                sender.spawn_oneshot_command(move || Cmd::Probed {
-                    generation,
-                    result: backend.probe(),
-                });
-            }
-            Step::RunPlan {
-                generation,
-                request,
-            } => {
-                let backend = Arc::clone(&self.backend);
-                sender.spawn_oneshot_command(move || Cmd::Planned {
-                    generation,
-                    result: backend.plan(&request),
-                });
-            }
-            Step::SwitchKeyboard { generation, layout } => {
-                // The session types in the new layout from now on; the call
-                // blocks on D-Bus. The flow keeps one switch outstanding, so
-                // the compositor ends on the last layout asked for.
-                let keyboard = Arc::clone(&self.keyboard);
-                sender.spawn_oneshot_command(move || Cmd::Switched {
-                    generation,
-                    layout: layout.id.clone(),
-                    result: keyboard.switch(&layout).map_err(|e| format!("{e:#}")),
-                });
-            }
-            Step::RunApply {
-                generation,
-                plan,
-                erase_disk,
-                password,
-                passphrase,
-            } => {
-                let backend = Arc::clone(&self.backend);
-                sender.spawn_oneshot_command(move || Cmd::Applied {
-                    generation,
-                    result: backend.start_installation(
-                        &plan,
-                        &erase_disk,
-                        &password,
-                        passphrase.as_ref(),
-                    ),
-                });
-            }
-            Step::RunState {
-                generation,
-                delay_ms,
-            } => {
-                let backend = Arc::clone(&self.backend);
-                let delay = self.poll_ms.map_or(delay_ms, |fast| delay_ms.min(fast));
-                sender.spawn_oneshot_command(move || {
-                    if delay > 0 {
-                        std::thread::sleep(Duration::from_millis(delay));
-                    }
-                    Cmd::Stated {
-                        generation,
-                        result: backend.state(),
-                    }
-                });
-            }
-            Step::RunTakeKey { generation, plan } => {
-                let backend = Arc::clone(&self.backend);
-                sender.spawn_oneshot_command(move || Cmd::KeyTaken {
-                    generation,
-                    result: backend.take_recovery_key(&plan),
-                });
-            }
-            Step::RunAcknowledge {
-                generation,
-                plan,
-                answer,
-            } => {
-                let backend = Arc::clone(&self.backend);
-                sender.spawn_oneshot_command(move || Cmd::KeyConfirmed {
-                    generation,
-                    result: backend.acknowledge_recovery_key(&plan, &answer),
-                });
-            }
-            Step::RunContinueWithout { generation, plan } => {
-                let backend = Arc::clone(&self.backend);
-                sender.spawn_oneshot_command(move || Cmd::KeySkipped {
-                    generation,
-                    result: backend.continue_without_recovery_key(&plan),
-                });
-            }
-            Step::RunLogProbe { generation } => {
-                let backend = Arc::clone(&self.backend);
-                sender.spawn_oneshot_command(move || Cmd::LogProbed {
-                    generation,
-                    result: backend.probe(),
-                });
-            }
-            Step::RunFinish { generation, action } => {
-                let backend = Arc::clone(&self.backend);
-                sender.spawn_oneshot_command(move || Cmd::Finished {
-                    generation,
-                    result: backend.finish(&action),
-                });
-            }
-            // The widgets follow the flow's page and its dialog.
-            Step::Goto(_) | Step::Confirm(_) | Step::Stay => {}
+        if let Some(job) = self.services.job(step) {
+            sender.spawn_oneshot_command(job);
         }
     }
 
     /// Tell the renderer what is shown.
     fn observe(&self) {
         if let Some(observer) = &self.observer {
-            let now = Observed {
-                page: self.flow.page(),
-                // On the recovery page the word is the key's: shown (`key`),
-                // being fetched (`taking`) or not to be shown again (`gone`).
-                check: if self.flow.page() == PageId::Recovery {
-                    match self.flow.recovery_view() {
-                        Some(view) if view.groups.is_some() => "key",
-                        Some(view)
-                            if view.no_key.as_ref().is_some_and(|m| {
-                                m.title == ilex_installer_flow::recovery::WAITING_KEY
-                            }) =>
-                        {
-                            "taking"
-                        }
-                        _ => "gone",
-                    }
-                } else {
-                    self.flow.check_word()
-                },
-                probe_pending: self.flow.is_probing(),
-                keyboard_switching: self.flow.keyboard_status() == KeyboardStatus::Switching,
-                attaching: self.flow.is_attaching(),
-                dialog: if self.flow.confirm_dialog().is_some() {
-                    "confirm"
-                } else if *self.flow.log_state() != LogSave::Closed {
-                    "log"
-                } else {
-                    ""
-                },
-            };
-            *observer.lock().unwrap_or_else(|e| e.into_inner()) = now;
+            *observer.lock().unwrap_or_else(|e| e.into_inner()) = self.flow.observed();
         }
     }
 }
@@ -358,7 +106,7 @@ impl Component for App {
     type Init = Init;
     type Input = Msg;
     type Output = ();
-    type CommandOutput = Cmd;
+    type CommandOutput = Answer;
     type Root = adw::ApplicationWindow;
     type Widgets = Widgets;
 
@@ -385,11 +133,13 @@ impl Component for App {
         root.connect_map(move |_| mapped.emit(Msg::Mapped));
         let mut model = App {
             flow,
-            backend: init.backend,
-            keyboard: init.keyboard,
+            services: Services {
+                backend: init.backend,
+                keyboard: init.keyboard,
+                poll_ms: init.poll_ms,
+            },
             stats: init.stats,
             observer: init.observer,
-            poll_ms: init.poll_ms,
             mapped: false,
         };
         // Where an installation is comes first: an interface that restarted
@@ -404,8 +154,8 @@ impl Component for App {
 
     fn update(&mut self, message: Msg, sender: ComponentSender<Self>, root: &Self::Root) {
         match message {
-            Msg::Probe => {
-                let step = self.flow.start_probe();
+            Msg::Event(event) => {
+                let step = self.flow.handle(event);
                 self.carry_out(step, &sender);
             }
             Msg::Mapped => {
@@ -423,177 +173,21 @@ impl Component for App {
                     ));
                     if self.stats {
                         let input = sender.input_sender().clone();
-                        glib::timeout_add_local_once(STATS_DELAY, move || input.emit(Msg::Stats));
+                        glib::timeout_add_local_once(STATS_DELAY, move || {
+                            input.emit(Msg::Event(Event::Stats))
+                        });
                     }
                 }
             }
-            Msg::Language(index) => {
-                if let Some(language) = LANGUAGES.get(index as usize) {
-                    self.flow.set_language(language.locale);
-                }
-            }
-            Msg::Layout(index) => {
-                let id = self
-                    .flow
-                    .layouts()
-                    .all()
-                    .get(index as usize)
-                    .map(|l| l.id.clone());
-                if let Some(id) = id
-                    && self.flow.keyboard() != id
-                {
-                    let step = self.flow.set_keyboard(&id);
-                    self.carry_out(step, &sender);
-                }
-            }
-            Msg::RetryLayout => {
-                let step = self.flow.retry_keyboard();
-                self.carry_out(step, &sender);
-            }
-            Msg::TryText(text) => self.flow.try_text(&text),
-            Msg::Machine(tag) => {
-                self.flow.select_machine(&tag);
-            }
-            Msg::Name(text) => {
-                self.flow.set_administrator(&text);
-            }
-            Msg::Password(secret) => {
-                self.flow.set_password(secret);
-            }
-            Msg::Confirmation(secret) => {
-                self.flow.set_confirmation(secret);
-            }
-            Msg::Encrypt(on) => {
-                self.flow.set_encrypt(on);
-            }
-            Msg::Chip(on) => {
-                self.flow.set_chip(on);
-            }
-            Msg::RecoveryKey(secret) => {
-                self.flow.set_recovery_key(secret);
-            }
-            Msg::ConfirmRecovery => {
-                let step = self.flow.confirm_recovery();
-                self.carry_out(step, &sender);
-            }
-            Msg::ContinueWithoutKey => {
-                let step = self.flow.continue_without_recovery_key();
-                self.carry_out(step, &sender);
-            }
-            Msg::Passphrase(secret) => {
-                self.flow.set_passphrase(secret);
-            }
-            Msg::PassphraseConfirmation(secret) => {
-                self.flow.set_passphrase_confirmation(secret);
-            }
-            Msg::Continue => {
-                let step = self.flow.advance();
-                self.carry_out(step, &sender);
-            }
-            Msg::Disk(id) => {
-                self.flow.set_disk(&id);
-            }
-            Msg::Retry => {
-                let step = self.flow.retry();
-                self.carry_out(step, &sender);
-            }
-            Msg::Install => {
-                let step = self.flow.install();
-                self.carry_out(step, &sender);
-            }
-            Msg::Confirmed(yes) => {
-                if yes {
-                    let step = self.flow.confirm_install();
-                    self.carry_out(step, &sender);
-                } else {
-                    self.flow.cancel_install();
-                }
-            }
-            Msg::RetryInstall => {
-                let step = self.flow.retry_install();
-                self.carry_out(step, &sender);
-            }
-            Msg::Restart => {
-                let step = self.flow.restart();
-                self.carry_out(step, &sender);
-            }
-            Msg::PowerOff => {
-                let step = self.flow.power_off();
-                self.carry_out(step, &sender);
-            }
-            Msg::ChooseLog => {
-                let step = self.flow.choose_log_device();
-                self.carry_out(step, &sender);
-            }
-            Msg::SaveLog(device) => {
-                let step = self.flow.save_log(&device);
-                self.carry_out(step, &sender);
-            }
-            Msg::CloseLog => self.flow.close_log(),
-            Msg::Visible(page) => {
-                // The view popped to `page` (Back, Escape): the flow steps
-                // back to it, and refuses while the helper is asked (the view
-                // is pushed again then).
-                while self.flow.page() != page && self.flow.back().is_some() {}
-            }
-            Msg::Jump(page) => self.flow.show(page),
-            Msg::Stats => self.flow.report_stats(),
             Msg::Ping(flag) => flag.store(true, Ordering::SeqCst),
         }
         self.print_markers();
         self.observe();
     }
 
-    fn update_cmd(&mut self, message: Cmd, sender: ComponentSender<Self>, _root: &Self::Root) {
-        match message {
-            Cmd::Probed { generation, result } => {
-                let step = self.flow.probe_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::Planned { generation, result } => {
-                let step = self.flow.plan_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::Switched {
-                generation,
-                layout,
-                result,
-            } => {
-                if let Err(why) = &result {
-                    eprintln!("ilex-installer: switching the session's layout to {layout}: {why}");
-                }
-                let step = self.flow.keyboard_switched(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::Applied { generation, result } => {
-                let step = self.flow.apply_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::Stated { generation, result } => {
-                let step = self.flow.state_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::LogProbed { generation, result } => {
-                let step = self.flow.log_probe_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::KeyTaken { generation, result } => {
-                let step = self.flow.take_key_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::KeyConfirmed { generation, result } => {
-                let step = self.flow.confirm_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::KeySkipped { generation, result } => {
-                let step = self.flow.skip_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-            Cmd::Finished { generation, result } => {
-                let step = self.flow.finish_finished(generation, result);
-                self.carry_out(step, &sender);
-            }
-        }
+    fn update_cmd(&mut self, answer: Answer, sender: ComponentSender<Self>, _root: &Self::Root) {
+        let step = self.flow.answer(answer);
+        self.carry_out(step, &sender);
         self.print_markers();
         self.observe();
     }
@@ -614,11 +208,9 @@ pub struct Widgets {
     welcome: Welcome,
     machine: Machine,
     disk: DiskPage,
-    encryption: Encryption,
     account: Account,
     review: ReviewPage,
     installing: InstallingPage,
-    recovery: RecoveryPage,
     done: DonePage,
     problem: ProblemPage,
     /// The erase dialog, while the flow has one open.
@@ -650,27 +242,6 @@ struct Machine {
     button: gtk::Button,
 }
 
-struct Encryption {
-    page: adw::NavigationPage,
-    banner: adw::Banner,
-    switch: adw::SwitchRow,
-    /// Unlock with the security chip, where the computer can.
-    chip: adw::SwitchRow,
-    /// The passphrase and its confirmation, in a group that is shown while
-    /// encryption is on.
-    group: adw::PreferencesGroup,
-    passphrase: adw::PasswordEntryRow,
-    confirmation: adw::PasswordEntryRow,
-    /// Under the fields: the keyboard layout the passphrase is typed in.
-    layout: gtk::Label,
-    message: gtk::Label,
-    /// While encryption is off: what that means.
-    off: gtk::Label,
-    button: gtk::Button,
-    /// The flow's wipe count the fields were last cleared at.
-    wiped: u64,
-}
-
 struct Account {
     page: adw::NavigationPage,
     banner: adw::Banner,
@@ -682,14 +253,6 @@ struct Account {
     button: gtk::Button,
     /// The flow's wipe count the fields were last cleared at.
     wiped: u64,
-}
-
-pub(super) fn sentence(message: &Message) -> String {
-    if message.detail.is_empty() {
-        message.title.clone()
-    } else {
-        format!("{}. {}", message.title, message.detail)
-    }
 }
 
 /// A form page's body: a heading and a paragraph, then the controls, centred
@@ -821,7 +384,7 @@ impl Widgets {
     fn build(root: &adw::ApplicationWindow, flow: &Flow, sender: &ComponentSender<App>) -> Self {
         let nav = adw::NavigationView::new();
         let starting = adw::StatusPage::builder()
-            .title("Starting the installer")
+            .title(view::STARTING_PAGE)
             .child(&adw::Spinner::new())
             .build();
         let pages = gtk::Stack::new();
@@ -830,38 +393,22 @@ impl Widgets {
         root.set_content(Some(&pages));
 
         // --- welcome ---
-        let language = combo(
-            "Language",
-            &LANGUAGES.iter().map(|l| l.label()).collect::<Vec<_>>(),
-        );
-        let keyboard = combo(
-            "Keyboard layout",
-            &flow
-                .layouts()
-                .all()
-                .iter()
-                .map(|l| l.name.clone())
-                .collect::<Vec<_>>(),
-        );
+        let catalogue = flow.catalogue();
+        let language = combo(view::LANGUAGE_LABEL, &catalogue.languages);
+        let keyboard = combo(view::KEYBOARD_LABEL, &catalogue.layouts);
         let test = adw::EntryRow::builder()
-            .title("Type here to try the layout")
+            .title(view::TRY_LAYOUT_LABEL)
             .build();
         let welcome_banner = banner(None);
-        let welcome_button = continue_button("Continue");
-        let language_group = group(
-            "",
-            "The language of the installed computer. The installer itself is in English.",
-        );
+        let welcome_button = continue_button(messages::CONTINUE_LABEL);
+        let language_group = group("", view::LANGUAGE_HELP);
         language_group.add(&language);
-        let keyboard_group = group(
-            "",
-            "The layout is used here at once, and for the disk passphrase when the computer starts.",
-        );
+        let keyboard_group = group("", view::KEYBOARD_HELP);
         keyboard_group.add(&keyboard);
         keyboard_group.add(&test);
         let keyboard_message = message_label();
         keyboard_message.set_hexpand(true);
-        let keyboard_retry = gtk::Button::with_label("Try again");
+        let keyboard_retry = gtk::Button::with_label(view::TRY_AGAIN);
         keyboard_retry.add_css_class("flat");
         keyboard_retry.set_valign(gtk::Align::Center);
         keyboard_retry.set_visible(false);
@@ -870,8 +417,8 @@ impl Widgets {
         keyboard_line.append(&keyboard_retry);
         keyboard_line.set_visible(false);
         let welcome_form = form(
-            "Welcome to ilex",
-            "This installs ilex on this computer. Nothing is changed until you confirm it on the last page.",
+            view::WELCOME_HEADING,
+            view::WELCOME_INTRO,
             &[
                 language_group.upcast_ref(),
                 keyboard_group.upcast_ref(),
@@ -879,7 +426,7 @@ impl Widgets {
             ],
         );
         let welcome_page = page(
-            "Welcome",
+            view::WELCOME_TITLE,
             PageId::Welcome.id(),
             Some(&welcome_banner),
             &welcome_form,
@@ -888,19 +435,19 @@ impl Widgets {
 
         // --- machine ---
         let machine_banner = banner(None);
-        let computer = property_row("This computer");
-        let machine_group = group("Configuration", "");
+        let computer = property_row(view::COMPUTER_LABEL);
+        let machine_group = group(view::CONFIGURATION, "");
         let notice = message_label();
-        let machine_button = continue_button("Continue");
+        let machine_button = continue_button(messages::CONTINUE_LABEL);
         let loading = adw::StatusPage::builder()
-            .title("Looking at this computer")
-            .description("The installer is reading what this computer is and which disks it has.")
+            .title(view::MACHINE_LOADING_TITLE)
+            .description(view::MACHINE_LOADING_DETAIL)
             .child(&adw::Spinner::new())
             .build();
         let problem = adw::StatusPage::builder()
             .icon_name("dialog-error-symbolic")
             .build();
-        let retry = gtk::Button::with_label("Try again");
+        let retry = gtk::Button::with_label(view::TRY_AGAIN);
         retry.add_css_class("pill");
         retry.set_halign(gtk::Align::Center);
         problem.set_child(Some(&retry));
@@ -914,30 +461,30 @@ impl Widgets {
         stack.add_named(&loading, Some("loading"));
         stack.add_named(&problem, Some("problem"));
         let machine_form = form(
-            "This computer",
-            "Pick the configuration to install. Computers ilex knows get their own; any other x86-64 computer uses the generic one.",
+            view::MACHINE_HEADING,
+            view::MACHINE_INTRO,
             &[machine_body.upcast_ref()],
         );
         stack.add_named(&machine_form, Some("choices"));
         let machine_page = page(
-            "This computer",
+            view::MACHINE_TITLE,
             PageId::Machine.id(),
             Some(&machine_banner),
             &stack,
             Some(&machine_button),
         );
         let on_retry = sender.input_sender().clone();
-        retry.connect_clicked(move |_| on_retry.emit(Msg::Probe));
+        retry.connect_clicked(move |_| on_retry.emit(Msg::Event(Event::Probe)));
 
         // --- account ---
-        let name = adw::EntryRow::builder().title("User name").build();
+        let name = adw::EntryRow::builder().title(view::NAME_LABEL).build();
         name.set_input_hints(gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::LOWERCASE);
         let password = adw::PasswordEntryRow::builder()
-            .title("Password")
+            .title(view::PASSWORD_LABEL)
             .name("password")
             .build();
         let confirmation = adw::PasswordEntryRow::builder()
-            .title("Confirm the password")
+            .title(view::CONFIRMATION_LABEL)
             .name("confirmation")
             .build();
         // GtkText keeps an undo history of what is typed, unwiped, and with
@@ -953,10 +500,10 @@ impl Widgets {
         let password_group = group("", "");
         password_group.add(&password);
         password_group.add(&confirmation);
-        let account_button = continue_button("Continue");
+        let account_button = continue_button(messages::CONTINUE_LABEL);
         let account_form = form(
-            "Administrator",
-            "This account maintains the computer and recovers it when something goes wrong: it can use sudo. You create your own daily account when the computer starts for the first time.",
+            view::ACCOUNT_HEADING,
+            view::ACCOUNT_INTRO,
             &[
                 name_group.upcast_ref(),
                 name_message.upcast_ref(),
@@ -966,87 +513,17 @@ impl Widgets {
         );
         let account_banner = banner(None);
         let account_page = page(
-            "Administrator",
+            view::ACCOUNT_TITLE,
             PageId::Account.id(),
             Some(&account_banner),
             &account_form,
             Some(&account_button),
         );
 
-        // --- encryption ---
-        let switch = adw::SwitchRow::builder()
-            .title("Encrypt this disk")
-            .subtitle(
-                "Recommended. The disk asks for its passphrase every time the computer starts.",
-            )
-            .name("encrypt")
-            .active(flow.encrypt())
-            .build();
-        let passphrase = adw::PasswordEntryRow::builder()
-            .title("Passphrase")
-            .name("passphrase")
-            .build();
-        let passphrase_confirmation = adw::PasswordEntryRow::builder()
-            .title("Confirm the passphrase")
-            .name("passphrase-confirmation")
-            .build();
-        // As the account page's: nothing a person types is kept for Ctrl+Z.
-        passphrase.set_enable_undo(false);
-        passphrase_confirmation.set_enable_undo(false);
-        let encrypt_group = group("", "");
-        encrypt_group.add(&switch);
-        // The security chip: on where the computer can, with one line that says
-        // why not where it cannot (`Flow::chip_view`).
-        let chip = adw::SwitchRow::builder()
-            .title(ilex_installer_flow::recovery::CHIP_TITLE)
-            .subtitle_lines(0)
-            .name("chip")
-            .active(false)
-            .sensitive(false)
-            .build();
-        encrypt_group.add(&chip);
-        let passphrase_group = group("", "");
-        passphrase_group.add(&passphrase);
-        passphrase_group.add(&passphrase_confirmation);
-        let passphrase_layout = gtk::Label::builder()
-            .xalign(0.0)
-            .wrap(true)
-            .css_classes(["caption", "dim-label"])
-            .build();
-        let passphrase_message = message_label();
-        let encryption_off = gtk::Label::builder()
-            .xalign(0.0)
-            .wrap(true)
-            .label(ilex_installer_flow::encryption::OFF_LINE)
-            .css_classes(["caption", "warning"])
-            .visible(false)
-            .build();
-        let encryption_button = continue_button("Continue");
-        let encryption_form = form(
-            "Encryption",
-            ilex_installer_flow::encryption::INTRODUCTION,
-            &[
-                encrypt_group.upcast_ref(),
-                passphrase_group.upcast_ref(),
-                passphrase_layout.upcast_ref(),
-                passphrase_message.upcast_ref(),
-                encryption_off.upcast_ref(),
-            ],
-        );
-        let encryption_banner = banner(None);
-        let encryption_page = page(
-            "Encryption",
-            PageId::Encryption.id(),
-            Some(&encryption_banner),
-            &encryption_form,
-            Some(&encryption_button),
-        );
-
         // --- disk, review, installing, done, problem ---
         let disk = DiskPage::build(sender);
         let review = ReviewPage::build(sender);
         let installing = InstallingPage::build();
-        let recovery = RecoveryPage::build(sender, flow.secrets_wiped());
         let done = DonePage::build(sender);
         let problem_page = ProblemPage::build(sender);
         let log = LogDialog::build(sender);
@@ -1055,11 +532,9 @@ impl Widgets {
             &welcome_page,
             &machine_page,
             &disk.page,
-            &encryption_page,
             &account_page,
             &review.page,
             &installing.page,
-            &recovery.page,
             &done.page,
             &problem_page.page,
         ] {
@@ -1071,72 +546,46 @@ impl Widgets {
         let input = sender.input_sender().clone();
         language.connect_selected_notify({
             let input = input.clone();
-            move |row| input.emit(Msg::Language(row.selected()))
+            move |row| input.emit(Msg::Event(Event::Language(row.selected() as usize)))
         });
         keyboard.connect_selected_notify({
             let input = input.clone();
-            move |row| input.emit(Msg::Layout(row.selected()))
+            move |row| input.emit(Msg::Event(Event::Layout(row.selected() as usize)))
         });
         // The layout test field is read only when the flow says its text may be
         // printed (a test): people type their intended passwords there.
         if flow.echo_try() {
             test.connect_changed({
                 let input = input.clone();
-                move |row| input.emit(Msg::TryText(secret_of(row)))
+                move |row| input.emit(Msg::Event(Event::TryText(secret_of(row))))
             });
         }
         keyboard_retry.connect_clicked({
             let input = input.clone();
-            move |_| input.emit(Msg::RetryLayout)
+            move |_| input.emit(Msg::Event(Event::RetryLayout))
         });
         name.connect_changed({
             let input = input.clone();
-            move |row| input.emit(Msg::Name(row.text().to_string()))
+            move |row| input.emit(Msg::Event(Event::Name(row.text().to_string())))
         });
         password.connect_changed({
             let input = input.clone();
-            move |row| input.emit(Msg::Password(secret_of(row)))
+            move |row| input.emit(Msg::Event(Event::Password(secret_of(row))))
         });
         confirmation.connect_changed({
             let input = input.clone();
-            move |row| input.emit(Msg::Confirmation(secret_of(row)))
+            move |row| input.emit(Msg::Event(Event::Confirmation(secret_of(row))))
         });
-        switch.connect_active_notify({
-            let input = input.clone();
-            move |row| input.emit(Msg::Encrypt(row.is_active()))
-        });
-        chip.connect_active_notify({
-            let input = input.clone();
-            move |row| input.emit(Msg::Chip(row.is_active()))
-        });
-        passphrase.connect_changed({
-            let input = input.clone();
-            move |row| input.emit(Msg::Passphrase(secret_of(row)))
-        });
-        passphrase_confirmation.connect_changed({
-            let input = input.clone();
-            move |row| input.emit(Msg::PassphraseConfirmation(secret_of(row)))
-        });
-        for banner in [
-            &welcome_banner,
-            &machine_banner,
-            &encryption_banner,
-            &account_banner,
-        ] {
+        for banner in [&welcome_banner, &machine_banner, &account_banner] {
             banner.connect_button_clicked({
                 let input = input.clone();
-                move |_| input.emit(Msg::Probe)
+                move |_| input.emit(Msg::Event(Event::Probe))
             });
         }
-        for button in [
-            &welcome_button,
-            &machine_button,
-            &encryption_button,
-            &account_button,
-        ] {
+        for button in [&welcome_button, &machine_button, &account_button] {
             button.connect_clicked({
                 let input = input.clone();
-                move |_| input.emit(Msg::Continue)
+                move |_| input.emit(Msg::Event(Event::Continue))
             });
         }
         // Back (the header bar's button or Escape) pops the page: the flow
@@ -1149,7 +598,7 @@ impl Widgets {
                     .and_then(|p| p.tag())
                     .and_then(|t| PageId::from_id(&t))
                 {
-                    input.emit(Msg::Visible(page));
+                    input.emit(Msg::Event(Event::Visible(page)));
                 }
             }
         });
@@ -1162,12 +611,10 @@ impl Widgets {
             name.upcast_ref(),
             password.upcast_ref(),
             confirmation.upcast_ref(),
-            passphrase.upcast_ref(),
-            passphrase_confirmation.upcast_ref(),
         ] {
             row.connect_entry_activated({
                 let input = input.clone();
-                move |_| input.emit(Msg::Continue)
+                move |_| input.emit(Msg::Event(Event::Continue))
             });
         }
         // The first control of each page has the focus when the page is shown.
@@ -1183,20 +630,6 @@ impl Widgets {
                 focus.grab_focus();
             });
         }
-
-        // The encryption page starts on the passphrase while encryption is on
-        // (what nearly everyone does first), else on the switch.
-        encryption_page.connect_shown({
-            let switch = switch.clone();
-            let passphrase = passphrase.clone();
-            move |_| {
-                if switch.is_active() {
-                    passphrase.grab_focus();
-                } else {
-                    switch.grab_focus();
-                }
-            }
-        });
 
         // The problem page starts on Try again when it has one, else on Restart.
         problem_page.page.connect_shown({
@@ -1249,24 +682,9 @@ impl Widgets {
                 button: account_button,
                 wiped: flow.secrets_wiped(),
             },
-            encryption: Encryption {
-                page: encryption_page,
-                banner: encryption_banner,
-                switch,
-                chip,
-                group: passphrase_group,
-                passphrase,
-                confirmation: passphrase_confirmation,
-                layout: passphrase_layout,
-                message: passphrase_message,
-                off: encryption_off,
-                button: encryption_button,
-                wiped: flow.secrets_wiped(),
-            },
             disk,
             review,
             installing,
-            recovery,
             done,
             problem: problem_page,
             confirm: None,
@@ -1274,50 +692,41 @@ impl Widgets {
         }
     }
 
-    /// Make every widget say what the flow says.
+    /// Make every widget say what the flow says (`Flow::view`).
     fn sync(&mut self, flow: &Flow, sender: &ComponentSender<App>) {
+        let v = flow.view();
         // Nothing of the pages until the helper has said where an
         // installation is (the answer takes a moment at start-up).
-        self.pages.set_visible_child_name(if flow.is_attaching() {
+        self.pages.set_visible_child_name(if v.starting.is_some() {
             "starting"
         } else {
             "pages"
         });
         // Which page: the navigation view follows the flow (a page pushed by
         // Continue), and the flow follows the view when the person goes back.
-        if !flow.is_attaching() {
-            show_stack(&self.nav, &flow.page().stack());
+        if v.starting.is_none() {
+            show_stack(&self.nav, &v.stack);
         }
-        self.sync_welcome(flow);
-        self.sync_machine(flow, sender);
-        self.disk.sync(flow, sender);
-        self.sync_encryption(flow);
-        self.sync_account(flow);
-        self.review.sync(flow);
-        self.installing.sync(flow);
-        self.recovery.sync(flow);
-        self.done.sync(flow);
-        self.problem.sync(flow);
-        // No way back while the helper is asked, or once the erase was
-        // confirmed; and none from the pages an installation ends on.
-        let free = !flow.is_frozen();
-        self.machine.page.set_can_pop(free);
-        self.disk.page.set_can_pop(free);
-        self.encryption.page.set_can_pop(free);
-        self.account.page.set_can_pop(free);
-        self.review.page.set_can_pop(free);
-        for page in [
-            &self.installing.page,
-            &self.recovery.page,
-            &self.done.page,
-            &self.problem.page,
-        ] {
+        self.sync_welcome(&v);
+        self.sync_machine(&v, sender);
+        self.disk.sync(&v, sender);
+        self.sync_account(&v, flow);
+        self.review.sync(&v, flow);
+        self.installing.sync(&v);
+        self.done.sync(&v);
+        self.problem.sync(&v);
+        // Whether the person may go back from a page is the flow's to say.
+        self.machine.page.set_can_pop(v.machine.chrome.can_pop);
+        self.disk.page.set_can_pop(v.disk.chrome.can_pop);
+        self.account.page.set_can_pop(v.account.chrome.can_pop);
+        self.review.page.set_can_pop(v.review.chrome.can_pop);
+        for page in [&self.installing.page, &self.done.page, &self.problem.page] {
             page.set_can_pop(false);
         }
         // The dialogs are open exactly while the flow says so.
-        match (flow.confirm_dialog(), &self.confirm) {
+        match (&v.confirm, &self.confirm) {
             (Some(dialog), None) => {
-                let alert = confirmation(&dialog, sender);
+                let alert = confirmation(dialog, sender);
                 alert.present(Some(&self.root));
                 self.confirm = Some(alert);
             }
@@ -1333,203 +742,111 @@ impl Widgets {
             }
             _ => {}
         }
-        if *flow.log_state() == LogSave::Closed {
-            if self.log.is_open() {
-                self.log.close();
-                // Back on the button that opened it.
-                self.problem.save.grab_focus();
+        match &v.log {
+            None => {
+                if self.log.is_open() {
+                    self.log.close();
+                    // Back on the button that opened it.
+                    self.problem.save.grab_focus();
+                }
             }
-        } else {
-            self.log.sync(flow, sender);
-            self.log.present(&self.root);
+            Some(_) => {
+                self.log.sync(&v, sender);
+                self.log.present(&self.root);
+            }
         }
     }
 
-    fn sync_welcome(&mut self, flow: &Flow) {
+    fn sync_welcome(&mut self, v: &View) {
         let w = &self.welcome;
-        sync_banner(&w.banner, flow);
-        // An installation this interface was waiting to see begin did not: the
-        // banner says so until Continue (a problem that stops the installation
-        // comes first).
-        if flow.blocking_problem().is_none()
-            && let Some(notice) = flow.start_notice()
-        {
-            w.banner.set_title(&sentence(&notice));
-            w.banner.set_button_label(None);
-            w.banner.set_revealed(true);
-        }
-        if let Some(index) = language::index_of(flow.language())
+        let welcome = &v.welcome;
+        sync_banner(&w.banner, &welcome.chrome.banner);
+        if let Some(index) = welcome.language.selected
             && w.language.selected() != index as u32
         {
             w.language.set_selected(index as u32);
         }
-        if let Some(index) = flow.layouts().index_of(flow.keyboard())
+        if let Some(index) = welcome.keyboard.selected
             && w.keyboard.selected() != index as u32
         {
             w.keyboard.set_selected(index as u32);
         }
-        match flow.keyboard_status() {
-            KeyboardStatus::Applied => w.keyboard_line.set_visible(false),
-            KeyboardStatus::Switching => {
-                w.keyboard_message
-                    .set_css_classes(&["caption", "dim-label"]);
-                w.keyboard_message.set_label(messages::SWITCHING_LAYOUT);
+        match &welcome.keyboard_line {
+            None => w.keyboard_line.set_visible(false),
+            Some(line) => {
+                w.keyboard_message.set_css_classes(&[
+                    "caption",
+                    if line.failed { "error" } else { "dim-label" },
+                ]);
+                w.keyboard_message.set_label(&line.text);
                 w.keyboard_message.set_visible(true);
-                w.keyboard_retry.set_visible(false);
-                w.keyboard_line.set_visible(true);
-            }
-            KeyboardStatus::Failed(message) => {
-                w.keyboard_message.set_css_classes(&["caption", "error"]);
-                w.keyboard_message.set_label(&sentence(&message));
-                w.keyboard_message.set_visible(true);
-                w.keyboard_retry.set_visible(true);
+                w.keyboard_retry.set_visible(line.retry.is_some());
                 w.keyboard_line.set_visible(true);
             }
         }
-        w.button.set_label(flow.continue_label());
-        w.button
-            .set_sensitive(flow.page() != PageId::Welcome || flow.can_continue());
+        if let Some(next) = &welcome.chrome.next {
+            w.button.set_label(next.label);
+            w.button.set_sensitive(next.enabled);
+        }
     }
 
-    fn sync_machine(&mut self, flow: &Flow, sender: &ComponentSender<App>) {
+    fn sync_machine(&mut self, v: &View, sender: &ComponentSender<App>) {
         let m = &mut self.machine;
-        m.button.set_label(flow.continue_label());
-        m.button
-            .set_sensitive(flow.page() != PageId::Machine || flow.can_continue());
-        match (flow.probe_state(), flow.machine_view()) {
-            (ProbeState::Pending, _) => m.stack.set_visible_child_name("loading"),
-            (ProbeState::Failed(message), _) => {
-                m.problem.set_title(&message.title);
-                m.problem.set_description(Some(&message.detail));
-                m.banner.set_revealed(false);
+        let machine = &v.machine;
+        if let Some(next) = &machine.chrome.next {
+            m.button.set_label(next.label);
+            m.button.set_sensitive(next.enabled);
+        }
+        sync_banner(&m.banner, &machine.chrome.banner);
+        match &machine.body {
+            view::MachineBody::Loading { .. } => m.stack.set_visible_child_name("loading"),
+            view::MachineBody::Problem { title, detail, .. } => {
+                m.problem.set_title(title);
+                m.problem.set_description(Some(detail));
                 m.stack.set_visible_child_name("problem");
             }
-            (ProbeState::Ready(_), Some(view)) => {
+            view::MachineBody::Choices {
+                computer,
+                choices,
+                selected,
+                notice,
+                ..
+            } => {
                 m.stack.set_visible_child_name("choices");
-                m.computer.set_subtitle(&view.computer);
-                rebuild_choices(m, view, sender);
-                let selected = flow.machine_tag().unwrap_or_default();
+                m.computer.set_subtitle(computer);
+                rebuild_choices(m, choices, sender);
                 for (tag, check, _) in &m.rows {
                     if check.is_active() != (tag == selected) {
                         check.set_active(tag == selected);
                     }
                 }
-                // A problem that stops the installation (a BIOS boot found
-                // after the person left the first page) comes before the
-                // notice about how the configuration was chosen.
-                let notice = view.notice();
-                if flow.blocking_problem().is_some() {
-                    sync_banner(&m.banner, flow);
-                    m.notice.set_visible(true);
-                    m.notice.set_label(&sentence(&notice.message));
-                } else {
-                    let loud = notice.severity != Severity::Info;
-                    m.banner.set_title(&sentence(&notice.message));
-                    m.banner.set_button_label(None);
-                    m.banner.set_revealed(loud);
-                    m.notice.set_visible(!loud);
-                    m.notice.set_label(&sentence(&notice.message));
-                }
-            }
-            (ProbeState::Ready(_), None) => {}
-        }
-    }
-
-    fn sync_encryption(&mut self, flow: &Flow) {
-        // The flow wiped its copy of the passphrase (the installation is over,
-        // or the computer is going down): the fields that hold it are cleared
-        // too.
-        if self.encryption.wiped != flow.secrets_wiped() {
-            self.encryption.wiped = flow.secrets_wiped();
-            self.encryption.passphrase.set_text("");
-            self.encryption.confirmation.set_text("");
-        }
-        let e = &self.encryption;
-        sync_banner(&e.banner, flow);
-        // The switch follows the flow (a restarted interface, the renderer);
-        // the flow ignores an echo of its own value.
-        if e.switch.is_active() != flow.encrypt() {
-            e.switch.set_active(flow.encrypt());
-        }
-        // The choices cannot change while the helper checks them (or while it is
-        // asked where an installation is, which is how the application starts).
-        // A field of this page that has the focus gives it up first (GTK warns
-        // when a focused text becomes insensitive); one that has it elsewhere
-        // keeps it: the welcome page's first control has it at the start.
-        let editable = !flow.is_frozen();
-        if e.switch.is_sensitive() != editable {
-            if !editable {
-                release_focus(&e.page);
-            }
-            e.switch.set_sensitive(editable);
-        }
-        // The security chip's row: a switch where the computer can, else a line
-        // that says why it cannot.
-        let chip = flow.chip_view();
-        if e.chip.is_sensitive() != chip.sensitive {
-            if !chip.sensitive {
-                release_focus(&e.page);
-            }
-            e.chip.set_sensitive(chip.sensitive);
-        }
-        if e.chip.is_active() != chip.on {
-            e.chip.set_active(chip.on);
-        }
-        if e.chip.subtitle().is_none_or(|s| s.as_str() != chip.line) {
-            e.chip.set_subtitle(&chip.line);
-        }
-        let typing = editable && flow.encrypt();
-        e.group.set_visible(flow.encrypt());
-        e.layout.set_visible(flow.encrypt());
-        e.off.set_visible(!flow.encrypt());
-        if e.passphrase.is_sensitive() != typing {
-            if !typing {
-                release_focus(&e.page);
-            }
-            e.passphrase.set_sensitive(typing);
-            e.confirmation.set_sensitive(typing);
-        }
-        e.layout.set_label(&flow.passphrase_layout_line());
-        let checks = flow.encryption_checks();
-        let rows: [&gtk::Widget; 2] = [e.passphrase.upcast_ref(), e.confirmation.upcast_ref()];
-        match checks
-            .passphrase
-            .message()
-            .or_else(|| checks.confirmation.message())
-        {
-            Some(refusal) if flow.encrypt() => show_message(&e.message, Some(refusal), &rows),
-            _ => {
-                show_message(&e.message, None, &rows);
-                if flow.encrypt()
-                    && let Some(advice) = flow.passphrase_advice()
-                {
-                    e.message.set_css_classes(&["caption", "dim-label"]);
-                    e.message.set_label(&sentence(&advice));
-                    e.message.set_visible(true);
+                // How the configuration was chosen: in the page when the
+                // banner is saying something else.
+                m.notice.set_visible(notice.is_some());
+                if let Some(text) = notice {
+                    m.notice.set_label(text);
                 }
             }
         }
-        e.button.set_label(flow.continue_label());
-        e.button
-            .set_sensitive(flow.page() != PageId::Encryption || flow.can_continue());
     }
 
-    fn sync_account(&mut self, flow: &Flow) {
+    fn sync_account(&mut self, v: &View, flow: &Flow) {
+        let account = &v.account;
         // The flow wiped its copy of the passwords (the installation is over,
         // or the computer is going down): the fields that hold them are
         // cleared too, not left with the text.
-        if self.account.wiped != flow.secrets_wiped() {
-            self.account.wiped = flow.secrets_wiped();
+        if self.account.wiped != account.wiped {
+            self.account.wiped = account.wiped;
             self.account.password.set_text("");
             self.account.confirmation.set_text("");
         }
         let a = &self.account;
-        sync_banner(&a.banner, flow);
+        sync_banner(&a.banner, &account.chrome.banner);
         // The choices cannot change while the helper checks them. A field that
         // has the focus gives it up first (GTK warns when a focused text
         // becomes insensitive), and the name has it again when the page is
         // editable once more.
-        let editable = !flow.is_checking();
+        let editable = account.editable;
         if a.name.is_sensitive() != editable {
             if editable {
                 a.name.set_sensitive(true);
@@ -1551,68 +868,40 @@ impl Widgets {
         // sends it as a message). The passwords never do: the fields are
         // where they are typed, and the flow takes a copy as they change;
         // reading them here would copy them again on every update.
-        if a.name.text() != flow.administrator() {
-            a.name.set_text(flow.administrator());
+        if a.name.text() != account.name_value {
+            a.name.set_text(&account.name_value);
         }
-        let checks = flow.account_checks();
-        show_message(
+        show_note(
             &a.name_message,
-            checks.name.message(),
+            account.name_note.as_ref(),
             &[a.name.upcast_ref()],
         );
         let rows: [&gtk::Widget; 2] = [a.password.upcast_ref(), a.confirmation.upcast_ref()];
-        // Only a refusal is an error; a hint is dimmed text, and the rows go
-        // back to valid (the error style and the accessible state) as soon as
-        // there is none.
-        match checks
-            .password
-            .message()
-            .or_else(|| checks.confirmation.message())
-        {
-            Some(refusal) => show_message(&a.password_message, Some(refusal), &rows),
-            None => {
-                show_message(&a.password_message, None, &rows);
-                if let Some(advice) = flow.password_advice() {
-                    a.password_message
-                        .set_css_classes(&["caption", "dim-label"]);
-                    a.password_message.set_label(&sentence(&advice));
-                    a.password_message.set_visible(true);
-                }
-            }
+        show_note(&a.password_message, account.password_note.as_ref(), &rows);
+        if let Some(next) = &account.chrome.next {
+            a.button.set_label(next.label);
+            a.button.set_sensitive(next.enabled);
         }
-        a.button.set_label(flow.continue_label());
-        a.button
-            .set_sensitive(flow.page() != PageId::Account || flow.can_continue());
     }
 }
 
-/// Take the focus away from the window if a widget of `page` has it, and from
-/// no other: a page that is not shown must not clear the focus of the one that
-/// is (the welcome page's first control has it when the application starts).
-fn release_focus(page: &adw::NavigationPage) {
-    if let Some(root) = page.root()
-        && let Some(focus) = root.focus()
-        && focus.is_ancestor(page)
-    {
-        root.set_focus(None::<&gtk::Widget>);
-    }
-}
-
-/// Show a refusal beside its field, or hide the label, and mark the rows to
-/// match: the error style, and for assistive technology the rows' invalid
-/// state with the message as their error message. With no refusal every row
-/// goes back to valid, state and relation included.
-pub(super) fn show_message(label: &gtk::Label, refusal: Option<&Message>, rows: &[&gtk::Widget]) {
-    match refusal {
-        Some(message) => {
-            label.set_css_classes(&["caption", "error"]);
-            label.set_label(&sentence(message));
+/// Show a note beside its field, or hide the label. A refusal (an error note)
+/// also marks the rows: the error style, and for assistive technology the
+/// rows' invalid state with the message as their error message; advice is
+/// dimmed text and the rows go back to valid (state and relation included), as
+/// they do with no note at all.
+fn show_note(label: &gtk::Label, note: Option<&view::Note>, rows: &[&gtk::Widget]) {
+    match note {
+        Some(note) => {
+            label.set_css_classes(&["caption", if note.error { "error" } else { "dim-label" }]);
+            label.set_label(&note.text);
             label.set_visible(true);
         }
         None => label.set_visible(false),
     }
+    let refused = note.is_some_and(|n| n.error);
     for row in rows {
-        if refusal.is_some() {
+        if refused {
             row.add_css_class("error");
             row.update_state(&[gtk::accessible::State::Invalid(
                 gtk::AccessibleInvalidState::True,
@@ -1630,14 +919,13 @@ pub(super) fn show_message(label: &gtk::Label, refusal: Option<&Message>, rows: 
     }
 }
 
-/// A page's banner: the problem that stops the installation, with Try again
-/// when asking the helper again can mend it, whichever page the person is on.
-pub(super) fn sync_banner(banner: &adw::Banner, flow: &Flow) {
-    let problem = flow.blocking_problem();
-    banner.set_revealed(problem.is_some());
-    if let Some(problem) = &problem {
-        banner.set_title(&sentence(problem));
-        banner.set_button_label(flow.can_retry_probe().then_some("Try again"));
+/// A page's banner as the flow says it: revealed with its text and button when
+/// there is one, hidden when there is none.
+pub(super) fn sync_banner(banner: &adw::Banner, say: &Option<view::Banner>) {
+    banner.set_revealed(say.is_some());
+    if let Some(say) = say {
+        banner.set_title(&say.text);
+        banner.set_button_label(say.retry);
     }
 }
 
@@ -1655,8 +943,8 @@ fn stack_tags(nav: &adw::NavigationView) -> Vec<String> {
 /// else (the flow moved between the pages an installation ends on, which have
 /// nothing under them, or from the review page to the installing page) replaces
 /// the stack. A page the view does not hold is never popped to.
-fn show_stack(nav: &adw::NavigationView, want: &[PageId]) {
-    let want: Vec<&str> = want.iter().map(|p| p.id()).collect();
+fn show_stack(nav: &adw::NavigationView, want: &[&str]) {
+    let want: Vec<&str> = want.to_vec();
     let have = stack_tags(nav);
     if have.iter().map(String::as_str).eq(want.iter().copied()) {
         return;
@@ -1678,7 +966,7 @@ fn show_stack(nav: &adw::NavigationView, want: &[PageId]) {
 /// into a `Secret`: no `String` or `GString` of it is made, so the only
 /// copies are the field's (secure) buffer and a value that is wiped when it is
 /// dropped.
-pub(super) fn secret_of(row: &impl IsA<gtk::Editable>) -> Secret {
+fn secret_of(row: &impl IsA<gtk::Editable>) -> Secret {
     let editable: &gtk::Editable = row.upcast_ref();
     // SAFETY: `gtk_editable_get_text` returns a NUL-terminated string that
     // the widget owns and keeps valid until its text changes; it is only read
@@ -1693,8 +981,8 @@ pub(super) fn secret_of(row: &impl IsA<gtk::Editable>) -> Secret {
 }
 
 /// One radio row per configuration, rebuilt only when the list changes.
-fn rebuild_choices(m: &mut Machine, view: &MachineView, sender: &ComponentSender<App>) {
-    let tags: Vec<&str> = view.choices.iter().map(|c| c.tag.as_str()).collect();
+fn rebuild_choices(m: &mut Machine, choices: &[view::Choice], sender: &ComponentSender<App>) {
+    let tags: Vec<&str> = choices.iter().map(|c| c.id.as_str()).collect();
     if m.rows
         .iter()
         .map(|(t, _, _)| t.as_str())
@@ -1707,7 +995,7 @@ fn rebuild_choices(m: &mut Machine, view: &MachineView, sender: &ComponentSender
         m.group.remove(&row);
     }
     let mut first: Option<gtk::CheckButton> = None;
-    for choice in &view.choices {
+    for choice in choices {
         let check = gtk::CheckButton::new();
         if let Some(first) = &first {
             check.set_group(Some(first));
@@ -1720,14 +1008,14 @@ fn rebuild_choices(m: &mut Machine, view: &MachineView, sender: &ComponentSender
             .activatable_widget(&check)
             .build();
         row.add_prefix(&check);
-        let tag = choice.tag.clone();
+        let tag = choice.id.clone();
         let input = sender.input_sender().clone();
         check.connect_toggled(move |check| {
             if check.is_active() {
-                input.emit(Msg::Machine(tag.clone()));
+                input.emit(Msg::Event(Event::Machine(tag.clone())));
             }
         });
         m.group.add(&row);
-        m.rows.push((choice.tag.clone(), check, row));
+        m.rows.push((choice.id.clone(), check, row));
     }
 }
