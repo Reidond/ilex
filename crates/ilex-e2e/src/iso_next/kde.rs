@@ -144,7 +144,8 @@ pub(super) fn kwin_keys(
         ("alt+Tab", "alt-tab"),
         ("meta", "meta"),
     ];
-    const PROCESSES: &str = r#"for p in /proc/[0-9]*; do [ "$(stat -c %U "$p" 2>/dev/null)" = ilex-installer ] && echo "$(cat "$p/comm")"; done | sort | tr '\n' ' '; systemctl show ilex-installer-session.service -p NRestarts --value"#;
+    // `busctl` is this probe's own (the KWin script's bus monitor and calls).
+    const PROCESSES: &str = r#"for p in /proc/[0-9]*; do [ "$(stat -c %U "$p" 2>/dev/null)" = ilex-installer ] && echo "$(cat "$p/comm")"; done | grep -v '^busctl$' | sort | tr '\n' ' '; systemctl show ilex-installer-session.service -p NRestarts --value"#;
     let before = kwin_script(vm, REPORT_SCRIPT)?;
     let words: BTreeMap<&str, &str> = before
         .split_whitespace()
