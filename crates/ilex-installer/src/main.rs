@@ -261,12 +261,36 @@ fn self_check(options: &Options) -> Result<()> {
     render(directory, options.dark)
 }
 
-#[cfg(all(target_os = "linux", feature = "gui"))]
+/// The pages drawn to files by the image's interface: the edition record says
+/// which (a development run without one takes whichever the build has, GTK
+/// when both).
 fn render(directory: &std::path::Path, dark: bool) -> Result<()> {
+    let kde = identity::read()
+        .ok()
+        .map_or(cfg!(not(feature = "gui")), |record| record.edition == "kde");
+    if kde {
+        render_kde(directory, dark)
+    } else {
+        render_gtk(directory, dark)
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "gui"))]
+fn render_gtk(directory: &std::path::Path, dark: bool) -> Result<()> {
     gui::render::run(directory, dark)
 }
 
 #[cfg(not(all(target_os = "linux", feature = "gui")))]
-fn render(_directory: &std::path::Path, _dark: bool) -> Result<()> {
+fn render_gtk(_directory: &std::path::Path, _dark: bool) -> Result<()> {
     bail!("built without the `gui` feature")
+}
+
+#[cfg(all(target_os = "linux", feature = "kde"))]
+fn render_kde(directory: &std::path::Path, dark: bool) -> Result<()> {
+    kde::render_all(directory, dark)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "kde")))]
+fn render_kde(_directory: &std::path::Path, _dark: bool) -> Result<()> {
+    bail!("built without the `kde` feature")
 }

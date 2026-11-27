@@ -1,7 +1,10 @@
 // The KDE edition's installer window: a Kirigami application window, the only
-// window of the live session (KWin shows nothing else). Written to KDE's HIG:
-// one page with a title, a placeholder message for what has no content yet, the
-// system's Breeze style and colours, sizes in Kirigami units.
+// window of the live session (KWin shows nothing else). It draws what the flow
+// says (`installer.view`, one JSON document from `ilex-installer-flow`) and
+// sends the person's inputs back as events; it holds no page logic, wording or
+// visibility rule. Written to KDE's HIG: Kirigami pages in a page row, form
+// layouts, inline messages, a prompt dialog for the one destructive question,
+// the system's Breeze style and colours, sizes in Kirigami units.
 import QtQuick
 import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
@@ -13,16 +16,46 @@ Kirigami.ApplicationWindow {
     title: installer.displayName
     visible: true
     // The session's only window fills the screen. `--windowed` (development)
-    // is an ordinary window.
+    // is an ordinary window; the renderer's is the size its pictures have.
     visibility: installer.fullscreen ? Window.FullScreen : Window.Windowed
-    width: Kirigami.Units.gridUnit * 50
-    height: Kirigami.Units.gridUnit * 34
+    width: installer.rendering ? 1280 : Kirigami.Units.gridUnit * 50
+    height: installer.rendering ? 800 : Kirigami.Units.gridUnit * 34
 
     // The only window of a live session: the compositor's close request must
     // not end the installer, which would leave tty1 with nothing on it. Only
     // the session unit stops it.
     onClosing: close => {
         close.accepted = !installer.fullscreen;
+    }
+
+    readonly property var view: JSON.parse(installer.view)
+    readonly property var catalogue: JSON.parse(installer.catalogue)
+    readonly property bool ready: view.page !== undefined
+
+    // The flow's glyphs, as this toolkit's icons.
+    readonly property var icons: ({
+            "error": "dialog-error",
+            "disk": "drive-harddisk",
+            "network": "network-disconnect",
+            "success": "dialog-ok-apply"
+        })
+
+    // What is typed into the administrator's password fields lives here, not in
+    // the page (which comes and goes with the stack): the flow says when it is
+    // wiped (`account.wiped`, and a new flow), and then it is cleared here and
+    // in the fields.
+    property string passwordText: ""
+    property string confirmationText: ""
+    property var wipeMark: null
+    signal wipe
+
+    // A line for the application's own stderr (`console.log` goes nowhere).
+    function logLine(text) {
+        installer.renderReport("log", text);
+    }
+
+    function send(name, argument) {
+        installer.send(name, argument === undefined ? "" : argument);
     }
 
     // What the first frame says is on screen, once.
@@ -49,6 +82,10 @@ Kirigami.ApplicationWindow {
 
     Installer {
         id: installer
+        Component.onCompleted: {
+            begin();
+        }
+        onRenderDo: (action, first, second) => root.renderRequest(action, first, second)
     }
 
     // The memory and uptime report of the boot trials comes this long after
@@ -59,16 +96,240 @@ Kirigami.ApplicationWindow {
         onTriggered: installer.reportStats()
     }
 
-    pageStack.initialPage: Kirigami.Page {
-        title: "Welcome"
+    // --- the pages: a stack the flow decides ---------------------------------
 
-        Kirigami.PlaceholderMessage {
+    property bool syncing: false
+
+    function pageComponent(id) {
+        return {
+            "welcome": welcomePage,
+            "machine": machinePage,
+            "disk": diskPage,
+            "account": accountPage,
+            "review": reviewPage,
+            "installing": installingPage,
+            "done": donePage,
+            "problem": problemPage
+        }[id];
+    }
+
+    function heldPages() {
+        const held = [];
+        for (let i = 0; i < pageStack.depth; ++i) {
+            held.push(pageStack.get(i).pageId);
+        }
+        return held;
+    }
+
+    // Make the page row hold exactly the flow's stack: one more is a push, fewer
+    // is a pop, anything else (the pages an installation ends on have nothing
+    // under them) replaces it. A page the row does not hold is never popped to.
+    function syncStack() {
+        if (!ready || view.starting) {
+            return;
+        }
+        const want = view.stack;
+        const have = heldPages();
+        if (want.join() === have.join()) {
+            return;
+        }
+        syncing = true;
+        const prefix = (shorter, longer) => shorter.every((id, i) => longer[i] === id);
+        if (want.length === have.length + 1 && prefix(have, want)) {
+            pageStack.push(pageComponent(want[want.length - 1]));
+        } else if (want.length < have.length && prefix(want, have)) {
+            pageStack.pop(pageStack.get(want.length - 1));
+        } else {
+            pageStack.clear();
+            for (const id of want) {
+                pageStack.push(pageComponent(id));
+            }
+        }
+        syncing = false;
+    }
+
+    onViewChanged: {
+        syncStack();
+        if (ready) {
+            const mark = view.epoch + "/" + view.account.wiped;
+            if (wipeMark !== null && wipeMark !== mark) {
+                passwordText = "";
+                confirmationText = "";
+                wipe();
+            }
+            wipeMark = mark;
+        }
+    }
+
+    pageStack.columnView.columnResizeMode: Kirigami.ColumnView.SingleColumn
+    pageStack.globalToolBar.style: Kirigami.ApplicationHeaderStyle.ToolBar
+    // No way back while the helper is asked, or once the erase was confirmed;
+    // and none from the pages an installation ends on: the flow says.
+    pageStack.globalToolBar.showNavigationButtons: ready && currentChrome && currentChrome.can_pop ? Kirigami.ApplicationHeaderStyle.ShowBackButton : Kirigami.ApplicationHeaderStyle.NoNavigationButtons
+    pageStack.globalToolBar.canContainHandles: false
+
+    readonly property var currentChrome: ready && view[view.page] ? view[view.page].chrome : null
+
+    // The row moved (Back, Escape): the flow follows, and refuses while the
+    // helper is asked (the page is pushed again then).
+    Connections {
+        target: root.pageStack
+        function onCurrentItemChanged() {
+            const item = root.pageStack.currentItem;
+            if (root.syncing || !item || !root.ready || item.pageId === root.view.page) {
+                return;
+            }
+            root.send("visible", item.pageId);
+            Qt.callLater(root.syncStack);
+            Qt.callLater(() => root.reportPage());
+        }
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Cancel]
+        enabled: root.currentChrome !== null && root.currentChrome.can_pop && root.pageStack.depth > 1 && !root.view.confirm && !root.view.log
+        onActivated: root.pageStack.pop()
+    }
+
+    Component {
+        id: welcomePage
+        WelcomePage {
+            view: root.view
+            catalogue: root.catalogue
+            host: root
+        }
+    }
+    Component {
+        id: machinePage
+        MachinePage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
+        id: diskPage
+        DiskPage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
+        id: accountPage
+        AccountPage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
+        id: reviewPage
+        ReviewPage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
+        id: installingPage
+        InstallingPage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
+        id: donePage
+        DonePage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
+        id: problemPage
+        ProblemPage {
+            view: root.view
+            host: root
+        }
+    }
+
+    // Until the helper has said where an installation is, nothing of the pages.
+    Rectangle {
+        anchors.fill: parent
+        z: 100
+        visible: !root.ready || !!root.view.starting
+        color: Kirigami.Theme.backgroundColor
+        Kirigami.LoadingPlaceholder {
             anchors.centerIn: parent
-            width: parent.width - Kirigami.Units.gridUnit * 4
+            text: root.ready && root.view.starting ? root.view.starting : ""
+        }
+    }
 
-            icon.name: "system-software-install"
-            text: installer.welcome
-            explanation: "The installation pages are not part of this image yet."
+    // --- the dialogs: open exactly while the flow says so ----------------------
+
+    ConfirmDialog {
+        id: confirm
+        view: root.view
+        host: root
+    }
+    LogDialog {
+        id: logDialog
+        view: root.view
+        host: root
+    }
+
+    // --- the renderer ------------------------------------------------------------
+
+    function reportPage() {
+        if (installer.rendering) {
+            const item = pageStack.currentItem;
+            installer.renderReport("page", item ? item.pageId : "");
+        }
+    }
+    Connections {
+        target: root.pageStack
+        enabled: installer.rendering
+        function onCurrentItemChanged() {
+            root.reportPage();
+        }
+        function onDepthChanged() {
+            root.reportPage();
+        }
+    }
+
+    // What only the window can do for the renderer.
+    function renderRequest(action, first, second) {
+        switch (action) {
+        case "flush":
+            installer.renderReport("flush", "");
+            break;
+        case "back":
+            if (pageStack.depth > 1) {
+                pageStack.pop();
+            }
+            break;
+        case "type":
+            // A person types into the field: its own edit reaches the flow.
+            {
+                const item = pageStack.currentItem;
+                const field = item && item.field ? item.field(first) : null;
+                if (field) {
+                    field.text = second;
+                    field.textEdited();
+                }
+                installer.renderReport("typed", field ? "ok" : "no " + first + " field on " + (item ? item.pageId : "no page"));
+            }
+            break;
+        case "fields":
+            {
+                // What is held: here, and in the page's fields while it exists.
+                const page = pageStack.currentItem;
+                const live = name => page && page.field && page.field(name) ? page.field(name).text.length : 0;
+                installer.renderReport("fields", [passwordText.length + live("password"), confirmationText.length + live("confirmation")].join(","));
+            }
+            break;
+        case "expand-log":
+            pageStack.currentItem.expandLog();
+            break;
+        case "quit":
+            Qt.quit();
+            break;
         }
     }
 }
