@@ -61,10 +61,10 @@ use super::{
     field, is_marker, iso_path, trial, wait_firmware_output, wait_page, words,
 };
 use crate::common;
-use crate::selinux;
 use crate::installer::apply::{
     ADMIN, Expected, PASSWORD, busctl, check_installed, document, gdm_screenshot, refusal, ssh,
 };
+use crate::selinux;
 
 /// The target's virtual size: what the helper's minimum asks for, with room.
 const TARGET_BYTES: u64 = 41 << 30;
