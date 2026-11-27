@@ -3,7 +3,7 @@
 //! the installer VM by the `installer::` tier.
 
 use crate::{
-    answers, apply, disks, exec, helper, install, policy, progress, registry, repart,
+    answers, apply, disks, exec, finish, helper, install, policy, progress, registry, repart,
     scratch::Scratch,
     secret, stagelog, stamp, sys, target,
     topology::{self, FileId, LoopRow, Roots, System, Tracer},
@@ -2865,6 +2865,175 @@ fn check_claims(parent: &Path) -> Result<()> {
     Ok(())
 }
 
+// --- Finish -----------------------------------------------------------------
+
+/// A loop device over a file, detached when dropped.
+struct LoopDevice(String);
+
+impl LoopDevice {
+    fn attach(image: &Path) -> Result<Self> {
+        let out = exec::run_ok(
+            "losetup",
+            &["--find", "--show", &image.to_string_lossy()],
+            Duration::from_secs(30),
+        )?;
+        Ok(Self(out.stdout_text().trim().to_owned()))
+    }
+}
+
+impl Drop for LoopDevice {
+    fn drop(&mut self) {
+        let _ = exec::run("losetup", &["-d", &self.0], Duration::from_secs(30));
+    }
+}
+
+/// `Finish(save-log)`: the tarball a log is, the names it may hold, and the
+/// writer that puts it on a stick: a real file system on a loop device,
+/// mounted in this process's namespace for the test, never overwriting a file.
+fn check_finish(parent: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // The archive: names, contents, padding, checksums.
+    let mut tar = finish::Tar::default();
+    tar.add("ilex-installer-log/state.json", b"{\"stage\": \"image\"}", 7)?;
+    tar.add("ilex-installer-log/empty", b"", 7)?;
+    tar.add("ilex-installer-log/big", &[b'x'; 1500], 7)?;
+    let bytes = tar.finish()?;
+    ensure!(bytes.len() % 512 == 0, "a tar's size is not whole blocks");
+    let members = finish::untar(&bytes)?;
+    ensure!(
+        members.len() == 3
+            && members[0] == ("ilex-installer-log/state.json".into(), b"{\"stage\": \"image\"}".to_vec())
+            && members[1].1.is_empty()
+            && members[2].1.len() == 1500,
+        "a tar does not read back as it was written: {} members",
+        members.len()
+    );
+    // GNU tar must agree (it is what the person unpacks it with).
+    let dir = TestDir::new(parent, "finish")?;
+    let archive = dir.0.join("log.tar");
+    fs::write(&archive, &bytes)?;
+    let listed = exec::run_ok("tar", &["-tvf", &archive.to_string_lossy()], Duration::from_secs(30))?
+        .stdout_text();
+    ensure!(
+        listed.contains("ilex-installer-log/state.json") && listed.contains("1500"),
+        "tar does not list the archive: {listed}"
+    );
+    for name in [
+        "",
+        "/etc/passwd",
+        "../x",
+        "a/../x",
+        "a//b",
+        "./a",
+        "a\nb",
+        "é",
+        &"x".repeat(101),
+    ] {
+        ensure!(
+            finish::Tar::default().add(name, b"x", 0).is_err(),
+            "the member name {name:?} is accepted"
+        );
+    }
+    ensure!(
+        finish::member_name_ok("01-partition.log")
+            && finish::member_name_ok("plan.json")
+            && !finish::member_name_ok("")
+            && !finish::member_name_ok(".hidden")
+            && !finish::member_name_ok("a b")
+            && !finish::member_name_ok("../x")
+            && !finish::member_name_ok(&"x".repeat(65)),
+        "the log member names"
+    );
+    ensure!(
+        finish::log_name(Some(&"ab".repeat(16)), 1_700_000_000)
+            == "ilex-installer-log-abababab-1700000000.tar"
+            && finish::log_name(None, 5) == "ilex-installer-log-none-5.tar",
+        "the log's file name"
+    );
+
+    // The writer refuses what it was not given by the helper, before it mounts.
+    let mountpoint = dir.0.join("stick");
+    fs::create_dir(&mountpoint)?;
+    let refused = |device: &str, fstype: &str, name: &str, expect: &str| {
+        finish::write_log_child(device, fstype, &mountpoint, &archive, name, expect).error
+    };
+    ensure!(
+        refused("/etc/passwd", "vfat", "a.tar", "1:1").is_some()
+            && refused("/dev/null", "vfat", "a.tar", "1:3").is_some()
+            && refused("/dev/null", "swap", "a.tar", "1:3").is_some()
+            && refused("/dev/null", "vfat", "../a.tar", "1:3").is_some()
+            && refused("/dev/null", "vfat", "a.txt", "1:3").is_some()
+            && refused("/dev/null", "vfat", "a.tar", "nonsense").is_some(),
+        "the log writer takes a device, a type, a name or a number it should not"
+    );
+
+    // For real: ext4 and FAT images on loop devices.
+    for (fs_name, mkfs) in [("ext4", "mkfs.ext4"), ("vfat", "mkfs.vfat")] {
+        let image = dir.0.join(format!("stick-{fs_name}.img"));
+        fs::File::create(&image)?.set_len(64 << 20)?;
+        let args: &[&str] = if fs_name == "ext4" {
+            &["-q", "-F"]
+        } else {
+            &["-F", "32"]
+        };
+        let mut all = args.to_vec();
+        let path = image.to_string_lossy().into_owned();
+        all.push(&path);
+        exec::run_ok(mkfs, &all, Duration::from_secs(60))?;
+        let device = LoopDevice::attach(&image)?;
+        let meta = fs::metadata(&device.0)?;
+        let number = topology::split_dev(meta.rdev());
+        let expect = format!("{}:{}", number.0, number.1);
+        let wrong = format!("{}:{}", number.0, number.1 + 1);
+        ensure!(
+            refused(&device.0, fs_name, "a.tar", &wrong)
+                .is_some_and(|e| e.contains("not the partition that was checked")),
+            "{fs_name}: a device number that is not the device's was accepted"
+        );
+        let first = finish::write_log_child(&device.0, fs_name, &mountpoint, &archive, "a.tar", &expect);
+        ensure!(
+            first.error.is_none() && first.file == "a.tar" && first.bytes == bytes.len() as u64,
+            "{fs_name}: the first write: {first:?}"
+        );
+        let second = finish::write_log_child(&device.0, fs_name, &mountpoint, &archive, "a.tar", &expect);
+        ensure!(
+            second.error.is_none() && second.file == "a-1.tar",
+            "{fs_name}: a file that exists was written over, or the name did not move on: {second:?}"
+        );
+        // What is on the stick is what was written.
+        let look = dir.0.join(format!("look-{fs_name}"));
+        fs::create_dir(&look)?;
+        exec::run_ok(
+            "mount",
+            &["-o", "ro,nodev,nosuid,noexec", &device.0, &look.to_string_lossy()],
+            Duration::from_secs(30),
+        )?;
+        let on_stick = fs::read(look.join("a.tar"));
+        let second_on_stick = fs::read(look.join("a-1.tar"));
+        let mode = fs::metadata(look.join("a.tar"))
+            .map(|m| m.mode() & 0o777)
+            .ok();
+        let _ = exec::run("umount", &[&look.to_string_lossy()], Duration::from_secs(30));
+        ensure!(
+            on_stick.as_ref().is_ok_and(|b| *b == bytes)
+                && second_on_stick.as_ref().is_ok_and(|b| *b == bytes),
+            "{fs_name}: the files on the stick are not the archive"
+        );
+        ensure!(
+            fs_name != "ext4" || mode == Some(0o644),
+            "{fs_name}: the log file's mode is {mode:?}"
+        );
+        ensure!(
+            target::current_mounts()?
+                .iter()
+                .all(|m| m.mount_point != mountpoint.to_string_lossy()
+                    && m.mount_point != look.to_string_lossy()),
+            "{fs_name}: the stick is still mounted"
+        );
+    }
+    Ok(())
+}
+
 // --- files ------------------------------------------------------------------
 
 fn tzif(path: &Path) -> Result<()> {
@@ -3187,6 +3356,7 @@ pub fn run(config: &helper::Config) -> Result<String> {
     check_target(parent.path()).context("the target system's files")?;
     check_apply_rules().context("the checks before the first write")?;
     check_answers(parent.path()).context("answers mode")?;
+    check_finish(parent.path()).context("Finish and the log on a stick")?;
     check_files(parent.path()).context("files")?;
     let repart = check_repart(config, parent.path()).context("repart")?;
     let system = check_system(config).context("system")?;
@@ -3546,6 +3716,17 @@ fn check_jobs(scratch: &Path) -> Result<()> {
     Ok(())
 }
 
+fn test_summary() -> ilex_installer_model::state::Summary {
+    ilex_installer_model::state::Summary {
+        edition: "ilex Glabra".into(),
+        composition: "generic.gnome".into(),
+        version: Some("45.20261127".into()),
+        digest: format!("sha256:{}", "c".repeat(64)),
+        disk: "virtio-target".into(),
+        disk_label: "QEMU HARDDISK target".into(),
+    }
+}
+
 /// The state record: written before a stage begins, recovered after a crash,
 /// never resumed.
 fn check_state(parent: &Path) -> Result<()> {
@@ -3558,7 +3739,7 @@ fn check_state(parent: &Path) -> Result<()> {
         tracker.state().stage == Stage::Idle && !tracker.active(),
         "a fresh tracker"
     );
-    tracker.begin(&"c".repeat(32), &Stage::UNENCRYPTED)?;
+    tracker.begin(&"c".repeat(32), &Stage::UNENCRYPTED, test_summary())?;
     tracker.start(Stage::Partition, "Writing the partition table")?;
     tracker.disk_changed()?;
     tracker.line("Formatting /dev/vda1 as vfat");
@@ -3620,7 +3801,10 @@ fn check_state(parent: &Path) -> Result<()> {
     write(&blocked, "")?;
     let stuck = progress::Tracker::new(&blocked);
     ensure!(
-        stuck.begin(&"d".repeat(32), &Stage::UNENCRYPTED).is_err() && !stuck.active(),
+        stuck
+            .begin(&"d".repeat(32), &Stage::UNENCRYPTED, test_summary())
+            .is_err()
+            && !stuck.active(),
         "an installation began without its record"
     );
     // An old state file of an installation that ended is kept as it was.

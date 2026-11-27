@@ -82,6 +82,26 @@ pub struct StageRecord {
     pub finished: Option<u64>,
 }
 
+/// What the running or last installation installs, taken from its plan when
+/// `Apply` accepted it: what an interface that restarted says on its closing
+/// pages without having seen the plan, and which disk is the installation's
+/// (the one a log is never written to).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    /// The edition's name for headings (`ilex Glabra`).
+    pub edition: String,
+    /// The composition's tag (`generic.gnome`).
+    pub composition: String,
+    /// The image's version label, when the registry gave one.
+    pub version: Option<String>,
+    /// The manifest digest that was installed.
+    pub digest: String,
+    /// The target disk's stable id.
+    pub disk: String,
+    /// How a person names it: model and serial number.
+    pub disk_label: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub schema: u32,
@@ -114,6 +134,9 @@ pub struct State {
     /// When `Apply` began.
     #[serde(default)]
     pub started: Option<u64>,
+    /// What the running or last installation installs, and where.
+    #[serde(default)]
+    pub summary: Option<Summary>,
 }
 
 impl State {
@@ -132,6 +155,13 @@ impl State {
             disk_changed: false,
             log: Vec::new(),
             started: None,
+            summary: None,
         }
+    }
+
+    /// The installation this state describes has ended (one that was applied
+    /// and has an outcome).
+    pub fn ended(&self) -> bool {
+        self.applied.is_some() && self.outcome.is_some()
     }
 }

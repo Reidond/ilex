@@ -13,6 +13,8 @@ mod exec;
 #[cfg(target_os = "linux")]
 mod fault;
 #[cfg(target_os = "linux")]
+mod finish;
+#[cfg(target_os = "linux")]
 mod helper;
 #[cfg(target_os = "linux")]
 mod install;
@@ -133,6 +135,10 @@ fn run() -> anyhow::Result<()> {
         /// starts this inside `unshare --mount`.
         #[arg(long, hide = true, num_args = 2, value_names = ["DEVICE", "DIR"])]
         scan_esp: Option<Vec<PathBuf>>,
+        /// Internal: mount a stick's partition in a mount namespace of its own,
+        /// write one log tarball to it and unmount (`Finish(save-log)`).
+        #[arg(long, hide = true, num_args = 6, value_names = ["DEVICE", "FSTYPE", "DIR", "SOURCE", "NAME", "MAJOR:MINOR"])]
+        write_log: Option<Vec<PathBuf>>,
     }
     #[derive(Clone, Copy, clap::ValueEnum)]
     enum ThenArg {
@@ -171,6 +177,9 @@ fn run() -> anyhow::Result<()> {
         let result = disks::scan_esp_child(&scan[0].to_string_lossy(), &scan[1]);
         println!("{}", serde_json::to_string(&result)?);
         return Ok(());
+    }
+    if let Some(write) = args.write_log {
+        return finish::run_write_log(&write);
     }
     let mut config = helper::Config::default();
     if let Some(table) = args.table {

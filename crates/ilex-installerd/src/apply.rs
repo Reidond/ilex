@@ -30,7 +30,7 @@ use anyhow::Context;
 use ilex_installer_model::{
     plan::{ErrorCode, Mode, Plan, PlanError, SECRET_MAX_BYTES, SecretKind},
     probe::Disk,
-    state::State,
+    state::{State, Summary},
 };
 use std::{os::fd::OwnedFd, sync::Arc, thread};
 
@@ -283,7 +283,7 @@ impl Helper {
             })?;
         locked(&self.secrets).retain(|(id, _), _| *id != plan.id);
         self.tracker
-            .begin(&plan.id, &install::stages())
+            .begin(&plan.id, &install::stages(), self.summary_of(&plan))
             .map_err(internal)?;
         // The plan is spent: it is the installation's now, and whatever
         // happens to it a new attempt is a new plan.
@@ -317,6 +317,20 @@ impl Helper {
             unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
         }
         Ok(self.state())
+    }
+
+    /// What the interface says about the installation once it has lost the
+    /// plan (a restarted one has not seen it): from the plan itself.
+    fn summary_of(&self, plan: &Plan) -> Summary {
+        let label = format!("{} {}", plan.disk.model.trim(), plan.disk.serial.trim());
+        Summary {
+            edition: self.edition_name.clone(),
+            composition: plan.composition.tag.clone(),
+            version: plan.image.version.clone(),
+            digest: plan.image.digest.clone(),
+            disk: plan.disk.id.clone(),
+            disk_label: label.trim().to_owned(),
+        }
     }
 
     /// Find the disk of the plan in a probe and require it to be the same disk

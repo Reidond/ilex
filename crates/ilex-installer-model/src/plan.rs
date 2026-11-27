@@ -381,6 +381,13 @@ pub enum ErrorCode {
     /// The image's signature does not verify against the shipped key and
     /// policy, or there is none: nothing was written.
     Signature,
+    /// `Finish(save-log:…)` names a disk that is not a removable volume.
+    NotRemovable,
+    /// `Finish(save-log:…)` names the disk the installation wrote to.
+    InstallTarget,
+    /// `Finish(save-log:…)` names a stick with no file system the installer
+    /// can write a file to.
+    NoFileSystem,
     Internal,
 }
 

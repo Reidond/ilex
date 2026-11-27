@@ -7,6 +7,7 @@ pub mod answers;
 pub mod catalogue;
 pub mod detect;
 pub mod edition;
+pub mod finish;
 pub mod plan;
 pub mod probe;
 pub mod selfcheck;

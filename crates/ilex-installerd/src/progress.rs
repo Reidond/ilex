@@ -7,7 +7,7 @@
 use crate::sys;
 use anyhow::{Context, Result};
 use ilex_installer_model::state::{
-    LOG_TAIL_LINES, Outcome, STATE_SCHEMA, Stage, StageRecord, StageStatus, State,
+    LOG_TAIL_LINES, Outcome, STATE_SCHEMA, Stage, StageRecord, StageStatus, State, Summary,
 };
 use std::{
     fs,
@@ -145,7 +145,7 @@ impl Tracker {
     /// installation's outcome and log are gone. Fails (and changes nothing)
     /// if the record cannot be written: nothing must be written to a disk
     /// without it.
-    pub fn begin(&self, plan: &str, stages: &[Stage]) -> Result<()> {
+    pub fn begin(&self, plan: &str, stages: &[Stage], summary: Summary) -> Result<()> {
         let mut state = locked(&self.state);
         let mut next = state.clone();
         next.active = true;
@@ -158,6 +158,7 @@ impl Tracker {
         next.log.clear();
         next.started = Some(sys::unix_time());
         next.updated = sys::unix_time();
+        next.summary = Some(summary);
         next.stages = stages
             .iter()
             .map(|&stage| StageRecord {

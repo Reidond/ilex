@@ -125,6 +125,16 @@ pub fn run(
             return;
         }
     };
+    // The plan the installation was applied from (the request names the
+    // administrator, never the password): what a log saved to a stick holds
+    // beside the stages' logs, and what the installed system's logs hold.
+    if let Err(e) = write_file(
+        &logs.dir().join("plan.json"),
+        &serde_json::to_vec_pretty(&plan).unwrap_or_default(),
+        0o600,
+    ) {
+        eprintln!("ilex-installerd: the plan was not kept with the logs: {e:#}");
+    }
     let target = helper.config.run_dir.join("target");
     let mut install = Install {
         helper,

@@ -113,7 +113,7 @@ pub struct Helper {
     /// This edition's catalogue.
     pub table: Table,
     /// The edition's display name.
-    edition_name: String,
+    pub(crate) edition_name: String,
     pub(crate) plans: Mutex<VecDeque<Recorded>>,
     /// The secrets `SetSecret` was given, by plan. Held in locked memory and
     /// wiped when taken or when their plan is forgotten.
@@ -186,7 +186,7 @@ impl Helper {
 
     /// While an installation runs the disks and the scratch space are its:
     /// nothing else probes, plans or applies.
-    fn refuse_while_installing(&self) -> Result<(), PlanError> {
+    pub(crate) fn refuse_while_installing(&self) -> Result<(), PlanError> {
         if self.tracker.active() {
             return Err(PlanError::new(
                 ErrorCode::InstallationActive,

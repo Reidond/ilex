@@ -91,6 +91,16 @@ impl Installer {
         serde_json::to_string(&self.helper.state()).map_err(|e| failed(e.into()))
     }
 
+    /// End the session: `restart`, `poweroff` or `save-log:<device id>` (a
+    /// tarball of the installation's logs onto a removable disk that is neither
+    /// the installation's target nor the medium the installer started from).
+    /// Refused while an installation runs. Returns JSON.
+    async fn finish(&self, action: String) -> Result<String, Error> {
+        let helper = Arc::clone(&self.helper);
+        let answer = blocking::unblock(move || helper.finish(&action)).await?;
+        Ok(answer)
+    }
+
     /// A stage began or moved: the stage's name, how far it is (0 to 1) and a
     /// sentence for the person.
     #[zbus(signal)]

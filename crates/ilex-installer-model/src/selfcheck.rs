@@ -6,8 +6,9 @@ use crate::answers::Answers;
 use crate::catalogue::Table;
 use crate::detect::{Identity, ProfileChoice, select};
 use crate::edition::{Edition, EditionRecord};
+use crate::finish::{FinishAction, check_log_device};
 use crate::plan::{ErrorCode, MIN_DISK_BYTES, PlanRequest, check_request};
-use crate::probe::{Disk, EditionInfo, Firmware, HelperInfo, Memory, Probe};
+use crate::probe::{Disk, EditionInfo, Firmware, HelperInfo, Memory, Partition, Probe};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
@@ -648,6 +649,9 @@ password = "hunter2"
         (ErrorCode::InvalidSecret, "invalid-secret"),
         (ErrorCode::InstallationActive, "installation-active"),
         (ErrorCode::Signature, "signature"),
+        (ErrorCode::NotRemovable, "not-removable"),
+        (ErrorCode::InstallTarget, "install-target"),
+        (ErrorCode::NoFileSystem, "no-file-system"),
     ] {
         ensure!(
             serde_json::to_value(code)? == json!(name),
@@ -678,5 +682,151 @@ password = "hunter2"
         })? == json!({"result": "failed", "stage": "image", "reason": "x"}),
         "the outcome's wire form"
     );
-    Ok("table rules, editions, detection, selection, requests, answers, secrets, stages".into())
+    finish_rules()?;
+    Ok("table rules, editions, detection, selection, requests, answers, secrets, stages, finish".into())
+}
+
+/// A partition of a stick: `fs` is what `lsblk` calls its file system.
+fn stick_partition(number: u32, fs: &str, size: u64) -> Partition {
+    Partition {
+        number,
+        path: format!("/dev/stick{number}"),
+        start_bytes: 1 << 20,
+        size_bytes: size,
+        type_id: String::new(),
+        label: String::new(),
+        filesystem: fs.into(),
+        filesystem_label: String::new(),
+    }
+}
+
+/// `Finish`: the action's grammar, and which disks a log may be written to.
+fn finish_rules() -> Result<()> {
+    for (text, action) in [
+        ("restart", FinishAction::Restart),
+        ("poweroff", FinishAction::PowerOff),
+        (
+            "save-log:usb-QEMU_HARDDISK_1-0:0",
+            FinishAction::SaveLog {
+                device: "usb-QEMU_HARDDISK_1-0:0".into(),
+            },
+        ),
+    ] {
+        ensure!(
+            FinishAction::parse(text).as_ref() == Ok(&action) && action.text() == text,
+            "the action {text} does not round-trip"
+        );
+    }
+    for text in [
+        "",
+        "Restart",
+        "reboot",
+        "restart ",
+        "save-log:",
+        "save-log:a/b",
+        "save-log:../x",
+        "save-log:.hidden",
+        "save-log:a\nb",
+        "restart:now",
+    ] {
+        let Err(error) = FinishAction::parse(text) else {
+            anyhow::bail!("the action {text:?} is accepted");
+        };
+        ensure!(
+            error.code == ErrorCode::InvalidField
+                && error.field.as_deref() == Some("action")
+                // It never quotes what it refuses (the prefix is part of its
+                // own wording).
+                && (text.len() <= "save-log:".len() || !error.message.contains(text)),
+            "the refusal of {text:?} is {error:?}"
+        );
+    }
+
+    let table = Table::parse(TWO_SHELLS.as_bytes()).context("fixture table")?;
+    let mut probe = probe_of(&table, &Edition::new("gnome")?)?;
+    let stick = |id: &str| Disk {
+        removable: true,
+        partitions: vec![stick_partition(1, "vfat", 64 << 20)],
+        ..disk(id, 8 << 30, false)
+    };
+    probe.disks = vec![
+        stick("usb-stick"),
+        Disk {
+            removable: true,
+            partitions: vec![stick_partition(1, "vfat", 64 << 20)],
+            ..disk("usb-live", 8 << 30, true)
+        },
+        Disk {
+            removable: true,
+            partitions: vec![stick_partition(1, "vfat", 64 << 20)],
+            ..disk("usb-target", 64 << 30, false)
+        },
+        Disk {
+            partitions: vec![stick_partition(1, "vfat", 64 << 20)],
+            ..disk("fixed", 64 << 30, false)
+        },
+        Disk {
+            in_use: vec!["/dev/stick1 is mounted at /mnt".into()],
+            ..stick("usb-busy")
+        },
+        Disk {
+            partitions: vec![],
+            ..stick("usb-blank")
+        },
+        Disk {
+            partitions: vec![stick_partition(1, "crypto_LUKS", 64 << 20)],
+            ..stick("usb-luks")
+        },
+        Disk {
+            partitions: vec![stick_partition(1, "vfat", 1 << 20)],
+            ..stick("usb-tiny")
+        },
+        Disk {
+            partitions: vec![
+                stick_partition(1, "swap", 64 << 20),
+                stick_partition(2, "ext4", 64 << 20),
+            ],
+            ..stick("usb-second")
+        },
+    ];
+    let target = Some("usb-target");
+    let ok = check_log_device(&probe, "usb-stick", target)?;
+    ensure!(
+        ok.0.id == "usb-stick" && ok.1.number == 1,
+        "the stick is not the log's place"
+    );
+    let second = check_log_device(&probe, "usb-second", target)?;
+    ensure!(
+        second.1.number == 2,
+        "the first partition with a file system the helper writes is not chosen"
+    );
+    for (id, code) in [
+        ("nothing", ErrorCode::UnknownDisk),
+        ("usb-live", ErrorCode::LiveMedium),
+        ("usb-target", ErrorCode::InstallTarget),
+        ("fixed", ErrorCode::NotRemovable),
+        ("usb-busy", ErrorCode::InUse),
+        ("usb-blank", ErrorCode::NoFileSystem),
+        ("usb-luks", ErrorCode::NoFileSystem),
+        ("usb-tiny", ErrorCode::NoFileSystem),
+    ] {
+        let Err(error) = check_log_device(&probe, id, target) else {
+            anyhow::bail!("{id} is accepted as a place for the log");
+        };
+        ensure!(
+            error.code == code && error.field.as_deref() == Some("device"),
+            "{id} is refused with {error:?}, expected {code:?}"
+        );
+    }
+    // The installation's own disk is refused whatever else is true of it, and
+    // a fixed disk that is also the target says so, not "not removable".
+    let Err(error) = check_log_device(&probe, "fixed", Some("fixed")) else {
+        anyhow::bail!("the target is accepted when it is a fixed disk");
+    };
+    ensure!(
+        error.code == ErrorCode::InstallTarget,
+        "the target that is a fixed disk is refused as {:?}",
+        error.code
+    );
+    Ok(())
 }
