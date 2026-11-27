@@ -3615,7 +3615,7 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   nothing carried) writes no file. It is a new file renamed into place (mode 600,
   root's) and the file system is synced (`syncfs`) **and its journal
   checkpointed** (`EXT4_IOC_CHECKPOINT` with no flags on the mounted `/boot`,
-  Linux 5.17: `jbd2_journal_flush`, which writes the journal's blocks to their
+  Linux 5.14: `jbd2_journal_flush`, which writes the journal's blocks to their
   places, flushes the device's cache and empties the journal), because answers
   mode reads with `ro,noload`: `syncfs` commits the journal with a flush but then
   writes the stamp's directory entry and inode to their places with no flush after

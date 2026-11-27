@@ -242,7 +242,8 @@ fn sync_file_system(dir: &Path) -> Result<()> {
 }
 
 /// `EXT4_IOC_CHECKPOINT` (`_IOW('f', 43, __u32)`, `<linux/fs.h>`/ext4's ioctls,
-/// Linux 5.17): checkpoint the journal of the file system the descriptor is on.
+/// Linux 5.14: commit 351a0a3fbc35 "ext4: add ioctl EXT4_IOC_CHECKPOINT", first
+/// in v5.14-rc1): checkpoint the journal of the file system the descriptor is on.
 const EXT4_IOC_CHECKPOINT: libc::c_ulong = 0x4004_662b;
 
 /// Checkpoint the journal of the ext4 file system `dir` (its mount point) is on,
