@@ -221,6 +221,7 @@ pub struct LinuxProvider {
     identity: CheckoutIdentity,
     usb_keyboard: bool,
     usb_medium: bool,
+    usb_sticks: Vec<PathBuf>,
     esp_dir: Option<PathBuf>,
     disk_serials: bool,
     hotplug_port: bool,
@@ -248,6 +249,7 @@ impl LinuxProvider {
             identity,
             usb_keyboard: false,
             usb_medium: false,
+            usb_sticks: Vec::new(),
             esp_dir: None,
             disk_serials: false,
             hotplug_port: false,
@@ -267,6 +269,14 @@ impl LinuxProvider {
     #[must_use]
     pub fn with_usb_medium(mut self, enabled: bool) -> Self {
         self.usb_medium = enabled;
+        self
+    }
+    /// Attach these raw images as removable USB sticks, read-write (see
+    /// [`qemu::VmConfig::extra_usb_disks`]): where an installer writes a log.
+    /// None by default.
+    #[must_use]
+    pub fn with_usb_sticks(mut self, sticks: Vec<PathBuf>) -> Self {
+        self.usb_sticks = sticks;
         self
     }
     /// Serve a directory as a small FAT disk, first in the boot order (see
@@ -440,6 +450,7 @@ impl VmProvider for LinuxProvider {
         config.cdrom = vm.spec.iso.clone();
         config.usb_keyboard = self.usb_keyboard;
         config.usb_medium = self.usb_medium;
+        config.extra_usb_disks.clone_from(&self.usb_sticks);
         config.esp_dir = self.esp_dir.clone();
         config.disk_serials = self.disk_serials;
         config.hotplug_port = self.hotplug_port;

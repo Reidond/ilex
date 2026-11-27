@@ -69,6 +69,14 @@
 //!   the welcome page, the session's keyboard layout switched at run time, the
 //!   machine detected from SMBIOS or named on the kernel command line.
 //!
+//! * `iso::next_keyboard_install`, `iso::next_reattach` and `iso::next_problem`:
+//!   the interface installing for real (see `iso_next/install_ui.rs`): a
+//!   complete install by keyboard alone and the installed disk booted; the
+//!   interface and the compositor killed in the image stage and the session
+//!   back on the installing page; a failed image stage, the log saved to a USB
+//!   stick, every device the log must not go to refused, Try again, and a helper
+//!   killed mid-installation.
+//!
 //! The boot trials use `SecurityLaunch::QualificationFixture`: provisioning
 //! (KVM with SMM, a Secure Boot firmware pair) is required, a passing
 //! qualification of the host is not. They measure whatever the host gives them
@@ -94,6 +102,7 @@ use crate::common;
 use crate::iso::grub_key;
 
 mod helper;
+mod install_ui;
 mod loop_file;
 mod ui;
 mod unattended;
@@ -148,6 +157,7 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_unattended_handover", unattended::run_handover),
     ];
     trials.extend(ui::trials());
+    trials.extend(install_ui::trials());
     trials
 }
 

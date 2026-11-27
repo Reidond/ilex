@@ -212,12 +212,12 @@ impl Bench {
 
 // --- talking to the helper --------------------------------------------------
 
-struct Ran {
-    code: Option<i32>,
-    text: String,
+pub(crate) struct Ran {
+    pub(crate) code: Option<i32>,
+    pub(crate) text: String,
 }
 
-fn ssh(vm: &Vm, script: &str) -> Result<Ran> {
+pub(crate) fn ssh(vm: &Vm, script: &str) -> Result<Ran> {
     let out = vm.ssh(script)?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -240,7 +240,7 @@ fn ok(vm: &Vm, script: &str) -> Result<String> {
 
 /// A method call as `user`, in a script for the guest's root shell. The
 /// request travels base64 so no quoting depends on its text.
-fn busctl(user: &str, method: &str, arguments: &[&str]) -> String {
+pub(crate) fn busctl(user: &str, method: &str, arguments: &[&str]) -> String {
     let arguments: String = arguments
         .iter()
         .map(|a| format!(" \"$(printf %s {} | base64 -d)\"", base64(a.as_bytes())))
@@ -256,7 +256,7 @@ fn busctl(user: &str, method: &str, arguments: &[&str]) -> String {
     )
 }
 
-fn document(ran: &Ran, what: &str) -> Result<Value> {
+pub(crate) fn document(ran: &Ran, what: &str) -> Result<Value> {
     ensure!(
         ran.code == Some(0),
         "{what} failed ({:?}): {}",
@@ -270,7 +270,7 @@ fn document(ran: &Ran, what: &str) -> Result<Value> {
 }
 
 /// The refusal a failed call carries.
-fn refusal(ran: &Ran) -> Result<PlanError> {
+pub(crate) fn refusal(ran: &Ran) -> Result<PlanError> {
     ensure!(
         ran.code != Some(0),
         "the call was not refused: {}",
@@ -284,7 +284,7 @@ fn refusal(ran: &Ran) -> Result<PlanError> {
     serde_json::from_str(json).with_context(|| format!("the refusal's document: {json}"))
 }
 
-fn denied(ran: &Ran) -> bool {
+pub(crate) fn denied(ran: &Ran) -> bool {
     ran.code != Some(0) && ran.text.contains("Access denied")
 }
 

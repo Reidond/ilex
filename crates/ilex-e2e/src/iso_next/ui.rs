@@ -24,10 +24,10 @@
 //!   reported with the model's list of offers (the notice's text names both
 //!   offered tags and the page's rows are those two) and the page stays usable
 //!   on the detected configuration.
-//! * `iso::next_account`: the administrator page typed with the keyboard on a
-//!   VM with a disk the installer could use; Enter in the last field asks the
-//!   real helper to `Plan` the choices (it resolves the image at the
-//!   registry), and the closing page reports the plan checked. The password
+//! * `iso::next_account`: the disk and administrator pages typed with the
+//!   keyboard on a VM with a disk the installer could use; Enter in the last
+//!   field asks the real helper to `Plan` the choices (it resolves the image at
+//!   the registry), and the review page reports the plan checked. The password
 //!   is on neither the serial console nor in the guest's journal.
 
 use std::collections::BTreeMap;
@@ -61,9 +61,9 @@ const OVERRIDE_TAG: &str = "ms-7c35.gnome";
 /// A tag no edition offers.
 const UNKNOWN_TAG: &str = "ms-7c35.kde";
 /// The administrator's password the account trial types.
-const PASSWORD: &str = "correct horse battery";
+pub(super) const PASSWORD: &str = "correct horse battery";
 /// How long the interface is given to answer one key press.
-const EVENT_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const EVENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(super) fn trials() -> Vec<Trial> {
     vec![
@@ -156,7 +156,7 @@ fn boot(
 /// The `key=value` words of the first complete line of the serial console
 /// that `matches`, waiting for it. Fails fast when the VM exited or the
 /// session gave up.
-fn wait_line(
+pub(super) fn wait_line(
     vm: &mut Vm,
     serial: &Path,
     what: &str,
@@ -190,7 +190,7 @@ fn wait_line(
     }
 }
 
-fn wait_page_marker(
+pub(super) fn wait_page_marker(
     vm: &mut Vm,
     serial: &Path,
     page: &str,
@@ -206,7 +206,7 @@ fn wait_page_marker(
     )
 }
 
-fn wait_event(
+pub(super) fn wait_event(
     vm: &mut Vm,
     serial: &Path,
     event: &str,
@@ -225,7 +225,7 @@ fn wait_event(
 
 /// The welcome page is up and the helper answered the probe: the page is
 /// drawn, with its marker and the probe's result.
-fn welcome_up(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &str) -> Result<()> {
+pub(super) fn welcome_up(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &str) -> Result<()> {
     let page = wait_page_marker(vm, serial, "welcome", PAGE_TIMEOUT)?;
     ensure!(
         field(&page, "edition")? == "gnome"
@@ -321,7 +321,7 @@ fn observe_welcome(vm: &mut Vm, artifacts: &Path) -> Result<()> {
 /// Tab through the welcome page's three controls to Continue and press it:
 /// the keyboard alone moves on. On the way the layout test field gets what a
 /// person might type there, their password: it must never be printed.
-fn continue_to_machine(ctl: &Vmctl) -> Result<()> {
+pub(super) fn continue_to_machine(ctl: &Vmctl) -> Result<()> {
     ctl.key("Tab")?;
     ctl.key("Tab")?;
     ctl.type_text(TRY_SECRET)?;
@@ -332,7 +332,7 @@ fn continue_to_machine(ctl: &Vmctl) -> Result<()> {
 /// Nothing typed in the layout test field reached the serial console, and no
 /// `event=try` line was printed: without the test credential the field is not
 /// even read.
-fn no_try_text(serial: &Path) -> Result<()> {
+pub(super) fn no_try_text(serial: &Path) -> Result<()> {
     let text = console(serial)?;
     ensure!(
         !text.contains(TRY_SECRET)
@@ -550,7 +550,16 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     // before then goes to the previous page's field, so wait for the settled
     // page like the other trials do.
     wait_page(vm, &ctl, artifacts, "account-machine")?;
-    // The machine page has Continue focused: Enter presses it.
+    // The machine page has Continue focused: Enter presses it. The disk page
+    // comes next, with the VM's one disk offered, and has Continue focused too.
+    ctl.key("Return")?;
+    let disk = wait_page_marker(vm, &serial, "disk", EVENT_TIMEOUT)?;
+    ensure!(
+        field(&disk, "offered")? == "1" && field(&disk, "unavailable")? == "0",
+        "the disk page of a VM with one blank disk: {disk:?}"
+    );
+    wait_page(vm, &ctl, artifacts, "account-disk")?;
+    ctl.save_screenshot(&artifacts.join("next-account-disk.png"))?;
     ctl.key("Return")?;
     wait_page_marker(vm, &serial, "account", EVENT_TIMEOUT)?;
     wait_page(vm, &ctl, artifacts, "account")?;
@@ -573,13 +582,13 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         field(&plan, "result")? == "ok",
         "the helper did not plan the choices: {plan:?}"
     );
-    let ready = wait_page_marker(vm, &serial, "ready", EVENT_TIMEOUT)?;
+    let review = wait_page_marker(vm, &serial, "review", EVENT_TIMEOUT)?;
     ensure!(
-        field(&ready, "check")? == "ok",
-        "the closing page does not report the plan checked: {ready:?}"
+        field(&review, "check")? == "ok",
+        "the review page does not report the plan checked: {review:?}"
     );
-    wait_page(vm, &ctl, artifacts, "account-ready")?;
-    ctl.save_screenshot(&artifacts.join("next-account-ready.png"))?;
+    wait_page(vm, &ctl, artifacts, "account-review")?;
+    ctl.save_screenshot(&artifacts.join("next-account-review.png"))?;
     // The password is nowhere on the serial console...
     let text = console(&serial)?;
     ensure!(
@@ -596,7 +605,7 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         .context("sshd did not start to read the journal")?;
     let count = vm.ssh_ok(
         "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
-         echo markers=$(grep -c -e '^ILEX-INSTALLER page=ready edition=gnome check=ok' /tmp/journal.txt); \
+         echo markers=$(grep -c -e '^ILEX-INSTALLER page=review edition=gnome check=ok' /tmp/journal.txt); \
          echo password=$(grep -c -e '[c]orrect horse battery' -e '[h]orse batt' /tmp/journal.txt); \
          echo tried=$(grep -c -e '[h]unter2tryfield' /tmp/journal.txt); \
          echo focus=$(grep -c -e 'GtkText - [d]id not receive a focus-out' /tmp/journal.txt); \
@@ -607,7 +616,7 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
             && count.contains("password=0")
             && count.contains("tried=0")
             && count.contains("focus=0"),
-        "the journal holds the closing page's marker, no password or test-field text and no \
+        "the journal holds the review page's marker, no password or test-field text and no \
          GTK focus warning (a focused field made insensitive): {count}"
     );
     Ok(())

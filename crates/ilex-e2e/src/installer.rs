@@ -31,6 +31,13 @@
 //! * `installer::plan`: whole-disk plans (plain and encrypted) against
 //!   repart's own dry run, the registry's manifest, every refusal a request
 //!   can cause, and the proof that planning wrote nothing.
+//! * `installer::finish`: `Finish`'s refusals through the real bus path: a
+//!   malformed action, a log written to a fixed disk, to the medium the system
+//!   started from (both ways it can be the live medium), or to a device that is
+//!   not there; another user is refused by the bus policy; no disk changes and
+//!   the helper still answers. (Restart and power off would end this VM, and a
+//!   stick that is removable needs a VM with USB: `iso::next_problem` writes the
+//!   log for real.)
 //! * `installer::ui`: the interface's own checks on the live image, without a
 //!   display of its own: `ilex-installer --self-check` (the flow's rules on
 //!   the simulation's fixtures, the image's keyboard catalogue, the edition
@@ -103,6 +110,9 @@ pub fn trials() -> Vec<Trial> {
         }),
         trial("installer::ui", || {
             GROUP.run(|vm| ui(&vm.lock().unwrap_or_else(PoisonError::into_inner)))
+        }),
+        trial("installer::finish", || {
+            GROUP.run(|vm| finish(&vm.lock().unwrap_or_else(PoisonError::into_inner)))
         }),
     ];
     // The trials that write a disk boot VMs of their own (UEFI), not this
@@ -1968,6 +1978,78 @@ fn disk_fingerprints(vm: &EphemeralVm) -> Result<String> {
     Ok(printed(&out))
 }
 
+/// `installer::finish`: every way `Finish` refuses, and the policy that lets
+/// only the installer's user ask.
+fn finish(vm: &EphemeralVm) -> Result<()> {
+    // The disks a trial before this one touched settle (its volume groups and
+    // arrays are put away asynchronously): the starting point is the first
+    // fingerprint that stays the same.
+    let mut before = disk_fingerprints(vm)?;
+    for _ in 0..15 {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let again = disk_fingerprints(vm)?;
+        if again == before {
+            break;
+        }
+        before = again;
+    }
+    let refused: [(&str, &str); 11] = [
+        ("", "invalid-field"),
+        ("bogus", "invalid-field"),
+        ("Restart", "invalid-field"),
+        ("restart ", "invalid-field"),
+        ("save-log:", "invalid-field"),
+        ("save-log:../x", "invalid-field"),
+        ("save-log:a/b", "invalid-field"),
+        ("save-log:virtio-blank", "not-removable"),
+        ("save-log:virtio-live", "live-medium"),
+        ("save-log:virtio-isoscan", "live-medium"),
+        ("save-log:usb-nothing-0:0", "unknown-disk"),
+    ];
+    let scripts: Vec<String> = refused
+        .iter()
+        .map(|(action, _)| busctl("ilex-installer", "Finish", Some(action)))
+        .chain([
+            busctl("nobody", "Finish", Some("restart")),
+            busctl("root", "State", None),
+        ])
+        .collect();
+    let ran = batch(vm, &scripts)?;
+    for ((action, code), ran) in refused.iter().zip(&ran) {
+        let document = refusal_document(ran).with_context(|| format!("Finish({action:?})"))?;
+        ensure!(
+            document["code"] == *code && document["field"].as_str().is_some(),
+            "Finish({action:?}) is refused as {document}, expected {code}"
+        );
+        // Not a word of what was asked comes back in the refusal.
+        ensure!(
+            action.len() <= 9 || !document["message"].as_str().unwrap_or_default().contains(action),
+            "the refusal of {action:?} quotes it: {document}"
+        );
+    }
+    ensure!(
+        denied(&ran[refused.len()]),
+        "the bus let another user call Finish: {}",
+        ran[refused.len()].text
+    );
+    let state = document(&ran[refused.len() + 1], "State")?;
+    ensure!(
+        state["stage"] == "idle" && state["active"] == false && state["summary"].is_null(),
+        "Finish changed the helper's state: {state}"
+    );
+    let after = disk_fingerprints(vm)?;
+    ensure!(
+        after == before,
+        "a refused Finish wrote to a disk:\nbefore: {before}\nafter:  {after}"
+    );
+    ensure!(
+        no_scratch_left(vm)?,
+        "a refused Finish left its scratch directory behind"
+    );
+    wait_for_helper(vm)?;
+    Ok(())
+}
+
 /// `installer::plan`: the helper is run against a firmware fixture for the
 /// test and put back as the image ships it, whatever happens.
 fn plan(vm: &EphemeralVm) -> Result<()> {
@@ -2594,7 +2676,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
             .lines()
             .find(|l| l.starts_with(want) && l.contains(&format!("scheme={scheme} scale={scale} ")))
             .with_context(|| format!("no render report for {scheme} at {scale}x:\n{log}"))?;
-        ensure!(line.contains("shots=27 "), "{line}");
+        ensure!(line.contains("shots=56 "), "{line}");
     }
     ensure!(
         !log.contains("render status 1") && log.matches("render status 0").count() == 3,
@@ -2628,12 +2710,12 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         }
     }
     ensure!(
-        seen.len() == 81,
-        "{} images came back, expected 81 (27 states in three configurations)",
+        seen.len() == 168,
+        "{} images came back, expected 168 (56 states in three configurations)",
         seen.len()
     );
     ensure!(
-        distinct.len() >= 70,
+        distinct.len() >= 140,
         "only {} of {} images differ: pages are not drawing their own states",
         distinct.len(),
         seen.len()

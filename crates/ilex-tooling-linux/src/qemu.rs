@@ -438,6 +438,10 @@ pub struct VmConfig {
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
+    /// Raw images attached as removable USB sticks (`/dev/sdX`, read-write,
+    /// serial `ILEXSTICK<n>`) beside the ISO's stick or alone: where an
+    /// installer's log goes. They are not boot devices.
+    pub extra_usb_disks: Vec<PathBuf>,
     /// Give each disk a serial number (`ilex-disk-0` for the main disk, then
     /// `ilex-disk-1`, `ilex-disk-2`, ... for the extra ones), which udev turns
     /// into a `/dev/disk/by-id/virtio-<serial>` name. Without one a virtio disk has
@@ -491,6 +495,7 @@ impl VmConfig {
             usb_keyboard: false,
             usb_medium: false,
             extra_disks: Vec::new(),
+            extra_usb_disks: Vec::new(),
             disk_serials: false,
             bare_disks: 0,
             hotplug_port: false,
@@ -719,6 +724,10 @@ impl Vm {
         // A stick (and its controller, `ilexusb`) exists only with an ISO to
         // put on it; `usb_medium` alone adds nothing.
         let usb_stick = config.usb_medium && config.cdrom.is_some();
+        if usb_stick || !config.extra_usb_disks.is_empty() {
+            // The controller the sticks are on.
+            qemu.args(["-device", "qemu-xhci,id=ilexusb"]);
+        }
         if let Some(iso) = &config.cdrom {
             if usb_stick {
                 // A stick: the whole ISO as a removable USB disk, first in
@@ -726,8 +735,7 @@ impl Vm {
                 // write to it, as to a real stick (a read-only disk is not
                 // offered as a target at all); its writes go to a temporary
                 // overlay, never to the ISO.
-                qemu.args(["-device", "qemu-xhci,id=ilexusb"])
-                    .arg("-drive")
+                qemu.arg("-drive")
                     .arg(format!(
                         "if=none,id=medium,media=disk,format=raw,snapshot=on,file={}",
                         std::path::absolute(iso)?.display()
@@ -742,6 +750,18 @@ impl Vm {
                     std::path::absolute(iso)?.display()
                 ));
             }
+        }
+        for (n, stick) in config.extra_usb_disks.iter().enumerate() {
+            qemu.arg("-drive").arg(format!(
+                "if=none,id=stick{n},media=disk,format=raw,file={}",
+                std::path::absolute(stick)?.display()
+            ));
+            qemu.args([
+                "-device",
+                &format!(
+                    "usb-storage,bus=ilexusb.0,drive=stick{n},removable=on,serial=ILEXSTICK{n}"
+                ),
+            ]);
         }
         let serialed = config.extra_disks.len().saturating_sub(config.bare_disks);
         for (index, extra) in config.extra_disks.iter().enumerate() {
