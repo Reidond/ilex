@@ -1,0 +1,7 @@
+# What compiles the KDE edition's interface (builder stage only): the Qt 6
+# development files cxx-qt links against, its tools (moc, rcc, qmlcachegen,
+# qmltyperegistrar) and a C++ compiler for the code it generates.
+pkgconf-pkg-config
+gcc-c++
+qt6-qtbase-devel
+qt6-qtdeclarative-devel

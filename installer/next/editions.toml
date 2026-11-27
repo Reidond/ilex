@@ -3,7 +3,10 @@
 # (`editions/<id>/`) and the ISO; the display name is what a person reads, and
 # this file is the only place it lives, so it can change without touching code.
 # The owner chose ilex Glabra for the GNOME edition and ilex Kingiana for the
-# future KDE edition (both holly species); the identifier stays the shell's name.
+# KDE edition (both holly species); the identifier stays the shell's name.
 
 [gnome]
 display-name = "ilex Glabra"
+
+[kde]
+display-name = "ilex Kingiana"

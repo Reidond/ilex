@@ -1,12 +1,15 @@
-//! `ilex-installer`: the interface of ilex's own installer for the GNOME
-//! edition: GTK 4 + libadwaita (relm4) over `ilex-installer-flow`, which holds
-//! the pages, the rules and the helper's client. This crate holds only what is
-//! GNOME's: the widgets, GNOME Kiosk's keyboard interface and the rendering of
-//! the pages to PNG files.
+//! `ilex-installer`: the interface of ilex's own installer, one per edition,
+//! over `ilex-installer-flow`, which holds the pages, the rules and the
+//! helper's client. This crate holds only what belongs to a toolkit: for the
+//! GNOME edition GTK 4 + libadwaita (relm4: the widgets, GNOME Kiosk's keyboard
+//! interface, the rendering of the pages to PNG files; the `gui` feature), for
+//! the KDE edition Qt Quick + Kirigami 6 (cxx-qt QObjects and QML pages; the
+//! `kde` feature). The image's edition record says which one starts; an image
+//! carries one (`installer/next/editions/<edition>/interface-feature`).
 //!
-//! It runs as the unprivileged `ilex-installer` user under GNOME Kiosk (see
-//! `installer/next/`) and talks to the root helper `ilex-installerd` over the
-//! system bus.
+//! It runs as the unprivileged `ilex-installer` user under the edition's
+//! compositor, GNOME Kiosk or KWin (see `installer/next/`) and talks to the
+//! root helper `ilex-installerd` over the system bus.
 //!
 //! * no arguments: the installer, fullscreen; the real helper.
 //! * `--windowed`: a normal window (development).
@@ -29,6 +32,8 @@ mod serial;
 
 #[cfg(all(target_os = "linux", feature = "gui"))]
 mod gui;
+#[cfg(all(target_os = "linux", feature = "kde"))]
+mod kde;
 
 use anyhow::{Context, Result, bail};
 use ilex_installer_flow::keyboard::Sources;
@@ -170,18 +175,64 @@ fn harden() {
 #[cfg(not(target_os = "linux"))]
 fn harden() {}
 
-#[cfg(all(target_os = "linux", feature = "gui"))]
+/// The interface of the image's edition: the KDE edition's Qt Quick window
+/// when the record says `kde`, otherwise the GNOME edition's GTK window. An
+/// image carries one interface; a development run without a record takes
+/// whichever the build has (GTK when both).
 fn window(options: &Options, simulated: Option<String>) -> Result<()> {
+    let edition = identity::read().ok();
+    let kde = edition
+        .as_ref()
+        .map_or(cfg!(not(feature = "gui")), |record| record.edition == "kde");
+    if kde {
+        run_kde(options, simulated, edition)
+    } else {
+        run_gtk(options, simulated, edition)
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "gui"))]
+fn run_gtk(
+    options: &Options,
+    simulated: Option<String>,
+    edition: Option<identity::Edition>,
+) -> Result<()> {
     gui::run(gui::Launch {
         fullscreen: options.fullscreen,
         simulate: simulated,
-        edition: identity::read().ok().map(|e| e.edition),
+        edition: edition.map(|e| e.edition),
     })
 }
 
 #[cfg(not(all(target_os = "linux", feature = "gui")))]
-fn window(_options: &Options, _simulated: Option<String>) -> Result<()> {
+fn run_gtk(
+    _options: &Options,
+    _simulated: Option<String>,
+    _edition: Option<identity::Edition>,
+) -> Result<()> {
     bail!("built without the `gui` feature")
+}
+
+#[cfg(all(target_os = "linux", feature = "kde"))]
+fn run_kde(
+    options: &Options,
+    simulated: Option<String>,
+    edition: Option<identity::Edition>,
+) -> Result<()> {
+    kde::run(kde::Launch {
+        fullscreen: options.fullscreen,
+        simulate: simulated,
+        edition,
+    })
+}
+
+#[cfg(not(all(target_os = "linux", feature = "kde")))]
+fn run_kde(
+    _options: &Options,
+    _simulated: Option<String>,
+    _edition: Option<identity::Edition>,
+) -> Result<()> {
+    bail!("built without the `kde` feature")
 }
 
 /// Everything the interface needs that a display is not needed for, and with

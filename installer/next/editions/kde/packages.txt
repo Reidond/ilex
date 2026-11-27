@@ -1,0 +1,20 @@
+# The KDE edition: KWin (Wayland, no Plasma shell) with Qt 6 Qt Quick, Kirigami 6
+# and the Breeze style, icons and cursors.
+kwin
+qt6-qtwayland
+qt6-qtdeclarative
+kf6-kirigami
+qqc2-breeze-style
+breeze-icon-theme
+breeze-cursor-theme
+# The keyboard layouts the welcome page offers: xkeyboard-config's names for
+# them (kbd's console keymaps, which the helper checks, are in the shared list).
+xkeyboard-config
+# Software rendering for machines and VMs without a GPU driver, and the
+# default fonts. KWin loads libGLESv2.so.2 at run time (no package requires it:
+# without it kwin_wayland aborts as soon as it has chosen its DRM backend), and
+# names the monitors from hwdata's tables.
+mesa-dri-drivers
+libglvnd-gles
+hwdata
+default-fonts-core-sans

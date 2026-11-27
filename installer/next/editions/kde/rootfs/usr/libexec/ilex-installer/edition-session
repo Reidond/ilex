@@ -1,0 +1,28 @@
+# The KDE edition's part of the session (sourced by ../session, not run): KWin
+# (Wayland) as the compositor, ilex-installer's Qt Quick + Kirigami window as its
+# only client. No Plasma shell, panel, session manager or other program: KWin
+# starts nothing but what it is told to.
+
+compositor_name=kwin
+
+edition_environment() {
+    export QT_QPA_PLATFORM=wayland
+    export XCURSOR_THEME=breeze_cursors
+    if [ "$graphics" = basic ]; then
+        # nomodeset leaves the display on the firmware's framebuffer: Qt Quick
+        # draws on the CPU, and KWin's own rendering is software too.
+        export QT_QUICK_BACKEND=software
+        export LIBGL_ALWAYS_SOFTWARE=1
+    fi
+}
+
+# --no-lockscreen and --no-global-shortcuts: KWin starts neither the screen
+# locker nor kglobalacceld, which are Plasma's. VT switching is KWin's own
+# (Ctrl+Alt+Fn reaches logind, which the polkit rule allows for this session).
+start_compositor() {
+    kwin_wayland --socket "$wayland_display" --no-lockscreen --no-global-shortcuts &
+}
+
+start_installer() {
+    WAYLAND_DISPLAY=$wayland_display ilex-installer &
+}

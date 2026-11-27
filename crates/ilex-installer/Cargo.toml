@@ -1,16 +1,23 @@
 [package]
 name = "ilex-installer"
-description = "The ilex installer's interface for the GNOME edition: GTK 4 + libadwaita (relm4) over the shared flow"
+description = "The ilex installer's interface: GTK 4 + libadwaita (relm4) for the GNOME edition, Qt Quick + Kirigami (cxx-qt) for the KDE edition, over the shared flow"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [features]
-# The GTK 4 + libadwaita interface. Off by default so that the workspace
-# builds and lints everywhere without gtk4-devel; the installer image's
-# builder stage turns it on (`cargo build -p ilex-installer --features gui`).
+# The GTK 4 + libadwaita interface of the GNOME edition. Off by default so that
+# the workspace builds and lints everywhere without gtk4-devel; the installer
+# image's builder stage turns it on (`cargo build -p ilex-installer --features
+# gui`, from installer/next/editions/gnome/interface-feature).
 gui = ["dep:relm4"]
+# The Qt 6 Qt Quick + Kirigami 6 interface of the KDE edition (src/kde/, the QML
+# in qml/): Rust QObjects through cxx-qt, which needs Qt 6's development
+# packages (qmake6, moc, qmlcachegen: qt6-qtbase-devel and
+# qt6-qtdeclarative-devel) and a C++ compiler at build time. Off by default for
+# the same reason as `gui`; the KDE edition's builder stage turns it on.
+kde = ["dep:cxx", "dep:cxx-qt", "dep:cxx-qt-lib", "dep:cxx-qt-build"]
 
 [dependencies]
 anyhow.workspace = true
@@ -24,3 +31,13 @@ libc = "0.2"
 zbus = "6"
 # gnome_49: the GTK 4.20 / libadwaita 1.8 API (Fedora 45 ships 4.24 / 1.10).
 relm4 = { version = "0.11", features = ["libadwaita", "gnome_49"], optional = true }
+# cxx-qt 0.10.0 (2026-08-24) and the `cxx` its generated code uses: pinned, so
+# that the Qt interface builds the same until someone chooses to move it. Fedora
+# 45 does not package cxx-qt; it is built from crates.io in the image's builder
+# stage against Fedora's Qt 6 (installer/next/Containerfile).
+cxx = { version = "=1.0.205", optional = true }
+cxx-qt = { version = "=0.10.0", optional = true }
+cxx-qt-lib = { version = "=0.10.0", features = ["qt_gui", "qt_qml", "qt_quickcontrols"], optional = true }
+
+[build-dependencies]
+cxx-qt-build = { version = "=0.10.0", optional = true }
