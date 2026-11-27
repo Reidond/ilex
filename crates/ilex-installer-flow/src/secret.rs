@@ -41,6 +41,14 @@ impl Secret {
     }
 }
 
+/// A copy is another buffer of its own, wiped when it is dropped: the flow
+/// hands one to the worker that gives it to the helper.
+impl Clone for Secret {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 impl PartialEq for Secret {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0

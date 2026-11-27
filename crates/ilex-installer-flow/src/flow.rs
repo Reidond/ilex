@@ -6,23 +6,37 @@
 //! ```text
 //! interface                       Flow                          helper / compositor
 //! ---------                       ----                          -------------------
-//! starts                    -->   Flow::new(layouts)[.with_markers(..)], flow.start_probe()
+//! starts                    -->   Flow::new(layouts)[.with_markers(..)], flow.start()
 //! every method that can ask       returns a Step the interface carries out:
 //!   for work returns a Step:
+//!   Step::RunState{generation,..} -> (after the delay) Backend::state on a worker, then
+//!                                    flow.state_finished(generation, result)
 //!   Step::RunProbe{generation}    -> Backend::probe on a worker, then
 //!                                    flow.probe_finished(generation, result)
 //!   Step::RunPlan{generation,..}  -> Backend::plan on a worker, then
 //!                                    flow.plan_finished(generation, result)
 //!   Step::SwitchKeyboard{..}      -> SessionKeyboard::switch on a worker, then
 //!                                    flow.keyboard_switched(generation, result)
+//!   Step::Confirm(dialog)         -> show the erase dialog; its answer goes to
+//!                                    flow.confirm_install() or flow.cancel_install()
+//!   Step::RunApply{..}            -> Backend::start_installation on a worker, then
+//!                                    flow.apply_finished(generation, result)
+//!   Step::RunLogProbe{..}         -> Backend::probe for the log dialog, then
+//!                                    flow.log_probe_finished(generation, result)
+//!   Step::RunFinish{..}           -> Backend::finish on a worker, then
+//!                                    flow.finish_finished(generation, result)
 //!   Step::Goto(page)              -> show the page (it is flow.page() already)
 //!   Step::Stay                    -> nothing
 //! person types / picks      -->   set_language / set_keyboard / select_machine /
-//!                                 set_administrator / set_password / ...
+//!                                 set_disk / set_administrator / set_password / ...
 //! Continue enabled?         <--   flow.can_continue()
 //! Continue pressed          -->   flow.advance()
 //! Back pressed              -->   flow.back()
-//! Try again (closing page)  -->   flow.retry()
+//! Erase and install         -->   flow.install(), then confirm_install()
+//! Try again (review page)   -->   flow.retry()
+//! Try again (problem page)  -->   flow.retry_install()
+//! Restart / Power off       -->   flow.restart() / flow.power_off()
+//! Save the log              -->   flow.choose_log_device(), then flow.save_log(id)
 //! after every call          -->   flow.drain_markers(): the lines to print
 //! ```
 //!
@@ -52,33 +66,84 @@
 //! ([`Flow::echo_try`]).
 //!
 //! Pages of this version: `welcome` (language and keyboard layout), `machine`
-//! (which configuration), `account` (the maintenance administrator) and
-//! `ready`, where the choices checked by `Plan` are shown and this version
-//! ends. The disk, encryption, review, progress, done and problem pages follow
-//! in later changes; they extend [`PageId`] and the `advance` table.
+//! (which configuration), `disk` (where to install: the whole disk), `account`
+//! (the maintenance administrator) and `review`, where the choices checked by
+//! `Plan` are shown and the destructive button begins the installation. After
+//! it come the pages no one goes back from: `installing` (the stages, from the
+//! helper's `State`), `done` and `problem`. The encryption page follows in a
+//! later change; it extends [`PageId`] and the `advance` table.
+//!
+//! The installation's own steps (`install`, `confirm_install`, `apply_finished`,
+//! `state_finished`, `restart`, `power_off`, `choose_log_device`, `save_log`,
+//! `retry_install`) live in [`installation`]; the interface calls them the same
+//! way: each returns a [`Step`] to carry out on a worker, and the answer comes
+//! back with the request's generation.
 
 use crate::account::{self, AccountChecks};
+use crate::disks::{self, DiskChoice, DiskView};
 use crate::keyboard::{self, Layout, Layouts};
 use crate::language::{self, Language};
 use crate::machine::{MachineChoice, MachineView};
 use crate::markers;
 use crate::messages::{self, ClientError, Message};
+use crate::review::Confirmation;
 use crate::secret::Secret;
-use ilex_installer_model::plan::{ErrorCode, MIN_DISK_BYTES, Plan, PlanRequest};
+use ilex_installer_model::finish::FinishAction;
+use ilex_installer_model::plan::{ErrorCode, Plan, PlanRequest};
 use ilex_installer_model::probe::{Disk, Probe};
 use serde_json::json;
 use std::collections::BTreeSet;
+
+mod installation;
+
+pub use installation::{
+    DoneView, InstallingView, LogChoice, LogSave, Phase, ProblemKind, ProblemView,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PageId {
     Welcome,
     Machine,
+    Disk,
     Account,
-    Ready,
+    Review,
+    Installing,
+    Done,
+    Problem,
 }
 
 impl PageId {
-    pub const ORDER: [PageId; 4] = [Self::Welcome, Self::Machine, Self::Account, Self::Ready];
+    /// The pages a person walks with Continue and Back.
+    pub const ORDER: [PageId; 5] = [
+        Self::Welcome,
+        Self::Machine,
+        Self::Disk,
+        Self::Account,
+        Self::Review,
+    ];
+
+    /// Every page, in the order a navigation stack builds them: the walk, then
+    /// the pages an installation ends on (nobody goes back from those).
+    pub const ALL: [PageId; 8] = [
+        Self::Welcome,
+        Self::Machine,
+        Self::Disk,
+        Self::Account,
+        Self::Review,
+        Self::Installing,
+        Self::Done,
+        Self::Problem,
+    ];
+
+    /// Installing, done and problem: Back and Continue do not exist there.
+    pub fn is_closing(self) -> bool {
+        matches!(self, Self::Installing | Self::Done | Self::Problem)
+    }
+
+    /// The page's place among [`PageId::ALL`].
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
 
     /// The id printed on the serial console when the page is shown
     /// (`ILEX-INSTALLER page=<id>`) and used for widget names.
@@ -86,8 +151,12 @@ impl PageId {
         match self {
             Self::Welcome => "welcome",
             Self::Machine => "machine",
+            Self::Disk => "disk",
             Self::Account => "account",
-            Self::Ready => "ready",
+            Self::Review => "review",
+            Self::Installing => "installing",
+            Self::Done => "done",
+            Self::Problem => "problem",
         }
     }
 
@@ -96,13 +165,17 @@ impl PageId {
         match self {
             Self::Welcome => "Welcome",
             Self::Machine => "This computer",
+            Self::Disk => "Disk",
             Self::Account => "Administrator",
-            Self::Ready => "Ready to continue",
+            Self::Review => "Review",
+            Self::Installing => "Installing",
+            Self::Done => "Done",
+            Self::Problem => "Problem",
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
-        Self::ORDER.into_iter().find(|p| p.id() == id)
+        Self::ALL.into_iter().find(|p| p.id() == id)
     }
 
     pub fn next(self) -> Option<Self> {
@@ -169,6 +242,30 @@ pub enum Step {
     /// give the answer to [`Flow::keyboard_switched`]. Only one switch is
     /// ever outstanding.
     SwitchKeyboard { generation: u64, layout: Layout },
+    /// Show this dialog and give the person's answer to
+    /// [`Flow::confirm_install`] (yes) or [`Flow::cancel_install`] (no).
+    Confirm(Confirmation),
+    /// Hand the administrator's password to the helper and begin the
+    /// installation of `plan` (`Backend::start_installation`); give the answer
+    /// to [`Flow::apply_finished`].
+    RunApply {
+        generation: u64,
+        plan: String,
+        erase_disk: String,
+        password: Secret,
+    },
+    /// Ask the helper where the installation is (`Backend::state`) after
+    /// `delay_ms`, and give the answer to [`Flow::state_finished`]. At most one
+    /// is outstanding.
+    RunState { generation: u64, delay_ms: u64 },
+    /// Call `Backend::probe` for the log dialog (which sticks there are) and
+    /// give the answer to [`Flow::log_probe_finished`].
+    RunLogProbe { generation: u64 },
+    /// Call `Backend::finish` and give the answer to [`Flow::finish_finished`].
+    RunFinish {
+        generation: u64,
+        action: FinishAction,
+    },
     /// Nothing changes (Continue was not allowed, the answer was stale, or
     /// the answer was a refusal shown on the current page).
     Stay,
@@ -241,6 +338,14 @@ pub struct Flow {
     /// The person picked the configuration (a new probe keeps it while it is
     /// still offered; otherwise it follows the probe's preselection).
     machine_chosen: bool,
+    /// The disk to install to (its id), and whether the person chose it (a new
+    /// probe keeps the choice while the disk is still offered; otherwise the
+    /// first disk that can be installed to is chosen).
+    disk: Option<String>,
+    disk_chosen: bool,
+    disk_view: Option<DiskView>,
+    /// The installation, from the review page's button to its end.
+    inst: installation::Installation,
     administrator: String,
     password: Secret,
     confirmation: Secret,
@@ -275,6 +380,10 @@ impl Flow {
             },
             machine: None,
             machine_chosen: false,
+            disk: None,
+            disk_chosen: false,
+            disk_view: None,
+            inst: installation::Installation::default(),
             administrator: String::new(),
             password: Secret::default(),
             confirmation: Secret::default(),
@@ -320,6 +429,12 @@ impl Flow {
         }
         queue.shown = true;
         let extra = format!("{toolkit} uptime={}", markers::uptime());
+        if self.inst.is_attaching() {
+            // The first page is the one the helper's answer puts the flow on:
+            // it is announced then, with these words.
+            self.inst.pending_extra = Some(extra);
+            return;
+        }
         self.announce_page(Some(&extra));
     }
 
@@ -362,10 +477,12 @@ impl Flow {
         let Some(queue) = self.markers.as_ref().filter(|m| m.shown) else {
             return;
         };
+        let pending = self.inst.pending_extra.take();
+        let extra = extra.map(str::to_owned).or(pending);
         let mut line = markers::page(&queue.edition, self.page, &self.marker_fields());
         if let Some(extra) = extra {
             line.push(' ');
-            line.push_str(extra);
+            line.push_str(&extra);
         }
         let mut lines = vec![line];
         if self.page == PageId::Machine {
@@ -418,7 +535,7 @@ impl Flow {
         self.probe_in_flight = None;
         self.say(markers::probe(&result));
         let step = self.take_probe(result);
-        if self.page == PageId::Machine {
+        if matches!(self.page, PageId::Machine | PageId::Disk) {
             self.announce_page(None);
         }
         step
@@ -439,8 +556,27 @@ impl Flow {
                     self.machine_chosen = false;
                 }
                 let reset = self.machine != before;
+                // The disk: the person's choice while it is still offered,
+                // else the first disk that can be installed to.
+                let disks = DiskView::from_probe(&probe);
+                let keep_disk = self.disk_chosen
+                    && self
+                        .disk
+                        .as_deref()
+                        .and_then(|id| disks.choice(id))
+                        .is_some_and(DiskChoice::is_offered);
+                let disk_before = self.disk.clone();
+                if !keep_disk {
+                    self.disk = disks.offered().next().map(|c| c.id.clone());
+                    self.disk_chosen = false;
+                }
+                let disk_reset = self.disk != disk_before;
+                self.disk_view = Some(disks);
                 self.view = Some(view);
                 self.probe = ProbeState::Ready(Box::new(probe));
+                if disk_reset {
+                    self.invalidate_check();
+                }
                 if reset {
                     // What an earlier check was made of has changed.
                     self.invalidate_check();
@@ -461,6 +597,7 @@ impl Flow {
             }
             Err(error) => {
                 self.view = None;
+                self.disk_view = None;
                 self.probe = ProbeState::Failed(error.message());
                 if self.resume_check {
                     self.resume_check = false;
@@ -469,6 +606,11 @@ impl Flow {
                 Step::Stay
             }
         }
+    }
+
+    /// Is a look at the computer outstanding?
+    pub fn is_probing(&self) -> bool {
+        self.probe_in_flight.is_some()
     }
 
     /// Is this the answer to the probe request in flight?
@@ -537,9 +679,10 @@ impl Flow {
         }
     }
 
-    /// Back is off on the first page and while the helper is being asked.
+    /// Back is off on the first page, while the helper is being asked, and
+    /// from the moment the erase is confirmed.
     pub fn can_go_back(&self) -> bool {
-        self.page.previous().is_some() && !self.is_checking()
+        self.page.previous().is_some() && !self.is_frozen()
     }
 
     /// Step back one page; `Some(page)` when the page changed.
@@ -571,13 +714,23 @@ impl Flow {
                         .zip(self.view.as_ref())
                         .is_some_and(|(tag, view)| view.choice(tag).is_some())
             }
+            PageId::Disk => {
+                self.probe().is_some()
+                    && self
+                        .disk
+                        .as_deref()
+                        .zip(self.disk_view.as_ref())
+                        .and_then(|(id, view)| view.choice(id))
+                        .is_some_and(DiskChoice::is_offered)
+            }
             // The check needs the computer's own answer: names are judged
             // against its profiles and the plan is asked for its disks. After
             // Back and a new look, Continue waits for it.
             PageId::Account => {
                 self.probe().is_some() && self.account_checks().all_valid() && !self.is_checking()
             }
-            PageId::Ready => false,
+            // The review page has its own button (`install`), not Continue.
+            PageId::Review | PageId::Installing | PageId::Done | PageId::Problem => false,
         }
     }
 
@@ -596,7 +749,7 @@ impl Flow {
             return Step::Stay;
         }
         match self.page {
-            PageId::Welcome | PageId::Machine => {
+            PageId::Welcome | PageId::Machine | PageId::Disk => {
                 let next = self.page.next().unwrap_or(self.page);
                 self.go(next)
             }
@@ -607,11 +760,11 @@ impl Flow {
                     self.run_plan()
                 }
             }
-            PageId::Ready => Step::Stay,
+            PageId::Review | PageId::Installing | PageId::Done | PageId::Problem => Step::Stay,
         }
     }
 
-    /// The closing page's Try again: look at this computer again, then check
+    /// The review page's Try again: look at this computer again, then check
     /// the choices. The earlier look is what a refusal such as "that disk is no
     /// longer there" was about, so repeating the check alone could never mend
     /// it.
@@ -625,8 +778,8 @@ impl Flow {
     /// May the closing page offer Try again? Not while the helper is asked, and
     /// not when only a restart can help (a BIOS boot stays a BIOS boot).
     pub fn can_retry(&self) -> bool {
-        self.page == PageId::Ready
-            && !self.is_checking()
+        self.page == PageId::Review
+            && !self.is_frozen()
             && !matches!(&self.probe, ProbeState::Ready(probe) if !probe.firmware.uefi)
     }
 
@@ -667,7 +820,7 @@ impl Flow {
     /// End the check with this result, on the closing page.
     fn conclude(&mut self, check: PlanCheck) -> Step {
         self.check = check;
-        self.go(PageId::Ready)
+        self.go(PageId::Review)
     }
 
     /// The helper's answer to the latest [`Step::RunPlan`]. A refusal of the
@@ -717,7 +870,13 @@ impl Flow {
         matches!(self.check, PlanCheck::Running)
     }
 
-    /// What the closing page says when the check did not end in a plan.
+    /// Nothing the plan is made of may change: the helper is being asked about
+    /// it, or the installation has been confirmed.
+    pub fn is_frozen(&self) -> bool {
+        self.is_checking() || self.inst.phase != installation::Phase::Idle
+    }
+
+    /// What the review page says when the check did not end in a plan.
     pub fn check_problem(&self) -> Option<Message> {
         match &self.check {
             PlanCheck::NoDisk(reasons) => Some(messages::no_disk(reasons)),
@@ -746,9 +905,9 @@ impl Flow {
         }
     }
 
-    /// The request for `Plan`: the choices so far on the first disk the
-    /// installer could use (the disk page of a later change replaces that
-    /// provisional choice). Unset fields keep the model's defaults.
+    /// The request for `Plan`: the choices so far, on the disk chosen on the
+    /// disk page, whole-disk and unencrypted. Unset fields keep the model's
+    /// defaults.
     pub fn plan_request(&self) -> Result<PlanRequest, Message> {
         let probe = self
             .probe()
@@ -756,19 +915,84 @@ impl Flow {
         let tag = self
             .machine_tag()
             .ok_or_else(|| Message::title("No configuration is chosen"))?;
-        let disk = usable_disks(probe)
-            .into_iter()
-            .next()
+        // The disk the person chose, which must still be one that can be
+        // installed to.
+        let disk = self
+            .disk
+            .as_deref()
+            .and_then(|id| usable_disks(probe).into_iter().find(|d| d.id == id))
             .ok_or_else(|| Message::title("No disk can be installed to"))?;
         let document = json!({
             "composition": tag,
             "disk": disk.id,
             "mode": "whole-disk",
+            // Encryption is a later change: the helper refuses an encrypted
+            // plan until then.
+            "encrypt": false,
             "keyboard": self.keyboard.requested,
             "language": self.language,
             "administrator": self.administrator,
         });
         PlanRequest::parse(&document.to_string()).map_err(|e| messages::plan_error(&e))
+    }
+
+    // --- disk ----------------------------------------------------------------
+
+    /// What the disk page lists, once the computer has been looked at.
+    pub fn disk_view(&self) -> Option<&DiskView> {
+        self.disk_view.as_ref()
+    }
+
+    /// The disk chosen (its id): the person's, else the first that can be
+    /// installed to.
+    pub fn disk(&self) -> Option<&str> {
+        self.disk.as_deref()
+    }
+
+    pub fn disk_choice(&self) -> Option<&DiskChoice> {
+        self.disk_view.as_ref()?.choice(self.disk.as_deref()?)
+    }
+
+    /// `false` for a disk that is not offered, and while the helper is being
+    /// asked. Choosing the disk that is chosen already changes nothing.
+    pub fn set_disk(&mut self, id: &str) -> bool {
+        if self.is_frozen()
+            || !self
+                .disk_view
+                .as_ref()
+                .and_then(|v| v.choice(id))
+                .is_some_and(DiskChoice::is_offered)
+        {
+            return false;
+        }
+        if self.disk.as_deref() != Some(id) {
+            self.invalidate_check();
+            self.disk = Some(id.to_owned());
+            self.disk_chosen = true;
+            self.say(markers::disk(id));
+        }
+        true
+    }
+
+    /// What the disk page says when no disk can be installed to: every disk's
+    /// reason, then what to do.
+    pub fn disk_problem(&self) -> Option<Message> {
+        let probe = self.probe()?;
+        usable_disks(probe)
+            .is_empty()
+            .then(|| messages::no_disk(&disk_report(probe)))
+    }
+
+    /// May the disk page offer to look again? Nothing can be installed to and
+    /// the helper is not being asked: a disk plugged in since appears.
+    pub fn can_look_again(&self) -> bool {
+        self.page == PageId::Disk
+            && !self.is_frozen()
+            && self.probe_in_flight.is_none()
+            && self
+                .disk_view
+                .as_ref()
+                .is_some_and(|v| v.offered().next().is_none())
     }
 
     // --- welcome -------------------------------------------------------------
@@ -784,7 +1008,7 @@ impl Flow {
     /// `false` for a locale the catalogue does not offer, and while the helper
     /// is being asked.
     pub fn set_language(&mut self, locale: &str) -> bool {
-        if self.is_checking() || language::find(locale).is_none() {
+        if self.is_frozen() || language::find(locale).is_none() {
             return false;
         }
         if self.language != locale {
@@ -827,12 +1051,16 @@ impl Flow {
     /// person chose last whatever order the answers come in. Continue stays
     /// off until the compositor has confirmed it.
     pub fn set_keyboard(&mut self, id: &str) -> Step {
-        if self.is_checking() || self.layouts.get(id).is_none() {
+        if self.is_frozen() || self.layouts.get(id).is_none() {
             return Step::Stay;
         }
-        if self.keyboard.requested != id {
-            self.invalidate_check();
+        // The layout that was asked for already: a toolkit that echoes its
+        // selection back is not choosing. Nothing changes, so a failure that is
+        // shown stays until Try again (`retry_keyboard`) and no switch starts.
+        if self.keyboard.requested == id {
+            return Step::Stay;
         }
+        self.invalidate_check();
         self.keyboard.requested = id.to_owned();
         self.keyboard.failure = None;
         self.pump_keyboard()
@@ -921,7 +1149,7 @@ impl Flow {
     /// that echoes the selection back is not choosing). A change queues the
     /// `ILEX-COMPOSITION` line of the new choice.
     pub fn select_machine(&mut self, tag: &str) -> bool {
-        if self.is_checking() || !self.view.as_ref().is_some_and(|v| v.choice(tag).is_some()) {
+        if self.is_frozen() || !self.view.as_ref().is_some_and(|v| v.choice(tag).is_some()) {
             return false;
         }
         if self.machine.as_deref() != Some(tag) {
@@ -966,7 +1194,7 @@ impl Flow {
 
     /// Refused (`false`) while the helper is being asked.
     pub fn set_administrator(&mut self, name: &str) -> bool {
-        if self.is_checking() {
+        if self.is_frozen() {
             return false;
         }
         if self.administrator != name {
@@ -980,7 +1208,7 @@ impl Flow {
     /// Refused (`false`) while the helper is being asked. The secret is moved
     /// in; the one it replaces is wiped.
     pub fn set_password(&mut self, secret: Secret) -> bool {
-        if self.is_checking() {
+        if self.is_frozen() {
             return false;
         }
         if self.password != secret {
@@ -992,7 +1220,7 @@ impl Flow {
 
     /// Refused (`false`) while the helper is being asked.
     pub fn set_confirmation(&mut self, secret: Secret) -> bool {
-        if self.is_checking() {
+        if self.is_frozen() {
             return false;
         }
         if self.confirmation != secret {
@@ -1069,8 +1297,18 @@ impl Flow {
                 ),
                 _ => "selected=none origin=pending".to_owned(),
             },
+            PageId::Disk => match &self.disk_view {
+                Some(view) => format!(
+                    "disk={} offered={} unavailable={}",
+                    markers::one_word(self.disk.as_deref().unwrap_or("none")),
+                    view.offered().count(),
+                    view.choices.len() - view.offered().count()
+                ),
+                None => "disk=none offered=pending".to_owned(),
+            },
             PageId::Account => format!("administrator={}", markers::one_word(&self.administrator)),
-            PageId::Ready => format!("check={}", self.check_word()),
+            PageId::Review => format!("check={}", self.check_word()),
+            PageId::Installing | PageId::Done | PageId::Problem => self.installation_fields(),
         }
     }
 
@@ -1081,12 +1319,12 @@ impl Flow {
 
 /// The disks the installer could install to now: not the medium it started
 /// from, not in use by the running system and big enough (the helper's own
-/// minimum). The disk page of a later change lists them for the person.
+/// minimum). The disk page lists them for the person.
 pub fn usable_disks(probe: &Probe) -> Vec<&Disk> {
     probe
         .disks
         .iter()
-        .filter(|d| !d.live_medium && d.in_use.is_empty() && d.size_bytes >= MIN_DISK_BYTES)
+        .filter(|d| disks::unavailable_reason(d).is_none())
         .collect()
 }
 
@@ -1099,25 +1337,10 @@ pub fn disk_report(probe: &Probe) -> Vec<String> {
     probe
         .disks
         .iter()
-        .filter(|d| !usable_disks(probe).contains(d))
-        .map(|d| {
-            let name = if d.model.is_empty() {
-                d.id.clone()
-            } else {
-                d.model.clone()
-            };
-            let why = if d.live_medium {
-                "it is the medium the installer started from".to_owned()
-            } else if let Some(use_) = d.in_use.first() {
-                format!("it is in use: {use_}")
-            } else {
-                format!(
-                    "it is too small ({}; at least {} are needed)",
-                    human_bytes(d.size_bytes),
-                    human_bytes(MIN_DISK_BYTES)
-                )
-            };
-            format!("{name} ({}): {why}.", human_bytes(d.size_bytes))
+        .filter_map(|d| {
+            disks::unavailable_reason(d).map(|why| {
+                format!("{} ({}): {why}.", disks::title_of(d), human_bytes(d.size_bytes))
+            })
         })
         .collect()
 }

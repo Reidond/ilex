@@ -174,6 +174,16 @@ pub fn plan_error(error: &PlanError) -> Message {
             "The image's signature could not be verified",
             "Nothing was written to the disk. Check that the clock is right and try again; if it fails again, this installer and the published image do not match.",
         ),
+        // What Finish adds: the place a log may be written to.
+        ErrorCode::NotRemovable => Message::new("That is not a USB stick or a card", cause),
+        ErrorCode::InstallTarget => Message::new(
+            "That is the disk ilex was installed on",
+            "A log is never written to it. Use a different USB stick.",
+        ),
+        ErrorCode::NoFileSystem => Message::new(
+            "The installer cannot write to that stick",
+            "It needs a partition formatted as FAT, exFAT, ext4 or NTFS. Format the stick on another computer, or use another one.",
+        ),
         ErrorCode::Internal => Message::new("The installer's helper failed", cause),
     }
 }
@@ -200,4 +210,142 @@ pub fn keyboard_switch_failed(why: &str) -> Message {
              what you type here and, later, the disk passphrase must match the layout you chose."
         ),
     )
+}
+
+// --- the installation -----------------------------------------------------------
+
+/// What a stage does, as a clause for a sentence ("while preparing the disk").
+pub fn stage_phrase(stage: ilex_installer_model::state::Stage) -> &'static str {
+    use ilex_installer_model::state::Stage;
+    match stage {
+        Stage::Idle => "starting",
+        Stage::Partition => "preparing the disk",
+        Stage::Encrypt => "encrypting the disk",
+        Stage::Mount => "mounting the new system",
+        Stage::Image => "downloading and installing ilex",
+        Stage::Configure => "configuring the system",
+        Stage::Account => "creating the administrator",
+        Stage::Recovery => "making the recovery key",
+        Stage::Tpm => "setting up automatic unlock",
+        Stage::Finalise => "finishing",
+        Stage::Done => "finishing",
+    }
+}
+
+/// The helper's reason for a failure, as one bounded sentence a person can
+/// read: its first line, no control characters, ended with a full stop.
+pub fn sentence_of(reason: &str) -> String {
+    let line = reason.lines().next().unwrap_or("").trim();
+    let mut text: String = line
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(400)
+        .collect();
+    if line.chars().count() > 400 {
+        text.push('…');
+    }
+    if text.is_empty() {
+        return "The helper gave no reason".to_owned();
+    }
+    let mut chars = text.chars();
+    let mut sentence: String = chars
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_default();
+    sentence.push_str(chars.as_str());
+    if !sentence.ends_with(['.', '…', '!', '?']) {
+        sentence.push('.');
+    }
+    sentence
+}
+
+/// The installation failed in `stage` for `reason`; `disk_changed` says whether
+/// the helper had begun to write to the disk (`disk` names it).
+pub fn install_failed(
+    stage: ilex_installer_model::state::Stage,
+    reason: &str,
+    disk_changed: bool,
+    disk: Option<&str>,
+) -> Message {
+    // The helper's own reason may already say what became of the disk (a
+    // helper that stopped does): then only the way forward is added.
+    let says_so = reason.contains("disk was already changed") || reason.contains("disk was not changed");
+    let consequence = match (disk_changed, disk) {
+        _ if says_so && disk_changed => {
+            "Try again to install from the start, or save the log and restart.".to_owned()
+        }
+        _ if says_so => "Try again, or save the log and restart.".to_owned(),
+        (true, Some(disk)) => format!(
+            "{disk} has been changed: what was on it is gone. Try again to install from the start, or save the log and restart."
+        ),
+        (true, None) => "The disk has been changed: what was on it is gone. Try again to install from the start, or save the log and restart.".to_owned(),
+        (false, _) => "Nothing was written to the disk.".to_owned(),
+    };
+    Message::new(
+        format!("The installation failed while {}", stage_phrase(stage)),
+        format!("{} {consequence}", sentence_of(reason)),
+    )
+}
+
+/// The installer stopped hearing from its helper during an installation.
+pub fn helper_lost(_error: &ClientError) -> Message {
+    Message::new(
+        "The installer lost contact with its helper",
+        "The installation may still be running, or may have stopped. Try again to ask the helper where it is; if it stays like this, restart the computer and install again.",
+    )
+}
+
+/// `Apply` was asked and its answer never came, and the helper says no
+/// installation began.
+pub fn not_started(cause: &ClientError) -> Message {
+    Message::new(
+        "The installation did not start",
+        format!(
+            "{} Nothing was written to the disk.",
+            sentence_of(&cause.to_string())
+        ),
+    )
+}
+
+/// What the closing page says once Restart or Power off was accepted.
+pub const RESTARTING: &str = "Restarting…";
+pub const POWERING_OFF: &str = "Powering off…";
+
+/// A Restart or Power off the helper did not carry out.
+pub fn finish_failed(error: &ClientError) -> Message {
+    let message = error.message();
+    Message::new(
+        "The computer did not restart",
+        format!(
+            "{} Hold the power button to turn it off, or press Ctrl+Alt+F2 for a shell.",
+            if message.detail.is_empty() {
+                message.title
+            } else {
+                format!("{}. {}", message.title, message.detail)
+            }
+        ),
+    )
+}
+
+/// The log was saved to a stick.
+pub fn log_saved(saved: &ilex_installer_model::finish::Saved) -> Message {
+    Message::new(
+        "The log was saved",
+        format!(
+            "{} was written to {}. It is safe to unplug the stick.",
+            saved.file, saved.label
+        ),
+    )
+}
+
+/// The log could not be saved.
+pub fn log_failed(error: &ClientError) -> Message {
+    let message = error.message();
+    Message::new("The log was not saved", {
+        if message.detail.is_empty() {
+            message.title
+        } else {
+            format!("{}. {}", message.title, message.detail)
+        }
+    })
 }

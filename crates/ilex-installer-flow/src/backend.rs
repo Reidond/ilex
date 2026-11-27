@@ -8,37 +8,19 @@
 //! queued call into the Qt thread for Kirigami). Nothing here is `async`, so
 //! neither toolkit's runtime is imposed on the other.
 //!
-//! `Probe`, `Plan` and `State` are implemented. `SetSecret`, `Apply` and the
-//! progress signals belong to the helper's installation (a later change) and
-//! are typed stubs that answer [`ClientError::NotYet`]: the interface pages
-//! that need them are written against these signatures.
+//! Every method of the helper is here: `Probe`, `Plan`, `SetSecret`, `Apply`,
+//! `State` and `Finish`. The interface learns how an installation goes by
+//! asking `State` about once a second (the same call a restarted interface
+//! re-attaches with, and the only one that carries the last lines of what the
+//! tools printed); the helper's `Progress` and `Finished` signals are for
+//! other listeners and are not subscribed to.
 
 use crate::messages::ClientError;
 use crate::secret::Secret;
-use ilex_installer_model::plan::{Plan, PlanRequest};
+use ilex_installer_model::finish::{FinishAction, Saved};
+use ilex_installer_model::plan::{Plan, PlanRequest, SecretKind};
 use ilex_installer_model::probe::Probe;
-use ilex_installer_model::state::{Outcome, Stage, State};
-
-/// What a secret is for: the helper reads each from a file descriptor, once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SecretKind {
-    DiskPassphrase,
-    AdminPassword,
-}
-
-/// A report from a running installation: the `Progress` signal.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProgressEvent {
-    pub stage: Stage,
-    pub fraction: f64,
-    pub message: String,
-}
-
-/// The end of an installation: the `Finished` signal.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Finished {
-    pub outcome: Outcome,
-}
+use ilex_installer_model::state::State;
 
 pub trait Backend: Send + Sync {
     /// This computer, its disks and what the installer offers.
@@ -50,33 +32,29 @@ pub trait Backend: Send + Sync {
     /// Where an installation is.
     fn state(&self) -> Result<State, ClientError>;
 
-    /// Give the helper a secret for a plan (a later change).
-    fn set_secret(
-        &self,
-        _plan: &str,
-        _kind: SecretKind,
-        _secret: &Secret,
-    ) -> Result<(), ClientError> {
-        Err(ClientError::NotYet("SetSecret"))
-    }
+    /// Give the helper a secret for a plan. It crosses as a sealed memfd, never
+    /// as text.
+    fn set_secret(&self, plan: &str, kind: SecretKind, secret: &Secret) -> Result<(), ClientError>;
 
     /// Start the installation of a plan; in whole-disk mode `erase_disk`
-    /// repeats the disk's id (a later change).
-    fn apply(&self, _plan: &str, _erase_disk: Option<&str>) -> Result<(), ClientError> {
-        Err(ClientError::NotYet("Apply"))
-    }
+    /// repeats the disk's id. The helper has checked everything again and
+    /// begun when this answers: the state returned is the installation's first.
+    fn apply(&self, plan: &str, erase_disk: &str) -> Result<State, ClientError>;
 
-    /// The next `Progress` or `Finished` report, waiting for it (a later
-    /// change). `Ok(None)` means the helper closed the stream.
-    fn next_report(&self) -> Result<Option<Report>, ClientError> {
-        Err(ClientError::NotYet("Progress"))
-    }
-}
+    /// Restart, power off, or write the log to a stick (the [`Saved`] record).
+    fn finish(&self, action: &FinishAction) -> Result<Option<Saved>, ClientError>;
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Report {
-    Progress(ProgressEvent),
-    Finished(Finished),
+    /// What the review page's destructive button does: the administrator's
+    /// password, then the installation.
+    fn start_installation(
+        &self,
+        plan: &str,
+        erase_disk: &str,
+        password: &Secret,
+    ) -> Result<State, ClientError> {
+        self.set_secret(plan, SecretKind::AdminPassword, password)?;
+        self.apply(plan, erase_disk)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -119,19 +97,34 @@ mod dbus {
             Ok(connection)
         }
 
-        /// One method of the helper: takes nothing or a JSON text, returns a
-        /// JSON text.
-        fn call(&self, method: &str, request: Option<&str>) -> Result<String, ClientError> {
+        /// One method of the helper: takes `body` (nothing, a JSON text, two
+        /// texts), returns a JSON text.
+        fn call<B>(&self, method: &str, body: &B) -> Result<String, ClientError>
+        where
+            B: serde::Serialize + zbus::zvariant::DynamicType,
+        {
+            self.call_returning(method, body)
+        }
+
+        /// A method that returns nothing (`SetSecret`).
+        fn call_unit<B>(&self, method: &str, body: &B) -> Result<(), ClientError>
+        where
+            B: serde::Serialize + zbus::zvariant::DynamicType,
+        {
+            self.call_returning(method, body)
+        }
+
+        fn call_returning<B, R>(&self, method: &str, body: &B) -> Result<R, ClientError>
+        where
+            B: serde::Serialize + zbus::zvariant::DynamicType,
+            R: for<'de> serde::Deserialize<'de> + zbus::zvariant::Type,
+        {
             let connection = self.connection()?;
             let reply = zbus::block_on(async {
                 let proxy = Proxy::new(&connection, NAME, PATH, NAME)
                     .await
                     .map_err(|e| ClientError::HelperUnavailable(e.to_string()))?;
-                let reply = match request {
-                    Some(request) => proxy.call::<_, _, String>(method, &(request,)).await,
-                    None => proxy.call::<_, _, String>(method, &()).await,
-                };
-                reply.map_err(map_error)
+                proxy.call::<_, _, R>(method, body).await.map_err(map_error)
             });
             if matches!(reply, Err(ClientError::HelperUnavailable(_))) {
                 // The connection may be what broke: connect afresh next time.
@@ -140,12 +133,15 @@ mod dbus {
             reply
         }
 
-        fn document<T: serde::de::DeserializeOwned>(
+        fn document<T: serde::de::DeserializeOwned, B>(
             &self,
             method: &str,
-            request: Option<&str>,
-        ) -> Result<T, ClientError> {
-            let text = self.call(method, request)?;
+            body: &B,
+        ) -> Result<T, ClientError>
+        where
+            B: serde::Serialize + zbus::zvariant::DynamicType,
+        {
+            let text = self.call(method, body)?;
             serde_json::from_str(&text)
                 .map_err(|e| ClientError::BadAnswer(format!("{method}: {e}")))
         }
@@ -153,18 +149,80 @@ mod dbus {
 
     impl Backend for DbusBackend {
         fn probe(&self) -> Result<Probe, ClientError> {
-            self.document("Probe", None)
+            self.document("Probe", &())
         }
 
         fn plan(&self, request: &PlanRequest) -> Result<Plan, ClientError> {
             let text = serde_json::to_string(request)
                 .map_err(|e| ClientError::Other(format!("the request: {e}")))?;
-            self.document("Plan", Some(&text))
+            self.document("Plan", &(text,))
         }
 
         fn state(&self) -> Result<State, ClientError> {
-            self.document("State", None)
+            self.document("State", &())
         }
+
+        fn set_secret(
+            &self,
+            plan: &str,
+            kind: SecretKind,
+            secret: &Secret,
+        ) -> Result<(), ClientError> {
+            // A sealed memfd holding the secret, handed over as a file
+            // descriptor: the bus never carries it as text.
+            let fd = sealed_memfd(secret.expose().as_bytes())
+                .map_err(|e| ClientError::Other(format!("the secret's descriptor: {e}")))?;
+            let fd = zbus::OwnedFd::from(fd);
+            self.call_unit("SetSecret", &(plan, kind.name(), fd))
+        }
+
+        fn apply(&self, plan: &str, erase_disk: &str) -> Result<State, ClientError> {
+            self.document("Apply", &(plan, erase_disk))
+        }
+
+        fn finish(&self, action: &FinishAction) -> Result<Option<Saved>, ClientError> {
+            let text = self.call("Finish", &(action.text(),))?;
+            match action {
+                FinishAction::SaveLog { .. } => serde_json::from_str(&text)
+                    .map(Some)
+                    .map_err(|e| ClientError::BadAnswer(format!("Finish: {e}"))),
+                _ => Ok(None),
+            }
+        }
+    }
+
+    /// A memfd holding `content`, sealed against writing and resizing: what the
+    /// helper requires of a secret's descriptor. Close-on-exec, so that no
+    /// child of this process inherits it.
+    fn sealed_memfd(content: &[u8]) -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::io::Write;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: a plain syscall with a constant name and flags.
+        let raw = unsafe {
+            libc::memfd_create(
+                c"ilex-secret".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `raw` is a descriptor this call just made.
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        let mut file = std::fs::File::from(owned.try_clone()?);
+        file.write_all(content)?;
+        // SAFETY: sealing a descriptor this function owns.
+        let sealed = unsafe {
+            libc::fcntl(
+                owned.as_raw_fd(),
+                libc::F_ADD_SEALS,
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE,
+            )
+        };
+        if sealed != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(owned)
     }
 
     /// The helper's refusals carry a `PlanError` document as the error's

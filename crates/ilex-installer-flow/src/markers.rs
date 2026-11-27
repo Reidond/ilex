@@ -13,6 +13,15 @@
 //! ILEX-INSTALLER event=layout layout=<id> applied=true|false | result=stale
 //! ILEX-INSTALLER event=language language=<locale>
 //! ILEX-INSTALLER event=notice severity=info|warning|error text=<the machine page's notice>
+//! ILEX-INSTALLER event=disk disk=<id>
+//! ILEX-INSTALLER event=attach result=idle|installing|done|failed|unavailable
+//! ILEX-INSTALLER event=confirm state=shown|cancelled|accepted
+//! ILEX-INSTALLER event=install result=started | refused code=<code> | unknown | not-started
+//! ILEX-INSTALLER event=stage stage=<name> status=running|done|failed
+//! ILEX-INSTALLER event=outcome result=success | failed stage=<name>
+//! ILEX-INSTALLER event=lost failures=<n>
+//! ILEX-INSTALLER event=finish action=restart|poweroff|save-log result=ok|refused code=<code>|failed
+//! ILEX-INSTALLER event=log state=looking|choosing|saving|saved|failed offered=<n> usable=<n>
 //! ILEX-INSTALLER event=try layout=<id> text=<what was typed>      (test boots only)
 //! ILEX-INSTALLER-STATS mem_total_kib=… mem_available_kib=… shmem_kib=… uptime=…
 //! ILEX-INSTALLER-SELFCHECK ok
@@ -144,6 +153,77 @@ pub fn tried(layout: &str, text: &Secret, echo: bool) -> Option<String> {
             one_word(&shown)
         )
     })
+}
+
+/// The person chose a disk (its id, one word).
+pub fn disk(id: &str) -> String {
+    format!("ILEX-INSTALLER event=disk disk={}", one_word(id))
+}
+
+/// Where the interface found the installation when it started.
+pub fn attach(result: &str) -> String {
+    format!("ILEX-INSTALLER event=attach result={result}")
+}
+
+/// The erase confirmation: `shown`, `cancelled` or `accepted`.
+pub fn confirm(state: &str) -> String {
+    format!("ILEX-INSTALLER event=confirm state={state}")
+}
+
+/// What `Apply` answered (`started`, `refused code=…`, `unknown` when the
+/// answer was lost, `not-started` when the helper then said none began).
+pub fn install(result: &str) -> String {
+    format!("ILEX-INSTALLER event=install result={result}")
+}
+
+pub fn install_refused(error: &ilex_installer_model::plan::PlanError) -> String {
+    format!(
+        "ILEX-INSTALLER event=install result=refused code={:?}",
+        error.code
+    )
+}
+
+/// A stage changed status in the helper's record.
+pub fn stage(stage: ilex_installer_model::state::Stage, status: &str) -> String {
+    format!(
+        "ILEX-INSTALLER event=stage stage={} status={status}",
+        stage.name()
+    )
+}
+
+/// The installation ended.
+pub fn outcome(outcome: &ilex_installer_model::state::Outcome) -> String {
+    use ilex_installer_model::state::Outcome;
+    match outcome {
+        Outcome::Success => "ILEX-INSTALLER event=outcome result=success".to_owned(),
+        Outcome::Failed { stage, .. } => format!(
+            "ILEX-INSTALLER event=outcome result=failed stage={}",
+            stage.name()
+        ),
+    }
+}
+
+/// The helper has not answered `State` for this many requests running.
+pub fn lost(failures: u32) -> String {
+    format!("ILEX-INSTALLER event=lost failures={failures}")
+}
+
+/// The answer to `Finish`: its action's word, never its device.
+pub fn finish(action: &str, result: &Result<(), ClientError>) -> String {
+    match result {
+        Ok(()) => format!("ILEX-INSTALLER event=finish action={action} result=ok"),
+        Err(ClientError::Refused(error)) => format!(
+            "ILEX-INSTALLER event=finish action={action} result=refused code={:?}",
+            error.code
+        ),
+        Err(_) => format!("ILEX-INSTALLER event=finish action={action} result=failed"),
+    }
+}
+
+/// The log dialog: `looking` (asking the helper which sticks there are),
+/// `choosing`, `saving`, `saved` or `failed`.
+pub fn log(state: &str, offered: usize, usable: usize) -> String {
+    format!("ILEX-INSTALLER event=log state={state} offered={offered} usable={usable}")
 }
 
 /// Memory and uptime, reported once the session has settled.

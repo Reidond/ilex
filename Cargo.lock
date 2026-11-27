@@ -1497,6 +1497,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ilex-installer-model",
+ "libc",
  "serde",
  "serde_json",
  "zbus",

@@ -5,7 +5,7 @@
 //! installation has no encryption, recovery key or TPM stage.
 
 use ilex_installer_model::plan::Plan;
-use ilex_installer_model::state::{Outcome, Stage, State};
+use ilex_installer_model::state::{Outcome, Stage, StageStatus, State};
 use serde::Serialize;
 
 /// Every stage, in the order the helper runs them.
@@ -108,6 +108,28 @@ impl Progress {
         }
     }
 
+    /// The rows of an installation the interface has not seen the plan of (it
+    /// restarted): the stages the helper recorded, with their outcomes.
+    pub fn from_state(state: &State) -> Self {
+        let mut progress = Self {
+            rows: state
+                .stages
+                .iter()
+                .filter(|record| record.status != StageStatus::Skipped)
+                .map(|record| Row {
+                    stage: record.stage,
+                    label: label(record.stage),
+                    status: Status::Pending,
+                    fraction: 0.0,
+                })
+                .collect(),
+            message: String::new(),
+            outcome: None,
+        };
+        progress.apply(state);
+        progress
+    }
+
     /// Take the helper's state: stages before the current one are done, the
     /// current one runs with the state's fraction (or has failed), later ones
     /// wait. A state in `Done` finishes every row.
@@ -123,10 +145,23 @@ impl Progress {
             matches!(state.outcome, Some(Outcome::Success)) || state.stage == Stage::Done;
         for row in &mut self.rows {
             let at = ORDER.iter().position(|s| *s == row.stage);
+            let recorded = state
+                .stages
+                .iter()
+                .find(|record| record.stage == row.stage)
+                .map(|record| record.status);
             (row.status, row.fraction) = if succeeded {
                 (Status::Done, 1.0)
             } else if failed == Some(row.stage) {
                 (Status::Failed, state.progress.clamp(0.0, 1.0))
+            } else if let Some(recorded) = recorded {
+                // The helper's own record of the stage, when it keeps one.
+                match recorded {
+                    StageStatus::Done | StageStatus::Skipped => (Status::Done, 1.0),
+                    StageStatus::Running => (Status::Running, state.progress.clamp(0.0, 1.0)),
+                    StageStatus::Failed => (Status::Failed, state.progress.clamp(0.0, 1.0)),
+                    StageStatus::Pending => (Status::Pending, 0.0),
+                }
             } else {
                 match (at, current) {
                     (Some(at), Some(current)) if at < current => (Status::Done, 1.0),

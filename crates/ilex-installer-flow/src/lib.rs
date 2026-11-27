@@ -12,9 +12,9 @@
 //! * [`backend`]: the root helper as a trait ([`backend::Backend`]), with the
 //!   real implementation over D-Bus (`org.ilex.Installer1`, Linux) and
 //!   [`simulate::Simulated`], which answers from JSON fixtures.
-//! * [`machine`], [`account`], [`keyboard`], [`language`]: the content and
-//!   rules of the pages made of what the helper reports and what the live image
-//!   ships.
+//! * [`machine`], [`disks`], [`account`], [`review`], [`keyboard`], [`language`]:
+//!   the content and rules of the pages made of what the helper reports and what
+//!   the live image ships.
 //! * [`messages`]: every sentence a refusal or a failure becomes, in one place.
 //! * [`markers`]: the serial-console lines the trials assert on, in one place.
 //! * [`progress`]: the installation's stages as rows, from the helper's state.
@@ -26,6 +26,7 @@
 
 pub mod account;
 pub mod backend;
+pub mod disks;
 pub mod flow;
 pub mod keyboard;
 pub mod language;
@@ -33,6 +34,7 @@ pub mod machine;
 pub mod markers;
 pub mod messages;
 pub mod progress;
+pub mod review;
 pub mod secret;
 pub mod selfcheck;
 pub mod simulate;
