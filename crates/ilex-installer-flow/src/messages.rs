@@ -160,6 +160,20 @@ pub fn plan_error(error: &PlanError) -> Message {
             "The registry has no image for this configuration yet.",
         ),
         ErrorCode::Repart => Message::new("The disk layout could not be prepared", cause),
+        // What Apply adds. No page applies yet; these are the sentences the
+        // progress and problem pages start from.
+        ErrorCode::UnknownPlan | ErrorCode::PlanExpired => Message::new(
+            "The installation plan is no longer valid",
+            "The helper keeps a plan for fifteen minutes and forgets it when it restarts. Go back to the review and confirm the choices again.",
+        ),
+        ErrorCode::DiskChanged => Message::new("The disk is not the one that was checked", cause),
+        ErrorCode::MissingSecret => Message::new("A password is missing", cause),
+        ErrorCode::InvalidSecret => Message::new("A password cannot be used", cause),
+        ErrorCode::InstallationActive => Message::new("An installation is already running", cause),
+        ErrorCode::Signature => Message::new(
+            "The image's signature could not be verified",
+            "Nothing was written to the disk. Check that the clock is right and try again; if it fails again, this installer and the published image do not match.",
+        ),
         ErrorCode::Internal => Message::new("The installer's helper failed", cause),
     }
 }
