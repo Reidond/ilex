@@ -136,6 +136,7 @@ COPY --from=ui-build /out/ /
 # image-builder omits the live ISO's RPM database: bind the tool versions the
 # helper's eligibility probe compares to the files actually shipped.
 RUN dconf update && \
+    semodule -n -i /usr/share/selinux/packages/ilex-installer.cil && \
     systemctl enable ilex-installer-session.service ilex-installer-fallback.service ilex-installerd.service ilex-installer-answers-gate.service ilex-installer-answers.service && \
     ilex-installer --version && \
     mkdir -p /usr/lib/ilex/security && \

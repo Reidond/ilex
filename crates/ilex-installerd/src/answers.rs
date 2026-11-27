@@ -101,8 +101,12 @@ pub struct Options {
 /// ever waiting for it: a port nobody reads, or one that has stopped, costs
 /// this line and nothing else.
 pub fn say(text: &str) {
+    emit(&format!("ILEX-INSTALLER-ANSWERS {text}"));
+}
+
+/// One whole line, as it is, to the same places as [`say`].
+fn emit(line: &str) {
     use std::io::Write;
-    let line = format!("ILEX-INSTALLER-ANSWERS {text}");
     println!("{line}");
     if let Ok(mut port) = fs::OpenOptions::new()
         .write(true)
@@ -110,6 +114,26 @@ pub fn say(text: &str) {
         .open("/dev/ttyS0")
     {
         let _ = port.write(format!("{line}\r\n").as_bytes());
+    }
+}
+
+/// What SELinux made of this boot, on the console and the serial port: the
+/// image's own report (mode, policy, and every denial in the audit log, one
+/// `ILEX-INSTALLER-SELINUX…` line each), printed when the unattended run ends,
+/// just before the machine powers off or the interface takes over. The live ISO
+/// boots enforcing and a denial is a defect of the image; this is where a person
+/// at the console, or the unattended trials, which see nothing else of a guest
+/// that powers itself off, read it. Nothing in the report comes from the
+/// answers.
+fn report_selinux() {
+    const REPORT: &str = "/usr/libexec/ilex-installer/selinux-report";
+    match exec::run(REPORT, &[], Duration::from_secs(60)) {
+        Ok(out) if out.success() => out.stdout_text().lines().for_each(emit),
+        Ok(out) => say(&format!("selinux=unavailable exit={:?}", out.code)),
+        Err(error) => say(&format!(
+            "selinux=unavailable {}",
+            exec::clean_line(format!("{error:#}").as_bytes())
+        )),
     }
 }
 
@@ -765,6 +789,7 @@ pub fn run(options: &Options) -> Result<()> {
             "result=failed {}",
             exec::clean_line(format!("{error:#}").as_bytes())
         ));
+        report_selinux();
         if keeps_interface_out(error) {
             // An installation is running: the flag says so to the
             // systemd-level hand-over as well, however this run began.
@@ -945,6 +970,7 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
         match &state.outcome {
             Some(Outcome::Success) if !state.active => {
                 say("result=success");
+                report_selinux();
                 if options.then == Then::PowerOff {
                     say("power=off");
                     let _ = exec::run("systemctl", &["poweroff"], Duration::from_secs(30));

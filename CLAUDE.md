@@ -2558,39 +2558,78 @@ the Windows paths of this change: no Windows host was available.
   assembles no MD array, opens no LUKS volume and sets up no DM RAID set, so a
   disk with an old installation is offered. The ISO's volume label is
   `ilex-installer-<edition>`.
-- **SELinux: the live image boots permissive and unlabeled.** The kernel
-  command line is `root=live:CDLABEL=… rd.live.image quiet rhgb enforcing=0
-  quiet`: image-builder's `generic-iso` hard-codes `enforcing=0` in the
-  `org.osbuild.grub2.iso` stage's kernel options, and our two entries use its
-  `${root}`. It cannot simply be dropped, because the squashfs carries no
-  labels: the tree is the container image copied by `org.osbuild.container-deploy`
-  into `os-tree` and squashed with no `org.osbuild.selinux` stage (the only
-  one in the manifest labels the build root), so none of the 976 files sampled
-  in `/usr/bin`, `/etc` and `/usr/lib/systemd/system` has a `security.selinux`
-  xattr and the squashfs's xattr table is 69 bytes. Without labels nothing
-  transitions: PID 1 and every process run as `kernel_t`, and files are
-  `unlabeled_t`. The image cannot supply the labels either: `setfiles` run in a
-  `podman build` step (it needs `--cap-add=sys_admin` on a host without SELinux)
-  sets them, but the committed layer loses them (measured on this image:
-  `/usr/bin/true` has no xattrs in the next container), since containers/storage
-  does not keep `security.selinux` in layers. A fix needs a labeling step in the
-  ISO pipeline between `container-deploy` and `squashfs` (an
-  `org.osbuild.selinux` stage with the policy's `file_contexts`, which means
-  upstream image-builder or our own osbuild manifest for the live tree), then
-  `enforcing=1` appended after `${root}` (the last `enforcing=` wins) and a
-  policy module for the installer's own units and the root helper. Until then
-  SELinux confines nothing here: ordinary services already run as `kernel_t`.
-  Measured on the 2026-11-26 image: **about 155 `avc:  denied` events per boot**
-  (154 and 158 on two runs, counted in the journal's audit transport; the
-  kernel prints 19 of them a second time and dbus-broker adds a few as
-  `USER_AVC`), all permissive, from `systemd-sysctl`, `systemd`,
-  `polkitd`, `systemd-oomd`, `systemd-journald`, `udev-worker`, `systemd-userd` (as the kernel truncates it),
-  `systemd-resolved`, `irqbalance`, `rtkit-daemon`, `colord`, `chronyd` and
-  `systemd-logind`, with source domain `kernel_t` (sysctl files, device nodes,
-  `mounton` of `/var`, executing `unlabeled_t`). `iso::next_boot` writes the
-  mode, command line, PID 1's and `/usr/bin/bash`'s labels, the event count and
-  the fifteen most frequent denials to `next-surface.txt` (recorded, not
-  asserted); a root helper added later will show up there too.
+- **SELinux: the live ISO boots enforcing, with labels.** `getenforce` says
+  `Enforcing`, PID 1 is `init_t`, the policy is Fedora's `targeted` (the
+  image's own `/etc/selinux/config`) and the kernel command line has no
+  `enforcing=` at all. Two things made that possible, both in the ISO build and
+  neither in the image: image-builder's `generic-iso` puts `enforcing=0` in the
+  kernel options of both GRUB stages (`org.osbuild.grub2.iso` and its legacy
+  twin) and its `os-tree` pipeline is `org.osbuild.container-deploy` and
+  nothing else, so the squashfs carried no `security.selinux` xattr at all (the
+  one `org.osbuild.selinux` stage of the manifest labels the build root) and
+  every process ran as `kernel_t` on `unlabeled_t` files. The image cannot ship
+  the labels itself: `setfiles` in a `podman build` step sets them, but
+  containers/storage does not keep `security.selinux` in a layer.
+  `installer/next/osbuild-selinux` (a Python script, only the standard library)
+  is therefore the `osbuild` image-builder runs for this ISO: it reads the
+  manifest image-builder pipes in, inserts an `org.osbuild.selinux` stage after
+  the deployment in `os-tree` (`file_contexts` of the image's own policy,
+  `etc/selinux/targeted/contexts/files/file_contexts`, the whole tree), removes
+  `enforcing=0` from the two GRUB stages, and hands the result to `osbuild` as
+  its standard input (an anonymous `memfd`) with the same `--checkpoint build
+  --checkpoint os-tree` the Anaconda ISO's wrapper passes. A manifest that is
+  not what it expects (no `os-tree`, not exactly one deployment, a selinux stage
+  already there, not exactly two `enforcing=0`) is an error, not a pass-through.
+  `crates/xtask/src/iso.rs` takes the wrapper as a parameter (`Osbuild`: the
+  script and the state directory its executable copy goes in); the Anaconda ISO
+  keeps `installer/image-builder/osbuild-cache` and `image-builder-bin`, the
+  next ISO uses `image-builder-bin-next`, and in the helper container (an
+  older image-builder on the host) the copy is bind-mounted over the container's
+  own wrapper. The squashfs now carries the labels (`/usr/bin/bootc` is
+  `install_exec_t`, `/usr/lib/systemd/systemd` `init_exec_t`, `/etc/passwd`
+  `passwd_file_t`).
+  **The policy module** is `installer/next/rootfs/usr/share/selinux/packages/ilex-installer.cil`,
+  installed by `semodule -n -i` in the Containerfile like the OS image's
+  `ilex-homed.cil`. Its rules are the answer to denials the trials recorded and
+  nothing else (the file says which): no permissive domain and no `dontaudit`,
+  which would hide the records the trials count. TODO-RULES
+  The installer's own units and programs (the session script, GNOME Kiosk,
+  the interface, the fallback watcher) have no types of their own: systemd
+  starts them from `/usr/libexec` and `/usr/bin` (`bin_t`), which Fedora runs as
+  `unconfined_service_t` (`type_transition init_t bin_t:process
+  unconfined_service_t`), and the user session of `ilex-installer` is
+  `unconfined_t` like any Fedora login. What SELinux confines on the live ISO is
+  therefore Fedora's own services (logind, polkit, udev, resolved, journald,
+  oomd, sshd, rtkit, the system bus) and the helper's domain; the isolation of
+  the installer's session from root is the unprivileged user, the bus policy and
+  polkit, as before. `iso::next_boot` records the domains of the running
+  processes in `next-surface.txt`.
+  **`/usr/libexec/ilex-installer/selinux-report`** says what SELinux made of the
+  boot, for a person on tty2, the serial log and the trials: one
+  `ILEX-INSTALLER-SELINUX mode=… policy=… pid1=… cmdline=… denials=N` line and
+  one `ILEX-INSTALLER-SELINUX-AVC …` line per record of the audit log of this
+  boot (AVC, USER_AVC and SELINUX_ERR, from journald's audit socket; the
+  kernel's own copy counts too when it holds more). `denials=unknown` means it
+  could not read them. `ilex-installerd --answers` runs it when it ends, success
+  or failure, and prints its lines to the console and the serial port (a
+  machine that powers itself off cannot be asked afterwards).
+  **Every `iso::next` trial ends with it** (`crates/ilex-e2e/src/selinux.rs`):
+  `Enforcing`, no `enforcing=0`/`selinux=0` on the command line, PID 1 in
+  `init_t`, the `targeted` policy and **zero denials** or the trial fails with
+  every record printed; the report is kept as `<trial>-selinux.txt` in
+  `<state dir>/artifacts/iso-next/`. Over SSH where the guest has the harness's
+  key; from the answers program's own console lines for the unattended runs
+  (including every refused one); from tty2's shell, with the output on the second
+  UART, for the two serial trials that boot without a key. A control in
+  `iso::next_boot` provokes one denial (`runcon` into `httpd_t`, whose entrypoint
+  `/usr/bin/true` is not) and requires the report to count it, so a report that
+  always says 0 cannot pass. The disk-booted `installer::policy`, `::install`
+  and `::interrupted` trials boot the live image enforcing too (they no longer
+  `setenforce 0`) and end with the same check. The ephemeral `installer::probe`,
+  `::plan` and `::ui` VMs are bcvk's: a virtiofs root cannot carry labels, so
+  SELinux is off there (`getenforce` says `Disabled`, asserted) and the ISO's
+  trials are what shows the helper under enforcing.
+  TODO-MEASURED
 - **Serial markers.** The session script and the interface print marker lines
   to the journal and to `/dev/ttyS0` (the user is in `dialout`):
   `ILEX-INSTALLER-SESSION compositor=… graphics=default|basic secure-boot=0|1`,
@@ -2709,14 +2748,12 @@ the Windows paths of this change: no Windows host was available.
     note would be a failed scan of its EFI partition);
     `ilex-installerd --self-check` must pass on the ISO's own files; no scan
     or self-check directory may be left in `/run/ilex-installer` after the plans
-    and the self-check; and no SELinux denial may have been enforced. The live ISO boots permissive
-    (`enforcing=0`, from image-builder's kernel arguments) with `unlabeled_t`
-    files, every process in `kernel_t`: denials are logged and nothing is
-    stopped, and the ones that name the helper (its user-namespace setup, the
-    `mount` of an ESP under `/run/ilex-installer`) are counted and printed, not
-    asserted. When the ISO enforces, each is a denial of the helper to resolve
-    first. The mounts and the numbers the tracer follows are the ISO's real
-    ones; the container-image tier cannot show them.
+    and the self-check; and the ISO must have booted SELinux enforcing with no
+    denial in the audit log of the whole trial: the helper's activation by the
+    bus, its probes (the disk-safety trace's reads), the plans (`skopeo
+    inspect` over the network) and the ESP mounts under `/run/ilex-installer`
+    ran in the helper's own domain. The mounts and the numbers the tracer
+    follows are the ISO's real ones; the container-image tier cannot show them.
   - `iso::next_helper_loop` boots the same ISO as a **file on another disk**,
     the way GRUB's loopback with dracut's `iso-scan/filename=` does, and
     nothing is attached as a medium. The VM's own disk is a GPT with one ext4
@@ -3164,9 +3201,9 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     initramfs' own file system, which no mount carries) is dracut's layout for
     an image with `LiveOS/rootfs.img`, which this ISO never has; the helper
     would refuse every disk under it, as it does for any file that could be a
-    device node. The live ISO also boots with `enforcing=0` (SELinux
-    permissive, from the kernel arguments image-builder gives it) and its files
-    carry `unlabeled_t`, so SELinux does not constrain the helper there yet.
+    device node. The live ISO boots SELinux enforcing, and the helper runs in
+    `install_t` (see "SELinux" below), so none of this is read or written
+    outside what that domain may do.
   - `in_use`: why the running system is using the disk otherwise, one sentence
     each: a mounted partition (a btrfs's other devices, an XFS log device), an
     entry of `/proc/swaps`, a loop device attached to a file or block node on
@@ -3398,9 +3435,12 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     Three properties of the live system matter and are the ISO's: `bootupd`
     chooses its components from how the **live system** booted, so it must be
     UEFI (`bootupctl --auto` on a direct-kernel BIOS boot installs GRUB for BIOS
-    and fails without a BIOS boot partition); SELinux must be **permissive** (the
-    ISO boots `enforcing=0`; under enforcing, bootc cannot enter its `install_t`
-    domain from the helper's: `Failed to enter install_t`); and the live root must
+    and fails without a BIOS boot partition); SELinux is **enforcing**, as it
+    boots (the helper runs in `install_t`, the domain bootc needs to write the
+    labels of the target's policy, and `bootc` is `install_exec_t`: from the
+    unlabeled live root it ran as `kernel_t`, and a labeled one with the helper
+    in `unconfined_service_t` stops at `Failed to enter install_t`, see the
+    policy module); and the live root must
     not be an ostree host (bootc asks `ostree --repo=/ostree/repo rev-parse
     --single` and stops at "Multiple commit objects found" if the live image was
     installed to a disk, as the `installer::` trials do, hence the harness hides

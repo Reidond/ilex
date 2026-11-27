@@ -49,6 +49,7 @@ use super::{
 };
 use crate::common;
 use crate::iso;
+use crate::selinux;
 
 /// The fixed public test credential (SMBIOS) that lets the interface print the
 /// text of the layout test field (`ilex_installer_flow::markers`).
@@ -258,7 +259,8 @@ fn welcome() -> Result<()> {
     let mut booted = boot("iso-next-welcome", false, echo, "1G")?;
     let artifacts = booted.artifacts.clone();
     let vm = booted.guest.vm.running_mut()?;
-    let outcome = observe_welcome(vm, &artifacts);
+    let outcome = observe_welcome(vm, &artifacts)
+        .and_then(|()| selinux::check_waiting(vm, &artifacts, "next-welcome"));
     if outcome.is_err() {
         diagnostics(vm, &artifacts, "welcome");
     }
@@ -368,7 +370,8 @@ fn detect(
     let mut booted = boot(purpose, false, smbios, "1G")?;
     let artifacts = booted.artifacts.clone();
     let vm = booted.guest.vm.running_mut()?;
-    let outcome = observe_machine(vm, &artifacts, purpose, expected, origin, notice);
+    let outcome = observe_machine(vm, &artifacts, purpose, expected, origin, notice)
+        .and_then(|()| selinux::check_waiting(vm, &artifacts, &format!("next-{purpose}")));
     if outcome.is_err() {
         diagnostics(vm, &artifacts, purpose);
     }
@@ -452,7 +455,8 @@ fn kernel_argument(purpose: &'static str, tag: &str) -> Result<()> {
     let artifacts = booted.artifacts.clone();
     let (iso, work) = (booted.iso.clone(), booted.work.clone());
     let vm = booted.guest.vm.running_mut()?;
-    let outcome = observe_kernel_argument(vm, &artifacts, &iso, &work, purpose, tag);
+    let outcome = observe_kernel_argument(vm, &artifacts, &iso, &work, purpose, tag)
+        .and_then(|()| selinux::check_waiting(vm, &artifacts, &format!("next-{purpose}")));
     if outcome.is_err() {
         diagnostics(vm, &artifacts, purpose);
     }
@@ -538,7 +542,8 @@ fn account() -> Result<()> {
     let mut booted = boot("iso-next-account", false, vec![], "40G")?;
     let artifacts = booted.artifacts.clone();
     let vm = booted.guest.vm.running_mut()?;
-    let outcome = observe_account(vm, &artifacts);
+    let outcome = observe_account(vm, &artifacts)
+        .and_then(|()| selinux::check_waiting(vm, &artifacts, "next-account"));
     if outcome.is_err() {
         diagnostics(vm, &artifacts, "account");
     }

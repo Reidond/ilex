@@ -44,6 +44,7 @@ use libtest_mimic::{Failed, Trial};
 use serde_json::{Value, json};
 
 use crate::common;
+use crate::selinux;
 
 const GIB: u64 = 1 << 30;
 /// The disk that is installed to: sparse, larger than the least a plan wants.
@@ -173,11 +174,14 @@ impl Bench {
         // repository to ask. Hide this one, so that the helper meets what it
         // meets there (the unattended ISO trial is the proof it does).
         ok(&vm, "mount -t tmpfs tmpfs /sysroot/ostree")?;
-        // And the ISO boots with `enforcing=0` (SELinux permissive, its files
-        // unlabeled); a disk-booted live image enforces, and `bootc install`
-        // then cannot enter its own `install_t` domain from the helper's
-        // (`Failed to enter install_t`). Same policy as the ISO's.
-        ok(&vm, "setenforce 0")?;
+        // The ISO boots SELinux enforcing and so does this: the helper's
+        // `bootc install` enters `install_t` under the module the live image
+        // ships (`ilex-installer.cil`), and nothing is made permissive here.
+        let mode = ok(&vm, "getenforce")?;
+        ensure!(
+            mode == "Enforcing",
+            "the live image booted {mode}, not Enforcing"
+        );
         Ok(vm)
     }
 
@@ -865,6 +869,7 @@ fn policy() -> Result<()> {
         "the password is in the helper's files or journal: {leaks}"
     );
     println!("     every refusal left the disks and the helper untouched");
+    selinux::check(&vm, &bench.artifacts, "installer-policy")?;
     Ok(())
 }
 
@@ -1177,6 +1182,8 @@ fn install() -> Result<()> {
         "the sentinel disk changed"
     );
     ok(&vm, "sync")?;
+    // The whole installation ran enforcing: nothing was denied.
+    selinux::check(&vm, &bench.artifacts, "installer-install")?;
     drop(vm);
 
     // The disk, booted.
@@ -1838,6 +1845,7 @@ fn interrupted() -> Result<()> {
     // A reboot before any retry: the machine is stopped as a power cut would
     // (the guest is not shut down) and the live system starts again. `/run` is
     // new, so only the disk can still name the old digests.
+    selinux::check(&vm, &bench.artifacts, "installer-interrupted-killed")?;
     drop(vm);
     let vm = bench.boot_live()?;
     ensure!(
@@ -1912,6 +1920,7 @@ fn interrupted() -> Result<()> {
         "the sentinel disk changed"
     );
     ok(&vm, "sync")?;
+    selinux::check(&vm, &bench.artifacts, "installer-interrupted-retry")?;
     drop(vm);
     let installed = bench.boot_target()?;
     let status: Value = serde_json::from_str(&installed.ssh_ok("bootc status --json")?)?;

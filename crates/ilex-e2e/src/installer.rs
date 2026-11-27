@@ -214,7 +214,30 @@ fn boot() -> Result<Mutex<EphemeralVm>> {
     prepare_old_linux_disk(&vm)?;
     prepare_medium_disks(&vm)?;
     wait_for_helper(&vm)?;
+    selinux_mode(&vm)?;
     Ok(Mutex::new(vm))
+}
+
+/// bcvk boots the image's own file system over virtiofs, which cannot carry
+/// the labels a policy needs, and its kernel has SELinux off: this VM is
+/// `Disabled`, and the helper under enforcing is what the ISO's trials
+/// (`iso::next…`) and the disk-booted ones (`installer::policy`, `::install`,
+/// `::interrupted`) show. Anything else is neither what a labeled system looks
+/// like nor what a disabled one does (a permissive guest would hide denials),
+/// and an enforcing one (bcvk changing) is held to the same report as the rest.
+fn selinux_mode(vm: &EphemeralVm) -> Result<()> {
+    let mode = guest_script(vm, "getenforce", "getenforce")?;
+    let mode = mode.trim();
+    match mode {
+        "Disabled" => Ok(()),
+        "Enforcing" => {
+            let ws = common::workspace()?;
+            let artifacts = ilex_devkit::qemu::artifact_dir(&ws, "installer")?;
+            let report = guest_script(vm, crate::selinux::REPORT, "the SELinux report")?;
+            crate::selinux::assert_report(&report, &artifacts, "installer-ephemeral")
+        }
+        other => bail!("the ephemeral installer VM is {other}: expected Disabled (bcvk) or a clean Enforcing"),
+    }
 }
 
 /// A GPT disk the way a dual-boot machine looks: an ESP with Windows' and

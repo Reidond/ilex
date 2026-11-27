@@ -19,8 +19,7 @@
 //!   table and no partition), and is refused on the stick and on a disk that is
 //!   too small,
 //! * `ilex-installerd --self-check` passes on the ISO's own files,
-//! * no SELinux denial was enforced (the ISO boots permissive today; the ones
-//!   that name the helper are counted and reported).
+//! * the ISO boots SELinux enforcing and no denial was logged (`selinux.rs`).
 //!
 //! A third trial, `iso::next_helper_loop` (named explicitly, never run by a
 //! broader filter), boots the same ISO as a *file* on another disk, the way
@@ -46,6 +45,7 @@ use super::{
     wait_for_marker,
 };
 use crate::common;
+use crate::selinux;
 
 const BUS: &str = "org.ilex.Installer1";
 const GIB: u64 = 1 << 30;
@@ -654,45 +654,13 @@ fn observe(vm: &mut Vm, medium: Medium, artifacts: &Path, host_bytes: Option<u64
         leftovers.text
     );
 
-    // SELinux. The live ISO boots permissive (`enforcing=0`) with unlabelled
-    // files, so denials are logged and nothing is stopped: none may be an
-    // enforced one (`permissive=0`), and those that name the helper (its
-    // process, its runtime directory, its bus name) are reported, because the
-    // day the ISO enforces, each of them is a denial of the helper. The mode
-    // and the label of the helper's files are recorded.
-    let avc = ssh(
-        vm,
-        "getenforce; ls -lZ /usr/libexec/ilex-installer/ilex-installerd; journalctl -b --no-pager -o short-monotonic -g 'avc:' 2>&1 | grep -iE 'avc: +denied' || true",
-    )?;
-    save(artifacts, medium, "avc.txt", &avc.text)?;
-    let denials: Vec<&str> = avc
-        .text
-        .lines()
-        .filter(|l| l.contains("avc:") && l.contains("denied"))
-        .collect();
-    let enforced: Vec<&&str> = denials
-        .iter()
-        .filter(|l| l.contains("permissive=0"))
-        .collect();
-    ensure!(
-        enforced.is_empty(),
-        "SELinux denied (and enforced): {enforced:#?} (all: next-helper-{}-avc.txt)",
-        medium.name()
-    );
-    let ours: Vec<&&str> = denials
-        .iter()
-        .filter(|l| {
-            l.contains("ilex-installe")
-                || l.contains("ilex_installer")
-                || l.contains("org.ilex.Installer1")
-        })
-        .collect();
+    // SELinux: the ISO boots enforcing with its own labels, and the probes, the
+    // plans, the self-check and the helper's activation by the bus ran as the
+    // helper does; none of it may have been denied.
+    selinux::check(vm, artifacts, &format!("next-helper-{}", medium.name()))?;
     println!(
-        "iso::next helper ({}): SELinux {}: {} denials logged, {} naming the helper (permissive; see next-helper-{}-avc.txt)",
+        "iso::next helper ({}): SELinux enforcing, no denial (next-helper-{}-selinux.txt)",
         medium.name(),
-        avc.text.lines().next().unwrap_or("?"),
-        denials.len(),
-        ours.len(),
         medium.name()
     );
     Ok(())

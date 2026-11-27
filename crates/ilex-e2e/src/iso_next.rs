@@ -100,6 +100,7 @@ use libtest_mimic::{Failed, Trial};
 
 use crate::common;
 use crate::iso::grub_key;
+use crate::selinux;
 
 mod helper;
 mod install_ui;
@@ -446,6 +447,15 @@ fn observe(
             "the session is {session} after a VT round trip"
         );
         surface(vm, artifacts)?;
+    } else {
+        vm.wait_ssh(Duration::from_secs(180))
+            .context("the harness's SSH key did not give a login to the live ISO")?;
+    }
+    // Enforcing and clean at the end of the trial, with a control that the
+    // check would have seen a denial.
+    selinux::check(vm, artifacts, &format!("next-{}", entry.name()))?;
+    if entry == Entry::Normal {
+        selinux::control(vm, artifacts, "next-normal-control")?;
     }
     Ok(())
 }
@@ -493,18 +503,14 @@ ss -tulnH
 echo "=== units running"
 systemctl list-units --type=service --state=running --no-legend --no-pager | awk '{print $1}'
 echo "=== selinux"
-# The live image boots permissive and unlabeled (image-builder's ${root} carries
-# enforcing=0 and the squashfs holds no security.selinux xattrs): PID 1 and
-# every process run as kernel_t. Recorded, not asserted; CLAUDE.md says why.
+# Recorded, not asserted: the end of every trial runs the image's own report
+# (selinux::check), and the domains below are what that report is about.
 echo "SELINUX-MODE $(getenforce)"
-echo "SELINUX-CMDLINE $(tr ' ' '\n' </proc/cmdline | grep -E '^(enforcing|selinux)=' | tr '\n' ' ')"
 echo "SELINUX-PID1 $(ps -o label= -p 1)"
-echo "SELINUX-BASH $(ls -Z /usr/bin/bash | awk '{print $1}')"
-avc=$(mktemp)
-journalctl -b _TRANSPORT=audit --no-pager -o cat | grep -a 'avc:  denied' > "$avc"
-echo "SELINUX-AVC-EVENTS $(wc -l < "$avc")"
-echo "SELINUX-AVC-TOP (count comm source-domain class target-type)"
-sed -E 's/.*comm="?([^" ]*)"?.*scontext=([^ ]*) tcontext=([^ ]*) tclass=([^ ]*).*/\1 \2 \4 \3/' "$avc" | awk '{split($4, t, ":"); print $1, $2, $3, t[3]}' | sort | uniq -c | sort -rn | head -15
+echo "SELINUX-DOMAINS (count domain comm; kernel threads left out)"
+ps -eo label=,comm= | awk '{split($1, l, ":"); if (l[3] != "kernel_t") print l[3], $2}' | sort | uniq -c | sort -rn
+echo "SELINUX-FILES"
+ls -dZ /usr/libexec/ilex-installer/* /run/ilex-installer /var/lib/ilex-installer /usr/share/ilex-installer /dev/tty2 /dev/ttyS0 2>&1
 "#;
     vm.wait_ssh(Duration::from_secs(180))
         .context("the harness's SSH key did not give a login to the live ISO")?;
@@ -1134,6 +1140,7 @@ fn observe_fallback(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     );
     fs::write(artifacts.join("next-fallback-serial.txt"), console)?;
 
+    selinux::check(vm, artifacts, "next-fallback")?;
     println!(
         "iso::next fallback: three failures, then the message on tty1, once, kept across a VT round trip"
     );
@@ -1232,6 +1239,7 @@ fn observe_restart(vm: &mut Vm, artifacts: &Path) -> Result<()> {
         "the fallback fired after two recoverable failures: {console}"
     );
     fs::write(artifacts.join("next-restart-serial.txt"), console)?;
+    selinux::check(vm, artifacts, "next-restart")?;
     println!("iso::next restart: close refused, compositor and client deaths recovered");
     Ok(())
 }
@@ -1354,6 +1362,15 @@ fn observe_serial(vm: &mut Vm, artifacts: &Path, mode: &str) -> Result<()> {
         artifacts.join(format!("next-serial-{mode}-secondary.txt")),
         console,
     )?;
+    // Enforcing and clean. The variants without the key have no SSH server:
+    // the report is asked of tty2's root shell, with its output on the second
+    // UART (which no fault touches).
+    let label = format!("next-serial-{mode}");
+    if mode == "stall" {
+        selinux::check(vm, artifacts, &label)?;
+    } else {
+        selinux::check_tty2(&ctl, &secondary, artifacts, &label)?;
+    }
     println!(
         "iso::next serial {mode}: {audited} faulted writes ({budgets} met the deadline, {busies} skipped as busy), each reported within {SERIAL_BUDGET_SECONDS}s"
     );
@@ -1445,7 +1462,7 @@ fn ssh_tmpfiles() -> Result<()> {
         .and_then(|()| {
             let state = vm.ssh_ok("systemctl is-active sshd")?;
             ensure!(state == "active", "sshd is {state}");
-            Ok(())
+            selinux::check(&vm, &artifacts, "next-ssh-tmpfiles")
         });
     if outcome.is_err() {
         diagnostics(&mut vm, &artifacts, "ssh-tmpfiles");

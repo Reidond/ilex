@@ -1,0 +1,39 @@
+#!/bin/bash
+# What SELinux made of this boot, for a person at tty2 (Ctrl+Alt+F2), the serial
+# log and the tests: the live ISO boots enforcing with the labels of the
+# image's own policy, and a denial is a bug of the image to be reported, not
+# something to live with.
+#
+#   ILEX-INSTALLER-SELINUX mode=Enforcing policy=targeted pid1=init_t cmdline=- denials=0
+#   ILEX-INSTALLER-SELINUX-AVC <one audit record per line, when there are any>
+#
+# The records are the audit log of this boot (journald listens on the audit
+# socket): every AVC, USER_AVC and SELINUX_ERR. The kernel's own copy of an AVC
+# (printk) counts when journald was not listening yet and holds more. Nothing
+# here changes the system; it is root's (the journal) and fails closed: a report
+# that cannot be read says `denials=unknown`.
+set -u
+export LC_ALL=C
+mode=$(getenforce 2>&1 | head -n 1)
+policy=$(sed -n 's/^SELINUXTYPE=//p' /etc/selinux/config 2>/dev/null | head -n 1)
+pid1=$(ps -o label= -p 1 2>/dev/null | awk -F: '{print $3}')
+cmdline=$(tr ' ' '\n' </proc/cmdline | grep -E '^(enforcing|selinux)=' | paste -sd, -)
+
+audit=$(mktemp) || exit 1
+kernel=$(mktemp) || exit 1
+trap 'rm -f "$audit" "$kernel"' EXIT
+unknown() {
+    echo "ILEX-INSTALLER-SELINUX mode=${mode:-unknown} policy=${policy:--} pid1=${pid1:--} cmdline=${cmdline:--} denials=unknown"
+    exit 0
+}
+timeout 30 journalctl -b -q --no-pager -o cat _TRANSPORT=audit _AUDIT_TYPE_NAME=AVC \
+    + _TRANSPORT=audit _AUDIT_TYPE_NAME=USER_AVC \
+    + _TRANSPORT=audit _AUDIT_TYPE_NAME=SELINUX_ERR >"$audit" 2>&1 || unknown
+# `-g` exits 1 when nothing matches; a timeout or any other failure is unknown.
+timeout 30 journalctl -b -q --no-pager -k -g 'avc: +denied' -o cat >"$kernel" 2>&1
+[ $? -le 1 ] || unknown
+a=$(grep -ac . "$audit")
+k=$(grep -ac . "$kernel")
+if [ "$a" -ge "$k" ]; then records=$audit n=$a; else records=$kernel n=$k; fi
+echo "ILEX-INSTALLER-SELINUX mode=${mode:-unknown} policy=${policy:--} pid1=${pid1:--} cmdline=${cmdline:--} denials=$n"
+grep -a . "$records" | head -n 200 | sed 's/^/ILEX-INSTALLER-SELINUX-AVC /'

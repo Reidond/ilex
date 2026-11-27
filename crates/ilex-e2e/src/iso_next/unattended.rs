@@ -76,6 +76,7 @@ use super::{
     wait_firmware_output, wait_for_marker,
 };
 use crate::common;
+use crate::selinux;
 use crate::installer::apply::{ADMIN, Expected, PASSWORD, check_installed, gdm_screenshot};
 
 /// The target's virtual size (`41G` for qemu-img): how the harness finds it in
@@ -527,6 +528,36 @@ fn sha256_of(path: &Path) -> Result<String> {
         .context("sha256sum printed nothing")
 }
 
+/// The end of an unattended run: its `result=` line, then the report on SELinux
+/// that follows it (`ILEX-INSTALLER-SELINUX`, printed by the answers program just
+/// before the machine powers off or hands over: a guest that powers itself off
+/// cannot be asked afterwards). The live ISO boots enforcing and no run of it
+/// may have a denial. Returns the console with both.
+fn wait_result(
+    vm: &mut Vm,
+    serial: &Path,
+    timeout: Duration,
+    artifacts: &Path,
+    label: &str,
+) -> Result<String> {
+    wait_for_marker(vm, serial, MARKER, "result", 1, timeout)?;
+    wait_for_marker(
+        vm,
+        serial,
+        selinux::SUMMARY,
+        "mode",
+        1,
+        Duration::from_secs(120),
+    )?;
+    // The denials follow the summary in one burst.
+    std::thread::sleep(Duration::from_secs(3));
+    let console = fs::read(serial)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    selinux::assert_console(&console, artifacts, &format!("next-{label}"))?;
+    Ok(console)
+}
+
 /// Boot to the end of the installation: the markers say what happened. On the
 /// way, once the pull is under way, the screen is saved: what a person at the
 /// machine sees of an unattended installation.
@@ -568,10 +599,15 @@ fn install(vm: &mut Vm, serial: &Path, artifacts: &Path, name: &str) -> Result<S
             .collect::<Vec<_>>()
             .join("\n")
     );
-    // It powers the machine off by itself.
+    // It powers the machine off by itself, and says what SELinux made of the
+    // boot just before (the report is the last thing it prints).
     let started = Instant::now();
     loop {
         if vm.exited()?.is_some() {
+            let console = fs::read(serial)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+            selinux::assert_console(&console, artifacts, &format!("next-{name}"))?;
             return Ok(console);
         }
         if started.elapsed() > Duration::from_secs(300) {
@@ -603,7 +639,7 @@ fn refuse_invalid(root: &Path, artifacts: &Path, layout: &Layout) -> Result<Stri
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-invalid"))
         .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-invalid")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-invalid-serial.txt")),
@@ -654,7 +690,7 @@ fn refuse_bus_path(root: &Path, artifacts: &Path, layout: &Layout, id: &str) -> 
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-bus-path"))
         .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-bus-path")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-bus-path-serial.txt")),
@@ -727,7 +763,7 @@ fn refuse_confirmation(root: &Path, artifacts: &Path, layout: &Layout) -> Result
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-confirmation"))
         .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-confirmation")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-confirmation-serial.txt")),
@@ -795,7 +831,7 @@ fn refuse_existing(root: &Path, artifacts: &Path, layout: &Layout, target: &str)
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-existing"))
         .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-existing")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-existing-serial.txt")),
@@ -917,7 +953,7 @@ fn refuse_whole_disk(root: &Path, artifacts: &Path, layout: &Layout, target: &st
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-whole-disk"))
         .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-whole-disk")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-whole-disk-serial.txt")),
@@ -990,7 +1026,7 @@ fn refuse_live_medium(root: &Path, artifacts: &Path, layout: &Layout, live: &str
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-medium"))
         .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-medium")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-medium-serial.txt")),
@@ -1058,7 +1094,7 @@ pub(super) fn run_fat() -> Result<()> {
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, &artifacts, "unattended-fat")
         .inspect_err(|_| diagnostics(vm, &artifacts, "unattended-fat"))?;
     let _ = fs::write(artifacts.join("next-unattended-fat-serial.txt"), &console);
     let volume_line = fields(&console, MARKER, "volume")?;
@@ -1079,6 +1115,7 @@ pub(super) fn run_fat() -> Result<()> {
         "the stick's label: {labels}"
     );
     assert_untouched(vm, &root, &layout)?;
+    selinux::check(vm, &artifacts, "next-unattended-fat-live")?;
     drop(guest);
     volume.unchanged()?;
     println!(
@@ -1201,6 +1238,7 @@ pub(super) fn run_late() -> Result<()> {
         "the interface's session changed: {before} then {after}"
     );
     assert_untouched(vm, &root, &layout)?;
+    selinux::check(vm, &artifacts, "next-unattended-late")?;
     drop(guest);
     volume.unchanged()?;
     println!(
@@ -1445,6 +1483,8 @@ sys.exit(0 if state["outcome"]["result"] == "success" else 1)
             "the installation made by hand was not made to fail in the image stage, with the disk wiped: {log}"
         );
     }
+    // Enforcing, and nothing denied, through the whole installation.
+    selinux::check(vm, artifacts, &format!("next-{name}-by-hand"))?;
     Ok(state)
 }
 
@@ -1538,7 +1578,7 @@ fn refused_boot(
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, &format!("{name}-{tag}"))
         .inspect_err(|_| diagnostics(vm, artifacts, &format!("{name}-{tag}")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-{tag}-serial.txt")),
@@ -1626,6 +1666,7 @@ pub(super) fn run_repeat() -> Result<()> {
         "the stamp of the first installation is not the one digest answers mode saw: {stamp:?}"
     );
     let a = stamp[0].clone();
+    selinux::check(vm, &artifacts, &format!("next-{name}-live"))?;
     drop(guest);
     volume.unchanged()?;
     ensure!(
@@ -1657,7 +1698,7 @@ pub(super) fn run_repeat() -> Result<()> {
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, &artifacts, &format!("{name}-edited"))
         .inspect_err(|_| diagnostics(vm, &artifacts, &format!("{name}-edited")))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-edited-serial.txt")),
@@ -1903,6 +1944,7 @@ fn reboot(same_plan: bool) -> Result<()> {
         "the record kept before the wipe: {record}"
     );
     // 3. A power cut: the guest is not shut down.
+    selinux::check(vm, &artifacts, &format!("next-{name}-before-cut"))?;
     drop(guest);
     volume.unchanged()?;
     let failed = target_digest(&root, &layout)?;
@@ -1944,6 +1986,7 @@ fn reboot(same_plan: bool) -> Result<()> {
         !console.contains("apply=started"),
         "the answers wrote after the reboot: {console}"
     );
+    selinux::check(vm, &artifacts, &format!("next-{name}-after-reboot"))?;
     drop(guest);
     volume.unchanged()?;
     ensure!(
@@ -1991,7 +2034,7 @@ pub(super) fn run_retry() -> Result<()> {
     )?;
     let vm = guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, INSTALL_TIMEOUT)
+    let console = wait_result(vm, &serial, INSTALL_TIMEOUT, &artifacts, name)
         .inspect_err(|_| diagnostics(vm, &artifacts, name))?;
     let _ = fs::write(
         artifacts.join(format!("next-{name}-failed-serial.txt")),
@@ -2016,6 +2059,7 @@ pub(super) fn run_retry() -> Result<()> {
         "the answers' own digest was kept in the stamp of the failed installation: seen {seen:?}, stamp {held:?}"
     );
     // 2. A power cut.
+    selinux::check(vm, &artifacts, &format!("next-{name}-before-cut"))?;
     drop(guest);
     volume.unchanged()?;
     let failed = target_digest(&root, &layout)?;
@@ -2208,6 +2252,7 @@ pub(super) fn run_handover() -> Result<()> {
             );
         }
         assert_untouched(vm, &dir, &layout)?;
+        selinux::check(vm, &artifacts, &format!("next-unattended-handover-{fault}"))?;
         drop(guest);
         volume.unchanged()?;
         println!(
@@ -2244,7 +2289,7 @@ fn handover_apply_fault(
     let tag = "unattended-handover-apply";
     // The helper has a plan, a secret and an Apply, and dies: the failure the
     // console shows is the answer that never came.
-    let console = wait_for_marker(vm, &serial, MARKER, "result", 1, PAGE_TIMEOUT)
+    let console = wait_result(vm, &serial, PAGE_TIMEOUT, artifacts, tag)
         .inspect_err(|_| diagnostics(vm, artifacts, tag))?;
     let _ = fs::write(artifacts.join(format!("next-{tag}-serial.txt")), &console);
     ensure!(
@@ -2285,6 +2330,7 @@ fn handover_apply_fault(
         !console.contains("handover="),
         "something handed over to the interface: {console}"
     );
+    selinux::check(vm, artifacts, "next-unattended-handover-helper")?;
     drop(guest);
     volume.unchanged()?;
     println!(
@@ -2409,6 +2455,7 @@ fn handover_restart(root: &Path, layout: &Layout, artifacts: &Path, target: &str
         after.active && after.applied == before.applied,
         "the installation of the first run did not go on: {after:?}"
     );
+    selinux::check(vm, artifacts, "next-unattended-handover-second-run")?;
     drop(guest);
     volume.unchanged()?;
     println!(

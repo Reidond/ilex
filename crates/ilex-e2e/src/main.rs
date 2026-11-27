@@ -35,6 +35,8 @@ mod iso;
 mod iso_next;
 #[cfg(target_os = "linux")]
 mod security;
+#[cfg(target_os = "linux")]
+mod selinux;
 #[cfg(target_os = "windows")]
 mod security_windows;
 #[cfg(target_os = "linux")]

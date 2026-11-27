@@ -215,7 +215,7 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         fs::remove_dir_all(&build_dir)?;
     }
     fs::create_dir_all(&build_dir)?;
-    run_image_builder(ws, &installer, &build_dir, ISO_NAME)?;
+    run_image_builder(ws, &installer, &build_dir, ISO_NAME, OSBUILD_CACHE)?;
 
     // image-builder puts the ISO in a subdirectory; the release wants it flat.
     let built = find_iso(&build_dir)?;
@@ -486,6 +486,23 @@ fn host_image_builder() -> Option<u32> {
         .and_then(|v| v.trim().split('.').next()?.parse().ok())
 }
 
+/// The `osbuild` image-builder runs: a wrapper that keeps the build root and
+/// the deployed tree in the checkout's store, and, for the next installer, also
+/// labels the live root (see `installer/next/osbuild-selinux`).
+#[derive(Clone, Copy)]
+pub(crate) struct Osbuild {
+    /// The script, relative to the checkout.
+    pub script: &'static str,
+    /// Where its executable copy goes, below the state directory.
+    pub dir: &'static str,
+}
+
+/// The Anaconda network installer's: checkpoints only.
+pub(crate) const OSBUILD_CACHE: Osbuild = Osbuild {
+    script: "installer/image-builder/osbuild-cache",
+    dir: "image-builder-bin",
+};
+
 /// Run `image-builder build … generic-iso`: directly when the one on `PATH`
 /// is new enough (CI), otherwise inside a privileged Fedora 45 container that
 /// shares this host's container storage, so a dev machine with an older
@@ -495,9 +512,20 @@ pub(crate) fn run_image_builder(
     installer: &str,
     out_dir: &Path,
     output_name: &str,
+    osbuild: Osbuild,
 ) -> Result<()> {
     let cache = ws.ensure_state()?.join("image-builder-cache");
     fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
+    // The wrapper's executable copy (checkouts on Windows carry no exec bits).
+    let bin = ws.ensure_state()?.join(osbuild.dir);
+    fs::create_dir_all(&bin)?;
+    let wrapper = bin.join("osbuild");
+    fs::copy(ws.root.join(osbuild.script), &wrapper)?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+    }
     let build_args = |out: &str, cache_path: &str| -> Vec<String> {
         [
             "build",
@@ -521,18 +549,6 @@ pub(crate) fn run_image_builder(
 
     if host_image_builder().is_some_and(|v| v >= MIN_IMAGE_BUILDER) {
         // Keep the native path equivalent without installing a host wrapper.
-        let bin = ws.ensure_state()?.join("image-builder-bin");
-        fs::create_dir_all(&bin)?;
-        let wrapper = bin.join("osbuild");
-        fs::copy(
-            ws.root.join("installer/image-builder/osbuild-cache"),
-            &wrapper,
-        )?;
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
-        }
         let mut paths = vec![bin];
         paths.extend(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
@@ -586,6 +602,12 @@ pub(crate) fn run_image_builder(
         .arg("--volume")
         .arg(format!("{}:/out", out_dir.display()))
         .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"]);
+    if osbuild.script != OSBUILD_CACHE.script {
+        // The helper image carries the checkpoint-only wrapper; this one is
+        // ours (and needs the container's python3, which osbuild requires).
+        run.arg("--volume")
+            .arg(format!("{}:/usr/local/bin/osbuild:ro", wrapper.display()));
+    }
     ilex_devkit::ownership::remote_container_args(ws, &mut run)?;
     run.arg(&helper)
         .args([

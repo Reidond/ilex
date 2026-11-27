@@ -20,7 +20,14 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use ilex_devkit::{Workspace, cmd};
 
-use crate::iso::{copy_sources, find_iso, run_image_builder, sha256_file};
+use crate::iso::{Osbuild, copy_sources, find_iso, run_image_builder, sha256_file};
+
+/// The `osbuild` of this ISO: the checkpoints of the Anaconda ISO's wrapper, and
+/// the labels the live root needs to boot SELinux enforcing.
+const OSBUILD: Osbuild = Osbuild {
+    script: "installer/next/osbuild-selinux",
+    dir: "image-builder-bin-next",
+};
 
 /// The edition built when none is named.
 pub const DEFAULT_EDITION: &str = "gnome";
@@ -212,7 +219,7 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         fs::remove_dir_all(&build_dir)?;
     }
     fs::create_dir_all(&build_dir)?;
-    run_image_builder(ws, &image, &build_dir, &iso_name(&edition.id))?;
+    run_image_builder(ws, &image, &build_dir, &iso_name(&edition.id), OSBUILD)?;
 
     let built = find_iso(&build_dir)?;
     let iso = out_dir.join(format!("{}.iso", iso_name(&edition.id)));
