@@ -496,6 +496,7 @@ impl Flow {
     /// again.
     fn start_over(&mut self) -> Step {
         self.administrator.clear();
+        self.encrypt = true;
         self.wipe_secrets();
         self.name_refusal = None;
         self.machine_chosen = false;
@@ -506,6 +507,15 @@ impl Flow {
         self.page = PageId::Welcome;
         self.announce_page(None);
         self.begin_probe()
+    }
+
+    /// Does this interface still hold the choices of the installation (it made
+    /// them itself: a restarted one has none)? The administrator and its
+    /// password, and the passphrase when the disk is to be encrypted.
+    fn have_choices(&self) -> bool {
+        !self.administrator.is_empty()
+            && !self.password.is_empty()
+            && (!self.encrypt || !self.passphrase.is_empty())
     }
 
     /// The installation's own state is forgotten (the request counters stay, so
@@ -534,7 +544,7 @@ impl Flow {
             .filter(|r| Some(&r.plan) == plan.as_ref())
             .map(|r| r.error.clone());
         self.say(markers::install("not-started"));
-        let have_choices = !self.administrator.is_empty() && !self.password.is_empty();
+        let have_choices = self.have_choices();
         self.reset_installation();
         if have_choices {
             self.stale_probe = true;
@@ -711,6 +721,14 @@ impl Flow {
                     .to_owned(),
             },
             Row {
+                title: "Encryption",
+                value: if plan.encryption.enabled {
+                    "On: the disk asks for its passphrase every time the computer starts".to_owned()
+                } else {
+                    "Off: anyone who has the disk can read it".to_owned()
+                },
+            },
+            Row {
                 title: "Administrator",
                 value: self.administrator().to_owned(),
             },
@@ -765,6 +783,7 @@ impl Flow {
             return Step::Stay;
         };
         let (plan_id, disk) = (plan.id.clone(), plan.disk.id.clone());
+        let plan_encrypts = plan.encryption.enabled;
         self.inst.phase = Phase::Starting;
         self.inst.unanswered = None;
         self.inst.apply_generation += 1;
@@ -775,6 +794,10 @@ impl Flow {
             plan: plan_id,
             erase_disk: disk,
             password: self.password().clone(),
+            // The passphrase goes only where the plan encrypts: what was
+            // typed while encryption was on is not sent after it was turned
+            // off, and the plan is what the helper holds.
+            passphrase: plan_encrypts.then(|| self.passphrase().clone()),
         }
     }
 
@@ -963,10 +986,19 @@ impl Flow {
                 title: "Installed on",
                 value: summary.disk_label.clone(),
             });
+
         }
+        let encrypted = summary.is_some_and(|s| s.encrypted);
         Some(DoneView {
             heading: format!("{edition} is installed"),
-            detail: "Remove the installation medium, then restart. The computer starts the new system; sign in with the administrator account you made, and create your own account there when it asks.".to_owned(),
+            detail: format!(
+                "Remove the installation medium, then restart. {}The computer starts the new system; sign in with the administrator account you made, and create your own account there when it asks.",
+                if encrypted {
+                    "The disk is encrypted: the computer asks for its passphrase every time it starts, in the keyboard layout you chose. "
+                } else {
+                    ""
+                }
+            ),
             rows,
             finishing: self.inst.finishing,
             error: self.inst.finish_error.clone(),
@@ -1089,7 +1121,7 @@ impl Flow {
             self.inst.failures = 0;
             return self.begin_state(0);
         }
-        let have_choices = !self.administrator.is_empty() && !self.password.is_empty();
+        let have_choices = self.have_choices();
         self.reset_installation();
         if have_choices {
             self.check = super::PlanCheck::Running;

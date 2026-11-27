@@ -1,7 +1,14 @@
 //! The installation itself: the stages that write the disk, run by `Apply` on a
-//! thread of their own (plan 9.1, unencrypted whole disk):
+//! thread of their own (plan 9.1, whole disk):
 //!
-//! partition → mount → image → configure → account → finalise
+//! partition → [encrypt →] mount → image → configure → account → finalise
+//!
+//! An encrypted installation's partition stage also makes the LUKS2 volume
+//! (`systemd-repart` formats it with the passphrase as the key of its one
+//! keyslot), and its encrypt stage opens the volume, checks the header it was
+//! given and keeps the opened device for the mount stage. The passphrase goes
+//! to the tools as a descriptor (`--key-file=/proc/self/fd/N`), never in an
+//! argument or a log, and is wiped when the encrypt stage is over.
 //!
 //! Each stage is recorded before it writes anything ([`Tracker`]), logs what
 //! its tools print under `/run/ilex-installer/log/<plan>/`, and fails with a
@@ -14,7 +21,7 @@ use crate::{
     exec::{self, Exit, Flow, Job},
     fault,
     helper::Helper,
-    repart,
+    luks, repart,
     secret::{self, Secret},
     stagelog::{Logs, StageLog},
     stamp, target,
@@ -48,11 +55,14 @@ const SETFILES: Duration = Duration::from_secs(300);
 /// so.
 const WRITTEN_PER_DOWNLOADED: f64 = 2.6;
 
-/// The stages an installation goes through. (Encryption, the recovery key and
-/// the TPM add theirs in later changes; `Apply` refuses an encrypted plan
-/// until then.)
-pub fn stages() -> Vec<Stage> {
-    Stage::UNENCRYPTED.to_vec()
+/// The stages a plan's installation goes through. (The recovery key and the
+/// TPM add theirs in a later change.)
+pub fn stages(plan: &Plan) -> Vec<Stage> {
+    if plan.request.encrypt {
+        Stage::ENCRYPTED.to_vec()
+    } else {
+        Stage::UNENCRYPTED.to_vec()
+    }
 }
 
 pub struct Install {
@@ -66,6 +76,16 @@ pub struct Install {
     /// The device nodes of the partitions this installation made.
     nodes: BTreeSet<String>,
     admin: Secret,
+    /// The disk's passphrase, until the encrypt stage has used it.
+    passphrase: Option<Secret>,
+    /// The passphrase as the file the tools read, from before the partition
+    /// stage until the encrypt stage is over.
+    key: Option<luks::KeyFile>,
+    /// The LUKS volume this installation made: its UUID, and whether it is
+    /// open (the device-mapper name [`luks::mapping_name`] exists).
+    volume: Option<Volume>,
+    /// The partitions repart made, as found after the partition stage.
+    found: Option<Vec<(PlannedPartition, String)>>,
     /// What the disk's stamp held before it was wiped.
     earlier: stamp::Earlier,
     /// The digests of the provisional stamp the mount stage left on the new
@@ -73,6 +93,12 @@ pub struct Install {
     provisional: Option<Vec<String>>,
     /// The stage that is running (or failed).
     stage: Stage,
+}
+
+/// The encrypted volume of an installation.
+struct Volume {
+    uuid: String,
+    open: bool,
 }
 
 struct Output {
@@ -113,6 +139,7 @@ pub fn run(
     hold: Hold,
     address: String,
     admin: Secret,
+    passphrase: Option<Secret>,
     earlier: stamp::Earlier,
 ) {
     let logs = match Logs::new(&helper.config.run_dir, &plan.id) {
@@ -144,6 +171,10 @@ pub fn run(
         address,
         nodes: BTreeSet::new(),
         admin,
+        passphrase,
+        key: None,
+        volume: None,
+        found: None,
         earlier,
         provisional: None,
         stage: Stage::Partition,
@@ -178,7 +209,19 @@ impl Install {
     }
 
     fn stages(&mut self, hold: Hold) -> Result<()> {
+        // The passphrase as a file for the tools, made before anything is
+        // written (a failure here leaves the disk as it was).
+        if let Some(passphrase) = &self.passphrase {
+            self.key = Some(luks::KeyFile::new(passphrase)?);
+        }
         self.partition(hold)?;
+        if self.plan.request.encrypt {
+            self.encrypt()?;
+        }
+        // Whatever the stages above held of the passphrase is wiped now: the
+        // key file overwritten, the secret's pages zeroed.
+        self.key = None;
+        self.passphrase = None;
         self.mount()?;
         self.image()?;
         let deployment =
@@ -217,6 +260,19 @@ impl Install {
         args: &[&str],
         timeout: Duration,
     ) -> Result<Vec<String>> {
+        self.checked_with(log, program, args, timeout, &[])
+    }
+
+    /// [`Install::checked`] for a tool that reads the passphrase's key file
+    /// through a descriptor it inherits.
+    fn checked_with(
+        &self,
+        log: &mut StageLog,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+        inherit: &[std::os::fd::RawFd],
+    ) -> Result<Vec<String>> {
         let out = self.tool(
             log,
             &Job {
@@ -224,6 +280,7 @@ impl Install {
                 args,
                 env: &[("HOME", "/root"), ("TMPDIR", "/var/tmp")],
                 stdin: None,
+                inherit,
                 timeout,
             },
             &mut || {},
@@ -299,6 +356,7 @@ impl Install {
                 args: &["settle", "--timeout=30"],
                 env: &[],
                 stdin: None,
+                inherit: &[],
                 timeout: Duration::from_secs(40),
             },
             &mut || {},
@@ -321,21 +379,27 @@ impl Install {
             held.0,
             held.1
         );
-        let lines = self.checked(
-            &mut log,
-            "systemd-repart",
-            &[
-                "--dry-run=no",
-                "--empty=force",
-                "--pretty=no",
-                "--no-pager",
-                "--json=pretty",
-                &definitions,
-                &seed,
-                &disk,
-            ],
-            REPART,
-        )?;
+        // The passphrase is the key of the new volume's one keyslot: repart
+        // reads it from the descriptor it inherits, and nothing names it.
+        let key_file = self.key.as_ref().map(|key| (key.path(), key.raw()));
+        let key_arg = key_file
+            .as_ref()
+            .map(|(path, _)| format!("--key-file={path}"));
+        let inherit: Vec<std::os::fd::RawFd> = key_file.iter().map(|(_, fd)| *fd).collect();
+        let mut args = vec![
+            "--dry-run=no",
+            "--empty=force",
+            "--pretty=no",
+            "--no-pager",
+            "--json=pretty",
+            definitions.as_str(),
+            seed.as_str(),
+        ];
+        if let Some(arg) = &key_arg {
+            args.push(arg);
+        }
+        args.push(&disk);
+        let lines = self.checked_with(&mut log, "systemd-repart", &args, REPART, &inherit)?;
         let made = repart::parse(&json_array(&lines)?, &layout)
             .context("reading what systemd-repart made")?;
         ensure!(
@@ -363,10 +427,16 @@ impl Install {
         Ok(())
     }
 
-    // --- mount -----------------------------------------------------------
+    // --- the partitions --------------------------------------------------
 
-    fn mount(&mut self) -> Result<()> {
-        let mut log = self.begin(Stage::Mount, "Mounting the new partitions")?;
+    /// The partitions repart made, found by their UUIDs and checked against
+    /// sysfs, once: the first stage that needs them looks (and lets udev finish
+    /// its probing of the new file systems), the later ones are given the same
+    /// list.
+    fn partitions(&mut self, log: &mut StageLog) -> Result<Vec<(PlannedPartition, String)>> {
+        if let Some(found) = &self.found {
+            return Ok(found.clone());
+        }
         let found = target::wait_for_partitions(
             &self.plan,
             Path::new("/sys"),
@@ -381,7 +451,93 @@ impl Install {
             self.nodes.insert(node.clone());
         }
         // udev has the links; let its probing of the new file systems finish
-        // before they are mounted.
+        // before they are opened or mounted.
+        let _ = self.tool(
+            log,
+            &Job {
+                program: "udevadm",
+                args: &["settle", "--timeout=30"],
+                env: &[],
+                stdin: None,
+                inherit: &[],
+                timeout: Duration::from_secs(40),
+            },
+            &mut || {},
+        );
+        self.found = Some(found.clone());
+        Ok(found)
+    }
+
+    // --- encrypt ---------------------------------------------------------
+
+    /// The new volume, opened: repart made it (the passphrase is the key of
+    /// its one keyslot) and closed it again. The volume's UUID is read, its
+    /// header is checked against what the installed system's unlock stack
+    /// accepts, and it is opened as `luks-<uuid>`, the name the installed
+    /// system's initramfs gives it; the mount stage mounts that device, not
+    /// the partition.
+    fn encrypt(&mut self) -> Result<()> {
+        let mut log = self.begin(Stage::Encrypt, "Opening the encrypted volume")?;
+        let found = self.partitions(&mut log)?;
+        let (root, node) = found
+            .iter()
+            .find(|(p, _)| p.kind.starts_with("root"))
+            .context("no root partition was made")?;
+        ensure!(
+            root.encrypted,
+            "the root partition {node} was not planned as an encrypted one"
+        );
+        let uuid = luks::parse_uuid(&self.checked(&mut log, "cryptsetup", &["luksUUID", node], TOOL)?)?;
+        // The header, whole: its JSON is one long line, which the output of a
+        // job (cut at 300 characters a line) cannot carry.
+        log.command("cryptsetup", &["luksDump", "--dump-json-metadata", node]);
+        let dump = exec::run(
+            "cryptsetup",
+            &["luksDump", "--dump-json-metadata", node],
+            TOOL,
+        )?;
+        ensure!(
+            dump.success(),
+            "cryptsetup luksDump failed: {}",
+            dump.stderr.lines().last().unwrap_or("no message")
+        );
+        let header = luks::check_header(&dump.stdout_text())
+            .context("the volume repart made is not what the installed system unlocks")?;
+        log.line(&format!(
+            "LUKS2 volume {uuid}: {}, {}-bit payload key, one keyslot derived with {}, {}-byte sectors",
+            header.cipher, header.key_bits, header.kdf, header.sector_size
+        ));
+        let key = self
+            .key
+            .as_ref()
+            .context("the passphrase is not available to open the volume with")?;
+        let key_arg = key.path();
+        let name = luks::mapping_name(&uuid);
+        self.volume = Some(Volume {
+            uuid: uuid.clone(),
+            open: false,
+        });
+        self.checked_with(
+            &mut log,
+            "cryptsetup",
+            &[
+                "open",
+                "--type",
+                "luks2",
+                "--allow-discards",
+                "--key-file",
+                &key_arg,
+                node,
+                &name,
+            ],
+            Duration::from_secs(300),
+            &[key.raw()],
+        )?;
+        if let Some(volume) = &mut self.volume {
+            volume.open = true;
+        }
+        let mapper = luks::mapping_node(&uuid);
+        self.nodes.insert(mapper.clone());
         let _ = self.tool(
             &mut log,
             &Job {
@@ -389,17 +545,76 @@ impl Install {
                 args: &["settle", "--timeout=30"],
                 env: &[],
                 stdin: None,
+                inherit: &[],
                 timeout: Duration::from_secs(40),
             },
             &mut || {},
         );
+        ensure!(
+            fs::metadata(&mapper).is_ok_and(|m| std::os::unix::fs::FileTypeExt::is_block_device(&m.file_type())),
+            "{mapper} is not a block device after the volume was opened"
+        );
+        // Whatever repart formatted inside is the planned root file system.
+        let lines = self.checked(
+            &mut log,
+            "blkid",
+            &["--probe", "--output", "value", "--match-tag", "TYPE", &mapper],
+            TOOL,
+        )?;
+        ensure!(
+            last_line(&lines) == root.filesystem,
+            "the opened volume holds {:?}, not a {} file system",
+            last_line(&lines),
+            root.filesystem
+        );
+        self.end(Stage::Encrypt, &mut log);
+        Ok(())
+    }
+
+    /// Close the opened volume (after everything of it is unmounted), trying
+    /// again while something still holds the device.
+    fn close_volume(&mut self, log: &mut StageLog) -> Result<()> {
+        let Some(volume) = &mut self.volume else {
+            return Ok(());
+        };
+        if !volume.open {
+            return Ok(());
+        }
+        let name = luks::mapping_name(&volume.uuid);
+        let mut last = String::new();
+        for attempt in 0..6 {
+            log.command("cryptsetup", &["close", &name]);
+            let out = exec::run("cryptsetup", &["close", &name], TOOL)?;
+            if out.success() || !Path::new(&luks::mapping_node(&volume.uuid)).exists() {
+                volume.open = false;
+                log.line(&format!("closed {name}"));
+                return Ok(());
+            }
+            last = out.stderr.lines().last().unwrap_or("no message").to_owned();
+            if attempt < 5 {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        bail!("cryptsetup close {name}: {last}")
+    }
+
+    // --- mount -----------------------------------------------------------
+
+    fn mount(&mut self) -> Result<()> {
+        let mut log = self.begin(Stage::Mount, "Mounting the new partitions")?;
+        let found = self.partitions(&mut log)?;
         let by_kind = |prefix: &str| -> Result<&(PlannedPartition, String)> {
             found
                 .iter()
                 .find(|(p, _)| p.kind.starts_with(prefix))
                 .with_context(|| format!("no {prefix} partition was made"))
         };
-        let (root, root_node) = by_kind("root")?;
+        let (root, root_partition) = by_kind("root")?;
+        // The root of an encrypted installation is the opened volume.
+        let root_node = match &self.volume {
+            Some(volume) => luks::mapping_node(&volume.uuid),
+            None => root_partition.clone(),
+        };
         let (boot, boot_node) = by_kind("xbootldr")?;
         let (esp, esp_node) = by_kind("esp")?;
         make_dir(&self.target)?;
@@ -407,7 +622,7 @@ impl Install {
         self.checked(
             &mut log,
             "mount",
-            &["-t", &root.filesystem, root_node, &target],
+            &["-t", &root.filesystem, &root_node, &target],
             TOOL,
         )?;
         let boot_dir = self.target.join("boot");
@@ -479,23 +694,37 @@ impl Install {
                 );
             }
         };
+        // An encrypted root: bootc knows nothing of a volume it did not make,
+        // so it is told how the installed system finds and unlocks it (and in
+        // which layout the passphrase is typed: the keymap of the console).
+        let kargs: Vec<String> = self
+            .volume
+            .as_ref()
+            .map(|volume| luks::kernel_args(&volume.uuid, &self.plan.request.keyboard))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|karg| format!("--karg={karg}"))
+            .collect();
+        let mut args = vec![
+            "install",
+            "to-filesystem",
+            "--source-imgref",
+            source.as_str(),
+            "--target-imgref",
+            self.plan.image.target.as_str(),
+            "--enforce-container-sigpolicy",
+            "--skip-finalize",
+        ];
+        args.extend(kargs.iter().map(String::as_str));
+        args.push(&target);
         let out = self.tool(
             &mut log,
             &Job {
                 program: "bootc",
-                args: &[
-                    "install",
-                    "to-filesystem",
-                    "--source-imgref",
-                    &source,
-                    "--target-imgref",
-                    &self.plan.image.target,
-                    "--enforce-container-sigpolicy",
-                    "--skip-finalize",
-                    &target,
-                ],
+                args: &args,
                 env: &[("HOME", "/root"), ("TMPDIR", "/var/tmp")],
                 stdin: None,
+                inherit: &[],
                 timeout: BOOTC,
             },
             &mut tick,
@@ -581,6 +810,13 @@ impl Install {
             target::setup_record(&self.plan).as_bytes(),
             0o644,
         )?;
+        // The encrypted root's line of /etc/crypttab: the shape Anaconda
+        // writes, which the installed system's unlock stack checks.
+        if let Some(volume) = &self.volume {
+            let line = luks::crypttab_line(&volume.uuid);
+            write_file(&etc.join("crypttab"), line.as_bytes(), 0o600)?;
+            log.line(&format!("wrote /etc/crypttab: {}", line.trim_end()));
+        }
         // No line for `/`: the root is an overlay the initramfs mounts.
         match fs::read_to_string(etc.join("fstab")) {
             Ok(text) => {
@@ -686,6 +922,7 @@ impl Install {
                     args: &["--root", &root],
                     env: &[],
                     stdin: Some(password_line.as_slice()),
+                    inherit: &[],
                     timeout: TOOL,
                 },
                 &mut || {},
@@ -830,6 +1067,7 @@ impl Install {
                     args: &["--verbose", &dir.to_string_lossy()],
                     env: &[],
                     stdin: None,
+                    inherit: &[],
                     timeout: Duration::from_secs(300),
                 },
                 &mut || {},
@@ -849,6 +1087,9 @@ impl Install {
             self.unmount(&mut log),
             "the target file systems could not be unmounted"
         );
+        // The opened volume is the last thing of the target: closed, the disk
+        // holds the encrypted root and nothing of it is readable.
+        self.close_volume(&mut log)?;
         self.end(Stage::Finalise, &mut log);
         Ok(())
     }
@@ -1102,6 +1343,9 @@ impl Install {
             } else {
                 "some mounts of the target could not be removed"
             });
+            if ended && let Err(why) = self.close_volume(&mut log) {
+                log.line(&format!("the encrypted volume could not be closed: {why:#}"));
+            }
         }
     }
 }

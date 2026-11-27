@@ -44,14 +44,19 @@ pub trait Backend: Send + Sync {
     /// Restart, power off, or write the log to a stick (the [`Saved`] record).
     fn finish(&self, action: &FinishAction) -> Result<Option<Saved>, ClientError>;
 
-    /// What the review page's destructive button does: the administrator's
-    /// password, then the installation.
+    /// What the review page's destructive button does: the disk's passphrase
+    /// (when the plan encrypts) and the administrator's password, then the
+    /// installation.
     fn start_installation(
         &self,
         plan: &str,
         erase_disk: &str,
         password: &Secret,
+        passphrase: Option<&Secret>,
     ) -> Result<State, ClientError> {
+        if let Some(passphrase) = passphrase {
+            self.set_secret(plan, SecretKind::DiskPassphrase, passphrase)?;
+        }
         self.set_secret(plan, SecretKind::AdminPassword, password)?;
         self.apply(plan, erase_disk)
     }

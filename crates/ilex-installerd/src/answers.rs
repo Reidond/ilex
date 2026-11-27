@@ -931,7 +931,7 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
         say(&format!("warning={}", exec::clean_line(warning.as_bytes())));
     }
 
-    // The password crosses as a sealed memfd, never as a string.
+    // The passwords cross as sealed memfds, never as strings.
     let memfd = secret::sealed_memfd(answers.administrator.password.expose().as_bytes())?;
     let _: () = call(
         &proxy,
@@ -940,6 +940,23 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
     )
     .await?;
     drop(memfd);
+    // The disk's passphrase, when the answers encrypt it (`to_request` checked
+    // that they hold one exactly then).
+    if request.encrypt {
+        let passphrase = answers
+            .encryption
+            .passphrase
+            .as_ref()
+            .context("encryption is on and the answers hold no passphrase")?;
+        let memfd = secret::sealed_memfd(passphrase.expose().as_bytes())?;
+        let _: () = call(
+            &proxy,
+            "SetSecret",
+            &(plan.id.as_str(), "disk-passphrase", zbus::Fd::from(&memfd)),
+        )
+        .await?;
+        drop(memfd);
+    }
     let confirm = answers.install.confirm_erase.clone().unwrap_or_default();
     drop(answers);
     // From here the helper may begin to write: the flag tells the systemd-level

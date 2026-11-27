@@ -198,3 +198,14 @@ pub fn admin_password(secret: &Secret) -> Result<&str> {
     );
     Ok(text)
 }
+
+/// The rules for the disk's passphrase: the ones the model states for every
+/// way a passphrase arrives (it is typed at a console prompt at every start of
+/// the installed computer), and that it is text.
+pub fn disk_passphrase(secret: &Secret) -> Result<&str> {
+    let text = std::str::from_utf8(secret.expose()).context("the passphrase is not UTF-8")?;
+    if let Some(why) = ilex_installer_model::plan::passphrase_problem(text) {
+        bail!("{why}");
+    }
+    Ok(text)
+}

@@ -4,7 +4,7 @@
 //! schema and its syntax checks; reading the volume and applying the answers
 //! belong to the installation itself.
 
-use crate::plan::{ErrorCode, Mode, PlanError, PlanRequest, TpmMode};
+use crate::plan::{ErrorCode, Mode, PlanError, PlanRequest, TpmMode, passphrase_problem};
 use anyhow::Result;
 use serde::Deserialize;
 use std::fmt;
@@ -187,17 +187,16 @@ impl Answers {
                 "the password may not contain a line break or a NUL character",
             );
         }
-        // A NUL ends a C string wherever the passphrase is handed on.
-        if self
+        // The passphrase is typed at a prompt at every start of the installed
+        // computer: what a prompt cannot take is refused here (the message
+        // names the rule, never the value).
+        if let Some(why) = self
             .encryption
             .passphrase
             .as_ref()
-            .is_some_and(|p| p.expose().contains('\0'))
+            .and_then(|p| passphrase_problem(p.expose()))
         {
-            return invalid(
-                "encryption.passphrase",
-                "the passphrase may not contain a NUL character",
-            );
+            return invalid("encryption.passphrase", why);
         }
         let defaults = PlanRequest::parse(
             r#"{"composition":"x","disk":"x","mode":"whole-disk","administrator":"x"}"#,

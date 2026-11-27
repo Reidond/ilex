@@ -2,7 +2,8 @@
 //! will go through, which one is running, how far it is, and how it ended.
 //! The helper reports a [`State`] (`State()` and the `Progress` signal); this
 //! turns it into rows. Which stages exist depends on the plan: an unencrypted
-//! installation has no encryption, recovery key or TPM stage.
+//! installation has no encryption stage (and none has a recovery key or TPM
+//! stage yet).
 
 use ilex_installer_model::plan::Plan;
 use ilex_installer_model::state::{Outcome, Stage, StageStatus, State};
@@ -90,7 +91,11 @@ impl Progress {
             .iter()
             .copied()
             .filter(|stage| match stage {
-                Stage::Encrypt | Stage::Recovery => encrypted,
+                Stage::Encrypt => encrypted,
+                // The recovery key, and the TPM with it, come in a later
+                // change: the helper reports them (and `will_enroll`) when it
+                // runs them.
+                Stage::Recovery => false,
                 Stage::Tpm => encrypted && plan.encryption.tpm.will_enroll,
                 _ => true,
             })

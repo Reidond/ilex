@@ -140,8 +140,26 @@ pub fn expected_origin(target_reference: &str) -> String {
 
 /// `/etc/ilex/setup.json` as the Anaconda path writes it (schema 1, the same
 /// keys, sorted, two-space indent): the composition, the image the machine
-/// tracks, no profile, and a TPM record that says nothing was configured.
+/// tracks, no profile, and the TPM record. An unencrypted installation says
+/// nothing was configured. An encrypted one says what phase 0's own completion
+/// says of a disk that unlocks with its passphrase alone: `passphrase-only`,
+/// with what was asked for, and a reason that says this installer did not try
+/// the TPM (enrolling it, and the recovery key, are a later change).
 pub fn setup_record(plan: &Plan) -> String {
+    let tpm = if plan.encryption.enabled {
+        json!({
+            "requested": plan.request.tpm_mode(),
+            "capability": "unknown",
+            "reason": "not-attempted",
+            "status": "passphrase-only",
+        })
+    } else {
+        json!({
+            "requested": "unspecified",
+            "capability": "unknown",
+            "status": "not-configured",
+        })
+    };
     let record = json!({
         "schema": 1,
         "composition": plan.composition.tag,
@@ -149,11 +167,7 @@ pub fn setup_record(plan: &Plan) -> String {
         "profile": { "id": null, "schema": null },
         "security": {
             "capabilities": {},
-            "tpm": {
-                "requested": "unspecified",
-                "capability": "unknown",
-                "status": "not-configured",
-            },
+            "tpm": tpm,
         },
     });
     let mut text = serde_json::to_string_pretty(&record).unwrap_or_default();

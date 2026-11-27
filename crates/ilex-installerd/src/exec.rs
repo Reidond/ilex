@@ -168,6 +168,10 @@ pub struct Job<'a> {
     /// Written to the tool's standard input, which is then closed. Never an
     /// argument: arguments are visible in `/proc` and in logs.
     pub stdin: Option<&'a [u8]>,
+    /// Descriptors the tool inherits under their own numbers (a key file,
+    /// read through `/proc/self/fd/N`): close-on-exec in this process, and
+    /// made inheritable in the child alone.
+    pub inherit: &'a [std::os::fd::RawFd],
     pub timeout: Duration,
 }
 
@@ -240,11 +244,16 @@ pub fn run_job(
         .stdout(writer.try_clone().context("duplicating the pipe")?)
         .stderr(writer)
         .process_group(0);
-    // SAFETY: only async-signal-safe `prctl` runs between fork and exec.
+    let inherit = job.inherit.to_vec();
+    // SAFETY: only async-signal-safe `prctl` and `fcntl` run between fork and
+    // exec (the list of descriptors was made before the fork).
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            for &fd in &inherit {
+                crate::luks::inheritable(fd)?;
             }
             Ok(())
         });

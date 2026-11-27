@@ -281,7 +281,6 @@ impl Helper {
             .as_str()
             .unwrap_or("unknown")
             .to_owned();
-        let eligible = probe.enrollment["verdict"] == "eligible";
         let tpm = checked.request.tpm_mode();
         if checked.disk.removable {
             warnings.push(format!("{} is a removable disk", checked.disk.id));
@@ -295,10 +294,14 @@ impl Helper {
                 checked.disk.other_systems.len()
             ));
         }
-        if tpm == TpmMode::Auto && !eligible {
-            warnings.push(format!(
-                "automatic unlock is not possible on this computer ({enrollment_reason}); the disk will ask for its passphrase"
-            ));
+        // The installation does not enrol the TPM yet (the recovery key and
+        // the enrolment are a later change): an encrypted disk asks for its
+        // passphrase at every start, whatever the computer could do.
+        if checked.request.encrypt && tpm == TpmMode::Auto {
+            warnings.push(
+                "unlocking the disk with this computer's security chip is not available in this installer yet; the disk asks for its passphrase at every start"
+                    .to_owned(),
+            );
         }
         let plan = Plan {
             schema: PLAN_SCHEMA,
@@ -344,7 +347,7 @@ impl Helper {
                 enabled: checked.request.encrypt,
                 tpm: PlannedTpm {
                     requested: tpm,
-                    will_enroll: checked.request.encrypt && tpm == TpmMode::Auto && eligible,
+                    will_enroll: false,
                     reason: enrollment_reason,
                 },
             },

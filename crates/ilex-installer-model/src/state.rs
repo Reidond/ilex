@@ -54,6 +54,20 @@ impl Stage {
         Stage::Account,
         Stage::Finalise,
     ];
+
+    /// The stages of an encrypted whole-disk installation, in order: the
+    /// partition stage also makes the LUKS2 volume (`systemd-repart` formats it
+    /// as it makes the partition), and the encrypt stage then opens it and
+    /// checks what was made. (The recovery key and the TPM add theirs later.)
+    pub const ENCRYPTED: [Stage; 7] = [
+        Stage::Partition,
+        Stage::Encrypt,
+        Stage::Mount,
+        Stage::Image,
+        Stage::Configure,
+        Stage::Account,
+        Stage::Finalise,
+    ];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +115,10 @@ pub struct Summary {
     pub disk: String,
     /// How a person names it: model and serial number.
     pub disk_label: String,
+    /// The disk is encrypted: the done page of an interface that restarted
+    /// says the computer asks for its passphrase at every start.
+    #[serde(default)]
+    pub encrypted: bool,
 }
 
 /// An `Apply` the helper took the work lock for and then refused (the plan

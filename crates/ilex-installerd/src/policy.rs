@@ -126,6 +126,7 @@ pub fn verify(image: &PlannedImage, run_dir: &Path) -> Result<(), PlanError> {
             args: &["copy", "--retry-times", "2", &source, &destination],
             env: &[("TMPDIR", "/var/tmp"), ("HOME", "/root")],
             stdin: None,
+            inherit: &[],
             timeout: TIMEOUT,
         },
         &mut |line| {

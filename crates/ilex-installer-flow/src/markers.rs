@@ -161,6 +161,15 @@ pub fn disk(id: &str) -> String {
     format!("ILEX-INSTALLER event=disk disk={}", one_word(id))
 }
 
+/// The person turned encryption on or off. (Never the passphrase, nor its
+/// length.)
+pub fn encryption(on: bool) -> String {
+    format!(
+        "ILEX-INSTALLER event=encryption encryption={}",
+        if on { "on" } else { "off" }
+    )
+}
+
 /// The disk the person had chosen is not offered any more.
 pub fn disk_gone(id: &str) -> String {
     format!("ILEX-INSTALLER event=disk-gone disk={}", one_word(id))

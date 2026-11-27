@@ -19,6 +19,8 @@ mod helper;
 #[cfg(target_os = "linux")]
 mod install;
 #[cfg(target_os = "linux")]
+mod luks;
+#[cfg(target_os = "linux")]
 mod policy;
 #[cfg(target_os = "linux")]
 mod progress;

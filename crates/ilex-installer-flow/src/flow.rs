@@ -68,12 +68,12 @@
 //! ([`Flow::echo_try`]).
 //!
 //! Pages of this version: `welcome` (language and keyboard layout), `machine`
-//! (which configuration), `disk` (where to install: the whole disk), `account`
+//! (which configuration), `disk` (where to install: the whole disk),
+//! `encryption` (whether the disk is encrypted, and its passphrase), `account`
 //! (the maintenance administrator) and `review`, where the choices checked by
 //! `Plan` are shown and the destructive button begins the installation. After
 //! it come the pages no one goes back from: `installing` (the stages, from the
-//! helper's `State`), `done` and `problem`. The encryption page follows in a
-//! later change; it extends [`PageId`] and the `advance` table.
+//! helper's `State`), `done` and `problem`.
 //!
 //! The installation's own steps (`install`, `confirm_install`, `apply_finished`,
 //! `state_finished`, `restart`, `power_off`, `choose_log_device`, `save_log`,
@@ -83,6 +83,7 @@
 
 use crate::account::{self, AccountChecks};
 use crate::disks::{self, DiskChoice, DiskView};
+use crate::encryption::{self, EncryptionChecks};
 use crate::keyboard::{self, Layout, Layouts};
 use crate::language::{self, Language};
 use crate::machine::{MachineChoice, MachineView};
@@ -108,6 +109,7 @@ pub enum PageId {
     Welcome,
     Machine,
     Disk,
+    Encryption,
     Account,
     Review,
     Installing,
@@ -117,20 +119,22 @@ pub enum PageId {
 
 impl PageId {
     /// The pages a person walks with Continue and Back.
-    pub const ORDER: [PageId; 5] = [
+    pub const ORDER: [PageId; 6] = [
         Self::Welcome,
         Self::Machine,
         Self::Disk,
+        Self::Encryption,
         Self::Account,
         Self::Review,
     ];
 
     /// Every page, in the order a navigation stack builds them: the walk, then
     /// the pages an installation ends on (nobody goes back from those).
-    pub const ALL: [PageId; 8] = [
+    pub const ALL: [PageId; 9] = [
         Self::Welcome,
         Self::Machine,
         Self::Disk,
+        Self::Encryption,
         Self::Account,
         Self::Review,
         Self::Installing,
@@ -155,6 +159,7 @@ impl PageId {
             Self::Welcome => "welcome",
             Self::Machine => "machine",
             Self::Disk => "disk",
+            Self::Encryption => "encryption",
             Self::Account => "account",
             Self::Review => "review",
             Self::Installing => "installing",
@@ -169,6 +174,7 @@ impl PageId {
             Self::Welcome => "Welcome",
             Self::Machine => "This computer",
             Self::Disk => "Disk",
+            Self::Encryption => "Encryption",
             Self::Account => "Administrator",
             Self::Review => "Review",
             Self::Installing => "Installing",
@@ -263,14 +269,18 @@ pub enum Step {
     /// Show this dialog and give the person's answer to
     /// [`Flow::confirm_install`] (yes) or [`Flow::cancel_install`] (no).
     Confirm(Confirmation),
-    /// Hand the administrator's password to the helper and begin the
-    /// installation of `plan` (`Backend::start_installation`); give the answer
-    /// to [`Flow::apply_finished`].
+    /// Hand the administrator's password (and the disk's passphrase, when the
+    /// plan encrypts) to the helper and begin the installation of `plan`
+    /// (`Backend::start_installation`); give the answer to
+    /// [`Flow::apply_finished`].
     RunApply {
         generation: u64,
         plan: String,
         erase_disk: String,
         password: Secret,
+        /// The disk's passphrase when the plan encrypts (`SetSecret` for it
+        /// comes first).
+        passphrase: Option<Secret>,
     },
     /// Ask the helper where the installation is (`Backend::state`) after
     /// `delay_ms`, and give the answer to [`Flow::state_finished`]. At most one
@@ -379,6 +389,11 @@ pub struct Flow {
     secrets_wiped: u64,
     /// The installation, from the review page's button to its end.
     inst: installation::Installation,
+    /// Whether the disk is encrypted (on until the person turns it off), and
+    /// the passphrase that unlocks it, typed twice.
+    encrypt: bool,
+    passphrase: Secret,
+    passphrase_confirmation: Secret,
     administrator: String,
     password: Secret,
     confirmation: Secret,
@@ -421,6 +436,9 @@ impl Flow {
             disk_notice: None,
             secrets_wiped: 0,
             inst: installation::Installation::default(),
+            encrypt: true,
+            passphrase: Secret::default(),
+            passphrase_confirmation: Secret::default(),
             administrator: String::new(),
             password: Secret::default(),
             confirmation: Secret::default(),
@@ -812,6 +830,9 @@ impl Flow {
                         .and_then(|(id, view)| view.choice(id))
                         .is_some_and(DiskChoice::is_offered)
             }
+            // Off, there is nothing to check; on, the passphrase and its
+            // confirmation.
+            PageId::Encryption => !self.encrypt || self.encryption_checks().all_valid(),
             // The check needs the computer's own answer: names are judged
             // against its profiles and the plan is asked for its disks. After
             // Back and a new look, Continue waits for it.
@@ -838,7 +859,7 @@ impl Flow {
             return Step::Stay;
         }
         match self.page {
-            PageId::Welcome | PageId::Machine | PageId::Disk => {
+            PageId::Welcome | PageId::Machine | PageId::Disk | PageId::Encryption => {
                 if self.page == PageId::Welcome {
                     self.start_notice = None;
                 }
@@ -1023,8 +1044,9 @@ impl Flow {
     }
 
     /// The request for `Plan`: the choices so far, on the disk chosen on the
-    /// disk page, whole-disk and unencrypted. Unset fields keep the model's
-    /// defaults.
+    /// disk page, whole-disk, encrypted unless the person turned that off.
+    /// Unset fields keep the model's defaults. (The passphrase is not in it:
+    /// it goes to the helper as a secret.)
     pub fn plan_request(&self) -> Result<PlanRequest, Message> {
         let probe = self
             .probe()
@@ -1039,17 +1061,20 @@ impl Flow {
             .as_deref()
             .and_then(|id| usable_disks(probe).into_iter().find(|d| d.id == id))
             .ok_or_else(|| Message::title("No disk can be installed to"))?;
-        let document = json!({
+        let mut document = json!({
             "composition": tag,
             "disk": disk.id,
             "mode": "whole-disk",
-            // Encryption is a later change: the helper refuses an encrypted
-            // plan until then.
-            "encrypt": false,
+            "encrypt": self.encrypt,
             "keyboard": self.keyboard.requested,
             "language": self.language,
             "administrator": self.administrator,
         });
+        if self.encrypt {
+            // Unlocking with the security chip comes with the recovery key (a
+            // later change); until then the disk asks for its passphrase.
+            document["tpm"] = json!("off");
+        }
         PlanRequest::parse(&document.to_string()).map_err(|e| messages::plan_error(&e))
     }
 
@@ -1319,6 +1344,79 @@ impl Flow {
         }
     }
 
+    // --- encryption ----------------------------------------------------------
+
+    /// Is the disk to be encrypted? (On until the person turns it off.)
+    pub fn encrypt(&self) -> bool {
+        self.encrypt
+    }
+
+    /// Refused (`false`) while the helper is being asked. Turning encryption
+    /// off keeps what was typed (turning it on again finds it); it is wiped
+    /// with the other secrets.
+    pub fn set_encrypt(&mut self, on: bool) -> bool {
+        if self.is_frozen() {
+            return false;
+        }
+        if self.encrypt != on {
+            self.encrypt = on;
+            self.invalidate_check();
+            self.say(markers::encryption(on));
+        }
+        true
+    }
+
+    /// Refused (`false`) while the helper is being asked. The secret is moved
+    /// in; the one it replaces is wiped.
+    pub fn set_passphrase(&mut self, secret: Secret) -> bool {
+        if self.is_frozen() {
+            return false;
+        }
+        if self.passphrase != secret {
+            self.passphrase = secret;
+            self.invalidate_check();
+        }
+        true
+    }
+
+    /// Refused (`false`) while the helper is being asked.
+    pub fn set_passphrase_confirmation(&mut self, secret: Secret) -> bool {
+        if self.is_frozen() {
+            return false;
+        }
+        if self.passphrase_confirmation != secret {
+            self.passphrase_confirmation = secret;
+            self.invalidate_check();
+        }
+        true
+    }
+
+    /// The passphrase, for the helper's `SetSecret`. It never goes into a
+    /// request, a marker or a log.
+    pub fn passphrase(&self) -> &Secret {
+        &self.passphrase
+    }
+
+    pub fn passphrase_confirmation(&self) -> &Secret {
+        &self.passphrase_confirmation
+    }
+
+    pub fn encryption_checks(&self) -> EncryptionChecks {
+        EncryptionChecks {
+            passphrase: encryption::passphrase(&self.passphrase),
+            confirmation: encryption::confirmation(&self.passphrase, &self.passphrase_confirmation),
+        }
+    }
+
+    pub fn passphrase_advice(&self) -> Option<Message> {
+        encryption::advice(&self.passphrase)
+    }
+
+    /// What the page says about the layout the passphrase is typed in.
+    pub fn passphrase_layout_line(&self) -> String {
+        encryption::layout_line(self.keyboard_layout())
+    }
+
     // --- account -------------------------------------------------------------
 
     pub fn administrator(&self) -> &str {
@@ -1378,11 +1476,14 @@ impl Flow {
     fn wipe_secrets(&mut self) {
         self.password = Secret::default();
         self.confirmation = Secret::default();
+        self.passphrase = Secret::default();
+        self.passphrase_confirmation = Secret::default();
         self.secrets_wiped += 1;
     }
 
-    /// How many times the flow has wiped the passwords it holds (after an
-    /// installation succeeded, or when the computer is about to restart).
+    /// How many times the flow has wiped the passwords and the passphrase it
+    /// holds (after an installation succeeded, or when the computer is about
+    /// to restart).
     pub fn secrets_wiped(&self) -> u64 {
         self.secrets_wiped
     }
@@ -1459,6 +1560,11 @@ impl Flow {
                 ),
                 None => "disk=none offered=pending".to_owned(),
             },
+            PageId::Encryption => format!(
+                "encryption={} keyboard={}",
+                if self.encrypt { "on" } else { "off" },
+                markers::one_word(&self.keyboard.requested)
+            ),
             PageId::Account => format!("administrator={}", markers::one_word(&self.administrator)),
             PageId::Review => format!("check={}", self.check_word()),
             PageId::Installing | PageId::Done | PageId::Problem => self.installation_fields(),

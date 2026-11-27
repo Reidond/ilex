@@ -50,6 +50,15 @@ enum Do {
     Name(&'static str),
     Password(&'static str),
     Confirm(&'static str),
+    /// The encryption page's switch, as a person flips it.
+    Encrypt(bool),
+    /// The encryption page's two fields.
+    Passphrase(&'static str),
+    PassphraseConfirm(&'static str),
+    /// On the encryption page: type the passphrase twice and continue.
+    Encrypted,
+    /// On the encryption page: turn encryption off and continue.
+    Unencrypted,
     /// A disk row (its id).
     Disk(&'static str),
     /// The review page's destructive button, and the dialog's two answers.
@@ -86,6 +95,7 @@ struct Shot {
 }
 
 const PASSWORD: &str = "correct horse battery";
+const PASSPHRASE: &str = "pluck the gentle wren, lest the winter come";
 
 macro_rules! shots {
     ($( $name:literal, $scenario:literal, $page:ident, $check:literal, $dialog:literal, [ $($step:expr),* $(,)? ] );* $(;)?) => {
@@ -115,57 +125,70 @@ const SHOTS: &[Shot] = shots![
     "disk-none", "no-disk", Disk, "", "", [Do::Continue, Do::Continue];
     "disk-helper-down", "helper-down", Disk, "", "", [Do::Jump(PageId::Disk)];
     "disk-bios", "bios", Disk, "", "", [Do::Jump(PageId::Disk)];
-    "account-empty", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue];
-    "account-name-invalid", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("Ilex Maint")];
-    "account-name-reserved", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("root")];
-    "account-password-short", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password("abc"), Do::Confirm("abc")];
-    "account-password-mismatch", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm("correct horse batter")];
-    "account-valid", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD)];
-    "account-refused-by-helper", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("rpcuser"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "review", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "review-machine", "ms-7c35", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "review-other-disk", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Disk("ata-WDC_WDS500G2B0A_214512800345"), Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "encryption", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue];
+    "encryption-typed", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Passphrase(PASSPHRASE), Do::PassphraseConfirm(PASSPHRASE)];
+    "encryption-short", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Passphrase("abc"), Do::PassphraseConfirm("abc")];
+    "encryption-mismatch", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Passphrase(PASSPHRASE), Do::PassphraseConfirm("pluck the gentle wren, lest the winter came")];
+    "encryption-unusable", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Passphrase("a\tb"), Do::PassphraseConfirm("a\tb")];
+    "encryption-off", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypt(false)];
+    "encryption-german", "generic", Encryption, "", "", [Do::Keyboard("de-nodeadkeys"), Do::Continue, Do::Continue, Do::Continue, Do::Passphrase(PASSPHRASE), Do::PassphraseConfirm(PASSPHRASE)];
+    "encryption-back", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Back];
+    "review-unencrypted", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Unencrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "installing-unencrypted", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Unencrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "installing-encrypted-reattached", "generic+attach-installing+encrypted", Installing, "", "", [];
+    "done-encrypted-reattached", "generic+attach-done+encrypted", Done, "", "", [];
+    "encryption-helper-down", "helper-down", Encryption, "", "", [Do::Jump(PageId::Encryption)];
+    "account-empty", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted];
+    "account-name-invalid", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("Ilex Maint")];
+    "account-name-reserved", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("root")];
+    "account-password-short", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password("abc"), Do::Confirm("abc")];
+    "account-password-mismatch", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm("correct horse batter")];
+    "account-valid", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD)];
+    "account-refused-by-helper", "generic", Account, "not-run", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("rpcuser"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-machine", "ms-7c35", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-other-disk", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Disk("ata-WDC_WDS500G2B0A_214512800345"), Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
     "review-no-disk", "no-disk", Review, "no-disk", "", [Do::Continue, Do::Continue, Do::Jump(PageId::Account), Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "review-registry-down", "registry-down", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
-    "review-back-to-account", "generic", Account, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Back];
-    "review-erase-dialog", "generic", Review, "ok", "confirm", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install];
-    "review-erase-cancelled", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Dismiss];
-    "review-apply-refused", "generic+apply-refused", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "review-apply-not-started", "generic+apply-lost", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "installing-early", "generic+early", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "installing", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "installing-log", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::ExpandLog];
+    "review-registry-down", "registry-down", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-back-to-account", "generic", Account, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Back];
+    "review-erase-dialog", "generic", Review, "ok", "confirm", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install];
+    "review-erase-cancelled", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Dismiss];
+    "review-apply-refused", "generic+apply-refused", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "review-apply-not-started", "generic+apply-lost", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "installing-early", "generic+early", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "installing", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "installing-log", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::ExpandLog];
     "installing-reattached", "generic+attach-installing", Installing, "", "", [];
-    "done", "generic", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Done), Do::PasswordsWiped];
-    "done-restarting", "generic", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Done), Do::Restart];
-    "done-restart-refused", "generic+finish-fails", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Done), Do::Restart];
+    "done", "generic", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Done), Do::PasswordsWiped];
+    "done-restarting", "generic", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Done), Do::Restart];
+    "done-restart-refused", "generic+finish-fails", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Done), Do::Restart];
     "done-reattached", "generic+attach-done", Done, "", "", [];
-    "problem-image", "generic+fail-image", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "problem-partition", "generic+fail-partition", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "problem-helper-stopped", "generic+helper-stopped", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "problem-lost", "generic+lost", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "problem-image", "generic+fail-image", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "problem-partition", "generic+fail-partition", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "problem-helper-stopped", "generic+helper-stopped", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "problem-lost", "generic+lost", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "problem-reattached", "generic+attach-failed", Problem, "", "", [];
-    "problem-restart-refused", "generic+fail-image+finish-fails", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::Restart];
-    "problem-restarting", "generic+fail-image", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::Restart, Do::PasswordsWiped];
+    "problem-restart-refused", "generic+fail-image+finish-fails", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::Restart];
+    "problem-restarting", "generic+fail-image", Problem, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::Restart, Do::PasswordsWiped];
     "installing-starting", "generic+attach-starting", Installing, "", "", [];
-    "installing-after-lost-answer", "generic+apply-slow+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "installing-after-lost-answer", "generic+apply-slow+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "welcome-state-down", "generic+state-down", Welcome, "", "", [];
     "welcome-state-down-retried", "generic+state-down+attach-failed", Problem, "", "", [Do::LookAgain];
     "welcome-not-started", "generic+attach-starting-refused", Welcome, "", "", [];
     "welcome-not-started-idle", "generic+attach-starting-refused-idle", Welcome, "", "", [];
-    "installing-other-installation", "generic+apply-lost-other", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "review-active-rechecked", "generic+probe-active", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
-    "review-active-state-down", "generic+probe-active+state-down-second", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
-    "review-active-state-down-retried", "generic+probe-active+state-down-second", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry, Do::Retry];
-    "review-apply-active-state-down", "generic+apply-active+state-down-second", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
-    "disk-chosen-gone", "generic+vanish", Disk, "", "", [Do::Continue, Do::Continue, Do::Disk("ata-WDC_WDS500G2B0A_214512800345"), Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
-    "problem-lost-then-installing", "generic+lost-then-running", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem)];
-    "problem-lost-then-done", "generic+lost-then-done", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem)];
-    "problem-retry", "generic+fail-image", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::RetryInstall];
-    "problem-save-log", "generic+fail-image+sticks", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog];
-    "problem-save-log-no-stick", "generic+fail-image+bare", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog];
-    "problem-save-log-saved", "generic+fail-image+sticks", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog, Do::SaveLog("usb-SanDisk_Cruzer_Blade_4C530001-0:0")];
-    "problem-save-log-failed", "generic+fail-image+sticks+log-fails", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog, Do::SaveLog("usb-SanDisk_Cruzer_Blade_4C530001-0:0")];
+    "installing-other-installation", "generic+apply-lost-other", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "review-active-rechecked", "generic+probe-active", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
+    "review-active-state-down", "generic+probe-active+state-down-second", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
+    "review-active-state-down-retried", "generic+probe-active+state-down-second", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry, Do::Retry];
+    "review-apply-active-state-down", "generic+apply-active+state-down-second", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "disk-chosen-gone", "generic+vanish", Disk, "", "", [Do::Continue, Do::Continue, Do::Disk("ata-WDC_WDS500G2B0A_214512800345"), Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Retry];
+    "problem-lost-then-installing", "generic+lost-then-running", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem)];
+    "problem-lost-then-done", "generic+lost-then-done", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem)];
+    "problem-retry", "generic+fail-image", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::RetryInstall];
+    "problem-save-log", "generic+fail-image+sticks", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog];
+    "problem-save-log-no-stick", "generic+fail-image+bare", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog];
+    "problem-save-log-saved", "generic+fail-image+sticks", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog, Do::SaveLog("usb-SanDisk_Cruzer_Blade_4C530001-0:0")];
+    "problem-save-log-failed", "generic+fail-image+sticks+log-fails", Problem, "", "log", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Problem), Do::ChooseLog, Do::SaveLog("usb-SanDisk_Cruzer_Blade_4C530001-0:0")];
 ];
 
 /// How often the application's state is looked at while a shot waits for it.
@@ -341,11 +364,14 @@ async fn flush(
     until(what, window, observer, None, |_| true).await
 }
 
-/// A field of the administrator page, by its widget name. The page is not in
-/// the navigation stack once an installation has begun (the stack then holds
-/// only the page it ends on), so it is found by its tag, not by walking the
-/// window.
-fn account_field(window: &adw::ApplicationWindow, name: &str) -> Result<gtk::Editable> {
+/// A widget of a page, by its widget name. The pages are not in the navigation
+/// stack once an installation has begun (the stack then holds only the page it
+/// ends on), so a page is found by its tag, not by walking the window.
+fn page_widget(
+    window: &adw::ApplicationWindow,
+    page: PageId,
+    name: &str,
+) -> Result<gtk::Widget> {
     fn find(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
         if widget.widget_name() == name {
             return Some(widget.clone());
@@ -359,25 +385,42 @@ fn account_field(window: &adw::ApplicationWindow, name: &str) -> Result<gtk::Edi
         }
         None
     }
-    let page = find_navigation(window.upcast_ref())
-        .and_then(|nav| nav.find_page(PageId::Account.id()))
-        .context("no administrator page")?;
-    let field = find(page.upcast_ref(), name).with_context(|| format!("no field {name}"))?;
-    field
+    let holder = find_navigation(window.upcast_ref())
+        .and_then(|nav| nav.find_page(page.id()))
+        .with_context(|| format!("no {} page", page.id()))?;
+    find(holder.upcast_ref(), name).with_context(|| format!("no widget {name}"))
+}
+
+/// A text field of a page, by its widget name.
+fn account_field(
+    window: &adw::ApplicationWindow,
+    page: PageId,
+    name: &str,
+) -> Result<gtk::Editable> {
+    page_widget(window, page, name)?
         .downcast::<gtk::Editable>()
         .map_err(|_| anyhow::anyhow!("{name} is not a text field"))
 }
 
+/// A person flips the encryption switch: its own change reaches the flow.
+fn set_switch(window: &adw::ApplicationWindow, name: &str, on: bool) -> Result<()> {
+    page_widget(window, PageId::Encryption, name)?
+        .downcast::<adw::SwitchRow>()
+        .map_err(|_| anyhow::anyhow!("{name} is not a switch"))?
+        .set_active(on);
+    Ok(())
+}
+
 /// A person types into a password field: set its text, so the field's own
 /// change reaches the flow.
-fn type_into(window: &adw::ApplicationWindow, name: &str, text: &str) -> Result<()> {
-    account_field(window, name)?.set_text(text);
+fn type_into(window: &adw::ApplicationWindow, page: PageId, name: &str, text: &str) -> Result<()> {
+    account_field(window, page, name)?.set_text(text);
     Ok(())
 }
 
 /// What a password field holds (a test reads it; the application never does).
-fn field_text(window: &adw::ApplicationWindow, name: &str) -> Result<String> {
-    Ok(account_field(window, name)?.text().to_string())
+fn field_text(window: &adw::ApplicationWindow, page: PageId, name: &str) -> Result<String> {
+    Ok(account_field(window, page, name)?.text().to_string())
 }
 
 async fn shoot(job: &Job) -> Result<Summary> {
@@ -474,8 +517,13 @@ async fn shoot(job: &Job) -> Result<Summary> {
                         &observer,
                     )
                     .await?;
-                    for name in ["password", "confirmation"] {
-                        let text = field_text(&window, name)?;
+                    for (page, name) in [
+                        (PageId::Account, "password"),
+                        (PageId::Account, "confirmation"),
+                        (PageId::Encryption, "passphrase"),
+                        (PageId::Encryption, "passphrase-confirmation"),
+                    ] {
+                        let text = field_text(&window, page, name)?;
                         if !text.is_empty() {
                             bail!(
                                 "{}: the {name} field still holds {} characters after the flow wiped them",
@@ -517,8 +565,58 @@ async fn shoot(job: &Job) -> Result<Summary> {
                     continue;
                 }
                 Do::Name(text) => Msg::Name(text.to_owned()),
+                Do::Encrypt(on) => {
+                    // The way a person does: the switch row flips, and its own
+                    // change reaches the flow.
+                    set_switch(&window, "encrypt", on)?;
+                    flush(
+                        &format!("{}: the switch", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::Passphrase(text) | Do::PassphraseConfirm(text) => {
+                    let name = if matches!(*step, Do::Passphrase(_)) {
+                        "passphrase"
+                    } else {
+                        "passphrase-confirmation"
+                    };
+                    type_into(&window, PageId::Encryption, name, text)?;
+                    flush(
+                        &format!("{}: {name}", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::Encrypted | Do::Unencrypted => {
+                    if matches!(*step, Do::Encrypted) {
+                        type_into(&window, PageId::Encryption, "passphrase", PASSPHRASE)?;
+                        type_into(
+                            &window,
+                            PageId::Encryption,
+                            "passphrase-confirmation",
+                            PASSPHRASE,
+                        )?;
+                    } else {
+                        set_switch(&window, "encrypt", false)?;
+                    }
+                    flush(
+                        &format!("{}: the encryption page", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    Msg::Continue
+                }
                 Do::Password(text) => {
-                    type_into(&window, "password", text)?;
+                    type_into(&window, PageId::Account, "password", text)?;
                     flush(
                         &format!("{}: password", shot.name),
                         &controller,
@@ -529,7 +627,7 @@ async fn shoot(job: &Job) -> Result<Summary> {
                     continue;
                 }
                 Do::Confirm(text) => {
-                    type_into(&window, "confirmation", text)?;
+                    type_into(&window, PageId::Account, "confirmation", text)?;
                     flush(
                         &format!("{}: confirmation", shot.name),
                         &controller,

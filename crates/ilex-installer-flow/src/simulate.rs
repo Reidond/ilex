@@ -28,7 +28,8 @@
 //! (`state-down-second`), whether the second look at the computer is refused
 //! because an installation is active (`probe-active`), whether the
 //! disk a plan was made for vanishes afterwards (`vanish`) and
-//! whether Restart and Power off fail (`finish-fails`); `early` holds an
+//! whether Restart and Power off fail (`finish-fails`); `encrypted` makes the
+//! plan of an installation that is already running an encrypted one; `early` holds an
 //! installation in its first stage. They are
 //! what the self-check and the screenshots use to reach every page and every
 //! error state; a boot can name them only with `ilex.installer.simulate` (see
@@ -47,7 +48,7 @@ use anyhow::{Context, Result, bail};
 use ilex_installer_model::finish::{FinishAction, Saved, check_log_device};
 use ilex_installer_model::plan::{
     Erase, ErrorCode, Plan, PlanError, PlanRequest, PlannedDisk, PlannedEncryption, PlannedTpm,
-    SecretKind, TpmMode, check_request,
+    SecretKind, TpmMode, check_request, passphrase_problem,
 };
 use ilex_installer_model::probe::{Disk, Partition, Probe};
 use ilex_installer_model::state::{
@@ -236,6 +237,10 @@ struct Modifiers {
     probe_active: bool,
     /// The disk a plan was made for is gone from every later probe.
     vanish: bool,
+    /// The fixture's own plan (what an installation that is already running
+    /// was made from) is an encrypted one. (Every plan `plan` makes follows its
+    /// request.)
+    encrypted: bool,
 }
 
 impl Modifiers {
@@ -251,6 +256,7 @@ impl Modifiers {
             state_down: None,
             probe_active: false,
             vanish: false,
+            encrypted: false,
         };
         for word in words {
             match *word {
@@ -272,6 +278,7 @@ impl Modifiers {
                 "apply-lost-other" => modifiers.apply = ApplyMode::LostOther,
                 "apply-active" => modifiers.apply = ApplyMode::Active,
                 "bare" => modifiers.bare = true,
+                "encrypted" => modifiers.encrypted = true,
                 "finish-fails" => modifiers.finish_fails = true,
                 "attach-installing" => modifiers.attach = Attach::Installing,
                 "attach-done" => modifiers.attach = Attach::Done,
@@ -293,7 +300,7 @@ impl Modifiers {
 struct Session {
     /// The plan `plan` answered last: the one `Apply` accepts.
     plan: Option<Plan>,
-    secrets: BTreeSet<String>,
+    secrets: BTreeSet<(String, SecretKind)>,
     /// How many `State` requests the running installation has answered.
     step: Option<usize>,
     summary: Option<Summary>,
@@ -403,7 +410,17 @@ impl Simulated {
             description: fixture.description,
             probe,
             probe_error: fixture.probe_error,
-            plan: fixture.plan,
+            plan: fixture.plan.map(|mut plan| {
+                // The fixtures' plans are unencrypted unless the scenario says
+                // so (a plan the interface asks for follows its request).
+                let encrypted = modifiers.encrypted;
+                plan.request.encrypt = encrypted;
+                plan.encryption.enabled = encrypted;
+                for partition in &mut plan.partitions {
+                    partition.encrypted = encrypted && partition.kind.starts_with("root");
+                }
+                plan
+            }),
             plan_error: fixture.plan_error,
             state,
             modifiers,
@@ -498,6 +515,7 @@ fn summary_of(plan: &Plan, edition: &str) -> Summary {
         disk_label: format!("{} {}", plan.disk.model.trim(), plan.disk.serial.trim())
             .trim()
             .to_owned(),
+        encrypted: plan.encryption.enabled,
     }
 }
 
@@ -508,7 +526,15 @@ fn script_state(
     plan: &Plan,
     summary: &Summary,
 ) -> Result<State, ClientError> {
-    let stages = Stage::UNENCRYPTED;
+    // An encrypted plan's list has the encrypt stage after the partition
+    // stage; the script's second step is that stage there (the mount stage,
+    // which follows, is over by the time the image is pulled).
+    let encrypted = plan.encryption.enabled;
+    let stages: &[Stage] = if encrypted {
+        &Stage::ENCRYPTED
+    } else {
+        &Stage::UNENCRYPTED
+    };
     // Which stage runs and how far, then what the tools printed.
     let (running, fraction, failing): (usize, f64, Option<Stage>) = match step {
         0 => (0, 0.3, None),
@@ -527,13 +553,24 @@ fn script_state(
         _ => (running, fraction),
     };
     let _ = failing;
-    let stage = stages[running.min(stages.len() - 1)];
+    let stage = Stage::UNENCRYPTED[running.min(Stage::UNENCRYPTED.len() - 1)];
+    let stage = if encrypted && stage == Stage::Mount {
+        Stage::Encrypt
+    } else {
+        stage
+    };
+    let running = stages.iter().position(|s| *s == stage).unwrap_or(0);
     let mut lines: Vec<String> = Vec::new();
     match stage {
         Stage::Partition => lines.extend([
             "$ wipefs --all --force /dev/disk/by-id/nvme-eui.0025385c1140a2b3".to_owned(),
             "$ systemd-repart --dry-run=no --empty=force --seed=… /dev/disk/by-id/nvme-eui.0025385c1140a2b3".to_owned(),
             "Created partition 1 of type esp and UUID 0b1a…, with 512M.".to_owned(),
+        ]),
+        Stage::Encrypt => lines.extend([
+            "$ cryptsetup luksUUID /dev/disk/by-id/nvme-eui.0025385c1140a2b3-part3".to_owned(),
+            "LUKS2 volume 0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11: aes-xts-plain64, 512-bit payload key, one keyslot derived with argon2id, 4096-byte sectors".to_owned(),
+            "$ cryptsetup open --type luks2 --allow-discards --key-file /proc/self/fd/7 /dev/disk/by-id/nvme-eui.0025385c1140a2b3-part3 luks-0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11".to_owned(),
         ]),
         Stage::Mount => lines.extend([
             "$ mount /dev/disk/by-id/nvme-eui.0025385c1140a2b3-part3 /run/ilex-installer/target".to_owned(),
@@ -555,6 +592,7 @@ fn script_state(
     state.progress = fraction;
     state.message = match stage {
         Stage::Partition => "Writing the partition table".to_owned(),
+        Stage::Encrypt => "Opening the encrypted volume".to_owned(),
         Stage::Mount => "Mounting the new partitions".to_owned(),
         Stage::Image => "Downloading and installing ilex".to_owned(),
         Stage::Configure => "Configuring the system".to_owned(),
@@ -732,7 +770,6 @@ impl Backend for Simulated {
             .ok_or_else(|| ClientError::BadAnswer("the fixture has no plan".into()))?;
         let tag = checked.composition.tag.clone();
         let tpm = checked.request.tpm_mode();
-        let eligible = probe.enrollment["verdict"] == "eligible";
         plan.request = checked.request.clone();
         plan.composition.tag.clone_from(&tag);
         plan.composition
@@ -768,7 +805,8 @@ impl Backend for Simulated {
             enabled: checked.request.encrypt,
             tpm: PlannedTpm {
                 requested: tpm,
-                will_enroll: checked.request.encrypt && tpm == TpmMode::Auto && eligible,
+                // As the helper: the installation does not enrol the TPM yet.
+                will_enroll: false,
                 reason: probe.enrollment["reason"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -787,6 +825,12 @@ impl Backend for Simulated {
                 checked.disk.other_systems.len()
             )]
         };
+        if checked.request.encrypt && tpm == TpmMode::Auto {
+            plan.warnings.push(
+                "unlocking the disk with this computer's security chip is not available in this installer yet; the disk asks for its passphrase at every start"
+                    .to_owned(),
+            );
+        }
         self.session().plan = Some(plan.clone());
         Ok(plan)
     }
@@ -848,15 +892,29 @@ impl Backend for Simulated {
             )));
         }
         let text = secret.expose();
-        if kind != SecretKind::AdminPassword || text.is_empty() || text.contains(['\n', '\r', '\0'])
-        {
+        let usable = match kind {
+            SecretKind::AdminPassword => {
+                !text.is_empty() && !text.contains(['\n', '\r', '\0'])
+            }
+            SecretKind::DiskPassphrase => passphrase_problem(text).is_none(),
+        };
+        if !usable {
             return Err(Self::refuse(PlanError::new(
                 ErrorCode::InvalidSecret,
                 Some("fd"),
                 "the password cannot be used",
             )));
         }
-        session.secrets.insert(plan.to_owned());
+        if kind == SecretKind::DiskPassphrase
+            && !session.plan.as_ref().is_some_and(|p| p.encryption.enabled)
+        {
+            return Err(Self::refuse(PlanError::new(
+                ErrorCode::InvalidSecret,
+                Some("fd"),
+                "this plan is not encrypted: it has no passphrase",
+            )));
+        }
+        session.secrets.insert((plan.to_owned(), kind));
         Ok(())
     }
 
@@ -916,11 +974,25 @@ impl Backend for Simulated {
                 "whole-disk mode erases the disk: repeat its id to confirm",
             )));
         }
-        if !session.secrets.contains(plan) {
+        if !session
+            .secrets
+            .contains(&(plan.to_owned(), SecretKind::AdminPassword))
+        {
             return Err(Self::refuse(PlanError::new(
                 ErrorCode::MissingSecret,
                 Some("admin-password"),
                 "the administrator's password has not been set (SetSecret)",
+            )));
+        }
+        if planned.encryption.enabled
+            && !session
+                .secrets
+                .contains(&(plan.to_owned(), SecretKind::DiskPassphrase))
+        {
+            return Err(Self::refuse(PlanError::new(
+                ErrorCode::MissingSecret,
+                Some("disk-passphrase"),
+                "the disk's passphrase has not been set (SetSecret)",
             )));
         }
         let edition = self

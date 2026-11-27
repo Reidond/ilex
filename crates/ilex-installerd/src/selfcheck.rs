@@ -3,7 +3,7 @@
 //! the installer VM by the `installer::` tier.
 
 use crate::{
-    answers, apply, disks, exec, finish, helper, install, policy, progress, registry, repart,
+    answers, apply, disks, exec, finish, helper, install, luks, policy, progress, registry, repart,
     scratch::Scratch,
     secret, stagelog, stamp, sys, target,
     topology::{self, FileId, LoopRow, Roots, System, Tracer},
@@ -3374,6 +3374,7 @@ pub fn run(config: &helper::Config) -> Result<String> {
     check_exiting_tasks(parent.path()).context("tasks that are exiting")?;
     check_claims(parent.path()).context("the exclusive open of a disk")?;
     check_secrets().context("secrets")?;
+    check_luks().context("the encrypted volume")?;
     check_jobs(parent.path()).context("the tools an installation runs")?;
     check_state(parent.path()).context("the installation's state")?;
     check_target(parent.path()).context("the target system's files")?;
@@ -3502,6 +3503,220 @@ fn check_secrets() -> Result<()> {
     Ok(())
 }
 
+/// What an encrypted installation needs besides the tools: the volume's header
+/// as the installed system accepts it, the line of `/etc/crypttab`, the kernel
+/// arguments, the passphrase as a file the tools read through a descriptor,
+/// and the rules for what a passphrase may hold.
+fn check_luks() -> Result<()> {
+    let uuid = "0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11";
+    ensure!(
+        luks::is_uuid(uuid)
+            && !luks::is_uuid(&uuid.to_ascii_uppercase())
+            && !luks::is_uuid(&uuid[1..])
+            && !luks::is_uuid("0b5d9a3e6a4e4a2c9d0e2f7c7b1c9f11----"),
+        "the UUID rule"
+    );
+    ensure!(
+        luks::mapping_name(uuid) == format!("luks-{uuid}")
+            && luks::mapping_node(uuid) == format!("/dev/mapper/luks-{uuid}")
+            && luks::crypttab_line(uuid) == format!("luks-{uuid} UUID={uuid} none discard\n"),
+        "the volume's names and its crypttab line"
+    );
+    ensure!(
+        luks::kernel_args(uuid, "de-nodeadkeys")
+            == [
+                format!("rd.luks.uuid={uuid}"),
+                "vconsole.keymap=de-nodeadkeys".to_owned()
+            ],
+        "the kernel arguments"
+    );
+    ensure!(
+        luks::parse_uuid(&["".into(), format!("  {}\n", uuid.to_ascii_uppercase())])? == uuid
+            && luks::parse_uuid(&["not a uuid".into()]).is_err()
+            && luks::parse_uuid(&[]).is_err(),
+        "luksUUID's output"
+    );
+
+    // The header of what repart makes (cryptsetup 2.8's own JSON, shortened).
+    let header = |edit: &dyn Fn(&mut serde_json::Value)| -> Result<luks::Header> {
+        let mut json = serde_json::json!({
+            "keyslots": {"0": {"type": "luks2", "key_size": 64,
+                "af": {"type": "luks1", "stripes": 4000, "hash": "sha256"},
+                "area": {"type": "raw", "offset": "32768", "size": "258048", "encryption": "aes-xts-plain64", "key_size": 64},
+                "kdf": {"type": "argon2id", "time": 4, "memory": 1048576, "cpus": 4, "salt": "x"}}},
+            "tokens": {},
+            "segments": {"0": {"type": "crypt", "offset": "16777216", "size": "dynamic", "iv_tweak": "0",
+                "encryption": "aes-xts-plain64", "sector_size": 4096}},
+            "digests": {"0": {"type": "pbkdf2", "keyslots": ["0"], "segments": ["0"]}},
+            "config": {"json_size": "12288", "keyslots_size": "16744448"},
+        });
+        edit(&mut json);
+        luks::check_header(&json.to_string())
+    };
+    ensure!(
+        header(&|_| {})?
+            == luks::Header {
+                cipher: "aes-xts-plain64".into(),
+                key_bits: 512,
+                kdf: "argon2id".into(),
+                sector_size: 4096
+            },
+        "a header repart makes was not accepted"
+    );
+    type Edit = Box<dyn Fn(&mut serde_json::Value)>;
+    let refused: [(&str, Edit); 8] = [
+        (
+            "a second keyslot",
+            Box::new(|j| j["keyslots"]["1"] = j["keyslots"]["0"].clone()),
+        ),
+        (
+            "no keyslot",
+            Box::new(|j| j["keyslots"] = serde_json::json!({})),
+        ),
+        (
+            "pbkdf2",
+            Box::new(|j| j["keyslots"]["0"]["kdf"]["type"] = "pbkdf2".into()),
+        ),
+        (
+            "another cipher",
+            Box::new(|j| j["segments"]["0"]["encryption"] = "aes-cbc-essiv:sha256".into()),
+        ),
+        (
+            "a 256-bit payload key",
+            Box::new(|j| j["keyslots"]["0"]["key_size"] = 32.into()),
+        ),
+        (
+            "a token",
+            Box::new(|j| j["tokens"]["0"] = serde_json::json!({"type": "systemd-tpm2"})),
+        ),
+        (
+            "a fixed-size segment",
+            Box::new(|j| j["segments"]["0"]["size"] = "1048576".into()),
+        ),
+        (
+            "two segments",
+            Box::new(|j| j["segments"]["1"] = j["segments"]["0"].clone()),
+        ),
+    ];
+    for (what, edit) in &refused {
+        ensure!(
+            header(edit.as_ref()).is_err(),
+            "a header with {what} was accepted"
+        );
+    }
+    ensure!(
+        luks::check_header("not json").is_err() && luks::check_header("{}").is_err(),
+        "a document that is no header was accepted"
+    );
+
+    // The passphrase as a file: the child reads exactly the bytes, by the path
+    // that names its own descriptor, and the file is zeros once it is dropped.
+    let passphrase = secret::Secret::from_memfd(
+        secret::sealed_memfd("Zürich y-z 'q' \"w\"".as_bytes())?,
+        4096,
+    )?;
+    let key = luks::KeyFile::new(&passphrase)?;
+    let path = key.path();
+    ensure!(
+        path == format!("/proc/self/fd/{}", key.raw()),
+        "the key file's path"
+    );
+    let run = |inherit: &[std::os::fd::RawFd],
+               script: &str|
+     -> Result<(exec::Exit, Vec<String>)> {
+        let mut lines = Vec::new();
+        let exit = exec::run_job(
+            &exec::Job {
+                program: "sh",
+                args: &["-c", script],
+                env: &[],
+                stdin: None,
+                inherit,
+                timeout: Duration::from_secs(20),
+            },
+            &mut |line| {
+                lines.push(line.to_owned());
+                exec::Flow::Continue
+            },
+            &mut || {},
+        )?;
+        Ok((exit, lines))
+    };
+    let read = format!("cat {path}; echo; wc -c < {path}");
+    let (exit, lines) = run(&[key.raw()], &read)?;
+    ensure!(
+        exit.success()
+            && lines
+                == [
+                    "Zürich y-z 'q' \"w\"".to_owned(),
+                    format!("{}", "Zürich y-z 'q' \"w\"".len())
+                ],
+        "a child did not read the passphrase through its descriptor: {lines:?}"
+    );
+    // Not given to the child, the descriptor is not there (it is close-on-exec).
+    let (exit, lines) = run(&[], &format!("cat {path}"))?;
+    ensure!(
+        !exit.success() && !lines.iter().any(|l| l.contains("Zürich")),
+        "a child that was not given the key file read it: {lines:?}"
+    );
+    // Mode 0600 (repart warns about a key file others can read).
+    ensure!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777 == 0o600,
+        "the key file is readable by others"
+    );
+    // Dropped, it is wiped: a duplicate of the descriptor reads nothing, and
+    // the zeros are not the passphrase.
+    // SAFETY: `dup` of a descriptor this function owns.
+    let dup = unsafe { libc::dup(key.raw()) };
+    ensure!(dup >= 0, "dup");
+    // SAFETY: `dup` is a descriptor this function just made and owns.
+    let dup = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(dup) };
+    drop(key);
+    ensure!(
+        std::fs::File::from(dup).metadata()?.len() == 0,
+        "the key file still holds bytes after it was dropped"
+    );
+
+    // What a passphrase may hold: it is typed at a prompt, so a line break (the
+    // end of what is typed), a tab or a NUL cannot be in it.
+    for (text, ok) in [
+        ("correct horse battery", true),
+        ("Zürich ß 日本語 x", true),
+        (" leading and trailing ", true),
+        ("", false),
+        ("a\nb", false),
+        ("a\rb", false),
+        ("a\tb", false),
+        ("a\0b", false),
+        ("\u{7f}", false),
+        (&"x".repeat(512), true),
+        (&"x".repeat(513), false),
+    ] {
+        ensure!(
+            ilex_installer_model::plan::passphrase_problem(text).is_none() == ok,
+            "the passphrase rule for {text:?}"
+        );
+        let secret = secret::Secret::from_memfd(secret::sealed_memfd(text.as_bytes())?, 4096);
+        if text.is_empty() {
+            ensure!(secret.is_err(), "an empty secret was taken");
+        } else {
+            ensure!(
+                secret::disk_passphrase(&secret?).is_ok() == ok,
+                "the helper's passphrase rule for {text:?}"
+            );
+        }
+    }
+    ensure!(
+        secret::disk_passphrase(&secret::Secret::from_memfd(
+            secret::sealed_memfd(b"\xff\xfe")?,
+            4096
+        )?)
+        .is_err(),
+        "a passphrase that is not UTF-8 was accepted"
+    );
+    Ok(())
+}
+
 /// The runner of long jobs: merged output in order, a secret on standard
 /// input, a deadline that ends the whole process group, an early stop.
 fn check_jobs(scratch: &Path) -> Result<()> {
@@ -3521,6 +3736,7 @@ fn check_jobs(scratch: &Path) -> Result<()> {
                 args: &["-c", script],
                 env: &[("ILEX_CHECK", "set")],
                 stdin,
+                inherit: &[],
                 timeout,
             },
             &mut |line| {
@@ -3587,6 +3803,7 @@ fn check_jobs(scratch: &Path) -> Result<()> {
             args: &["-c", "echo first; sleep 30; echo never"],
             env: &[],
             stdin: None,
+            inherit: &[],
             timeout: Duration::from_secs(60),
         },
         &mut |line| {
@@ -3747,6 +3964,7 @@ fn test_summary() -> ilex_installer_model::state::Summary {
         digest: format!("sha256:{}", "c".repeat(64)),
         disk: "virtio-target".into(),
         disk_label: "QEMU HARDDISK target".into(),
+        encrypted: false,
     }
 }
 
@@ -4003,6 +4221,29 @@ fn check_target(parent: &Path) -> Result<()> {
     );
     fs::remove_file(deploy.join(format!("{checksum}.0")))?;
 
+    // An encrypted installation's record says what phase 0's own completion
+    // says of a disk that unlocks with its passphrase alone.
+    let mut encrypted = fixture_plan()?;
+    encrypted.request.encrypt = true;
+    encrypted.encryption.enabled = true;
+    let record: serde_json::Value = serde_json::from_str(&target::setup_record(&encrypted))?;
+    ensure!(
+        record["security"]["tpm"]
+            == serde_json::json!({"requested": "auto", "capability": "unknown", "reason": "not-attempted", "status": "passphrase-only"})
+            && record["composition"] == "generic.gnome",
+        "an encrypted installation's setup.json: {record}"
+    );
+    encrypted.request.tpm = Some(ilex_installer_model::plan::TpmMode::Off);
+    ensure!(
+        serde_json::from_str::<serde_json::Value>(&target::setup_record(&encrypted))?["security"]
+            ["tpm"]["requested"]
+            == "off",
+        "the TPM mode the person turned off is not recorded"
+    );
+    ensure!(
+        install::stages(&encrypted).len() == 7 && install::stages(&fixture_plan()?).len() == 6,
+        "the stages of an encrypted and of an unencrypted installation"
+    );
     // The reserved record of the Anaconda path, key for key.
     let plan = fixture_plan()?;
     let record: serde_json::Value = serde_json::from_str(&target::setup_record(&plan))?;

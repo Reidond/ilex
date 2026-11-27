@@ -314,7 +314,8 @@ pub fn is_reserved_user(name: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SecretKind {
-    /// The disk's passphrase (encryption, a later PR).
+    /// The disk's passphrase: the key of the LUKS2 volume's one slot, typed
+    /// again at every start of the computer.
     DiskPassphrase,
     /// The maintenance administrator's password.
     AdminPassword,
@@ -339,6 +340,27 @@ impl SecretKind {
 
 /// The most a secret may hold (a sealed memfd of this size or less).
 pub const SECRET_MAX_BYTES: usize = 4096;
+
+/// The longest disk passphrase, in bytes: what `cryptsetup` itself reads at a
+/// prompt, and so what the start of the installed computer can be given.
+pub const PASSPHRASE_MAX_BYTES: usize = 512;
+
+/// Why a text cannot be a disk passphrase, or `None` when it can. The
+/// passphrase is typed at a console prompt at every start of the computer, so
+/// whatever the prompt cannot take (a line break ends it, a control character
+/// is not typed) is refused here, once, for the interface, the helper and the
+/// answers file alike.
+pub fn passphrase_problem(text: &str) -> Option<&'static str> {
+    if text.is_empty() {
+        Some("the passphrase is empty")
+    } else if text.len() > PASSPHRASE_MAX_BYTES {
+        Some("the passphrase is longer than 512 bytes")
+    } else if text.chars().any(char::is_control) {
+        Some("the passphrase has a control character (a line break, a tab or a NUL)")
+    } else {
+        None
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

@@ -202,29 +202,30 @@ pub fn run() -> Result<String> {
     }
 
     // The flow end to end on the generic scenario.
-    walk()?;
-    generations()?;
-    probe_answers()?;
-    keyboard_switches()?;
-    retries()?;
-    gates()?;
-    marker_formats()?;
-    bus_errors()?;
-    progress()?;
-    disk_page()?;
-    installation()?;
-    install_markers()?;
-    failures()?;
-    attaching()?;
-    log_dialog()?;
-    starting_window()?;
-    refused_window()?;
-    other_installation()?;
-    interrupted_attach()?;
-    unreachable_helper()?;
-    chosen_disk()?;
-    wiped_secrets()?;
-    page_views()?;
+    walk().context("walk")?;
+    generations().context("generations")?;
+    probe_answers().context("probe_answers")?;
+    keyboard_switches().context("keyboard_switches")?;
+    retries().context("retries")?;
+    gates().context("gates")?;
+    marker_formats().context("marker_formats")?;
+    bus_errors().context("bus_errors")?;
+    progress().context("progress")?;
+    disk_page().context("disk_page")?;
+    encryption().context("encryption")?;
+    installation().context("installation")?;
+    install_markers().context("install_markers")?;
+    failures().context("failures")?;
+    attaching().context("attaching")?;
+    log_dialog().context("log_dialog")?;
+    starting_window().context("starting_window")?;
+    refused_window().context("refused_window")?;
+    other_installation().context("other_installation")?;
+    interrupted_attach().context("interrupted_attach")?;
+    unreachable_helper().context("unreachable_helper")?;
+    chosen_disk().context("chosen_disk")?;
+    wiped_secrets().context("wiped_secrets")?;
+    page_views().context("page_views")?;
     Ok(format!(
         "{} scenarios, {} sample layouts, {} languages",
         simulate::names().count(),
@@ -263,8 +264,8 @@ fn at_account(name: &str) -> Result<(Flow, Simulated)> {
     ensure!(
         flow.advance() == Step::Goto(PageId::Machine)
             && flow.advance() == Step::Goto(PageId::Disk)
-            && flow.advance() == Step::Goto(PageId::Account),
-        "{name}: welcome, machine and disk do not continue"
+            && through_encryption(&mut flow),
+        "{name}: welcome, machine, disk and encryption do not continue"
     );
     fill_account(&mut flow, name)?;
     Ok((flow, sim))
@@ -285,6 +286,16 @@ fn at_account_without_disk(name: &str) -> Result<(Flow, Simulated)> {
     flow.show(PageId::Account);
     fill_account(&mut flow, name)?;
     Ok((flow, sim))
+}
+
+/// From the disk page, past the encryption page with encryption turned off (the
+/// rules of the checks that are not about encryption are the same either way),
+/// to the account page.
+fn through_encryption(flow: &mut Flow) -> bool {
+    flow.advance() == Step::Goto(PageId::Encryption)
+        && flow.set_encrypt(false)
+        && flow.can_continue()
+        && flow.advance() == Step::Goto(PageId::Account)
 }
 
 fn fill_account(flow: &mut Flow, name: &str) -> Result<()> {
@@ -364,8 +375,31 @@ fn walk() -> Result<()> {
     ensure!(
         flow.advance() == Step::Goto(PageId::Disk)
             && flow.disk() == Some("nvme-eui.0025385c1140a2b3")
-            && flow.advance() == Step::Goto(PageId::Account),
-        "machine -> disk -> account"
+            && flow.advance() == Step::Goto(PageId::Encryption),
+        "machine -> disk -> encryption"
+    );
+    // The disk is encrypted unless the person says otherwise, and the page
+    // names the layout the passphrase is typed in.
+    ensure!(
+        flow.encrypt()
+            && !flow.can_continue()
+            && flow.advance() == Step::Stay
+            && flow.passphrase_layout_line().contains("German (no dead keys)"),
+        "encryption is on by default and waits for a passphrase"
+    );
+    ensure!(
+        flow.set_passphrase(Secret::new("correct horse battery"))
+            && !flow.can_continue()
+            && flow.set_passphrase_confirmation(Secret::new("correct horse batter"))
+            && flow.encryption_checks().confirmation.message().is_some()
+            && !flow.can_continue()
+            && flow.set_passphrase_confirmation(Secret::new("correct horse battery"))
+            && flow.can_continue(),
+        "the passphrase and its confirmation"
+    );
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Account),
+        "encryption -> account"
     );
     ensure!(!flow.can_continue(), "account continues empty");
     flow.set_administrator("root");
@@ -394,6 +428,8 @@ fn walk() -> Result<()> {
     let (generation, request) = run_plan(&mut flow)?;
     ensure!(
         request.administrator == "ilexmaint"
+            && request.encrypt
+            && request.tpm == Some(ilex_installer_model::plan::TpmMode::Off)
             && request.keyboard == "de-nodeadkeys"
             && request.language == "de_DE.UTF-8"
             && request.composition == "ms-7c35.gnome"
@@ -402,7 +438,7 @@ fn walk() -> Result<()> {
     );
     ensure!(
         !serde_json::to_string(&*request)?.contains("horse"),
-        "the password is in the plan request"
+        "the password or the passphrase is in the plan request"
     );
     ensure!(
         !flow.can_continue()
@@ -713,13 +749,15 @@ fn retries() -> Result<()> {
     let (mut flow, sim) = at_account("generic")?;
     // Back on the machine page the person picks the specific configuration.
     ensure!(
-        flow.back() == Some(PageId::Disk) && flow.back() == Some(PageId::Machine),
+        flow.back() == Some(PageId::Encryption)
+            && flow.back() == Some(PageId::Disk)
+            && flow.back() == Some(PageId::Machine),
         "back to the machine page"
     );
     ensure!(flow.select_machine("ms-7c35.gnome"), "machine choice");
     ensure!(
-        flow.advance() == Step::Goto(PageId::Disk) && flow.advance() == Step::Goto(PageId::Account),
-        "machine -> disk -> account"
+        flow.advance() == Step::Goto(PageId::Disk) && through_encryption(&mut flow),
+        "machine -> disk -> encryption -> account"
     );
     let (generation, request) = run_plan(&mut flow)?;
     // The disk is gone by the time the helper looks: a refusal that only a
@@ -1103,9 +1141,11 @@ fn marker_formats() -> Result<()> {
     // The administrator's name is one word in the marker whatever was typed.
     ensure!(
         flow.advance() == Step::Goto(PageId::Disk)
-            && flow.advance() == Step::Goto(PageId::Account)
+            && through_encryption(&mut flow)
             && flow.set_administrator("two words\nhere")
+            && flow.back() == Some(PageId::Encryption)
             && flow.back() == Some(PageId::Disk)
+            && flow.advance() == Step::Goto(PageId::Encryption)
             && flow.advance() == Step::Goto(PageId::Account),
         "account page"
     );
@@ -1312,9 +1352,10 @@ fn carry_out(flow: &mut Flow, sim: &Simulated, step: Step) -> Result<Step> {
             plan,
             erase_disk,
             password,
+            passphrase,
         } => flow.apply_finished(
             generation,
-            sim.start_installation(&plan, &erase_disk, &password),
+            sim.start_installation(&plan, &erase_disk, &password, passphrase.as_ref()),
         ),
         Step::RunState { generation, .. } => flow.state_finished(generation, sim.state()),
         Step::RunLogProbe { generation } => flow.log_probe_finished(generation, sim.probe()),
@@ -1368,6 +1409,287 @@ fn start_install(flow: &mut Flow, sim: &Simulated) -> Result<Step> {
         "the confirmation does not apply: {step:?}"
     );
     carry_out(flow, sim, step)
+}
+
+/// The encryption page: on unless turned off, a passphrase typed twice, what is
+/// asked of the helper and what is not, and where the passphrase goes.
+fn encryption() -> Result<()> {
+    let (mut flow, sim) = flow_on("generic")?;
+    flow.advance();
+    flow.advance();
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Encryption)
+            && flow.page() == PageId::Encryption
+            && PageId::Encryption.id() == "encryption"
+            && PageId::Disk.next() == Some(PageId::Encryption)
+            && PageId::Account.previous() == Some(PageId::Encryption)
+            && flow.can_go_back()
+            && flow.encrypt()
+            && flow.marker_fields() == "encryption=on keyboard=us",
+        "the page after the disk page, with encryption on"
+    );
+    ensure!(
+        flow.passphrase_layout_line()
+            == "You type it in the English (US) layout: here, and every time the computer starts.",
+        "the layout line: {}",
+        flow.passphrase_layout_line()
+    );
+    // Every state of the two fields.
+    let checks = |flow: &Flow| flow.encryption_checks();
+    ensure!(
+        checks(&flow).passphrase == Check::Empty
+            && checks(&flow).confirmation == Check::Empty
+            && !flow.can_continue()
+            && flow.advance() == Step::Stay,
+        "an empty page continues"
+    );
+    for (text, valid) in [
+        ("a", true),
+        ("correct horse battery staple", true),
+        ("Zürich ß 日本語", true),
+        (" spaces are part of it ", true),
+        ("line\nbreak", false),
+        ("tab\tbed", false),
+        ("nul\0byte", false),
+    ] {
+        flow.set_passphrase(Secret::new(text));
+        ensure!(
+            checks(&flow).passphrase.is_valid() == valid
+                && (valid || checks(&flow).passphrase.message().is_some()),
+            "the rule for {text:?}"
+        );
+    }
+    flow.set_passphrase(Secret::new(&"x".repeat(513)));
+    ensure!(
+        checks(&flow)
+            .passphrase
+            .message()
+            .is_some_and(|m| m.title == "The passphrase is too long"),
+        "a passphrase longer than the prompt takes"
+    );
+    flow.set_passphrase(Secret::new("short"));
+    ensure!(
+        checks(&flow).passphrase.is_valid()
+            && flow
+                .passphrase_advice()
+                .is_some_and(|m| m.title == "A longer passphrase is safer"),
+        "a short passphrase is advised against, not refused"
+    );
+    flow.set_passphrase(Secret::new("correct horse battery staple"));
+    ensure!(
+        flow.passphrase_advice().is_none()
+            && !flow.can_continue()
+            && flow.set_passphrase_confirmation(Secret::new("correct horse battery stapl"))
+            && checks(&flow)
+                .confirmation
+                .message()
+                .is_some_and(|m| m.title == "The passphrases do not match")
+            && !flow.can_continue()
+            && flow.advance() == Step::Stay,
+        "a mismatch continues"
+    );
+    // The secrets are held, not printed.
+    ensure!(
+        format!("{:?}", flow.passphrase()) == "Secret(<redacted>)"
+            && flow.passphrase_confirmation().expose() == "correct horse battery stapl",
+        "the passphrase's debug output"
+    );
+    flow.set_passphrase_confirmation(Secret::new("correct horse battery staple"));
+    ensure!(
+        flow.can_continue() && flow.advance() == Step::Goto(PageId::Account),
+        "a confirmed passphrase does not continue"
+    );
+    // Back keeps what was typed; turning encryption off on the page keeps it
+    // too, and the page continues without it.
+    ensure!(
+        flow.back() == Some(PageId::Encryption)
+            && flow.passphrase().expose() == "correct horse battery staple"
+            && flow.set_encrypt(false)
+            && !flow.encrypt()
+            && flow.can_continue()
+            && flow.marker_fields() == "encryption=off keyboard=us"
+            && flow.set_encrypt(true)
+            && flow.can_continue(),
+        "going back and turning encryption off and on"
+    );
+
+    // What `Plan` is asked: encrypted, the security chip left alone (the
+    // installation does not enrol it yet), and nothing of the passphrase.
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Account),
+        "encryption -> account"
+    );
+    fill_account(&mut flow, "generic")?;
+    let (generation, request) = run_plan(&mut flow)?;
+    let text = serde_json::to_string(&*request)?;
+    ensure!(
+        request.encrypt
+            && request.tpm == Some(ilex_installer_model::plan::TpmMode::Off)
+            && !text.contains("battery")
+            && !text.contains("horse"),
+        "the request of an encrypted installation: {text}"
+    );
+    let plan = sim.plan(&request)?;
+    ensure!(
+        plan.encryption.enabled
+            && !plan.encryption.tpm.will_enroll
+            && plan.warnings.iter().all(|w| !w.contains("security chip"))
+            && plan
+                .partitions
+                .iter()
+                .filter(|p| p.encrypted)
+                .map(|p| p.kind.as_str())
+                .collect::<Vec<_>>()
+                == ["root"],
+        "the plan of an encrypted installation: {plan:?}"
+    );
+    let rows: Vec<Stage> = Progress::for_plan(&plan).rows.iter().map(|r| r.stage).collect();
+    ensure!(
+        rows == Stage::ENCRYPTED,
+        "the stages of an encrypted plan: {rows:?}"
+    );
+    flow.plan_finished(generation, Ok(plan));
+    let review = flow.review().context("no review page")?;
+    ensure!(
+        review
+            .choices
+            .iter()
+            .any(|r| r.title == "Encryption" && r.value.starts_with("On: ")),
+        "the review page's choices: {:?}",
+        review.choices
+    );
+    ensure!(
+        review.partitions.iter().any(|p| p.detail.ends_with("btrfs, encrypted")),
+        "the review page's partitions: {:?}",
+        review.partitions
+    );
+
+    // The helper gets the passphrase, and the password, and begins.
+    let Step::Confirm(_) = flow.install() else {
+        bail!("no dialog");
+    };
+    let Step::RunApply { passphrase, password, .. } = flow.confirm_install() else {
+        bail!("the confirmation does not apply");
+    };
+    ensure!(
+        passphrase.as_ref().map(Secret::expose) == Some("correct horse battery staple")
+            && password.expose() == "correct horse",
+        "what the helper is given"
+    );
+    // ...and no passphrase for a plan that does not encrypt, even if one was
+    // typed while encryption was on.
+    let (mut flow, sim) = at_account("generic")?;
+    flow.show(PageId::Encryption);
+    ensure!(
+        flow.set_encrypt(true)
+            && flow.set_passphrase(Secret::new("typed while it was on"))
+            && flow.set_passphrase_confirmation(Secret::new("typed while it was on"))
+            && flow.set_encrypt(false),
+        "turning encryption off after typing"
+    );
+    flow.show(PageId::Account);
+    let (generation, request) = run_plan(&mut flow)?;
+    ensure!(
+        !request.encrypt && request.tpm.is_none() && !serde_json::to_string(&*request)?.contains("typed"),
+        "the request of an unencrypted installation: {request:?}"
+    );
+    flow.plan_finished(generation, sim.plan(&request));
+    let Step::Confirm(_) = flow.install() else {
+        bail!("no dialog");
+    };
+    let Step::RunApply { passphrase, .. } = flow.confirm_install() else {
+        bail!("the confirmation does not apply");
+    };
+    ensure!(passphrase.is_none(), "a passphrase went to an unencrypted plan");
+    flow.cancel_install();
+
+    // The simulated helper refuses what the real one does: a passphrase for a
+    // plan that is not encrypted, an encrypted plan without one, one that
+    // cannot be typed at the prompt.
+    let (mut flow, sim) = flow_on("generic")?;
+    flow.advance();
+    flow.advance();
+    flow.advance();
+    flow.set_passphrase(Secret::new("correct horse battery staple"));
+    flow.set_passphrase_confirmation(Secret::new("correct horse battery staple"));
+    flow.advance();
+    fill_account(&mut flow, "generic")?;
+    let (generation, request) = run_plan(&mut flow)?;
+    flow.plan_finished(generation, sim.plan(&request));
+    let plan = match flow.plan_check() {
+        PlanCheck::Checked(plan) => plan.id.clone(),
+        other => bail!("the plan: {other:?}"),
+    };
+    let secret = Secret::new("correct horse battery staple");
+    let refused = |result: Result<State, ClientError>, field: &str| match result {
+        Err(ClientError::Refused(error)) if error.field.as_deref() == Some(field) => Ok(()),
+        other => bail!("wanted a refusal naming {field}: {other:?}"),
+    };
+    refused(
+        sim.start_installation(&plan, "nvme-eui.0025385c1140a2b3", &secret, None),
+        "disk-passphrase",
+    )?;
+    ensure!(
+        matches!(
+            sim.set_secret(&plan, ilex_installer_model::plan::SecretKind::DiskPassphrase, &Secret::new("a\nb")),
+            Err(ClientError::Refused(_))
+        ),
+        "a passphrase with a line break was taken"
+    );
+    let began = sim.start_installation(&plan, "nvme-eui.0025385c1140a2b3", &secret, Some(&secret))?;
+    ensure!(
+        began.active
+            && began.stages.iter().map(|r| r.stage).collect::<Vec<_>>() == Stage::ENCRYPTED
+            && began.summary.as_ref().is_some_and(|s| s.encrypted),
+        "an encrypted installation begins: {began:?}"
+    );
+    let (mut unencrypted, sim) = at_review("generic")?;
+    let Step::Confirm(_) = unencrypted.install() else {
+        bail!("no dialog");
+    };
+    let Step::RunApply { plan, .. } = unencrypted.confirm_install() else {
+        bail!("the confirmation does not apply");
+    };
+    ensure!(
+        matches!(
+            sim.set_secret(&plan, ilex_installer_model::plan::SecretKind::DiskPassphrase, &secret),
+            Err(ClientError::Refused(e)) if e.field.as_deref() == Some("fd")
+        ),
+        "a passphrase for a plan that is not encrypted was taken"
+    );
+
+    // The done page of an encrypted installation says what to expect, and the
+    // passphrase is wiped with the password.
+    let (mut flow, sim) = at_review("generic+encrypted")?;
+    flow.show(PageId::Encryption);
+    flow.set_encrypt(true);
+    flow.set_passphrase(Secret::new("correct horse battery staple"));
+    flow.set_passphrase_confirmation(Secret::new("correct horse battery staple"));
+    flow.show(PageId::Account);
+    let (generation, request) = run_plan(&mut flow)?;
+    flow.plan_finished(generation, sim.plan(&request));
+    let step = start_install(&mut flow, &sim)?;
+    let step = settle(&mut flow, &sim, step)?;
+    ensure!(
+        step == Step::Goto(PageId::Done) || flow.page() == PageId::Done,
+        "the installation does not end: {step:?}"
+    );
+    let done = flow.done_view().context("no done page")?;
+    ensure!(
+        done.detail.contains("The disk is encrypted: the computer asks for its passphrase every time it starts")
+            && flow.passphrase().is_empty()
+            && flow.passphrase_confirmation().is_empty()
+            && flow.password().is_empty()
+            && flow.secrets_wiped() == 1,
+        "the done page of an encrypted installation: {done:?}"
+    );
+    // Back at the start, encryption is on again and nothing is kept.
+    let (flow, _) = flow_on("generic+attach-done+encrypted")?;
+    ensure!(
+        flow.done_view().is_none() && flow.encrypt(),
+        "a restarted interface"
+    );
+    Ok(())
 }
 
 fn disk_page() -> Result<()> {
@@ -1453,11 +1775,9 @@ fn disk_page() -> Result<()> {
         flow.disk() == Some("ata-WDC_WDS500G2B0A_214512800345"),
         "a new look changed the person's disk"
     );
-    // ...and goes into the request, whole-disk and unencrypted.
-    ensure!(
-        flow.advance() == Step::Goto(PageId::Account),
-        "disk -> account"
-    );
+    // ...and goes into the request, whole-disk (unencrypted here: the
+    // encryption page is turned off).
+    ensure!(through_encryption(&mut flow), "disk -> encryption -> account");
     fill_account(&mut flow, "generic")?;
     let (generation, request) = run_plan(&mut flow)?;
     ensure!(
@@ -1473,7 +1793,9 @@ fn disk_page() -> Result<()> {
     // A disk that is gone after the check invalidates it, and the default
     // moves on to one that is offered.
     ensure!(
-        flow.back() == Some(PageId::Account) && flow.back() == Some(PageId::Disk),
+        flow.back() == Some(PageId::Account)
+            && flow.back() == Some(PageId::Encryption)
+            && flow.back() == Some(PageId::Disk),
         "back to the disk page"
     );
     ensure!(
@@ -1623,6 +1945,7 @@ fn installation() -> Result<()> {
         plan,
         erase_disk,
         password,
+        ..
     } = step
     else {
         bail!("the confirmation does not apply");
@@ -1641,12 +1964,12 @@ fn installation() -> Result<()> {
     ensure!(
         flow.apply_finished(
             generation + 1,
-            sim.start_installation(&plan, &erase_disk, &password)
+            sim.start_installation(&plan, &erase_disk, &password, None)
         ) == Step::Stay
             && flow.is_starting(),
         "a stale answer to Apply"
     );
-    let started = sim.start_installation(&plan, &erase_disk, &password);
+    let started = sim.start_installation(&plan, &erase_disk, &password, None);
     let first = flow.apply_finished(generation, started.clone());
     let Step::RunState { delay_ms, .. } = first else {
         bail!("an accepted Apply does not poll");
@@ -1988,11 +2311,12 @@ fn failures() -> Result<()> {
         plan,
         erase_disk,
         password,
+        ..
     } = flow.confirm_install()
     else {
         bail!("no apply");
     };
-    let began = sim.start_installation(&plan, &erase_disk, &password)?;
+    let began = sim.start_installation(&plan, &erase_disk, &password, None)?;
     let Step::RunState {
         generation: asked, ..
     } = flow.apply_finished(
@@ -2352,7 +2676,7 @@ fn install_markers() -> Result<()> {
     settle(&mut flow, &sim, step)?;
     flow.advance();
     flow.advance();
-    flow.advance();
+    through_encryption(&mut flow);
     fill_account(&mut flow, "generic")?;
     let step = flow.advance();
     settle(&mut flow, &sim, step)?;
@@ -2455,11 +2779,12 @@ fn starting_window() -> Result<()> {
         plan,
         erase_disk,
         password,
+        ..
     } = step
     else {
         bail!("no apply: {step:?}");
     };
-    let lost = sim.start_installation(&plan, &erase_disk, &password);
+    let lost = sim.start_installation(&plan, &erase_disk, &password, None);
     ensure!(lost.is_err(), "the simulated Apply answered");
     let mut step = first.apply_finished(generation, lost);
     ensure!(
@@ -2514,7 +2839,7 @@ fn starting_window() -> Result<()> {
         bail!("no apply");
     };
     ensure!(
-        sim.start_installation(&plan, &erase_disk, &password)
+        sim.start_installation(&plan, &erase_disk, &password, None)
             .is_err(),
         "the simulated Apply answered"
     );
@@ -2751,9 +3076,8 @@ fn refused_window() -> Result<()> {
             "{name}: Continue does not dismiss the notice"
         );
         ensure!(
-            flow.advance() == Step::Goto(PageId::Disk)
-                && flow.advance() == Step::Goto(PageId::Account),
-            "{name}: machine and disk do not continue"
+            flow.advance() == Step::Goto(PageId::Disk) && through_encryption(&mut flow),
+            "{name}: machine, disk and encryption do not continue"
         );
         fill_account(&mut flow, name)?;
         let (generation, request) = run_plan(&mut flow)?;
@@ -2807,11 +3131,12 @@ fn refused_window() -> Result<()> {
         plan,
         erase_disk,
         password,
+        ..
     } = flow.confirm_install()
     else {
         bail!("no apply");
     };
-    let lost = sim.start_installation(&plan, &erase_disk, &password);
+    let lost = sim.start_installation(&plan, &erase_disk, &password, None);
     ensure!(lost.is_err(), "the simulated Apply answered");
     let mut step = flow.apply_finished(generation, lost);
     for round in 0..8 {
@@ -2861,11 +3186,12 @@ fn other_installation() -> Result<()> {
             plan,
             erase_disk,
             password,
+            ..
         } = flow.confirm_install()
         else {
             bail!("no apply");
         };
-        let lost = sim.start_installation(&plan, &erase_disk, &password);
+        let lost = sim.start_installation(&plan, &erase_disk, &password, None);
         ensure!(lost.is_err(), "{name}: the simulated Apply answered");
         let step = flow.apply_finished(generation, lost);
         ensure!(
@@ -3189,7 +3515,7 @@ fn chosen_disk() -> Result<()> {
         "the preselected disk"
     );
     ensure!(
-        flow.advance() == Step::Goto(PageId::Account),
+        flow.advance() == Step::Goto(PageId::Encryption),
         "the disk page does not continue"
     );
     let Step::RunProbe { generation } = flow.start_probe() else {
@@ -3222,7 +3548,7 @@ fn chosen_disk() -> Result<()> {
         if let Some(id) = chosen {
             ensure!(flow.set_disk(id), "choosing {id}");
         }
-        flow.advance();
+        through_encryption(&mut flow);
         fill_account(&mut flow, "generic")?;
         let (generation, request) = run_plan(&mut flow)?;
         flow.plan_finished(generation, sim.plan(&request));
@@ -3270,7 +3596,7 @@ fn chosen_disk() -> Result<()> {
             "an echoed selection cleared the notice"
         );
         ensure!(
-            flow.can_continue() && flow.advance() == Step::Goto(PageId::Account),
+            flow.can_continue() && flow.advance() == Step::Goto(PageId::Encryption),
             "the disk page does not go on"
         );
         ensure!(flow.disk_notice().is_none(), "the notice stays");
@@ -3380,7 +3706,7 @@ fn page_views() -> Result<()> {
     let (mut flow, _) = flow_on("generic")?;
     flow.advance();
     flow.advance();
-    flow.advance();
+    through_encryption(&mut flow);
     fill_account(&mut flow, "generic")?;
     flow.advance();
     let page = flow.review_page();
@@ -3392,7 +3718,7 @@ fn page_views() -> Result<()> {
     let (mut flow, sim) = flow_on("registry-down")?;
     flow.advance();
     flow.advance();
-    flow.advance();
+    through_encryption(&mut flow);
     fill_account(&mut flow, "registry-down")?;
     let (generation, request) = run_plan(&mut flow)?;
     flow.plan_finished(generation, sim.plan(&request));

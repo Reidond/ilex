@@ -12,7 +12,7 @@
 //! * [`backend`]: the root helper as a trait ([`backend::Backend`]), with the
 //!   real implementation over D-Bus (`org.ilex.Installer1`, Linux) and
 //!   [`simulate::Simulated`], which answers from JSON fixtures.
-//! * [`machine`], [`disks`], [`account`], [`review`], [`keyboard`], [`language`]:
+//! * [`machine`], [`disks`], [`encryption`], [`account`], [`review`], [`keyboard`], [`language`]:
 //!   the content and rules of the pages made of what the helper reports and what
 //!   the live image ships.
 //! * [`messages`]: every sentence a refusal or a failure becomes, in one place.
@@ -27,6 +27,7 @@
 pub mod account;
 pub mod backend;
 pub mod disks;
+pub mod encryption;
 pub mod flow;
 pub mod keyboard;
 pub mod language;

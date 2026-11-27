@@ -117,24 +117,22 @@ impl Helper {
                 "the helper has no such plan (it keeps the latest eight and forgets them when it restarts)",
             )
         })?;
-        match kind {
-            SecretKind::AdminPassword => {}
-            SecretKind::DiskPassphrase => {
-                return Err(if recorded.plan.request.encrypt {
-                    PlanError::new(
-                        ErrorCode::UnsupportedMode,
-                        Some("encrypt"),
-                        "encrypted installations are not available yet",
-                    )
-                } else {
-                    invalid("this plan is not encrypted: it has no passphrase".into())
-                });
-            }
+        if kind == SecretKind::DiskPassphrase && !recorded.plan.request.encrypt {
+            return Err(invalid(
+                "this plan is not encrypted: it has no passphrase".into(),
+            ));
         }
         // The descriptor is read and closed whatever follows.
         let secret =
             Secret::from_memfd(fd, SECRET_MAX_BYTES).map_err(|e| invalid(format!("{e:#}")))?;
-        secret::admin_password(&secret).map_err(|e| invalid(format!("{e:#}")))?;
+        match kind {
+            SecretKind::AdminPassword => {
+                secret::admin_password(&secret).map_err(|e| invalid(format!("{e:#}")))?;
+            }
+            SecretKind::DiskPassphrase => {
+                secret::disk_passphrase(&secret).map_err(|e| invalid(format!("{e:#}")))?;
+            }
+        }
         let id = recorded.plan.id.clone();
         drop(plans);
         locked(&self.secrets).insert((id, kind), secret);
@@ -229,18 +227,20 @@ impl Helper {
                 ));
             }
         }
-        if plan.request.encrypt {
-            return Err(PlanError::new(
-                ErrorCode::UnsupportedMode,
-                Some("encrypt"),
-                "encrypted installations are not available yet",
-            ));
-        }
         if !locked(&self.secrets).contains_key(&(plan.id.clone(), SecretKind::AdminPassword)) {
             return Err(PlanError::new(
                 ErrorCode::MissingSecret,
                 Some("admin-password"),
                 "the administrator's password has not been set (SetSecret)",
+            ));
+        }
+        if plan.request.encrypt
+            && !locked(&self.secrets).contains_key(&(plan.id.clone(), SecretKind::DiskPassphrase))
+        {
+            return Err(PlanError::new(
+                ErrorCode::MissingSecret,
+                Some("disk-passphrase"),
+                "the disk's passphrase has not been set (SetSecret)",
             ));
         }
 
@@ -307,9 +307,25 @@ impl Helper {
                     "the administrator's password has not been set (SetSecret)",
                 )
             })?;
+        // The disk's passphrase, for a plan that encrypts (checked above).
+        let passphrase = if plan.request.encrypt {
+            Some(
+                locked(&self.secrets)
+                    .remove(&(plan.id.clone(), SecretKind::DiskPassphrase))
+                    .ok_or_else(|| {
+                        PlanError::new(
+                            ErrorCode::MissingSecret,
+                            Some("disk-passphrase"),
+                            "the disk's passphrase has not been set (SetSecret)",
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
         locked(&self.secrets).retain(|(id, _), _| *id != plan.id);
         self.tracker
-            .begin(&plan.id, &install::stages(), self.summary_of(&plan))
+            .begin(&plan.id, &install::stages(&plan), self.summary_of(&plan))
             .map_err(internal)?;
         // The plan is spent: it is the installation's now, and whatever
         // happens to it a new attempt is a new plan.
@@ -319,7 +335,7 @@ impl Helper {
             .name("ilex-apply".into())
             .spawn({
                 let plan = plan.clone();
-                move || install::run(helper, plan, hold, address, admin, earlier)
+                move || install::run(helper, plan, hold, address, admin, passphrase, earlier)
             })
             .context("starting the installation thread")
             .map_err(internal);
@@ -356,6 +372,7 @@ impl Helper {
             digest: plan.image.digest.clone(),
             disk: plan.disk.id.clone(),
             disk_label: label.trim().to_owned(),
+            encrypted: plan.encryption.enabled,
         }
     }
 

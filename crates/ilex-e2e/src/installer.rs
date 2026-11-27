@@ -2706,7 +2706,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
             .lines()
             .find(|l| l.starts_with(want) && l.contains(&format!("scheme={scheme} scale={scale} ")))
             .with_context(|| format!("no render report for {scheme} at {scale}x:\n{log}"))?;
-        ensure!(line.contains("shots=71 "), "{line}");
+        ensure!(line.contains("shots=84 "), "{line}");
     }
     ensure!(
         !log.contains("render status 1") && log.matches("render status 0").count() == 3,
@@ -2740,8 +2740,8 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         }
     }
     ensure!(
-        seen.len() == 213,
-        "{} images came back, expected 213 (71 states in three configurations)",
+        seen.len() == 252,
+        "{} images came back, expected 252 (84 states in three configurations)",
         seen.len()
     );
     ensure!(
