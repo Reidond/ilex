@@ -310,14 +310,35 @@ fn to_account_filled(
     ctl.key("Tab")?;
     ctl.key("Tab")?;
     ctl.key("Return")?;
-    nth_marker(vm, serial, "the machine page", 1, EVENT_TIMEOUT, is_page("machine"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the machine page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("machine"),
+    )?;
     wait_page(vm, ctl, artifacts, &format!("{name}-machine"))?;
     ctl.key("Return")?;
-    nth_marker(vm, serial, "the disk page", 1, EVENT_TIMEOUT, is_page("disk"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the disk page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("disk"),
+    )?;
     wait_page(vm, ctl, artifacts, &format!("{name}-disk"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-disk.png")))?;
     ctl.key("Return")?;
-    nth_marker(vm, serial, "the administrator page", 1, EVENT_TIMEOUT, is_page("account"))?;
+    nth_marker(
+        vm,
+        serial,
+        "the administrator page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("account"),
+    )?;
     wait_page(vm, ctl, artifacts, &format!("{name}-account"))?;
     // The name has the focus; Tab moves down the fields. A password field has
     // two stops: its text and the button that shows what was typed.
@@ -370,11 +391,25 @@ fn install() -> Result<()> {
         // The destructive button has the focus: Enter opens the dialog, whose
         // safe answer (Cancel) has the focus; Escape cancels and nothing began.
         ctl.key("Return")?;
-        nth_marker(vm, &serial, "the erase dialog", 1, EVENT_TIMEOUT, is_event("confirm", "state", "shown"))?;
+        nth_marker(
+            vm,
+            &serial,
+            "the erase dialog",
+            1,
+            EVENT_TIMEOUT,
+            is_event("confirm", "state", "shown"),
+        )?;
         std::thread::sleep(Duration::from_secs(2));
         ctl.save_screenshot(&artifacts.join("next-kde-install-erase-dialog.png"))?;
         ctl.key("Escape")?;
-        nth_marker(vm, &serial, "the cancelled dialog", 1, EVENT_TIMEOUT, is_event("confirm", "state", "cancelled"))?;
+        nth_marker(
+            vm,
+            &serial,
+            "the cancelled dialog",
+            1,
+            EVENT_TIMEOUT,
+            is_event("confirm", "state", "cancelled"),
+        )?;
         ensure!(
             count(&serial, is_event("install", "result", "started"))? == 0,
             "the installation began after the dialog was cancelled"
@@ -385,17 +420,41 @@ fn install() -> Result<()> {
         // Again: Tab moves from the safe answer to the destructive one, Enter
         // takes it (tried with one Tab, then two, as the GNOME trials do).
         confirm_erase(vm, &ctl, &serial, artifacts, "kde-install")?;
-        nth_marker(vm, &serial, "the installing page", 1, EVENT_TIMEOUT, is_page("installing"))?;
-        nth_marker(vm, &serial, "the done page", 1, Duration::from_secs(180), is_page("done"))?;
+        nth_marker(
+            vm,
+            &serial,
+            "the installing page",
+            1,
+            EVENT_TIMEOUT,
+            is_page("installing"),
+        )?;
+        nth_marker(
+            vm,
+            &serial,
+            "the done page",
+            1,
+            Duration::from_secs(180),
+            is_page("done"),
+        )?;
         wait_page(vm, &ctl, artifacts, "kde-install-done")?;
         ctl.save_screenshot(&artifacts.join("next-kde-install-done.png"))?;
         // Restart has the focus on the done page.
         ctl.key("Return")?;
-        nth_marker(vm, &serial, "the restart", 1, EVENT_TIMEOUT, is_event("finish", "action", "restart"))?;
+        nth_marker(
+            vm,
+            &serial,
+            "the restart",
+            1,
+            EVENT_TIMEOUT,
+            is_event("finish", "action", "restart"),
+        )?;
 
         // The password is nowhere on the serial console...
         let text = console(&serial)?;
-        ensure!(!text.contains(PASSWORD), "the password reached the serial console");
+        ensure!(
+            !text.contains(PASSWORD),
+            "the password reached the serial console"
+        );
         // ...and nowhere in the guest's journal, which holds the interface's own
         // marker lines (the patterns are written so that the command that
         // searches does not match itself).
@@ -421,8 +480,22 @@ fn problem() -> Result<()> {
         let ctl = Vmctl::from_info(vm.info.clone());
         to_review(vm, &ctl, &serial, artifacts, "kde-problem")?;
         confirm_erase(vm, &ctl, &serial, artifacts, "kde-problem")?;
-        nth_marker(vm, &serial, "the failed outcome", 1, Duration::from_secs(120), is_event("outcome", "result", "failed"))?;
-        let problem = nth_marker(vm, &serial, "the problem page", 1, EVENT_TIMEOUT, is_page("problem"))?;
+        nth_marker(
+            vm,
+            &serial,
+            "the failed outcome",
+            1,
+            Duration::from_secs(120),
+            is_event("outcome", "result", "failed"),
+        )?;
+        let problem = nth_marker(
+            vm,
+            &serial,
+            "the problem page",
+            1,
+            EVENT_TIMEOUT,
+            is_page("problem"),
+        )?;
         println!("iso::next kde problem page: {problem:?}");
         wait_page(vm, &ctl, artifacts, "kde-problem-page")?;
         ctl.save_screenshot(&artifacts.join("next-kde-problem.png"))?;
@@ -431,7 +504,14 @@ fn problem() -> Result<()> {
         // dialog, which lists the sticks.
         ctl.key("Tab")?;
         ctl.key("Return")?;
-        nth_marker(vm, &serial, "the log dialog", 1, EVENT_TIMEOUT, is_event("log", "state", "choosing"))?;
+        nth_marker(
+            vm,
+            &serial,
+            "the log dialog",
+            1,
+            EVENT_TIMEOUT,
+            is_event("log", "state", "choosing"),
+        )?;
         std::thread::sleep(Duration::from_secs(2));
         ctl.save_screenshot(&artifacts.join("next-kde-problem-save-log.png"))?;
         // Tab moves to a stick's Save here button (the first one that can take
@@ -502,8 +582,7 @@ fn frozen_back() -> Result<()> {
             "the plan was not checked: {review:?}"
         );
         ensure!(
-            count(&serial, page_markers)? == pages + 1
-                && count(&serial, is_page("account"))? == 1,
+            count(&serial, page_markers)? == pages + 1 && count(&serial, is_page("account"))? == 1,
             "a page marker came besides the review page's while the plan was checked"
         );
         // The window said it put its page row back (the interface's own stderr

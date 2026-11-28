@@ -3155,7 +3155,8 @@ the Windows paths of this change: no Windows host was available.
     shell and Ctrl+Alt+F1 returns, under the same polkit rule as GNOME's
     (`org.freedesktop.login1.chvt` is the only action authorized). KWin owns
     `org.kde.keyboard` (`/Layouts`) on the session bus, which is what the layout
-    switch of a later page talks to (there is no `org.gnome.Kiosk.InputSources`).
+    switch of the welcome page talks to (there is no `org.gnome.Kiosk.InputSources`,
+    and no `kded`: see the layout switch below).
   - **The interface.** `ilex-installer --features kde` (the `interface-feature` of
     the edition) renders every page the flow defines with Kirigami 6 and Breeze
     (KDE HIG): `src/kde/` holds one cxx-qt `Installer` QObject and `qml/` the pages.
@@ -3200,13 +3201,27 @@ the Windows paths of this change: no Windows host was available.
     `Flow::answer`. The QML has the page row's navigation, `Qt.callLater` focus
     on each page's first control (the same ones as GTK's), the glyph-to-icon
     table and the page that is shown while the helper has not said where an
-    installation is. What is typed in the two password fields is kept by the
-    window (not by the page, which comes and goes with the stack) and cleared,
-    with the fields, when the flow wipes its copy (`account.wiped` changes) or
-    is replaced; Qt gives no way to wipe a `QString`'s old buffer, which GTK's
-    secure text buffer does: the field and the window's copy are emptied and
-    the `String` the Rust side makes of the text is zeroed straight after the
-    event is parsed, but a freed Qt buffer is not overwritten.
+    installation is. The two password fields (and the layout test field) are
+    read from Rust, not through JavaScript: the field handlers call
+    `sendField(name, field)` and the Rust side reads the item's `text` through a
+    small C++ shim (`cpp/ilex_grab.cpp`, `ilexItemText`), so the QML makes no
+    JavaScript string of a password for each keystroke and the window keeps no
+    copy of its own (the flow holds the `Secret`s; a page that comes back, as the
+    administrator page does after Back, has its fields filled from them by
+    `restoreField`). The fields are cleared when the flow wipes its copy
+    (`account.wiped` changes) or is replaced; Qt gives no way to wipe a
+    `QString`'s old buffer, which GTK's secure text buffer does: the `String` the
+    Rust side makes of the text is zeroed straight after the event is parsed, but
+    a freed Qt buffer (and the text input's own) is not overwritten. The layout
+    test field is sent only when the view says the flow reads it
+    (`welcome.echo_try`: the test credential or a simulated session), as in GTK:
+    on a normal boot people type their intended passwords there and nothing of it
+    leaves the field. Kirigami's page row has a Back shortcut of its own
+    (Alt+Left) that lowers the current page whatever the flow says; when the flow
+    refuses (while the helper is asked or the plan is checked) the stack still
+    equals the flow's, so the window puts the row back on the flow's page
+    (`putBack`, with a line on the interface's stderr) instead of showing the
+    administrator page over a running check.
     The Rust side is cxx-qt 0.10.0 with `cxx` 1.0.205, pinned (`=`) in
     `crates/ilex-installer/Cargo.toml`: Fedora 45 does not package cxx-qt, so
     the builder stage compiles it from crates.io against Fedora's Qt 6 devel
@@ -5415,7 +5430,9 @@ the erase on the review page.
     first (`state-down`) or the second (`state-down-second`) `State` fails,
     whether the second look at the computer is refused as active
     (`probe-active`), whether the disk a plan was made for is gone from
-    every later probe (`vanish`), which
+    every later probe (`vanish`), whether the plan check answers only after
+    twelve seconds (`plan-slow`: a frozen administrator page for a trial to
+    press keys in), which
     sticks are plugged in (`sticks`, `bare`), and whether a log write or a
     restart fails (`log-fails`, `finish-fails`): they are how the self-check and
     the screenshots reach every page and every error state. `ilex-installer --simulate [SCENARIO]` runs the application on
@@ -5675,17 +5692,35 @@ the erase on the review page.
   helper itself (a plan checked against the registry, a real installation, the
   detection and the boot argument as the model decides them) are K3's and run
   on the published composition; these show that the pages work on the real
-  ISO. `iso::next_kde_welcome`: the layout search dialog by keyboard, the
-  layout test field, Enter continues; KWin 6.8 **does not take a new layout in a
-  running session** (measured with `--virtual`: after `kxkbrc` is rewritten,
-  `reloadConfig`, a KConfig change notification, `kwriteconfig6` and `org.kde.KWin
-  /KWin reconfigure` each leave `getLayoutsList` as it was; Plasma's keyboard
-  daemon, absent here, is what normally re-reads it and KWin itself owns
-  `org.kde.keyboard` in this session), so choosing another layout shows the
-  refusal with Try again and keeps Continue off, and the trial asserts that
-  (`applied=false`) and that the layout KWin has (US) works. Changing layouts in
-  a running KDE session is not delivered (it needs Plasma's keyboard daemon or a
-  compositor that can be restarted around the page).
+  ISO. `iso::next_kde_welcome`: the layout search dialog by keyboard; German (no
+  dead keys) is chosen and **KWin takes it in the running session**
+  (`applied=true`), proved by the keys the person presses: the test field turns a
+  US keyboard's `yz` into `zy`; US again (`yz`, a second reconfiguration, with
+  the text selected and replaced), German again, and Enter in the field goes on
+  to the machine page (Continue is enabled). How: KWin 6.8's `KeyboardLayout`
+  holds a `KConfigWatcher` for `kxkbrc`, which listens on the **session bus** for
+  `org.kde.kconfig.notify.ConfigChanged` on the path `/kxkbrc` (signature
+  `a{saay}`: group to key names as byte arrays); a `Layout` group in it makes KWin
+  re-read `kxkbrc`, build the keymap again from `LayoutList`, `VariantList` and
+  `Options` (`ResetOldOptions` honoured) and emit `layoutListChanged`. Nothing
+  else reaches it: `org.kde.keyboard`'s `reloadConfig` has no listener on
+  `/Layouts` (`/KWin`'s `reloadConfig` reloads the workspace), and the slot only
+  fires for exactly `a{saay}` on this user's session bus (`a{sas}`, root's bus and
+  `kwriteconfig6` without `--notify` are dropped silently). `kde/keyboard.rs`
+  therefore writes `kxkbrc` atomically, emits that signal from the installer's own
+  session-bus connection (zbus `emit_signal`) and asks `getLayoutsList` every
+  100 ms for ten seconds until KWin's current layout is the one asked for (a
+  variant by its description, `German (no dead keys)`, which is the catalogue's own
+  name for it; a plain layout also by its code). A layout KWin does not take in
+  that time is the page's refusal with Try again, as before. (The fallback of
+  starting KWin with `--locale1` and having the root helper call localed's
+  `SetX11Keyboard` was not needed.) The trial types the layout search under
+  German too, where a US keyboard's Shift+9 is not `(`.
+  `iso::next_kde_frozen_back` (the simulation's `plan-slow` holds the plan
+  check for twelve seconds, `PLAN_SLOW`): Alt+Left twice while the administrator
+  page says "Checking..." does not leave the window on the disk page: the
+  interface says it put the row back (twice, in the journal), no page marker
+  came but the review page's, and the check still ends on the review page.
   `iso::next_kde_detect_board` and `_detect_generic`, `_kernel_argument` and
   `_kernel_argument_unknown`: the machine page for the detected board
   (`ms-7c35-board`), a computer nothing matches, a boot override and an unknown
