@@ -4243,6 +4243,7 @@ fn recovery_key() -> Result<()> {
             && view.skip.as_ref().is_some_and(|s| s.title == page::SKIP_TITLE
                 && s.detail.contains("passphrase only")
                 && s.detail.contains("ilex-enroll complete --root / --reissue-recovery")
+                && s.detail.contains("Ctrl+Alt+F8")
                 && s.button == Control::shown(true))
             && flow.marker_fields() == "key=gone skip=true reattached=true",
         "the page of a key that cannot be shown: {view:?}"
@@ -4306,6 +4307,7 @@ fn recovery_key() -> Result<()> {
             && done
                 .detail
                 .contains("sudo ilex-enroll complete --root / --reissue-recovery")
+            && done.detail.contains("Ctrl+Alt+F8")
             && done.rows.iter().any(|r| r.title == "Disk unlock"
                 && r.value == "Passphrase at every start: no recovery key was made and confirmed"),
         "the done page after going on without a key: {done:?}"

@@ -64,7 +64,10 @@ library's `recovery_attempt`, `state: unavailable`; the receipt does not outlive
 the installer's scratch). On the installed system,
 `sudo ilex-enroll complete --root / --reissue-recovery` reconciles that slot as
 manual cleanup and makes a key to replace it; without `--reissue-recovery` it
-asks for the key that was "previously displayed", which nobody has.
+asks for the key that was "previously displayed", which nobody has. The command
+talks only on tty8: after starting it (from a terminal or a text console), press
+Ctrl+Alt+F8 and follow the prompts there; Ctrl+Alt+F1 or F2 returns. The
+installer's page and its done page say the same.
 
 Add `--reissue-recovery` to request a new key or resume an interrupted explicit
 reissue. Reissue keeps the previously confirmed key and its acknowledgement

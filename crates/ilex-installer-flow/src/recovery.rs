@@ -42,7 +42,7 @@ pub const WAITING_KEY: &str = "Getting the recovery key from the installer's hel
 /// Going on without a key: offered only when the key cannot be shown or the
 /// volume refused the confirmation; it says what the disk is then.
 pub const SKIP_TITLE: &str = "Continue without a recovery key";
-pub const SKIP_DETAIL: &str = "The disk will then unlock with its passphrase only, and the computer's security chip will not unlock it by itself. If the passphrase is forgotten, the data cannot be recovered. To get a recovery key later, sign in and run: sudo ilex-enroll complete --root / --reissue-recovery";
+pub const SKIP_DETAIL: &str = "The disk will then unlock with its passphrase only, and the computer's security chip will not unlock it by itself. If the passphrase is forgotten, the data cannot be recovered. To get a recovery key later, sign in, run sudo ilex-enroll complete --root / --reissue-recovery in a terminal, then press Ctrl+Alt+F8 and follow the prompts there (Ctrl+Alt+F1 or F2 comes back).";
 pub const SKIP_LABEL: &str = "Continue without a recovery key";
 pub const SKIPPING_LABEL: &str = "Continuing…";
 
@@ -176,7 +176,7 @@ pub fn done_line(outcome: Option<&TpmOutcome>) -> String {
             };
             // A key was made and never confirmed: say how to get one.
             let later = if outcome.reason == "recovery-key-failed" {
-                " To get a recovery key later, run: sudo ilex-enroll complete --root / --reissue-recovery"
+                " To get a recovery key later, run sudo ilex-enroll complete --root / --reissue-recovery in a terminal, then press Ctrl+Alt+F8 and follow the prompts there."
             } else {
                 ""
             };
