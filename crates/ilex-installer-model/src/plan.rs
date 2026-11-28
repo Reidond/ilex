@@ -400,15 +400,17 @@ pub enum ErrorCode {
     /// The disk is not the one the plan describes: another device answers to
     /// its id or the partitions on it changed since the plan was made.
     DiskChanged,
-    /// `TakeRecoveryKey` or `AcknowledgeRecoveryKey` for a plan whose
-    /// installation has no recovery key (not asked for, not made yet, or
-    /// already over).
+    /// `TakeRecoveryKey`, `AcknowledgeRecoveryKey` or
+    /// `ContinueWithoutRecoveryKey` for a plan whose installation has no
+    /// recovery key (not asked for, not made yet, or already over).
     NoRecoveryKey,
     /// `TakeRecoveryKey` after the key was taken: it is handed over once.
     RecoveryKeyTaken,
-    /// `AcknowledgeRecoveryKey` with groups that are not the key's, or before
-    /// the key was taken.
+    /// `AcknowledgeRecoveryKey` with a key that is not the installation's (any
+    /// of its eight groups), or before the key was taken.
     RecoveryKeyMismatch,
+    /// `ContinueWithoutRecoveryKey` after the key was confirmed: the key stays.
+    RecoveryKeyConfirmed,
     /// A secret the plan needs has not been supplied (`SetSecret`).
     MissingSecret,
     /// The secret's file descriptor, kind or content is not acceptable.

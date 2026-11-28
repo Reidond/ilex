@@ -840,7 +840,7 @@ pub const TEST_KEY: &str =
     "cdefghij-klnrtuvc-dbcdefgh-ijklnrtu-vcbdefgh-ijklnrtu-vcdefghi-jklnrtuv";
 
 fn recovery_rules() -> Result<()> {
-    use crate::recovery::{self, GroupProblem};
+    use crate::recovery::{self, KeyProblem};
     ensure!(
         recovery::is_key(TEST_KEY)
             && recovery::groups(TEST_KEY).len() == recovery::GROUPS
@@ -857,75 +857,51 @@ fn recovery_rules() -> Result<()> {
     ] {
         ensure!(!recovery::is_key(not), "{not:?} is not a recovery key");
     }
-    // What a person types for a group: the paper's hyphens, spaces and capitals
+    // What a person types for the key: the paper's hyphens, spaces and capitals
     // are forgiven; the wrong length and letters the key never has are not.
     ensure!(
         recovery::normalize(" CDEF-ghij ") == "cdefghij"
-            && recovery::group_problem("cdefghij").is_none()
-            && recovery::group_problem("CDEF GHIJ").is_none()
-            && recovery::group_problem("") == Some(GroupProblem::Empty)
-            && recovery::group_problem("cdef") == Some(GroupProblem::Short)
-            && recovery::group_problem("cdefghijk") == Some(GroupProblem::Long)
-            && recovery::group_problem("cdefghia") == Some(GroupProblem::NotInKey)
-            && recovery::group_problem("cdefgh1j") == Some(GroupProblem::NotInKey),
-        "typing a group"
+            && recovery::key_problem(TEST_KEY).is_none()
+            && recovery::key_problem(&TEST_KEY.replace('-', " ").to_uppercase()).is_none()
+            && recovery::key_problem(&TEST_KEY.replace('-', "")).is_none()
+            && recovery::key_problem("") == Some(KeyProblem::Empty)
+            && recovery::key_problem("cdefghij-klnr") == Some(KeyProblem::Short { letters: 12 })
+            && recovery::key_problem(&format!("{TEST_KEY}c")) == Some(KeyProblem::Long)
+            && recovery::key_problem("cdefghia") == Some(KeyProblem::NotInKey { group: 1 })
+            && recovery::key_problem("cdefghij-klnrtuv1")
+                == Some(KeyProblem::NotInKey { group: 2 })
+            && recovery::key_problem(&TEST_KEY.replacen('v', "w", 6))
+                == Some(KeyProblem::NotInKey { group: 2 }),
+        "typing the key"
     );
-    // Which two groups: one from each half, always the same for a seed.
-    for seed in ["", "a", "plan-1", "0123456789abcdef0123456789abcdef"] {
-        let [first, second] = recovery::asked(seed);
-        ensure!(
-            (1..=4).contains(&first) && (5..=8).contains(&second),
-            "the groups asked for {seed:?}: {first} {second}"
-        );
-        ensure!(recovery::asked(seed) == [first, second], "not repeatable");
-    }
-    let asks: std::collections::BTreeSet<_> = (0..40)
-        .map(|i| recovery::asked(&format!("plan-{i}")))
-        .collect();
-    ensure!(asks.len() > 4, "the question never changes: {asks:?}");
-    // The answer's text and what matches.
-    let text = recovery::answer_text(&[(2, "klnrtuvc".into()), (6, "IJKL-nrtu".into())]);
-    let answer = recovery::parse_answer(&text).map_err(anyhow::Error::msg)?;
+    // The answer's text is the whole key as the paper has it, and every group
+    // of it matters.
     ensure!(
-        answer == [(2, "klnrtuvc".to_owned()), (6, "ijklnrtu".to_owned())]
-            && recovery::matches(TEST_KEY, &answer),
-        "a right answer: {answer:?}"
+        recovery::canonical(&TEST_KEY.to_uppercase().replace('-', " ")).as_deref()
+            == Some(TEST_KEY)
+            && recovery::canonical("cdefghij").is_none()
+            && recovery::matches(TEST_KEY, TEST_KEY)
+            && recovery::matches(TEST_KEY, &TEST_KEY.replace('-', "").to_uppercase()),
+        "a right answer"
     );
-    for (wrong, why) in [
-        (
-            vec![(2, "klnrtuvc".to_owned()), (6, "ijklnrtv".to_owned())],
-            "one letter",
-        ),
-        (
-            vec![(2, "klnrtuvc".to_owned()), (5, "ijklnrtu".to_owned())],
-            "another group",
-        ),
-        (vec![(2, "klnrtuvc".to_owned())], "one group only"),
-        (
-            vec![(2, "klnrtuvc".to_owned()), (2, "klnrtuvc".to_owned())],
-            "the same twice",
-        ),
-        (
-            vec![(0, "cdefghij".to_owned()), (9, "ijklnrtu".to_owned())],
-            "no such groups",
-        ),
-        (
-            vec![(2, "klnrtuv".to_owned()), (6, "ijklnrtu".to_owned())],
-            "a short group",
-        ),
-    ] {
-        ensure!(!recovery::matches(TEST_KEY, &wrong), "{why} matched");
+    for group in 0..recovery::GROUPS {
+        let mut typed: Vec<char> = TEST_KEY.chars().collect();
+        // One letter of this group changed to another letter of the alphabet.
+        let at = group * (recovery::GROUP_CHARS + 1) + 3;
+        typed[at] = if typed[at] == 'c' { 'b' } else { 'c' };
+        let typed: String = typed.into_iter().collect();
+        ensure!(
+            recovery::key_problem(&typed).is_none() && !recovery::matches(TEST_KEY, &typed),
+            "a changed letter in group {} matched",
+            group + 1
+        );
     }
-    for bad in [
-        "",
-        "2",
-        "x klnrtuvc\n6 ijklnrtu\n",
-        "2 klnrtuvc\n2 klnrtuvc\n",
-        "9 klnrtuvc\n1 cdefghij\n",
-        "1 cdefghij\n2 klnrtuvc\n3 dbcdefgh\n",
-    ] {
-        ensure!(recovery::parse_answer(bad).is_err(), "{bad:?} parsed");
-    }
+    ensure!(
+        !recovery::matches(TEST_KEY, "cdefghij-klnrtuvc")
+            && !recovery::matches(TEST_KEY, "")
+            && !recovery::matches("not a key", TEST_KEY),
+        "a short answer or a key that is not one matched"
+    );
     // Every reason a security chip is not used has a sentence.
     for code in [
         "secure-boot-off",
@@ -945,6 +921,7 @@ fn recovery_rules() -> Result<()> {
     }
     ensure!(
         serde_json::to_value(recovery::KeyStatus::Shown)? == json!("shown")
+            && serde_json::to_value(recovery::KeyStatus::Declined)? == json!("declined")
             && serde_json::to_value(recovery::TpmStatus::EnrolledUnverified)?
                 == json!("enrolled-unverified")
             && serde_json::to_value(recovery::TpmStatus::PassphraseOnly)?

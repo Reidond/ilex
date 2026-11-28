@@ -19,13 +19,17 @@ use anyhow::{Context, Result, ensure};
 use ilex_enroll::{Device, Reconciled, SecurityState, secret_fd};
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
 
 /// What an installation needs to open `ilex-enroll`'s session on its volume.
 pub struct Prepared {
-    pub device: Device,
+    /// Shared with the recovery key's verifier: the bus thread that takes the
+    /// typed key opens its keyslot through this one handle (it holds the
+    /// volume's lock, so a second `Device` for the same volume cannot exist).
+    pub device: Arc<Device>,
     unlock: ilex_enroll::Secret,
     /// The root of the scratch state directory: the record is at
     /// `<scratch>/var/lib/ilex/security/enrollment.json`.
@@ -50,7 +54,8 @@ impl Prepared {
             );
             thread::sleep(Duration::from_millis(250));
         }
-        let device = Device::open(&path).context("opening the LUKS volume for enrolment")?;
+        let device =
+            Arc::new(Device::open(&path).context("opening the LUKS volume for enrolment")?);
         let unlock = ilex_enroll::Secret::read(secret_fd(passphrase.expose())?)
             .context("keeping the passphrase for enrolment")?;
         Ok(Self {

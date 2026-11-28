@@ -46,6 +46,26 @@ cannot decrypt one, ilex keeps the encrypted receipt and all existing slots,
 and marks them for manual cleanup. Ordinary TPM completion and repair can
 proceed using the acknowledged recovery key.
 
+The interface installer (`ilex-installerd`, shown on its own recovery key page)
+keeps the same rule instead of a weaker one. The key is handed to the interface
+once; the person types the **whole** key back (hyphens, spaces and capitals are
+forgiven); the helper compares all eight groups, then opens the key's own
+keyslot with what was typed (`authenticate_slot`) before calling
+`Reconciled::acknowledge`. A key that is mis-copied in any group, or one the
+volume refuses, is never recorded as `acknowledged`, so `ilexctl security repair`
+can rely on it as it does after Anaconda's completion. A person whose key cannot
+be shown (the window that took it is gone, the helper could not hand it over, the
+volume refused it) can choose **Continue without a recovery key**
+(`ContinueWithoutRecoveryKey`): the installation finishes `passphrase-only` with
+the reason `recovery-key-failed` and enrols no TPM. The keyslot nobody saw stays
+in the volume and in `enrollment.json` as this document describes an
+unconfirmed key (`recovery.acknowledged: false`, its `slot` and `token`, the
+library's `recovery_attempt`, `state: unavailable`; the receipt does not outlive
+the installer's scratch). On the installed system,
+`sudo ilex-enroll complete --root / --reissue-recovery` reconciles that slot as
+manual cleanup and makes a key to replace it; without `--reissue-recovery` it
+asks for the key that was "previously displayed", which nobody has.
+
 Add `--reissue-recovery` to request a new key or resume an interrupted explicit
 reissue. Reissue keeps the previously confirmed key and its acknowledgement
 until you confirm the replacement. It retains the disk passphrase and earlier

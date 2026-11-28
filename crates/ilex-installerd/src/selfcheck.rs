@@ -5654,39 +5654,67 @@ fn check_answers(parent: &Path) -> Result<()> {
 }
 
 /// The recovery key between the installation and the interface: handed over
-/// once, confirmed by two groups the helper compares, waited for.
+/// once, confirmed by the whole key (every group compared, then the key's own
+/// keyslot opened with it), waited for, and given up on.
 fn check_recovery_holder() -> Result<()> {
-    use crate::recovery::Holder;
+    use crate::recovery::{Holder, Verifier, Wait};
     use ilex_installer_model::{
         plan::ErrorCode,
         recovery::{self, KeyStatus},
         selfcheck::TEST_KEY,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     let plan = "a".repeat(32);
     let holder = Holder::default();
     fn code<T>(result: Result<T, ilex_installer_model::plan::PlanError>) -> Option<ErrorCode> {
         result.err().map(|error| error.code)
     }
-    let answer = |lines: &[(usize, &str)]| -> Result<secret::Secret> {
-        let lines: Vec<(usize, String)> = lines.iter().map(|(n, g)| (*n, (*g).into())).collect();
-        secret::Secret::from_bytes(recovery::answer_text(&lines).as_bytes())
+    let answer =
+        |text: &str| -> Result<secret::Secret> { secret::Secret::from_bytes(text.as_bytes()) };
+    // The keyslot check, as the installation gives it: it counts its calls and
+    // can be made to fail, and it is given what was typed.
+    let opened = Arc::new(AtomicUsize::new(0));
+    let slot_refuses = Arc::new(AtomicBool::new(false));
+    let verifier = || -> Verifier {
+        let opened = Arc::clone(&opened);
+        let slot_refuses = Arc::clone(&slot_refuses);
+        Box::new(move |typed: &secret::Secret| {
+            anyhow::ensure!(
+                typed.expose() == TEST_KEY.as_bytes(),
+                "the verifier was not given the canonical key"
+            );
+            opened.fetch_add(1, Ordering::SeqCst);
+            anyhow::ensure!(
+                !slot_refuses.load(Ordering::SeqCst),
+                "the keyslot refused the key"
+            );
+            Ok(())
+        })
     };
     ensure!(
         code(holder.take(&plan)) == Some(ErrorCode::NoRecoveryKey)
-            && code(holder.acknowledge(&plan, &answer(&[(2, "klnrtuvc"), (6, "ijklnrtu")])?))
-                == Some(ErrorCode::NoRecoveryKey),
-        "a key nobody made was handed over"
+            && code(holder.acknowledge(&plan, &answer(TEST_KEY)?))
+                == Some(ErrorCode::NoRecoveryKey)
+            && code(holder.decline(&plan)) == Some(ErrorCode::NoRecoveryKey),
+        "a key nobody made was handed over, confirmed or skipped"
     );
-    holder.offer(&plan, secret::Secret::from_bytes(TEST_KEY.as_bytes())?);
+    holder.offer(
+        &plan,
+        secret::Secret::from_bytes(TEST_KEY.as_bytes())?,
+        verifier(),
+    );
     ensure!(
         holder.status() == Some(KeyStatus::Waiting)
-            && code(holder.take(&"b".repeat(32))) == Some(ErrorCode::NoRecoveryKey),
+            && code(holder.take(&"b".repeat(32))) == Some(ErrorCode::NoRecoveryKey)
+            && code(holder.decline(&"b".repeat(32))) == Some(ErrorCode::NoRecoveryKey),
         "another plan's key was taken"
     );
     // Confirming a key that was not shown is refused: nobody could have read it.
     ensure!(
-        code(holder.acknowledge(&plan, &answer(&[(2, "klnrtuvc"), (6, "ijklnrtu")])?))
-            == Some(ErrorCode::RecoveryKeyMismatch),
+        code(holder.acknowledge(&plan, &answer(TEST_KEY)?)) == Some(ErrorCode::RecoveryKeyMismatch),
         "a key that was not shown was confirmed"
     );
     // Handed over once, as a sealed memfd with the key and nothing else.
@@ -5701,28 +5729,52 @@ fn check_recovery_holder() -> Result<()> {
         code(holder.take(&plan)) == Some(ErrorCode::RecoveryKeyTaken),
         "the key was handed over twice"
     );
-    // Wrong groups change nothing; the person tries again.
-    for wrong in [
-        &[(2, "klnrtuvc"), (6, "ijklnrtv")][..],
-        &[(1, "klnrtuvc"), (6, "ijklnrtu")][..],
-        &[(2, "klnrtuvc")][..],
-    ] {
+    // A key that differs in any one of its eight groups, or is not a whole key,
+    // changes nothing; the person tries again. (Two right groups of eight are
+    // not a key: phase 0 asks for all of it.)
+    let mut wrong: Vec<String> = (0..recovery::GROUPS)
+        .map(|group| {
+            let mut typed: Vec<char> = TEST_KEY.chars().collect();
+            let at = group * (recovery::GROUP_CHARS + 1) + 5;
+            typed[at] = if typed[at] == 'c' { 'b' } else { 'c' };
+            typed.into_iter().collect()
+        })
+        .collect();
+    wrong.extend([
+        "klnrtuvc ijklnrtu".to_owned(),
+        TEST_KEY[..TEST_KEY.len() - 9].to_owned(),
+        format!("{TEST_KEY}-cdefghij"),
+        String::new(),
+        "2 klnrtuvc\n6 ijklnrtu\n".to_owned(),
+    ]);
+    for typed in &wrong {
         ensure!(
-            code(holder.acknowledge(&plan, &answer(wrong)?))
+            code(holder.acknowledge(&plan, &answer(typed)?))
                 == Some(ErrorCode::RecoveryKeyMismatch)
                 && holder.status() == Some(KeyStatus::Shown),
-            "wrong groups {wrong:?} were taken"
+            "a wrong key {typed:?} was taken"
         );
     }
     ensure!(
         code(holder.acknowledge(&plan, &secret::Secret::from_bytes(b"\xff\xfe")?))
-            == Some(ErrorCode::RecoveryKeyMismatch),
-        "groups that are not text were taken"
+            == Some(ErrorCode::RecoveryKeyMismatch)
+            && opened.load(Ordering::SeqCst) == 0,
+        "text that is not text was taken, or a keyslot was opened for a wrong key"
     );
+    // A right key that its keyslot refuses is not confirmed either (the volume's
+    // fault, said as such), and the person may still try again or go on without.
+    slot_refuses.store(true, Ordering::SeqCst);
+    ensure!(
+        code(holder.acknowledge(&plan, &answer(TEST_KEY)?)) == Some(ErrorCode::Internal)
+            && holder.status() == Some(KeyStatus::Shown)
+            && opened.load(Ordering::SeqCst) == 1,
+        "a key its keyslot refused was confirmed"
+    );
+    slot_refuses.store(false, Ordering::SeqCst);
     // The installation's wait ends when the key is confirmed, and not before.
-    let holder = std::sync::Arc::new(holder);
+    let holder = Arc::new(holder);
     let waiting = std::thread::spawn({
-        let holder = std::sync::Arc::clone(&holder);
+        let holder = Arc::clone(&holder);
         move || holder.wait_acknowledged(&mut || {})
     });
     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -5730,21 +5782,69 @@ fn check_recovery_holder() -> Result<()> {
         !waiting.is_finished(),
         "the wait ended before the key was confirmed"
     );
+    // The paper's hyphens, spaces and capitals are forgiven.
     holder
-        .acknowledge(&plan, &answer(&[(2, "KLNR-tuvc"), (6, "ijklnrtu")])?)
+        .acknowledge(&plan, &answer(&TEST_KEY.to_uppercase().replace('-', " "))?)
         .map_err(|e| anyhow::anyhow!(e.message))?;
     ensure!(
         waiting
             .join()
             .map_err(|_| anyhow::anyhow!("the waiting thread panicked"))?
-            && holder.status() == Some(KeyStatus::Acknowledged),
+            == Wait::Acknowledged
+            && holder.status() == Some(KeyStatus::Acknowledged)
+            && opened.load(Ordering::SeqCst) == 2,
         "the wait did not end with the confirmation"
+    );
+    // Once confirmed the key stays: skipping it is refused.
+    ensure!(
+        code(holder.decline(&plan)) == Some(ErrorCode::RecoveryKeyConfirmed)
+            && holder.status() == Some(KeyStatus::Acknowledged),
+        "a confirmed key was given up"
     );
     // Cleared (the installation is over): nothing is left, and a wait ends.
     holder.clear();
     ensure!(
-        holder.status().is_none() && !holder.wait_acknowledged(&mut || {}),
+        holder.status().is_none() && holder.wait_acknowledged(&mut || {}) == Wait::Abandoned,
         "a key was left after the installation"
     );
+    // Going on without the key: allowed before the key was taken (three failed
+    // takes) and after it (a window that went away), wipes the key, ends the
+    // wait as declined and is not undone by a later confirmation or take.
+    for taken_first in [false, true] {
+        holder.offer(
+            &plan,
+            secret::Secret::from_bytes(TEST_KEY.as_bytes())?,
+            verifier(),
+        );
+        if taken_first {
+            holder.take(&plan).map_err(|e| anyhow::anyhow!(e.message))?;
+        }
+        let waiting = std::thread::spawn({
+            let holder = Arc::clone(&holder);
+            move || holder.wait_acknowledged(&mut || {})
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        ensure!(
+            !waiting.is_finished(),
+            "the wait ended before the key was given up"
+        );
+        holder
+            .decline(&plan)
+            .map_err(|e| anyhow::anyhow!(e.message))?;
+        ensure!(
+            waiting
+                .join()
+                .map_err(|_| anyhow::anyhow!("the waiting thread panicked"))?
+                == Wait::Declined
+                && holder.status() == Some(KeyStatus::Declined)
+                && holder.decline(&plan).is_ok()
+                && code(holder.acknowledge(&plan, &answer(TEST_KEY)?))
+                    == Some(ErrorCode::NoRecoveryKey)
+                && code(holder.take(&plan)) == Some(ErrorCode::NoRecoveryKey)
+                && holder.status() == Some(KeyStatus::Declined),
+            "giving up the key (taken first: {taken_first})"
+        );
+        holder.clear();
+    }
     Ok(())
 }

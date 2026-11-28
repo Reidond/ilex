@@ -11,8 +11,9 @@
 //!   `ilex-installer` makes it, except that the interface is a script. Its
 //!   second step is the one the page asks of a person: the recovery key is
 //!   taken from the helper (once, through the descriptor it returns: a second
-//!   request is refused), two groups of it that are wrong are refused, the
-//!   right two are confirmed. The final state says the security chip was
+//!   request is refused), keys that differ from it in any one group (and the
+//!   two groups the old page asked for, and part of the key) are refused, the
+//!   whole key is confirmed. The final state says the security chip was
 //!   enrolled. The installed disk is then started cold with **nobody at the
 //!   keyboard**: it reaches SSH, the unlock record says the security chip
 //!   opened it, `cryptsetup luksDump` shows exactly one TPM token bound to PCR 7
@@ -26,8 +27,17 @@
 //!   `passphrase-only` with the reason `secure-boot-off`, `setup.json` and the
 //!   enrolment record say so, and the disk opens with the recovery key typed
 //!   at its prompt.
+//! * `iso::next_security_declined`: the same installation on the secure VM, where
+//!   the person's window takes the key and goes away: nothing confirms it.
+//!   `ContinueWithoutRecoveryKey` (refused for another plan) ends the recovery
+//!   stage, the chip is not enrolled, and the installation finishes
+//!   `passphrase-only` with the reason `recovery-key-failed`. The record is
+//!   phase 0's: `recovery` unacknowledged with the unseen keyslot and its token
+//!   (the library's `recovery_attempt` kept), no chip token, two keyslots,
+//!   `setup.json` and `ilexctl security verify` say what phase 0 says of a
+//!   passphrase-only disk. The disk opens with its passphrase.
 //!
-//! In both, nothing the helper writes or prints holds the passphrase or the
+//! In all, nothing the helper writes or prints holds the passphrase or the
 //! recovery key: the helper's run directory, its journal, the kernel log, the
 //! process list, the log saved to a stick (a tarball, scanned extracted and
 //! raw), the installed system's logs, `/etc` and `/var/lib`, and every file
@@ -64,12 +74,41 @@ const TARGET_REF: &str = "ghcr.io/reidond/ilex:generic.gnome";
 /// The raw D-Bus client the guest runs (see the file's own comment).
 const RAWBUS: &str = include_str!("rawbus.py");
 
+/// Which of the trials this is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    /// Secure Boot on, the key confirmed, the chip enrolled.
+    Confirmed,
+    /// Secure Boot off: the key confirmed, no chip.
+    Off,
+    /// Secure Boot on, the key taken and never confirmed: continued without it.
+    Declined,
+}
+
+impl Variant {
+    fn secure_boot(self) -> bool {
+        self != Self::Off
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Confirmed => "security",
+            Self::Off => "security-off",
+            Self::Declined => "security-declined",
+        }
+    }
+}
+
 pub(super) fn run() -> Result<()> {
-    scenario(true)
+    scenario(Variant::Confirmed)
 }
 
 pub(super) fn run_off() -> Result<()> {
-    scenario(false)
+    scenario(Variant::Off)
+}
+
+pub(super) fn run_declined() -> Result<()> {
+    scenario(Variant::Declined)
 }
 
 /// A VM of the trial: the provider that made it, its spec (the identity of its
@@ -325,7 +364,7 @@ if again:
 print("KEY " + key, flush=True)
 "#;
 
-/// Part three: two groups, typed back, as a sealed memfd (`AcknowledgeRecoveryKey`).
+/// Part three: the whole key, typed back, as a sealed memfd (`AcknowledgeRecoveryKey`).
 const ACK_SCRIPT: &str = r#"import base64, fcntl, os, subprocess, sys
 BUS = "org.ilex.Installer1"
 plan, text = sys.argv[1], base64.b64decode(sys.argv[2])
@@ -387,10 +426,11 @@ fn with_secrets(passphrase: &str, key: &str, body: &str) -> String {
 
 // --- the trial ----------------------------------------------------------------------
 
-fn scenario(secure: bool) -> Result<()> {
+fn scenario(variant: Variant) -> Result<()> {
+    let secure = variant.secure_boot();
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
-    let name = if secure { "security" } else { "security-off" };
+    let name = variant.name();
     let root = ws.state_dir().join("iso-next-fixtures").join(name);
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root)?;
@@ -404,8 +444,8 @@ fn scenario(secure: bool) -> Result<()> {
     let mut machine = Machine::boot_iso(&root, secure, &artifacts)?;
     let mut secrets: Vec<String> = vec![US.passphrase.to_owned(), PASSWORD.to_owned()];
     let result = (|| -> Result<()> {
-        let key = install(&mut machine, secure, &artifacts, name, &mut secrets)?;
-        boots(&mut machine, secure, &artifacts, name, &key)
+        let key = install(&mut machine, variant, &artifacts, name, &mut secrets)?;
+        boots(&mut machine, variant, &artifacts, name, &key)
     })();
     // Whatever was saved here holds no secret: the passphrase, the password
     // and the key (when there is one) are looked for in every file.
@@ -429,11 +469,12 @@ fn scenario(secure: bool) -> Result<()> {
 /// helper and its logs hold. Returns the recovery key.
 fn install(
     machine: &mut Machine,
-    secure: bool,
+    variant: Variant,
     artifacts: &Path,
     name: &str,
     secrets: &mut Vec<String>,
 ) -> Result<String> {
+    let secure = variant.secure_boot();
     let started = Instant::now();
     let vm = machine.vm()?;
     vm.wait_ssh(Duration::from_secs(600))
@@ -539,39 +580,100 @@ fn install(
         "the state after the key was taken: {}",
         state["security"]
     );
-    // Two groups that are wrong (right shape, wrong letters) are refused; the
-    // helper keeps waiting.
-    let asked = recovery::asked(&plan_id);
-    let groups = recovery::groups(&key);
-    let answer = |a: [String; 2]| -> String {
-        recovery::answer_text(&[(asked[0], a[0].clone()), (asked[1], a[1].clone())])
-    };
-    let reversed = |n: usize| groups[n - 1].chars().rev().collect::<String>();
+    // Keys that are not the key are refused, whatever they share with it: a
+    // letter changed in any one group (the groups the old two-group page did not
+    // ask for among them), the two groups it did ask for, a part of the key. The
+    // helper keeps waiting, and nothing is recorded as confirmed.
     let ack = |text: &str| -> Result<String> {
         vm.ssh_ok(&format!(
             "python3 /run/sec-ack.py {plan_id} {}",
             qemu::base64(text.as_bytes())
         ))
     };
-    let refused = ack(&answer([reversed(asked[0]), reversed(asked[1])]))?;
-    ensure!(
-        refused.contains("ACK-REFUSED") && refused.contains("recovery-key-mismatch"),
-        "wrong groups were not refused: {refused}"
-    );
+    let groups = recovery::groups(&key);
+    let mut wrong: Vec<(String, String)> = [0usize, 3, 7]
+        .into_iter()
+        .map(|group| {
+            let mut typed: Vec<char> = key.chars().collect();
+            let at = group * (recovery::GROUP_CHARS + 1) + 2;
+            typed[at] = if typed[at] == 'c' { 'b' } else { 'c' };
+            (
+                format!("a letter changed in group {}", group + 1),
+                typed.into_iter().collect(),
+            )
+        })
+        .collect();
+    wrong.push((
+        "two groups only".to_owned(),
+        format!("{} {}", groups[1], groups[5]),
+    ));
+    wrong.push((
+        "a part of the key".to_owned(),
+        key[..key.len() - 9].to_owned(),
+    ));
+    for (why, typed) in &wrong {
+        let refused = ack(typed)?;
+        ensure!(
+            refused.contains("ACK-REFUSED") && refused.contains("recovery-key-mismatch"),
+            "{why} was not refused: {refused}"
+        );
+    }
     let state = busctl_state(vm)?;
     ensure!(
         state["security"]["recovery_key"] == "shown" && state["active"] == true,
-        "the state after a refusal: {}",
+        "the state after the refusals: {}",
         state["security"]
     );
-    let accepted = ack(&answer([
-        groups[asked[0] - 1].to_uppercase(),
-        groups[asked[1] - 1].to_owned(),
-    ]))?;
-    ensure!(
-        accepted.contains("ACK-OK"),
-        "the right groups were not accepted: {accepted}"
-    );
+    if variant == Variant::Declined {
+        // The window that took the key is gone, and the paper is lost. Another
+        // plan's key cannot be given up; this one's can, and then the key is
+        // neither handed over nor confirmed any more.
+        let other = ssh(
+            vm,
+            &busctl("root", "ContinueWithoutRecoveryKey", &[&"0".repeat(32)]),
+        )?;
+        ensure!(
+            other.code != Some(0) && other.text.contains("no-recovery-key"),
+            "another plan's key was given up: {}",
+            other.text
+        );
+        let skipped = ssh(
+            vm,
+            &busctl("root", "ContinueWithoutRecoveryKey", &[&plan_id]),
+        )?;
+        ensure!(
+            skipped.code == Some(0),
+            "going on without the key was refused: {}",
+            skipped.text
+        );
+        let state = busctl_state(vm)?;
+        ensure!(
+            state["security"]["recovery_key"] == "declined" && state["active"] == true,
+            "the state after going on without the key: {}",
+            state["security"]
+        );
+        let late = ack(&key)?;
+        ensure!(
+            late.contains("ACK-REFUSED") && late.contains("no-recovery-key"),
+            "the key was confirmed after it was given up: {late}"
+        );
+        let again = ssh(
+            vm,
+            &busctl("root", "ContinueWithoutRecoveryKey", &[&plan_id]),
+        )?;
+        ensure!(
+            again.code == Some(0),
+            "giving the key up twice is not a no-op: {}",
+            again.text
+        );
+    } else {
+        // The right key, as the paper gets it: capitals and spaces.
+        let accepted = ack(&key.to_uppercase().replace('-', " "))?;
+        ensure!(
+            accepted.contains("ACK-OK"),
+            "the right key was not accepted: {accepted}"
+        );
+    }
 
     // The end.
     let waited = vm.wait_for(
@@ -593,20 +695,15 @@ fn install(
         state["outcome"]
     );
     let tpm = &state["security"]["tpm"];
+    let (key_state, status, reason) = match variant {
+        Variant::Confirmed => ("acknowledged", "enrolled-unverified", "pcr7-sha256"),
+        Variant::Off => ("acknowledged", "passphrase-only", "secure-boot-off"),
+        Variant::Declined => ("declined", "passphrase-only", "recovery-key-failed"),
+    };
     ensure!(
-        state["security"]["recovery_key"] == "acknowledged"
-            && tpm["status"]
-                == if secure {
-                    "enrolled-unverified"
-                } else {
-                    "passphrase-only"
-                }
-            && tpm["reason"]
-                == if secure {
-                    "pcr7-sha256"
-                } else {
-                    "secure-boot-off"
-                },
+        state["security"]["recovery_key"] == key_state
+            && tpm["status"] == status
+            && tpm["reason"] == reason,
         "the helper's record of the chip: {}",
         state["security"]
     );
@@ -616,6 +713,8 @@ fn install(
         .iter()
         .filter_map(|s| s["stage"].as_str())
         .collect();
+    // The chip's stage runs whenever the plan said it would be enrolled, even
+    // when the key it needs was given up.
     let expected: &[&str] = if secure {
         &[
             "partition",
@@ -748,7 +847,7 @@ umount /run/stick; rm -rf /run/stickscan
 /// The installed disk, started cold; then on a new TPM.
 fn boots(
     machine: &mut Machine,
-    secure: bool,
+    variant: Variant,
     artifacts: &Path,
     name: &str,
     key: &str,
@@ -756,7 +855,33 @@ fn boots(
     let save = |file: &str, text: &str| {
         let _ = qemu::write_artifact(artifacts, &format!("next-{name}-{file}"), text);
     };
-    if secure {
+    if variant == Variant::Declined {
+        // The key was never confirmed and the chip was not enrolled: the disk asks
+        // for the passphrase, which is typed at its prompt.
+        machine.boot_disk(false, "cold")?;
+        let vm = machine.vm()?;
+        encrypted::unlock(vm, US.keys, artifacts, &format!("next-{name}-cold"))
+            .context("unlocking with the passphrase at the prompt")?;
+        vm.wait_ssh(BOOT_TIMEOUT)
+            .context("the disk did not come up after the passphrase")?;
+        check_enrolled(vm, false, key, &save, variant)?;
+        check_installed(
+            &save,
+            vm,
+            &Expected {
+                digest: &installed_digest(artifacts, name)?,
+                target: TARGET_REF,
+                host: HOST,
+                zone: "Etc/UTC",
+                locale: "en_US.UTF-8",
+                keymap: "us",
+                layout: "us",
+                admin: ADMIN,
+                password: PASSWORD,
+                stamp: &[],
+            },
+        )?;
+    } else if variant == Variant::Confirmed {
         // The first cold boot: nobody types. It reaches SSH on its own.
         machine.boot_disk(false, "cold")?;
         let vm = machine.vm()?;
@@ -769,7 +894,7 @@ fn boots(
             "iso::next {name}: the cold boot reached SSH after {:?}, no input",
             started.elapsed()
         );
-        check_enrolled(vm, true, key, &save, name)?;
+        check_enrolled(vm, true, key, &save, variant)?;
         check_installed(
             &save,
             vm,
@@ -795,7 +920,7 @@ fn boots(
             .context("unlocking with the recovery key at the prompt, on another TPM")?;
         vm.wait_ssh(BOOT_TIMEOUT)
             .context("the disk did not come up after the recovery key")?;
-        check_enrolled(vm, false, key, &save, name)?;
+        check_enrolled(vm, false, key, &save, variant)?;
     } else {
         // Secure Boot off: no chip; the recovery key opens the disk.
         machine.boot_disk(false, "cold")?;
@@ -804,7 +929,7 @@ fn boots(
             .context("unlocking with the recovery key at the prompt")?;
         vm.wait_ssh(BOOT_TIMEOUT)
             .context("the disk did not come up after the recovery key")?;
-        check_enrolled(vm, false, key, &save, name)?;
+        check_enrolled(vm, false, key, &save, variant)?;
     }
     Ok(())
 }
@@ -828,9 +953,11 @@ fn check_enrolled(
     cold: bool,
     key: &str,
     save: &dyn Fn(&str, &str),
-    name: &str,
+    variant: Variant,
 ) -> Result<()> {
-    let secure = name == "security";
+    // The chip is enrolled only when the key was confirmed on a secure computer.
+    let secure = variant == Variant::Confirmed;
+    let declined = variant == Variant::Declined;
     let out = vm.ssh_ok(&with_secrets(
         US.passphrase,
         key,
@@ -845,6 +972,7 @@ tpm = [t for t in tokens if t["type"] == "systemd-tpm2"]
 print("slots=%d" % len(h["keyslots"]))
 print("token_types=%s" % ",".join(sorted(t["type"] for t in tokens)))
 print("tpm_tokens=%d" % len(tpm))
+print("recovery_tokens=%s" % ";".join("%s:%s" % (i, ",".join(t.get("keyslots", []))) for i, t in sorted(h["tokens"].items()) if t["type"] == "systemd-recovery"))
 if tpm:
     t = tpm[0]
     print("tpm_pcrs=%s" % ",".join(str(p) for p in t.get("tpm2-pcrs", [])))
@@ -857,7 +985,7 @@ echo "setup=$(python3 -c 'import json; print(json.dumps(json.load(open("/etc/ile
 echo "record=$(python3 -c '
 import json
 r = json.load(open("/var/lib/ilex/security/enrollment.json"))
-print(json.dumps({"state": r.get("state"), "uuid": r.get("uuid"), "recovery": r.get("recovery"), "tpm": r.get("tpm"), "reason": r.get("reason")}, sort_keys=True, separators=(",", ":")))')"
+print(json.dumps({"state": r.get("state"), "uuid": r.get("uuid"), "recovery": r.get("recovery"), "recovery_attempt": r.get("recovery_attempt"), "tpm": r.get("tpm"), "reason": r.get("reason")}, sort_keys=True, separators=(",", ":")))')"
 echo "record_mode=$(stat -c %a:%U /var/lib/ilex/security/enrollment.json)"
 echo "security_dir=$(ls -A /var/lib/ilex/security | tr '\n' ' ')"
 echo "unlock_record=$(tr -d '\n ' < /run/ilex/root-unlock.json)"
@@ -874,6 +1002,8 @@ echo "failed=$(systemctl --failed --no-legend --plain | wc -l)"
         "cold"
     } else if secure {
         "swap"
+    } else if declined {
+        "declined"
     } else {
         "off"
     };
@@ -896,7 +1026,12 @@ echo "failed=$(systemctl --failed --no-legend --plain | wc -l)"
     };
     // The volume: the passphrase's slot, the recovery key's, and the chip's
     // when it was enrolled; nothing the installer did not make.
-    if secure {
+    if declined {
+        // The unseen key's slot stays beside the passphrase's; no chip.
+        want("slots", "2")?;
+        want("token_types", "systemd-recovery")?;
+        want("tpm_tokens", "0")?;
+    } else if secure {
         want("slots", "3")?;
         want("token_types", "systemd-recovery,systemd-tpm2")?;
         want("tpm_tokens", "1")?;
@@ -919,35 +1054,66 @@ echo "failed=$(systemctl --failed --no-legend --plain | wc -l)"
         &format!("luks-{uuid} UUID={uuid} none discard,tpm2-device=auto"),
     )?;
     let setup: Value = serde_json::from_str(field(&out, "setup")?)?;
+    let (status, reason) = match variant {
+        Variant::Confirmed => ("enrolled-unverified", "pcr7-sha256"),
+        Variant::Off => ("passphrase-only", "secure-boot-off"),
+        Variant::Declined => ("passphrase-only", "recovery-key-failed"),
+    };
     ensure!(
         setup["requested"] == "auto"
-            && setup["status"]
-                == if secure {
-                    "enrolled-unverified"
+            && setup["status"] == status
+            && setup["reason"] == reason
+            && setup["capability"]
+                == if variant == Variant::Off {
+                    "unavailable"
                 } else {
-                    "passphrase-only"
-                }
-            && setup["reason"]
-                == if secure {
-                    "pcr7-sha256"
-                } else {
-                    "secure-boot-off"
-                }
-            && setup["capability"] == if secure { "eligible" } else { "unavailable" },
+                    "eligible"
+                },
         "setup.json's security.tpm: {setup}"
     );
     let record: Value = serde_json::from_str(field(&out, "record")?)?;
-    ensure!(
-        record["uuid"] == uuid
-            && record["recovery"]["acknowledged"] == true
-            && record["recovery"]["displayed_and_acknowledged"] == true
-            && if secure {
-                record["tpm"].is_object() && record["state"] != "unavailable"
-            } else {
-                record["tpm"].is_null() && record["state"] == "unavailable"
-            },
-        "the enrolment record: {record}"
-    );
+    if declined {
+        // Phase 0's record of a key that was made and never confirmed: the
+        // recovery entry unacknowledged, the library's attempt kept (so that
+        // `ilex-enroll complete --reissue-recovery` reconciles that slot and makes
+        // a key to replace it), the chip unavailable. The slot and token it
+        // names are the header's systemd-recovery token and its keyslot.
+        let recovery = &record["recovery"];
+        let (slot, token) = (&recovery["slot"], &recovery["token"]);
+        ensure!(
+            record["uuid"] == uuid
+                && recovery["acknowledged"] == false
+                && recovery["displayed_and_acknowledged"] == false
+                && slot.is_u64()
+                && token.is_u64()
+                && record["recovery_attempt"]["slot"] == *slot
+                && record["recovery_attempt"]["token"] == *token
+                && record["tpm"].is_null()
+                && record["state"] == "unavailable"
+                && record["reason"] == "recovery-key-failed",
+            "the enrolment record of a key given up: {record}"
+        );
+        want(
+            "recovery_tokens",
+            &format!(
+                "{}:{}",
+                token.as_u64().unwrap_or(99),
+                slot.as_u64().unwrap_or(99)
+            ),
+        )?;
+    } else {
+        ensure!(
+            record["uuid"] == uuid
+                && record["recovery"]["acknowledged"] == true
+                && record["recovery"]["displayed_and_acknowledged"] == true
+                && if secure {
+                    record["tpm"].is_object() && record["state"] != "unavailable"
+                } else {
+                    record["tpm"].is_null() && record["state"] == "unavailable"
+                },
+            "the enrolment record: {record}"
+        );
+    }
     want("record_mode", "600:root")?;
     // Only the record: no receipt of the key or of the chip is left.
     want("security_dir", "enrollment.json ")?;
@@ -956,6 +1122,16 @@ echo "failed=$(systemctl --failed --no-legend --plain | wc -l)"
         unlock["uuid"] == uuid && unlock["method"] == if cold { "tpm2" } else { "fallback" },
         "how this boot opened the volume: {unlock}"
     );
+    if declined {
+        // The passphrase opened it, and `verify` says what phase 0 says of a
+        // disk with no chip: nothing to verify yet.
+        ensure!(
+            field(&out, "verify")?.contains("\"state\":\"pending\"")
+                && field(&out, "verify")?.contains("\"reason\":\"fallback-unlock-deferred\""),
+            "ilexctl security verify: {}",
+            field(&out, "verify")?
+        );
+    }
     if cold {
         ensure!(
             (unlock["token"].is_u64() || unlock["token"].is_string()) && unlock["slot"].is_u64(),

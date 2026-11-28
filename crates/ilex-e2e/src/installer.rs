@@ -2740,8 +2740,8 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
         }
     }
     ensure!(
-        seen.len() == 297,
-        "{} images came back, expected 297 (99 states in three configurations)",
+        seen.len() == 312,
+        "{} images came back, expected 312 (104 states in three configurations)",
         seen.len()
     );
     ensure!(

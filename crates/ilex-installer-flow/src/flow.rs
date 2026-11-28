@@ -25,6 +25,8 @@
 //!                                    flow.take_key_finished(generation, result)
 //!   Step::RunAcknowledge{..}      -> Backend::acknowledge_recovery_key on a worker, then
 //!                                    flow.confirm_finished(generation, result)
+//!   Step::RunContinueWithout{..}  -> Backend::continue_without_recovery_key on a worker,
+//!                                    then flow.skip_finished(generation, result)
 //!   Step::RunLogProbe{..}         -> Backend::probe for the log dialog, then
 //!                                    flow.log_probe_finished(generation, result)
 //!   Step::RunFinish{..}           -> Backend::finish on a worker, then
@@ -78,8 +80,9 @@
 //! `Plan` are shown and the destructive button begins the installation. After
 //! it come the pages no one goes back from: `installing` (the stages, from the
 //! helper's `State`), `recovery` (the recovery key of an encrypted installation,
-//! shown while the image downloads and confirmed with two groups; it takes the
-//! place of `installing` for as long as the key is waiting for the person),
+//! shown while the image downloads and confirmed by typing the whole key back; it
+//! takes the place of `installing` for as long as the key is waiting for the
+//! person, and offers going on without a key when it cannot be shown),
 //! `done` and `problem`.
 //!
 //! The installation's own steps (`install`, `confirm_install`, `apply_finished`,
@@ -108,8 +111,8 @@ use std::collections::BTreeSet;
 mod installation;
 
 pub use installation::{
-    AskedGroup, Control, DoneView, InstallingView, LogChoice, LogSave, Phase, ProblemIcon,
-    ProblemKind, ProblemView, RecoveryView, ReviewBody, ReviewPage,
+    Control, DoneView, InstallingView, LogChoice, LogSave, Phase, ProblemIcon, ProblemKind,
+    ProblemView, RecoveryView, ReviewBody, ReviewPage, SkipView, TypedKey,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -306,14 +309,18 @@ pub enum Step {
     /// (`Backend::take_recovery_key`; it hands the key over once) and give the
     /// answer to [`Flow::take_key_finished`].
     RunTakeKey { generation: u64, plan: String },
-    /// Give the helper the two groups the person typed
-    /// (`Backend::acknowledge_recovery_key`; `answer` is the model's answer
-    /// text) and give the answer to [`Flow::confirm_finished`].
+    /// Give the helper the whole key the person typed
+    /// (`Backend::acknowledge_recovery_key`; `answer` is the key as the paper
+    /// has it) and give the answer to [`Flow::confirm_finished`].
     RunAcknowledge {
         generation: u64,
         plan: String,
         answer: Secret,
     },
+    /// Tell the helper the person goes on without a recovery key
+    /// (`Backend::continue_without_recovery_key`) and give the answer to
+    /// [`Flow::skip_finished`].
+    RunContinueWithout { generation: u64, plan: String },
     /// Call `Backend::probe` for the log dialog (which sticks there are) and
     /// give the answer to [`Flow::log_probe_finished`].
     RunLogProbe { generation: u64 },

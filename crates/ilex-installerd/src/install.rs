@@ -22,7 +22,9 @@ use crate::{
     exec::{self, Exit, Flow, Job},
     fault,
     helper::Helper,
-    luks, repart,
+    luks,
+    recovery::{Verifier, Wait},
+    repart,
     secret::{self, Secret},
     stagelog::{Logs, StageLog},
     stamp, target,
@@ -1127,7 +1129,16 @@ impl Install {
                 std::str::from_utf8(key.expose()).is_ok_and(recovery::is_key),
                 "the recovery key is not in the form this installer shows"
             );
-            self.helper.recovery.offer(&self.plan.id, key);
+            // What the person types back must open the key's own keyslot (phase
+            // 0's `authenticate_slot` after its comparison): the check runs on
+            // the bus thread that takes the typed key, through the volume's one
+            // `Device`.
+            let device = Arc::clone(&prepared.device);
+            let slot = entry.slot;
+            let verify: Verifier = Box::new(move |typed| {
+                device.authenticate_slot(ilex_enroll::secret_fd(typed.expose())?, slot)
+            });
+            self.helper.recovery.offer(&self.plan.id, key, verify);
             self.helper
                 .tracker
                 .set_security(|security| security.recovery_key = Some(KeyStatus::Waiting));
@@ -1148,8 +1159,8 @@ impl Install {
         }
     }
 
-    /// After the account: wait for the person to confirm two groups of the
-    /// key, then enrol the security chip, and write what happened where the
+    /// After the account: wait for the person to type the whole key back (or
+    /// to go on without it), then enrol the security chip, and write what happened where the
     /// installed system reads it (`setup.json` and `enrollment.json`). Neither
     /// step fails the installation: the system is installed and opens with its
     /// passphrase, and the outcome says so.
@@ -1174,10 +1185,9 @@ impl Install {
             )?;
             let confirmed = match enrolment.as_deref_mut() {
                 Some(e) => {
-                    log.line("waiting for two groups of the recovery key to be typed back");
-                    let heard = self.helper.recovery.wait_acknowledged(&mut || {});
-                    if heard {
-                        match e.session.acknowledge(e.entry) {
+                    log.line("waiting for the whole recovery key to be typed back");
+                    match self.helper.recovery.wait_acknowledged(&mut || {}) {
+                        Wait::Acknowledged => match e.session.acknowledge(e.entry) {
                             Ok(()) => {
                                 log.line("the recovery key is confirmed and recorded");
                                 true
@@ -1187,11 +1197,25 @@ impl Install {
                                 outcome.reason = "enrollment-failed".into();
                                 false
                             }
+                        },
+                        // Phase 0's record of a key that was made and never
+                        // confirmed: `recovery` unacknowledged and the attempt
+                        // kept (`record_enrolment` writes it), so that `ilex-enroll
+                        // complete --reissue-recovery` on the installed system
+                        // reconciles that slot and makes a key to replace it.
+                        Wait::Declined => {
+                            log.line(&format!(
+                                "the person went on without a recovery key: token {} and keyslot {} were never confirmed and stay recorded for `ilex-enroll complete --reissue-recovery`",
+                                e.entry.token, e.entry.slot
+                            ));
+                            outcome.reason = "recovery-key-failed".into();
+                            false
                         }
-                    } else {
-                        log.line("the confirmation was abandoned");
-                        outcome.reason = "enrollment-failed".into();
-                        false
+                        Wait::Abandoned => {
+                            log.line("the confirmation was abandoned");
+                            outcome.reason = "enrollment-failed".into();
+                            false
+                        }
                     }
                 }
                 None => {

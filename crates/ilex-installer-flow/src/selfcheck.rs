@@ -1371,6 +1371,9 @@ fn carry_out(flow: &mut Flow, sim: &Simulated, step: Step) -> Result<Step> {
             plan,
             answer,
         } => flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer)),
+        Step::RunContinueWithout { generation, plan } => {
+            flow.skip_finished(generation, sim.continue_without_recovery_key(&plan))
+        }
         Step::RunLogProbe { generation } => flow.log_probe_finished(generation, sim.probe()),
         Step::RunFinish { generation, action } => {
             flow.finish_finished(generation, sim.finish(&action))
@@ -1390,6 +1393,7 @@ fn settle(flow: &mut Flow, sim: &Simulated, mut step: Step) -> Result<Step> {
                 | Step::RunState { .. }
                 | Step::RunTakeKey { .. }
                 | Step::RunAcknowledge { .. }
+                | Step::RunContinueWithout { .. }
                 | Step::RunLogProbe { .. }
                 | Step::RunFinish { .. }
         ) {
@@ -4036,39 +4040,59 @@ fn recovery_key() -> Result<()> {
         "the poll does not go on after the key: {poll:?}"
     );
     let view = flow.recovery_view().context("no recovery page")?;
-    let [first, second] = flow.recovery_asked();
     ensure!(
         view.groups.as_ref() == Some(&key_groups)
             && view.warning == Some(page::WRITE_IT_DOWN)
             && view.no_key.is_none()
-            && (1..=4).contains(&first)
-            && (5..=8).contains(&second)
-            && view.asked[0].number == first
-            && view.asked[1].number == second
+            // The key is on this screen: there is nothing to give up on.
+            && view.skip.is_none()
+            && view.typed.label == page::KEY_LABEL
+            && view.typed.hint == page::KEY_HINT
             && view.confirm == Control::shown(false)
-            && flow.marker_fields() == format!("key=shown asked={first},{second} reattached=false"),
+            && flow.marker_fields() == "key=shown skip=false reattached=false",
         "the key page: {view:?}"
     );
-    // The groups' shapes are checked before anything is sent.
-    flow.set_recovery_group(0, Secret::new("cdef"));
-    flow.set_recovery_group(1, Secret::new("cdefgh1j"));
+    // The key's shape is checked before anything is sent: a part of it is not
+    // refused (it is not finished), a letter no key has is, and two right
+    // groups are not a key.
+    flow.set_recovery_key(Secret::new("cdefghij-klnr"));
     let view = flow.recovery_view().context("no view")?;
     ensure!(
-        view.asked[0]
+        view.typed.check == Check::Empty
+            && view.typed.hint == "12 of 64 letters: 1 of 8 groups are complete."
+            && flow.confirm_recovery() == Step::Stay,
+        "a part of the key: {view:?}"
+    );
+    flow.set_recovery_key(Secret::new(&TEST_KEY.replacen('v', "w", 6)));
+    let view = flow.recovery_view().context("no view")?;
+    ensure!(
+        view.typed
             .check
             .message()
-            .is_some_and(|m| m.title == "That group is too short")
-            && view.asked[1]
-                .check
-                .message()
-                .is_some_and(|m| m.title == "A recovery key has no such letter")
+            .is_some_and(|m| m.title == "A recovery key has no such letter"
+                && m.detail.starts_with("Group 2 has a letter no key has"))
             && flow.confirm_recovery() == Step::Stay,
-        "short and wrong letters: {view:?}"
+        "wrong letters: {view:?}"
     );
-    // The right shape, the wrong groups: the helper refuses, the fields empty.
-    let reversed = |n: usize| key_groups[n - 1].chars().rev().collect::<String>();
-    flow.set_recovery_group(0, Secret::new(&reversed(first)));
-    flow.set_recovery_group(1, Secret::new(&reversed(second)));
+    flow.set_recovery_key(Secret::new(&format!("{TEST_KEY}-cdefghij")));
+    ensure!(
+        flow.recovery_view()
+            .and_then(|v| v.typed.check.message().map(|m| m.title.clone()))
+            .as_deref()
+            == Some("That is more than a recovery key"),
+        "too much"
+    );
+    flow.set_recovery_key(Secret::new(&format!("{} {}", key_groups[1], key_groups[5])));
+    ensure!(
+        flow.confirm_recovery() == Step::Stay,
+        "two right groups of eight are not a key"
+    );
+    // The right shape, the wrong key (the last letter of the last group): the
+    // helper refuses, the field empties.
+    flow.set_recovery_key(Secret::new(&format!(
+        "{}u",
+        &TEST_KEY[..TEST_KEY.len() - 1]
+    )));
     let Step::RunAcknowledge {
         generation,
         plan,
@@ -4080,7 +4104,7 @@ fn recovery_key() -> Result<()> {
     ensure!(
         flow.recovery_view().is_some_and(
             |v| v.confirm_label == page::CONFIRMING_LABEL && v.confirm == Control::shown(false)
-        ) && !flow.set_recovery_group(0, Secret::new("x")),
+        ) && !flow.set_recovery_key(Secret::new("x")),
         "while the helper compares"
     );
     let wiped = flow.secrets_wiped();
@@ -4089,36 +4113,43 @@ fn recovery_key() -> Result<()> {
         step == Step::Stay
             && flow.page() == PageId::Recovery
             && flow.secrets_wiped() == wiped + 1
-            && flow.recovery_group(0).is_empty()
+            && flow.recovery_typed().is_empty()
             && flow.recovery_view().is_some_and(|v| v
                 .problem
                 .as_ref()
-                .is_some_and(|m| m.title == "Those are not the groups of the recovery key")
-                && v.groups.is_some()),
+                .is_some_and(|m| m.title == "That is not the recovery key")
+                && v.groups.is_some()
+                // A wrong key is the person's to retype, not the volume's:
+                // no way out is offered while the key is on screen.
+                && v.skip.is_none()),
         "a wrong answer: {:?}",
         flow.recovery_view()
     );
-    // Typing again clears the refusal; the right groups end the page.
-    flow.set_recovery_group(0, Secret::new(&key_groups[first - 1]));
+    // Typing again clears the refusal; the right key (with the paper's spaces and
+    // capitals) ends the page, and the helper is given it as the paper has it.
+    flow.set_recovery_key(Secret::new(&TEST_KEY.to_uppercase().replace('-', " ")));
     ensure!(
         flow.recovery_view().is_some_and(|v| v.problem.is_none()),
         "typing does not clear the refusal"
     );
-    flow.set_recovery_group(1, Secret::new(&key_groups[second - 1].to_uppercase()));
     let Step::RunAcknowledge {
         generation,
         plan,
         answer,
     } = flow.confirm_recovery()
     else {
-        bail!("the right groups were not sent");
+        bail!("the right key was not sent");
     };
+    ensure!(
+        answer.expose() == TEST_KEY,
+        "the key is not sent as the paper has it"
+    );
     let step = flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer));
     ensure!(
         step == Step::Goto(PageId::Installing)
             && flow.page() == PageId::Installing
             && flow.recovery_view().is_none()
-            && flow.recovery_group(0).is_empty(),
+            && flow.recovery_typed().is_empty(),
         "the confirmed key: {step:?}"
     );
     // The key is handed over once.
@@ -4154,16 +4185,14 @@ fn recovery_key() -> Result<()> {
     let step = start_install(&mut flow, &sim)?;
     let step = drive(&mut flow, &sim, step, |f| f.page() == PageId::Recovery)?;
     let poll = carry_out(&mut flow, &sim, step)?;
-    let [first, second] = flow.recovery_asked();
-    flow.set_recovery_group(0, Secret::new(&key_groups[first - 1]));
-    flow.set_recovery_group(1, Secret::new(&key_groups[second - 1]));
+    flow.set_recovery_key(Secret::new(TEST_KEY));
     let Step::RunAcknowledge {
         generation,
         plan,
         answer,
     } = flow.confirm_recovery()
     else {
-        bail!("the groups were not sent");
+        bail!("the key was not sent");
     };
     flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer));
     drive(&mut flow, &sim, poll, |f| f.page() == PageId::Done)?;
@@ -4194,7 +4223,7 @@ fn recovery_key() -> Result<()> {
         "the key of a restarted interface"
     );
     // The key was taken by an interface that is gone: it is not shown again,
-    // and two groups from the paper confirm it all the same.
+    // and the whole key from the paper confirms it all the same.
     let (mut flow, sim, step) = restarted_on("generic+attach-key-shown+chip")?;
     ensure!(
         flow.page() == PageId::Recovery && matches!(step, Step::RunState { .. }),
@@ -4209,7 +4238,13 @@ fn recovery_key() -> Result<()> {
                 .no_key
                 .as_ref()
                 .is_some_and(|m| m.title == page::GONE_TITLE && m.detail == page::GONE_DETAIL)
-            && flow.marker_fields().starts_with("key=gone asked="),
+            // Nothing to show and nothing to type from: the way out is offered,
+            // with what the disk is then and how to get a key later.
+            && view.skip.as_ref().is_some_and(|s| s.title == page::SKIP_TITLE
+                && s.detail.contains("passphrase only")
+                && s.detail.contains("ilex-enroll complete --root / --reissue-recovery")
+                && s.button == Control::shown(true))
+            && flow.marker_fields() == "key=gone skip=true reattached=true",
         "the page of a key that cannot be shown: {view:?}"
     );
     ensure!(
@@ -4219,21 +4254,19 @@ fn recovery_key() -> Result<()> {
         ),
         "the simulated helper hands a key to another plan"
     );
-    let [first, second] = flow.recovery_asked();
-    flow.set_recovery_group(0, Secret::new(&key_groups[first - 1]));
-    flow.set_recovery_group(1, Secret::new(&key_groups[second - 1]));
+    flow.set_recovery_key(Secret::new(&TEST_KEY.replace('-', "")));
     let Step::RunAcknowledge {
         generation,
         plan,
         answer,
     } = flow.confirm_recovery()
     else {
-        bail!("the groups were not sent");
+        bail!("the key was not sent");
     };
     ensure!(
         flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer))
             == Step::Goto(PageId::Installing),
-        "the groups of a key shown before were not accepted"
+        "the key of a key shown before was not accepted"
     );
     drive(&mut flow, &sim, step, |f| f.page() == PageId::Done)?;
     ensure!(
@@ -4251,5 +4284,149 @@ fn recovery_key() -> Result<()> {
         "a restarted interface after the confirmation: on {:?}",
         flow.page()
     );
+
+    // Going on without a recovery key. (1) The key was shown to an interface that
+    // is gone and the paper is lost: the page offers it, the helper is told, the
+    // installation ends passphrase-only and the done page says how to get a key
+    // later.
+    let (mut flow, sim, step) = restarted_on("generic+attach-key-shown+chip")?;
+    ensure!(
+        flow.recovery_view().is_some_and(|v| v.skip.is_some()),
+        "a key that cannot be shown does not offer going on without it"
+    );
+    let skipped = skip_and_finish(&mut flow, &sim, step)?;
+    ensure!(
+        flow.page() == PageId::Done && flow.recovery_view().is_none(),
+        "going on without a key does not end on the done page: {skipped:?}"
+    );
+    let done = flow.done_view().context("no done page")?;
+    ensure!(
+        done.detail.contains("The computer asks for the passphrase at every start: no recovery key was made and confirmed.")
+            && done.detail.contains("The passphrase opens the disk, in the keyboard layout you chose.")
+            && done
+                .detail
+                .contains("sudo ilex-enroll complete --root / --reissue-recovery")
+            && done.rows.iter().any(|r| r.title == "Disk unlock"
+                && r.value == "Passphrase at every start: no recovery key was made and confirmed"),
+        "the done page after going on without a key: {done:?}"
+    );
+    let markers = flow.drain_markers().join("\n");
+    ensure!(
+        markers.contains("event=recovery state=declining")
+            && markers.contains("event=recovery state=declined")
+            && !markers.contains(TEST_KEY),
+        "the markers of going on without a key: {markers}"
+    );
+    // (2) The helper cannot hand the key over: three tries, then the way out.
+    let (mut flow, sim) = encrypted_review("generic+recovery+chip+take-fails", None)?;
+    let step = start_install(&mut flow, &sim)?;
+    let step = drive(&mut flow, &sim, step, |f| {
+        f.recovery_view().is_some_and(|v| v.skip.is_some())
+    })?;
+    let view = flow.recovery_view().context("no recovery page")?;
+    ensure!(
+        view.groups.is_none()
+            && view
+                .no_key
+                .as_ref()
+                .is_some_and(|m| m.title == "The recovery key could not be fetched")
+            && flow.marker_fields().starts_with("key=gone skip=true"),
+        "three failed takes: {view:?}"
+    );
+    skip_and_finish(&mut flow, &sim, step)?;
+    ensure!(
+        flow.done_view()
+            .is_some_and(|d| d.detail.contains("no recovery key was made and confirmed")),
+        "the done page after failed takes"
+    );
+    // (3) The volume refuses the right key: not a typing mistake, so the way out
+    // is offered with the key still on the screen, and the key is kept typed.
+    let (mut flow, sim) = encrypted_review("generic+recovery+chip+slot-refuses", None)?;
+    let step = start_install(&mut flow, &sim)?;
+    let step = drive(&mut flow, &sim, step, |f| f.page() == PageId::Recovery)?;
+    let poll = carry_out(&mut flow, &sim, step)?;
+    ensure!(
+        flow.recovery_view().is_some_and(|v| v.skip.is_none()),
+        "going on without a key is offered before anything went wrong"
+    );
+    flow.set_recovery_key(Secret::new(TEST_KEY));
+    let Step::RunAcknowledge {
+        generation,
+        plan,
+        answer,
+    } = flow.confirm_recovery()
+    else {
+        bail!("the key was not sent");
+    };
+    let step = flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer));
+    let view = flow.recovery_view().context("no recovery page")?;
+    ensure!(
+        step == Step::Stay
+            && view.groups.is_some()
+            && view
+                .problem
+                .as_ref()
+                .is_some_and(|m| m.title == "The recovery key could not be confirmed"
+                    && m.detail.contains("does not open its keyslot"))
+            && view.skip.is_some()
+            && !flow.recovery_typed().is_empty(),
+        "a key its keyslot refused: {view:?}"
+    );
+    skip_and_finish(&mut flow, &sim, poll)?;
+    // (4) The helper does not answer: the page says so and the button is back.
+    let (mut flow, sim, _) = restarted_on("generic+attach-key-shown+chip+skip-fails")?;
+    let step = flow.continue_without_recovery_key();
+    let Step::RunContinueWithout { generation, plan } = step else {
+        bail!("going on without a key was not sent: {step:?}");
+    };
+    ensure!(
+        flow.recovery_view()
+            .is_some_and(|v| v.skip.as_ref().is_some_and(|s| s.skipping
+                && s.label == page::SKIPPING_LABEL
+                && s.button == Control::shown(false)))
+            && flow.continue_without_recovery_key() == Step::Stay,
+        "the page while the helper is asked"
+    );
+    flow.skip_finished(generation, sim.continue_without_recovery_key(&plan));
+    ensure!(
+        flow.page() == PageId::Recovery
+            && flow
+                .recovery_view()
+                .is_some_and(|v| v.skip.as_ref().is_some_and(|s| !s.skipping
+                    && s.button == Control::shown(true)
+                    && s.problem
+                        .as_ref()
+                        .is_some_and(|m| m.title
+                            == "The installation could not go on without a recovery key"))),
+        "an unanswered request is not said: {:?}",
+        flow.recovery_view()
+    );
+    // Nothing to give up once the key is confirmed.
+    let (mut flow, _, _) = restarted_on("generic+attach-key-acked+chip")?;
+    ensure!(
+        flow.continue_without_recovery_key() == Step::Stay,
+        "a confirmed key was given up"
+    );
     Ok(())
+}
+
+/// Press "Continue without a recovery key", carry the request out and drive the
+/// installation to its done page.
+fn skip_and_finish(flow: &mut Flow, sim: &Simulated, poll: Step) -> Result<Step> {
+    let step = flow.continue_without_recovery_key();
+    ensure!(
+        matches!(step, Step::RunContinueWithout { .. }),
+        "going on without a key was not sent: {step:?}"
+    );
+    let wiped = flow.secrets_wiped();
+    let after = carry_out(flow, sim, step)?;
+    ensure!(
+        after == Step::Goto(PageId::Installing)
+            && flow.page() == PageId::Installing
+            && flow.secrets_wiped() == wiped + 1
+            && flow.recovery_view().is_none()
+            && flow.recovery_typed().is_empty(),
+        "the page after going on without a key: {after:?}"
+    );
+    drive(flow, sim, poll, |f| f.page() == PageId::Done)
 }

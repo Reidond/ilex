@@ -48,9 +48,14 @@ pub trait Backend: Send + Sync {
     /// time (a sealed memfd) and refuses every later request.
     fn take_recovery_key(&self, plan: &str) -> Result<Secret, ClientError>;
 
-    /// Two groups of the key typed back (`ilex_installer_model::recovery`'s
-    /// answer text). The helper compares them with the key it holds.
+    /// The whole key typed back (as the paper has it). The helper compares all
+    /// eight groups with the key it holds and opens the key's keyslot with it.
     fn acknowledge_recovery_key(&self, plan: &str, answer: &Secret) -> Result<(), ClientError>;
+
+    /// The person goes on without a recovery key: the installation ends as
+    /// passphrase-only and the unconfirmed keyslot is recorded for a later
+    /// `ilex-enroll complete --reissue-recovery`.
+    fn continue_without_recovery_key(&self, plan: &str) -> Result<(), ClientError>;
 
     /// What the review page's destructive button does: the disk's passphrase
     /// (when the plan encrypts) and the administrator's password, then the
@@ -204,6 +209,10 @@ mod dbus {
                 .map_err(|e| ClientError::Other(format!("the groups' descriptor: {e}")))?;
             let fd = zbus::OwnedFd::from(fd);
             self.call_unit("AcknowledgeRecoveryKey", &(plan, fd))
+        }
+
+        fn continue_without_recovery_key(&self, plan: &str) -> Result<(), ClientError> {
+            self.call_unit("ContinueWithoutRecoveryKey", &(plan,))
         }
 
         fn finish(&self, action: &FinishAction) -> Result<Option<Saved>, ClientError> {

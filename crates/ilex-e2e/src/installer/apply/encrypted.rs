@@ -705,7 +705,7 @@ pub(crate) fn booted_encrypted(
     variant: &Variant,
     save: &dyn Fn(&str, &str),
 ) -> Result<()> {
-    booted_encrypted_as(vm, uuid, variant, false, save)
+    booted_encrypted_as(vm, uuid, variant, Key::None, save)
 }
 
 /// [`booted_encrypted`] for an installation that made a recovery key (an
@@ -720,16 +720,41 @@ pub(crate) fn booted_encrypted_with_key(
     variant: &Variant,
     save: &dyn Fn(&str, &str),
 ) -> Result<()> {
-    booted_encrypted_as(vm, uuid, variant, true, save)
+    booted_encrypted_as(vm, uuid, variant, Key::Confirmed, save)
+}
+
+/// As [`booted_encrypted_with_key`], for an installation whose person went on
+/// without the recovery key (`ContinueWithoutRecoveryKey`): the key's keyslot
+/// and token are there and recorded unconfirmed, the chip is not used, and
+/// `setup.json` says `recovery-key-failed`.
+pub(crate) fn booted_encrypted_key_given_up(
+    vm: &Vm,
+    uuid: Option<&str>,
+    variant: &Variant,
+    save: &dyn Fn(&str, &str),
+) -> Result<()> {
+    booted_encrypted_as(vm, uuid, variant, Key::GivenUp, save)
+}
+
+/// What the volume holds of a recovery key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Key {
+    /// No key was made (an installation that did not ask for one).
+    None,
+    /// Made, shown and confirmed.
+    Confirmed,
+    /// Made and never confirmed: the person went on without it.
+    GivenUp,
 }
 
 fn booted_encrypted_as(
     vm: &Vm,
     uuid: Option<&str>,
     variant: &Variant,
-    with_key: bool,
+    key: Key,
     save: &dyn Fn(&str, &str),
 ) -> Result<()> {
+    let with_key = key != Key::None;
     let own = ok(vm, "cryptsetup luksUUID /dev/disk/by-partlabel/ilex-root")?;
     ensure!(
         uuid.is_none_or(|known| known == own),
@@ -744,7 +769,7 @@ echo "cmdline=$(cat /proc/cmdline)"
 echo "crypttab=$(tr '\t' ' ' < /etc/crypttab)"
 echo "token_types=$(cryptsetup luksDump --dump-json-metadata /dev/disk/by-uuid/{uuid} | python3 -c 'import json,sys; print(",".join(sorted(t["type"] for t in json.load(sys.stdin)["tokens"].values())))')"
 echo "setup_tpm=$(python3 -c 'import json; print(json.dumps(json.load(open("/etc/ilex/setup.json"))["security"]["tpm"], sort_keys=True, separators=(",", ":")))')"
-echo "record=$(python3 -c 'import json; r=json.load(open("/var/lib/ilex/security/enrollment.json")); print(json.dumps({{"state": r.get("state"), "recovery": r.get("recovery"), "tpm": r.get("tpm")}}, sort_keys=True, separators=(",", ":")))' 2>/dev/null)"
+echo "record=$(python3 -c 'import json; r=json.load(open("/var/lib/ilex/security/enrollment.json")); print(json.dumps({{"state": r.get("state"), "recovery": r.get("recovery"), "tpm": r.get("tpm"), "reason": r.get("reason")}}, sort_keys=True, separators=(",", ":")))' 2>/dev/null)"
 echo "sysroot_source=$(findmnt -no SOURCE /sysroot)"
 echo "var_source=$(findmnt -no SOURCE /var | sed 's/\[.*//')"
 echo "boot_source=$(findmnt -no SOURCE /boot)"
@@ -806,19 +831,28 @@ echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} 
         )?;
         want("token_types", "systemd-recovery")?;
         let setup: Value = serde_json::from_str(field(&out, "setup_tpm")?)?;
+        let given_up = key == Key::GivenUp;
         ensure!(
             setup["status"] == "passphrase-only"
-                // The installer's VM has Secure Boot and no TPM, or neither.
-                && matches!(setup["reason"].as_str(), Some("no-tpm" | "secure-boot-off"))
+                // The installer's VM has Secure Boot and no TPM, or neither; a
+                // key given up says so instead.
+                && if given_up {
+                    setup["reason"] == "recovery-key-failed"
+                } else {
+                    matches!(setup["reason"].as_str(), Some("no-tpm" | "secure-boot-off"))
+                }
                 && setup["capability"] == "unavailable"
                 && setup["requested"] == "auto",
             "setup.json's security.tpm: {setup}"
         );
         let record: Value = serde_json::from_str(field(&out, "record")?)?;
         ensure!(
-            record["recovery"]["acknowledged"] == true
+            record["recovery"]["acknowledged"] == !given_up
+                && record["recovery"]["displayed_and_acknowledged"] == !given_up
+                && record["recovery"]["slot"].is_u64()
                 && record["tpm"].is_null()
-                && record["state"] == "unavailable",
+                && record["state"] == "unavailable"
+                && (!given_up || record["reason"] == "recovery-key-failed"),
             "the enrolment record: {record}"
         );
     } else {

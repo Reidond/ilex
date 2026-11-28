@@ -219,14 +219,15 @@ pub(super) struct Installation {
 }
 
 /// What the recovery key page holds: the key this interface took (and nothing
-/// when it did not: a restarted interface never has it), the two groups typed,
+/// when it did not: a restarted interface never has it), the whole key typed,
 /// and the requests in flight.
 #[derive(Default)]
 pub(super) struct RecoveryPage {
     /// The key, from the helper's `TakeRecoveryKey`, until it is confirmed or
     /// the installation ends.
     key: Option<Secret>,
-    typed: [Secret; 2],
+    /// The key as the person types it from the paper.
+    typed: Secret,
     take_generation: u64,
     taking: Option<u64>,
     /// Times the key was asked for: the helper hands it over once, so a few
@@ -235,8 +236,15 @@ pub(super) struct RecoveryPage {
     take_failed: Option<Message>,
     confirm_generation: u64,
     confirming: Option<u64>,
-    /// The helper's refusal of the groups, shown above them until one changes.
+    /// The helper's refusal of the key, shown above the field until it changes.
     problem: Option<Message>,
+    /// The helper could not carry the confirmation out (not a wrong key): the
+    /// volume's trouble, so going on without a key is offered.
+    confirm_failed: bool,
+    skip_generation: u64,
+    skipping: Option<u64>,
+    /// Why going on without a key did not work.
+    skip_problem: Option<Message>,
 }
 
 impl Installation {
@@ -249,22 +257,39 @@ impl Installation {
         let generations = (
             self.recovery.take_generation,
             self.recovery.confirm_generation,
+            self.recovery.skip_generation,
         );
         self.recovery = RecoveryPage {
             take_generation: generations.0,
             confirm_generation: generations.1,
+            skip_generation: generations.2,
             ..RecoveryPage::default()
         };
     }
 }
 
-/// One of the two groups the page asks for.
+/// The field the whole key is typed into.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AskedGroup {
-    /// 1 to 8.
-    pub number: usize,
-    pub label: String,
+pub struct TypedKey {
+    pub label: &'static str,
+    /// What is under the field: the hint, or how far the typing is.
+    pub hint: String,
     pub check: crate::account::Check,
+}
+
+/// Going on without a recovery key, as the page offers it (only when the key
+/// cannot be shown, or the volume refused the confirmation).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkipView {
+    pub title: &'static str,
+    /// What the disk is then, and how to get a key later.
+    pub detail: &'static str,
+    pub label: &'static str,
+    pub button: Control,
+    /// The helper is asked.
+    pub skipping: bool,
+    /// Why it did not work.
+    pub problem: Option<Message>,
 }
 
 /// What the recovery key page shows.
@@ -281,15 +306,17 @@ pub struct RecoveryView {
     /// the key).
     pub warning: Option<&'static str>,
     pub keep: Option<&'static str>,
-    /// What is asked, then the two groups.
+    /// What is asked, then the field for the whole key.
     pub ask: &'static str,
-    pub asked: [AskedGroup; 2],
+    pub typed: TypedKey,
     /// The helper's refusal of what was typed.
     pub problem: Option<Message>,
     pub confirm: Control,
     pub confirm_label: &'static str,
-    /// The groups are with the helper: the fields wait.
+    /// The key is with the helper: the field waits.
     pub confirming: bool,
+    /// Going on without a key, when it is offered.
+    pub skip: Option<SkipView>,
     /// The installation goes on: its last sentence and how far it is.
     pub progress_line: String,
     pub overall: f64,
@@ -758,7 +785,9 @@ impl Flow {
                     self.go(PageId::Recovery);
                 }
             }
-            KeyStatus::Acknowledged => {
+            // Confirmed (here or by another interface), or given up: the key and
+            // what was typed go, and the installing page is back.
+            KeyStatus::Acknowledged | KeyStatus::Declined => {
                 if self.page == PageId::Recovery {
                     self.inst.clear_recovery();
                     self.secrets_wiped += 1;
@@ -813,16 +842,24 @@ impl Flow {
         }
     }
 
-    /// The two groups the page asks for (1-based numbers), the same for the
-    /// installation whichever interface asks.
-    pub fn recovery_asked(&self) -> [usize; 2] {
-        recovery::asked(
-            self.inst
-                .state
-                .as_ref()
-                .and_then(|s| s.applied.as_deref())
-                .unwrap_or(""),
-        )
+    /// Going on without a key is offered when the page cannot finish its work:
+    /// the key could not be fetched, was shown to an interface that is gone, or
+    /// the volume refused what was typed. (Not while the key is on the screen
+    /// and the person can still confirm it.)
+    fn skip_offered(&self) -> bool {
+        let r = &self.inst.recovery;
+        let Some((status, _)) = self.key_status() else {
+            return false;
+        };
+        // Stuck: the key was asked for three times and not delivered, or it was
+        // taken by an interface that is gone (or whose answer was lost); or the
+        // volume refused the key that was typed.
+        let stuck = match status {
+            KeyStatus::Waiting => (r.key.is_none() && r.take_attempts >= 3) || r.confirm_failed,
+            KeyStatus::Shown => r.key.is_none() || r.confirm_failed,
+            KeyStatus::Acknowledged | KeyStatus::Declined => false,
+        };
+        self.page == PageId::Recovery && stuck && r.taking.is_none() && r.confirming.is_none()
     }
 
     /// What the recovery key page shows; `None` when it is not the page.
@@ -831,12 +868,6 @@ impl Flow {
             return None;
         }
         let r = &self.inst.recovery;
-        let asked = self.recovery_asked();
-        let group = |i: usize| AskedGroup {
-            number: asked[i],
-            label: page::group_label(asked[i]),
-            check: page::group_check(&r.typed[i]),
-        };
         let groups = r.key.as_ref().map(page::key_groups);
         let no_key = if groups.is_some() {
             None
@@ -849,6 +880,18 @@ impl Flow {
         };
         let confirming = r.confirming.is_some();
         let progress = self.inst.progress.as_ref();
+        let skip = self.skip_offered().then(|| SkipView {
+            title: page::SKIP_TITLE,
+            detail: page::SKIP_DETAIL,
+            label: if r.skipping.is_some() {
+                page::SKIPPING_LABEL
+            } else {
+                page::SKIP_LABEL
+            },
+            button: Control::shown(r.skipping.is_none()),
+            skipping: r.skipping.is_some(),
+            problem: r.skip_problem.clone(),
+        });
         Some(RecoveryView {
             heading: page::HEADING,
             introduction: page::INTRODUCTION,
@@ -857,7 +900,11 @@ impl Flow {
             groups,
             no_key,
             ask: page::ASK,
-            asked: [group(0), group(1)],
+            typed: TypedKey {
+                label: page::KEY_LABEL,
+                hint: page::key_progress(&r.typed),
+                check: page::key_check(&r.typed),
+            },
             problem: r.problem.clone(),
             confirm: Control::shown(self.can_confirm_recovery()),
             confirm_label: if confirming {
@@ -866,6 +913,7 @@ impl Flow {
                 page::CONFIRM_LABEL
             },
             confirming,
+            skip,
             progress_line: format!(
                 "{} {}",
                 page::GOES_ON,
@@ -877,37 +925,36 @@ impl Flow {
         })
     }
 
-    /// Type into the field of group `slot` (0 or 1). Typing again clears the
-    /// helper's refusal. Refused while the helper is asked, or when there is
-    /// no page.
-    pub fn set_recovery_group(&mut self, slot: usize, typed: Secret) -> bool {
-        if slot > 1 || self.page != PageId::Recovery || self.inst.recovery.confirming.is_some() {
+    /// Type into the key field. Typing again clears the helper's refusal.
+    /// Refused while the helper is asked, or when there is no page.
+    pub fn set_recovery_key(&mut self, typed: Secret) -> bool {
+        if self.page != PageId::Recovery
+            || self.inst.recovery.confirming.is_some()
+            || self.inst.recovery.skipping.is_some()
+        {
             return false;
         }
-        if self.inst.recovery.typed[slot] != typed {
-            self.inst.recovery.typed[slot] = typed;
+        if self.inst.recovery.typed != typed {
+            self.inst.recovery.typed = typed;
             self.inst.recovery.problem = None;
         }
         true
     }
 
-    pub fn recovery_group(&self, slot: usize) -> &Secret {
-        &self.inst.recovery.typed[slot.min(1)]
+    pub fn recovery_typed(&self) -> &Secret {
+        &self.inst.recovery.typed
     }
 
-    /// Both groups are the right shape and nothing is outstanding.
+    /// The typed key is the shape of a whole key and nothing is outstanding.
     pub fn can_confirm_recovery(&self) -> bool {
         self.page == PageId::Recovery
             && self.inst.recovery.confirming.is_none()
-            && self
-                .inst
-                .recovery
-                .typed
-                .iter()
-                .all(|t| page::group_check(t).is_valid())
+            && self.inst.recovery.skipping.is_none()
+            && page::key_check(&self.inst.recovery.typed).is_valid()
     }
 
-    /// Confirm was pressed: the groups go to the helper, which compares them.
+    /// Confirm was pressed: the key goes to the helper, which compares every
+    /// group and opens the key's keyslot with it.
     pub fn confirm_recovery(&mut self) -> Step {
         if !self.can_confirm_recovery() {
             return Step::Stay;
@@ -915,14 +962,13 @@ impl Flow {
         let Some((_, plan)) = self.key_status() else {
             return Step::Stay;
         };
-        let asked = self.recovery_asked();
-        let answer = recovery::answer_text(&[
-            (asked[0], self.inst.recovery.typed[0].expose().to_owned()),
-            (asked[1], self.inst.recovery.typed[1].expose().to_owned()),
-        ]);
+        let Some(answer) = recovery::canonical(self.inst.recovery.typed.expose()) else {
+            return Step::Stay;
+        };
         self.inst.recovery.confirm_generation += 1;
         self.inst.recovery.confirming = Some(self.inst.recovery.confirm_generation);
         self.inst.recovery.problem = None;
+        self.inst.recovery.confirm_failed = false;
         Step::RunAcknowledge {
             generation: self.inst.recovery.confirm_generation,
             plan,
@@ -957,9 +1003,64 @@ impl Flow {
                 Step::Stay
             }
             Err(error) => {
+                // The key was right in shape, or the helper could not tell: not
+                // a typing mistake, so going on without a key is offered.
                 self.say(markers::recovery("failed"));
+                self.inst.recovery.confirm_failed = true;
                 self.inst.recovery.problem =
                     Some(page::confirm_failed(&error.message().one_line()));
+                Step::Stay
+            }
+        }
+    }
+
+    /// "Continue without a recovery key" was pressed (offered by
+    /// [`Self::recovery_view`]'s `skip`): the helper is told, and the installation
+    /// finishes as passphrase-only.
+    pub fn continue_without_recovery_key(&mut self) -> Step {
+        if !self.skip_offered() || self.inst.recovery.skipping.is_some() {
+            return Step::Stay;
+        }
+        let Some((_, plan)) = self.key_status() else {
+            return Step::Stay;
+        };
+        self.inst.recovery.skip_generation += 1;
+        self.inst.recovery.skipping = Some(self.inst.recovery.skip_generation);
+        self.inst.recovery.skip_problem = None;
+        self.say(markers::recovery("declining"));
+        Step::RunContinueWithout {
+            generation: self.inst.recovery.skip_generation,
+            plan,
+        }
+    }
+
+    pub fn skip_is_current(&self, generation: u64) -> bool {
+        self.inst.recovery.skipping == Some(generation)
+    }
+
+    /// The helper answered `ContinueWithoutRecoveryKey`.
+    pub fn skip_finished(&mut self, generation: u64, result: Result<(), ClientError>) -> Step {
+        if !self.skip_is_current(generation) {
+            return Step::Stay;
+        }
+        self.inst.recovery.skipping = None;
+        match result {
+            // Given up (or confirmed meanwhile: the next `State` says which):
+            // either way the page's work is over.
+            Ok(())
+            | Err(ClientError::Refused(ilex_installer_model::plan::PlanError {
+                code: ErrorCode::RecoveryKeyConfirmed,
+                ..
+            })) => {
+                self.say(markers::recovery("declined"));
+                self.inst.clear_recovery();
+                self.secrets_wiped += 1;
+                self.go(PageId::Installing)
+            }
+            Err(error) => {
+                self.say(markers::recovery("failed"));
+                self.inst.recovery.skip_problem =
+                    Some(page::skip_failed(&error.message().one_line()));
                 Step::Stay
             }
         }
@@ -1426,9 +1527,8 @@ impl Flow {
                 )
             }
             PageId::Recovery => {
-                let [first, second] = self.recovery_asked();
                 format!(
-                    "key={} asked={first},{second} reattached={}",
+                    "key={} skip={} reattached={}",
                     if self.inst.recovery.key.is_some() {
                         "shown"
                     } else if self.inst.recovery.taking.is_some() {
@@ -1436,6 +1536,7 @@ impl Flow {
                     } else {
                         "gone"
                     },
+                    self.skip_offered(),
                     self.inst.reattached
                 )
             }

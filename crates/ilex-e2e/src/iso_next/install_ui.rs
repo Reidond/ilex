@@ -15,7 +15,14 @@
 //!   policy, the administrator's password and `sudo`, the answers applied, the
 //!   system running, GDM up), with the root on the mapped LUKS2 volume. Neither
 //!   the password nor the passphrase is on the serial console or in the
-//!   guest's journal.
+//!   guest's journal. The recovery key page is the one a restarted window shows
+//!   (the trial took the key from the helper): the whole key is typed wrongly
+//!   (refused, the field empties), then rightly.
+//! * `iso::next_keyboard_skip`: the same installation where the person cannot
+//!   confirm the key: on that page Tab reaches "Continue without a recovery key"
+//!   and Return takes it. The installation finishes passphrase-only
+//!   (`recovery-key-failed`, the key's keyslot recorded unconfirmed) and the
+//!   disk opens with the passphrase.
 //! * `iso::next_reattach`: the interface is killed while the helper's `Apply` is
 //!   still checking (a fixed test credential holds it for a minute after it took
 //!   its lock, as a slow registry would: `State` then says `starting` over the
@@ -84,6 +91,7 @@ const MARKER: &str = "ILEX-INSTALLER";
 pub(super) fn trials() -> Vec<Trial> {
     vec![
         trial("iso::next_keyboard_install", keyboard_install),
+        trial("iso::next_keyboard_skip", keyboard_skip),
         trial("iso::next_reattach", reattach),
         trial("iso::next_problem", problem),
     ]
@@ -628,15 +636,18 @@ fn no_password(vm: &mut Vm, serial: &Path, key: Option<&str>) -> Result<()> {
 /// The recovery key page, driven the way a person who cannot be shown the key
 /// again drives it: the trial takes the key from the helper while the interface
 /// is stopped (the helper hands it over once, so this window finds it taken: the
-/// page that a restarted window shows), then types two groups wrongly (the helper
-/// refuses them and the fields empty) and rightly. The key is in the trial's
-/// memory only; no screenshot is kept of a page with a group typed on it.
+/// page that a restarted window shows, with the way out offered). Then either the
+/// whole key is typed wrongly (the helper refuses it and the field empties) and
+/// rightly, or, with `give_up`, Tab reaches "Continue without a recovery key"
+/// and Return gives the key up. The key is in the trial's memory only; no
+/// screenshot is kept of a page with the key typed on it.
 fn recovery_page(
     vm: &mut Vm,
     ctl: &Vmctl,
     serial: &Path,
     artifacts: &Path,
     name: &str,
+    give_up: bool,
 ) -> Result<String> {
     // Stopped before the helper has made the key (it does after the volume is
     // open, some seconds after `Apply`), continued once the trial has the key.
@@ -651,27 +662,40 @@ fn recovery_page(
         is_page("recovery"),
     )?;
     ensure!(
-        field(&page, "key")? == "gone",
+        field(&page, "key")? == "gone" && field(&page, "skip")? == "true",
         "the recovery page of an interface that was not given the key: {page:?}"
-    );
-    let asked: Vec<usize> = field(&page, "asked")?
-        .split(',')
-        .map(str::parse)
-        .collect::<std::result::Result<_, _>>()
-        .context("the groups the page asks for")?;
-    ensure!(
-        asked.len() == 2 && asked == recovery::asked(&asked_plan(vm)?),
-        "the groups asked for: {asked:?}"
     );
     wait_page(vm, ctl, artifacts, &format!("{name}-recovery"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-recovery.png")))?;
-    let groups = recovery::groups(&key);
+    if give_up {
+        // The field has the focus; the way out is the next stop.
+        ctl.key("Tab")?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join(format!("next-{name}-recovery-skip-focused.png")))?;
+        ctl.key("Return")?;
+        nth_marker(
+            vm,
+            serial,
+            "going on without the key",
+            1,
+            EVENT_TIMEOUT,
+            is_event("recovery", "state", "declined"),
+        )?;
+        // The page is left for the installing page; the key stays unconfirmed.
+        nth_marker(
+            vm,
+            serial,
+            "the installing page after going on without the key",
+            2,
+            EVENT_TIMEOUT,
+            is_page("installing"),
+        )?;
+        return Ok(key);
+    }
     let refused = count(serial, is_event("recovery", "state", "refused"))?;
-    // The right shape, the wrong letters: the helper refuses.
-    let reversed = |n: usize| groups[n - 1].chars().rev().collect::<String>();
-    ctl.type_text(&reversed(asked[0]))?;
-    ctl.key("Tab")?;
-    ctl.type_text(&reversed(asked[1]))?;
+    // The right shape, the wrong key (the last letter of the last group): the
+    // helper refuses.
+    ctl.type_text(&format!("{}u", &key[..key.len() - 1]))?;
     std::thread::sleep(Duration::from_secs(1));
     ctl.key("Return")?;
     nth_marker(
@@ -684,11 +708,8 @@ fn recovery_page(
     )?;
     std::thread::sleep(Duration::from_secs(2));
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-recovery-refused.png")))?;
-    // The fields are empty and the focus is on the second: back to the first.
-    ctl.key("shift+Tab")?;
-    ctl.type_text(groups[asked[0] - 1])?;
-    ctl.key("Tab")?;
-    ctl.type_text(groups[asked[1] - 1])?;
+    // The field is empty and still has the focus: the whole key, typed.
+    ctl.type_text(&key)?;
     std::thread::sleep(Duration::from_secs(1));
     ctl.key("Return")?;
     nth_marker(
@@ -702,25 +723,18 @@ fn recovery_page(
     Ok(key)
 }
 
-/// The plan the helper is installing (the groups asked for follow its id).
-fn asked_plan(vm: &Vm) -> Result<String> {
-    helper_state(vm)?
-        .applied
-        .context("the helper has no installation")
-}
-
 /// Wait for the installation to end and the done page: the stages' markers say
 /// how it went. On the way, once the image is being written, the screen is saved.
-/// With `recovery` the installation has a recovery key, which is taken and
-/// confirmed on the way ([`recovery_page`]); it is returned.
+/// The installation has a recovery key, which is taken and confirmed on the way
+/// (or, with `give_up`, given up: [`recovery_page`]); it is returned.
 fn wait_done(
     vm: &mut Vm,
     ctl: &Vmctl,
     serial: &Path,
     artifacts: &Path,
     name: &str,
-    recovery: bool,
-) -> Result<Option<String>> {
+    give_up: bool,
+) -> Result<String> {
     nth_marker(
         vm,
         serial,
@@ -731,14 +745,10 @@ fn wait_done(
     )?;
     std::thread::sleep(Duration::from_secs(3));
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-installing.png")))?;
-    let key = if recovery {
-        // The interface is stopped while the key is made: the helper makes it
-        // some seconds after `Apply`, and this window would take it first.
-        vm.ssh_ok("pkill -STOP -x ilex-installer")?;
-        Some(recovery_page(vm, ctl, serial, artifacts, name)?)
-    } else {
-        None
-    };
+    // The interface is stopped while the key is made: the helper makes it some
+    // seconds after `Apply`, and this window would take it first.
+    vm.ssh_ok("pkill -STOP -x ilex-installer")?;
+    let key = recovery_page(vm, ctl, serial, artifacts, name, give_up)?;
     nth_marker(
         vm,
         serial,
@@ -781,9 +791,32 @@ fn wait_done(
 // --- iso::next_keyboard_install ----------------------------------------------------------
 
 fn keyboard_install() -> Result<()> {
+    keys(false)
+}
+
+/// `iso::next_keyboard_skip`: the same installation by keys, where the person
+/// cannot confirm the key and gives it up with the page's last button.
+fn keyboard_skip() -> Result<()> {
+    keys(true)
+}
+
+fn keys(give_up: bool) -> Result<()> {
+    let name = if give_up {
+        "keyboard-skip"
+    } else {
+        "keyboard-install"
+    };
     let mut rig = boot(&Setup {
-        name: "iso-next-keys",
-        purpose: "iso-next-keys",
+        name: if give_up {
+            "iso-next-skip"
+        } else {
+            "iso-next-keys"
+        },
+        purpose: if give_up {
+            "iso-next-skip"
+        } else {
+            "iso-next-keys"
+        },
         fault: None,
         usb_medium: false,
         spares: false,
@@ -793,33 +826,40 @@ fn keyboard_install() -> Result<()> {
     let vm = rig.guest.vm.running_mut()?;
     let serial = vm.info.dir.join("serial.log");
     let started = Instant::now();
-    let outcome = install_by_keys(vm, &serial, &artifacts);
+    let outcome = install_by_keys(vm, &serial, &artifacts, name, give_up);
     let (digest, key) = match outcome {
         Ok(done) => done,
         Err(error) => {
-            diagnostics(vm, &artifacts, "keyboard-install");
+            diagnostics(vm, &artifacts, name);
             return Err(error);
         }
     };
     println!(
-        "iso::next keyboard install: installed and powered off in {:?}",
+        "iso::next {name}: installed and powered off in {:?}",
         started.elapsed()
     );
     // The machine is off; the disk it installed boots on its own.
     drop(rig);
     let ws = common::workspace()?;
-    let mut config = VmConfig::new("iso-next-keys-t", &target);
+    let mut config = VmConfig::new(
+        if give_up {
+            "iso-next-skip-t"
+        } else {
+            "iso-next-keys-t"
+        },
+        &target,
+    );
     config.snapshot = true;
     config.memory = "4G".into();
     let mut installed = Vm::boot(&ws, &config)?;
     // The disk is encrypted: the passphrase is typed at its boot prompt.
-    encrypted::unlock(&mut installed, US.keys, &artifacts, "next-keyboard-install")
+    encrypted::unlock(&mut installed, US.keys, &artifacts, &format!("next-{name}"))
         .context("unlocking the installed disk at its prompt")?;
     installed
         .wait_ssh(PAGE_TIMEOUT)
         .context("the unlocked disk did not come up")?;
     let save = |file: &str, text: &str| {
-        let _ = qemu::write_artifact(&artifacts, &format!("next-keyboard-install-{file}"), text);
+        let _ = qemu::write_artifact(&artifacts, &format!("next-{name}-{file}"), text);
     };
     check_installed(
         &save,
@@ -837,9 +877,14 @@ fn keyboard_install() -> Result<()> {
             stamp: &[],
         },
     )?;
-    // A recovery key was made and confirmed; the computer cannot use the chip
-    // (Secure Boot is off here), so the disk asked for the passphrase.
-    encrypted::booted_encrypted_with_key(&installed, None, &US, &save)?;
+    // A recovery key was made; the computer cannot use the chip (Secure Boot is
+    // off here), so the disk asked for the passphrase. Confirmed, or given up
+    // (recorded unconfirmed, `recovery-key-failed`).
+    if give_up {
+        encrypted::booted_encrypted_key_given_up(&installed, None, &US, &save)?;
+    } else {
+        encrypted::booted_encrypted_with_key(&installed, None, &US, &save)?;
+    }
     // The key opens the volume, and is nowhere on the installed system.
     let found = installed.ssh_ok(&format!(
         "printf %s {} | base64 -d | cryptsetup open --test-passphrase --key-file=- /dev/disk/by-partlabel/ilex-root; echo key_rc=$?; \
@@ -853,15 +898,21 @@ fn keyboard_install() -> Result<()> {
     );
     gdm_screenshot(
         &mut installed,
-        &artifacts.join("next-keyboard-install-gdm.png"),
+        &artifacts.join(format!("next-{name}-gdm.png")),
     )?;
     Ok(())
 }
 
 /// Every page by key, to Power off; the digest the helper installed.
-fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<(String, String)> {
+fn install_by_keys(
+    vm: &mut Vm,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+    give_up: bool,
+) -> Result<(String, String)> {
     let ctl = Vmctl::from_info(vm.info.clone());
-    to_review(vm, &ctl, serial, artifacts, "keyboard-install", "0", true)?;
+    to_review(vm, &ctl, serial, artifacts, name, "0", true)?;
     // Escape closes the dialog: nothing is asked of the helper.
     ctl.key("Return")?;
     nth_marker(
@@ -874,7 +925,7 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<(Stri
     )?;
     // The dialog is on screen once it has finished opening.
     std::thread::sleep(Duration::from_secs(2));
-    ctl.save_screenshot(&artifacts.join("next-keyboard-install-erase-dialog.png"))?;
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-erase-dialog.png")))?;
     ctl.key("Escape")?;
     nth_marker(
         vm,
@@ -893,9 +944,8 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<(Stri
         "Apply was asked after the dialog was cancelled"
     );
     // Then the erase is confirmed (a second dialog: its second `shown`).
-    confirm_erase(vm, &ctl, serial, artifacts, "keyboard-install")?;
-    let key = wait_done(vm, &ctl, serial, artifacts, "keyboard-install", true)?
-        .context("the installation had no recovery key")?;
+    confirm_erase(vm, &ctl, serial, artifacts, name)?;
+    let key = wait_done(vm, &ctl, serial, artifacts, name, give_up)?;
     let state = helper_state(vm)?;
     let summary = state
         .summary
@@ -911,7 +961,7 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<(Stri
     no_password(vm, serial, Some(&key))?;
     // Enforcing and not one denial through the whole installation, asked before
     // the machine goes down.
-    selinux::check(vm, artifacts, "next-keyboard-install")?;
+    selinux::check(vm, artifacts, &format!("next-{name}"))?;
     // The done page's Restart has the focus; Tab reaches Power off. The
     // machine going down is the proof (a Restart would leave QEMU running): its
     // last serial lines may not reach the log before the VM is gone.

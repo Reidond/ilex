@@ -181,6 +181,10 @@ pub fn plan_error(error: &PlanError) -> Message {
             "It is handed over once and cannot be shown again.",
         ),
         ErrorCode::RecoveryKeyMismatch => crate::recovery::mismatch(),
+        ErrorCode::RecoveryKeyConfirmed => Message::new(
+            "The recovery key was confirmed already",
+            "The installation keeps it; there is nothing to skip.",
+        ),
         ErrorCode::MissingSecret => Message::new("A password is missing", cause),
         ErrorCode::InvalidSecret => Message::new("A password cannot be used", cause),
         ErrorCode::InstallationActive => Message::new("An installation is already running", cause),

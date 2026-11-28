@@ -69,7 +69,8 @@
 //!   the welcome page, the session's keyboard layout switched at run time, the
 //!   machine detected from SMBIOS or named on the kernel command line.
 //!
-//! * `iso::next_keyboard_install`, `iso::next_reattach` and `iso::next_problem`:
+//! * `iso::next_keyboard_install`, `iso::next_keyboard_skip`, `iso::next_reattach`
+//!   and `iso::next_problem`:
 //!   the interface installing for real (see `iso_next/install_ui.rs`): a
 //!   complete install by keyboard alone and the installed disk booted; the
 //!   interface and the compositor killed in the image stage and the session
@@ -164,6 +165,7 @@ pub fn trials() -> Vec<Trial> {
         trial("iso::next_unattended_handover", unattended::run_handover),
         trial("iso::next_security", security::run),
         trial("iso::next_security_off", security::run_off),
+        trial("iso::next_security_declined", security::run_declined),
     ];
     trials.extend(ui::trials());
     trials.extend(install_ui::trials());

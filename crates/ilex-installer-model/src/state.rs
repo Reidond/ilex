@@ -224,7 +224,8 @@ pub struct State {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Security {
     /// The recovery key of this installation, when it has one: waiting to be
-    /// taken, taken (shown) and waiting for two groups, or acknowledged.
+    /// taken, taken (shown) and waiting for the whole key typed back, acknowledged,
+    /// or given up (the person went on without it).
     #[serde(default)]
     pub recovery_key: Option<KeyStatus>,
     /// How the security chip step ended, once it has: enrolled or not, and why.

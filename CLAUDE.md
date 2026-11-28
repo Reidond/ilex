@@ -3595,15 +3595,38 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     `configure_crypttab`) and `setup.json`'s `security.tpm` says `{requested,
     capability: <the probe's verdict>, reason, status}`. The key is **handed over
     once**: `TakeRecoveryKey(plan)` returns it as a sealed memfd (a second call is
-    `recovery-key-taken`), `State.security.recovery_key` says `waiting`, `shown` or
-    `acknowledged` (never the key), and `AcknowledgeRecoveryKey(plan, groups)`
-    takes two groups of it typed back (a sealed memfd of `<number> <group>`
-    lines; which two the model's `recovery::asked(plan id)` says, one of each half)
-    and **the helper compares them** (`recovery-key-mismatch`: the person tries
-    again), so that an interface that was restarted after it took the key, and
-    cannot show it again, can still confirm it from the paper. The key is in no
+    `recovery-key-taken`), `State.security.recovery_key` says `waiting`, `shown`,
+    `acknowledged` or `declined` (never the key), and
+    `AcknowledgeRecoveryKey(plan, key)` takes the **whole key** typed back (a
+    sealed memfd of its text; the paper's hyphens, spaces and capitals are
+    forgiven). As phase 0's local completion does, **the helper compares all eight
+    groups** with the key it holds (`recovery-key-mismatch`: the person tries
+    again) **and opens the key's own keyslot with what was typed**
+    (`Device::authenticate_slot`, through a verifier the installation hands the
+    holder with the key: the volume's one `Device`, shared) before it calls the
+    key acknowledged. A key that is mis-copied in any group, or a volume that
+    refuses the key it was given (`internal`), is never recorded as confirmed: the
+    record is the one `ilexctl security repair` relies on. An interface that was
+    restarted after it took the key, and cannot show it again, can still confirm
+    it from the paper. **`ContinueWithoutRecoveryKey(plan)`** (the same bus
+    policy as the others) is the way out of a page that cannot finish: a window
+    that died between `TakeRecoveryKey` and drawing, a lost reply, three failed
+    takes or a keyslot that refuses the key would otherwise leave the `recovery`
+    stage waiting for ever with the work lock held (`Finish` refused). It is
+    refused with `no-recovery-key` for another plan and `recovery-key-confirmed`
+    once the key was confirmed, and is a no-op the second time. It wipes the key,
+    makes `State` say `declined` and ends the stage as `passphrase-only` /
+    `recovery-key-failed`: no chip is enrolled (the `tpm` stage still runs and
+    logs why), the keyslot nobody saw stays in the volume and is recorded as phase
+    0 records a key that was made and never confirmed (`enrollment.json`:
+    `recovery` unacknowledged with its `slot` and `token`, the library's
+    `recovery_attempt` kept, `state: unavailable`, `reason: recovery-key-failed`;
+    no receipt), so that `sudo ilex-enroll complete --root / --reissue-recovery`
+    on the installed system reconciles that slot as manual cleanup and makes a key
+    to replace it; `setup.json` says the same, and the installation finishes. The
+    key is in no
     state file, plan, stage log, saved-log tarball or target log: the helper holds
-    it in locked pages of their own until it is confirmed. The installation goes
+    it in locked pages of their own until it is confirmed or given up. The installation goes
     on while the key is shown (the image takes ten to twenty minutes); after the
     account the `recovery` stage waits for the confirmation, then, only when the
     plan says `will_enroll` (a key was asked for, `tpm` is `auto`, and the probe
@@ -3619,7 +3642,8 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     `no-recovery-key` (answers mode: **an unattended installation makes no
     recovery key and does not enrol the chip**, because nothing could show the key
     and a key nobody saw is not one a person can rely on; `sudo ilex-enroll
-    complete --root /` issues one and enrols later), `recovery-key-failed` and
+    complete --root /` issues one and enrols later), `recovery-key-failed` (no key
+    could be made, or the person went on without confirming it) and
     `enrollment-failed`. The passphrase slot always stays. The stages of such an
     installation are `partition, encrypt, mount, image, configure, account,
     recovery, [tpm,] finalise` (`Stage::of_plan`).
@@ -4249,9 +4273,10 @@ encryption says `will_enroll` with `pcr7-sha256` on the secure VM and
 `secure-boot-off` on the other (with the warning only there). The key is taken
 through a small raw D-Bus client (`iso_next/rawbus.py`: busctl cannot keep the
 descriptor a method returns) once, and a second request is refused
-(`recovery-key-taken`); `State` says `shown`, never the key; two wrong groups are
-refused (`recovery-key-mismatch`) and leave `shown`; the right two (typed in
-capitals) are accepted. The installation ends in `recovery, tpm, finalise` (no
+(`recovery-key-taken`); `State` says `shown`, never the key; keys that differ from it
+in one letter of group 1, 4 or 8, the two groups the first design asked for, and
+a part of the key are refused (`recovery-key-mismatch`) and leave `shown`; the
+whole key (in capitals, with spaces) is accepted. The installation ends in `recovery, tpm, finalise` (no
 `tpm` stage when Secure Boot is off) with `recovery_key: acknowledged` and the
 chip `enrolled-unverified` / `pcr7-sha256`, or `passphrase-only` /
 `secure-boot-off`, with the SELinux check as every trial (enforcing, zero
@@ -4272,8 +4297,22 @@ chip sealed) shows the prompt, and **the recovery key typed at it** opens the di
 installed system. `iso::next_security_off` does the same with Secure Boot off: no
 chip token, two keyslots, `setup.json` `passphrase-only` / `secure-boot-off`, the
 record `unavailable`, and the recovery key typed at the prompt opens the disk.
-Every file either trial saves on the host is scanned for the passphrase, the
-password and the key.
+`iso::next_security_declined` is the way out: on the secure VM the person's window
+takes the key and goes away. The same wrong keys are refused;
+`ContinueWithoutRecoveryKey` for another plan is refused (`no-recovery-key`) and
+for the plan is accepted (`State` says `declined`; confirming or taking the key
+afterwards is refused, a second call is a no-op); the stages are `recovery, tpm,
+finalise` and the installation ends `passphrase-only` / `recovery-key-failed`
+with the chip not enrolled. The disk, started cold on the secure VM, asks for the
+passphrase (typed at its prompt); `luksDump` shows two keyslots, the
+`systemd-recovery` token (the one `enrollment.json` names) and no TPM token,
+`setup.json` is `passphrase-only` / `recovery-key-failed`, `enrollment.json`
+records `recovery` unacknowledged with its `slot`/`token`, `recovery_attempt`,
+`state: unavailable` and no `tpm`, `ilexctl security verify` says `pending` /
+`fallback-unlock-deferred` as it does for any disk without a chip, and the
+passphrase and the unseen key open their slots.
+Every file any of the three trials saves on the host is scanned for the
+passphrase, the password and the key.
 `iso::next_unattended_handover` boots with the fixed
 credential `ilex.installer.fault=helper` (the helper exits before it takes its bus
 name) and then `=answers` (the unattended process kills itself with `SIGKILL`
@@ -4453,17 +4492,28 @@ disk before the person has confirmed the erase on the review page.
     - *The recovery key.* While the image downloads, a `Waiting` key in
       `State.security` puts the flow on the `recovery` page and asks the helper for
       the key once (`Step::RunTakeKey`): the page shows its eight groups, "Write it
-      down. It is shown only now.", and two fields for the groups
-      `recovery_asked` names (`flow/src/recovery.rs` has the words and
-      `group_check`; the model's `recovery` module has the shape, the rule and the
-      comparison, and the helper decides). Confirm sends them
-      (`Step::RunAcknowledge`); a refusal says so and empties the fields; success
-      goes back to the installing page. An interface that was restarted finds
-      `shown` (taken, not confirmed): the page cannot show the key again and says
-      so, and still takes the two groups from the paper; `acknowledged` goes
-      straight to the installing page. The key is a `Secret` wiped when the page is
+      down. It is shown only now.", and **one field for the whole key**, typed from
+      the paper (`flow/src/recovery.rs` has the words and `key_check`, which
+      counts and checks the letters group by group; the model's `recovery` module
+      has the shape and the comparison, and the helper decides). Confirm sends the
+      key as the paper has it (`Step::RunAcknowledge`); a refusal says so and
+      empties the field; success goes back to the installing page. An interface
+      that was restarted finds `shown` (taken, not confirmed): the page cannot show
+      the key again and says so, and still takes the whole key from the paper;
+      `acknowledged` and `declined` go straight to the installing page. **Going on
+      without a recovery key** (`RecoveryView.skip`, `Step::RunContinueWithout`,
+      `Flow::continue_without_recovery_key`) is offered exactly when the page
+      cannot finish: the key was taken by a window that is gone (or whose answer
+      was lost), the key could not be fetched in three tries, or the helper could
+      not carry out the confirmation (the volume refused a key that was typed
+      right). It says what the disk is then (it unlocks with its passphrase
+      only, the chip will not unlock it, and the data cannot be recovered without
+      the passphrase) and how to get a key later (`sudo ilex-enroll complete
+      --root / --reissue-recovery`); the done page repeats the command for
+      `recovery-key-failed`. The key is a `Secret` wiped when the page is
       left, and in no marker (`ILEX-INSTALLER page=recovery key=shown|taking|gone
-      asked=3,7`, `event=recovery state=…`).
+      skip=true|false`, `event=recovery state=…`: `taking`, `shown`, `refused`,
+      `confirmed`, `declining`, `declined`, `failed`).
     - *The installation.* The review page (`Flow::review`, from the plan:
       the choices in words, the disk, the partitions that will be created, the
       image as target, version, digest and download size, `Everything on <model>
@@ -4881,10 +4931,15 @@ disk before the person has confirmed the erase on the review page.
     page:** the interface is stopped (`SIGSTOP`) while the helper makes the key,
     the trial takes the key from the helper (the helper hands it over once) and
     lets the interface go on, which finds the key taken: the page of a restarted
-    window (`key=gone`, no key on screen), which asks only for the two groups
-    named in its marker (`asked=3,8`); two wrong groups are refused by the helper
-    (`event=recovery state=refused`, the fields empty) and the right two confirmed
-    (`state=confirmed`), with no screenshot of a page that has a group typed on it.
+    window (`key=gone skip=true`, no key on screen), which asks for the whole key
+    from the paper; the whole key with its last letter changed is refused by the
+    helper (`event=recovery state=refused`, the field empty) and the right key
+    confirmed (`state=confirmed`), with no screenshot of a page that has the key
+    typed on it. `iso::next_keyboard_skip` is the same installation where the
+    person cannot confirm: Tab reaches "Continue without a recovery key" and
+    Return takes it (`state=declined`, back on the installing page); the disk
+    asks for the passphrase and `setup.json` says `recovery-key-failed`, with the
+    key's keyslot in `enrollment.json` unconfirmed (`booted_encrypted_key_given_up`).
     The key is not on the console, in the journal or in the helper's run directory.
     The disk it installed asks for the passphrase at its boot prompt (typed
     through QMP: the VM has no usable security chip) and then boots

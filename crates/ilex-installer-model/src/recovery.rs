@@ -5,9 +5,10 @@
 //!
 //! The key is systemd's: eight groups of eight letters from a sixteen-letter
 //! alphabet, joined with hyphens (`cdefghij-klnrtuvc-…`, 71 characters). It
-//! is shown once, on paper-sized type, and two of its groups are typed back
-//! before the installation relies on it: the interface chooses which two, the
-//! helper compares them with the key it holds.
+//! is shown once, on paper-sized type, and the whole key is typed back before
+//! the installation relies on it (as phase 0's local completion does): the
+//! helper compares all eight groups with the key it holds and opens the key's
+//! keyslot with what was typed.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +21,6 @@ pub const KEY_CHARS: usize = GROUPS * GROUP_CHARS + (GROUPS - 1);
 /// systemd's recovery-key alphabet: sixteen letters chosen to differ on every
 /// layout and be hard to confuse on paper.
 pub const ALPHABET: &str = "cbdefghijklnrtuv";
-/// How many groups a person is asked to type back.
-pub const ASKED: usize = 2;
 
 /// Is `text` a recovery key as systemd makes one (and so as the helper may
 /// hand it over)?
@@ -56,116 +55,73 @@ pub fn normalize(typed: &str) -> String {
         .collect()
 }
 
-/// What typing a group can be wrong about, before it is compared with the key.
+/// What typing the key can be wrong about, before it is compared with the
+/// helper's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GroupProblem {
+pub enum KeyProblem {
     /// Nothing typed.
     Empty,
-    /// Fewer characters than a group has.
-    Short,
-    /// More characters than a group has.
+    /// Fewer letters than a key has: how many were typed (the groups before
+    /// `letters / GROUP_CHARS + 1` are complete).
+    Short { letters: usize },
+    /// More letters than a key has.
     Long,
-    /// A character that no key has (the alphabet leaves out `a`, `m`, `o`, `p`,
-    /// `q`, `s`, `w`, `x`, `y`, `z` and the digits).
-    NotInKey,
+    /// A letter that no key has (the alphabet leaves out `a`, `m`, `o`, `p`,
+    /// `q`, `s`, `w`, `x`, `y`, `z` and the digits), in the 1-based group it
+    /// falls in.
+    NotInKey { group: usize },
 }
 
-/// Is `typed` the shape of a group? (Whether it is the right one is the
-/// helper's to say.)
-pub fn group_problem(typed: &str) -> Option<GroupProblem> {
-    let group = normalize(typed);
-    if group.is_empty() {
-        return Some(GroupProblem::Empty);
+/// Is `typed` the shape of a whole key? (Whether it is the right one is the
+/// helper's to say.) A person copying from paper adds hyphens, spaces and
+/// capitals; they are forgiven, the groups are counted without them.
+pub fn key_problem(typed: &str) -> Option<KeyProblem> {
+    let letters = normalize(typed);
+    if letters.is_empty() {
+        return Some(KeyProblem::Empty);
     }
-    if !group.chars().all(is_letter) {
-        return Some(GroupProblem::NotInKey);
+    if let Some(at) = letters.chars().position(|c| !is_letter(c)) {
+        return Some(KeyProblem::NotInKey {
+            group: (at / GROUP_CHARS + 1).min(GROUPS),
+        });
     }
-    match group.chars().count().cmp(&GROUP_CHARS) {
-        std::cmp::Ordering::Less => Some(GroupProblem::Short),
-        std::cmp::Ordering::Greater => Some(GroupProblem::Long),
+    match letters.chars().count().cmp(&(GROUPS * GROUP_CHARS)) {
+        std::cmp::Ordering::Less => Some(KeyProblem::Short {
+            letters: letters.chars().count(),
+        }),
+        std::cmp::Ordering::Greater => Some(KeyProblem::Long),
         std::cmp::Ordering::Equal => None,
     }
 }
 
-/// Which two groups a person is asked for: one from the first half and one
-/// from the second, as 1-based numbers, chosen from `seed` (any bytes: a
-/// plan's id, a counter). The same seed asks for the same groups again, so a
-/// retry after a typing mistake asks the same question and a restarted
-/// interface asks what its predecessor did.
-pub fn asked(seed: &str) -> [usize; ASKED] {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in seed.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+/// The key as the paper has it (eight hyphenated groups, lower case), from what
+/// was typed: `None` unless it is a whole key's shape. What `AcknowledgeRecoveryKey`
+/// carries.
+pub fn canonical(typed: &str) -> Option<String> {
+    if key_problem(typed).is_some() {
+        return None;
     }
-    let half = GROUPS / 2;
-    let first = (hash % half as u64) as usize + 1;
-    let second = ((hash >> 16) % half as u64) as usize + 1 + half;
-    [first, second]
+    let letters = normalize(typed);
+    let groups: Vec<&str> = (0..GROUPS)
+        .map(|i| &letters[i * GROUP_CHARS..(i + 1) * GROUP_CHARS])
+        .collect();
+    Some(groups.join("-"))
 }
 
-/// What the helper's `AcknowledgeRecoveryKey` is given as its secret: one
-/// line per asked group, `<number> <group as typed>`.
-pub fn answer_text(answer: &[(usize, String)]) -> String {
-    let mut text = String::new();
-    for (number, typed) in answer {
-        text.push_str(&format!("{number} {typed}\n"));
-    }
-    text
-}
-
-/// A parsed answer: the groups' numbers (1-based) and what was typed for each,
-/// normalised.
-pub fn parse_answer(text: &str) -> Result<Vec<(usize, String)>, &'static str> {
-    let mut seen = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let (number, typed) = line
-            .trim()
-            .split_once(' ')
-            .ok_or("a line is not `<number> <group>`")?;
-        let number: usize = number
-            .parse()
-            .map_err(|_| "a group number is not a number")?;
-        if !(1..=GROUPS).contains(&number) {
-            return Err("a group number is not between 1 and 8");
-        }
-        if seen.iter().any(|(n, _)| *n == number) {
-            return Err("a group is given twice");
-        }
-        seen.push((number, normalize(typed)));
-    }
-    if seen.len() != ASKED {
-        return Err("two groups are needed");
-    }
-    Ok(seen)
-}
-
-/// Do the typed groups match the key's? Compared without stopping at the first
-/// difference.
-pub fn matches(key: &str, answer: &[(usize, String)]) -> bool {
-    let groups = groups(key);
-    if groups.is_empty()
-        || answer.len() != ASKED
-        || (1..answer.len()).any(|i| answer[..i].iter().any(|(n, _)| *n == answer[i].0))
-    {
+/// Does `typed` give all eight groups of `key`? Compared without stopping at
+/// the first difference.
+pub fn matches(key: &str, typed: &str) -> bool {
+    let Some(typed) = canonical(typed) else {
+        return false;
+    };
+    if !is_key(key) {
         return false;
     }
-    let mut same = true;
-    for (number, typed) in answer {
-        let Some(group) = number.checked_sub(1).and_then(|i| groups.get(i)) else {
-            return false;
-        };
-        if group.len() != typed.len() {
-            same = false;
-            continue;
-        }
-        let mut diff = 0u8;
-        for (a, b) in group.bytes().zip(typed.bytes()) {
-            diff |= a ^ b;
-        }
-        same &= diff == 0;
+    let mut diff = 0u8;
+    for (a, b) in key.bytes().zip(typed.bytes()) {
+        diff |= a ^ b;
     }
-    same
+    key.len() == typed.len() && diff == 0
 }
 
 /// Where the recovery key stands, as `State` reports it. The key itself is
@@ -176,10 +132,15 @@ pub enum KeyStatus {
     /// The helper holds a key nobody has taken yet.
     Waiting,
     /// An interface took it (it is read once): it cannot be shown again, and
-    /// the helper waits for two groups of it.
+    /// the helper waits for the whole key typed back.
     Shown,
-    /// Two groups were typed back and matched.
+    /// The whole key was typed back, matched and opened its keyslot.
     Acknowledged,
+    /// The person chose to go on without a recovery key (`ContinueWithoutRecoveryKey`):
+    /// the keyslot nobody saw is recorded for `ilex-enroll complete
+    /// --reissue-recovery`, the security chip is not enrolled and the disk opens
+    /// with its passphrase only.
+    Declined,
 }
 
 /// What the TPM step ended as. Mirrors `setup.json`'s `security.tpm.status`.
@@ -228,7 +189,7 @@ pub fn tpm_reason(code: &str) -> String {
             "no recovery key was made, because nothing in this installation could show it"
                 .to_owned()
         }
-        "recovery-key-failed" => "the recovery key could not be made".to_owned(),
+        "recovery-key-failed" => "no recovery key was made and confirmed".to_owned(),
         "enrollment-failed" => "enrolling the security chip failed".to_owned(),
         other => format!("reason code {other}"),
     }

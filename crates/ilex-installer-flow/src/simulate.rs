@@ -31,8 +31,11 @@
 //! whether Restart and Power off fail (`finish-fails`); `recovery` makes the
 //! simulated helper make the recovery key of an encrypted installation whose
 //! request asks for one (a fixed test key, [`TEST_KEY`]), hand it over once,
-//! compare two groups typed back and hold the installation in its recovery
-//! stage until they match; `chip` makes this computer eligible for the
+//! compare the whole key typed back and hold the installation in its recovery
+//! stage until it matches or the person goes on without a key; `take-fails`
+//! (the key cannot be fetched), `slot-refuses` (the volume refuses the right
+//! key) and `skip-fails` (going on without a key is not answered) make the
+//! helper fail those requests; `chip` makes this computer eligible for the
 //! security chip (the fixtures' probes are not); `attach-key` and
 //! `attach-key-shown` and `attach-key-acked` start the interface on an
 //! installation whose key waits to be taken, was taken by an interface that is
@@ -255,6 +258,13 @@ struct Modifiers {
     recovery: bool,
     /// This computer is eligible for the security chip.
     chip: bool,
+    /// The helper cannot hand the key over (three tries fail: the page offers
+    /// going on without one).
+    take_fails: bool,
+    /// The key's keyslot refuses the right key (the volume's trouble).
+    slot_refuses: bool,
+    /// The helper does not answer `ContinueWithoutRecoveryKey`.
+    skip_fails: bool,
     /// For the `attach-key*` scenarios: the key's status when the interface
     /// starts.
     key_at_start: Option<KeyStatus>,
@@ -276,6 +286,9 @@ impl Modifiers {
             encrypted: false,
             recovery: false,
             chip: false,
+            take_fails: false,
+            slot_refuses: false,
+            skip_fails: false,
             key_at_start: None,
         };
         for word in words {
@@ -301,6 +314,9 @@ impl Modifiers {
                 "encrypted" => modifiers.encrypted = true,
                 "recovery" => modifiers.recovery = true,
                 "chip" => modifiers.chip = true,
+                "take-fails" => modifiers.take_fails = true,
+                "slot-refuses" => modifiers.slot_refuses = true,
+                "skip-fails" => modifiers.skip_fails = true,
                 "attach-key" => {
                     modifiers.attach = Attach::Installing;
                     modifiers.recovery = true;
@@ -632,11 +648,12 @@ fn script_state(
     } else {
         stage
     };
-    // With a recovery key the installation waits, after the account, for two
-    // groups of it (the recovery stage), and goes on when they match.
+    // With a recovery key the installation waits, after the account, for the
+    // whole key (the recovery stage), and goes on when it matches or the person
+    // gives it up.
     let waiting_key = plan.encryption.recovery_key
         && stage == Stage::Finalise
-        && key != Some(KeyStatus::Acknowledged);
+        && !matches!(key, Some(KeyStatus::Acknowledged | KeyStatus::Declined));
     let stage = if waiting_key { Stage::Recovery } else { stage };
     let finished = finished && !waiting_key;
     let (fraction, running) = if waiting_key {
@@ -741,7 +758,14 @@ fn script_state(
                 record.status = StageStatus::Done;
             }
             if plan.encryption.enabled {
-                state.security.tpm = Some(if plan.encryption.tpm.will_enroll {
+                state.security.tpm = Some(if key == Some(KeyStatus::Declined) {
+                    // Went on without a recovery key: passphrase only, as the
+                    // helper ends it.
+                    TpmOutcome {
+                        status: TpmStatus::PassphraseOnly,
+                        reason: "recovery-key-failed".into(),
+                    }
+                } else if plan.encryption.tpm.will_enroll {
                     TpmOutcome {
                         status: TpmStatus::EnrolledUnverified,
                         reason: "pcr7-sha256".into(),
@@ -1150,10 +1174,20 @@ impl Backend for Simulated {
                 Some("plan"),
                 "this installation has no recovery key to take",
             ))),
+            (true, Some(KeyStatus::Waiting)) if self.modifiers.take_fails => {
+                Err(ClientError::HelperUnavailable(
+                    "org.freedesktop.DBus.Error.NoReply: the helper did not answer".into(),
+                ))
+            }
             (true, Some(KeyStatus::Waiting)) => {
                 session.key = Some(KeyStatus::Shown);
                 Ok(Secret::new(TEST_KEY))
             }
+            (true, Some(KeyStatus::Declined)) => Err(Self::refuse(PlanError::new(
+                ErrorCode::NoRecoveryKey,
+                Some("plan"),
+                "the installation goes on without a recovery key",
+            ))),
             (true, Some(_)) => Err(Self::refuse(PlanError::new(
                 ErrorCode::RecoveryKeyTaken,
                 Some("plan"),
@@ -1176,12 +1210,57 @@ impl Backend for Simulated {
         if session.key == Some(KeyStatus::Waiting) {
             return Err(mismatch("the recovery key has not been shown yet"));
         }
-        let typed = recovery::parse_answer(answer.expose()).map_err(mismatch)?;
-        if !recovery::matches(TEST_KEY, &typed) {
-            return Err(mismatch("those are not the groups of the recovery key"));
+        if session.key == Some(KeyStatus::Declined) {
+            return Err(Self::refuse(PlanError::new(
+                ErrorCode::NoRecoveryKey,
+                Some("plan"),
+                "the installation goes on without a recovery key",
+            )));
+        }
+        if !recovery::matches(TEST_KEY, answer.expose()) {
+            return Err(mismatch("that is not the recovery key"));
+        }
+        if self.modifiers.slot_refuses {
+            return Err(Self::refuse(PlanError::new(
+                ErrorCode::Internal,
+                None,
+                "the recovery key does not open its keyslot: Keyslot open failed",
+            )));
         }
         session.key = Some(KeyStatus::Acknowledged);
         Ok(())
+    }
+
+    fn continue_without_recovery_key(&self, plan: &str) -> Result<(), ClientError> {
+        let mut session = self.session();
+        if session.applied.as_deref() != Some(plan) {
+            return Err(Self::refuse(PlanError::new(
+                ErrorCode::NoRecoveryKey,
+                Some("plan"),
+                "this installation has no recovery key to skip",
+            )));
+        }
+        if self.modifiers.skip_fails {
+            return Err(ClientError::HelperUnavailable(
+                "org.freedesktop.DBus.Error.NoReply: the helper did not answer".into(),
+            ));
+        }
+        match session.key {
+            None => Err(Self::refuse(PlanError::new(
+                ErrorCode::NoRecoveryKey,
+                Some("plan"),
+                "this installation has no recovery key to skip",
+            ))),
+            Some(KeyStatus::Acknowledged) => Err(Self::refuse(PlanError::new(
+                ErrorCode::RecoveryKeyConfirmed,
+                Some("plan"),
+                "the recovery key was confirmed: the installation keeps it",
+            ))),
+            Some(_) => {
+                session.key = Some(KeyStatus::Declined);
+                Ok(())
+            }
+        }
     }
 
     fn finish(&self, action: &FinishAction) -> Result<Option<Saved>, ClientError> {

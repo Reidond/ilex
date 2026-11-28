@@ -110,10 +110,12 @@ pub enum Msg {
     Encrypt(bool),
     /// The security chip's switch.
     Chip(bool),
-    /// What is typed in the recovery page's field `0` or `1`.
-    RecoveryGroup(usize, Secret),
+    /// What is typed in the recovery page's field: the whole key.
+    RecoveryKey(Secret),
     /// The recovery page's Confirm.
     ConfirmRecovery,
+    /// The recovery page's "Continue without a recovery key".
+    ContinueWithoutKey,
     Passphrase(Secret),
     PassphraseConfirmation(Secret),
     Continue,
@@ -178,8 +180,13 @@ pub enum Cmd {
         generation: u64,
         result: Result<Secret, ClientError>,
     },
-    /// The helper compared the two groups.
+    /// The helper compared the key (and opened its keyslot with it).
     KeyConfirmed {
+        generation: u64,
+        result: Result<(), ClientError>,
+    },
+    /// The helper answered `ContinueWithoutRecoveryKey`.
+    KeySkipped {
         generation: u64,
         result: Result<(), ClientError>,
     },
@@ -281,6 +288,13 @@ impl App {
                 sender.spawn_oneshot_command(move || Cmd::KeyConfirmed {
                     generation,
                     result: backend.acknowledge_recovery_key(&plan, &answer),
+                });
+            }
+            Step::RunContinueWithout { generation, plan } => {
+                let backend = Arc::clone(&self.backend);
+                sender.spawn_oneshot_command(move || Cmd::KeySkipped {
+                    generation,
+                    result: backend.continue_without_recovery_key(&plan),
                 });
             }
             Step::RunLogProbe { generation } => {
@@ -455,11 +469,15 @@ impl Component for App {
             Msg::Chip(on) => {
                 self.flow.set_chip(on);
             }
-            Msg::RecoveryGroup(slot, secret) => {
-                self.flow.set_recovery_group(slot, secret);
+            Msg::RecoveryKey(secret) => {
+                self.flow.set_recovery_key(secret);
             }
             Msg::ConfirmRecovery => {
                 let step = self.flow.confirm_recovery();
+                self.carry_out(step, &sender);
+            }
+            Msg::ContinueWithoutKey => {
+                let step = self.flow.continue_without_recovery_key();
                 self.carry_out(step, &sender);
             }
             Msg::Passphrase(secret) => {
@@ -565,6 +583,10 @@ impl Component for App {
             }
             Cmd::KeyConfirmed { generation, result } => {
                 let step = self.flow.confirm_finished(generation, result);
+                self.carry_out(step, &sender);
+            }
+            Cmd::KeySkipped { generation, result } => {
+                let step = self.flow.skip_finished(generation, result);
                 self.carry_out(step, &sender);
             }
             Cmd::Finished { generation, result } => {

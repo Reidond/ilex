@@ -94,14 +94,25 @@ impl Installer {
         Ok(fd.into())
     }
 
-    /// Two groups of the recovery key typed back, as a sealed memfd of
-    /// `<number> <group>` lines. The helper compares them with the key; the
-    /// installation does not rely on the key (and does not enrol the security
-    /// chip) before they match.
+    /// The whole recovery key typed back, as a sealed memfd of its text. The
+    /// helper compares all eight groups with the key and opens the key's own
+    /// keyslot with what was typed; the installation does not rely on the key
+    /// (and does not enrol the security chip) before that.
     async fn acknowledge_recovery_key(&self, plan: String, groups: OwnedFd) -> Result<(), Error> {
         let helper = Arc::clone(&self.helper);
         let fd: std::os::fd::OwnedFd = groups.into();
         blocking::unblock(move || helper.acknowledge_recovery_key(&plan, fd))
+            .await
+            .map_err(Error::from)
+    }
+
+    /// The person goes on without a recovery key: the installation ends as
+    /// passphrase-only (`recovery-key-failed`), enrols no security chip and
+    /// records the unconfirmed keyslot for `ilex-enroll complete
+    /// --reissue-recovery`. Refused once the key was confirmed.
+    async fn continue_without_recovery_key(&self, plan: String) -> Result<(), Error> {
+        let helper = Arc::clone(&self.helper);
+        blocking::unblock(move || helper.continue_without_recovery_key(&plan))
             .await
             .map_err(Error::from)
     }
