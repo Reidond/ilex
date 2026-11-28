@@ -4,6 +4,8 @@
 //! machine-wide VM slot while it lives, and is removed when the last
 //! `ephemeral::` test finishes (or, on a panic, when its guard drops).
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use ilex_devkit::bcvk::{self, EphemeralOpts, EphemeralVm};
 use libtest_mimic::Trial;
@@ -58,6 +60,7 @@ pub fn trials() -> Vec<Trial> {
         trial("ephemeral::configuration", || GROUP.run(configuration)),
         trial("ephemeral::apps_plan", || GROUP.run(apps_plan)),
         trial("ephemeral::user_profiles", || GROUP.run(user_profiles)),
+        trial("ephemeral::shell_themes", || GROUP.run(shell_themes)),
     ]
 }
 
@@ -125,6 +128,105 @@ fn user_profiles(vm: &EphemeralVm) -> Result<()> {
         .ssh("timeout 120 python3 -I -S /run/ilex-profiles-build/check.py")?
         .ok("public profile regressions")?;
     println!("     {}", result.stdout);
+    Ok(())
+}
+
+/// Each desktop keeps its own look. Nothing a shell ships may restyle another
+/// shell's session, so GTK, portal and GSettings defaults are never global;
+/// the KDE shell's GTK defaults are reachable only from a Plasma session.
+fn shell_themes(vm: &EphemeralVm) -> Result<()> {
+    let selection = common::selection()?;
+    if selection.shells.is_empty() {
+        return Ok(());
+    }
+    // No global GTK theme, portal selection or GSettings interface override.
+    vm.ssh(
+        r#"set -eu
+for f in /etc/gtk-2.0/gtkrc /etc/gtk-3.0/settings.ini /etc/gtk-4.0/settings.ini \
+         /etc/xdg/gtk-3.0/settings.ini /etc/xdg/gtk-4.0/settings.ini \
+         /etc/xdg-desktop-portal/portals.conf /usr/share/xdg-desktop-portal/portals.conf; do
+    test ! -e "$f" || { echo "global default $f"; exit 1; }
+done
+if grep -rIls -E '(^|[[:space:]])(export[[:space:]]+)?(GTK_THEME|GTK2_RC_FILES|GTK_USE_PORTAL|DCONF_PROFILE|QT_QPA_PLATFORMTHEME)=' \
+    /etc/environment /etc/environment.d /usr/lib/environment.d /etc/profile.d \
+    /usr/lib/systemd/user.conf.d /etc/systemd/user.conf.d /usr/lib/systemd/user-environment-generators 2>/dev/null; then
+    echo "a global environment default sets a toolkit theme"; exit 1
+fi
+for f in /usr/share/glib-2.0/schemas/*ilex*.override; do
+    ! grep -q 'org.gnome.desktop' "$f" || { echo "$f restyles GNOME"; exit 1; }
+done
+"#,
+    )?
+    .ok("no global GTK, portal or GSettings theme default")?;
+    println!("     no global GTK theme, portal or GSettings interface default");
+    if !selection.shells.iter().any(|s| s == "kde") {
+        return Ok(());
+    }
+    // The KDE shell's GTK look: its pieces, the portal's choice per start, the
+    // sync in a real user session, and nothing left in a shared place.
+    // The script runs the session watch and the login-time script through dozens
+    // of stand-in scenarios (each stand-in is an exec on the guest's virtiofs
+    // root): well over the default 180 seconds of one SSH command.
+    let script = ilex_devkit::qemu::base64(include_bytes!("shell-themes-guest.sh"));
+    let started = Instant::now();
+    let out = vm
+        .ssh_timeout(
+            &format!(
+                "printf %s {script} | base64 -d > /run/shell-themes-check.sh && bash /run/shell-themes-check.sh"
+            ),
+            Duration::from_secs(600),
+        )?
+        .ok("KDE shell GTK look")?;
+    println!("     the guest script took {:?}", started.elapsed());
+    for line in out.stdout.lines().filter(|l| l.starts_with("ok:")) {
+        println!("     {line}");
+    }
+    // Everything the shell's overlay ships is scoped to Plasma, except the one
+    // portal drop-in, whose wrapper decides at start (checked above).
+    let overlay = common::workspace()?.root.join("shells/kde/rootfs");
+    let mut seen = Vec::new();
+    kde_overlay_paths(&overlay, &overlay, &mut seen)?;
+    for path in &seen {
+        let scoped = path.starts_with("etc/xdg/plasma-workspace/env/")
+            || path.starts_with("etc/xdg/plasma-workspace/shutdown/")
+            || path.starts_with("usr/lib/systemd/user/plasma-workspace.target.wants/ilex-kde-")
+            || [
+                "usr/lib/systemd/user/ilex-kde-gtk.service",
+                "usr/lib/systemd/user/ilex-kde-flathub.service",
+                "usr/lib/systemd/user/ilex-kde-session.service",
+                "usr/lib/systemd/user/xdg-desktop-portal-gtk.service.d/50-ilex-kde.conf",
+                "usr/libexec/ilex/kde-gtk-sync",
+                "usr/libexec/ilex/kde-flathub",
+                "usr/libexec/ilex/kde-session-watch",
+                "usr/libexec/ilex/portal-gtk",
+                "usr/share/dconf/profile/ilex-kde",
+            ]
+            .contains(&path.as_str());
+        ensure(scoped, || {
+            format!("KDE overlay path {path} is not scoped to a Plasma session")
+        })?;
+    }
+    println!("     KDE overlay: {} files, all Plasma-scoped", seen.len());
+    Ok(())
+}
+
+fn kde_overlay_paths(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() && !path.is_symlink() {
+            kde_overlay_paths(root, &path, out)?;
+        } else {
+            out.push(
+                path.strip_prefix(root)?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -377,13 +479,10 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
         let packages = toml::Table::from_iter([("packages".into(), toml::Value::try_from(&expected)?)]);
         check_packages(vm, &packages)?;
         if key == "shell-packages" && selected {
-            for package in expected["exclude"].as_array().context("shell excludes missing")? {
-                let name = package.as_str().context("shell exclude must be a string")?;
-                if !name.contains(['*', '?', '[', ']']) {
-                    vm.ssh(&format!("rpm -q -- {}; result=$?; test \"$result\" -eq 1", common::quote(name)))?
-                        .ok(&format!("literal shell exclude {name} must not be installed"))?;
-                    println!("     literal shell exclude {name} absent");
-                }
+            let names = literal_names(&expected["exclude"], "shell exclude")?;
+            check_absent(vm, &names)?;
+            for name in &names {
+                println!("     literal shell exclude {name} absent");
             }
         }
     }
@@ -431,13 +530,23 @@ fn configuration(vm: &EphemeralVm) -> Result<()> {
             })?;
         }
         check_packages(vm, &manifest)?;
-        if let Some(excludes) = manifest.get("packages").and_then(|a| a.get("exclude")).and_then(|a| a.as_array()) {
-            for package in excludes {
-                let name = package.as_str().context("exclude must be a string")?;
-                if !name.contains(['*', '?', '[', ']']) {
-                    vm.ssh(&format!("rpm -q -- {}; test $? -eq 1", common::quote(name)))?.ok("excluded shell RPM absent")?;
-                }
-            }
+        // The default shell's greeter owns display-manager.service: with several
+        // shells each package enables its own, and the Containerfile leaves the
+        // default's. A secondary shell that names the same unit shares it.
+        if Some(name.as_str()) != selection.default_shell.as_deref()
+            && let Ok(unit) = common::shell_property(&manifest, "greeter", "unit")
+            && common::greeter()?.as_deref() != Some(unit.as_str())
+        {
+            let state = vm.ssh(&format!("systemctl is-enabled -- {}", common::quote(&unit)))?;
+            ensure(state.out() != "enabled", || {
+                format!(
+                    "shell {name}: greeter {unit} must not be enabled beside the default shell's"
+                )
+            })?;
+            println!("     shell {name}: greeter {unit} is {}", state.out());
+        }
+        if let Some(excludes) = manifest.get("packages").and_then(|a| a.get("exclude")) {
+            check_absent(vm, &literal_names(&serde_json::to_value(excludes)?, "exclude")?)?;
         }
         let overlay = common::workspace()?
             .root
@@ -586,87 +695,122 @@ fn app_manifest(manifest: &toml::Table) -> Result<Value> {
     let mut value = serde_json::to_value(manifest)?;
     let apps = value.as_object_mut().context("manifest must be a table")?
         .entry("apps").or_insert_with(|| serde_json::json!({}));
-    for key in ["flatpak", "rpm"] {
+    for key in ["flatpak", "flatpak-extension", "rpm"] {
         apps.as_object_mut().context("apps must be a table")?
             .entry(key).or_insert_with(|| serde_json::json!([]));
     }
     Ok(value)
 }
 
-fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {
-    if let Some(packages) = manifest
-        .get("apps")
-        .and_then(|a| a.get("rpm"))
-        .and_then(|a| a.as_array())
-    {
-        for package in packages {
-            let name = package.as_str().context("app RPM must be a string")?;
-            if !name.starts_with('@') {
-                vm.ssh(&format!("rpm -q -- {}", common::quote(name)))?
-                    .ok("app RPM installed")?;
-            }
-        }
+/// The literal (glob-free) package names of a manifest list.
+fn literal_names(list: &Value, what: &str) -> Result<Vec<String>> {
+    list.as_array()
+        .with_context(|| format!("{what} list missing"))?
+        .iter()
+        .map(|v| v.as_str().map(str::to_owned).with_context(|| format!("{what} must be a string")))
+        .filter(|name| name.as_ref().map_or(true, |n| !n.contains(['*', '?', '[', ']'])))
+        .collect()
+}
+
+/// Every named package is installed. One SSH session for the lot: every
+/// `bcvk ephemeral ssh` holds an inotify instance, of which a host has 128.
+fn check_installed(vm: &EphemeralVm, names: &[String], what: &str) -> Result<()> {
+    let names: Vec<_> = names
+        .iter()
+        .filter(|n| !n.starts_with('@'))
+        .map(|n| common::quote(n))
+        .collect();
+    if names.is_empty() {
+        return Ok(());
     }
-    if let Some(packages) = manifest
-        .get("packages")
-        .and_then(|p| p.get("install"))
-        .and_then(|v| v.as_array())
-    {
-        for package in packages {
-            let name = package.as_str().context("package must be a string")?;
-            if !name.starts_with('@') {
-                vm.ssh(&format!("rpm -q -- {}", common::quote(name)))?
-                    .ok("manifest package installed")?;
-            }
-        }
+    vm.ssh(&format!("rpm -q -- {}", names.join(" ")))?
+        .ok(what)?;
+    Ok(())
+}
+
+/// None of the named packages is installed.
+fn check_absent(vm: &EphemeralVm, names: &[String]) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<_> = names.iter().map(|n| common::quote(n)).collect();
+    vm.ssh(&format!(
+        "for package in {}; do ! rpm -q -- \"$package\" >/dev/null 2>&1 || {{ echo \"$package is installed\"; exit 1; }}; done",
+        list.join(" ")
+    ))?
+    .ok("excluded packages must not be installed")?;
+    Ok(())
+}
+
+fn check_packages(vm: &EphemeralVm, manifest: &toml::Table) -> Result<()> {
+    if let Some(packages) = manifest.get("apps").and_then(|a| a.get("rpm")) {
+        let packages = serde_json::to_value(packages)?;
+        check_installed(
+            vm,
+            &literal_names(&packages, "app RPM")?,
+            "app RPMs installed",
+        )?;
+    }
+    if let Some(packages) = manifest.get("packages").and_then(|p| p.get("install")) {
+        let packages = serde_json::to_value(packages)?;
+        check_installed(
+            vm,
+            &literal_names(&packages, "package")?,
+            "manifest packages installed",
+        )?;
     }
     Ok(())
 }
 
 /// Every overlay file must survive unchanged: the installer rejects collisions.
+/// One SSH session for the whole overlay.
 fn check_overlay(
     vm: &EphemeralVm,
     root: &std::path::Path,
     directory: &std::path::Path,
 ) -> Result<()> {
+    let mut script = String::from("status=0\n");
+    overlay_checks(root, directory, &mut script)?;
+    script.push_str("exit $status\n");
+    vm.ssh(&script)?
+        .ok("overlay files and links survive unchanged")?;
+    Ok(())
+}
+
+fn overlay_checks(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    script: &mut String,
+) -> Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();
-        let destination = format!(
+        let destination = common::quote(&format!(
             "/{}",
             path.strip_prefix(root)?
                 .to_string_lossy()
                 .replace('\\', "/")
-        );
+        ));
         if path.is_dir() && !path.is_symlink() {
-            check_overlay(vm, root, &path)?;
+            overlay_checks(root, &path, script)?;
         } else if path.is_symlink() {
-            let target = std::fs::read_link(&path)?.to_string_lossy().into_owned();
-            let guest = vm
-                .ssh(&format!("readlink -- {}", common::quote(&destination)))?
-                .ok("overlay symlink")?;
-            ensure(guest.out() == target, || {
-                format!("overlay symlink {destination} differs")
-            })?;
+            let target = common::quote(&std::fs::read_link(&path)?.to_string_lossy());
+            script.push_str(&format!(
+                "[ \"$(readlink -- {destination})\" = {target} ] || {{ echo \"symlink differs: \"{destination}; status=1; }}\n"
+            ));
         } else {
-            check_file(vm, &path, &destination)?;
+            let host = ilex_devkit::cmd::output(
+                std::process::Command::new("sha256sum").arg("--").arg(&path),
+            )?;
+            let hash = host
+                .split_whitespace()
+                .next()
+                .context("sha256sum printed nothing")?;
+            script.push_str(&format!(
+                "[ \"$(sha256sum -- {destination} | cut -d' ' -f1)\" = {hash} ] || {{ echo \"sha256 differs: \"{destination}; status=1; }}\n"
+            ));
         }
     }
     Ok(())
-}
-
-fn check_file(vm: &EphemeralVm, source: &std::path::Path, destination: &str) -> Result<()> {
-    let host = ilex_devkit::cmd::output(
-        std::process::Command::new("sha256sum")
-            .arg("--")
-            .arg(source),
-    )?;
-    let guest = vm
-        .ssh(&format!("sha256sum -- {}", common::quote(destination)))?
-        .ok("configuration file sha256")?;
-    ensure(
-        host.split_whitespace().next() == guest.out().split_whitespace().next(),
-        || format!("{destination} sha256 differs from {}", source.display()),
-    )
 }
 
 /// Compare image references, ignoring a leading `localhost/`.

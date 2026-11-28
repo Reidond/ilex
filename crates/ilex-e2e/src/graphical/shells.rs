@@ -1,0 +1,1415 @@
+//! `graphical::shells`: one image, GNOME and KDE, one home, one user manager.
+//!
+//! The image has both shells with GNOME as the default, so GDM is the greeter
+//! and offers Plasma as a session. The test account (lingering, so one user
+//! manager outlives every session, as it does with an SSH or TTY login) goes
+//! through four sessions, each ended with the desktop's own logout:
+//!
+//! 1. Plasma, left in Breeze Dark with everything the KDE shell does to a home
+//!    turned up (Breeze GTK theme, dark scheme);
+//! 2. GNOME, which must still look like GNOME: GTK 3, GTK 4 and libadwaita
+//!    applications are light and Adwaita, GNOME's database is untouched, and
+//!    Plasma left nothing in the home or the manager that GNOME reads;
+//! 3. GNOME made dark, with Adwaita-dark and a purple accent;
+//! 4. Plasma again, which must be Breeze Dark with Plasma's accent, not
+//!    GNOME's choices, while GNOME's own settings stay as GNOME left them;
+//! 5. a crash of that Plasma session (compositor and session leader killed with
+//!    SIGKILL, so no shutdown script runs), then GNOME again in the same
+//!    lingering user manager: no GTK settings portal that reads the KDE
+//!    database may be left running, and GNOME's GTK 3, GTK 4 and libadwaita
+//!    applications must look as GNOME chose;
+//! 6. a crash followed by a GNOME login before the session watch has acted, and
+//! 7. a crash followed by a Plasma login before it has acted. A real login takes
+//!    longer than the watch's poll, so the watch is stopped (SIGSTOP) before the
+//!    crash: it wakes as late as the login manager's auto-relogin or a slow
+//!    `loginctl` could make it. The GNOME login fails by itself (gnome-session
+//!    will not start over a graphical session that is still up), the late watch
+//!    must then clear Plasma's leftovers without stopping what it must not, and
+//!    the next GNOME login must work and look as GNOME chose. The Plasma login
+//!    must get a stack of its own (the login stops the leftovers), show the
+//!    desktop rather than the greeter, and keep it when the watch wakes;
+//! 8. a live Plasma session while the manager's `XDG_SESSION_ID` names a session
+//!    that is over (what a login that failed after exporting its id leaves): a
+//!    second login's hook, sourced by hand (a second login through the greeter is
+//!    not tried), must leave the running Plasma alone; and
+//! 9. a Plasma login while the watch's own stop is still running: the targets
+//!    are down at once and a unit's stop job is held up (a drop-in, released by
+//!    the test), which Plasma's target cannot be started over. The login's hook
+//!    must wait for it and the login must get a desktop.
+//!
+//! Select it explicitly (`ilexctl test graphical::shells --shell gnome --shell kde`).
+
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
+use ilex_devkit::qemu::{self, Vm, VmConfig};
+use ilex_vmctl::Vmctl;
+use libtest_mimic::{Failed, Trial};
+
+use super::kde::{self, probe, show, user};
+use super::{
+    SESSION_TIMEOUT, USER, clear_artifacts, create_user, no_failed_user_units, session_active,
+    settle, shot, test_password, wait_greeter,
+};
+use crate::common;
+use crate::disk::vmtest;
+
+pub fn trial() -> Trial {
+    Trial::test("graphical::shells", || {
+        run().map_err(|e| Failed::from(format!("{e:#}")))
+    })
+}
+
+fn run() -> Result<()> {
+    let selection = common::selection()?;
+    if selection.default_shell.as_deref() != Some("gnome")
+        || !selection.shells.iter().any(|s| s == "kde")
+    {
+        bail!(
+            "graphical::shells needs shells gnome (default) and kde, got {:?}",
+            selection.shells
+        );
+    }
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "graphical-shells")?;
+    clear_artifacts(&artifacts);
+    let disk = vmtest::disk(&ws)?;
+    let mut vm = vmtest::boot(&ws, VmConfig::graphical("graphical-shells", disk))?;
+    let ctl = Vmctl::from_info(vm.info.clone());
+    let result = session(&mut vm, &ctl, &artifacts);
+    if result.is_err() {
+        let _ = ctl.save_screenshot(&artifacts.join("failure.png"));
+        if let Ok(journal) = vm.ssh("journalctl -b --no-pager -n 500 -o short-monotonic") {
+            let _ = qemu::write_artifact(
+                &artifacts,
+                "failure-journal.txt",
+                &String::from_utf8_lossy(&journal.stdout),
+            );
+        }
+        println!("artifacts: {}", artifacts.display());
+    }
+    result
+}
+
+fn session(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
+    wait_greeter(vm)?;
+    settle(ctl)?;
+    shot(ctl, artifacts, "01-first-boot")?;
+
+    // The account, with GNOME's initial setup marked done, Plasma's idle
+    // handling off and a user manager that outlives its sessions.
+    let password = test_password();
+    create_user(vm, &password)?;
+    kde::seed_plasma_config(vm, &format!("/var/home/{USER}"))?;
+    vm.ssh_ok(&format!("loginctl enable-linger {USER}"))?;
+    println!("ok   created test user {USER} (lingering)");
+    // GDM's greeter lists AccountsService users, so the user is created first,
+    // the session chosen through AccountsService, and the guest restarted.
+    choose_session(vm, "plasma")?;
+    vm.reboot(vmtest::BOOT_TIMEOUT)
+        .context("rebooting with the test user in place")?;
+    wait_greeter(vm)?;
+    settle(ctl)?;
+    shot(ctl, artifacts, "02-gdm-login")?;
+
+    // 1. Plasma, started by GDM, ending in Breeze Dark.
+    login(vm, ctl, &password)?;
+    vm.wait_for(
+        "the Plasma shell in the user session",
+        &format!("pgrep -u {USER} -x plasmashell"),
+        SESSION_TIMEOUT,
+    )?;
+    settle(ctl)?;
+    shot(ctl, artifacts, "03-plasma-from-gdm")?;
+    let mut report = vmtest::Report::default();
+    report.check("GDM started a Plasma Wayland session", session_active(vm));
+    report.finish()?;
+    kde::theming(vm, ctl, artifacts)?;
+    // The host's GTK 4 and libadwaita applications (GNOME's, in this image).
+    toolkits(vm, ToolkitLook::Plasma { dark: true })?;
+    show(vm, ctl, artifacts, "10-plasma-libadwaita-dark", "adw", None)?;
+    let leftovers = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
+    println!(
+        "     Plasma ends dark; the user's own database holds: {}",
+        leftovers.trim()
+    );
+
+    // 2. A normal logout, then the same home in GNOME.
+    kde::logout(vm)?;
+    let mut report = vmtest::Report::default();
+    report.check(
+        "a Plasma logout leaves nothing in the user manager",
+        manager_clean(vm, false),
+    );
+    report.check(
+        "and nothing in the home that GNOME reads",
+        kde::nothing_shared(vm),
+    );
+    report.finish()?;
+    choose_session(vm, "gnome")?;
+    settle(ctl)?;
+    login(vm, ctl, &password)?;
+    vm.wait_for(
+        "gnome-shell in the user session",
+        &format!("pgrep -u {USER} -x gnome-shell"),
+        SESSION_TIMEOUT,
+    )?;
+    settle(ctl)?;
+    // First-login noise (welcome tour, updater prompt): clear what is there.
+    ctl.key("Escape")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.key("Escape")?;
+    settle(ctl)?;
+    shot(ctl, artifacts, "11-gnome-same-home")?;
+    gnome_unchanged(vm, ctl, artifacts)?;
+
+    // 3. GNOME's own choices: dark, Adwaita-dark, a purple accent.
+    gnome_dark(vm)?;
+    toolkits(vm, ToolkitLook::GnomeDark)?;
+    show(vm, ctl, artifacts, "13-gnome-libadwaita-dark", "adw", None)?;
+    gnome_logout(vm)?;
+
+    // 4. Plasma again: still Breeze Dark with Plasma's accent, GNOME's
+    // choices unreached; and GNOME's own database as GNOME left it.
+    choose_session(vm, "plasma")?;
+    settle(ctl)?;
+    login(vm, ctl, &password)?;
+    vm.wait_for(
+        "the Plasma shell in the user session",
+        &format!("pgrep -u {USER} -x plasmashell"),
+        SESSION_TIMEOUT,
+    )?;
+    settle(ctl)?;
+    shot(ctl, artifacts, "14-plasma-after-gnome")?;
+    plasma_unchanged(vm)?;
+    toolkits(vm, ToolkitLook::Plasma { dark: true })?;
+    show(
+        vm,
+        ctl,
+        artifacts,
+        "15-plasma-gtk3-after-gnome",
+        "gtk3",
+        None,
+    )?
+    .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
+
+    // 5. The same Plasma session crashes; GNOME follows in the same manager.
+    crash_plasma(vm)?;
+    choose_session(vm, "gnome")?;
+    settle(ctl)?;
+    login(vm, ctl, &password)?;
+    vm.wait_for(
+        "gnome-shell in the user session",
+        &format!("pgrep -u {USER} -x gnome-shell"),
+        SESSION_TIMEOUT,
+    )?;
+    settle(ctl)?;
+    ctl.key("Escape")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.key("Escape")?;
+    settle(ctl)?;
+    shot(ctl, artifacts, "16-gnome-after-crash")?;
+    gnome_after_crash(vm)?;
+    show(
+        vm,
+        ctl,
+        artifacts,
+        "17-gnome-libadwaita-after-crash",
+        "adw",
+        None,
+    )?;
+
+    // 6 and 7. The watch is late: a login arrives before it acts.
+    late_watch_gnome(vm, ctl, artifacts, &password)?;
+    late_watch_plasma(vm, ctl, artifacts, &password)?;
+
+    // 8 and 9. A login next to a live Plasma, and one during a stop.
+    second_login(vm, ctl, artifacts, &password)?;
+    login_during_stop(vm, ctl, artifacts, &password)?;
+    Ok(())
+}
+
+/// Processes of the test user whose environment selects the KDE database: only
+/// the GTK settings portal of a Plasma session may ever have it.
+fn kde_profile_holders(vm: &Vm) -> Result<Vec<String>> {
+    let out = vm.ssh_ok(&format!(
+        "for pid in $(pgrep -u {USER}); do \
+           if tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep -qx 'DCONF_PROFILE=ilex-kde'; then \
+             printf '%s %s\\n' \"$pid\" \"$(tr '\\0' ' ' < /proc/$pid/cmdline)\"; \
+           fi; \
+         done; true"
+    ))?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
+/// SIGKILL the Plasma session's compositor and session leader, as a crash would
+/// (no logout, no shutdown script), and wait until logind has dropped the
+/// session and the greeter is back.
+fn kill_plasma(vm: &mut Vm) -> Result<()> {
+    // `-f` with a bracket keeps the pattern from matching this very command line.
+    vm.ssh_ok(&format!(
+        "pkill -KILL -u {USER} -x kwin_wayland; pkill -KILL -u {USER} -f '^[/a-z]*startplasma-wayland'; true"
+    ))?;
+    vm.wait_for(
+        "the crashed Plasma session to end",
+        &format!("! loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep -q ."),
+        SESSION_TIMEOUT,
+    )
+    .map(drop)?;
+    wait_greeter(vm)
+}
+
+/// A crash of the Plasma session: logind ends the session, but the lingering
+/// user manager keeps Plasma's units (upstream stops `plasma-workspace.target`
+/// only on a logout), so the shell's session watch must stop them; nothing that
+/// reads the KDE database may outlive it.
+fn crash_plasma(vm: &mut Vm) -> Result<()> {
+    let before = kde_profile_holders(vm)?;
+    println!("     before the crash, processes selecting the KDE database: {before:?}");
+    if before.is_empty() {
+        bail!("no process selects the KDE database in a running Plasma session: nothing to leak");
+    }
+    // What logind announces around the crash, to print below: the watch polls
+    // logind because a session turning `closing` has to be noticed.
+    vm.ssh_ok(
+        "systemd-run --quiet --unit=ilex-test-logind-signals \
+         gdbus monitor --system --dest org.freedesktop.login1",
+    )?;
+    let crashed = vm.ssh_ok("date +%T.%N | cut -c1-12")?;
+    println!("     crashing Plasma at {crashed}");
+    kill_plasma(vm)?;
+    // The watch stops Plasma's stack once logind calls the session closing.
+    let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
+    let down = vm.wait_for(
+        "Plasma's targets to stop after the crash",
+        &kde::user_cmd(
+            &uid,
+            "sh -c '! systemctl --user is-active --quiet plasma-workspace.target && \
+             ! systemctl --user is-active --quiet graphical-session.target'",
+        ),
+        Duration::from_secs(60),
+    );
+    // What the manager made of it, before anything else runs.
+    let state = |unit: &str| user(vm, &format!("systemctl --user is-active {unit} || true"));
+    let manager = format!(
+        "plasma-workspace.target {}, graphical-session.target {}, xdg-desktop-portal-gtk.service {}, \
+         xdg-desktop-portal.service {}",
+        state("plasma-workspace.target")?,
+        state("graphical-session.target")?,
+        state("xdg-desktop-portal-gtk.service")?,
+        state("xdg-desktop-portal.service")?,
+    );
+    println!("     after the crash, in the user manager: {manager}");
+    let failed = user(vm, "systemctl --user --failed --no-legend --plain || true")?;
+    println!("     failed user units: {}", failed.replace('\n', "; "));
+    let signals = vm.ssh_ok(
+        "systemctl stop ilex-test-logind-signals; \
+         journalctl -u ilex-test-logind-signals -o short-precise --no-pager | grep -E 'Session|State' \
+         | sed 's/ [^ ]* gdbus\\[[0-9]*\\]://' | cut -c1-200; true",
+    )?;
+    println!("     logind's signals around the crash:\n{signals}");
+    let env = user(vm, "systemctl --user show-environment")?;
+    println!(
+        "     user manager environment keeps: {:?}",
+        env.lines()
+            .filter(|l| l.starts_with("GTK_USE_PORTAL=") || l.starts_with("XDG_CURRENT_DESKTOP="))
+            .collect::<Vec<_>>()
+    );
+    let mut report = vmtest::Report::default();
+    report.check(
+        "the session watch stopped Plasma's targets after the crash",
+        down.map(drop),
+    );
+    report.check(
+        "no portal or other process selects the KDE database after the crash",
+        {
+            let holders = kde_profile_holders(vm)?;
+            if holders.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!("still running: {holders:?}"))
+            }
+        },
+    );
+    report.finish()
+}
+
+/// GNOME after a crashed Plasma session, in the same lingering manager: GNOME's
+/// GTK 3, GTK 4 and libadwaita applications look as GNOME chose, and no portal
+/// answers from the KDE database.
+fn gnome_after_crash(vm: &Vm) -> Result<()> {
+    let mut report = vmtest::Report::default();
+    report.check("the session is GNOME and carries no profile or theme", {
+        let env = user(vm, "systemctl --user show-environment")?;
+        if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME")
+            && !env.lines().any(|l| {
+                ["DCONF_PROFILE=", "GTK_THEME="]
+                    .iter()
+                    .any(|p| l.starts_with(p))
+            })
+        {
+            Ok(())
+        } else {
+            Err(anyhow!("session environment:\n{env}"))
+        }
+    });
+    report.check("no process selects the KDE database", {
+        let holders = kde_profile_holders(vm)?;
+        if holders.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("still running: {holders:?}"))
+        }
+    });
+    report.check("GNOME's database is as GNOME left it", {
+        let keys = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
+        if keys.contains("gtk-theme='Adwaita-dark'") && keys.contains("accent-color='purple'") {
+            Ok(())
+        } else {
+            Err(anyhow!("GNOME's keys:\n{keys}"))
+        }
+    });
+    report.check("the portal reports GNOME's dark scheme", {
+        let scheme = kde::appearance(vm, "color-scheme")?;
+        if scheme == "v v u 1" {
+            Ok(())
+        } else {
+            Err(anyhow!("color-scheme is `{scheme}`"))
+        }
+    });
+    report.finish()?;
+    // The look GNOME chose in step 3, whatever Plasma's crash left behind.
+    toolkits(vm, ToolkitLook::GnomeDark)?;
+    // What Plasma's crash left failed in the manager (its Wayland clients, which
+    // lost their compositor) is Plasma's own business, printed; GNOME's units
+    // must be healthy.
+    let failed = user(vm, "systemctl --user --failed --no-legend --plain || true")?;
+    println!(
+        "     failed user units in GNOME: {}",
+        failed.replace('\n', "; ")
+    );
+    let gnome_side: Vec<_> = failed
+        .lines()
+        .map(str::trim_start)
+        .filter(|u| u.starts_with("gnome-") || u.starts_with("org.gnome"))
+        .collect();
+    if gnome_side.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "failed GNOME user units after the crash: {gnome_side:?}"
+        ))
+    }
+}
+
+/// GDM picks the user's session from AccountsService.
+fn choose_session(vm: &Vm, session: &str) -> Result<()> {
+    vm.ssh_ok(&format!(
+        "set -e; path=$(busctl --system call org.freedesktop.Accounts /org/freedesktop/Accounts \
+           org.freedesktop.Accounts FindUserByName s {USER} | awk '{{print $2}}' | tr -d '\"'); \
+         busctl --system call org.freedesktop.Accounts \"$path\" org.freedesktop.Accounts.User SetSession s {session}; \
+         busctl --system call org.freedesktop.Accounts \"$path\" org.freedesktop.Accounts.User SetSessionType s wayland"
+    ))?;
+    Ok(())
+}
+
+/// The user tile is focused: Return opens its password prompt.
+fn login(vm: &mut Vm, ctl: &Vmctl, password: &str) -> Result<()> {
+    ctl.key("Return")?;
+    std::thread::sleep(Duration::from_secs(3));
+    ctl.type_text(password)?;
+    std::thread::sleep(Duration::from_secs(1));
+    ctl.key("Return")?;
+    vm.wait_for(
+        "a graphical session for the test user",
+        &format!(
+            "loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep ."
+        ),
+        SESSION_TIMEOUT,
+    )?;
+    Ok(())
+}
+
+/// GNOME's own logout, with no confirmation dialog, then the greeter.
+fn gnome_logout(vm: &mut Vm) -> Result<()> {
+    user(
+        vm,
+        "busctl --user call org.gnome.SessionManager /org/gnome/SessionManager org.gnome.SessionManager Logout u 1",
+    )?;
+    vm.wait_for(
+        "the GNOME session to end",
+        &format!("! loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep -q ."),
+        SESSION_TIMEOUT,
+    )?;
+    wait_greeter(vm)
+}
+
+/// After Plasma's logout the lingering user manager holds no trace of Plasma:
+/// its target is down and the environment it exported is gone. `portal_kept`
+/// allows `GTK_USE_PORTAL=1` to stay: `startplasma` puts the manager's
+/// environment back as it found it, and a session that started after a crash
+/// found the crashed session's variable there (benign: GNOME's own portal
+/// answers, see the crash step).
+fn manager_clean(vm: &Vm, portal_kept: bool) -> Result<()> {
+    let env = user(vm, "systemctl --user show-environment")?;
+    let plasma = user(vm, "systemctl --user is-active plasma-workspace.target")
+        .unwrap_or_else(|_| "inactive".into());
+    let stale: Vec<_> = env
+        .lines()
+        .filter(|l| {
+            let mut vars = vec!["DCONF_PROFILE=", "GTK_THEME="];
+            if !portal_kept {
+                vars.push("GTK_USE_PORTAL=");
+            }
+            vars.iter().any(|p| l.starts_with(p))
+        })
+        .collect();
+    if !stale.is_empty() || plasma == "active" {
+        bail!("the user manager still holds {stale:?}, plasma-workspace.target {plasma}");
+    }
+    Ok(())
+}
+
+/// What a toolkit session is expected to look like.
+enum ToolkitLook {
+    /// Plasma's: Breeze for GTK 3, libadwaita with Plasma's blue accent.
+    Plasma { dark: bool },
+    /// GNOME as `gnome_dark` leaves it: Adwaita-dark, a purple accent.
+    GnomeDark,
+}
+
+/// The host's GTK 3, GTK 4 and libadwaita applications resolve what `look` says.
+fn toolkits(vm: &Vm, look: ToolkitLook) -> Result<()> {
+    let mut report = vmtest::Report::default();
+    match look {
+        ToolkitLook::Plasma { dark } => {
+            let theme = if dark { "Breeze-Dark" } else { "Breeze" };
+            report.check(
+                "GTK 3 is Breeze",
+                probe(vm, "gtk3", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(Some(theme), Some("breeze"), dark)
+                }),
+            );
+            // Applications launched from Plasma inherit GTK_USE_PORTAL=1, so
+            // their icons, cursor and font come through the portal from the KDE
+            // database, not from the user's own (GNOME's) database.
+            let font = user(
+                vm,
+                "env DCONF_PROFILE=ilex-kde dconf read /org/gnome/desktop/interface/font-name",
+            )?
+            .trim_matches('\'')
+            .replace(' ', "_");
+            let from_plasma = move |p: &kde::Probe| -> Result<()> {
+                if p.field("cursor") != Some("breeze_cursors") || p.field("font") != Some(&font) {
+                    bail!("cursor or font is not Plasma's ({font}): {}", p.describe());
+                }
+                Ok(())
+            };
+            report.check(
+                "GTK 4 follows the scheme, with Plasma's icons, cursor and font",
+                probe(vm, "gtk4", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(None, Some("breeze"), dark)?;
+                    from_plasma(&p)
+                }),
+            );
+            report.check(
+                "libadwaita follows the scheme with Plasma's accent, icons, cursor and font",
+                probe(vm, "adw", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(None, Some("breeze"), dark)?;
+                    if p.field("accent") != Some("blue") {
+                        bail!("libadwaita's accent is not Plasma's blue: {}", p.describe());
+                    }
+                    from_plasma(&p)
+                }),
+            );
+        }
+        ToolkitLook::GnomeDark => {
+            // Fedora's GTK 3 has no Adwaita-dark theme directory (gnome-themes-extra
+            // is not installed) and does not read `color-scheme`, so GNOME's
+            // choice is the name GTK 3 resolved, not its colours.
+            report.check(
+                "GTK 3 resolves GNOME's choice, Adwaita-dark",
+                probe(vm, "gtk3", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    if p.field("theme") == Some("Adwaita-dark")
+                        && p.field("icons") == Some("Adwaita")
+                    {
+                        Ok(())
+                    } else {
+                        bail!("GTK 3 did not resolve Adwaita-dark: {}", p.describe())
+                    }
+                }),
+            );
+            report.check(
+                "GTK 4 is dark",
+                probe(vm, "gtk4", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(None, None, true)
+                }),
+            );
+            report.check(
+                "libadwaita is dark with GNOME's purple accent",
+                probe(vm, "adw", None).and_then(|p| {
+                    println!("     {}", p.describe());
+                    p.expect(None, None, true)?;
+                    if p.field("accent") != Some("purple") {
+                        bail!("libadwaita's accent is not purple: {}", p.describe());
+                    }
+                    Ok(())
+                }),
+            );
+        }
+    }
+    report.finish()
+}
+
+/// What Plasma left in the home does not restyle GNOME.
+fn gnome_unchanged(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path) -> Result<()> {
+    let mut report = vmtest::Report::default();
+    report.check(
+        "the session is GNOME and carries no profile or theme of Plasma's",
+        {
+            let env = user(vm, "systemctl --user show-environment")?;
+            if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=GNOME")
+                && !env.lines().any(|l| {
+                    ["DCONF_PROFILE=", "GTK_THEME="]
+                        .iter()
+                        .any(|p| l.starts_with(p))
+                })
+            {
+                Ok(())
+            } else {
+                Err(anyhow!("session environment:\n{env}"))
+            }
+        },
+    );
+    // The keys that decide a look. Other keys of the schema are not Plasma's
+    // doing: AT-SPI's bus launcher, which any session starts on demand, writes
+    // `toolkit-accessibility` into whichever database it sees.
+    report.check("GNOME's own dconf database holds no look setting", {
+        let keys = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
+        let looks: Vec<_> = keys
+            .lines()
+            .filter(|l| {
+                [
+                    "accent-color",
+                    "color-scheme",
+                    "cursor-",
+                    "document-font-name",
+                    "font-name",
+                    "gtk-theme",
+                    "icon-theme",
+                    "monospace-font-name",
+                ]
+                .iter()
+                .any(|k| l.starts_with(k))
+            })
+            .collect();
+        if looks.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("Plasma wrote into GNOME's database:\n{keys}"))
+        }
+    });
+    report.check(
+        "GNOME keeps its GTK, icon and cursor themes and its colour scheme",
+        {
+            let mut wrong = Vec::new();
+            for (key, want) in [
+                ("gtk-theme", "'Adwaita'"),
+                ("icon-theme", "'Adwaita'"),
+                ("cursor-theme", "'Adwaita'"),
+                ("color-scheme", "'default'"),
+            ] {
+                let got = user(
+                    vm,
+                    &format!("gsettings get org.gnome.desktop.interface {key}"),
+                )?;
+                if got != want {
+                    wrong.push(format!("{key}: {got}, expected {want}"));
+                }
+            }
+            if wrong.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!("{}", wrong.join("; ")))
+            }
+        },
+    );
+    report.check("no GTK settings file in the home", kde::nothing_shared(vm));
+    report.check("no user units failed", no_failed_user_units(vm));
+    report.finish()?;
+    // GNOME's GTK 3, GTK 4 and libadwaita applications: light and Adwaita,
+    // after a Plasma session that ended in Breeze Dark.
+    let mut report = vmtest::Report::default();
+    report.check(
+        "GTK 3 is Adwaita and light",
+        probe(vm, "gtk3", None).and_then(|p| {
+            println!("     {}", p.describe());
+            p.expect(Some("Adwaita"), Some("Adwaita"), false)
+        }),
+    );
+    report.check(
+        "GTK 4 is light",
+        probe(vm, "gtk4", None).and_then(|p| {
+            println!("     {}", p.describe());
+            p.expect(None, None, false)
+        }),
+    );
+    report.check(
+        "libadwaita is light with GNOME's blue accent",
+        probe(vm, "adw", None).and_then(|p| {
+            println!("     {}", p.describe());
+            p.expect(None, None, false)?;
+            if p.field("accent") != Some("blue") || p.field("adw_dark") != Some("False") {
+                bail!("libadwaita is not GNOME's light blue: {}", p.describe());
+            }
+            Ok(())
+        }),
+    );
+    report.finish()?;
+    show(vm, ctl, artifacts, "12-gtk3-in-gnome", "gtk3", None)?.expect(
+        Some("Adwaita"),
+        Some("Adwaita"),
+        false,
+    )
+}
+
+/// GNOME's choices: the dark scheme, Adwaita-dark for GTK 3 applications and a
+/// purple accent. Plasma could only show them by reading GNOME's database.
+fn gnome_dark(vm: &Vm) -> Result<()> {
+    for (key, value) in [
+        ("color-scheme", "prefer-dark"),
+        ("gtk-theme", "Adwaita-dark"),
+        ("accent-color", "purple"),
+    ] {
+        user(
+            vm,
+            &format!("gsettings set org.gnome.desktop.interface {key} {value}"),
+        )?;
+    }
+    // GNOME's portal answers from the new values.
+    std::thread::sleep(Duration::from_secs(3));
+    Ok(())
+}
+
+/// Plasma, after GNOME's dark session, is Plasma's.
+fn plasma_unchanged(vm: &mut Vm) -> Result<()> {
+    let mut report = vmtest::Report::default();
+    report.check(
+        "Plasma's session carries GTK_USE_PORTAL and no profile or theme",
+        {
+            let env = user(vm, "systemctl --user show-environment")?;
+            let has = |p: &str| env.lines().any(|l| l.starts_with(p));
+            if env.lines().any(|l| l == "XDG_CURRENT_DESKTOP=KDE")
+                && has("GTK_USE_PORTAL=1")
+                && !has("DCONF_PROFILE=")
+                && !has("GTK_THEME=")
+            {
+                Ok(())
+            } else {
+                Err(anyhow!("session environment:\n{env}"))
+            }
+        },
+    );
+    report.check("the KDE database still holds Breeze Dark", {
+        let keys = user(
+            vm,
+            "env DCONF_PROFILE=ilex-kde dconf dump /org/gnome/desktop/interface/",
+        )?;
+        if keys.contains("gtk-theme='Breeze-Dark'") && keys.contains("icon-theme='breeze'") {
+            Ok(())
+        } else {
+            Err(anyhow!("KDE keys:\n{keys}"))
+        }
+    });
+    report.check("GNOME's own database is as GNOME left it", {
+        let keys = user(vm, "dconf dump /org/gnome/desktop/interface/")?;
+        if keys.contains("gtk-theme='Adwaita-dark'") && keys.contains("accent-color='purple'") {
+            Ok(())
+        } else {
+            Err(anyhow!("GNOME's keys:\n{keys}"))
+        }
+    });
+    report.check("the GTK portal reads the KDE database again", {
+        let profile = vm.ssh_ok(&format!(
+            "for pid in $(pgrep -u {USER} -f '^/usr/libexec/xdg-desktop-portal-gtk'); do \
+               tr '\\0' '\\n' < /proc/$pid/environ | grep '^DCONF_PROFILE='; done"
+        ))?;
+        if profile.trim() == "DCONF_PROFILE=ilex-kde" {
+            Ok(())
+        } else {
+            Err(anyhow!("`{profile}`"))
+        }
+    });
+    report.finish()
+}
+
+/// Pids of the test user's processes called `name`, sorted.
+fn pids(vm: &Vm, name: &str) -> Result<Vec<u32>> {
+    let out = vm.ssh_ok(&format!("pgrep -u {USER} -x {name} | sort -n; true"))?;
+    Ok(out.lines().filter_map(|l| l.trim().parse().ok()).collect())
+}
+
+/// The ids of the test user's graphical sessions, as logind lists them. The
+/// test's own `runuser` commands open short-lived sessions of the user that are
+/// not graphical and not counted.
+fn user_sessions(vm: &Vm) -> Result<Vec<String>> {
+    let out = vm.ssh_ok(&format!(
+        "for s in $(loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\" {{print $1}}'); do \
+           [ \"$(loginctl show-session $s -p Type --value 2>/dev/null)\" = wayland ] && echo $s; \
+         done; true"
+    ))?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
+/// The session watch's own log since `since` (a `date` stamp): what it decided,
+/// and why.
+fn watch_log(vm: &Vm, since: &str) -> Result<String> {
+    vm.ssh_ok(&format!(
+        "journalctl -b --no-pager -o cat --since '{since}' _UID=$(id -u {USER}) \
+         _SYSTEMD_USER_UNIT=ilex-kde-session.service; true"
+    ))
+}
+
+fn now(vm: &Vm) -> Result<String> {
+    vm.ssh_ok("date '+%Y-%m-%d %H:%M:%S'")
+}
+
+/// Stop the session watch (SIGSTOP of its process), so that the crash and the
+/// login after it happen before it acts: as late as an auto-relogin or a slow
+/// `loginctl` could make it. Returns its pid.
+fn freeze_watch(vm: &mut Vm) -> Result<String> {
+    let pid = user(
+        vm,
+        "systemctl --user show -P MainPID ilex-kde-session.service",
+    )?;
+    if pid == "0" || pid.is_empty() {
+        bail!("the session watch is not running in the Plasma session");
+    }
+    user(
+        vm,
+        "systemctl --user kill --kill-whom=main --signal=SIGSTOP ilex-kde-session.service",
+    )?;
+    vm.wait_for(
+        "the session watch to be stopped",
+        &format!("ps -o stat= -p {pid} | grep -q '^T'"),
+        Duration::from_secs(15),
+    )?;
+    println!("     session watch (pid {pid}) frozen");
+    Ok(pid)
+}
+
+/// Let the watch run again. systemd sends SIGCONT along with the SIGTERM of a
+/// stop, so a watch whose unit went down while it was stopped is already gone.
+fn thaw_watch(vm: &Vm) -> Result<()> {
+    let out = user(
+        vm,
+        "systemctl --user kill --kill-whom=main --signal=SIGCONT ilex-kde-session.service 2>&1 \
+         && echo continued || echo 'already gone: the unit was stopped'",
+    )?;
+    println!("     session watch: {}", out.lines().last().unwrap_or(""));
+    Ok(())
+}
+
+/// Plasma's stack as the crash left it, printed. Fails when
+/// `plasma-workspace.target` is already down, which would leave nothing for a
+/// late watch to act on. Returns the compositor's and the shell's pids.
+fn stale_plasma(vm: &Vm, what: &str) -> Result<(Vec<u32>, Vec<u32>)> {
+    let state = |unit: &str| user(vm, &format!("systemctl --user is-active {unit} || true"));
+    let target = state("plasma-workspace.target")?;
+    let (compositor, shell) = (pids(vm, "kwin_wayland")?, pids(vm, "plasmashell")?);
+    println!(
+        "     {what}: plasma-workspace.target {target}, graphical-session.target {}, \
+         plasma-kwin_wayland.service {}, xdg-desktop-portal.service {}; kwin_wayland {compositor:?}, \
+         plasmashell {shell:?}",
+        state("graphical-session.target")?,
+        state("plasma-kwin_wayland.service")?,
+        state("xdg-desktop-portal.service")?,
+    );
+    if target != "active" {
+        bail!(
+            "{what}: plasma-workspace.target is {target}: nothing is left for a late watch to act on"
+        );
+    }
+    Ok((compositor, shell))
+}
+
+/// Plasma's targets and the session watch are active.
+fn plasma_up(vm: &Vm) -> Result<Result<()>> {
+    let mut down = Vec::new();
+    for unit in [
+        "plasma-workspace.target",
+        "graphical-session.target",
+        "ilex-kde-session.service",
+    ] {
+        let state = user(vm, &format!("systemctl --user is-active {unit} || true"))?;
+        if state != "active" {
+            down.push(format!("{unit} {state}"));
+        }
+    }
+    Ok(if down.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("{}", down.join(", ")))
+    })
+}
+
+/// The most common colour's share of the screen, over a sample of its pixels
+/// (colours in steps of 16): the greeter is one flat colour with a small tile,
+/// a Plasma desktop is not.
+fn flat_share(rgb: &[u8], width: u32, height: u32) -> f64 {
+    let mut buckets = std::collections::HashMap::new();
+    let mut total = 0u32;
+    for y in (0..height).step_by(8) {
+        for x in (0..width).step_by(8) {
+            let i = (y as usize * width as usize + x as usize) * 3;
+            let key = (rgb[i] / 16, rgb[i + 1] / 16, rgb[i + 2] / 16);
+            *buckets.entry(key).or_insert(0u32) += 1;
+            total += 1;
+        }
+    }
+    f64::from(buckets.values().copied().max().unwrap_or(0)) / f64::from(total.max(1))
+}
+
+/// A Plasma session from GDM, and its shell up.
+fn plasma_login(vm: &mut Vm, ctl: &Vmctl, password: &str) -> Result<()> {
+    choose_session(vm, "plasma")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    vm.wait_for(
+        "the Plasma shell in the user session",
+        &format!("pgrep -u {USER} -x plasmashell"),
+        SESSION_TIMEOUT,
+    )?;
+    let frame = settle(ctl)?;
+    println!(
+        "     Plasma on screen: {:.2} of it is one colour",
+        flat_share(&frame.rgb, frame.width, frame.height)
+    );
+    Ok(())
+}
+
+/// A GNOME session from GDM, its shell up and the first-login noise cleared.
+fn gnome_login(vm: &mut Vm, ctl: &Vmctl, password: &str) -> Result<()> {
+    choose_session(vm, "gnome")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    vm.wait_for(
+        "gnome-shell in the user session",
+        &format!("pgrep -u {USER} -x gnome-shell"),
+        SESSION_TIMEOUT,
+    )?;
+    settle(ctl)?;
+    ctl.key("Escape")?;
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.key("Escape")?;
+    settle(ctl).map(drop)
+}
+
+/// Step 6: Plasma crashes and a GNOME login starts before the session watch has
+/// acted. Upstream makes that login fail: gnome-session-init-worker will not
+/// start over a graphical session that is still up ("A graphical session is
+/// already running!") and GDM drops the login, so no GNOME session can be live
+/// next to a leftover Plasma (the watch relies on it too: Plasma's target is
+/// bound to graphical-session.target). The failed attempt still exports GNOME's
+/// desktop into the manager, which is what the late watch wakes to: it must stop
+/// Plasma's leftovers without graphical-session.target being left active, and
+/// the next GNOME login must work and look as GNOME chose.
+fn late_watch_gnome(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
+    gnome_logout(vm)?;
+    plasma_login(vm, ctl, password)?;
+    let since = now(vm)?;
+    freeze_watch(vm)?;
+    kill_plasma(vm)?;
+    stale_plasma(vm, "after the crash, the watch late")?;
+    choose_session(vm, "gnome")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    // The attempt fails on its own; the session can stay listed for a while
+    // (the keyring helper of the password login holds its scope).
+    vm.wait_for(
+        "the failed GNOME login to end",
+        &format!(
+            "! loginctl list-sessions --no-legend | awk '$3 == \"{USER}\" && $6 == \"user\"' | grep -q ."
+        ),
+        SESSION_TIMEOUT,
+    )
+    .map(drop)?;
+    wait_greeter(vm)?;
+    let env = user(vm, "systemctl --user show-environment")?;
+    println!(
+        "     after the failed GNOME login the manager exports {:?}; gnome-shell of the user: {:?}",
+        env.lines()
+            .filter(|l| l.starts_with("XDG_CURRENT_DESKTOP=") || l.starts_with("XDG_SESSION_ID="))
+            .collect::<Vec<_>>(),
+        pids(vm, "gnome-shell")?
+    );
+    stale_plasma(vm, "the watch still late")?;
+
+    thaw_watch(vm)?;
+    let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
+    let down = vm.wait_for(
+        "the crashed Plasma's targets to stop once the watch wakes",
+        &kde::user_cmd(
+            &uid,
+            "sh -c '! systemctl --user is-active --quiet plasma-workspace.target && \
+             ! systemctl --user is-active --quiet graphical-session.target'",
+        ),
+        Duration::from_secs(60),
+    );
+    let log = watch_log(vm, &since)?;
+    println!("     the watch says:\n{log}");
+    let mut report = vmtest::Report::default();
+    report.check(
+        "the late watch stopped Plasma's targets, graphical-session.target included",
+        down.map(drop),
+    );
+    report.check(
+        "none of the crashed Plasma's compositor or shell is left",
+        {
+            let left: Vec<_> = ["kwin_wayland", "plasmashell"]
+                .iter()
+                .map(|name| pids(vm, name).map(|p| (*name, p)))
+                .collect::<Result<_>>()?;
+            if left.iter().all(|(_, p)| p.is_empty()) {
+                Ok(())
+            } else {
+                Err(anyhow!("still running: {left:?}"))
+            }
+        },
+    );
+    report.check("no process selects the KDE database", {
+        let holders = kde_profile_holders(vm)?;
+        if holders.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("still running: {holders:?}"))
+        }
+    });
+    report.finish()?;
+
+    // GNOME can log in now, and looks as GNOME chose.
+    gnome_login(vm, ctl, password)?;
+    shot(ctl, artifacts, "18-gnome-after-the-late-watch")?;
+    gnome_after_crash(vm)?;
+    show(
+        vm,
+        ctl,
+        artifacts,
+        "19-gnome-libadwaita-after-the-late-watch",
+        "adw",
+        None,
+    )?;
+    Ok(())
+}
+
+/// Step 7: Plasma crashes and Plasma logs in again before the session watch has
+/// acted. The leftover stack has no seat, so a session that started over it
+/// would show nothing (the greeter stays on screen): the login must stop the
+/// leftovers and start its own stack, and the late watch, waking in the middle
+/// of that, must neither stop what the new session starts nor be needed for it.
+fn late_watch_plasma(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
+    gnome_logout(vm)?;
+    plasma_login(vm, ctl, password)?;
+    let first = user_sessions(vm)?;
+    let since = now(vm)?;
+    freeze_watch(vm)?;
+    kill_plasma(vm)?;
+    let (stale_compositor, stale_shell) = stale_plasma(vm, "after the crash, the watch late")?;
+
+    // The second login, with the leftovers up; the watch wakes as soon as the
+    // new session exists, which is as late as an auto-relogin makes it.
+    choose_session(vm, "plasma")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    thaw_watch(vm)?;
+    let not_stale = |name: &str, stale: &[u32]| {
+        let skip: String = stale.iter().map(|p| format!(" -e {p}")).collect();
+        format!("pgrep -u {USER} -x {name} | grep -qvxF{skip}")
+    };
+    vm.wait_for(
+        "a Plasma compositor of the new session",
+        &not_stale("kwin_wayland", &stale_compositor),
+        SESSION_TIMEOUT,
+    )?;
+    vm.wait_for(
+        "a Plasma shell of the new session",
+        &not_stale("plasmashell", &stale_shell),
+        SESSION_TIMEOUT,
+    )?;
+    let frame = settle(ctl)?;
+    let flat = flat_share(&frame.rgb, frame.width, frame.height);
+    println!("     the new session on screen: {flat:.2} of it is one colour");
+    shot(ctl, artifacts, "21-plasma-over-a-crashed-plasma")?;
+    let second = user_sessions(vm)?;
+    let (compositor, shell) = (pids(vm, "kwin_wayland")?, pids(vm, "plasmashell")?);
+    let log = watch_log(vm, &since)?;
+    println!(
+        "     sessions: first {first:?}, second {second:?}; kwin_wayland {stale_compositor:?} -> {compositor:?}, \
+         plasmashell {stale_shell:?} -> {shell:?}\n     the watch says:\n{log}"
+    );
+
+    let mut report = vmtest::Report::default();
+    report.check(
+        "the new login is a session of its own, active",
+        if second.len() == 1 && first != second {
+            session_active(vm)
+        } else {
+            Err(anyhow!("sessions: first {first:?}, second {second:?}"))
+        },
+    );
+    report.check(
+        "none of the crashed Plasma's compositor or shell is left, the new session has its own",
+        {
+            let kept = |now: &[u32], stale: &[u32]| now.iter().any(|p| stale.contains(p));
+            if kept(&compositor, &stale_compositor) || kept(&shell, &stale_shell) {
+                Err(anyhow!("a leftover is still running"))
+            } else if compositor.is_empty() || shell.is_empty() {
+                Err(anyhow!("no compositor or no shell"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    report.check("the screen shows the new session, not the greeter", {
+        if flat < 0.9 {
+            Ok(())
+        } else {
+            Err(anyhow!("{flat:.2} of the screen is one colour"))
+        }
+    });
+    report.check(
+        "Plasma's targets and the session watch are up",
+        plasma_up(vm)?,
+    );
+    report.check("the watch stopped nothing of the new session", {
+        if log.contains("stopping") {
+            Err(anyhow!("the watch's log:\n{log}"))
+        } else {
+            Ok(())
+        }
+    });
+    report.finish()?;
+    // Plasma's look, with the database the crashed session left.
+    plasma_unchanged(vm)?;
+    toolkits(vm, ToolkitLook::Plasma { dark: true })?;
+    show(
+        vm,
+        ctl,
+        artifacts,
+        "22-plasma-gtk3-after-the-late-watch",
+        "gtk3",
+        None,
+    )?
+    .expect(Some("Breeze-Dark"), Some("breeze"), true)?;
+    // And its logout ends the session the way it always does.
+    kde::logout(vm)?;
+    manager_clean(vm, true)
+}
+
+/// The guest script that sources Plasma's login-time hook as a login of the user.
+const HOOK_PROBE: &[u8] = include_bytes!("hook-probe.sh");
+
+/// A session id logind does not have: `offset` above the highest it lists.
+fn unused_session_id(vm: &Vm, offset: u32) -> Result<String> {
+    let highest =
+        vm.ssh_ok("loginctl list-sessions --no-legend | awk '{print $1}' | sort -n | tail -n 1")?;
+    let highest: u32 = highest
+        .trim()
+        .parse()
+        .with_context(|| format!("the highest session id `{highest}`"))?;
+    Ok((highest + offset).to_string())
+}
+
+/// Step 8: another login of the user, next to a Plasma session that is live. The
+/// manager has one `XDG_SESSION_ID`, the one of whichever login imported its
+/// environment last: a login that failed (GNOME's, refusing to start next to a
+/// live Plasma, exports its id and closes) leaves the id of a session that is
+/// gone beside a Plasma that is alive, and the next Plasma login's hook must not
+/// take that for a crashed session's leftovers. A second login of the user through
+/// the greeter is not tried (GDM is expected to switch to a compatible live session
+/// instead of starting one): the hook is sourced by hand, as a login with an id of
+/// its own (one logind has never had; the hook looks no further than the listing),
+/// against the real manager, logind and Plasma. Also with a `loginctl` that always
+/// fails.
+fn second_login(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
+    plasma_login(vm, ctl, password)?;
+    let live = user_sessions(vm)?;
+    let [owner] = live.as_slice() else {
+        bail!("expected one graphical session of the user, found {live:?}");
+    };
+    let owner = owner.clone();
+    let (compositor, shell) = (pids(vm, "kwin_wayland")?, pids(vm, "plasmashell")?);
+    let (gone, own) = (unused_session_id(vm, 50)?, unused_session_id(vm, 51)?);
+    vm.ssh_ok(&format!(
+        "printf %s {} | base64 -d > /tmp/hook-probe.sh && chmod 644 /tmp/hook-probe.sh",
+        qemu::base64(HOOK_PROBE)
+    ))?;
+    let since = now(vm)?;
+    user(
+        vm,
+        &format!("systemctl --user set-environment XDG_SESSION_ID={gone}"),
+    )?;
+    let probes = (|| {
+        Ok::<_, anyhow::Error>((
+            user(vm, &format!("sh /tmp/hook-probe.sh {own}"))?,
+            user(vm, &format!("sh /tmp/hook-probe.sh {own} loginctl-fails"))?,
+        ))
+    })();
+    // The owner's id is the manager's again, whatever the probes said.
+    user(
+        vm,
+        &format!("systemctl --user set-environment XDG_SESSION_ID={owner}"),
+    )?;
+    let (normal, failing) = probes?;
+    println!(
+        "     live session {owner}, the manager named {gone}, this login {own}; the hook said:\n{normal}\n     and with a failing loginctl:\n{failing}"
+    );
+    let frame = settle(ctl)?;
+    let flat = flat_share(&frame.rgb, frame.width, frame.height);
+    shot(ctl, artifacts, "23-second-login-next-to-plasma")?;
+    let log = watch_log(vm, &since)?;
+
+    let mut report = vmtest::Report::default();
+    for (what, out, session) in [
+        ("with logind answering", &normal, owner.as_str()),
+        ("with a loginctl that fails", &failing, "?"),
+    ] {
+        report.check(
+            &format!("the hook leaves the live Plasma alone {what}"),
+            if out.starts_with("status=0 stdout=[]")
+                && out.contains(&format!(
+                    "stderr: ilex: session(s) {session} of this user are live, leaving the running Plasma alone"
+                ))
+                && !out.contains("stopping")
+            {
+                Ok(())
+            } else {
+                Err(anyhow!("{out}"))
+            },
+        );
+    }
+    report.check("the compositor and the shell are the same processes", {
+        let (c, s) = (pids(vm, "kwin_wayland")?, pids(vm, "plasmashell")?);
+        if c == compositor && s == shell && !c.is_empty() && !s.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "kwin_wayland {compositor:?} -> {c:?}, plasmashell {shell:?} -> {s:?}"
+            ))
+        }
+    });
+    report.check(
+        "Plasma's targets and the session watch are up",
+        plasma_up(vm)?,
+    );
+    report.check("the session is still the live one", {
+        let now = user_sessions(vm)?;
+        if now == live {
+            session_active(vm)
+        } else {
+            Err(anyhow!("sessions {live:?} -> {now:?}"))
+        }
+    });
+    report.check("the screen still shows the desktop, not the greeter", {
+        if flat < 0.9 {
+            Ok(())
+        } else {
+            Err(anyhow!("{flat:.2} of the screen is one colour"))
+        }
+    });
+    report.check("the session watch stopped nothing", {
+        if log.contains("stopping") {
+            Err(anyhow!("the watch's log:\n{log}"))
+        } else {
+            Ok(())
+        }
+    });
+    report.finish()?;
+    kde::logout(vm)?;
+    manager_clean(vm, true)
+}
+
+/// The Plasma unit whose stop the test holds up in step 9. It is in Plasma's
+/// start closure, so a start of the target over its pending stop is refused,
+/// like one over a compositor that is still stopping.
+const HELD_UNIT: &str = "plasma-polkit-agent.service";
+
+/// A drop-in that keeps a stop of the unit running until the test creates the
+/// release file: the stop job stays queued, and the targets are down already.
+const HOLD_DROPIN: &str = "[Service]\n\
+    ExecStop=/bin/sh -c 'while [ ! -e /run/user/%U/ilex-test-release ]; do sleep 0.2; done'\n\
+    TimeoutStopSec=150\n";
+
+fn hold_dropin_dir(vm: &Vm) -> Result<(String, String)> {
+    let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
+    let dir = format!("/run/user/{uid}/systemd/user/{HELD_UNIT}.d");
+    Ok((uid, dir))
+}
+
+/// Hold the stop of [`HELD_UNIT`] up, or let go of it for good.
+fn hold_stop(vm: &Vm, hold: bool) -> Result<()> {
+    let (uid, dir) = hold_dropin_dir(vm)?;
+    if hold {
+        vm.ssh_ok(&format!(
+            "install -d {dir} && printf %s {} | base64 -d > {dir}/90-ilex-test-hold.conf && rm -f /run/user/{uid}/ilex-test-release",
+            qemu::base64(HOLD_DROPIN.as_bytes())
+        ))?;
+    } else {
+        vm.ssh_ok(&format!(
+            "touch /run/user/{uid}/ilex-test-release; rm -rf {dir}"
+        ))?;
+    }
+    user(vm, "systemctl --user daemon-reload")?;
+    if !hold {
+        vm.ssh_ok(&format!("rm -f /run/user/{uid}/ilex-test-release"))?;
+    }
+    Ok(())
+}
+
+/// Step 9: a Plasma login while the stop of the crashed session's stack is still
+/// running. The watch's stop does not wait for the stop jobs it queues: the
+/// targets are down at once, a compositor's or a portal's own stop ends later, and
+/// Plasma's target cannot be started over it (`TransactionIsDestructive`, "Could
+/// not start systemd managed Plasma session", the greeter stays). The stop of one
+/// unit of Plasma's start closure is held up by a drop-in, so the window is as long
+/// as the test needs; the login's hook must wait for it, and the session that
+/// starts after it must have a desktop of its own.
+fn login_during_stop(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, password: &str) -> Result<()> {
+    plasma_login(vm, ctl, password)?;
+    let first = user_sessions(vm)?;
+    let since = now(vm)?;
+    hold_stop(vm, true)?;
+    let result = login_during_stop_held(vm, ctl, artifacts, password, &first, &since);
+    // Whatever happened, the next test does not wait for a held unit.
+    let _ = hold_stop(vm, false);
+    result
+}
+
+fn login_during_stop_held(
+    vm: &mut Vm,
+    ctl: &Vmctl,
+    artifacts: &Path,
+    password: &str,
+    first: &[String],
+    since: &str,
+) -> Result<()> {
+    freeze_watch(vm)?;
+    kill_plasma(vm)?;
+    let (stale_compositor, stale_shell) = stale_plasma(vm, "after the crash, the watch late")?;
+    // The watch wakes and stops the stack: the targets go inactive at once, the
+    // held unit's stop job stays queued.
+    thaw_watch(vm)?;
+    let uid = vm.ssh_ok(&format!("id -u {USER}"))?;
+    vm.wait_for(
+        "Plasma's targets to be down after the watch's stop",
+        &kde::user_cmd(
+            &uid,
+            "sh -c '! systemctl --user is-active --quiet plasma-workspace.target && \
+             ! systemctl --user is-active --quiet graphical-session.target'",
+        ),
+        Duration::from_secs(60),
+    )?;
+    let jobs = user(vm, "systemctl --user list-jobs --no-legend --full || true")?;
+    println!("     the manager's jobs while its targets are down:\n{jobs}");
+    if !jobs
+        .lines()
+        .any(|l| l.split_whitespace().nth(1) == Some(HELD_UNIT) && l.contains(" stop"))
+    {
+        bail!(
+            "no stop job of {HELD_UNIT} is queued with Plasma's targets down: the window this step needs is not there"
+        );
+    }
+
+    // The login arrives inside that window.
+    choose_session(vm, "plasma")?;
+    settle(ctl)?;
+    login(vm, ctl, password)?;
+    let waited = vm.wait_for(
+        "the login's hook to wait for the stop",
+        &format!(
+            "journalctl -b --no-pager -o cat -t ilex-kde-stale --since '{since}' | grep -F 'still stopping, waiting'"
+        ),
+        Duration::from_secs(40),
+    );
+    let during = user(vm, "systemctl --user list-jobs --no-legend --full || true")?;
+    println!("     the hook waits ({waited:?}); the manager's jobs then:\n{during}");
+    // Let the stop go: the hook returns and startplasma starts the session.
+    let (_, dir) = hold_dropin_dir(vm)?;
+    vm.ssh_ok(&format!(
+        "touch /run/user/{uid}/ilex-test-release; rm -rf {dir}"
+    ))?;
+    let not_stale = |name: &str, stale: &[u32]| {
+        let skip: String = stale.iter().map(|p| format!(" -e {p}")).collect();
+        format!("pgrep -u {USER} -x {name} | grep -qvxF{skip}")
+    };
+    let compositor = vm.wait_for(
+        "a Plasma compositor of the new session",
+        &not_stale("kwin_wayland", &stale_compositor),
+        SESSION_TIMEOUT,
+    );
+    let shell = vm.wait_for(
+        "a Plasma shell of the new session",
+        &not_stale("plasmashell", &stale_shell),
+        SESSION_TIMEOUT,
+    );
+    let frame = settle(ctl)?;
+    let flat = flat_share(&frame.rgb, frame.width, frame.height);
+    println!("     the new session on screen: {flat:.2} of it is one colour");
+    shot(ctl, artifacts, "24-plasma-login-during-a-stop")?;
+    let second = user_sessions(vm)?;
+    let journal = vm.ssh_ok(&format!(
+        "journalctl -b --no-pager -o cat --since '{since}' | grep -aE 'still stopping|still up, stopping it|leaving the running Plasma alone|TransactionIsDestructive|Could not start systemd managed Plasma' | cut -c1-200; true"
+    ))?;
+    println!("     what the login said:\n{journal}");
+
+    let mut report = vmtest::Report::default();
+    report.check(
+        "the hook saw the stop job and waited for it",
+        waited.map(drop),
+    );
+    report.check(
+        "the new login is a session of its own, active",
+        if second.len() == 1 && first != second.as_slice() {
+            session_active(vm)
+        } else {
+            Err(anyhow!("sessions: first {first:?}, second {second:?}"))
+        },
+    );
+    report.check(
+        "the new session has a compositor and a shell of its own",
+        compositor.and(shell).map(drop),
+    );
+    report.check("the screen shows the new session, not the greeter", {
+        if flat < 0.9 {
+            Ok(())
+        } else {
+            Err(anyhow!("{flat:.2} of the screen is one colour"))
+        }
+    });
+    report.check(
+        "Plasma's targets and the session watch are up",
+        plasma_up(vm)?,
+    );
+    report.check(
+        "Plasma's target was not refused for the stop that was running",
+        {
+            if journal.contains("TransactionIsDestructive")
+                || journal.contains("Could not start systemd managed Plasma")
+            {
+                Err(anyhow!("{journal}"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    report.finish()?;
+    plasma_unchanged(vm)?;
+    kde::logout(vm)?;
+    manager_clean(vm, true)
+}

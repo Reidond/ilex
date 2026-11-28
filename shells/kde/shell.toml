@@ -1,0 +1,87 @@
+name = "kde"
+description = "KDE Plasma on Wayland, signed in through Plasma Login Manager"
+
+[packages]
+# Fedora 45's KDE edition lists one comps group (@kde-desktop) whose defaults
+# add a mail server, mobile-device sync, remote-desktop servers and vendor
+# repositories, so this names the parts a desktop session needs. The file
+# manager, terminal, settings, software centre, system monitor, partition tool,
+# screenshot tool and portals stay host RPMs, as in the GNOME shell; the other
+# KDE applications are Flatpaks below. plasma-setup (a first-boot account
+# wizard that runs whether or not users exist) is deliberately not installed:
+# ilex creates accounts with `ilexctl home`.
+install = [
+    # Session, shell, compositor (kwin) and the Plasma Login Manager greeter.
+    "plasma-workspace", "plasma-desktop", "plasma-login-manager",
+    "kcm-plasmalogin", "kde-settings-plasmalogin",
+    # Hardware and system integration that cannot run in a sandbox.
+    "kscreen", "kscreenlocker", "plasma-nm", "plasma-pa", "bluedevil",
+    "plasma-systemmonitor", "plasma-disks", "kde-partitionmanager",
+    "kinfocenter", "kio-admin", "polkit-kde", "kde-inotify-survey",
+    "plasma-drkonqi", "cups-pk-helper", "plasma-print-manager",
+    # Files, terminal, screenshots, archives.
+    "dolphin", "konsole", "spectacle", "ark",
+    # Software centre with the Flatpak backend, and Flatpak permissions.
+    "plasma-discover", "plasma-discover-flatpak", "flatpak-kcm",
+    # Look: Breeze style and icons; the GTK 3 and GTK 4 Breeze themes (breeze-gtk),
+    # which the KDE-only sync in rootfs/ selects through the GTK settings portal.
+    "plasma-breeze", "breeze-icon-theme", "xdg-desktop-portal-kde", "breeze-gtk",
+    # Public profile settings confine the session's dconf writer.
+    "bubblewrap",
+]
+exclude = [
+    # Plasma Welcome and online-account web logins (which need Qt WebEngine,
+    # 277 MiB) are not part of ilex's first-run or account flow.
+    "plasma-welcome", "kaccounts-providers", "signon-ui",
+    # bootc owns OS updates: no Discover backend may manage the OS itself.
+    "plasma-discover-packagekit", "plasma-discover-rpm-ostree",
+    "plasma-discover-offline-updates",
+    # Its notifier would announce system Flatpak updates, which only root
+    # (ilexctl apps) may apply here.
+    "plasma-discover-notifier",
+    # It writes the GTK settings (settings.ini, gtkrc, GSettings) into the shared
+    # home that every desktop of that user reads; the shell mirrors Plasma's look
+    # into a KDE-only database instead (see rootfs/usr/libexec/ilex/kde-gtk-sync).
+    "kde-gtk-config",
+]
+
+[apps]
+# System-wide Flathub apps, installed by the installer and ilex-apps.timer.
+# Firefox keeps the ID the GNOME shell uses.
+flatpak = [
+    "org.kde.kwrite", "org.kde.kcalc", "org.kde.merkuro", "org.kde.kclock",
+    "org.kde.kweather", "org.kde.marble", "org.kde.gwenview", "org.kde.okular",
+    "org.kde.kamoso", "org.kde.kcharselect", "org.kde.filelight",
+    "org.kde.kfind", "org.kde.haruna", "org.kde.elisa", "org.kde.krdc",
+    "org.kde.skanpage", "org.kde.kjournaldbrowser", "org.kde.kwalletmanager",
+    "org.kde.ktorrent", "org.kde.neochat", "org.kde.kolourpaint",
+    "org.mozilla.firefox",
+]
+# Host integrations for the Flatpaks above: Dolphin's thumbnails for what Okular,
+# Gwenview and Haruna open, and Flatpak's desktop-database triggers.
+rpm = ["kdegraphics-thumbnailers", "ffmpegthumbs", "desktop-file-utils", "xdg-utils"]
+
+# The GTK 3 themes sandboxed GTK 3 applications resolve in Plasma: the portal's
+# gtk-theme names Breeze or Breeze-Dark and GTK 3 cannot take a dark variant of
+# one theme from the portal. Breeze-Dark is end of life on Flathub ("replaced by
+# org.gtk.Gtk3theme.Breeze"), whose dark colours (gtk-dark.css) GTK 3 loads only
+# for gtk-application-prefer-dark-theme: a gtk-3.0/settings.ini that every
+# desktop of the home would read, which the settings portal does not carry. The
+# old extension still installs and is kept while `graphical::apps` shows that
+# with Breeze alone a GTK 3 Flatpak stays light in a dark Plasma; its palette is
+# Plasma 5's. Libadwaita and GTK 4 applications need neither.
+[[apps.flatpak-extension]]
+id = "org.gtk.Gtk3theme.Breeze"
+branch = "3.22"
+
+[[apps.flatpak-extension]]
+id = "org.gtk.Gtk3theme.Breeze-Dark"
+branch = "3.22"
+
+[session]
+# The session file in /usr/share/wayland-sessions, without .desktop.
+desktop = "plasma"
+compositor = "kwin_wayland"
+
+[greeter]
+unit = "plasmalogin.service"

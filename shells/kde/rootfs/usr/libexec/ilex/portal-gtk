@@ -1,0 +1,14 @@
+#!/bin/sh
+# Start the GTK settings portal. In a running Plasma session it reads the
+# KDE-only dconf database (profile ilex-kde), where ilex-kde-gtk.service keeps
+# Plasma's look; anywhere else it reads the user's own database as before.
+# Decided here, per process, from the desktop that is running now: nothing
+# persists in the session environment for a later GNOME login to inherit.
+case ":${XDG_CURRENT_DESKTOP:-}:" in
+*:KDE:*)
+    case "$(systemctl --user show -P ActiveState plasma-workspace.target 2>/dev/null)" in
+    active | activating) export DCONF_PROFILE=ilex-kde ;;
+    esac
+    ;;
+esac
+exec /usr/libexec/xdg-desktop-portal-gtk "$@"

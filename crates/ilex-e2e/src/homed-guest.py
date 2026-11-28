@@ -103,8 +103,8 @@ def terminal(argv, dialogue, timeout=180, allow_failure=False, optional=False, c
                 pass
 
 
-def create(name, password, admin=False):
-    argv = ["/usr/bin/ilexctl", "home", "create", name, "--disk-size=2", "--real-name=Ilex Homed Test"]
+def create(name, password, admin=False, disk_size=2):
+    argv = ["/usr/bin/ilexctl", "home", "create", name, f"--disk-size={disk_size}", "--real-name=Ilex Homed Test"]
     if admin:
         argv.append("--admin")
     terminal(argv, [(r"password[^\r\n]*:", password), (r"(?:password|again)[^\r\n]*:", password)])
@@ -338,7 +338,7 @@ test -s ~/.config/ilex/welcome.txt""".replace("\n", " "))
         tty("ilexmaint", secrets[0], "sudo -k; sudo -p ILEX-'SUDO:' id -u", [(r"ILEX-SUDO:", secrets[0])])
         return "maintenance recovery login and sudo still work with the daily home inactive"
     if action == "create":
-        create(name, secrets[0], request.get("admin", False))
+        create(name, secrets[0], request.get("admin", False), request.get("disk_size", 2))
         assert not any(line.startswith(name + ":") for line in open("/etc/passwd"))
         assert run("getent", "passwd", name).startswith(name + ":")
         return "created encrypted home; NSS resolves identity without a passwd entry"

@@ -86,6 +86,13 @@ if gnome:
     assert any(c.startswith("settings.gnome") for c in json.loads(result.stdout)["conflicts"])
     assert sentinel_db.read_bytes() == b"outside encrypted home sentinel\n"
     (dconf_dir / "user").unlink()
+    # The KDE shell keeps Plasma's GTK look in a second database of this
+    # directory: its leaf is checked like the user's own.
+    (dconf_dir / "kde").symlink_to(sentinel_db)
+    result = cli("andriishafar", code=1)
+    assert any(c.startswith("settings.gnome") for c in json.loads(result.stdout)["conflicts"])
+    assert sentinel_db.read_bytes() == b"outside encrypted home sentinel\n"
+    (dconf_dir / "kde").unlink()
     dconf_dir.rmdir()
     if saved_dconf.exists():
         saved_dconf.rename(dconf_dir)

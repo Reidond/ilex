@@ -1,0 +1,112 @@
+#!/bin/bash
+# Mirror Plasma's look into the GSettings keys GTK applications read through the
+# settings portal, in the KDE-only dconf database (profile ilex-kde), never in a
+# shared file or database.
+#
+#   kde-gtk-sync          once
+#   kde-gtk-sync watch    once, then again after each change Plasma announces
+#                         (ilex-kde-gtk.service, which only a Plasma session runs)
+set -eu
+export DCONF_PROFILE=ilex-kde
+
+read_key() { # file group key default
+    kreadconfig6 --file "$1" --group "$2" --key "$3" --default "$4"
+}
+# A value that goes into a GVariant text: names and numbers only.
+safe() { # value fallback
+    case $1 in
+    '' | *[!A-Za-z0-9\ ._+-]*) printf '%s' "$2" ;;
+    *) printf '%s' "$1" ;;
+    esac
+}
+# A non-negative integer written in base 10, however it is padded: bash reads a
+# leading 0 as octal (08 is an error) and any run of digits as a possible overflow.
+decimal() { # text -> digits without padding or spaces; fails for anything else
+    local v=${1//[[:space:]]/}
+    case $v in '' | *[!0-9]*) return 1 ;; esac
+    while [ ${#v} -gt 1 ] && [ "${v#0}" != "$v" ]; do v=${v#0}; done
+    printf '%s' "$v"
+}
+# One colour channel, 0-255.
+channel() { # text
+    local v
+    v=$(decimal "$1") && [ ${#v} -le 3 ] && [ "$v" -le 255 ] && printf '%s' "$v"
+}
+# "r,g,b" or "r,g,b,a" (spaces allowed; the alpha is not needed) -> "r g b".
+rgb() { # text
+    local f r g b
+    IFS=, read -ra f <<<"$1"
+    case ${#f[@]} in 3 | 4) ;; *) return 1 ;; esac
+    r=$(channel "${f[0]}") && g=$(channel "${f[1]}") && b=$(channel "${f[2]}") || return 1
+    [ "${#f[@]}" -eq 3 ] || channel "${f[3]}" >/dev/null || return 1
+    printf '%s %s %s\n' "$r" "$g" "$b"
+}
+# The cursor size GTK takes: 8-256, Plasma's 0 (the theme's own size) and anything
+# that is not a number are the default 24.
+cursor_size() { # text
+    local v
+    v=$(decimal "$1") || { printf 24; return; }
+    if [ ${#v} -gt 3 ] || [ "$v" -gt 256 ]; then printf 256
+    elif [ "$v" -eq 0 ]; then printf 24
+    elif [ "$v" -lt 8 ]; then printf 8
+    else printf '%s' "$v"
+    fi
+}
+# "Noto Sans,10,-1,5,..." (a Qt font description) -> "Noto Sans 10".
+font() { # description fallback
+    local family=${1%%,*} rest=${1#*,}
+    local size=${rest%%,*}
+    case $size in '' | *[!0-9.]*) size=10 ;; esac
+    safe "$family $size" "$2"
+}
+
+sync() {
+    local red green blue theme scheme icons cursor size ui fixed keys
+    # An unreadable background is Breeze Light's.
+    read -r red green blue < <(rgb "$(read_key kdeglobals Colors:Window BackgroundNormal 239,240,241)" ||
+        echo 239 240 241)
+    # Breeze and Breeze-Dark are the GTK 3 themes (Flatpak: the two
+    # org.gtk.Gtk3theme.Breeze* extensions), picked by the window background.
+    if [ $((red * 299 + green * 587 + blue * 114)) -lt 128000 ]; then
+        theme=Breeze-Dark scheme=prefer-dark
+    else
+        theme=Breeze scheme=prefer-light
+    fi
+    icons=$(safe "$(read_key kdeglobals Icons Theme breeze)" breeze)
+    cursor=$(safe "$(read_key kcminputrc Mouse cursorTheme breeze_cursors)" breeze_cursors)
+    size=$(cursor_size "$(read_key kcminputrc Mouse cursorSize 24)")
+    ui=$(font "$(read_key kdeglobals General font 'Noto Sans,10')" 'Noto Sans 10')
+    fixed=$(font "$(read_key kdeglobals General fixed 'Noto Sans Mono,10')" 'Noto Sans Mono 10')
+    keys="[/]
+color-scheme='$scheme'
+cursor-size=$size
+cursor-theme='$cursor'
+document-font-name='$ui'
+font-name='$ui'
+gtk-theme='$theme'
+icon-theme='$icons'
+monospace-font-name='$fixed'"
+    # dconf dump lists the keys sorted, as above; skip an unchanged rewrite.
+    [ "$(dconf dump /org/gnome/desktop/interface/)" = "$keys" ] ||
+        printf '%s\n' "$keys" | dconf load /org/gnome/desktop/interface/
+}
+
+command -v kreadconfig6 >/dev/null || exit 0
+if [ "${1:-}" != watch ]; then
+    sync
+    exit
+fi
+# Subscribe first, so a change during the first sync is not missed. Plasma
+# announces a change several times in a row: settle for half a second.
+exec 3< <(busctl --user --json=short monitor \
+    --match "type=signal,interface=org.kde.KGlobalSettings,member=notifyChange" \
+    --match "type=signal,interface=org.freedesktop.portal.Settings,member=SettingChanged")
+sync
+while read -r -u 3 _; do
+    while read -r -u 3 -t 0.5 _; do :; done
+    sync
+done
+# The monitor ended (the bus went away or busctl died): fail, so that
+# Restart=on-failure starts a watcher that is listening again.
+echo "kde-gtk-sync: the D-Bus monitor ended" >&2
+exit 1

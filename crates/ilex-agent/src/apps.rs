@@ -626,10 +626,42 @@ fn status(json_output: bool) -> Result<()> {
     Ok(())
 }
 
+/// Several shells and the machine may list the same Flatpak, but only with the
+/// same branch and kind: one preinstall group carries one of each, so a second
+/// declaration that differs would silently replace the first.
+fn declare(
+    expected: &mut BTreeMap<String, (String, bool)>,
+    id: &str,
+    branch: &str,
+    runtime: bool,
+) -> Result<()> {
+    let kind = |runtime: bool| {
+        if runtime {
+            "runtime extension"
+        } else {
+            "application"
+        }
+    };
+    match expected.insert(id.to_string(), (branch.to_string(), runtime)) {
+        Some((other_branch, other_runtime))
+            if (other_branch.as_str(), other_runtime) != (branch, runtime) =>
+        {
+            Err(format!(
+                "{id} is declared as {} ({other_branch}) and as {} ({branch})",
+                kind(other_runtime),
+                kind(runtime)
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn check() -> Result<()> {
     let image = read("/usr/share/ilex/image.json")?;
     let machine = read("/usr/share/ilex/machine.json")?;
-    let mut expected = BTreeSet::new();
+    // id -> (branch, is a runtime extension). Applications are on stable; an
+    // extension (a GTK theme, say) names its branch and is a runtime.
+    let mut expected = BTreeMap::new();
     for entry in image["shells"]
         .as_array()
         .ok_or("shells missing")?
@@ -638,11 +670,23 @@ pub fn check() -> Result<()> {
     {
         if let Some(ids) = entry["apps"]["flatpak"].as_array() {
             for id in ids {
-                expected.insert(id.as_str().ok_or("invalid app ID")?.to_string());
+                declare(
+                    &mut expected,
+                    id.as_str().ok_or("invalid app ID")?,
+                    "stable",
+                    false,
+                )?;
+            }
+        }
+        if let Some(extensions) = entry["apps"]["flatpak-extension"].as_array() {
+            for extension in extensions {
+                let id = extension["id"].as_str().ok_or("invalid extension ID")?;
+                let branch = extension["branch"].as_str().ok_or("invalid extension branch")?;
+                declare(&mut expected, id, branch, true)?;
             }
         }
     }
-    let mut actual = BTreeSet::new();
+    let mut actual = BTreeMap::new();
     for path in files("/usr/share/ilex/apps")? {
         let bytes = fs::read(&path).map_err(|e| e.to_string())?;
         let installed = Path::new(LIST_DIRS[0]).join(format!(
@@ -656,17 +700,20 @@ pub fn check() -> Result<()> {
             let id = group
                 .strip_prefix("Flatpak Preinstall ")
                 .ok_or("invalid preinstall group")?;
-            if values.get("Branch").map(String::as_str) != Some("stable")
-                || values.contains_key("CollectionID")
-            {
-                return Err("preinstall must use stable without CollectionID".into());
+            if values.contains_key("CollectionID") {
+                return Err("preinstall must not set CollectionID".into());
             }
-            actual.insert(id.to_string());
+            let runtime = values.get("IsRuntime").map(String::as_str) == Some("true");
+            let branch = values.get("Branch").cloned().unwrap_or_default();
+            if !runtime && branch != "stable" {
+                return Err("preinstall applications must use stable".into());
+            }
+            actual.insert(id.to_string(), (branch, runtime));
         }
     }
     if actual != expected {
         return Err(format!(
-            "preinstall IDs differ: expected {expected:?}, found {actual:?}"
+            "preinstall entries differ: expected {expected:?}, found {actual:?}"
         ));
     }
     let enabled = Path::new("/etc/systemd/system/timers.target.wants/ilex-apps.timer").exists();

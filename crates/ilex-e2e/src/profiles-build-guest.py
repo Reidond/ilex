@@ -172,3 +172,50 @@ else:
         raise AssertionError("changed generated file collision accepted")
 
 print("public profile schema, credentials, paths, symlinks, special files and generated collisions: passed")
+
+# Shells may list the same Flatpak (both desktops ship Firefox), but only with the
+# same kind and branch: a preinstall group carries one of each, so a second
+# declaration that differs would silently replace the first.
+import types
+
+with tempfile.TemporaryDirectory(prefix="ilex-shell-apps-") as temporary:
+    ctx = Path(temporary, "ctx")
+    for directory in ("machines/generic", "shells", "build"):
+        (ctx / directory).mkdir(parents=True)
+    (ctx / "image.toml").write_text(
+        'shells = ["a", "b"]\ndefault-shell = "a"\ninstaller = "generic.a.b"\n'
+        '[[publish]]\nshells = ["a", "b"]\nmachines = ["generic"]\n')
+    (ctx / "packages.toml").write_text("")
+    (ctx / "shells/packages.toml").write_text("")
+    (ctx / "build/install-packages.sh").write_text("#!/bin/sh\n")
+    (ctx / "machines/generic/machine.toml").write_text('name = "generic"\ndescription = "fixture"\n')
+
+    def write_shell(name, apps):
+        directory = ctx / "shells" / name
+        directory.mkdir(exist_ok=True)
+        greeter = f'[greeter]\nunit = "{name}.service"\n' if name == "a" else ""
+        (directory / "shell.toml").write_text(
+            f'name = "{name}"\ndescription = "fixture"\n{apps}\n'
+            f'[session]\ndesktop = "{name}"\ncompositor = "{name}"\n{greeter}')
+
+    def compose_shells(a, b):
+        write_shell("a", a)
+        write_shell("b", b)
+        out = Path(tempfile.mkdtemp(dir=temporary))
+        compose.image(types.SimpleNamespace(context=ctx, out=out, shells="a,b", default_shell="a"))
+        return out
+
+    shared = '[apps]\nflatpak = ["org.example.Both"]\n[[apps.flatpak-extension]]\nid = "org.example.Theme"\nbranch = "3.22"\n'
+    compose_shells(shared, shared)
+    for name, other in (
+        ("branch", '[[apps.flatpak-extension]]\nid = "org.example.Theme"\nbranch = "3.20"\n'),
+        ("kind", '[apps]\nflatpak = ["org.example.Theme"]\n'),
+        ("kind the other way", '[[apps.flatpak-extension]]\nid = "org.example.Both"\nbranch = "stable"\n'),
+    ):
+        try:
+            compose_shells(shared, other)
+        except ValueError as error:
+            assert "is declared as" in str(error), (name, str(error))
+        else:
+            raise AssertionError(f"a Flatpak declared with another {name} in two shells was accepted")
+print("a Flatpak declared with different branches or kinds by two shells: refused")

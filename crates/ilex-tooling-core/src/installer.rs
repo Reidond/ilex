@@ -72,39 +72,26 @@ pub fn table(root: &Path, testing_tag: Option<&str>) -> Result<Table> {
         validate_tag(tag)?;
     }
     let rows = config::publications(root)?;
-    let manifest = config::manifest(&root.join("image.toml"))?;
-    let shell_order = manifest["publish"]
-        .as_array()
-        .context("publish must be an array")?
-        .iter()
-        .map(|entry| {
-            config::string_list(
-                entry.as_table().context("publish entry must be a table")?,
-                "shells",
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
     let default = config::installer(root)?;
     let default_shells = &rows
         .iter()
         .find(|row| row.tag == default)
         .context("installer publication missing")?
         .shells;
-    let mut compositions: Vec<_> = rows.iter().filter(|row| !row.shells.is_empty()).collect();
+    // One ISO per shell edition: this Anaconda network installer is the edition
+    // of the installer composition's shell list (GNOME), so it offers that list
+    // with every machine and no other shell list. Another shell's compositions
+    // (KDE) arrive with that shell's own installer and release; offering them
+    // here would also make this release wait for tags it cannot install.
+    let mut compositions: Vec<_> = rows
+        .iter()
+        .filter(|row| !row.shells.is_empty() && &row.shells == default_shells)
+        .collect();
     compositions.sort_by_key(|row| {
         if row.tag == default {
             (0, 0, String::new())
-        } else if &row.shells == default_shells {
-            (1, 0, row.machine.clone())
         } else {
-            (
-                2,
-                shell_order
-                    .iter()
-                    .position(|shells| shells == &row.shells)
-                    .unwrap_or(usize::MAX),
-                String::new(),
-            )
+            (1, 0, row.machine.clone())
         }
     });
     let mut table = Table {

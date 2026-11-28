@@ -37,10 +37,12 @@ shells = selected("ILEX_SHELLS", "shells", "shell.toml")
 machines = selected("ILEX_APPS_MACHINES", "machines", "machine.toml")
 print(f"checking the apps of shells [{', '.join(shells)}] and machines [{', '.join(machines)}]")
 ids = set()
+extensions = {}  # id -> branch
 for directory, filename, names in (("shells", "shell.toml", shells), ("machines", "machine.toml", machines)):
     for name in names:
-        manifest = tomllib.loads((root / directory / name / filename).read_text())
-        ids.update(manifest.get("apps", {}).get("flatpak", []))
+        apps = tomllib.loads((root / directory / name / filename).read_text()).get("apps", {})
+        ids.update(apps.get("flatpak", []))
+        extensions.update({e["id"]: e["branch"] for e in apps.get("flatpak-extension", [])})
 
 
 def get(url):
@@ -65,9 +67,29 @@ def check(app_id):
         return "warning", f"not verified: Flathub unreachable for {app_id}: {error}"
 
 
+def check_extension(item):
+    """A runtime extension has no appstream entry: its summary names its branches.
+
+    Flathub's API does not report an extension's end of life (a replaced theme
+    still installs); the manifest comment is where that is recorded.
+    """
+    extension_id, branch = item
+    try:
+        summary = json.loads(get(f"https://flathub.org/api/v2/summary/{extension_id}"))
+        if branch not in summary.get("branches", {}) or "x86_64" not in summary.get("arches", []):
+            return "error", f"{extension_id}//{branch}: no x86_64 build on that branch"
+        return "ok", f"{extension_id}//{branch}"
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return "error", f"{extension_id}: {error}"
+        return "warning", f"not verified: Flathub unreachable for {extension_id}: {error}"
+    except (OSError, ValueError) as error:
+        return "warning", f"not verified: Flathub unreachable for {extension_id}: {error}"
+
+
 errors = 0
 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-    for level, message in pool.map(check, sorted(ids)):
+    for level, message in [*pool.map(check, sorted(ids)), *pool.map(check_extension, sorted(extensions.items()))]:
         print(f"{level}: {message}")
         errors += level == "error"
 try:

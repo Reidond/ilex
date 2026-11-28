@@ -1,0 +1,11 @@
+[Unit]
+Description=Add Flathub to the user's Flatpak installation for Discover, once
+# Started with the Plasma session only (plasma-workspace.target.wants). Once per
+# user: a remote the user later removes is not added again.
+PartOf=plasma-workspace.target
+ConditionUser=!root
+ConditionPathExists=!%S/ilex/kde-flathub-remote
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ilex/kde-flathub

@@ -1,0 +1,11 @@
+[Unit]
+Description=Mirror Plasma's look into the KDE-only GSettings database for GTK applications
+# Started with the Plasma session only (plasma-workspace.target.wants); GNOME
+# never reaches this unit.
+PartOf=plasma-workspace.target
+After=plasma-kded6.service
+
+[Service]
+ExecStart=/usr/libexec/ilex/kde-gtk-sync watch
+Restart=on-failure
+RestartSec=2
