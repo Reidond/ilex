@@ -902,7 +902,11 @@ echo "failed=$(systemctl --failed --no-legend --plain | wc -l)"
         want("tpm_tokens", "1")?;
         want("tpm_pcrs", "7")?;
         want("tpm_bank", "sha256")?;
-        want("tpm_pin", "False")?;
+        // systemd leaves `tpm2-pin` out of a token that has none.
+        ensure!(
+            matches!(field(&out, "tpm_pin")?, "None" | "False"),
+            "the chip's token wants a PIN: {out}"
+        );
         want("tpm_extra", "")?;
     } else {
         want("slots", "2")?;
