@@ -93,10 +93,18 @@ Eligibility requires SecureBoot=1, SetupMode=0, TPM2, a nonzero SHA-256 PCR 7
 matching event-log replay, the qualified systemd 262 format, matching live/target
 RPM versions and the target unlock-stack marker. The allowlist is
 systemd/systemd-udev `262.1-1.fc45.x86_64` and cryptsetup/cryptsetup-libs
-`2.8.8-1.fc45.x86_64` or `2.8.9-1.fc45.x86_64` (the second joined with the new
-installer's `iso::next_security`, which enrolls and unlocks with it on KVM with
-enrolled OVMF and a persistent swtpm); another pair stays passphrase-only until
-qualified.
+`2.8.8-1.fc45.x86_64` or `2.8.9-1.fc45.x86_64`; another pair stays
+passphrase-only until qualified. 2.8.9 (Fedora's bootc from 2026-11-27) was
+joined by the new installer's `iso::next_security`, which enrolls and unlocks
+with it on KVM with enrolled OVMF and a persistent swtpm, and was then
+requalified through this document's own tiers on KVM / 6 GiB / two vCPUs with
+the live ISO and the rebuilt candidate both on 2.8.9 (every probe and token
+record names it): `security::encrypted_install` (first boot opened by the chip,
+`tpm2`), `security::encrypted_existing_space` (including repair cut after
+actual header writes) and `security::encrypted_interrupted` passed.
+`security::upgrade_rollback` needs a signed, published rollback image pinned by
+digest whose tools equal the installer's; until a published image carries 2.8.9
+only CI's installer release can run it.
 Both builds record package versions and SHA-256 hashes of the helper, enrollment
 and unlock executables, TPM token plugin, cryptsetup library and TSS ESAPI.
 Runtime verifies these files against `/usr/lib/ilex/security/tools.json` before
