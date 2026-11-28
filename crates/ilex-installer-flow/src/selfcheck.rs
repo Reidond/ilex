@@ -1708,6 +1708,41 @@ fn encryption() -> Result<()> {
             && flow.secrets_wiped() == 1,
         "the done page of an encrypted installation: {done:?}"
     );
+    // A layout chosen after the passphrase and password were typed: what was
+    // typed holds the old layout's characters, so the fields are emptied and
+    // the pages ask for them again (the boot prompt would not unlock).
+    let (mut flow, _) = flow_on("generic")?;
+    flow.advance();
+    flow.advance();
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Encryption)
+            && flow.set_passphrase(Secret::new("zebra-yoga"))
+            && flow.set_passphrase_confirmation(Secret::new("zebra-yoga"))
+            && flow.can_continue()
+            && flow.advance() == Step::Goto(PageId::Account),
+        "the encryption page before the layout change"
+    );
+    fill_account(&mut flow, "before the layout change")?;
+    let wiped = flow.secrets_wiped();
+    while flow.page() != PageId::Welcome {
+        ensure!(flow.back().is_some(), "Back to the welcome page");
+    }
+    flow.set_keyboard("de-nodeadkeys");
+    ensure!(
+        flow.secrets_wiped() == wiped + 1
+            && flow.passphrase().is_empty()
+            && flow.passphrase_confirmation().is_empty()
+            && flow.password().is_empty()
+            && flow.confirmation().is_empty(),
+        "a layout change keeps what was typed in the old layout"
+    );
+    // Choosing the same layout again, or one with nothing typed, wipes nothing.
+    flow.set_keyboard("de-nodeadkeys");
+    flow.set_keyboard("us");
+    ensure!(
+        flow.secrets_wiped() == wiped + 1,
+        "a layout change with nothing typed counts as a wipe"
+    );
     // Back at the start, encryption is on again and nothing is kept.
     let (flow, _) = flow_on("generic+attach-done+encrypted")?;
     ensure!(

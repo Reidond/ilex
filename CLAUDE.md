@@ -3554,6 +3554,9 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     initramfs applies before `systemd-ask-password` asks, so that **the prompt is
     in the layout the passphrase was typed in** (the image's initramfs has every
     kbd keymap and no Plymouth: the prompt is text on the console, not a splash).
+    For that to hold, a layout chosen after the passphrase or the password was
+    typed empties them in the flow (`set_keyboard` wipes the secrets; the fields
+    follow `secrets_wiped`), so they are typed again in the layout that is used.
     Measured: bootc adds no LUKS argument of its own to the boot entry, which
     reads `root=UUID=<btrfs> rootflags=subvol=/ rw boot=UUID=<boot> rhgb quiet
     rd.luks.options=tpm2-device=auto rd.luks.uuid=<luks uuid>

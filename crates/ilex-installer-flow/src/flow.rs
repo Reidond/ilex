@@ -1218,6 +1218,18 @@ impl Flow {
         if self.keyboard.requested == id {
             return Step::Stay;
         }
+        // What was typed in the old layout holds that layout's characters,
+        // and the installed computer asks for it in the new one (the
+        // passphrase at the start-up prompt, the password at the login
+        // screen): a match would no longer unlock the disk. The fields are
+        // emptied, so they are typed again in the layout that will be used.
+        if !(self.password.is_empty()
+            && self.confirmation.is_empty()
+            && self.passphrase.is_empty()
+            && self.passphrase_confirmation.is_empty())
+        {
+            self.wipe_secrets();
+        }
         self.invalidate_check();
         self.keyboard.requested = id.to_owned();
         self.keyboard.failure = None;
@@ -1472,7 +1484,8 @@ impl Flow {
     }
 
     /// Wipe the flow's own copy of the passwords. An interface clears the
-    /// fields it holds them in when [`Flow::secrets_wiped`] changes.
+    /// fields it holds them in when [`Flow::secrets_wiped`] changes. Also
+    /// when the keyboard layout changes after they were typed.
     fn wipe_secrets(&mut self) {
         self.password = Secret::default();
         self.confirmation = Secret::default();
