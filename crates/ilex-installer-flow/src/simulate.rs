@@ -308,6 +308,9 @@ impl Modifiers {
                     modifiers.key_at_start = Some(KeyStatus::Waiting);
                 }
                 "attach-key-acked" => {
+                    // Confirmed already: it stays where it is, for a page to look
+                    // at.
+                    modifiers.script = Script::Stalled;
                     modifiers.attach = Attach::Installing;
                     modifiers.recovery = true;
                     modifiers.encrypted = true;
@@ -499,11 +502,18 @@ impl Simulated {
             plan.disk.serial.clone_from(&disk.serial);
         }
         let summary = summary_of(&plan, &probe.edition.name);
-        let key = self.modifiers.key_at_start;
+        // An installation that ended had its key confirmed.
+        let key = self.modifiers.key_at_start.or_else(|| {
+            (attach == Attach::Done && plan.encryption.recovery_key)
+                .then_some(KeyStatus::Acknowledged)
+        });
         let script = match attach {
             // With a key under way the installation really goes on (it waits for
-            // the confirmation, then ends).
-            Attach::Installing if key.is_some() => Script::Success,
+            // the confirmation, then ends); once confirmed it stays where it is
+            // (a page to look at).
+            Attach::Installing if key.is_some() && key != Some(KeyStatus::Acknowledged) => {
+                Script::Success
+            }
             Attach::Installing => Script::Stalled,
             Attach::Done => Script::Success,
             _ => Script::FailImage,

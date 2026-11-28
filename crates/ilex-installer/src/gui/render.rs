@@ -181,7 +181,7 @@ const SHOTS: &[Shot] = shots![
     "installing-key-confirmed", "generic+attach-key-acked+chip", Installing, "", "", [];
     "done-chip", "generic+chip+recovery", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Recovery), Do::GroupsRight, Do::ConfirmRecovery, Do::Wait(PageId::Done), Do::PasswordsWiped];
     "done-passphrase-only", "generic+recovery", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Recovery), Do::GroupsRight, Do::ConfirmRecovery, Do::Wait(PageId::Done)];
-    "done-chip-reattached", "generic+attach-key-acked+chip", Done, "", "", [Do::Wait(PageId::Done)];
+    "done-chip-reattached", "generic+attach-done+encrypted+recovery+chip", Done, "", "", [];
     "installing-early", "generic+early", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "installing", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "installing-log", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::ExpandLog];
