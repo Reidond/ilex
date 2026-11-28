@@ -203,7 +203,11 @@ fn welcome() -> Result<()> {
         ctl.key("shift+Tab")?;
         ctl.key("Return")?;
         std::thread::sleep(Duration::from_secs(2));
-        ctl.type_text("english (us")?;
+        // German is active: the parenthesis of a US keyboard's Shift+9 is Shift+8
+        // here (everything else in the name is the same key on both).
+        ctl.type_text("english ")?;
+        ctl.key("shift+8")?;
+        ctl.type_text("us")?;
         std::thread::sleep(Duration::from_secs(1));
         ctl.key("Return")?;
         let back = wait_event(vm, &serial, "layout", EVENT_TIMEOUT, |w| {
@@ -467,8 +471,9 @@ fn frozen_back() -> Result<()> {
         let serial = vm.info.dir.join("serial.log");
         let ctl = Vmctl::from_info(vm.info.clone());
         to_account_filled(vm, &ctl, &serial, artifacts, "kde-frozen-back")?;
-        // Enter asks the helper to check the choices; the review page is shown
-        // while it does (its marker comes with the result, twelve seconds on).
+        // Enter asks the helper to check the choices: the administrator page
+        // says "Checking..." and the flow is frozen until the answer, twelve
+        // seconds on (the review page comes with it).
         ctl.key("Return")?;
         std::thread::sleep(Duration::from_secs(2));
         let page_markers = |w: &std::collections::BTreeMap<String, String>| {
@@ -476,7 +481,8 @@ fn frozen_back() -> Result<()> {
         };
         let pages = count(&serial, page_markers)?;
         ctl.save_screenshot(&artifacts.join("next-kde-frozen-back-checking.png"))?;
-        // Twice, a second apart: the second one finds the row put back.
+        // Twice, a second apart: the row is lowered to the disk page, and put
+        // back, each time.
         for _ in 0..2 {
             ctl.key("alt+Left")?;
             std::thread::sleep(Duration::from_secs(1));
@@ -498,14 +504,14 @@ fn frozen_back() -> Result<()> {
         ensure!(
             count(&serial, page_markers)? == pages + 1
                 && count(&serial, is_page("account"))? == 1,
-            "the flow went back to the administrator page while the plan was checked"
+            "a page marker came besides the review page's while the plan was checked"
         );
         // The window said it put its page row back (the interface's own stderr
-        // is in the journal): it had moved off the review page.
+        // is in the journal): it had moved off the administrator page.
         vm.wait_ssh(Duration::from_secs(180))?;
         let found = vm.ssh_ok(
             "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
-             echo moved=$(grep -c -e 'qml: the page row showed .* while the flow is on review: put back' /tmp/journal.txt); \
+             echo moved=$(grep -c -e 'qml: the page row showed .* while the flow is on account: put back' /tmp/journal.txt); \
              rm -f /tmp/journal.txt",
         )?;
         ensure!(
