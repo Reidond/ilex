@@ -132,7 +132,15 @@ pub struct Build<'a> {
 }
 
 pub(crate) fn validated_table(root: &Path, testing_tag: Option<&str>) -> Result<installer::Table> {
-    let mut table = installer::table(root, testing_tag)?;
+    with_profiles(root, installer::table(root, testing_tag)?)
+}
+
+/// The next installer's table (every edition's compositions).
+pub(crate) fn validated_table_next(root: &Path) -> Result<installer::Table> {
+    with_profiles(root, installer::table_next(root)?)
+}
+
+fn with_profiles(root: &Path, mut table: installer::Table) -> Result<installer::Table> {
     let output = cmd::output(
         Command::new("python3")
             .args([

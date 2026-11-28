@@ -158,11 +158,11 @@ pub fn build_image(ws: &Workspace, spec: &Build) -> Result<String> {
     let generated = out_dir.join("generated");
     fs::create_dir_all(&generated)?;
     fs::write(generated.join("edition.json"), edition_json(&edition)?)?;
-    // The catalogue the root helper offers: the Anaconda installer's table,
-    // which the helper narrows to this edition.
+    // The catalogue the root helper offers: every edition's compositions, which
+    // the helper narrows to this edition.
     fs::write(
         generated.join("compositions.json"),
-        crate::iso::table_bytes(&crate::iso::validated_table(&ws.root, None)?)?,
+        crate::iso::table_bytes(&crate::iso::validated_table_next(&ws.root)?)?,
     )?;
     fs::write(
         generated.join("iso.yaml"),
