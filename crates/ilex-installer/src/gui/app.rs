@@ -1,5 +1,6 @@
 //! The application: an `AdwNavigationView` with the welcome, machine, disk,
-//! account, review, installing, done and problem pages, each drawn from the
+//! encryption, account, review, installing, recovery key, done and problem
+//! pages, each drawn from the
 //! flow's state. The flow decides which
 //! page is next and whether Continue works; this file turns its state into
 //! widgets and the person's input into flow calls. Nothing here talks to the
@@ -25,7 +26,8 @@ use relm4::gtk::{self, glib};
 use relm4::prelude::*;
 
 use super::install::{
-    DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, ReviewPage, confirmation,
+    DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, RecoveryPage, ReviewPage,
+    confirmation,
 };
 use crate::serial;
 
@@ -208,9 +210,11 @@ pub struct Widgets {
     welcome: Welcome,
     machine: Machine,
     disk: DiskPage,
+    encryption: Encryption,
     account: Account,
     review: ReviewPage,
     installing: InstallingPage,
+    recovery: RecoveryPage,
     done: DonePage,
     problem: ProblemPage,
     /// The erase dialog, while the flow has one open.
@@ -240,6 +244,27 @@ struct Machine {
     notice: gtk::Label,
     rows: Vec<(String, gtk::CheckButton, adw::ActionRow)>,
     button: gtk::Button,
+}
+
+struct Encryption {
+    page: adw::NavigationPage,
+    banner: adw::Banner,
+    switch: adw::SwitchRow,
+    /// Unlock with the security chip, where the computer can.
+    chip: adw::SwitchRow,
+    /// The passphrase and its confirmation, in a group that is shown while
+    /// encryption is on.
+    group: adw::PreferencesGroup,
+    passphrase: adw::PasswordEntryRow,
+    confirmation: adw::PasswordEntryRow,
+    /// Under the fields: the keyboard layout the passphrase is typed in.
+    layout: gtk::Label,
+    message: gtk::Label,
+    /// While encryption is off: what that means.
+    off: gtk::Label,
+    button: gtk::Button,
+    /// The flow's wipe count the fields were last cleared at.
+    wiped: u64,
 }
 
 struct Account {
@@ -520,10 +545,78 @@ impl Widgets {
             Some(&account_button),
         );
 
-        // --- disk, review, installing, done, problem ---
+        // --- encryption ---
+        let switch = adw::SwitchRow::builder()
+            .title(view::ENCRYPT_TITLE)
+            .subtitle(view::ENCRYPT_SUBTITLE)
+            .name("encrypt")
+            .active(flow.encrypt())
+            .build();
+        let passphrase = adw::PasswordEntryRow::builder()
+            .title(view::PASSPHRASE_LABEL)
+            .name("passphrase")
+            .build();
+        let passphrase_confirmation = adw::PasswordEntryRow::builder()
+            .title(view::PASSPHRASE_CONFIRMATION_LABEL)
+            .name("passphrase-confirmation")
+            .build();
+        // As the account page's: nothing a person types is kept for Ctrl+Z.
+        passphrase.set_enable_undo(false);
+        passphrase_confirmation.set_enable_undo(false);
+        let encrypt_group = group("", "");
+        encrypt_group.add(&switch);
+        // The security chip: on where the computer can, with one line that says
+        // why not where it cannot (`view.encryption.chip`).
+        let chip = adw::SwitchRow::builder()
+            .title(ilex_installer_flow::recovery::CHIP_TITLE)
+            .subtitle_lines(0)
+            .name("chip")
+            .active(false)
+            .sensitive(false)
+            .build();
+        encrypt_group.add(&chip);
+        let passphrase_group = group("", "");
+        passphrase_group.add(&passphrase);
+        passphrase_group.add(&passphrase_confirmation);
+        let passphrase_layout = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "dim-label"])
+            .build();
+        let passphrase_message = message_label();
+        let encryption_off = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .label(ilex_installer_flow::encryption::OFF_LINE)
+            .css_classes(["caption", "warning"])
+            .visible(false)
+            .build();
+        let encryption_button = continue_button(messages::CONTINUE_LABEL);
+        let encryption_form = form(
+            view::ENCRYPTION_HEADING,
+            ilex_installer_flow::encryption::INTRODUCTION,
+            &[
+                encrypt_group.upcast_ref(),
+                passphrase_group.upcast_ref(),
+                passphrase_layout.upcast_ref(),
+                passphrase_message.upcast_ref(),
+                encryption_off.upcast_ref(),
+            ],
+        );
+        let encryption_banner = banner(None);
+        let encryption_page = page(
+            view::ENCRYPTION_TITLE,
+            PageId::Encryption.id(),
+            Some(&encryption_banner),
+            &encryption_form,
+            Some(&encryption_button),
+        );
+
+        // --- disk, review, installing, recovery key, done, problem ---
         let disk = DiskPage::build(sender);
         let review = ReviewPage::build(sender);
         let installing = InstallingPage::build();
+        let recovery = RecoveryPage::build(sender, flow.secrets_wiped());
         let done = DonePage::build(sender);
         let problem_page = ProblemPage::build(sender);
         let log = LogDialog::build(sender);
@@ -532,9 +625,11 @@ impl Widgets {
             &welcome_page,
             &machine_page,
             &disk.page,
+            &encryption_page,
             &account_page,
             &review.page,
             &installing.page,
+            &recovery.page,
             &done.page,
             &problem_page.page,
         ] {
@@ -576,13 +671,39 @@ impl Widgets {
             let input = input.clone();
             move |row| input.emit(Msg::Event(Event::Confirmation(secret_of(row))))
         });
-        for banner in [&welcome_banner, &machine_banner, &account_banner] {
+        switch.connect_active_notify({
+            let input = input.clone();
+            move |row| input.emit(Msg::Event(Event::Encrypt(row.is_active())))
+        });
+        chip.connect_active_notify({
+            let input = input.clone();
+            move |row| input.emit(Msg::Event(Event::Chip(row.is_active())))
+        });
+        passphrase.connect_changed({
+            let input = input.clone();
+            move |row| input.emit(Msg::Event(Event::Passphrase(secret_of(row))))
+        });
+        passphrase_confirmation.connect_changed({
+            let input = input.clone();
+            move |row| input.emit(Msg::Event(Event::PassphraseConfirmation(secret_of(row))))
+        });
+        for banner in [
+            &welcome_banner,
+            &machine_banner,
+            &encryption_banner,
+            &account_banner,
+        ] {
             banner.connect_button_clicked({
                 let input = input.clone();
                 move |_| input.emit(Msg::Event(Event::Probe))
             });
         }
-        for button in [&welcome_button, &machine_button, &account_button] {
+        for button in [
+            &welcome_button,
+            &machine_button,
+            &encryption_button,
+            &account_button,
+        ] {
             button.connect_clicked({
                 let input = input.clone();
                 move |_| input.emit(Msg::Event(Event::Continue))
@@ -611,6 +732,8 @@ impl Widgets {
             name.upcast_ref(),
             password.upcast_ref(),
             confirmation.upcast_ref(),
+            passphrase.upcast_ref(),
+            passphrase_confirmation.upcast_ref(),
         ] {
             row.connect_entry_activated({
                 let input = input.clone();
@@ -630,6 +753,20 @@ impl Widgets {
                 focus.grab_focus();
             });
         }
+
+        // The encryption page starts on the passphrase while encryption is on
+        // (what nearly everyone does first), else on the switch.
+        encryption_page.connect_shown({
+            let switch = switch.clone();
+            let passphrase = passphrase.clone();
+            move |_| {
+                if switch.is_active() {
+                    passphrase.grab_focus();
+                } else {
+                    switch.grab_focus();
+                }
+            }
+        });
 
         // The problem page starts on Try again when it has one, else on Restart.
         problem_page.page.connect_shown({
@@ -671,6 +808,20 @@ impl Widgets {
                 rows: Vec::new(),
                 button: machine_button,
             },
+            encryption: Encryption {
+                page: encryption_page,
+                banner: encryption_banner,
+                switch,
+                chip,
+                group: passphrase_group,
+                passphrase,
+                confirmation: passphrase_confirmation,
+                layout: passphrase_layout,
+                message: passphrase_message,
+                off: encryption_off,
+                button: encryption_button,
+                wiped: flow.secrets_wiped(),
+            },
             account: Account {
                 page: account_page,
                 banner: account_banner,
@@ -685,6 +836,7 @@ impl Widgets {
             disk,
             review,
             installing,
+            recovery,
             done,
             problem: problem_page,
             confirm: None,
@@ -710,17 +862,27 @@ impl Widgets {
         self.sync_welcome(&v);
         self.sync_machine(&v, sender);
         self.disk.sync(&v, sender);
+        self.sync_encryption(&v);
         self.sync_account(&v, flow);
         self.review.sync(&v, flow);
         self.installing.sync(&v);
+        self.recovery.sync(&v);
         self.done.sync(&v);
         self.problem.sync(&v);
         // Whether the person may go back from a page is the flow's to say.
         self.machine.page.set_can_pop(v.machine.chrome.can_pop);
         self.disk.page.set_can_pop(v.disk.chrome.can_pop);
+        self.encryption
+            .page
+            .set_can_pop(v.encryption.chrome.can_pop);
         self.account.page.set_can_pop(v.account.chrome.can_pop);
         self.review.page.set_can_pop(v.review.chrome.can_pop);
-        for page in [&self.installing.page, &self.done.page, &self.problem.page] {
+        for page in [
+            &self.installing.page,
+            &self.recovery.page,
+            &self.done.page,
+            &self.problem.page,
+        ] {
             page.set_can_pop(false);
         }
         // The dialogs are open exactly while the flow says so.
@@ -830,6 +992,68 @@ impl Widgets {
         }
     }
 
+    fn sync_encryption(&mut self, v: &View) {
+        let encryption = &v.encryption;
+        // The flow wiped its copy of the passphrase (the installation is over,
+        // or the computer is going down): the fields that hold it are cleared
+        // too.
+        if self.encryption.wiped != encryption.wiped {
+            self.encryption.wiped = encryption.wiped;
+            self.encryption.passphrase.set_text("");
+            self.encryption.confirmation.set_text("");
+        }
+        let e = &self.encryption;
+        sync_banner(&e.banner, &encryption.chrome.banner);
+        // The switch follows the flow (a restarted interface, the renderer);
+        // the flow ignores an echo of its own value.
+        if e.switch.is_active() != encryption.encrypt.on {
+            e.switch.set_active(encryption.encrypt.on);
+        }
+        // The choices cannot change while the helper checks them (or while it is
+        // asked where an installation is, which is how the application starts).
+        // A field of this page that has the focus gives it up first (GTK warns
+        // when a focused text becomes insensitive); one that has it elsewhere
+        // keeps it: the welcome page's first control has it at the start.
+        if e.switch.is_sensitive() != encryption.encrypt.enabled {
+            if !encryption.encrypt.enabled {
+                release_focus(&e.page);
+            }
+            e.switch.set_sensitive(encryption.encrypt.enabled);
+        }
+        // The security chip's row: a switch where the computer can, else a line
+        // that says why it cannot.
+        let chip = &encryption.chip;
+        if e.chip.is_sensitive() != chip.enabled {
+            if !chip.enabled {
+                release_focus(&e.page);
+            }
+            e.chip.set_sensitive(chip.enabled);
+        }
+        if e.chip.is_active() != chip.on {
+            e.chip.set_active(chip.on);
+        }
+        if e.chip.subtitle().is_none_or(|s| s.as_str() != chip.line) {
+            e.chip.set_subtitle(&chip.line);
+        }
+        e.group.set_visible(encryption.fields);
+        e.layout.set_visible(encryption.fields);
+        e.off.set_visible(encryption.off_line.is_some());
+        if e.passphrase.is_sensitive() != encryption.editable {
+            if !encryption.editable {
+                release_focus(&e.page);
+            }
+            e.passphrase.set_sensitive(encryption.editable);
+            e.confirmation.set_sensitive(encryption.editable);
+        }
+        e.layout.set_label(&encryption.layout_line);
+        let rows: [&gtk::Widget; 2] = [e.passphrase.upcast_ref(), e.confirmation.upcast_ref()];
+        show_note(&e.message, encryption.note.as_ref(), &rows);
+        if let Some(next) = &encryption.chrome.next {
+            e.button.set_label(next.label);
+            e.button.set_sensitive(next.enabled);
+        }
+    }
+
     fn sync_account(&mut self, v: &View, flow: &Flow) {
         let account = &v.account;
         // The flow wiped its copy of the passwords (the installation is over,
@@ -885,12 +1109,23 @@ impl Widgets {
     }
 }
 
+/// The focus leaves `page` when something on it has it (GTK warns when a
+/// focused widget becomes insensitive).
+fn release_focus(page: &adw::NavigationPage) {
+    if let Some(root) = page.root()
+        && let Some(focus) = root.focus()
+        && focus.is_ancestor(page)
+    {
+        root.set_focus(None::<&gtk::Widget>);
+    }
+}
+
 /// Show a note beside its field, or hide the label. A refusal (an error note)
 /// also marks the rows: the error style, and for assistive technology the
 /// rows' invalid state with the message as their error message; advice is
 /// dimmed text and the rows go back to valid (state and relation included), as
 /// they do with no note at all.
-fn show_note(label: &gtk::Label, note: Option<&view::Note>, rows: &[&gtk::Widget]) {
+pub(super) fn show_note(label: &gtk::Label, note: Option<&view::Note>, rows: &[&gtk::Widget]) {
     match note {
         Some(note) => {
             label.set_css_classes(&["caption", if note.error { "error" } else { "dim-label" }]);
@@ -966,7 +1201,7 @@ fn show_stack(nav: &adw::NavigationView, want: &[&str]) {
 /// into a `Secret`: no `String` or `GString` of it is made, so the only
 /// copies are the field's (secure) buffer and a value that is wiped when it is
 /// dropped.
-fn secret_of(row: &impl IsA<gtk::Editable>) -> Secret {
+pub(super) fn secret_of(row: &impl IsA<gtk::Editable>) -> Secret {
     let editable: &gtk::Editable = row.upcast_ref();
     // SAFETY: `gtk_editable_get_text` returns a NUL-terminated string that
     // the widget owns and keeps valid until its text changes; it is only read

@@ -75,8 +75,10 @@ pub mod qobject {
         #[cxx_name = "sendField"]
         unsafe fn send_field(self: Pin<&mut Installer>, name: &QString, item: *mut QObject);
 
-        /// A page that comes back puts what the flow holds of a password in its
-        /// field (`password` or `confirmation`).
+        /// A page that comes back puts what the flow holds of a password, the
+        /// disk's passphrase or the recovery key typed back in its field
+        /// (`password`, `confirmation`, `passphrase`, `passphrase-confirmation`
+        /// or `recovery-key`).
         ///
         /// # Safety
         /// `item` is a live QML text field (it is written on the Qt thread).
@@ -110,7 +112,7 @@ pub mod qobject {
         fn render_report(self: Pin<&mut Installer>, kind: &QString, value: &QString);
 
         /// The renderer asks the window to do something only the window can
-        /// (`type`, `back`, `expand-log`, `fields`, `quit`).
+        /// (`type`, `switch`, `back`, `expand-log`, `fields`, `quit`).
         #[qsignal]
         #[cxx_name = "renderDo"]
         fn render_do(self: Pin<&mut Installer>, action: &QString, first: &QString, second: &QString);
@@ -256,6 +258,9 @@ impl qobject::Installer {
             let secret = match String::from(name).as_str() {
                 "password" => running.flow.password(),
                 "confirmation" => running.flow.confirmation(),
+                "passphrase" => running.flow.passphrase(),
+                "passphrase-confirmation" => running.flow.passphrase_confirmation(),
+                "recovery-key" => running.flow.recovery_typed(),
                 _ => return None,
             };
             (!secret.is_empty()).then(|| QString::from(secret.expose()))

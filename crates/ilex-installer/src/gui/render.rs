@@ -28,7 +28,7 @@ use ilex_installer_flow::keyboard::{Layout, Layouts, SessionKeyboard, Sources};
 use ilex_installer_flow::language;
 use ilex_installer_flow::markers;
 use ilex_installer_flow::selfcheck;
-use ilex_installer_flow::shots::{Do, SHOTS};
+use ilex_installer_flow::shots::{Do, PASSPHRASE, SHOTS};
 use ilex_installer_flow::simulate::Simulated;
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::{self, gdk, glib, graphene};
@@ -210,11 +210,10 @@ async fn flush(
     until(what, window, observer, None, |_| true).await
 }
 
-/// A field of the administrator page, by its widget name. The page is not in
-/// the navigation stack once an installation has begun (the stack then holds
-/// only the page it ends on), so it is found by its tag, not by walking the
-/// window.
-fn account_field(window: &adw::ApplicationWindow, name: &str) -> Result<gtk::Editable> {
+/// A widget of a page, by its widget name. The page is not in the navigation
+/// stack once an installation has begun (the stack then holds only the page it
+/// ends on), so it is found by its tag, not by walking the window.
+fn page_widget(window: &adw::ApplicationWindow, page: PageId, name: &str) -> Result<gtk::Widget> {
     fn find(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
         if widget.widget_name() == name {
             return Some(widget.clone());
@@ -228,25 +227,43 @@ fn account_field(window: &adw::ApplicationWindow, name: &str) -> Result<gtk::Edi
         }
         None
     }
-    let page = find_navigation(window.upcast_ref())
-        .and_then(|nav| nav.find_page(PageId::Account.id()))
-        .context("no administrator page")?;
-    let field = find(page.upcast_ref(), name).with_context(|| format!("no field {name}"))?;
-    field
+    let holder = find_navigation(window.upcast_ref())
+        .and_then(|nav| nav.find_page(page.id()))
+        .with_context(|| format!("no {} page", page.id()))?;
+    find(holder.upcast_ref(), name).with_context(|| format!("no widget {name}"))
+}
+
+/// A text field of a page, by its widget name.
+fn account_field(
+    window: &adw::ApplicationWindow,
+    page: PageId,
+    name: &str,
+) -> Result<gtk::Editable> {
+    page_widget(window, page, name)?
         .downcast::<gtk::Editable>()
         .map_err(|_| anyhow::anyhow!("{name} is not a text field"))
 }
 
+/// A person flips a switch of the encryption page: its own change reaches the
+/// flow.
+fn set_switch(window: &adw::ApplicationWindow, name: &str, on: bool) -> Result<()> {
+    page_widget(window, PageId::Encryption, name)?
+        .downcast::<adw::SwitchRow>()
+        .map_err(|_| anyhow::anyhow!("{name} is not a switch"))?
+        .set_active(on);
+    Ok(())
+}
+
 /// A person types into a password field: set its text, so the field's own
 /// change reaches the flow.
-fn type_into(window: &adw::ApplicationWindow, name: &str, text: &str) -> Result<()> {
-    account_field(window, name)?.set_text(text);
+fn type_into(window: &adw::ApplicationWindow, page: PageId, name: &str, text: &str) -> Result<()> {
+    account_field(window, page, name)?.set_text(text);
     Ok(())
 }
 
 /// What a password field holds (a test reads it; the application never does).
-fn field_text(window: &adw::ApplicationWindow, name: &str) -> Result<String> {
-    Ok(account_field(window, name)?.text().to_string())
+fn field_text(window: &adw::ApplicationWindow, page: PageId, name: &str) -> Result<String> {
+    Ok(account_field(window, page, name)?.text().to_string())
 }
 
 async fn shoot(job: &Job) -> Result<Summary> {
@@ -334,8 +351,13 @@ async fn shoot(job: &Job) -> Result<Summary> {
                         &observer,
                     )
                     .await?;
-                    for name in ["password", "confirmation"] {
-                        let text = field_text(&window, name)?;
+                    for (page, name) in [
+                        (PageId::Account, "password"),
+                        (PageId::Account, "confirmation"),
+                        (PageId::Encryption, "passphrase"),
+                        (PageId::Encryption, "passphrase-confirmation"),
+                    ] {
+                        let text = field_text(&window, page, name)?;
                         if !text.is_empty() {
                             bail!(
                                 "{}: the {name} field still holds {} characters after the flow wiped them",
@@ -377,8 +399,83 @@ async fn shoot(job: &Job) -> Result<Summary> {
                     continue;
                 }
                 Do::Name(text) => Msg::Event(Event::Name(text.to_owned())),
+                Do::Encrypt(on) => {
+                    // The way a person does: the switch row flips, and its own
+                    // change reaches the flow.
+                    set_switch(&window, "encrypt", on)?;
+                    flush(
+                        &format!("{}: the switch", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::Passphrase(text) | Do::PassphraseConfirm(text) => {
+                    let name = if matches!(*step, Do::Passphrase(_)) {
+                        "passphrase"
+                    } else {
+                        "passphrase-confirmation"
+                    };
+                    type_into(&window, PageId::Encryption, name, text)?;
+                    flush(
+                        &format!("{}: {name}", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::Chip(on) => {
+                    set_switch(&window, "chip", on)?;
+                    flush(
+                        &format!("{}: the chip switch", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::KeyRight | Do::KeyWrong | Do::KeyShort | Do::KeyNotInKey => {
+                    let text = step.key_text().unwrap_or_default();
+                    type_into(&window, PageId::Recovery, "recovery-key", &text)?;
+                    flush(
+                        &format!("{}: the key", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::ConfirmRecovery => Msg::Event(Event::ConfirmRecovery),
+                Do::SkipRecovery => Msg::Event(Event::ContinueWithoutKey),
+                Do::Encrypted | Do::Unencrypted => {
+                    if matches!(*step, Do::Encrypted) {
+                        type_into(&window, PageId::Encryption, "passphrase", PASSPHRASE)?;
+                        type_into(
+                            &window,
+                            PageId::Encryption,
+                            "passphrase-confirmation",
+                            PASSPHRASE,
+                        )?;
+                    } else {
+                        set_switch(&window, "encrypt", false)?;
+                    }
+                    flush(
+                        &format!("{}: the encryption page", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    Msg::Event(Event::Continue)
+                }
                 Do::Password(text) => {
-                    type_into(&window, "password", text)?;
+                    type_into(&window, PageId::Account, "password", text)?;
                     flush(
                         &format!("{}: password", shot.name),
                         &controller,
@@ -389,7 +486,7 @@ async fn shoot(job: &Job) -> Result<Summary> {
                     continue;
                 }
                 Do::Confirm(text) => {
-                    type_into(&window, "confirmation", text)?;
+                    type_into(&window, PageId::Account, "confirmation", text)?;
                     flush(
                         &format!("{}: confirmation", shot.name),
                         &controller,

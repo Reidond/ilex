@@ -26,7 +26,7 @@ use ilex_installer_flow::flow::PageId;
 use ilex_installer_flow::keyboard::{Layout, Layouts, SessionKeyboard};
 use ilex_installer_flow::language;
 use ilex_installer_flow::runner::Services;
-use ilex_installer_flow::shots::{Do, SHOTS};
+use ilex_installer_flow::shots::{Do, PASSPHRASE, SHOTS};
 use ilex_installer_flow::simulate::Simulated;
 
 use super::installer::qobject::Installer;
@@ -205,6 +205,35 @@ fn send(shared: &Shared, event: Event) -> Result<()> {
     shared.post(move |installer| installer.dispatch(event))
 }
 
+/// A person types into a field of the page that is shown: the field's own
+/// change reaches the flow.
+fn type_into(shared: &Shared, shot: &str, field: &'static str, text: &str) -> Result<()> {
+    let text = text.to_owned();
+    let (before, _) = shared.current("typed");
+    shared.post(move |installer| installer.ask_window("type", field, &text))?;
+    let typed = shared.wait_for("typed", before)?;
+    if typed != "ok" {
+        bail!("{shot}: typing into {field}: {typed}");
+    }
+    shared.flush(&format!("{shot}: {field}"))?;
+    shared.until(&format!("{shot}: {field}"), None, |_| true)
+}
+
+/// A person flips a check box of the page that is shown: its own toggle
+/// reaches the flow.
+fn flip(shared: &Shared, shot: &str, name: &'static str, on: bool) -> Result<()> {
+    let (before, _) = shared.current("typed");
+    shared.post(move |installer| {
+        installer.ask_window("switch", name, if on { "on" } else { "off" })
+    })?;
+    let flipped = shared.wait_for("typed", before)?;
+    if flipped != "ok" {
+        bail!("{shot}: flipping {name}: {flipped}");
+    }
+    shared.flush(&format!("{shot}: {name}"))?;
+    shared.until(&format!("{shot}: {name}"), None, |_| true)
+}
+
 /// Play every shot; the window quits at the end, whatever happens.
 pub fn drive(
     shared: Arc<Shared>,
@@ -279,7 +308,7 @@ fn shoot(shared: &Shared, layouts: &Layouts, directory: &Path, dark: bool) -> Re
                     let (before, _) = shared.current("fields");
                     shared.post(|installer| installer.ask_window("fields", "", ""))?;
                     let lengths = shared.wait_for("fields", before)?;
-                    if lengths != "0,0" {
+                    if lengths != "0,0,0,0" {
                         bail!(
                             "{}: the password fields still hold text after the flow wiped them (lengths {lengths})",
                             shot.name
@@ -307,23 +336,44 @@ fn shoot(shared: &Shared, layouts: &Layouts, directory: &Path, dark: bool) -> Re
                     continue;
                 }
                 Do::Name(text) => Event::Name(text.to_owned()),
-                Do::Password(text) | Do::Confirm(text) => {
-                    // A person types into the field: the field's own change
-                    // reaches the flow.
-                    let field = if matches!(step, Do::Password(_)) {
-                        "password"
+                Do::Encrypt(on) => {
+                    flip(shared, shot.name, "encrypt", on)?;
+                    continue;
+                }
+                Do::Chip(on) => {
+                    flip(shared, shot.name, "chip", on)?;
+                    continue;
+                }
+                Do::Passphrase(text) => {
+                    type_into(shared, shot.name, "passphrase", text)?;
+                    continue;
+                }
+                Do::PassphraseConfirm(text) => {
+                    type_into(shared, shot.name, "passphrase-confirmation", text)?;
+                    continue;
+                }
+                Do::Encrypted | Do::Unencrypted => {
+                    if matches!(step, Do::Encrypted) {
+                        type_into(shared, shot.name, "passphrase", PASSPHRASE)?;
+                        type_into(shared, shot.name, "passphrase-confirmation", PASSPHRASE)?;
                     } else {
-                        "confirmation"
-                    };
-                    let text = text.to_owned();
-                    let (before, _) = shared.current("typed");
-                    shared.post(move |installer| installer.ask_window("type", field, &text))?;
-                    let typed = shared.wait_for("typed", before)?;
-                    if typed != "ok" {
-                        bail!("{}: typing into {field}: {typed}", shot.name);
+                        flip(shared, shot.name, "encrypt", false)?;
                     }
-                    shared.flush(&format!("{}: {field}", shot.name))?;
-                    shared.until(&format!("{}: {field}", shot.name), None, |_| true)?;
+                    Event::Continue
+                }
+                Do::KeyRight | Do::KeyWrong | Do::KeyShort | Do::KeyNotInKey => {
+                    let text = step.key_text().unwrap_or_default();
+                    type_into(shared, shot.name, "recovery-key", &text)?;
+                    continue;
+                }
+                Do::ConfirmRecovery => Event::ConfirmRecovery,
+                Do::SkipRecovery => Event::ContinueWithoutKey,
+                Do::Password(text) => {
+                    type_into(shared, shot.name, "password", text)?;
+                    continue;
+                }
+                Do::Confirm(text) => {
+                    type_into(shared, shot.name, "confirmation", text)?;
                     continue;
                 }
             };

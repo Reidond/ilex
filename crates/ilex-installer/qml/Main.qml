@@ -40,10 +40,11 @@ Kirigami.ApplicationWindow {
             "success": "dialog-ok-apply"
         })
 
-    // The administrator's passwords are the flow's, not the window's (it reads
-    // the fields from Rust, `sendField`, and a page that comes back is filled
-    // from the flow, `restoreField`): when the flow says it wiped them
-    // (`account.wiped`, and a new flow) the page's fields are cleared.
+    // The administrator's password, the disk's passphrase and the recovery key
+    // typed back are the flow's, not the window's (it reads the fields from
+    // Rust, `sendField`, and a page that comes back is filled from the flow,
+    // `restoreField`): when the flow says it wiped them (`account.wiped`, and a
+    // new flow) the pages' fields are cleared.
     property var wipeMark: null
     signal wipe
 
@@ -111,9 +112,11 @@ Kirigami.ApplicationWindow {
             "welcome": welcomePage,
             "machine": machinePage,
             "disk": diskPage,
+            "encryption": encryptionPage,
             "account": accountPage,
             "review": reviewPage,
             "installing": installingPage,
+            "recovery": recoveryPage,
             "done": donePage,
             "problem": problemPage
         }[id];
@@ -236,6 +239,13 @@ Kirigami.ApplicationWindow {
         }
     }
     Component {
+        id: encryptionPage
+        EncryptionPage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
         id: accountPage
         AccountPage {
             view: root.view
@@ -252,6 +262,13 @@ Kirigami.ApplicationWindow {
     Component {
         id: installingPage
         InstallingPage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
+        id: recoveryPage
+        RecoveryPage {
             view: root.view
             host: root
         }
@@ -338,13 +355,25 @@ Kirigami.ApplicationWindow {
                 installer.renderReport("typed", field ? "ok" : "no " + first + " field on " + (item ? item.pageId : "no page"));
             }
             break;
+        case "switch":
+            // A person flips a check box: its own toggle reaches the flow.
+            {
+                const item = pageStack.currentItem;
+                const box = item && item.field ? item.field(first) : null;
+                if (box) {
+                    box.checked = second === "on";
+                    box.toggled();
+                }
+                installer.renderReport("typed", box ? "ok" : "no " + first + " switch on " + (item ? item.pageId : "no page"));
+            }
+            break;
         case "fields":
             {
                 // What the page's fields hold while the page exists (the flow's
                 // own copies are wiped by the flow).
                 const page = pageStack.currentItem;
                 const live = name => page && page.field && page.field(name) ? page.field(name).text.length : 0;
-                installer.renderReport("fields", [live("password"), live("confirmation")].join(","));
+                installer.renderReport("fields", [live("password"), live("confirmation"), live("passphrase"), live("passphrase-confirmation")].join(","));
             }
             break;
         case "expand-log":

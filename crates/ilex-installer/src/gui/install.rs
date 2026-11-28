@@ -1,16 +1,18 @@
-//! The pages from the disk to the end: disk, review, installing, done and
-//! problem, and the two dialogs (the erase confirmation and the log). Each is
+//! The pages from the disk to the end: disk, review, installing, recovery
+//! key, done and problem, and the two dialogs (the erase confirmation and the log). Each is
 //! drawn from what `ilex-installer-flow` says (`Flow::disk_view`,
 //! `Flow::review`, `Flow::installing_view`, `Flow::done_view`,
 //! `Flow::problem_view`, `Flow::log_state`); nothing here decides anything.
 
 use super::app::{
-    App, Msg, banner, continue_button, form, group, message_label, page, property_row, sync_banner,
+    App, Msg, banner, continue_button, form, group, message_label, page, property_row, secret_of,
+    show_note as show_note_beside, sync_banner,
 };
 use ilex_installer_flow::disks as flow_disks;
 use ilex_installer_flow::events::Event;
 use ilex_installer_flow::flow::{Flow, PageId};
 use ilex_installer_flow::messages;
+use ilex_installer_flow::recovery;
 use ilex_installer_flow::view::{self, StageStatus, View};
 use relm4::adw::{self, prelude::*};
 use relm4::gtk;
@@ -740,6 +742,352 @@ impl InstallingPage {
         }
         set_log(&self.log, &view.log);
     }
+}
+
+// --- recovery key ----------------------------------------------------------------------
+
+/// The recovery key page: the key in groups (while this interface holds it),
+/// then the field for the whole key, and, when the key cannot be shown or the
+/// volume refused it, the way out (continue without a recovery key). What it
+/// shows is `view.recovery`.
+pub struct RecoveryPage {
+    pub page: adw::NavigationPage,
+    heading: gtk::Label,
+    intro: gtk::Label,
+    /// The key, its warning and where to keep it: shown while this interface
+    /// holds the key.
+    key_box: gtk::Box,
+    warning: gtk::Label,
+    cells: Vec<gtk::Label>,
+    keep: gtk::Label,
+    /// Why there is no key to show (being fetched, shown before a restart).
+    no_key: gtk::Label,
+    ask: gtk::Label,
+    /// The whole key, typed from the paper.
+    entry: adw::EntryRow,
+    hint: gtk::Label,
+    message: gtk::Label,
+    problem: gtk::Label,
+    /// Going on without a key: what it means, and the button.
+    skip_box: gtk::Box,
+    skip_title: gtk::Label,
+    skip_detail: gtk::Label,
+    skip_problem: gtk::Label,
+    skip_button: gtk::Button,
+    progress: gtk::ProgressBar,
+    line: gtk::Label,
+    pub button: gtk::Button,
+    /// The flow's wipe count the field was last cleared at.
+    wiped: u64,
+}
+
+impl RecoveryPage {
+    pub fn build(sender: &ComponentSender<App>, wiped: u64) -> Self {
+        let heading = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["title-1"])
+            .build();
+        let intro = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["body"])
+            .build();
+        // The key, eight groups in two rows of four, numbered. Not selectable:
+        // nothing copies it to a clipboard.
+        let warning = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["heading", "warning"])
+            .build();
+        let grid = gtk::Grid::builder()
+            .row_spacing(12)
+            .column_spacing(18)
+            .halign(gtk::Align::Center)
+            .build();
+        let mut cells = Vec::new();
+        for index in 0..ilex_installer_model::recovery::GROUPS {
+            let cell = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            let number = gtk::Label::builder()
+                .label(format!("{}", index + 1))
+                .css_classes(["caption", "dim-label"])
+                .build();
+            let group = gtk::Label::builder()
+                .css_classes(["title-1", "monospace"])
+                .selectable(false)
+                .build();
+            group.set_widget_name(&format!("recovery-key-group-{}", index + 1));
+            cell.append(&number);
+            cell.append(&group);
+            grid.attach(&cell, (index % 4) as i32, (index / 4) as i32, 1, 1);
+            cells.push(group);
+        }
+        let keep = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "dim-label"])
+            .build();
+        let key_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        key_box.add_css_class("card");
+        key_box.set_margin_top(6);
+        for widget in [
+            warning.upcast_ref::<gtk::Widget>(),
+            grid.upcast_ref(),
+            keep.upcast_ref(),
+        ] {
+            widget.set_margin_start(18);
+            widget.set_margin_end(18);
+            key_box.append(widget);
+        }
+        warning.set_margin_top(18);
+        keep.set_margin_bottom(18);
+        let no_key = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["body", "warning"])
+            .visible(false)
+            .build();
+        let ask = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["body"])
+            .build();
+        let entry = adw::EntryRow::builder().name("recovery-key").build();
+        entry.set_enable_undo(false);
+        entry.set_input_purpose(gtk::InputPurpose::FreeForm);
+        let fields = group("", "");
+        fields.add(&entry);
+        let hint = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "dim-label"])
+            .build();
+        let message = message_label();
+        let problem = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "error"])
+            .visible(false)
+            .build();
+        // The way out: what the disk is then, and the button.
+        let skip_title = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["heading"])
+            .build();
+        let skip_detail = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["body"])
+            .build();
+        let skip_problem = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "error"])
+            .visible(false)
+            .build();
+        let skip_button = gtk::Button::builder()
+            .halign(gtk::Align::Start)
+            .name("recovery-skip")
+            .build();
+        let skip_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        skip_box.set_visible(false);
+        skip_box.append(&skip_title);
+        skip_box.append(&skip_detail);
+        skip_box.append(&skip_problem);
+        skip_box.append(&skip_button);
+        let progress = gtk::ProgressBar::new();
+        let line = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "dim-label"])
+            .build();
+        let button = continue_button(recovery::CONFIRM_LABEL);
+        let content = form_content(
+            &heading,
+            &intro,
+            &[
+                key_box.upcast_ref::<gtk::Widget>(),
+                no_key.upcast_ref(),
+                ask.upcast_ref(),
+                fields.upcast_ref(),
+                hint.upcast_ref(),
+                message.upcast_ref(),
+                problem.upcast_ref(),
+                skip_box.upcast_ref(),
+                progress.upcast_ref(),
+                line.upcast_ref(),
+            ],
+        );
+        let page = page(
+            view::RECOVERY_TITLE,
+            PageId::Recovery.id(),
+            None,
+            &content,
+            Some(&button),
+        );
+        let input = sender.input_sender().clone();
+        entry.connect_changed({
+            let input = input.clone();
+            move |row| input.emit(Msg::Event(Event::RecoveryKey(secret_of(row))))
+        });
+        entry.connect_entry_activated({
+            let input = input.clone();
+            move |_| input.emit(Msg::Event(Event::ConfirmRecovery))
+        });
+        button.connect_clicked({
+            let input = input.clone();
+            move |_| input.emit(Msg::Event(Event::ConfirmRecovery))
+        });
+        skip_button.connect_clicked({
+            let input = input.clone();
+            move |_| input.emit(Msg::Event(Event::ContinueWithoutKey))
+        });
+        // The field has the focus when the page is shown.
+        page.connect_shown({
+            let first = entry.clone();
+            move |_| {
+                first.grab_focus();
+            }
+        });
+        Self {
+            page,
+            heading,
+            intro,
+            key_box,
+            warning,
+            cells,
+            keep,
+            no_key,
+            ask,
+            entry,
+            hint,
+            message,
+            problem,
+            skip_box,
+            skip_title,
+            skip_detail,
+            skip_problem,
+            skip_button,
+            progress,
+            line,
+            button,
+            wiped,
+        }
+    }
+
+    pub fn sync(&mut self, v: &View) {
+        // The flow wiped the key it holds (confirmed, refused, given up, or the
+        // installation ended): the field is cleared too.
+        if self.wiped != v.account.wiped {
+            self.wiped = v.account.wiped;
+            self.entry.set_text("");
+        }
+        let Some(view) = &v.recovery else {
+            // Not the page: nothing of the key stays in a widget.
+            for cell in &self.cells {
+                cell.set_label("");
+            }
+            return;
+        };
+        self.heading.set_label(view.heading);
+        self.intro.set_label(view.intro);
+        match &view.key {
+            Some(groups) => {
+                for (cell, group) in self.cells.iter().zip(&groups.0) {
+                    cell.set_label(group);
+                }
+                self.warning.set_label(view.warning.unwrap_or_default());
+                self.keep.set_label(view.keep.unwrap_or_default());
+                self.key_box.set_visible(true);
+            }
+            None => {
+                for cell in &self.cells {
+                    cell.set_label("");
+                }
+                self.key_box.set_visible(false);
+            }
+        }
+        match &view.no_key {
+            Some(message) => {
+                self.no_key.set_label(&message.text);
+                self.no_key.set_visible(true);
+            }
+            None => self.no_key.set_visible(false),
+        }
+        self.ask.set_label(view.ask);
+        // The field stays as it is while the helper compares (an insensitive
+        // field would give up the focus, and a refusal would leave a person with
+        // none): the flow ignores what is typed meanwhile.
+        self.entry.set_title(view.field.label);
+        self.hint.set_label(&view.hint);
+        let refusal = view.check.as_ref().map(|said| view::Note {
+            text: said.text.clone(),
+            error: true,
+        });
+        show_note_beside(
+            &self.message,
+            refusal.as_ref(),
+            &[self.entry.upcast_ref::<gtk::Widget>()],
+        );
+        match &view.problem {
+            Some(problem) => {
+                self.problem.set_label(&problem.text);
+                self.problem.set_visible(true);
+            }
+            None => self.problem.set_visible(false),
+        }
+        match &view.skip {
+            Some(skip) => {
+                self.skip_title.set_label(skip.title);
+                self.skip_detail.set_label(skip.detail);
+                self.skip_button.set_label(&skip.button.label);
+                self.skip_button.set_sensitive(skip.button.enabled);
+                match &skip.problem {
+                    Some(problem) => {
+                        self.skip_problem.set_label(&problem.text);
+                        self.skip_problem.set_visible(true);
+                    }
+                    None => self.skip_problem.set_visible(false),
+                }
+                self.skip_box.set_visible(true);
+            }
+            None => self.skip_box.set_visible(false),
+        }
+        self.progress.set_fraction(view.overall);
+        self.line.set_label(&view.progress_line);
+        self.button.set_label(&view.confirm.label);
+        self.button.set_sensitive(view.confirm.enabled);
+    }
+}
+
+/// A page body of the same shape as `form`, with the heading and the paragraph
+/// already built (the recovery page changes them).
+fn form_content(
+    heading: &gtk::Label,
+    intro: &gtk::Label,
+    controls: &[&gtk::Widget],
+) -> gtk::ScrolledWindow {
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    content.append(heading);
+    content.append(intro);
+    for control in controls {
+        content.append(*control);
+    }
+    let clamp = adw::Clamp::builder()
+        .maximum_size(620)
+        .tightening_threshold(460)
+        .margin_top(24)
+        .margin_bottom(24)
+        .margin_start(18)
+        .margin_end(18)
+        .child(&content)
+        .build();
+    gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&clamp)
+        .build()
 }
 
 // --- done ---------------------------------------------------------------------------
