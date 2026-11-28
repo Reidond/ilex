@@ -100,6 +100,9 @@ pub const GROUP_CHOICES: &str = "Your choices";
 pub const GROUP_DISK: &str = "The disk";
 pub const GROUP_PARTITIONS: &str = "What is created";
 pub const GROUP_PARTITIONS_INTRO: &str = "These partitions are made on the disk.";
+pub const GROUP_KEPT: &str = "What stays";
+pub const GROUP_KEPT_INTRO: &str = "These partitions are not changed.";
+pub const SHARED_ROW: &str = "Shared with the other systems";
 pub const GROUP_IMAGE: &str = "The image";
 pub const GROUP_NOTES: &str = "Worth knowing";
 
@@ -274,11 +277,17 @@ pub struct Machine {
     pub body: MachineBody,
 }
 
+/// A way of installing the chosen disk: erase it, or install beside what is
+/// on it where it allows.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Mode {
+    /// The id an input names it by (`whole-disk`, `free-space`).
+    pub id: &'static str,
     pub title: &'static str,
-    pub subtitle: &'static str,
+    /// What it does on the chosen disk, or why it cannot be used there.
+    pub subtitle: String,
     pub available: bool,
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -459,6 +468,10 @@ pub enum ReviewBodyView {
         groups: Vec<Group>,
         erase: String,
         end: &'static str,
+        /// The installation erases something: its sentence and its button are
+        /// drawn as what they are (installing beside the other systems erases
+        /// nothing).
+        destructive: bool,
     },
 }
 
@@ -466,8 +479,9 @@ pub enum ReviewBodyView {
 pub struct Review {
     pub chrome: Chrome,
     pub body: ReviewBodyView,
-    /// The destructive button.
+    /// The page's one button (destructive when the installation erases).
     pub button: Button,
+    pub destructive: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -614,6 +628,9 @@ pub struct Confirm {
     /// Cancel is first and has the focus: Tab reaches the destructive answer.
     pub cancel: &'static str,
     pub confirm: String,
+    /// The answer destroys something (erasing a disk, removing partitions) and
+    /// is drawn so; installing beside the other systems does not.
+    pub destructive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -912,12 +929,15 @@ impl Flow {
                             rows: away,
                         }),
                         modes_title: DISK_MODES,
-                        modes: disks::modes()
+                        modes: self
+                            .mode_choices()
                             .iter()
                             .map(|m| Mode {
+                                id: crate::markers::mode_word(m.mode),
                                 title: m.title,
-                                subtitle: m.subtitle,
+                                subtitle: m.subtitle.clone(),
                                 available: m.available,
+                                selected: m.mode == self.mode(),
                             })
                             .collect(),
                     }
@@ -1160,6 +1180,7 @@ impl Flow {
             can_pop: !self.is_frozen(),
         };
         let mut label = REVIEW_BUTTON.to_owned();
+        let mut destructive = true;
         let body = match &page.body {
             ReviewBody::Waiting(message) => ReviewBodyView::Waiting {
                 title: message.title.clone(),
@@ -1180,6 +1201,7 @@ impl Flow {
             },
             ReviewBody::Checked(review) => {
                 label.clone_from(&review.button);
+                destructive = review.destructive;
                 let rows = |rows: &[crate::review::Row]| -> Vec<Row> {
                     rows.iter()
                         .map(|r| Row {
@@ -1212,6 +1234,22 @@ impl Flow {
                             .collect(),
                     },
                     Group {
+                        title: GROUP_KEPT,
+                        intro: GROUP_KEPT_INTRO,
+                        rows: review
+                            .kept
+                            .iter()
+                            .map(|p| Row {
+                                title: p.title.clone(),
+                                value: p.detail.clone(),
+                            })
+                            .chain(review.shared.iter().map(|shared| Row {
+                                title: SHARED_ROW.to_owned(),
+                                value: shared.clone(),
+                            }))
+                            .collect(),
+                    },
+                    Group {
                         title: GROUP_IMAGE,
                         intro: "",
                         rows: rows(&review.image),
@@ -1229,6 +1267,7 @@ impl Flow {
                     groups,
                     erase: review.erase.clone(),
                     end: REVIEW_END,
+                    destructive: review.destructive,
                 }
             }
         };
@@ -1237,6 +1276,7 @@ impl Flow {
             body,
             // Its text is the plan's while there is one.
             button: Button::of(&label, page.button),
+            destructive,
         }
     }
 
@@ -1341,6 +1381,7 @@ impl Flow {
                 body: c.body,
                 cancel: c.cancel,
                 confirm: c.confirm,
+                destructive: c.destructive,
             }),
             log: self.log_dialog_view(),
         }

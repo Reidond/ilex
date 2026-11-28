@@ -298,6 +298,7 @@ fn shoot(shared: &Shared, layouts: &Layouts, directory: &Path, dark: bool) -> Re
                 ),
                 Do::Machine(tag) => Event::Machine(tag.to_owned()),
                 Do::Disk(id) => Event::Disk(id.to_owned()),
+                Do::Mode(id) => Event::Mode(id.to_owned()),
                 Do::Install => Event::Install,
                 Do::Accept => Event::Confirmed(true),
                 Do::Dismiss => Event::Confirmed(false),

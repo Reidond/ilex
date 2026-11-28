@@ -168,6 +168,19 @@ pub fn daily(id: &str) -> String {
     format!("ILEX-INSTALLER event=daily daily={}", one_word(id))
 }
 
+/// The person chose the way of installing (`whole-disk` or `free-space`).
+pub fn mode(mode: ilex_installer_model::plan::Mode) -> String {
+    format!("ILEX-INSTALLER event=mode mode={}", mode_word(mode))
+}
+
+/// The way of installing as one word.
+pub fn mode_word(mode: ilex_installer_model::plan::Mode) -> &'static str {
+    match mode {
+        ilex_installer_model::plan::Mode::WholeDisk => "whole-disk",
+        ilex_installer_model::plan::Mode::FreeSpace => "free-space",
+    }
+}
+
 /// The person turned encryption on or off. (Never the passphrase, nor its
 /// length.)
 pub fn encryption(on: bool) -> String {

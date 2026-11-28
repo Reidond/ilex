@@ -158,6 +158,10 @@ pub fn plan_error(error: &PlanError) -> Message {
         ErrorCode::UnsupportedMode => {
             Message::new("That way of installing is not available yet", cause)
         }
+        ErrorCode::FreeSpaceUnavailable => Message::new(
+            "ilex cannot be installed beside the other systems on that disk",
+            format!("{cause}. Choose another disk, or erase the whole disk."),
+        ),
         ErrorCode::TpmNeedsEncryption => Message::new(
             "Automatic unlock needs an encrypted disk",
             "Turn encryption on, or turn automatic unlock off.",

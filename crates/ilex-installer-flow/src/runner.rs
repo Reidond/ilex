@@ -20,8 +20,10 @@ use crate::keyboard::SessionKeyboard;
 use crate::messages::ClientError;
 use crate::secret::Secret;
 
-/// What a worker brings back.
+/// What a worker brings back. (A plan is large and an answer is moved once, so
+/// the size difference between the variants costs nothing worth a box.)
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Answer {
     Probed {
         generation: u64,

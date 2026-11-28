@@ -45,12 +45,14 @@ Kirigami.ScrollablePage {
             }
             PressButton {
                 id: erase
-                icon.name: "edit-delete"
+                icon.name: page.v.destructive ? "edit-delete" : "dialog-ok-apply"
                 text: page.v.button.label
                 enabled: page.v.button.enabled
-                // The destructive answer, as Breeze draws one.
+                // The destructive answer, as Breeze draws one; installing beside
+                // the other systems erases nothing and is the page's suggested
+                // action.
                 Kirigami.Theme.colorSet: Kirigami.Theme.Button
-                palette.button: Kirigami.Theme.negativeTextColor
+                palette.button: page.v.destructive ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.highlightColor
                 palette.buttonText: Kirigami.Theme.highlightedTextColor
                 palette.brightText: Kirigami.Theme.highlightedTextColor
                 onClicked: page.host.send("install")
@@ -139,7 +141,7 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 level: 3
                 wrapMode: Text.Wrap
-                color: Kirigami.Theme.negativeTextColor
+                color: page.v.destructive ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
                 text: page.body.erase || ""
             }
             QQC2.Label {

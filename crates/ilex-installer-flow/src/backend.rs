@@ -36,8 +36,8 @@ pub trait Backend: Send + Sync {
     /// as text.
     fn set_secret(&self, plan: &str, kind: SecretKind, secret: &Secret) -> Result<(), ClientError>;
 
-    /// Start the installation of a plan; in whole-disk mode `erase_disk`
-    /// repeats the disk's id. The helper has checked everything again and
+    /// Start the installation of a plan; `erase_disk` repeats the disk's id (it
+    /// is erased in whole-disk mode, written to beside the other systems). The helper has checked everything again and
     /// begun when this answers: the state returned is the installation's first.
     fn apply(&self, plan: &str, erase_disk: &str) -> Result<State, ClientError>;
 

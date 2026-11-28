@@ -338,6 +338,7 @@ async fn shoot(job: &Job) -> Result<Summary> {
                 )),
                 Do::Machine(tag) => Msg::Event(Event::Machine(tag.to_owned())),
                 Do::Disk(id) => Msg::Event(Event::Disk(id.to_owned())),
+                Do::Mode(id) => Msg::Event(Event::Mode(id.to_owned())),
                 Do::Install => Msg::Event(Event::Install),
                 Do::Accept => Msg::Event(Event::Confirmed(true)),
                 Do::Dismiss => Msg::Event(Event::Confirmed(false)),

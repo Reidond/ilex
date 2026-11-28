@@ -1,9 +1,11 @@
 //! The disk page's content, made from the helper's probe: which disks the
 //! installation can go to and what is on each, why the others are not offered,
-//! and the way of installing (this version erases the whole disk; installing
-//! beside what is there comes later).
+//! and the ways of installing: erase the whole disk, or install beside what is
+//! on it when it has the room and an EFI system partition to share (the model's
+//! own rule, `free_space::assess`, so the page says what the helper will).
 
 use crate::flow::human_bytes;
+use ilex_installer_model::free_space::{self, Offer};
 use ilex_installer_model::plan::{MIN_DISK_BYTES, Mode};
 use ilex_installer_model::probe::{Disk, Probe};
 
@@ -23,6 +25,18 @@ pub struct DiskChoice {
     pub warning: Option<String>,
     /// Why the disk is not offered; `None` when it is.
     pub unavailable: Option<String>,
+    /// Installing beside what is on the disk: what that would do, or the
+    /// sentence that says why it cannot be done here.
+    pub beside: Result<Beside, String>,
+}
+
+/// What installing beside the other systems of a disk does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Beside {
+    /// One line for the mode's row: how much unallocated space is used.
+    pub summary: String,
+    /// One line each: where ilex goes, what is shared and what stays.
+    pub lines: Vec<String>,
 }
 
 impl DiskChoice {
@@ -49,7 +63,8 @@ impl DiskChoice {
 pub struct ModeChoice {
     pub mode: Mode,
     pub title: &'static str,
-    pub subtitle: &'static str,
+    /// What the way does on the chosen disk, or why it cannot be used there.
+    pub subtitle: String,
     pub available: bool,
 }
 
@@ -59,7 +74,6 @@ pub struct DiskView {
     /// The disks that can be installed to first, then the ones that cannot,
     /// each group in the probe's order.
     pub choices: Vec<DiskChoice>,
-    pub modes: Vec<ModeChoice>,
 }
 
 /// How the disk is attached, as a person says it.
@@ -149,6 +163,37 @@ fn contents_of(disk: &Disk) -> Vec<String> {
     lines
 }
 
+/// What installing beside the systems on `disk` does, in words.
+fn beside_of(offer: &Offer) -> Beside {
+    let placement = &offer.placement;
+    let kept = offer.kept.len();
+    let mut lines = vec![format!(
+        "ilex is added in unallocated space: /boot ({}) and the root file system ({}).",
+        human_bytes(ilex_installer_model::plan::BOOT_BYTES),
+        human_bytes(placement.root.size_bytes)
+    )];
+    lines.push(format!(
+        "The EFI system partition ({}, {} free) is shared: ilex adds its boot files to it and the other systems keep theirs.",
+        offer.esp.path,
+        human_bytes(offer.esp_info.free_bytes.unwrap_or(0))
+    ));
+    lines.push(format!(
+        "{} stay{} exactly as {} {}.",
+        if kept == 1 {
+            "The one partition on the disk".to_owned()
+        } else {
+            format!("All {kept} partitions on the disk")
+        },
+        if kept == 1 { "s" } else { "" },
+        if kept == 1 { "it" } else { "they" },
+        if kept == 1 { "is" } else { "are" }
+    ));
+    Beside {
+        summary: free_space::describe(offer),
+        lines,
+    }
+}
+
 impl DiskChoice {
     fn new(disk: &Disk) -> Self {
         let serial = disk.serial.trim();
@@ -167,24 +212,33 @@ impl DiskChoice {
                     .to_owned()
             }),
             unavailable,
+            beside: free_space::assess(disk).map(|offer| beside_of(&offer)),
         }
     }
 }
 
-/// The ways of installing: this version erases the whole disk.
-pub fn modes() -> Vec<ModeChoice> {
+/// The ways of installing `disk`: erasing it is always possible; beside what
+/// is on it only where the model's rule says so (and otherwise the row says
+/// why not).
+pub fn modes_for(choice: Option<&DiskChoice>) -> Vec<ModeChoice> {
+    let beside = match choice.map(|c| &c.beside) {
+        Some(Ok(beside)) => (true, beside.summary.clone()),
+        Some(Err(why)) => (false, format!("Not available on this disk: {why}.")),
+        None => (false, "Choose a disk first.".to_owned()),
+    };
     vec![
         ModeChoice {
             mode: Mode::WholeDisk,
             title: "Erase the whole disk",
-            subtitle: "Everything on the disk is erased and ilex is installed on all of it.",
+            subtitle: "Everything on the disk is erased and ilex is installed on all of it."
+                .to_owned(),
             available: true,
         },
         ModeChoice {
             mode: Mode::FreeSpace,
-            title: "Install beside what is on the disk",
-            subtitle: "Not available in this version of the installer.",
-            available: false,
+            title: "Install beside the other systems",
+            subtitle: beside.1,
+            available: beside.0,
         },
     ]
 }
@@ -196,7 +250,6 @@ impl DiskView {
             all.into_iter().partition(DiskChoice::is_offered);
         Self {
             choices: offered.into_iter().chain(unavailable).collect(),
-            modes: modes(),
         }
     }
 

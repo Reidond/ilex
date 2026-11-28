@@ -27,8 +27,10 @@
 //! is asked (`state-down`: a helper that is restarting) or the second
 //! (`state-down-second`), whether the second look at the computer is refused
 //! because an installation is active (`probe-active`), whether the
-//! disk a plan was made for vanishes afterwards (`vanish`) and
-//! whether Restart and Power off fail (`finish-fails`); `recovery` makes the
+//! disk a plan was made for vanishes afterwards (`vanish`; the `beside`
+//! scenario has a Windows disk to install beside, a disk that holds partitions of
+//! an earlier ilex installation and one whose EFI system partition has no room)
+//! and whether Restart and Power off fail (`finish-fails`); `recovery` makes the
 //! simulated helper make the recovery key of an encrypted installation whose
 //! request asks for one (a fixed test key, [`TEST_KEY`]), hand it over once,
 //! compare the whole key typed back and hold the installation in its recovery
@@ -76,6 +78,7 @@ use std::sync::Mutex;
 
 const FIXTURES: &[(&str, &str)] = &[
     ("generic", include_str!("../fixtures/generic.json")),
+    ("beside", include_str!("../fixtures/beside.json")),
     ("ms-7c35", include_str!("../fixtures/ms-7c35.json")),
     (
         "ms-7c35-board",
@@ -422,6 +425,7 @@ fn sticks() -> Vec<Disk> {
         partitions,
         free_extents: vec![],
         other_systems: vec![],
+        esps: vec![],
     };
     vec![
         stick(
@@ -437,6 +441,7 @@ fn sticks() -> Vec<Disk> {
                 label: String::new(),
                 filesystem: "vfat".into(),
                 filesystem_label: "STICK".into(),
+                uuid: String::new(),
             }],
         ),
         stick(
@@ -942,16 +947,96 @@ impl Backend for Simulated {
             serial: checked.disk.serial.clone(),
             size_bytes: checked.disk.size_bytes,
         };
-        plan.erases = Erase {
-            disk: checked.disk.id.clone(),
-            partitions: checked
+        plan.erases = if checked.offer.is_some() {
+            Erase {
+                disk: checked.disk.id.clone(),
+                partitions: vec![],
+                systems: vec![],
+            }
+        } else {
+            Erase {
+                disk: checked.disk.id.clone(),
+                partitions: checked
+                    .disk
+                    .partitions
+                    .iter()
+                    .map(|p| p.path.clone())
+                    .collect(),
+                systems: checked.disk.other_systems.clone(),
+            }
+        };
+        plan.esp = None;
+        plan.kept = vec![];
+        if let Some(offer) = &checked.offer {
+            // Beside the other systems: the two partitions repart would add,
+            // where the model's rule puts them, and what is kept and shared.
+            use ilex_installer_model::free_space::{ESP_TYPE, kept_description};
+            use ilex_installer_model::plan::{
+                BOOT_BYTES, KeptPartition, PlannedEsp, PlannedPartition,
+            };
+            let next = checked
                 .disk
                 .partitions
                 .iter()
-                .map(|p| p.path.clone())
-                .collect(),
-            systems: checked.disk.other_systems.clone(),
-        };
+                .map(|p| p.number)
+                .max()
+                .unwrap_or(0);
+            let node = |n: u32| {
+                let path = &checked.disk.path;
+                if path.chars().last().is_some_and(|c| c.is_ascii_digit()) {
+                    format!("{path}p{n}")
+                } else {
+                    format!("{path}{n}")
+                }
+            };
+            let place = offer.placement;
+            plan.partitions = vec![
+                PlannedPartition {
+                    number: next + 1,
+                    path: node(next + 1),
+                    kind: "xbootldr".into(),
+                    label: "ilex-boot".into(),
+                    uuid: "22222222-3333-4444-8555-666666666666".into(),
+                    start_bytes: place.boot.start_bytes,
+                    size_bytes: BOOT_BYTES,
+                    filesystem: "ext4".into(),
+                    encrypted: false,
+                },
+                PlannedPartition {
+                    number: next + 2,
+                    path: node(next + 2),
+                    kind: "root".into(),
+                    label: "ilex-root".into(),
+                    uuid: "33333333-4444-4555-8666-777777777777".into(),
+                    start_bytes: place.root.start_bytes,
+                    size_bytes: place.root.size_bytes,
+                    filesystem: "btrfs".into(),
+                    encrypted: false,
+                },
+            ];
+            plan.esp = Some(PlannedEsp {
+                number: offer.esp.number,
+                path: offer.esp.path.clone(),
+                uuid: offer.esp.uuid.clone(),
+                size_bytes: offer.esp.size_bytes,
+                free_bytes: offer.esp_info.free_bytes.unwrap_or(0),
+                loaders: offer.esp_info.loaders.clone(),
+            });
+            plan.kept = offer
+                .kept
+                .iter()
+                .map(|p| KeptPartition {
+                    number: p.number,
+                    path: p.path.clone(),
+                    start_bytes: p.start_bytes,
+                    size_bytes: p.size_bytes,
+                    label: p.label.clone(),
+                    filesystem: p.filesystem.clone(),
+                    description: kept_description(p, &checked.disk.other_systems),
+                })
+                .collect();
+            let _ = ESP_TYPE;
+        }
         // As the helper decides it: a key only when asked for (and the simulated
         // helper makes one), the chip only with a key, on an eligible computer.
         let recovery_key =
@@ -980,7 +1065,14 @@ impl Backend for Simulated {
         for partition in &mut plan.partitions {
             partition.encrypted = checked.request.encrypt && partition.kind == "root";
         }
-        plan.warnings = if checked.disk.other_systems.is_empty() {
+        plan.warnings = if let Some(offer) = &checked.offer {
+            vec![format!(
+                "back up what matters on {} before installing beside another system: ilex does not change its {} partition(s) and adds only its boot files to {}, but a power cut or a mistake while a disk is written cannot be undone",
+                checked.disk.id,
+                offer.kept.len(),
+                offer.esp.path
+            )]
+        } else if checked.disk.other_systems.is_empty() {
             vec![]
         } else {
             vec![format!(
@@ -1137,7 +1229,7 @@ impl Backend for Simulated {
             return Err(Self::refuse(PlanError::new(
                 ErrorCode::InvalidField,
                 Some("erase_disk"),
-                "whole-disk mode erases the disk: repeat its id to confirm",
+                "this writes to the disk: repeat its id to confirm",
             )));
         }
         if !session

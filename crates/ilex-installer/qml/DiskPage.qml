@@ -1,6 +1,7 @@
 // Where to install: the disks the helper found, those it cannot use and why,
-// and the way of installing. Every state, word and row is the flow's
-// (`view.disk`).
+// and the way of installing (erase the disk, or install beside the other
+// systems where the disk allows it, with the reason where it does not). Every
+// state, word and row is the flow's (`view.disk`).
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as QQC2
@@ -125,15 +126,21 @@ Kirigami.ScrollablePage {
                 level: 2
                 text: page.body.modes_title || ""
             }
+            QQC2.ButtonGroup {
+                id: modeGroup
+            }
             Repeater {
                 model: page.body.kind === "choices" ? page.body.modes : []
                 delegate: Kirigami.RadioSubtitleDelegate {
                     required property var modelData
+                    objectName: "mode-" + modelData.id
                     Layout.fillWidth: true
+                    QQC2.ButtonGroup.group: modeGroup
                     enabled: modelData.available
-                    checked: modelData.available
+                    checked: modelData.selected
                     text: modelData.title
                     subtitle: modelData.subtitle
+                    onClicked: page.host.send("mode", modelData.id)
                 }
             }
         }

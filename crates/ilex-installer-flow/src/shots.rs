@@ -50,6 +50,8 @@ pub enum Do {
     SkipRecovery,
     /// A disk row (its id).
     Disk(&'static str),
+    /// The disk page's way of installing (`whole-disk`, `free-space`).
+    Mode(&'static str),
     /// The review page's destructive button, and the dialog's two answers.
     Install,
     Accept,
@@ -129,6 +131,10 @@ pub const SHOTS: &[Shot] = shots![
     "disk-none", "no-disk", Disk, "", "", [Do::Continue, Do::Continue];
     "disk-helper-down", "helper-down", Disk, "", "", [Do::Jump(PageId::Disk)];
     "disk-bios", "bios", Disk, "", "", [Do::Jump(PageId::Disk)];
+    "disk-beside", "beside", Disk, "", "", [Do::Continue, Do::Continue, Do::Mode("free-space")];
+    "disk-beside-whole-disk", "beside", Disk, "", "", [Do::Continue, Do::Continue];
+    "disk-beside-unavailable", "beside", Disk, "", "", [Do::Continue, Do::Continue, Do::Disk("nvme-eui.0000000000000fed")];
+    "disk-ilex-partitions", "beside", Disk, "", "", [Do::Continue, Do::Continue, Do::Disk("ata-WDC_WDS500G2B0A_214512800345")];
     "encryption", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue];
     "encryption-typed", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Passphrase(PASSPHRASE), Do::PassphraseConfirm(PASSPHRASE)];
     "encryption-short", "generic", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Passphrase("abc"), Do::PassphraseConfirm("abc")];
@@ -169,6 +175,10 @@ pub const SHOTS: &[Shot] = shots![
     "review-registry-down", "registry-down", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue];
     "review-back-to-account", "generic", Account, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue, Do::Back, Do::Back];
     "review-back-to-profile", "generic", Profile, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue, Do::Back];
+    "review-beside", "beside", Review, "ok", "", [Do::Continue, Do::Continue, Do::Mode("free-space"), Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue];
+    "review-beside-unencrypted", "beside", Review, "ok", "", [Do::Continue, Do::Continue, Do::Mode("free-space"), Do::Continue, Do::Unencrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue];
+    "review-beside-dialog", "beside", Review, "ok", "confirm", [Do::Continue, Do::Continue, Do::Mode("free-space"), Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue, Do::Install];
+    "installing-beside", "beside+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Mode("free-space"), Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue, Do::Install, Do::Accept];
     "review-erase-dialog", "generic", Review, "ok", "confirm", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue, Do::Install];
     "review-erase-cancelled", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue, Do::Install, Do::Dismiss];
     "review-apply-refused", "generic+apply-refused", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Continue, Do::Install, Do::Accept];

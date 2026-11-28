@@ -5,6 +5,7 @@
 
 use crate::account::{self, Check};
 use crate::backend::Backend;
+use crate::events::Event;
 use crate::flow::{
     Control, Flow, KeyboardStatus, LogSave, MarkerConfig, PageId, Phase, PlanCheck, ProbeState,
     ProblemIcon, ProblemKind, ReviewBody, Step, usable_disks,
@@ -213,6 +214,7 @@ pub fn run() -> Result<String> {
     bus_errors().context("bus_errors")?;
     progress().context("progress")?;
     disk_page().context("disk_page")?;
+    beside().context("installing beside the other systems")?;
     encryption().context("encryption")?;
     daily_page().context("daily_page")?;
     installation().context("installation")?;
@@ -2102,13 +2104,17 @@ fn disk_page() -> Result<()> {
         "why the others are not offered: {:?}",
         view.choices
     );
+    let modes = flow.mode_choices();
     ensure!(
-        view.modes.len() == 2
-            && view.modes[0].available
-            && !view.modes[1].available
-            && view.modes[0].title == "Erase the whole disk",
-        "the ways of installing: {:?}",
-        view.modes
+        modes.len() == 2
+            && modes[0].available
+            && !modes[1].available
+            && modes[0].title == "Erase the whole disk"
+            && modes[1]
+                .subtitle
+                .starts_with("Not available on this disk: ")
+            && flow.mode() == ilex_installer_model::plan::Mode::WholeDisk,
+        "the ways of installing: {modes:?}"
     );
     // The first disk that can be installed to is chosen until the person says.
     ensure!(
@@ -2232,6 +2238,251 @@ fn disk_page() -> Result<()> {
 
 /// The review page's destructive button, the dialog, `Apply` and the installing
 /// page to the done page, with every refusal on the way.
+/// Installing beside the other systems: the disk page offers it where the
+/// model's rule allows it and says why not where it does not; the request,
+/// the review and the dialog say what is created and what is kept; the remains
+/// of an unfinished installation are removed only on the person's say-so.
+fn beside() -> Result<()> {
+    use ilex_installer_model::plan::Mode;
+    const WINDOWS: &str = "nvme-eui.0025385c1140a2b3";
+    const REMAINS: &str = "ata-WDC_WDS500G2B0A_214512800345";
+    const FULL: &str = "nvme-eui.0000000000000fed";
+    let sim = Simulated::load("beside")?;
+    let mut flow = Flow::new(sample_layouts()?).with_markers(config(true, false));
+    let Step::RunProbe { generation } = flow.start_probe() else {
+        bail!("a new flow does not ask for the probe");
+    };
+    ensure!(
+        flow.probe_finished(generation, sim.probe()) == Step::Stay,
+        "the first probe's answer moves the flow"
+    );
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Machine) && flow.advance() == Step::Goto(PageId::Disk),
+        "welcome and machine do not continue"
+    );
+    // The Windows disk: erase it, or install beside it.
+    let windows = flow.disk_choice().context("no disk chosen")?.clone();
+    let offer = windows
+        .beside
+        .as_ref()
+        .map_err(|why| anyhow::anyhow!("the Windows disk cannot be installed beside: {why}"))?;
+    ensure!(
+        flow.disk() == Some(WINDOWS)
+            && offer.summary.contains("unallocated space")
+            && offer.lines.len() == 3
+            && offer.lines[1].contains("/dev/nvme0n1p1")
+            && offer.lines[2].contains("All 4 partitions")
+            && flow.mode() == Mode::WholeDisk
+            && flow.mode_choices().iter().all(|m| m.available),
+        "the Windows disk: {windows:?}"
+    );
+    ensure!(
+        flow.set_mode(Mode::FreeSpace) && flow.mode() == Mode::FreeSpace,
+        "the mode is not accepted"
+    );
+    ensure!(
+        flow.drain_markers()
+            .iter()
+            .any(|l| l == "ILEX-INSTALLER event=mode mode=free-space")
+            && flow.marker_fields().contains("mode=free-space"),
+        "the mode is not announced: {:?}",
+        flow.marker_fields()
+    );
+    // A disk that holds partitions of an earlier ilex installation: beside is
+    // not possible (it never removes a partition) and says what to do, and the
+    // way falls back to erasing.
+    ensure!(
+        flow.set_disk(REMAINS),
+        "the disk with ilex's partitions is not offered"
+    );
+    let remains = flow.disk_choice().context("no disk")?.clone();
+    ensure!(
+        flow.mode() == Mode::WholeDisk
+            && remains
+                .beside
+                .as_ref()
+                .err()
+                .is_some_and(|why| why.contains("remove them with a partition tool")
+                    && why.contains("ilex-boot")
+                    && why.contains("erase the whole disk"))
+            && !flow.set_mode(Mode::FreeSpace),
+        "the disk with ilex's partitions: {remains:?}"
+    );
+    // The same through the vocabulary the interfaces speak: an event is what a
+    // person's input means, the view is what both toolkits draw from.
+    {
+        let (mut f, _) = flow_on("beside")?;
+        f.advance();
+        f.advance();
+        let view = f.view();
+        let crate::view::DiskBody::Choices { modes, .. } = &view.disk.body else {
+            bail!("the disk page has no choices: {:?}", view.disk.body);
+        };
+        ensure!(
+            modes.len() == 2
+                && modes[0].id == "whole-disk"
+                && modes[0].selected
+                && modes[1].id == "free-space"
+                && modes[1].available
+                && !modes[1].selected,
+            "the ways of installing in the view: {modes:?}"
+        );
+        ensure!(
+            f.handle(Event::Mode("free-space".into())) == Step::Stay && f.mode() == Mode::FreeSpace,
+            "the mode event does not choose the way"
+        );
+        ensure!(
+            f.handle(Event::Mode("nonsense".into())) == Step::Stay && f.mode() == Mode::FreeSpace,
+            "an unknown mode changed the way"
+        );
+        let view = f.view();
+        let crate::view::DiskBody::Choices { modes, .. } = &view.disk.body else {
+            bail!("no choices");
+        };
+        ensure!(
+            modes[1].selected && !modes[0].selected,
+            "the chosen way is not in the view: {modes:?}"
+        );
+        ensure!(
+            f.handle(Event::Disk(REMAINS.into())) == Step::Stay,
+            "the disk event"
+        );
+        let view = f.view();
+        let crate::view::DiskBody::Choices { modes, .. } = &view.disk.body else {
+            bail!("no choices");
+        };
+        ensure!(
+            !modes[1].available
+                && modes[1]
+                    .subtitle
+                    .contains("remove them with a partition tool")
+                && modes[0].selected,
+            "the way that is not offered in the view: {modes:?}"
+        );
+    }
+    // A disk whose EFI system partition has no room says so.
+    let view = flow.disk_view().context("no view")?;
+    ensure!(
+        view.choice(FULL)
+            .and_then(|c| c.beside.as_ref().err())
+            .is_some_and(|why| why.contains("6 MiB free") && why.contains("never resizes")),
+        "the full ESP: {:?}",
+        view.choice(FULL)
+    );
+    ensure!(
+        flow.set_disk(FULL) && flow.mode() == Mode::WholeDisk,
+        "the way is not settled on a disk that cannot be installed beside"
+    );
+    // Through the pages with beside chosen: the request, the plan, the review.
+    ensure!(
+        flow.set_disk(WINDOWS) && flow.set_mode(Mode::FreeSpace),
+        "back to the Windows disk"
+    );
+    ensure!(
+        through_encryption(&mut flow),
+        "encryption does not continue"
+    );
+    fill_account(&mut flow, "beside")?;
+    let (generation, request) = run_plan(&mut flow)?;
+    ensure!(
+        request.mode == Mode::FreeSpace && request.disk == WINDOWS,
+        "the request: {request:?}"
+    );
+    ensure!(
+        flow.plan_finished(generation, sim.plan(&request)) == Step::Goto(PageId::Review)
+            && flow.can_install(),
+        "the review page cannot install"
+    );
+    let review = flow.review().context("no review")?;
+    ensure!(
+        !review.destructive
+            && review.partitions.len() == 2
+            && review.partitions[0].title.starts_with("Boot partition")
+            && review.partitions[1].title.starts_with("Root file system")
+            && review.kept.len() == 4
+            && review.kept[0]
+                .title
+                .starts_with("EFI system partition, shared (Windows Boot Manager")
+            && review.kept[1].title.contains("Microsoft reserved")
+            && review.kept[2].title.contains("NTFS")
+            && review.kept[2].detail.contains("/dev/nvme0n1p3")
+            && review
+                .shared
+                .as_deref()
+                .is_some_and(|s| s.contains("/dev/nvme0n1p1") && s.contains("EFI/fedora"))
+            && review.erase.starts_with("Nothing on ")
+            && review.button == "Install beside the other systems"
+            && review
+                .disk
+                .iter()
+                .any(|r| r.title == "Way of installing"
+                    && r.value == "Install beside the other systems"),
+        "the review: {review:?}"
+    );
+    ensure!(
+        review
+            .notes
+            .iter()
+            .any(|n| n.title == "Note" && n.value.starts_with("back up what matters on ")),
+        "the advice to back up is not on the review: {:?}",
+        review.notes
+    );
+    let dialog = review.confirmation();
+    ensure!(
+        dialog
+            .title
+            .starts_with("Install ilex beside the other systems on ")
+            && dialog.body.contains("ilex creates: ")
+            && dialog.body.contains("Kept exactly as they are: ")
+            && dialog.body.contains("Nothing is erased")
+            && dialog.confirm == "Install beside"
+            && !dialog.body.contains("cannot be undone"),
+        "the dialog: {dialog:?}"
+    );
+    // The review as the interfaces draw it: nothing is erased, so the sentence
+    // and the button are not drawn as destructive; what stays is a group of its
+    // own, and the shared partition is in it.
+    let view = flow.view();
+    let crate::view::ReviewBodyView::Checked {
+        groups,
+        destructive,
+        ..
+    } = &view.review.body
+    else {
+        bail!("the review is not checked in the view");
+    };
+    let kept = groups
+        .iter()
+        .find(|g| g.title == crate::view::GROUP_KEPT)
+        .context("no group of what stays")?;
+    ensure!(
+        !destructive
+            && !view.review.destructive
+            && kept.rows.len() == 5
+            && kept
+                .rows
+                .iter()
+                .any(|r| r.title == crate::view::SHARED_ROW && r.value.contains("EFI/fedora")),
+        "the review in the view: {kept:?}"
+    );
+    // The button asks for the dialog, and Apply gets the disk's id.
+    let Step::Confirm(shown) = flow.install() else {
+        bail!("the button does not ask for the dialog");
+    };
+    ensure!(shown == dialog, "the dialog the flow shows is the review's");
+    ensure!(
+        flow.view()
+            .confirm
+            .is_some_and(|c| !c.destructive && c.confirm == "Install beside"),
+        "the install dialog is drawn as a destructive one"
+    );
+    let Step::RunApply { erase_disk, .. } = flow.confirm_install() else {
+        bail!("the confirmation does not apply");
+    };
+    ensure!(erase_disk == WINDOWS, "Apply is given {erase_disk}");
+    Ok(())
+}
+
 fn installation() -> Result<()> {
     let (mut flow, sim) = at_review("generic")?;
     let review = flow.review().context("no review")?;

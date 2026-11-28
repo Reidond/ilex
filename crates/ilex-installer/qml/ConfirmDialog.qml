@@ -1,5 +1,6 @@
-// The erase confirmation: the one destructive question. Its words are the
-// flow's (`view.confirm`); it is open exactly while the flow has it. Cancel is
+// The confirmation: the erase, or the install beside the other systems, which
+// erases nothing. Its words and whether it destroys something are the flow's
+// (`view.confirm`); it is open exactly while the flow has it. Cancel is
 // first and has the focus when it opens: Tab reaches the destructive answer,
 // never the other way round, and Escape is a cancellation. The two answers are
 // in the dialog's own content (not Kirigami's footer buttons) so that Enter
@@ -18,7 +19,7 @@ Kirigami.PromptDialog {
 
     title: c ? c.title : ""
     subtitle: c ? c.body : ""
-    dialogType: Kirigami.PromptDialog.Warning
+    dialogType: c && !c.destructive ? Kirigami.PromptDialog.Information : Kirigami.PromptDialog.Warning
     standardButtons: Kirigami.Dialog.NoButton
     closePolicy: QQC2.Popup.CloseOnEscape
 
@@ -38,7 +39,7 @@ Kirigami.PromptDialog {
             onClicked: dialog.close()
         }
         PressButton {
-            icon.name: "edit-delete"
+            icon.name: dialog.c && !dialog.c.destructive ? "dialog-ok-apply" : "edit-delete"
             text: dialog.c ? dialog.c.confirm : ""
             onClicked: {
                 dialog.answered = true;

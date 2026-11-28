@@ -8,7 +8,6 @@ use super::app::{
     App, Msg, banner, continue_button, form, group, message_label, page, property_row, secret_of,
     show_note as show_note_beside, sync_banner,
 };
-use ilex_installer_flow::disks as flow_disks;
 use ilex_installer_flow::events::Event;
 use ilex_installer_flow::flow::{Flow, PageId};
 use ilex_installer_flow::messages;
@@ -187,6 +186,10 @@ pub struct DiskPage {
     away: adw::PreferencesGroup,
     away_rows: Vec<adw::ActionRow>,
     shown: Vec<(String, bool)>,
+    /// The ways of installing the chosen disk, one row each.
+    modes: adw::PreferencesGroup,
+    mode_rows: Vec<(String, gtk::CheckButton, adw::ActionRow)>,
+    modes_shown: Vec<(String, bool, String)>,
     pub button: gtk::Button,
 }
 
@@ -200,31 +203,10 @@ impl DiskPage {
         let modes = adw::PreferencesGroup::builder()
             .title(view::DISK_MODES)
             .build();
-        let mut first: Option<gtk::CheckButton> = None;
-        for mode in flow_disks::modes() {
-            let check = gtk::CheckButton::new();
-            if let Some(first) = &first {
-                check.set_group(Some(first));
-            } else {
-                first = Some(check.clone());
-            }
-            check.set_active(mode.available);
-            let row = adw::ActionRow::builder()
-                .title(mode.title)
-                .subtitle(mode.subtitle)
-                .subtitle_lines(0)
-                .activatable_widget(&check)
-                .build();
-            row.add_prefix(&check);
-            // This version erases the whole disk: the row is shown as the way
-            // that is used, and the other as one that comes later.
-            row.set_sensitive(mode.available);
-            modes.add(&row);
-        }
         let content = form(
             view::DISK_HEADING,
             view::DISK_INTRO,
-            &[group.upcast_ref(), away.upcast_ref(), modes.upcast_ref()],
+            &[group.upcast_ref(), modes.upcast_ref(), away.upcast_ref()],
         );
         let none = status_page("drive-harddisk-symbolic");
         let again = pill(view::TRY_AGAIN);
@@ -262,6 +244,9 @@ impl DiskPage {
             away,
             away_rows: Vec::new(),
             shown: Vec::new(),
+            modes,
+            mode_rows: Vec::new(),
+            modes_shown: Vec::new(),
             button,
         }
     }
@@ -291,6 +276,7 @@ impl DiskPage {
                 offered,
                 selected,
                 away,
+                modes,
                 ..
             } => {
                 self.stack.set_visible_child_name("choices");
@@ -350,7 +336,55 @@ impl DiskPage {
                         check.set_active(id == selected);
                     }
                 }
+                self.sync_modes(modes, sender);
             }
+        }
+    }
+
+    /// The ways of installing the chosen disk: erase it, or install beside what
+    /// is on it where the disk allows. The row that is not available says why.
+    fn sync_modes(&mut self, modes: &[view::Mode], sender: &ComponentSender<App>) {
+        let key: Vec<(String, bool, String)> = modes
+            .iter()
+            .map(|m| (m.id.to_owned(), m.available, m.subtitle.clone()))
+            .collect();
+        if key != self.modes_shown {
+            for (_, _, row) in self.mode_rows.drain(..) {
+                self.modes.remove(&row);
+            }
+            let mut first: Option<gtk::CheckButton> = None;
+            for mode in modes {
+                let check = gtk::CheckButton::new();
+                if let Some(first) = &first {
+                    check.set_group(Some(first));
+                } else {
+                    first = Some(check.clone());
+                }
+                let row = adw::ActionRow::builder()
+                    .title(mode.title)
+                    .subtitle(&mode.subtitle)
+                    .subtitle_lines(0)
+                    .activatable_widget(&check)
+                    .build();
+                row.add_prefix(&check);
+                row.set_sensitive(mode.available);
+                let (id, input) = (mode.id.to_owned(), sender.input_sender().clone());
+                check.connect_toggled(move |check| {
+                    if check.is_active() {
+                        input.emit(Msg::Event(Event::Mode(id.clone())));
+                    }
+                });
+                self.modes.add(&row);
+                self.mode_rows.push((mode.id.to_owned(), check, row));
+            }
+            self.modes_shown = key;
+        }
+        for ((id, check, row), mode) in self.mode_rows.iter().zip(modes) {
+            if check.is_active() != mode.selected {
+                check.set_active(mode.selected);
+            }
+            debug_assert_eq!(id, mode.id);
+            row.set_sensitive(mode.available);
         }
     }
 }
@@ -380,6 +414,7 @@ pub struct ReviewPage {
     choices: Rows,
     disk: Rows,
     partitions: Rows,
+    kept: Rows,
     image: Rows,
     notes: Rows,
     erase: gtk::Label,
@@ -399,12 +434,14 @@ impl ReviewPage {
         let mut choices = Rows::new(view::GROUP_CHOICES, "");
         let mut disk = Rows::new(view::GROUP_DISK, "");
         let mut partitions = Rows::new(view::GROUP_PARTITIONS, view::GROUP_PARTITIONS_INTRO);
+        let mut kept = Rows::new(view::GROUP_KEPT, view::GROUP_KEPT_INTRO);
         let mut image = Rows::new(view::GROUP_IMAGE, "");
         let mut notes = Rows::new(view::GROUP_NOTES, "");
         for rows in [
             &mut choices,
             &mut disk,
             &mut partitions,
+            &mut kept,
             &mut image,
             &mut notes,
         ] {
@@ -428,6 +465,7 @@ impl ReviewPage {
                 choices.group.upcast_ref(),
                 disk.group.upcast_ref(),
                 partitions.group.upcast_ref(),
+                kept.group.upcast_ref(),
                 image.group.upcast_ref(),
                 notes.group.upcast_ref(),
                 erase.upcast_ref(),
@@ -463,6 +501,7 @@ impl ReviewPage {
             choices,
             disk,
             partitions,
+            kept,
             image,
             notes,
             erase,
@@ -481,7 +520,12 @@ impl ReviewPage {
                 self.running.set_description(Some(detail));
                 self.stack.set_visible_child_name("running");
             }
-            view::ReviewBodyView::Checked { groups, erase, .. } => {
+            view::ReviewBodyView::Checked {
+                groups,
+                erase,
+                destructive,
+                ..
+            } => {
                 let items = |title: &str| -> Vec<(String, String)> {
                     groups
                         .iter()
@@ -497,9 +541,23 @@ impl ReviewPage {
                 self.choices.set(&items(view::GROUP_CHOICES));
                 self.disk.set(&items(view::GROUP_DISK));
                 self.partitions.set(&items(view::GROUP_PARTITIONS));
+                self.kept.set(&items(view::GROUP_KEPT));
                 self.image.set(&items(view::GROUP_IMAGE));
                 self.notes.set(&items(view::GROUP_NOTES));
                 self.erase.set_label(erase);
+                // Erasing is drawn as what it is; installing beside is not.
+                self.erase.set_css_classes(if *destructive {
+                    &["heading", "error"]
+                } else {
+                    &["heading"]
+                });
+                if *destructive {
+                    self.button.remove_css_class("suggested-action");
+                    self.button.add_css_class("destructive-action");
+                } else {
+                    self.button.remove_css_class("destructive-action");
+                    self.button.add_css_class("suggested-action");
+                }
                 self.stack.set_visible_child_name("checked");
                 self.checked = true;
                 if !was_checked && flow.page() == PageId::Review {
@@ -547,7 +605,11 @@ pub fn confirmation(dialog: &view::Confirm, sender: &ComponentSender<App>) -> ad
         .justify(gtk::Justification::Center)
         .build();
     let erase = gtk::Button::with_label(&dialog.confirm);
-    erase.add_css_class("destructive-action");
+    erase.add_css_class(if dialog.destructive {
+        "destructive-action"
+    } else {
+        "suggested-action"
+    });
     erase.add_css_class("pill");
     let cancel = gtk::Button::with_label(dialog.cancel);
     cancel.add_css_class("pill");

@@ -11,6 +11,7 @@
 
 use crate::flow::{Flow, KeyboardStatus, LogSave, PageId, Step};
 use crate::secret::Secret;
+use ilex_installer_model::plan::Mode;
 
 #[derive(Debug)]
 pub enum Event {
@@ -48,6 +49,8 @@ pub enum Event {
     ContinueWithoutKey,
     Continue,
     Disk(String),
+    /// The disk page's way of installing: `whole-disk` or `free-space`.
+    Mode(String),
     /// The review page's Try again: look again, then check the choices.
     Retry,
     /// The review page's destructive button.
@@ -111,6 +114,7 @@ impl Event {
             "skip-recovery" => Self::ContinueWithoutKey,
             "continue" => Self::Continue,
             "disk" => Self::Disk(argument.to_owned()),
+            "mode" => Self::Mode(argument.to_owned()),
             "retry" => Self::Retry,
             "install" => Self::Install,
             "confirm" => Self::Confirmed(true),
@@ -143,7 +147,8 @@ pub struct Observed {
     /// The first question to the helper (where an installation is) has not
     /// been answered.
     pub attaching: bool,
-    /// The dialog the flow says is open: `confirm`, `log` or `` for none.
+    /// The dialog the flow says is open: `confirm` (the erase or install
+    /// dialog), `log` or `` for none.
     pub dialog: &'static str,
 }
 
@@ -283,6 +288,14 @@ impl Flow {
             Event::Continue => self.advance(),
             Event::Disk(id) => {
                 self.set_disk(&id);
+                Step::Stay
+            }
+            Event::Mode(name) => {
+                match name.as_str() {
+                    "whole-disk" => self.set_mode(Mode::WholeDisk),
+                    "free-space" => self.set_mode(Mode::FreeSpace),
+                    _ => false,
+                };
                 Step::Stay
             }
             Event::Retry => self.retry(),

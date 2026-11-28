@@ -95,7 +95,7 @@
 
 use crate::account::{self, AccountChecks};
 use crate::daily::{self, Daily, DailyChecks};
-use crate::disks::{self, DiskChoice, DiskView};
+use crate::disks::{self, DiskChoice, DiskView, ModeChoice};
 use crate::encryption::{self, EncryptionChecks};
 use crate::keyboard::{self, Layout, Layouts};
 use crate::language::{self, Language};
@@ -106,7 +106,7 @@ use crate::recovery;
 use crate::review::Confirmation;
 use crate::secret::Secret;
 use ilex_installer_model::finish::FinishAction;
-use ilex_installer_model::plan::{ErrorCode, Plan, PlanRequest};
+use ilex_installer_model::plan::{ErrorCode, Mode, Plan, PlanRequest};
 use ilex_installer_model::probe::{Disk, Probe};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -415,6 +415,10 @@ pub struct Flow {
     disk: Option<String>,
     disk_chosen: bool,
     disk_view: Option<DiskView>,
+    /// The way of installing: erase the disk, or install beside what is on it
+    /// (only ever the latter where the disk allows it).
+    mode: Mode,
+    /// Removing the remains of an unfinished installation from the disk.
     /// `State` could not be asked at start-up (the helper was not up, or is
     /// restarting) and has not been answered since. Nothing is known of an
     /// installation that may be under way: the first look at the computer
@@ -486,6 +490,7 @@ impl Flow {
             disk: None,
             disk_chosen: false,
             disk_view: None,
+            mode: Mode::WholeDisk,
             attach_failed: false,
             start_notice: None,
             disk_notice: None,
@@ -717,9 +722,10 @@ impl Flow {
                 }
                 let disk_reset = self.disk != disk_before;
                 self.disk_view = Some(disks);
+                let mode_reset = self.settle_mode();
                 self.view = Some(view);
                 self.probe = ProbeState::Ready(Box::new(probe));
-                if disk_reset {
+                if disk_reset || mode_reset {
                     self.invalidate_check();
                 }
                 if reset {
@@ -1128,7 +1134,8 @@ impl Flow {
     }
 
     /// The request for `Plan`: the choices so far, on the disk chosen on the
-    /// disk page, whole-disk, encrypted unless the person turned that off.
+    /// disk page, in the way chosen there (the whole disk, or beside the other
+    /// systems), encrypted unless the person turned that off.
     /// Unset fields keep the model's defaults. (The passphrase is not in it:
     /// it goes to the helper as a secret.)
     pub fn plan_request(&self) -> Result<PlanRequest, Message> {
@@ -1148,7 +1155,7 @@ impl Flow {
         let mut document = json!({
             "composition": tag,
             "disk": disk.id,
-            "mode": "whole-disk",
+            "mode": markers::mode_word(self.mode),
             "encrypt": self.encrypt,
             "keyboard": self.keyboard.requested,
             "language": self.language,
@@ -1204,8 +1211,60 @@ impl Flow {
             self.disk = Some(id.to_owned());
             self.disk_chosen = true;
             self.say(markers::disk(id));
+            // Beside the other systems is a way of one disk: another disk
+            // that cannot be installed beside is erased or not used at all.
+            self.settle_mode();
         }
         true
+    }
+
+    // --- the way of installing -------------------------------------------------
+
+    /// The way of installing chosen: erasing the disk until the person chooses
+    /// to install beside the other systems (and only where the disk allows it).
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// The ways of installing the chosen disk, each with what it does there or
+    /// why it cannot be used there.
+    pub fn mode_choices(&self) -> Vec<ModeChoice> {
+        disks::modes_for(self.disk_choice())
+    }
+
+    /// `false` for a way the chosen disk does not allow, and while the helper
+    /// is being asked. Choosing the way that is chosen already changes nothing.
+    pub fn set_mode(&mut self, mode: Mode) -> bool {
+        if self.is_frozen()
+            || !self
+                .mode_choices()
+                .iter()
+                .any(|m| m.mode == mode && m.available)
+        {
+            return false;
+        }
+        if self.mode != mode {
+            self.mode = mode;
+            self.invalidate_check();
+            self.say(markers::mode(mode));
+        }
+        true
+    }
+
+    /// After the disk or the probe changed: the way of installing is one the
+    /// chosen disk allows, or the whole disk. Returns whether it changed.
+    fn settle_mode(&mut self) -> bool {
+        if self.mode == Mode::FreeSpace
+            && !self
+                .mode_choices()
+                .iter()
+                .any(|m| m.mode == Mode::FreeSpace && m.available)
+        {
+            self.mode = Mode::WholeDisk;
+            self.say(markers::mode(Mode::WholeDisk));
+            return true;
+        }
+        false
     }
 
     /// What the welcome page says after an installation that this interface was
@@ -1834,10 +1893,11 @@ impl Flow {
             },
             PageId::Disk => match &self.disk_view {
                 Some(view) => format!(
-                    "disk={} offered={} unavailable={}",
+                    "disk={} offered={} unavailable={} mode={}",
                     markers::one_word(self.disk.as_deref().unwrap_or("none")),
                     view.offered().count(),
-                    view.choices.len() - view.offered().count()
+                    view.choices.len() - view.offered().count(),
+                    markers::mode_word(self.mode)
                 ),
                 None => "disk=none offered=pending".to_owned(),
             },
