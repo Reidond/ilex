@@ -507,31 +507,7 @@ fn encrypted_inspected(text: &str, plan: &Plan, variant: &Variant) -> Result<Fou
     let uuid = field(text, "uuid")?.to_owned();
     ensure!(uuid.len() == 36, "the LUKS UUID: {uuid:?}");
     // What the installed system finds the volume by.
-    if with_key {
-        want(
-            "crypttab",
-            &format!("luks-{uuid} UUID={uuid} none discard,tpm2-device=auto"),
-        )?;
-        want("token_types", "systemd-recovery")?;
-        let setup: Value = serde_json::from_str(field(&out, "setup_tpm")?)?;
-        ensure!(
-            setup["status"] == "passphrase-only"
-                && setup["reason"] == "secure-boot-off"
-                && setup["capability"] == "unavailable"
-                && setup["requested"] == "auto",
-            "setup.json's security.tpm: {setup}"
-        );
-        let record: Value = serde_json::from_str(field(&out, "record")?)?;
-        ensure!(
-            record["recovery"]["acknowledged"] == true
-                && record["tpm"].is_null()
-                && record["state"] == "unavailable",
-            "the enrolment record: {record}"
-        );
-    } else {
-        want("crypttab", &format!("luks-{uuid} UUID={uuid} none discard"))?;
-        want("token_types", "")?;
-    }
+    want("crypttab", &format!("luks-{uuid} UUID={uuid} none discard"))?;
     want("crypttab_mode", "600")?;
     let vconsole = field(text, "vconsole")?;
     ensure!(
@@ -767,7 +743,7 @@ echo "cmdline=$(cat /proc/cmdline)"
 echo "crypttab=$(tr '\t' ' ' < /etc/crypttab)"
 echo "token_types=$(cryptsetup luksDump --dump-json-metadata /dev/disk/by-uuid/{uuid} | python3 -c 'import json,sys; print(",".join(sorted(t["type"] for t in json.load(sys.stdin)["tokens"].values())))')"
 echo "setup_tpm=$(python3 -c 'import json; print(json.dumps(json.load(open("/etc/ilex/setup.json"))["security"]["tpm"], sort_keys=True, separators=(",", ":")))')"
-echo "record=$(python3 -c 'import json; r=json.load(open("/var/lib/ilex/security/enrollment.json")); print(json.dumps({"state": r.get("state"), "recovery": r.get("recovery"), "tpm": r.get("tpm")}, sort_keys=True, separators=(",", ":")))' 2>/dev/null)"
+echo "record=$(python3 -c 'import json; r=json.load(open("/var/lib/ilex/security/enrollment.json")); print(json.dumps({{"state": r.get("state"), "recovery": r.get("recovery"), "tpm": r.get("tpm")}}, sort_keys=True, separators=(",", ":")))' 2>/dev/null)"
 echo "sysroot_source=$(findmnt -no SOURCE /sysroot)"
 echo "var_source=$(findmnt -no SOURCE /var | sed 's/\[.*//')"
 echo "boot_source=$(findmnt -no SOURCE /boot)"
@@ -822,7 +798,31 @@ echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} 
             "the booted kernel command line lacks {karg}: {cmdline}"
         );
     }
-    want("crypttab", &format!("luks-{uuid} UUID={uuid} none discard"))?;
+    if with_key {
+        want(
+            "crypttab",
+            &format!("luks-{uuid} UUID={uuid} none discard,tpm2-device=auto"),
+        )?;
+        want("token_types", "systemd-recovery")?;
+        let setup: Value = serde_json::from_str(field(&out, "setup_tpm")?)?;
+        ensure!(
+            setup["status"] == "passphrase-only"
+                && setup["reason"] == "secure-boot-off"
+                && setup["capability"] == "unavailable"
+                && setup["requested"] == "auto",
+            "setup.json's security.tpm: {setup}"
+        );
+        let record: Value = serde_json::from_str(field(&out, "record")?)?;
+        ensure!(
+            record["recovery"]["acknowledged"] == true
+                && record["tpm"].is_null()
+                && record["state"] == "unavailable",
+            "the enrolment record: {record}"
+        );
+    } else {
+        want("crypttab", &format!("luks-{uuid} UUID={uuid} none discard"))?;
+        want("token_types", "")?;
+    }
     want("sysroot_source", &format!("/dev/mapper/luks-{uuid}"))?;
     want("var_source", &format!("/dev/mapper/luks-{uuid}"))?;
     want("root_type", "crypt")?;

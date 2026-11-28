@@ -52,9 +52,9 @@ use ilex_devkit::cmd;
 use ilex_devkit::core::{Capability, Requirement, SecurityLaunch, VmProvider};
 use ilex_devkit::installer_model::plan::ErrorCode;
 use ilex_devkit::installer_model::probe::Probe;
+use ilex_devkit::installer_model::recovery;
 use ilex_devkit::installer_model::state::{Outcome, State};
 use ilex_devkit::provider::LinuxProvider;
-use ilex_devkit::installer_model::recovery;
 use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
@@ -1184,7 +1184,7 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path, target: &Path)
             && state.refusal.is_none(),
         "the helper's record after the restarts: {state:?}"
     );
-    no_password(vm, serial)?;
+    no_password(vm, serial, None)?;
     selinux::check(vm, artifacts, "next-reattach")?;
     Ok(())
 }
@@ -1558,7 +1558,7 @@ fn observe_problem(
         matches!(&recorded.outcome, Some(Outcome::Failed { reason, .. }) if reason.contains("helper stopped")),
         "the helper's successor did not record the stop: {recorded:?}"
     );
-    no_password(vm, serial)?;
+    no_password(vm, serial, None)?;
     selinux::check(vm, artifacts, "next-problem")?;
     Ok(())
 }
