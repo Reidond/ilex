@@ -382,7 +382,7 @@ fn from_welcome(
         // The trials that are not about the encryption (they would stop at the
         // recovery key page it brings) turn it off, as a person does: from the
         // passphrase back to the switch (the security chip's row has nothing to
-        // focus on a computer that cannot use it), Space, then on to Continue.
+        // focus on a computer that cannot use it), Space, then Continue.
         let off = count(serial, is_event("encryption", "encryption", "off"))?;
         ctl.key("shift+Tab")?;
         ctl.key("space")?;
@@ -396,8 +396,10 @@ fn from_welcome(
         )?;
         std::thread::sleep(Duration::from_secs(1));
         ctl.save_screenshot(&artifacts.join(format!("next-{name}-encryption-off.png")))?;
-        ctl.key("Tab")?;
-        ctl.key("Return")?;
+        // Continue is the button at the bottom right of every page (the focus
+        // is nowhere after the passphrase fields went away, and Tab from
+        // nowhere starts at the header's Back button).
+        ctl.click(1226, 770, ilex_vmctl::Button::Left, 1)?;
     }
     nth_marker(
         vm,
