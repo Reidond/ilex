@@ -228,7 +228,8 @@ interrupts repair between actual LUKS keyslot and token writes. The earlier
 tiers that drove Anaconda's kickstart (existing free space, interrupted
 completion, the installer profile setup) went with Anaconda: the live
 installer's own trials (`installer::`, `iso::next_security…`) cover its
-equivalents, and the installer's free-space and profile pages bring theirs.
+equivalents: installing into free space, and its undo, are the
+`installer::free_space*` trials ("Free-space mode"); the profile page brings its own.
 
 PR 17's consumer checks and backend requirements are documented in
 [`docs/security-probes.md`](docs/security-probes.md). Guest probes also require
@@ -3575,7 +3576,7 @@ The installer (a Rust interface per shell on its own live ISO) replaced Anaconda
 Its live image is
 `installer/next/`; this section covers the shared model and the root helper
 only: it probes, plans and, on `Apply`, installs a signed composition to a whole
-disk (no encryption yet). Everything up to the first write is checked again at
+disk, or into free space beside the systems on one (**Free-space mode**). Everything up to the first write is checked again at
 `Apply`; the interface that asks a person for the answers is not here.
 
 `crates/ilex-installer-model` holds what the host that writes the composition
@@ -3866,9 +3867,12 @@ the model crate and the Cargo files.
   probes afresh and refuses, with a JSON `{code, field, message}` as the error
   message: a BIOS boot (`unsupported-firmware`: the installer is UEFI only), a
   composition outside the edition (`vm` is named as never installed
-  on hardware), `free-space` mode (a later PR), a disk id not in the probe, the
-  live medium, a disk in use (`in-use`), a disk under `MIN_DISK_BYTES` (512 MiB ESP
-  + 1 GiB `/boot` + 30 GiB root + alignment, to be set from a measured install),
+  on hardware), a disk id not in the probe, the
+  live medium, a disk in use (`in-use`), in whole-disk mode a disk under
+  `MIN_DISK_BYTES` (512 MiB ESP + 1 GiB `/boot` + 30 GiB root + alignment; the root's
+  30 GiB is `MIN_ROOT_BYTES`: the image takes 4,150 MiB of it and `/var` the
+  daily home and the apps' 8 GiB), in free-space mode a disk it cannot be
+  installed beside (`free-space-unavailable`, the sentence says why),
   TPM without encryption, an administrator name that is reserved, and a malformed
   or unavailable language, keymap, zone or host name. An administrator name is
   at most 31 bytes (as systemd and `build/compose.py` limit them) and may not be
@@ -4294,6 +4298,111 @@ the model crate and the Cargo files.
     writer's refusals and a real write to ext4 and FAT loop devices (the first
     file, the second under another name, the bytes and mode on the stick, nothing
     left mounted).
+- **Free-space mode** (`installer/next/rootfs/usr/lib/ilex-installer/repart/free-space[-encrypted]`,
+  `ilex_installer_model::free_space`, `crates/ilex-installerd/src/{esp,remove}.rs`;
+  `"mode": "free-space"`): install ilex beside the systems on a disk, adding only
+  ilex's `/boot` and root and sharing the disk's EFI system partition. **It never
+  formats, resizes, moves or deletes a partition that is there**; the only
+  partitions it ever removes are the ones its own run made, as its own undo when
+  it fails. One disk; no shrinking (the other system's own tools make the room);
+  GPT with exactly one EFI system partition.
+  - **The rules** are one function, `free_space::assess(&Disk)`, which the helper's
+    `Plan` and `Apply`, the interface's disk page and the simulation all call, so
+    the page says what the helper will. A disk is refused, each with a sentence, when
+    it has no GPT, has partitions of ilex's own (any with an `ilex-` label, an
+    earlier installation finished or not: installing beside never removes a
+    partition, so the sentence tells the person to remove them with a partition tool,
+    or to erase the whole disk), has a BIOS boot partition (type `21686148-…`:
+    `bootupd`'s BIOS component could write GRUB into it and into the MBR's boot code,
+    which another system's BIOS boot may depend on), has a partition of the type
+    `systemd-repart` would match
+    to ilex's own (XBOOTLDR or root x86-64: repart takes it for ilex's and would
+    **grow** it, which the dry run's check also refuses), has no ESP or more than one,
+    an ESP that is not `vfat` (never reformatted), unreadable, with less than
+    `ESP_MIN_FREE_BYTES` (24 MiB: `bootupctl backend install` of `generic.gnome` adds
+    8,074 KiB, and an update writes each file beside the old) or holding
+    `EFI/fedora` (another Fedora's or an earlier ilex's, which `bootupd` would
+    replace), or whose free extents cannot hold `/boot` (1 GiB) and a root of at least
+    `MIN_ROOT_BYTES`. The probe gained `Partition.uuid` (`PARTUUID`) and
+    `Disk.esps` (each ESP mounted read-only in `--scan-esp`'s private namespace: size,
+    free bytes, loader directories, `EFI/fedora`).
+  - **Placement is repart's, not chosen** (measured with systemd 262): each new
+    partition, `/boot` first, goes to the *smallest* free area that holds its minimum
+    size, and the root grows to fill its area, so `/boot` can land in a small gap
+    and the root in a larger one (with an 80 GiB and a 118 GiB gap both go to the
+    80 GiB). `free_space::place` is that rule; the helper's `--self-check`
+    compares it with repart's dry run on sparse GPT images (the exact fit and a MiB
+    short included), and the plan is repart's own dry run on the real disk
+    (`--empty=refuse`: additive). The plan's `partitions` are the two new ones,
+    numbered after the ones there; `kept` lists every partition that stays and
+    `esp` the shared one; `erases` is empty. `repart::parse` requires every
+    partition that was there to be listed *unchanged*, at the probe's offset and size,
+    and exactly ilex's two to be created: anything repart plans to change fails the
+    plan and, at `Apply`, the claimed disk's second dry run. There is no choice of
+    gap: the page says where ilex goes.
+  - **`Apply`** repeats the whole-disk checks and, before the claim (a mounted ESP is
+    refused under it), looks at the ESP again (`esp_unchanged`: still assessable,
+    the same partition, the same other loaders). The confirmation `Apply` takes is
+    the disk's id, as in whole-disk mode (the interface's dialog says what is created
+    and kept; the answers file is the confirmation in unattended mode). The partition
+    stage does not `wipefs` or recreate the table: it ends the claim and runs
+    `systemd-repart --empty=refuse`; the stages and the provisional/finished stamp on
+    the new `ilex-boot` are as before (no earlier stamp is carried: such a disk has no
+    ilex partition).
+  - **The shared ESP and the firmware.** The mount stage finds the ESP by `PARTUUID`
+    (checked against sysfs like the new partitions), mounts it read-write at `boot/efi`
+    and never formats it; `bootupd` reuses what is mounted there. Measured: `bootupd`
+    **replaces a file of the same name under `EFI/BOOT`** (`BOOTX64.EFI`, which
+    Windows' setup fills with a copy of its boot manager), adds `fbx64.efi` and
+    `EFI/fedora/*`, and **deletes the firmware entries that have its label** (`Fedora`:
+    another Fedora's, on another disk, or a stale one whose disk is gone) before it
+    makes its own, first in `BootOrder`. So, before `bootc` (`guard_esp`), the image
+    stage saves, in the helper's memory, (a) every file of the ESP (`esp::Snapshot`:
+    size and SHA-256, the bytes of `EFI/BOOT`) and (b) **every `Boot####` variable and
+    `BootOrder`, raw, from efivarfs, attributes and data** (`esp::Nvram`). No entry is
+    re-created from what it points at (a stale entry's disk need not exist): **right
+    after `bootc` returns** (`check_esp`, before anything else) every saved variable
+    that is missing or changed is written back at its own number with its exact bytes
+    (`Nvram::restore`; ilex's own entry, recognised by the shared partition's GUID in
+    its device path and `\EFI\fedora\`, stays but moves to a free number if `bootupd`
+    gave it one that was another entry's; `BootOrder` is the saved bytes, so ilex's
+    entry is not in it), then what `bootupd` replaced under `EFI/BOOT` is put back,
+    durably (`syncfs`), and every other file must be as it was with nothing added
+    outside `EFI/fedora` and `EFI/BOOT`. **ilex becomes the firmware's first choice
+    only in `finalise`, after everything else and only on success**
+    (`Nvram::put_ilex_first`: its entry, then the order the firmware had). The finalise
+    stage does not `fstrim` the ESP.
+  - **A failure removes what the run made**, and only that, and puts the other
+    systems' side back as it was found: the firmware's variables first (ilex's entry
+    removed, every saved variable back byte for byte, verified), the shared ESP
+    (`Snapshot::undo`: `EFI/fedora` and new `EFI/BOOT` files out, the fallback loader
+    back, `syncfs`), then the partitions of the plan, found by their UUIDs and checked
+    against sysfs, are `wipefs`ed and removed with `sfdisk --delete`
+    (`remove::remove_partitions`). The outcome's reason ends with what was done.
+    **Known limit:** nothing is kept anywhere but in the helper's memory, so a power
+    cut or a crash while `bootc` runs (the seconds between `bootupd` and its return, in
+    which ilex's entry is first in `BootOrder` and its shim is the fallback loader)
+    is not undone: the firmware may start ilex's incomplete system, or its shim as the
+    fallback, until a person fixes the order and the files, and the partitions it made
+    stay (the next plan refuses the disk: remove them with a partition tool).
+    `bootupd` is a child of `bootc`, and writing under it while it runs could make it
+    fail, so the window is not closed. An installed system's own `bootupctl update`
+    can also write its shim over the other system's fallback loader again; that is
+    not guarded.
+  - **Answers mode**: `[install] mode = "free-space"` needs no `confirm-erase`
+    (nothing is erased). Other systems on the disk are what it is for and are not
+    refused; partitions of ilex's own are: the answers program refuses and hands over
+    to the interface, whatever `reinstall` says. The stamp rule (`these answers
+    already installed ...`) applies as before.
+  - **Not done:** shrinking another system's partition, choosing the gap, a disk with
+    no ESP of its own (an ESP is not made beside other systems; erase the disk instead),
+    a second EFI system partition, a DOS table, another system's `EFI/fedora`, a root of
+    the XBOOTLDR/root-x86-64 types or a BIOS boot partition, installing beside an ilex
+    installation or removing one from here, closing the window of a power cut during
+    `bootc` (above), keeping an existing `/var/home` (the plan's "reinstall keeping
+    /var/home" needs a rule for an existing stateroot and LUKS volume and is later),
+    reading the ESP's dirty bit (a Windows that was hibernated or not shut down leaves
+    its NTFS dirty, not the ESP).
 - **Answers mode** (`ilex-installerd --answers [--then poweroff]`, started by
   `ilex-installer-answers.service`): an installation with no interface, decided
   **at boot only**. `ilex-installer-answers-gate.service` (one-shot, once per
@@ -4679,6 +4788,43 @@ helper); **the live system is then stopped without a shutdown and booted again**
 reads it, still names both digests); and the retried installation, in that new
 boot, leaves a stamp on the booted disk that is exactly the two old digests and
 its own.
+`installer::free_space`, `::free_space_encrypted`, `::free_space_refusals`,
+`::free_space_failure` and `::free_space_answers` (`installer/apply/free_space.rs`)
+install beside another system. The target is made on the host as another system
+leaves one: a GPT with an ESP (FAT32 with a Windows Boot Manager directory and the
+fallback copy `EFI/Boot/bootx64.efi`), the reserved partition, an ext4 data
+partition with known bytes, a 2 GiB gap, a recovery partition and 71 GiB free, and,
+in the firmware variables the trial's VMs share, a "Windows Boot Manager" entry and
+**another Fedora's entry on a disk that is not there any more** (written raw:
+`bootupd` replaces an entry with its label, and putting this one back must not need
+its disk). `installer::free_space` asserts the probe of that disk (`esps`, `uuid`,
+the two free extents, the model's `assess` and `place`), the plan (`/boot` in the 2 GiB
+gap, the root in the tail, `kept`, `esp`, nothing erased, the advice to back up), a
+refused `Apply` that repeats no disk id, the installation and its log lines about the
+shared partition, then **the firmware's variables, byte for byte** (`efivarfs`,
+SHA-256 of each `Boot####` and `BootOrder`: every variable that was there, the stale
+entry included, is what it was; ilex has exactly one more; ilex is first in
+`BootOrder` and the order after it is the old one); **from the host** the SHA-256 of
+every kept partition and of every file of the ESP (the fallback loader `bootc`
+replaced is back byte for byte, ilex's `EFI/fedora` is added) and of the MBR's first
+440 bytes; from the guest no `ilex-esp` and a zero-denial SELinux report; and that a
+second plan beside ilex's own partitions is refused (remove them with a partition
+tool). The disk is then booted with the same devices: the firmware boots ilex through
+its own entry (`BootCurrent`) and `installer::install`'s assertions hold. `_encrypted`
+repeats it with a LUKS2 root unlocked at the prompt. `_refusals` attaches twelve
+disks (a MiB short of 31 GiB, exactly 31 GiB, a full ESP, an ESP that is ext4, no free
+space, `EFI/fedora`, no ESP, another system's root partition, an ilex installation
+with its own ESP, ilex's two partitions, a BIOS boot partition), requires the model
+and `Plan` to agree on each, and an ESP that fills up between the plan and `Apply`:
+refused, nothing written. `_failure` makes the installation fail with a test
+credential (`ilex.installer.fault`) twice: `image` (before `bootc` runs) and
+`esp-check` (right after it, when `bootupd` has written ilex's loader and replaced the
+firmware's entries and nothing is put back yet, so the undo has all of it to do): the
+outcome says the partitions it made were removed, and the firmware's variables
+(byte for byte), the files of the shared partition (in the guest and, with the VM
+stopped, on the host), the other partitions and the MBR are what they were.
+`_answers` installs with `mode = "free-space"` from an `ILEXANSWERS` stick, with the
+SELinux report of its console at zero denials, and boots the result.
 `installer::encrypted` and `installer::encrypted_german` (each a VM of its own,
 the live image booted as a disk with the target, a sentinel and a USB stick for
 the log) install `generic.gnome` onto a whole disk with LUKS2 and unlock it at
@@ -4979,10 +5125,13 @@ the erase on the review page.
       problem has and when a field is invalid are the view's decisions, not
       GTK's). `Event` and `Flow::handle` (`events`) are what a person's input
       means (GTK's `Msg` wraps an `Event`); `Event::parse(name, text)` is the
-      same by name, for QML. `runner::Services::job(step)` turns a `Step` into a
+      same by name, for QML (`mode` `whole-disk` or `free-space` is the disk page's
+      way of installing; the view lists both with what each does on the chosen disk or
+      why it cannot be used, and whether the installation erases, which draws the
+      review's sentence, button and dialog). `runner::Services::job(step)` turns a `Step` into a
       blocking `Job` that returns an `Answer`, and `Flow::answer` gives it to the
       right method with its generation (GTK's `carry_out` and `update_cmd` are
-      these). `shots::SHOTS` is the table of the 118 states the renderers draw (the
+      these). `shots::SHOTS` is the table of the 126 states the renderers draw (the
       steps from a fixture scenario's start to the page, check and dialog a shot
       names); each toolkit's renderer turns a `Do` into its own input.
       `Flow::observed()` says what is on screen in the flow's words, for a
@@ -5044,9 +5193,11 @@ the erase on the review page.
       reason. The first disk that can be installed to is chosen until the person
       chooses (`set_disk`); a later look keeps the person's disk while it is still
       offered, otherwise the default moves on and an earlier check is dropped.
-      The way of installing is the whole disk (the other, beside what is
-      there, is listed as unavailable). The request that `Plan` takes names
-      that disk, `whole-disk` and `encrypt` as the encryption page left it (with
+      The way of installing is the whole disk, or beside the other systems
+      where the model's rule allows it (`Flow::mode_choices`; the row says why
+      it cannot be used on a disk where it cannot, and the way falls back to the
+      whole disk when another disk is chosen). The request that `Plan` takes names
+      that disk, the way and `encrypt` as the encryption page left it (with
       `tpm: "off"` when it is on: the installation does not enrol the security chip
       yet, so the plan has nothing to warn of). Nothing to install to is the
       page's own problem (`disk_problem`) with Try again (`start_probe`).
@@ -5370,7 +5521,13 @@ the erase on the review page.
   - *Disk.* A radio row per disk that can be installed to (model, then size,
     bus and serial, what is on it and a warning for a removable disk), the
     ones that cannot in a group of their own, greyed, each with its reason, and
-    the way of installing (whole disk, the other greyed). Continue is focused
+    the way of installing (whole disk, or beside the other systems where the disk
+    allows it, each with what it does or why not: a disk that holds partitions of
+    ilex's own says to remove them with a partition tool first, or to erase the
+    whole disk). Beside the other systems the review lists what is created, what
+    stays and the shared EFI system partition, says nothing is erased, and its
+    dialog names exactly what is created and kept (its answer is not drawn as a
+    destructive one). Continue is focused
     (Enter takes the default disk); nothing is written. Without a disk, the
     page says why of every disk with Try again.
   - *Daily user.* Radio rows (No daily profile, each public profile of the
@@ -5446,11 +5603,14 @@ the erase on the review page.
   mirror and its faults are unchanged.
 - **`--self-check --render DIR [--dark]`** draws every page and error state to
   PNG files with GTK's renderer from the window's widget tree at the surface's
-  own scale (`<state>-<light|dark>-<scale>x.png`, 118 states): the welcome page
+  own scale (`<state>-<light|dark>-<scale>x.png`, 126 states): the welcome page
   in German, BIOS, without a helper and with a layout the compositor did not
   take; the machine page for every kind of detection result and for a BIOS
   boot found there; the disk page with the default and another disk chosen,
-  with no disk, without a helper and on a BIOS boot; the administrator page
+  with no disk, without a helper and on a BIOS boot, with the way of installing
+  beside the other systems chosen, offered, not offered for a disk whose EFI
+  system partition has no room (with its reason) and not offered for a disk that
+  holds partitions of an earlier ilex installation; the administrator page
   empty, with each refusal and valid; the daily user page (none, a profile, a custom
   user empty and typed, each refusal of its name and capacity, without encryption,
   and the helper's refusal); the encryption page (on, typed, a short
@@ -5459,7 +5619,9 @@ the erase on the review page.
   encryption); the review page (with the chip's line, and where the computer
   cannot use it; another machine, another
   disk, no disk, no registry, after Back, with the erase dialog open, after the
-  dialog was cancelled, after a refused `Apply` and after one whose answer was
+  dialog was cancelled, for an installation beside the other systems (what is
+  created, what stays and what is shared, unencrypted too, its dialog and the
+  installing page), after a refused `Apply` and after one whose answer was
   lost and nothing began); the installing page early, stalled in the image
   stage, with the log open and re-attached; the recovery key page (the key,
   typed short, right, wrong, with a letter no key has, a window that was not
@@ -5500,7 +5662,7 @@ the erase on the review page.
   `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
   these files. They are not an accessibility walk: AT-SPI driving of the pages
   is not done.
-  The KDE edition's interface draws the **same 118 states** (the same
+  The KDE edition's interface draws the **same 126 states** (the same
   `shots::SHOTS`) with `ilex-installer --self-check --render DIR [--dark]`
   (`kde::render`): the real window (`Main.qml`, 1280x800 logical, with `rendering`
   on) under KWin, and a driver thread that plays the person: it sends the events
@@ -5521,7 +5683,7 @@ the erase on the review page.
   only for a filter that names it, in a VM of its own from `ILEX_INSTALLER_IMAGE_KDE`,
   built by `ilexctl test` when unset) runs it in the guest in the same three
   configurations and holds the KDE edition to the same rules as `installer::ui`:
-  118 shots in each, 354 images of their sizes, mostly different (the count is
+  126 shots in each, 378 images of their sizes, mostly different (the count is
   one constant, `SHOTS`, for both).
 - **On the real KDE ISO** (`iso::next_kde_*`, registered with the other KDE
   trials: Secure Boot on KVM, real key input over QMP, KWin, the real session
@@ -5703,7 +5865,7 @@ the erase on the review page.
   - `installer::finish` (no ISO) drives `Finish`'s refusals through the bus.
 - **Not done here.** Strings are English constants (no gettext catalogue); the
   installed system's computer name and time zone, the display's scale, the
-  network, encryption and recovery-key pages, the free-space mode, the daily
+  network, encryption and recovery-key pages, the daily
   profile page, Cancel during the image stage and a screen reader's walk of the
   pages are later changes. No new polkit action and no change to the bus policy
   was needed: Restart and Power off are the root helper's, and the helper's
