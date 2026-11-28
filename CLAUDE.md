@@ -3164,13 +3164,27 @@ the Windows paths of this change: no Windows host was available.
     the flow's stack (`view.stack`: one more page is a push, fewer a pop, else
     it is replaced; going back is Back or Escape, and the flow refuses while the
     helper is asked, in which case the page is pushed again): `WelcomePage`,
-    `MachinePage`, `DiskPage`, `AccountPage`, `ReviewPage`, `InstallingPage`,
-    `DonePage` and `ProblemPage` (`Kirigami.ScrollablePage`, `FormLayout`,
+    `MachinePage`, `DiskPage`, `EncryptionPage`, `AccountPage`, `ReviewPage`,
+    `InstallingPage`, `RecoveryPage`, `DonePage` and `ProblemPage`
+    (`Kirigami.ScrollablePage`, `FormLayout`,
     `PasswordField`, `RadioSubtitleDelegate`, `LoadingPlaceholder` and
     `PlaceholderMessage` for the waiting and empty states, `InlineMessage` for
     every banner and notice), `ConfirmDialog` (a `Kirigami.PromptDialog`: Cancel
     first and focused, Escape cancels) and `LogDialog` (the stick to save the log
-    to). The 379 keyboard layouts are chosen in a `Kirigami.SearchDialog`
+    to). `EncryptionPage` has two check boxes (encrypt the disk; unlock with the
+    computer's security chip, which says why not where the computer cannot) and
+    the passphrase typed twice with the layout it is typed in; `RecoveryPage`
+    shows the recovery key in eight numbered groups (only while this window holds
+    it, not selectable), the field for the whole key typed back, the helper's
+    refusals, and, when the key cannot be shown or the volume refused it, the
+    way out ("Continue without a recovery key") with its text; the installation's
+    progress goes on under it. Their words are the flow's constants
+    (`view::ENCRYPT_TITLE`, `recovery::…`, `encryption::…`): the GNOME edition
+    shows the same sentences. The passphrase, its confirmation and the typed key
+    are read from Rust like the password (`sendField`, `restoreField`) and
+    cleared when the flow wipes its copy; the key is the one secret `view`
+    carries (`KeyGroups`: it prints nothing in `Debug`, and the JSON is never
+    logged). The 379 keyboard layouts are chosen in a `Kirigami.SearchDialog`
     behind a button (a combo box cannot be searched); the 54 languages in a
     combo box. Enter presses a button as well as Space (`PressButton`: Qt
     Quick Controls' own buttons take Space only). The style is `org.kde.breeze`
@@ -3795,7 +3809,12 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   list or nothing. A table with neither an edition record nor `--edition` is the
   Anaconda path's: its default composition's shell (GNOME). `--table` brings the
   `edition.json` beside it; a record that exists but cannot be read stops the
-  helper, only an absent one means the Anaconda path.
+  helper, only an absent one means the Anaconda path. The next installer's ISO
+  carries `ilex_devkit::installer::table_next`: every published composition
+  with a shell, of every edition (the Anaconda table, `table`, keeps the
+  installer composition's shell list only), which each ISO's helper narrows to
+  its own edition: the KDE ISO's helper starts and offers `generic.kde` and
+  `ms-7c35.kde`.
 - **Detection** is `installer/chooser/ilex-installer-choice` ported with the same
   meaning: exact, case-sensitive comparison of the four SMBIOS strings (stripped
   as Python's `strip` does); a vendor or model alone never matches; two
@@ -5159,7 +5178,7 @@ the erase on the review page.
       same by name, for QML. `runner::Services::job(step)` turns a `Step` into a
       blocking `Job` that returns an `Answer`, and `Flow::answer` gives it to the
       right method with its generation (GTK's `carry_out` and `update_cmd` are
-      these). `shots::SHOTS` is the table of the 71 states the renderers draw (the
+      these). `shots::SHOTS` is the table of the 104 states the renderers draw (the
       steps from a fixture scenario's start to the page, check and dialog a shot
       names); each toolkit's renderer turns a `Do` into its own input.
       `Flow::observed()` says what is on screen in the flow's words, for a
@@ -5614,16 +5633,25 @@ the erase on the review page.
   mirror and its faults are unchanged.
 - **`--self-check --render DIR [--dark]`** draws every page and error state to
   PNG files with GTK's renderer from the window's widget tree at the surface's
-  own scale (`<state>-<light|dark>-<scale>x.png`, 71 states): the welcome page
+  own scale (`<state>-<light|dark>-<scale>x.png`, 104 states): the welcome page
   in German, BIOS, without a helper and with a layout the compositor did not
   take; the machine page for every kind of detection result and for a BIOS
   boot found there; the disk page with the default and another disk chosen,
   with no disk, without a helper and on a BIOS boot; the administrator page
-  empty, with each refusal and valid; the review page (another machine, another
+  empty, with each refusal and valid; the encryption page (on, typed, a short
+  passphrase, a mismatch, a character a prompt cannot take, off, in German, after
+  Back, without a helper, and with the security chip on, off, and needing
+  encryption); the review page (with the chip's line, and where the computer
+  cannot use it; another machine, another
   disk, no disk, no registry, after Back, with the erase dialog open, after the
   dialog was cancelled, after a refused `Apply` and after one whose answer was
   lost and nothing began); the installing page early, stalled in the image
-  stage, with the log open and re-attached; the done page, restarting, with a
+  stage, with the log open and re-attached; the recovery key page (the key,
+  typed short, right, wrong, with a letter no key has, a window that was not
+  given the key before and after the key is typed, a key that could not be
+  fetched, a keyslot that refuses the right key, going on without a key and a
+  refusal of that); the done page (also for a chip that unlocks, a passphrase-only
+  disk and a key given up), restarting, with a
   refused restart and re-attached; the problem page for a failed image stage, a
   failure before the disk was written, a helper that stopped, a helper that is
   lost, a refused restart, restarting (the passwords gone from the fields),
@@ -5651,13 +5679,13 @@ the erase on the review page.
   `--headless --virtual-monitor 1920x1200` is enough, with the scale from a
   `monitors.xml` for the virtual monitor (`MetaVendor` / `MetaVirtualMonitor`,
   connector `Meta-0`, serial `0x00`). `installer::ui` does that in the live
-  image's VM: the flow's rules, `--simulate` refused on a real boot, and 213
+  image's VM: the flow's rules, `--simulate` refused on a real boot, and 312
   images (light and dark at 1x, light at 1.5x, 1280x800 and 1920x1200) that
   must all be PNGs of their size, drawn and mostly different, kept under
   `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
   these files. They are not an accessibility walk: AT-SPI driving of the pages
   is not done.
-  The KDE edition's interface draws the **same 71 states** (the same
+  The KDE edition's interface draws the **same 104 states** (the same
   `shots::SHOTS`) with `ilex-installer --self-check --render DIR [--dark]`
   (`kde::render`): the real window (`Main.qml`, 1280x800 logical, with `rendering`
   on) under KWin, and a driver thread that plays the person: it sends the events
@@ -5678,20 +5706,16 @@ the erase on the review page.
   only for a filter that names it, in a VM of its own from `ILEX_INSTALLER_IMAGE_KDE`,
   built by `ilexctl test` when unset) runs it in the guest in the same three
   configurations and holds the KDE edition to the same rules as `installer::ui`:
-  71 shots in each, 213 images of their sizes, mostly different (the count is
+  104 shots in each, 312 images of their sizes, mostly different (the count is
   one constant, `SHOTS`, for both).
 - **On the real KDE ISO** (`iso::next_kde_*`, registered with the other KDE
   trials: Secure Boot on KVM, real key input over QMP, KWin, the real session
   unit and the real Kirigami window): the helper is **simulated**
   (`ilex.installer.simulate=<scenario>` typed into GRUB's editor; a literal `+` is
-  typed as Shift and `=`). The real helper refuses to start on the KDE ISO
-  (`ilex-installerd: edition kde has no generic composition; the catalogue
-  offers: generic.gnome, ms-7c35.gnome`): its catalogue is generated from
-  `image.toml`'s publications and has no composition for the KDE edition until
-  the KDE shell is published (`generic.kde`, PR #85). The trials that need the
-  helper itself (a plan checked against the registry, a real installation, the
-  detection and the boot argument as the model decides them) are K3's and run
-  on the published composition; these show that the pages work on the real
+  typed as Shift and `=`) for the trials that are about the pages: what they
+  show is that the pages work on the real ISO. The helper itself is the real
+  one for `iso::next_kde_security` and `_declined` (below): the KDE ISO's
+  catalogue has the KDE compositions (`table_next`).
   ISO. `iso::next_kde_welcome`: the layout search dialog by keyboard; German (no
   dead keys) is chosen and **KWin takes it in the running session**
   (`applied=true`), proved by the keys the person presses: the test field turns a
@@ -5738,6 +5762,29 @@ the erase on the review page.
   `iso::next_kde_problem`: a failed image stage ends on the problem page and its
   log is saved to a stick by keyboard. Screenshots of each step are kept under
   `<state dir>/artifacts/iso-next/next-kde-*.png`.
+  `iso::next_kde_encryption` (simulated helper, `generic+chip+recovery+attach-key-shown`)
+  is the recovery key page by keyboard: a window that was not given the key
+  shows its field, the wrong key is refused and the field empties, Tab reaches
+  "Continue without a recovery key" and Enter takes it (nothing typed reaches
+  the serial console). `iso::next_kde_install` walks the encryption page (the
+  passphrase typed twice) before the administrator page.
+  `iso::next_kde_security` and `iso::next_kde_security_declined` are the KDE
+  edition's `iso::next_keyboard_install` and `_skip` on the secure VM of
+  `iso::next_security` (KVM with SMM, Secure Boot on, a persistent swtpm), the
+  real helper installing the registry's `generic.kde`, and **share their
+  harness**: `security::scenario_of` (the VM, the installed disk's cold boot with
+  nobody at the keyboard, another TPM and the recovery key at the prompt, what
+  `luksDump`, `setup.json`, the enrolment record and `ilexctl security verify`
+  say, the secrets scan, the SELinux check) with the person at the Kirigami
+  interface as the installation (`kde_ui::ui_install`, using
+  `install_ui::wait_done`, `recovery_page` and `no_password`): every page by
+  key, the chip's check box on (this computer is eligible), the erase dialog
+  cancelled and then confirmed, the recovery key page of a window that was not
+  given the key (the trial takes it from the helper while the interface is
+  stopped, types a wrong key, refused, then the right one), the end, Power off.
+  The declined trial gives the key up with the page's last button: the disk
+  opens with its passphrase and the chip is not enrolled. They need
+  `ghcr.io/reidond/ilex:generic.kde` (published by a main run of CI).
 - **On the real ISO** (`iso::next_*`, Secure Boot on KVM, real key input over
   QMP, the real helper): `iso::next_welcome` opens the layout list with the
   keyboard, searches it, chooses German (no dead keys), waits for GNOME Kiosk to
