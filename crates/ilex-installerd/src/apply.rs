@@ -28,6 +28,7 @@ use crate::{
 };
 use anyhow::Context;
 use ilex_installer_model::{
+    free_space,
     plan::{ErrorCode, Mode, Plan, PlanError, SECRET_MAX_BYTES, SecretKind},
     probe::Disk,
     state::{State, Summary},
@@ -219,12 +220,17 @@ impl Helper {
                     ));
                 }
             }
+            // Nothing is erased beside other systems, but the disk still gets
+            // new partitions and the shared EFI system partition new files:
+            // the caller says which disk it means, as whole-disk mode does.
             Mode::FreeSpace => {
-                return Err(PlanError::new(
-                    ErrorCode::UnsupportedMode,
-                    Some("mode"),
-                    "installing into free space is not available yet",
-                ));
+                if erase_disk != plan.disk.id {
+                    return Err(PlanError::new(
+                        ErrorCode::InvalidField,
+                        Some("erase_disk"),
+                        "installing beside the other systems writes to the disk: repeat its id to confirm",
+                    ));
+                }
             }
         }
         if !locked(&self.secrets).contains_key(&(plan.id.clone(), SecretKind::AdminPassword)) {
@@ -257,6 +263,12 @@ impl Helper {
             ));
         }
         let now = self.disk_for_apply(&probe.disks, &plan, &planned)?;
+        if plan.request.mode == Mode::FreeSpace {
+            // The shared EFI system partition can only be read before the
+            // claim (a mounted partition is refused under it): this is where
+            // its room and its contents are checked once more.
+            self.esp_unchanged(&plan, now)?;
+        }
         // What the disk's `/boot` says it was installed from, read now: the
         // claim below keeps a partition from being mounted, and the wipe takes
         // the stamp with it. The installation writes these digests into the
@@ -425,6 +437,49 @@ impl Helper {
         Ok(now)
     }
 
+    /// Free-space mode: the disk can still be installed beside, with the same
+    /// EFI system partition the plan named, and that partition still has the
+    /// room the plan saw and no `EFI/fedora` of anybody's.
+    fn esp_unchanged(&self, plan: &Plan, now: &Disk) -> Result<(), PlanError> {
+        let changed = |why: String| {
+            PlanError::new(
+                ErrorCode::DiskChanged,
+                Some("disk"),
+                format!(
+                    "{} is not as it was planned: {why}; plan again",
+                    plan.disk.id
+                ),
+            )
+        };
+        let offer = free_space::assess(now).map_err(|why| {
+            PlanError::new(
+                ErrorCode::FreeSpaceUnavailable,
+                Some("mode"),
+                format!(
+                    "ilex cannot be installed beside the other systems on {} now: {why}",
+                    plan.disk.id
+                ),
+            )
+        })?;
+        let Some(planned) = &plan.esp else {
+            return Err(changed("the plan names no EFI system partition".into()));
+        };
+        if offer.esp.uuid != planned.uuid
+            || offer.esp.number != planned.number
+            || offer.esp.size_bytes != planned.size_bytes
+        {
+            return Err(changed(
+                "its EFI system partition is not the one the plan named".into(),
+            ));
+        }
+        if offer.esp_info.loaders != planned.loaders {
+            return Err(changed(
+                "the other loaders on its EFI system partition are not what the plan showed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The last look, with the disk claimed: probe again (the held disk is not
     /// claimed a second time and its partitions are not mounted for reading),
     /// require the same disk, and require `systemd-repart`'s dry run to be the
@@ -434,10 +489,19 @@ impl Helper {
             |e: anyhow::Error| PlanError::new(ErrorCode::Internal, None, format!("{e:#}"));
         let disks = disks::scan_held(&self.config.run_dir, hold).map_err(internal)?;
         let now = self.disk_for_apply(&disks, plan, planned)?;
-        let layout =
-            repart::layout(&self.config.definitions, plan.request.encrypt).map_err(internal)?;
-        let made = repart::dry_run(&layout, &now.path, &plan.seed)
-            .map_err(|e| PlanError::new(ErrorCode::Repart, None, format!("{e:#}")))?;
+        let layout = repart::layout(
+            &self.config.definitions,
+            plan.request.mode,
+            plan.request.encrypt,
+        )
+        .map_err(internal)?;
+        let made = repart::dry_run(
+            &layout,
+            &now.path,
+            &plan.seed,
+            &repart::spans(&now.partitions),
+        )
+        .map_err(|e| PlanError::new(ErrorCode::Repart, None, format!("{e:#}")))?;
         if made != plan.partitions {
             return Err(PlanError::new(
                 ErrorCode::DiskChanged,

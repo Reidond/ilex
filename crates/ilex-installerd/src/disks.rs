@@ -9,7 +9,7 @@ use crate::{
     topology::{self, DevNum, Roots, System, Tracer},
 };
 use anyhow::{Context, Result};
-use ilex_installer_model::probe::{Disk, Extent, OtherSystem, Partition};
+use ilex_installer_model::probe::{Disk, EspInfo, Extent, OtherSystem, Partition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -24,10 +24,10 @@ use std::{
 const MIB: u64 = 1024 * 1024;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 /// GPT type GUIDs.
-const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+use ilex_installer_model::free_space::ESP_TYPE;
 const MICROSOFT_RESERVED: &str = "e3c9e316-0b5c-4db8-817d-f92df00215ae";
 
-const LSBLK_COLUMNS: &str = "NAME,KNAME,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,RO,LOG-SEC,PTTYPE,PARTTYPE,PARTLABEL,FSTYPE,LABEL,PKNAME";
+const LSBLK_COLUMNS: &str = "NAME,KNAME,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,RO,LOG-SEC,PTTYPE,PARTTYPE,PARTLABEL,PARTUUID,FSTYPE,LABEL,PKNAME";
 
 fn text(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().trim().to_owned()
@@ -223,6 +223,7 @@ pub fn parse_lsblk(
                     label: text(child, "partlabel"),
                     filesystem: text(child, "fstype"),
                     filesystem_label: text(child, "label"),
+                    uuid: text(child, "partuuid").to_ascii_lowercase(),
                 }
             })
             .collect();
@@ -249,6 +250,7 @@ pub fn parse_lsblk(
                 partitions,
                 free_extents: vec![],
                 other_systems: whole.into_iter().collect(),
+                esps: vec![],
             },
             kname,
         });
@@ -720,6 +722,7 @@ pub fn classify_whole_disk(path: &str, filesystem: &str, label: &str) -> Option<
         label: String::new(),
         filesystem: filesystem.to_owned(),
         filesystem_label: label.to_owned(),
+        uuid: String::new(),
     };
     let mut found = classify(&as_partition).unwrap_or_else(|| {
         let clean: String = filesystem
@@ -766,6 +769,16 @@ pub fn efi_loader_names(esp_root: &Path) -> Vec<String> {
     names
 }
 
+/// Does `<esp>/EFI` hold an entry called `name`, in any case (FAT is case
+/// insensitive)? A link is not followed.
+pub fn efi_has_entry(esp_root: &Path, name: &str) -> bool {
+    fs::read_dir(esp_root.join("EFI")).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name))
+    })
+}
+
 /// What those loader directories say about the computer's other systems.
 pub fn loader_systems(names: &[String], partition: &str) -> Vec<OtherSystem> {
     names
@@ -795,6 +808,14 @@ pub fn efi_loaders(esp_root: &Path, partition: &str) -> Vec<OtherSystem> {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EspScan {
     pub loaders: Vec<String>,
+    /// `EFI/fedora` is there (in any case).
+    #[serde(default)]
+    pub fedora_directory: bool,
+    /// The file system's size and free bytes, as `statvfs` says.
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
     /// The mount failed.
     pub error: Option<String>,
     /// Unmounting failed (the namespace's end drops the mount regardless).
@@ -838,6 +859,11 @@ pub fn scan_esp_child(device: &str, mountpoint: &Path) -> EspScan {
         }
     }
     scan.loaders = efi_loader_names(mountpoint);
+    scan.fedora_directory = efi_has_entry(mountpoint, "fedora");
+    if let Some((total, free)) = crate::target::space(mountpoint) {
+        scan.total_bytes = Some(total);
+        scan.free_bytes = Some(free);
+    }
     match exec::run("umount", &[&mountpoint.to_string_lossy()], TOOL_TIMEOUT) {
         Ok(out) if out.success() => {}
         Ok(out) => {
@@ -854,7 +880,11 @@ pub fn scan_esp_child(device: &str, mountpoint: &Path) -> EspScan {
 /// List an ESP's loaders by running this program's `--scan-esp` in a mount
 /// namespace of its own. Failure is reported, not hidden: the other systems
 /// on that disk may then be missing from the list.
-fn scan_esp(device: &str, scratch: &mut Scratch, n: usize) -> (Vec<OtherSystem>, Vec<String>) {
+fn scan_esp(
+    device: &str,
+    scratch: &mut Scratch,
+    n: usize,
+) -> (Vec<OtherSystem>, Vec<String>, EspInfo) {
     // An ESP that cannot be read may hold any loader: it counts as another
     // system, so that erasing the disk is something the answers must say.
     let unreadable = |why: String| {
@@ -870,6 +900,14 @@ fn scan_esp(device: &str, scratch: &mut Scratch, n: usize) -> (Vec<OtherSystem>,
             vec![format!(
                 "could not read the EFI system partition {device} ({why}); other systems on this disk may be missing from the list"
             )],
+            EspInfo {
+                partition: device.to_owned(),
+                readable: false,
+                total_bytes: None,
+                free_bytes: None,
+                loaders: vec![],
+                fedora_directory: false,
+            },
         )
     };
     let (Ok(exe), Ok(mountpoint)) = (std::env::current_exe(), scratch.subdir(&format!("esp{n}")))
@@ -918,7 +956,15 @@ fn scan_esp(device: &str, scratch: &mut Scratch, n: usize) -> (Vec<OtherSystem>,
             "{device}: {error} (the private mount ended with its scan)"
         ));
     }
-    (loader_systems(&scan.loaders, device), notes)
+    let info = EspInfo {
+        partition: device.to_owned(),
+        readable: true,
+        total_bytes: scan.total_bytes,
+        free_bytes: scan.free_bytes,
+        loaders: scan.loaders.clone(),
+        fedora_directory: scan.fedora_directory,
+    };
+    (loader_systems(&scan.loaders, device), notes, info)
 }
 
 /// A reason every disk is refused: the live medium, or something in use, could
@@ -1042,9 +1088,10 @@ fn scan_with(run_dir: &Path, roots: &Roots, held: Option<&str>) -> Result<Vec<Di
         for partition in disk.partitions.clone() {
             if partition.type_id == ESP_TYPE && !ours {
                 esp_count += 1;
-                let (systems, notes) = scan_esp(&partition.path, &mut scratch, esp_count);
+                let (systems, notes, info) = scan_esp(&partition.path, &mut scratch, esp_count);
                 disk.other_systems.extend(systems);
                 disk.notes.extend(notes);
+                disk.esps.push(info);
             }
             disk.other_systems.extend(classify(&partition));
         }

@@ -51,6 +51,7 @@ fn disk(id: &str, size: u64, live: bool) -> Disk {
         partitions: vec![],
         free_extents: vec![],
         other_systems: vec![],
+        esps: vec![],
     }
 }
 
@@ -391,8 +392,10 @@ pub fn run() -> Result<String> {
             Box::new(|v| v["disk"] = json!("tiny")),
         ),
         (
-            "free space",
-            ErrorCode::UnsupportedMode,
+            // The fixture's blank disk has no partition table: nothing is
+            // beside ilex there.
+            "free space on a blank disk",
+            ErrorCode::FreeSpaceUnavailable,
             Box::new(|v| v["mode"] = json!("free-space")),
         ),
         (
@@ -845,8 +848,9 @@ password = "hunter2"
     );
     finish_rules()?;
     recovery_rules()?;
+    free_space_rules(&table)?;
     Ok(
-        "table rules, editions, detection, selection, requests, answers, secrets, stages, finish, recovery key"
+        "table rules, editions, detection, selection, requests, answers, secrets, stages, finish, recovery key, free space"
             .into(),
     )
 }
@@ -862,6 +866,7 @@ fn stick_partition(number: u32, fs: &str, size: u64) -> Partition {
         label: String::new(),
         filesystem: fs.into(),
         filesystem_label: String::new(),
+        uuid: String::new(),
     }
 }
 
@@ -1090,4 +1095,290 @@ fn recovery_rules() -> Result<()> {
         "the status words are setup.json's"
     );
     Ok(())
+}
+
+const GIB: u64 = 1 << 30;
+const MIB: u64 = 1 << 20;
+
+fn extent(start: u64, size: u64) -> crate::probe::Extent {
+    crate::probe::Extent {
+        start_bytes: start,
+        size_bytes: size,
+    }
+}
+
+fn part(
+    number: u32,
+    start: u64,
+    size: u64,
+    type_id: &str,
+    label: &str,
+    fs: &str,
+    uuid: &str,
+) -> Partition {
+    Partition {
+        number,
+        path: format!("/dev/fixture{number}"),
+        start_bytes: start,
+        size_bytes: size,
+        type_id: type_id.into(),
+        label: label.into(),
+        filesystem: fs.into(),
+        filesystem_label: String::new(),
+        uuid: uuid.into(),
+    }
+}
+
+/// A Windows-like disk of 200 GiB: an ESP of 100 MiB with `Microsoft`, the
+/// MSR, 20 GiB of NTFS, a 5 GiB gap, the recovery partition and the rest free.
+fn windows_disk(id: &str) -> Disk {
+    use crate::free_space::{ESP_TYPE, ROOT_X86_64_TYPE};
+    let _ = ROOT_X86_64_TYPE;
+    let esp = part(
+        1,
+        MIB,
+        100 * MIB,
+        ESP_TYPE,
+        "EFI system partition",
+        "vfat",
+        "aaaaaaaa-0000-4000-8000-000000000001",
+    );
+    let msr = part(
+        2,
+        101 * MIB,
+        16 * MIB,
+        "e3c9e316-0b5c-4db8-817d-f92df00215ae",
+        "",
+        "",
+        "aaaaaaaa-0000-4000-8000-000000000002",
+    );
+    let ntfs = part(
+        3,
+        117 * MIB,
+        20 * GIB,
+        "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7",
+        "Basic data partition",
+        "ntfs",
+        "aaaaaaaa-0000-4000-8000-000000000003",
+    );
+    let recovery_start = 117 * MIB + 25 * GIB;
+    let recovery = part(
+        4,
+        recovery_start,
+        500 * MIB,
+        "de94bba4-06d1-4d40-a16a-bfd50179d6ac",
+        "",
+        "ntfs",
+        "aaaaaaaa-0000-4000-8000-000000000004",
+    );
+    let recovery_end = recovery_start + 500 * MIB;
+    Disk {
+        partition_table: Some("gpt".into()),
+        partitions: vec![esp, msr, ntfs, recovery],
+        free_extents: vec![
+            extent(117 * MIB + 20 * GIB, 5 * GIB),
+            extent(recovery_end, 200 * GIB - MIB - recovery_end),
+        ],
+        other_systems: vec![crate::probe::OtherSystem {
+            kind: "efi-loader".into(),
+            partition: Some("/dev/fixture1".into()),
+            description: "Windows Boot Manager (EFI/Microsoft)".into(),
+        }],
+        esps: vec![crate::probe::EspInfo {
+            partition: "/dev/fixture1".into(),
+            readable: true,
+            total_bytes: Some(96 * MIB),
+            free_bytes: Some(60 * MIB),
+            loaders: vec!["Microsoft".into()],
+            fedora_directory: false,
+        }],
+        ..disk(id, 200 * GIB, false)
+    }
+}
+
+/// Free-space mode: where `systemd-repart` puts the two partitions (the
+/// helper's own self-check compares this rule with repart's dry run on sparse
+/// disks) and the refusals.
+fn free_space_rules(table: &Table) -> Result<()> {
+    use crate::free_space::{
+        BIOS_BOOT_TYPE, ESP_TYPE, MIN_GAP_BYTES, ROOT_X86_64_TYPE, XBOOTLDR_TYPE, assess, place,
+    };
+    // Best fit: each partition goes to the smallest area that holds it.
+    let two = place(&[extent(10 * GIB, 5 * GIB), extent(20 * GIB, 84 * GIB)])
+        .context("a 5 GiB and an 84 GiB gap")?;
+    ensure!(
+        two.boot == extent(10 * GIB, 5 * GIB) && two.root == extent(20 * GIB, 84 * GIB),
+        "/boot goes to the small gap, the root to the big one: {two:?}"
+    );
+    let one = place(&[extent(0, 80 * GIB), extent(100 * GIB, 118 * GIB)])
+        .context("an 80 GiB and a 118 GiB gap")?;
+    ensure!(
+        one.boot == extent(0, 80 * GIB) && one.root == extent(GIB, 79 * GIB),
+        "both go to the smaller gap, the root after /boot: {one:?}"
+    );
+    let tail = place(&[extent(0, 100 * GIB), extent(150 * GIB, 99 * GIB)])
+        .context("a 100 GiB and a 99 GiB gap")?;
+    ensure!(
+        tail.boot == extent(150 * GIB, 99 * GIB) && tail.root == extent(151 * GIB, 98 * GIB),
+        "both go to the smaller gap: {tail:?}"
+    );
+    ensure!(
+        place(&[extent(0, MIN_GAP_BYTES)]).is_some()
+            && place(&[extent(0, MIN_GAP_BYTES - MIB)]).is_none()
+            && place(&[extent(0, 40 * GIB - MIB), extent(80 * GIB, 20 * GIB)]).is_some()
+            && place(&[extent(0, 2 * GIB), extent(10 * GIB, 29 * GIB)]).is_none()
+            && place(&[]).is_none(),
+        "the least free space"
+    );
+
+    // A disk that can be installed beside, and each way it cannot.
+    let offer = assess(&windows_disk("win")).map_err(|why| anyhow::anyhow!("{why}"))?;
+    ensure!(
+        offer.esp.number == 1
+            && offer.kept.len() == 4
+            && offer.placement.boot.size_bytes == 5 * GIB
+            && offer.placement.root.start_bytes > 20 * GIB,
+        "a Windows disk's offer: {offer:?}"
+    );
+    type Break = (&'static str, fn(&mut Disk), &'static str);
+    let refusals: [Break; 13] = [
+        (
+            "no partition table",
+            |d| d.partition_table = None,
+            "no partition table",
+        ),
+        (
+            "a DOS table",
+            |d| d.partition_table = Some("dos".into()),
+            "DOS partition table",
+        ),
+        (
+            "no ESP",
+            |d| d.partitions.retain(|p| p.type_id != ESP_TYPE),
+            "no EFI system partition",
+        ),
+        (
+            "an ESP that is not FAT",
+            |d| d.partitions[0].filesystem = "ext4".into(),
+            "not FAT",
+        ),
+        (
+            "an ESP with no room",
+            |d| d.esps[0].free_bytes = Some(8 * MIB),
+            "8 MiB free",
+        ),
+        (
+            "an ESP that cannot be read",
+            |d| d.esps[0].readable = false,
+            "could not be read",
+        ),
+        (
+            "EFI/fedora",
+            |d| d.esps[0].fedora_directory = true,
+            "already holds EFI/fedora",
+        ),
+        (
+            "no gap",
+            |d| d.free_extents = vec![],
+            "no unallocated space",
+        ),
+        (
+            "a small gap",
+            |d| d.free_extents = vec![extent(0, 20 * GIB)],
+            "20 GiB",
+        ),
+        (
+            "a root of another system",
+            |d| {
+                d.partitions.push(part(
+                    5,
+                    300 * GIB,
+                    GIB,
+                    ROOT_X86_64_TYPE,
+                    "arch",
+                    "ext4",
+                    "bbbbbbbb-0000-4000-8000-000000000005",
+                ));
+            },
+            "type ilex uses",
+        ),
+        (
+            "a BIOS boot partition",
+            |d| {
+                d.partitions.push(part(
+                    5,
+                    300 * GIB,
+                    MIB,
+                    BIOS_BOOT_TYPE,
+                    "",
+                    "",
+                    "bbbbbbbb-0000-4000-8000-000000000007",
+                ));
+            },
+            "BIOS boot partition",
+        ),
+        (
+            "an ilex installation",
+            |d| {
+                d.partitions.push(part(
+                    5,
+                    300 * GIB,
+                    GIB,
+                    ESP_TYPE,
+                    "ilex-esp",
+                    "vfat",
+                    "bbbbbbbb-0000-4000-8000-000000000006",
+                ));
+            },
+            "remove them with a partition tool",
+        ),
+        (
+            "the partitions of an installation that did not finish",
+            |d| {
+                d.partitions.push(part(
+                    5,
+                    200 * GIB - 40 * GIB,
+                    GIB,
+                    XBOOTLDR_TYPE,
+                    "ilex-boot",
+                    "ext4",
+                    "bbbbbbbb-0000-4000-8000-0000000000b0",
+                ));
+                d.partitions.push(part(
+                    6,
+                    200 * GIB - 39 * GIB,
+                    30 * GIB,
+                    ROOT_X86_64_TYPE,
+                    "ilex-root",
+                    "btrfs",
+                    "bbbbbbbb-0000-4000-8000-0000000000b1",
+                ));
+            },
+            "ilex-boot (1 GiB), ilex-root (30 GiB)",
+        ),
+    ];
+    for (name, edit, says) in refusals {
+        let mut broken = windows_disk("win");
+        edit(&mut broken);
+        let why = assess(&broken)
+            .err()
+            .with_context(|| format!("{name}: a disk beside which ilex cannot go was accepted"))?;
+        ensure!(why.contains(says), "{name}: '{why}' does not say '{says}'");
+    }
+    // The plan for free-space mode: through the probe, with the offer.
+    let mut probe = probe_of(table, &Edition::new("gnome")?)?;
+    probe.disks.push(windows_disk("win"));
+    let ok = check_request(&request_of(&|v| v["disk"] = json!("win"))?, &probe)
+        .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    ensure!(ok.offer.is_some(), "free-space mode carries its offer");
+    Ok(())
+}
+
+fn request_of(edit: &dyn Fn(&mut Value)) -> Result<PlanRequest> {
+    let mut value = json!({
+        "composition": "generic.gnome", "disk": "blank", "mode": "free-space",
+        "administrator": "ilexmaint"
+    });
+    edit(&mut value);
+    Ok(serde_json::from_value(value)?)
 }

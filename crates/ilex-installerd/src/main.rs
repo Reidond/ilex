@@ -11,6 +11,8 @@ mod disks;
 #[cfg(target_os = "linux")]
 mod enrol;
 #[cfg(target_os = "linux")]
+mod esp;
+#[cfg(target_os = "linux")]
 mod exec;
 #[cfg(target_os = "linux")]
 mod fault;
@@ -30,6 +32,8 @@ mod progress;
 mod recovery;
 #[cfg(target_os = "linux")]
 mod registry;
+#[cfg(target_os = "linux")]
+mod remove;
 #[cfg(target_os = "linux")]
 mod repart;
 #[cfg(target_os = "linux")]

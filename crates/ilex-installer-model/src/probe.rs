@@ -83,6 +83,14 @@ pub struct Disk {
     pub partitions: Vec<Partition>,
     pub free_extents: Vec<Extent>,
     pub other_systems: Vec<OtherSystem>,
+    /// What the probe read from inside each EFI system partition (mounted
+    /// read-only for the look): installing beside another system reuses one,
+    /// so how much room it has and what it already holds decide whether that
+    /// can be done. Empty for a disk the helper holds (its partitions are not
+    /// mounted then); the plan and `Apply` read it from the probe made before
+    /// the claim.
+    #[serde(default)]
+    pub esps: Vec<EspInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +104,32 @@ pub struct Partition {
     pub label: String,
     pub filesystem: String,
     pub filesystem_label: String,
+    /// The partition's own UUID (GPT's `PARTUUID`), the name that stays its
+    /// own when the kernel renumbers a disk's partitions. Empty on a disk
+    /// with a DOS table or when the probe could not read it.
+    #[serde(default)]
+    pub uuid: String,
+}
+
+/// What the probe found inside one EFI system partition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EspInfo {
+    /// The partition's node, as in [`Partition::path`].
+    pub partition: String,
+    /// The partition could be mounted and read. When it could not, nothing
+    /// else here is known and a plan beside other systems refuses it.
+    pub readable: bool,
+    /// Bytes the file system holds in all, and how many of them are free.
+    pub total_bytes: Option<u64>,
+    pub free_bytes: Option<u64>,
+    /// The directories below `EFI/`, other than the fallback `EFI/BOOT`
+    /// (`Microsoft`, `ubuntu`, ...), at most sixteen, sorted.
+    #[serde(default)]
+    pub loaders: Vec<String>,
+    /// `EFI/fedora` exists (any case): the directory ilex's own boot files go
+    /// to, which another Fedora or an earlier ilex installation already uses.
+    #[serde(default)]
+    pub fedora_directory: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -18,20 +18,20 @@
 
 use crate::{
     disks::{self, Hold},
-    enrol,
+    enrol, esp,
     exec::{self, Exit, Flow, Job},
     fault,
     helper::Helper,
     luks,
     recovery::{Verifier, Wait},
-    repart,
+    remove, repart,
     secret::{self, Secret},
     stagelog::{Logs, StageLog},
     stamp, target,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use ilex_installer_model::{
-    plan::{Plan, PlannedPartition},
+    plan::{Mode, Plan, PlannedPartition},
     recovery::{self, KeyStatus, TpmOutcome, TpmStatus},
     state::Stage,
 };
@@ -92,6 +92,18 @@ pub struct Install {
     provisional: Option<Vec<String>>,
     /// The stage that is running (or failed).
     stage: Stage,
+    /// Free-space mode: the shared EFI system partition's node, once found,
+    /// and what it held before `bootc` wrote to it.
+    esp_node: Option<String>,
+    esp_snapshot: Option<esp::Snapshot>,
+    /// The firmware's boot variables before `bootc` ran, byte for byte: what a
+    /// failed installation puts back, whatever `bootupd` did to them.
+    nvram: Option<esp::Nvram>,
+    /// The shared EFI system partition's GUID, as the firmware's entries hold it.
+    esp_guid: Option<[u8; 16]>,
+    /// Free-space mode: the exclusive claim has been let go, so the partitions
+    /// this run plans may exist; a failure removes them again.
+    partitions_may_exist: bool,
 }
 
 /// The encrypted volume of an installation.
@@ -184,6 +196,11 @@ pub fn run(
         earlier,
         provisional: None,
         stage: Stage::Partition,
+        esp_node: None,
+        esp_snapshot: None,
+        nvram: None,
+        esp_guid: None,
+        partitions_may_exist: false,
     };
     match install.stages(hold) {
         Ok(()) => install.helper.tracker.succeed(),
@@ -193,8 +210,11 @@ pub fn run(
                 "ilex-installerd: installation failed in the {} stage: {reason}",
                 install.stage.name()
             );
-            install.cleanup();
-            install.helper.tracker.fail(install.stage, &reason);
+            let cleaned = install.cleanup();
+            install
+                .helper
+                .tracker
+                .fail(install.stage, &format!("{reason}{cleaned}"));
         }
     }
     // Whatever the installation held of a recovery key is wiped now, whichever
@@ -317,8 +337,20 @@ impl Install {
     // --- partition -------------------------------------------------------
 
     fn partition(&mut self, hold: Hold) -> Result<()> {
-        let mut log = self.begin(Stage::Partition, "Writing the partition table")?;
-        let layout = repart::layout(&self.helper.config.definitions, self.plan.request.encrypt)?;
+        let free_space = self.plan.request.mode == Mode::FreeSpace;
+        let mut log = self.begin(
+            Stage::Partition,
+            if free_space {
+                "Adding the partitions beside the other systems"
+            } else {
+                "Writing the partition table"
+            },
+        )?;
+        let layout = repart::layout(
+            &self.helper.config.definitions,
+            self.plan.request.mode,
+            self.plan.request.encrypt,
+        )?;
         let definitions = format!("--definitions={}", layout.dir.display());
         let seed = format!("--seed={}", self.plan.seed);
         let kernel_name = self.plan.disk.path.clone();
@@ -349,6 +381,14 @@ impl Install {
         ));
         let held = hold.rdev;
         hold.release();
+        // From here the partitions this run plans may exist on a disk that is
+        // kept: a failure removes exactly them.
+        self.partitions_may_exist = free_space;
+        if free_space {
+            // Beside other systems nothing is wiped and no table is made: the
+            // disk's partitions stay as they are and repart adds two.
+            log.line("free-space mode: the partitions on the disk are not wiped and its table is not recreated; systemd-repart adds ilex's /boot and root to it");
+        }
         // A disk that has partitions must lose them first. `systemd-repart
         // --empty=force` wipes the table but not the kernel's partitions, and
         // then cannot add the new first partition over the old one ("Failed to
@@ -357,13 +397,15 @@ impl Install {
         // removes the table's signatures and has the kernel forget the
         // partitions, which is what a person expects whole-disk mode to do to
         // a disk that was used.
-        self.checked(&mut log, "wipefs", &["--all", &disk], TOOL)?;
         let kname = kernel_name
             .rsplit('/')
             .next()
             .unwrap_or(&kernel_name)
             .to_owned();
-        target::wait_for_no_partitions(Path::new("/sys"), &kname, Duration::from_secs(20))?;
+        if !free_space {
+            self.checked(&mut log, "wipefs", &["--all", &disk], TOOL)?;
+            target::wait_for_no_partitions(Path::new("/sys"), &kname, Duration::from_secs(20))?;
+        }
         // udev has seen the signatures go and the partitions with them: let it
         // finish removing and making its links before anything is written, so
         // that repart does not race it (a link of the old contents vanishes
@@ -385,18 +427,28 @@ impl Install {
         // gone or another took its place, and nothing more is written to it.
         let (_, now) = disks::by_id_node(&self.plan.disk.id).map_err(|why| {
             anyhow!(
-                "{} is gone after the disk was wiped ({why}); the disk was erased, install again from a new plan",
-                self.address
+                "{} is gone after the disk was wiped ({why}); {}",
+                self.address,
+                if free_space {
+                    "nothing more is written to it; install again from a new plan"
+                } else {
+                    "the disk was erased, install again from a new plan"
+                }
             )
         })?;
         ensure!(
             now == held,
-            "{} no longer leads to the disk that was wiped ({}:{} against {}:{}); the disk was erased, install again from a new plan",
+            "{} no longer leads to the disk that was wiped ({}:{} against {}:{}); {}",
             self.address,
             now.0,
             now.1,
             held.0,
-            held.1
+            held.1,
+            if free_space {
+                "nothing more is written to it; install again from a new plan"
+            } else {
+                "the disk was erased, install again from a new plan"
+            }
         );
         // The passphrase is the key of the new volume's one keyslot: repart
         // reads it from the descriptor it inherits, and nothing names it.
@@ -407,7 +459,7 @@ impl Install {
         let inherit: Vec<std::os::fd::RawFd> = key_file.iter().map(|(_, fd)| *fd).collect();
         let mut args = vec![
             "--dry-run=no",
-            "--empty=force",
+            repart::empty_mode(&layout),
             "--pretty=no",
             "--no-pager",
             "--json=pretty",
@@ -419,11 +471,22 @@ impl Install {
         }
         args.push(&disk);
         let lines = self.checked_with(&mut log, "systemd-repart", &args, REPART, &inherit)?;
-        let made = repart::parse(&json_array(&lines)?, &layout)
+        let existing: Vec<(u64, u64)> = self
+            .plan
+            .kept
+            .iter()
+            .map(|k| (k.start_bytes, k.size_bytes))
+            .collect();
+        let made = repart::parse(&json_array(&lines)?, &layout, &existing)
             .context("reading what systemd-repart made")?;
         ensure!(
             repart::same_partitions(&made, &self.plan.partitions),
-            "the partitions systemd-repart made are not the planned ones; the disk was erased, install again from a new plan"
+            "the partitions systemd-repart made are not the planned ones; {}",
+            if free_space {
+                "install again from a new plan"
+            } else {
+                "the disk was erased, install again from a new plan"
+            }
         );
         self.end(Stage::Partition, &mut log);
         Ok(())
@@ -644,7 +707,40 @@ impl Install {
             None => root_partition.clone(),
         };
         let (boot, boot_node) = by_kind("xbootldr")?;
-        let (esp, esp_node) = by_kind("esp")?;
+        // The EFI system partition: ilex's own, or in free-space mode the
+        // disk's, found again by its UUID and checked against sysfs.
+        let shared_esp = self.plan.esp.clone();
+        let (esp_filesystem, esp_node) = match &shared_esp {
+            None => {
+                let (esp, node) = by_kind("esp")?;
+                (esp.filesystem.clone(), node.clone())
+            }
+            Some(shared) => {
+                let disk = self
+                    .plan
+                    .disk
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .context("the planned disk has no name")?;
+                let node = target::locate_partition(
+                    &shared.uuid,
+                    shared.number,
+                    shared.size_bytes,
+                    disk,
+                    Path::new("/sys"),
+                    Path::new("/dev/disk/by-partuuid"),
+                )
+                .context("finding the disk's own EFI system partition again")?;
+                log.line(&format!(
+                    "the disk's EFI system partition {} ({}) is shared: it is mounted, never formatted",
+                    node, shared.uuid
+                ));
+                self.nodes.insert(node.clone());
+                self.esp_node = Some(node.clone());
+                ("vfat".to_owned(), node)
+            }
+        };
         make_dir(&self.target)?;
         let target = self.target.to_string_lossy().into_owned();
         self.checked(
@@ -673,10 +769,10 @@ impl Install {
             "mount",
             &[
                 "-t",
-                &esp.filesystem,
+                &esp_filesystem,
                 "-o",
                 "umask=0077,shortname=winnt",
-                esp_node,
+                &esp_node,
                 &esp_dir.to_string_lossy(),
             ],
             TOOL,
@@ -701,6 +797,9 @@ impl Install {
         if fault::requested("image") {
             log.line("fault=image (a test credential): the image stage fails before bootc is run");
             bail!("fault=image (a test credential): the image stage is made to fail");
+        }
+        if self.plan.esp.is_some() {
+            self.guard_esp(&mut log)?;
         }
         let source = format!("registry:{}", self.plan.image.source);
         let target = self.target.to_string_lossy().into_owned();
@@ -761,6 +860,9 @@ impl Install {
             bail!("bootc {}: {}", out.exit.describe(), last_line(&out.lines));
         }
         self.provisional_intact(&mut log)?;
+        if self.plan.esp.is_some() {
+            self.check_esp(&mut log)?;
+        }
         self.helper
             .tracker
             .progress(0.99, Some("Checking what was installed"));
@@ -793,6 +895,130 @@ impl Install {
         );
         log.line(&format!("installed {digest}, tracking {wanted}"));
         self.end(Stage::Image, &mut log);
+        Ok(())
+    }
+
+    // --- the shared EFI system partition -----------------------------------
+
+    /// Free-space mode, before `bootc`: read what the shared EFI system
+    /// partition holds and the firmware's boot variables (byte for byte), so
+    /// that what `bootupd` changes of them can be proved and put back.
+    fn guard_esp(&mut self, log: &mut StageLog) -> Result<()> {
+        let esp_dir = self.target.join("boot/efi");
+        let snapshot = esp::Snapshot::take(&esp_dir)
+            .context("reading the shared EFI system partition before ilex's files are added")?;
+        ensure!(
+            !snapshot.has_fedora(),
+            "EFI/fedora appeared on the shared EFI system partition since the plan; ilex would replace its files"
+        );
+        log.line(&format!(
+            "the shared EFI system partition holds {} files, read before bootc adds ilex's",
+            snapshot.file_count()
+        ));
+        let uuid = self
+            .plan
+            .esp
+            .as_ref()
+            .context("a free-space installation has a shared EFI system partition")?
+            .uuid
+            .clone();
+        let guid = esp::esp_guid(&uuid)?;
+        let nvram = esp::Nvram::read().context("reading the firmware's boot variables")?;
+        for line in nvram.describe() {
+            log.line(&format!("firmware variable before: {line}"));
+        }
+        for line in esp::boot_entry_lines() {
+            log.line(&format!("firmware boot entry before: {line}"));
+        }
+        self.esp_snapshot = Some(snapshot);
+        self.nvram = Some(nvram);
+        self.esp_guid = Some(guid);
+        Ok(())
+    }
+
+    /// Free-space mode, right after `bootc`: put the firmware's boot variables
+    /// back (ilex's own entry stays, but not first), put back what `bootupd`
+    /// replaced under `EFI/BOOT` and require every file that was there to be as
+    /// it was and nothing to have been added outside ilex's own places. ilex
+    /// becomes the firmware's first choice only in the last stage, and only on
+    /// success.
+    fn check_esp(&mut self, log: &mut StageLog) -> Result<()> {
+        // The test credential `esp-check` fails here, right after `bootc`:
+        // ilex's loader and entry are in place and nothing is put back yet, so
+        // the undo has all of it to do.
+        if fault::requested("esp-check") {
+            log.line("fault=esp-check (a test credential): the installation fails after bootc, before anything is put back");
+            bail!(
+                "fault=esp-check (a test credential): the installation is made to fail after bootc"
+            );
+        }
+        let esp_dir = self.target.join("boot/efi");
+        let saved = self
+            .nvram
+            .clone()
+            .context("the firmware's boot variables were not saved before bootc ran")?;
+        let guid = self
+            .esp_guid
+            .context("the shared EFI system partition's GUID is not known")?;
+        let vars = Path::new(esp::EFIVARS);
+        // The firmware first.
+        let restored = saved
+            .restore(vars, &guid, true)
+            .context("putting the firmware's boot variables back")?;
+        for line in &restored.lines {
+            log.line(line);
+        }
+        saved
+            .verify_restored(vars)
+            .context("checking the firmware's boot variables after they were put back")?;
+        log.line(&format!(
+            "all {} firmware boot variables that were there are as they were, byte for byte; ilex's own entry is not first until the last stage",
+            saved.vars().len()
+        ));
+        let snapshot = self
+            .esp_snapshot
+            .as_ref()
+            .context("the shared EFI system partition was not read before bootc ran")?;
+        let restored = snapshot
+            .restore_and_verify(&esp_dir)
+            .context("checking the other systems' files on the shared EFI system partition")?;
+        for file in &restored {
+            log.line(&format!(
+                "bootc replaced {file}; the other system's file was put back byte for byte (ilex is reached through its own firmware boot entry)"
+            ));
+        }
+        log.line(&format!(
+            "all {} files that were on the shared EFI system partition are as they were",
+            snapshot.file_count()
+        ));
+        for line in esp::boot_entry_lines() {
+            log.line(&format!("firmware boot entry after: {line}"));
+        }
+        let after = esp::Nvram::read()?;
+        if after.ilex_entries(&saved, &guid).is_empty() {
+            log.line("bootupd made no firmware boot entry for ilex: it is reached through the fallback path only if the firmware picks it, or from the firmware's menu");
+        }
+        Ok(())
+    }
+
+    /// Free-space mode, the last thing before the unmounts, and only when
+    /// everything before it succeeded: ilex becomes the firmware's first choice.
+    fn complete_shared_esp(&mut self, log: &mut StageLog) -> Result<()> {
+        let (Some(saved), Some(guid)) = (&self.nvram, self.esp_guid) else {
+            return Ok(());
+        };
+        match saved
+            .put_ilex_first(Path::new(esp::EFIVARS), &guid)
+            .context("making ilex the firmware's first choice")?
+        {
+            Some(order) => log.line(&format!(
+                "ilex is the firmware's first choice now: BootOrder {order}"
+            )),
+            None => log.line("no firmware boot entry of ilex's to put first"),
+        }
+        for line in esp::boot_entry_lines() {
+            log.line(&format!("firmware boot entry at the end: {line}"));
+        }
         Ok(())
     }
 
@@ -1335,13 +1561,21 @@ impl Install {
         self.stamp(&mut log, deployment)?;
         self.relabel(&mut log, deployment, &["var/log", "var/lib/ilex"])?;
         self.checked(&mut log, "sync", &[], TOOL)?;
+        if self.plan.esp.is_some() {
+            self.complete_shared_esp(&mut log)?;
+        }
         // Free space the new file systems can discard; not every device
         // supports it, and none of it matters for the install.
-        for dir in [
-            self.target.join("boot/efi"),
-            self.target.join("boot"),
-            self.target.clone(),
-        ] {
+        // (Not the shared EFI system partition: it is another system's.)
+        let esp_trim = self
+            .plan
+            .esp
+            .is_none()
+            .then(|| self.target.join("boot/efi"));
+        for dir in esp_trim
+            .into_iter()
+            .chain([self.target.join("boot"), self.target.clone()])
+        {
             let _ = self.tool(
                 &mut log,
                 &Job {
@@ -1615,22 +1849,175 @@ impl Install {
         })
     }
 
-    /// After a failure: leave nothing mounted.
-    fn cleanup(&mut self) {
-        if let Ok(mut log) = self.logs.stage(self.stage) {
-            log.line("cleaning up after a failure");
-            let ended = self.unmount(&mut log);
-            log.line(if ended {
-                "nothing of the target is mounted"
+    /// After a failure: leave nothing mounted, and in free-space mode leave the
+    /// disk as it was found: what was added to the shared EFI system partition
+    /// and to the firmware's boot entries is taken out again, and so are the
+    /// partitions this run made (exactly those, found by their UUIDs). Returns
+    /// a sentence for the failure's message, empty when there is nothing to say.
+    fn cleanup(&mut self) -> String {
+        let Ok(mut log) = self.logs.stage(self.stage) else {
+            return String::new();
+        };
+        log.line("cleaning up after a failure");
+        let free_space = self.plan.request.mode == Mode::FreeSpace;
+        let mut problems: Vec<String> = Vec::new();
+        if free_space {
+            problems.extend(self.undo_shared_esp(&mut log));
+        }
+        let ended = self.unmount(&mut log);
+        log.line(if ended {
+            "nothing of the target is mounted"
+        } else {
+            "some mounts of the target could not be removed"
+        });
+        let mut closed = true;
+        if ended && let Err(why) = self.close_volume(&mut log) {
+            closed = false;
+            log.line(&format!(
+                "the encrypted volume could not be closed: {why:#}"
+            ));
+        }
+        if !free_space {
+            return String::new();
+        }
+        if !self.partitions_may_exist {
+            return if problems.is_empty() {
+                String::new()
             } else {
-                "some mounts of the target could not be removed"
-            });
-            if ended && let Err(why) = self.close_volume(&mut log) {
-                log.line(&format!(
-                    "the encrypted volume could not be closed: {why:#}"
-                ));
+                format!(". {}", problems.join("; "))
+            };
+        }
+        if !(ended && closed) {
+            problems.push("the partitions it made could not be removed because they are still in use; remove them with the installer's next attempt".into());
+        } else {
+            match self.remove_made_partitions(&mut log) {
+                Ok(0) => log.line("no partition of this installation was made"),
+                Ok(n) => log.line(&format!(
+                    "removed the {n} partition{} this installation made; nothing else on the disk was changed",
+                    if n == 1 { "" } else { "s" }
+                )),
+                Err(why) => problems.push(format!("the partitions it made could not be removed: {why:#}")),
             }
         }
+        if problems.is_empty() {
+            ". The partitions it made were removed again; nothing of the other systems on the disk was changed".into()
+        } else {
+            format!(". {}", problems.join("; "))
+        }
+    }
+
+    /// Free-space mode: put the other systems' side back as it was found: the
+    /// firmware's boot variables (ilex's own entries removed, every saved
+    /// variable back with its exact bytes), what was added to the shared EFI
+    /// system partition (and the fallback loaders `bootupd` replaced). Returns
+    /// what could not be undone.
+    fn undo_shared_esp(&mut self, log: &mut StageLog) -> Vec<String> {
+        let mut problems = Vec::new();
+        // The firmware first: it needs no mount.
+        if let (Some(saved), Some(guid)) = (&self.nvram, self.esp_guid) {
+            let vars = Path::new(esp::EFIVARS);
+            let result = saved.restore(vars, &guid, false).and_then(|done| {
+                saved.verify_restored(vars)?;
+                Ok(done)
+            });
+            match result {
+                Ok(done) => {
+                    for line in &done.lines {
+                        log.line(line);
+                    }
+                    log.line("the firmware's boot variables are as they were found, byte for byte");
+                }
+                Err(why) => {
+                    log.line(&format!(
+                        "the firmware's boot variables could not be restored: {why:#}"
+                    ));
+                    problems.push(format!(
+                        "the firmware's boot variables could not be put back ({why:#})"
+                    ));
+                }
+            }
+        }
+        if let Some(snapshot) = self.esp_snapshot.clone() {
+            let at = self.target.join("boot/efi");
+            let result = if proc_is_mounted(&at) {
+                snapshot.undo(&at)
+            } else if let Some(node) = self.esp_node.clone() {
+                // The failure came after the partition was unmounted: mount it
+                // again, only for this.
+                let scratch = self.helper.config.run_dir.join("esp-undo");
+                make_dir(&scratch).and_then(|()| {
+                    let mounted = exec::run(
+                        "mount",
+                        &[
+                            "-t",
+                            "vfat",
+                            "-o",
+                            "umask=0077,shortname=winnt",
+                            &node,
+                            &scratch.to_string_lossy(),
+                        ],
+                        TOOL,
+                    )?;
+                    ensure!(
+                        mounted.success(),
+                        "mounting the shared EFI system partition: {}",
+                        mounted.stderr.lines().last().unwrap_or("failed")
+                    );
+                    let undone = snapshot.undo(&scratch);
+                    let _ = exec::run("umount", &[&scratch.to_string_lossy()], TOOL);
+                    let _ = fs::remove_dir(&scratch);
+                    undone
+                })
+            } else {
+                Ok(())
+            };
+            match result {
+                Ok(()) => log.line(
+                    "what the installation added to the shared EFI system partition was removed",
+                ),
+                Err(why) => {
+                    log.line(&format!(
+                        "the shared EFI system partition could not be restored: {why:#}"
+                    ));
+                    problems.push(format!(
+                        "what it added to the shared EFI system partition could not be removed ({why:#})"
+                    ));
+                }
+            }
+        }
+        problems
+    }
+
+    /// Free-space mode: remove the partitions of the plan that exist on the
+    /// disk (found by their UUIDs, checked against sysfs by the removal).
+    /// Returns how many were removed.
+    fn remove_made_partitions(&self, log: &mut StageLog) -> Result<usize> {
+        let by_partuuid = Path::new("/dev/disk/by-partuuid");
+        let doomed: Vec<remove::Doomed> = self
+            .plan
+            .partitions
+            .iter()
+            .filter(|p| by_partuuid.join(p.uuid.to_ascii_lowercase()).exists())
+            .map(|p| remove::Doomed {
+                number: p.number,
+                uuid: p.uuid.clone(),
+                label: p.label.clone(),
+                size_bytes: p.size_bytes,
+            })
+            .collect();
+        if doomed.is_empty() {
+            return Ok(0);
+        }
+        let kname = self
+            .plan
+            .disk
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.plan.disk.path)
+            .to_owned();
+        remove::remove_partitions(&self.address, &kname, &doomed, &mut |line| log.line(line))?;
+        Ok(doomed.len())
     }
 }
 

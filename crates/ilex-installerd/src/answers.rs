@@ -29,7 +29,8 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use ilex_installer_model::{
     answers::Answers,
-    plan::{ErrorCode, Plan, PlanError},
+    free_space,
+    plan::{ErrorCode, Mode, Plan, PlanError},
     probe::{Disk, Probe},
     state::{Outcome, State},
 };
@@ -904,19 +905,38 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
             target::REQUEST_STAMP
         );
     }
-    // A disk that already holds a system is erased only when the answers say so.
-    let found = existing_systems(disk);
-    if !found.is_empty() && !answers.install.reinstall {
-        // What a person must do comes first: the console line is cut at 300
-        // characters, and what a disk holds can be a long list.
-        bail!(
-            "{} already holds a system: an unattended installation erases such a disk only when answers.toml says reinstall = true under [install]; it holds {}",
-            disk.id,
-            found.join(", ")
-        );
-    }
-    if !found.is_empty() {
-        say(&format!("reinstall=true erases: {}", found.join("; ")));
+    if request.mode == Mode::FreeSpace {
+        // Beside other systems nothing is erased, and the systems found are
+        // what the installation is for. What is in the way is ilex's own
+        // partitions, an earlier installation (finished or not): installing
+        // beside never removes a partition, whatever the answers say.
+        let ilex = free_space::ilex_partitions(disk);
+        if !ilex.is_empty() {
+            let names = ilex
+                .iter()
+                .map(|p| exec::clean_line(p.label.as_bytes()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "{} already holds partitions of an earlier ilex installation ({names}): installing beside other systems never removes a partition; remove them with a partition tool, or erase the whole disk instead (mode = \"whole-disk\" with reinstall = true)",
+                disk.id
+            );
+        }
+    } else {
+        // A disk that already holds a system is erased only when the answers say so.
+        let found = existing_systems(disk);
+        if !found.is_empty() && !answers.install.reinstall {
+            // What a person must do comes first: the console line is cut at 300
+            // characters, and what a disk holds can be a long list.
+            bail!(
+                "{} already holds a system: an unattended installation erases such a disk only when answers.toml says reinstall = true under [install]; it holds {}",
+                disk.id,
+                found.join(", ")
+            );
+        }
+        if !found.is_empty() {
+            say(&format!("reinstall=true erases: {}", found.join("; ")));
+        }
     }
     let plan: String = call(&proxy, "Plan", &(serde_json::to_string(&request)?,)).await?;
     let plan: Plan = serde_json::from_str(&plan).context("reading the plan")?;
@@ -957,7 +977,13 @@ async fn drive(options: &Options, reached: &mut Reached) -> Result<()> {
         .await?;
         drop(memfd);
     }
-    let confirm = answers.install.confirm_erase.clone().unwrap_or_default();
+    // Whole-disk mode repeats the disk id as `confirm-erase`; beside other
+    // systems the answers are the confirmation and the id is repeated here.
+    let confirm = if request.mode == Mode::FreeSpace {
+        plan.disk.id.clone()
+    } else {
+        answers.install.confirm_erase.clone().unwrap_or_default()
+    };
     drop(answers);
     // From here the helper may begin to write: the flag tells the systemd-level
     // hand-over to stay out of it. Only a refusal of the helper lowers it.

@@ -17,7 +17,10 @@ const GIB: u64 = 1024 * MIB;
 /// `/boot` and the root filesystem in the rest.
 pub const ESP_BYTES: u64 = 512 * MIB;
 pub const BOOT_BYTES: u64 = GIB;
-/// A stated minimum, to be set from a measured install.
+/// The least a root file system is made with, in both modes. Measured: the
+/// image of `generic.gnome` takes 4,150 MiB on the new btrfs (1,688 MiB of
+/// layers); the rest is for `/var` (the daily home, 20 GiB by default, and the
+/// Flatpak apps the first boot installs, which reserve 8 GiB).
 pub const MIN_ROOT_BYTES: u64 = 30 * GIB;
 /// The disk must also hold the partition table and alignment.
 pub const MIN_DISK_BYTES: u64 = ESP_BYTES + BOOT_BYTES + MIN_ROOT_BYTES + 2 * MIB;
@@ -27,7 +30,9 @@ pub const MIN_DISK_BYTES: u64 = ESP_BYTES + BOOT_BYTES + MIN_ROOT_BYTES + 2 * MI
 pub enum Mode {
     /// Erase the disk and install into all of it.
     WholeDisk,
-    /// Install into free space beside what is there (a later PR).
+    /// Install into unallocated space beside what is there: ilex's `/boot` and
+    /// root are added, the disk's own EFI system partition is shared, and
+    /// nothing that is on the disk is changed or removed.
     FreeSpace,
 }
 
@@ -456,6 +461,10 @@ pub enum ErrorCode {
     InUse,
     DiskTooSmall,
     UnsupportedMode,
+    /// The disk cannot be installed beside: no GPT table, no usable EFI system
+    /// partition, no room, or something on it ilex must not share a disk with.
+    /// The message says which, as a sentence.
+    FreeSpaceUnavailable,
     TpmNeedsEncryption,
     ReservedName,
     /// The registry could not be reached or answered with something unusable.
@@ -534,6 +543,8 @@ pub struct Checked<'a> {
     pub request: PlanRequest,
     pub composition: &'a crate::catalogue::Composition,
     pub disk: &'a Disk,
+    /// Free-space mode: where ilex goes and what it shares and keeps.
+    pub offer: Option<crate::free_space::Offer>,
 }
 
 /// Check every field against the probe and the catalogue. The helper adds the
@@ -567,13 +578,6 @@ pub fn check_request<'a>(
             message,
         ));
     };
-    if request.mode == Mode::FreeSpace {
-        return Err(PlanError::new(
-            ErrorCode::UnsupportedMode,
-            Some("mode"),
-            "installing into free space is not available yet; use whole-disk",
-        ));
-    }
     let Some(disk) = probe.disks.iter().find(|d| d.id == request.disk) else {
         return Err(PlanError::new(
             ErrorCode::UnknownDisk,
@@ -608,16 +612,31 @@ pub fn check_request<'a>(
             ),
         ));
     }
-    if disk.size_bytes < MIN_DISK_BYTES {
-        return Err(PlanError::new(
-            ErrorCode::DiskTooSmall,
-            Some("disk"),
-            format!(
-                "{} holds {} bytes; the installation needs at least {MIN_DISK_BYTES}",
-                disk.id, disk.size_bytes
-            ),
-        ));
-    }
+    let offer = match request.mode {
+        Mode::WholeDisk => {
+            if disk.size_bytes < MIN_DISK_BYTES {
+                return Err(PlanError::new(
+                    ErrorCode::DiskTooSmall,
+                    Some("disk"),
+                    format!(
+                        "{} holds {} bytes; the installation needs at least {MIN_DISK_BYTES}",
+                        disk.id, disk.size_bytes
+                    ),
+                ));
+            }
+            None
+        }
+        Mode::FreeSpace => Some(crate::free_space::assess(disk).map_err(|why| {
+            PlanError::new(
+                ErrorCode::FreeSpaceUnavailable,
+                Some("mode"),
+                format!(
+                    "ilex cannot be installed beside the other systems on {}: {why}",
+                    disk.id
+                ),
+            )
+        })?),
+    };
     if request.recovery_key && !request.encrypt {
         return Err(PlanError::new(
             ErrorCode::InvalidField,
@@ -686,6 +705,7 @@ pub fn check_request<'a>(
         request: request.normalized(),
         composition,
         disk,
+        offer,
     })
 }
 
@@ -703,10 +723,48 @@ pub struct Plan {
     pub composition: PlannedComposition,
     pub image: PlannedImage,
     pub disk: PlannedDisk,
+    /// The partitions the installation creates. In free-space mode these are
+    /// only ilex's own `/boot` and root, numbered after the ones that are there.
     pub partitions: Vec<PlannedPartition>,
     pub erases: Erase,
     pub encryption: PlannedEncryption,
     pub warnings: Vec<String>,
+    /// Free-space mode: the disk's own EFI system partition, which ilex shares.
+    #[serde(default)]
+    pub esp: Option<PlannedEsp>,
+    /// Free-space mode: every partition that is on the disk and stays exactly
+    /// as it is.
+    #[serde(default)]
+    pub kept: Vec<KeptPartition>,
+}
+
+/// The EFI system partition free-space mode shares: never formatted, never
+/// resized; ilex's boot files are added to it under `EFI/fedora` (and `EFI/BOOT`
+/// where nothing is).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedEsp {
+    pub number: u32,
+    /// The kernel name it has now: informational, never an input.
+    pub path: String,
+    /// Its `PARTUUID`: how the installation finds it again.
+    pub uuid: String,
+    pub size_bytes: u64,
+    pub free_bytes: u64,
+    /// The other loaders found in it (`EFI/<name>`).
+    pub loaders: Vec<String>,
+}
+
+/// A partition of the disk that the installation leaves exactly as it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptPartition {
+    pub number: u32,
+    pub path: String,
+    pub start_bytes: u64,
+    pub size_bytes: u64,
+    pub label: String,
+    pub filesystem: String,
+    /// What it is, in words: the system the probe recognised, or its file system.
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

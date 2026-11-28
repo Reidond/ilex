@@ -324,62 +324,84 @@ fn check_partitions(
 ) -> Result<Vec<(PlannedPartition, String)>> {
     let mut found = Vec::new();
     for partition in &plan.partitions {
-        let link = by_partuuid.join(partition.uuid.to_ascii_lowercase());
-        let node = fs::canonicalize(&link)
-            .with_context(|| format!("{} is not there yet", link.display()))?;
-        let meta = fs::metadata(&node)?;
-        ensure!(
-            meta.file_type().is_block_device(),
-            "{} is not a block device",
-            node.display()
-        );
-        let name = node
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .context("a node with no name")?;
-        let block = sys.join("class/block").join(&name);
-        let read = |file: &str| -> Result<String> {
-            Ok(fs::read_to_string(block.join(file))
-                .with_context(|| format!("reading {}/{file}", block.display()))?
-                .trim()
-                .to_owned())
-        };
-        let number: u32 = read("partition")?.parse()?;
-        ensure!(
-            number == partition.number,
-            "{} is partition {number}, planned {}",
-            node.display(),
-            partition.number
-        );
-        // The partition's parent is the planned disk: its sysfs directory is
-        // below the disk's.
-        let parent = fs::canonicalize(&block)?
-            .parent()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_default();
-        ensure!(
-            parent == disk,
-            "{} belongs to {parent}, not to {disk}",
-            node.display()
-        );
-        let sectors: u64 = read("size")?.parse()?;
-        ensure!(
-            sectors * 512 == partition.size_bytes,
-            "{} is {} bytes, planned {}",
-            node.display(),
-            sectors * 512,
-            partition.size_bytes
-        );
-        let numbers = read("dev")?;
-        let rdev = topology::split_dev(meta.rdev());
-        ensure!(
-            numbers == format!("{}:{}", rdev.0, rdev.1),
-            "{} is not the device sysfs lists under its name",
-            node.display()
-        );
-        found.push((partition.clone(), node.to_string_lossy().into_owned()));
+        let node = locate_partition(
+            &partition.uuid,
+            partition.number,
+            partition.size_bytes,
+            disk,
+            sys,
+            by_partuuid,
+        )?;
+        found.push((partition.clone(), node));
     }
     Ok(found)
+}
+
+/// The node of the partition with this `PARTUUID`, checked against sysfs: a
+/// block device that is partition `number` of `disk` (a kernel name) with
+/// exactly `size_bytes`, and the device sysfs lists under that name. Used for
+/// the partitions repart made and for the EFI system partition free-space
+/// mode shares.
+pub fn locate_partition(
+    uuid: &str,
+    number: u32,
+    size_bytes: u64,
+    disk: &str,
+    sys: &Path,
+    by_partuuid: &Path,
+) -> Result<String> {
+    let link = by_partuuid.join(uuid.to_ascii_lowercase());
+    let node =
+        fs::canonicalize(&link).with_context(|| format!("{} is not there yet", link.display()))?;
+    let meta = fs::metadata(&node)?;
+    ensure!(
+        meta.file_type().is_block_device(),
+        "{} is not a block device",
+        node.display()
+    );
+    let name = node
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .context("a node with no name")?;
+    let block = sys.join("class/block").join(&name);
+    let read = |file: &str| -> Result<String> {
+        Ok(fs::read_to_string(block.join(file))
+            .with_context(|| format!("reading {}/{file}", block.display()))?
+            .trim()
+            .to_owned())
+    };
+    let actual: u32 = read("partition")?.parse()?;
+    ensure!(
+        actual == number,
+        "{} is partition {actual}, planned {number}",
+        node.display()
+    );
+    // The partition's parent is the planned disk: its sysfs directory is
+    // below the disk's.
+    let parent = fs::canonicalize(&block)?
+        .parent()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    ensure!(
+        parent == disk,
+        "{} belongs to {parent}, not to {disk}",
+        node.display()
+    );
+    let sectors: u64 = read("size")?.parse()?;
+    ensure!(
+        sectors * 512 == size_bytes,
+        "{} is {} bytes, planned {size_bytes}",
+        node.display(),
+        sectors * 512
+    );
+    let numbers = read("dev")?;
+    let rdev = topology::split_dev(meta.rdev());
+    ensure!(
+        numbers == format!("{}:{}", rdev.0, rdev.1),
+        "{} is not the device sysfs lists under its name",
+        node.display()
+    );
+    Ok(node.to_string_lossy().into_owned())
 }
 
 /// The target's compiled SELinux policy: `etc/selinux/targeted/policy/policy.<n>`
@@ -435,6 +457,20 @@ pub fn wait_for_no_partitions(sys: &Path, disk: &str, wait: Duration) -> Result<
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// The size of the file system holding `path` and the bytes free to a
+/// process that is not root, from `statvfs`.
+pub fn space(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is a valid C string and `stat` is a statvfs to fill.
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    let unit = stat.f_frsize as u64;
+    Some((stat.f_blocks as u64 * unit, stat.f_bavail as u64 * unit))
 }
 
 /// Bytes in use on the file system holding `path`, from `statvfs`.

@@ -8,6 +8,7 @@ pub mod catalogue;
 pub mod detect;
 pub mod edition;
 pub mod finish;
+pub mod free_space;
 pub mod plan;
 pub mod probe;
 pub mod recovery;

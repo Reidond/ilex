@@ -7,10 +7,11 @@ use anyhow::{Context, Result, bail};
 use ilex_installer_model::{
     Edition, Identity, Table,
     edition::EditionRecord,
+    free_space,
     plan::{
-        DailyUser, Erase, ErrorCode, PLAN_SCHEMA, PLAN_VALID_SECONDS, Plan, PlanError, PlanRequest,
-        PlannedComposition, PlannedDisk, PlannedEncryption, PlannedTpm, SecretKind, TpmMode,
-        check_request,
+        DailyUser, Erase, ErrorCode, KeptPartition, PLAN_SCHEMA, PLAN_VALID_SECONDS, Plan,
+        PlanError, PlanRequest, PlannedComposition, PlannedDisk, PlannedEncryption, PlannedEsp,
+        PlannedTpm, SecretKind, TpmMode, check_request,
     },
     probe::{Disk, EditionInfo, HelperInfo, Probe},
     select,
@@ -264,10 +265,19 @@ impl Helper {
         let seed = sys::random_uuid().map_err(internal)?;
         // The shipped directory of this layout is what repart reads: it is
         // never copied or assembled, and holds exactly one root partition.
-        let layout =
-            repart::layout(&self.config.definitions, checked.request.encrypt).map_err(internal)?;
-        let partitions = repart::dry_run(&layout, &checked.disk.path, &seed)
-            .map_err(|e| PlanError::new(ErrorCode::Repart, None, format!("{e:#}")))?;
+        let layout = repart::layout(
+            &self.config.definitions,
+            checked.request.mode,
+            checked.request.encrypt,
+        )
+        .map_err(internal)?;
+        let partitions = repart::dry_run(
+            &layout,
+            &checked.disk.path,
+            &seed,
+            &repart::spans(&checked.disk.partitions),
+        )
+        .map_err(|e| PlanError::new(ErrorCode::Repart, None, format!("{e:#}")))?;
 
         // The kernel's claim on the chosen disk, once more and as late as it
         // can be: a use that began since the probe, or one the trace does not
@@ -291,7 +301,16 @@ impl Helper {
         }
         // The list of other systems may be incomplete: say so.
         warnings.extend(checked.disk.notes.iter().cloned());
-        if !checked.disk.other_systems.is_empty() {
+        if let Some(offer) = &checked.offer {
+            // Beside other systems nothing is erased: say what is added to
+            // what, and that a backup is the person's own safety net.
+            warnings.push(format!(
+                "back up what matters on {} before installing beside another system: ilex does not change its {} partition(s) and adds only its boot files to {}, but a power cut or a mistake while a disk is written cannot be undone",
+                checked.disk.id,
+                offer.kept.len(),
+                offer.esp.path
+            ));
+        } else if !checked.disk.other_systems.is_empty() {
             warnings.push(format!(
                 "everything on {} will be erased, including {} other system(s) found on it",
                 checked.disk.id,
@@ -350,15 +369,24 @@ impl Helper {
                 size_bytes: checked.disk.size_bytes,
             },
             partitions,
-            erases: Erase {
-                disk: checked.disk.id.clone(),
-                partitions: checked
-                    .disk
-                    .partitions
-                    .iter()
-                    .map(|p| p.path.clone())
-                    .collect(),
-                systems: checked.disk.other_systems.clone(),
+            // Free-space mode erases nothing: the disk's partitions are kept.
+            erases: if checked.offer.is_some() {
+                Erase {
+                    disk: checked.disk.id.clone(),
+                    partitions: vec![],
+                    systems: vec![],
+                }
+            } else {
+                Erase {
+                    disk: checked.disk.id.clone(),
+                    partitions: checked
+                        .disk
+                        .partitions
+                        .iter()
+                        .map(|p| p.path.clone())
+                        .collect(),
+                    systems: checked.disk.other_systems.clone(),
+                }
             },
             encryption: PlannedEncryption {
                 enabled: checked.request.encrypt,
@@ -370,6 +398,29 @@ impl Helper {
                 },
             },
             warnings,
+            esp: checked.offer.as_ref().map(|offer| PlannedEsp {
+                number: offer.esp.number,
+                path: offer.esp.path.clone(),
+                uuid: offer.esp.uuid.clone(),
+                size_bytes: offer.esp.size_bytes,
+                free_bytes: offer.esp_info.free_bytes.unwrap_or(0),
+                loaders: offer.esp_info.loaders.clone(),
+            }),
+            kept: checked.offer.as_ref().map_or_else(Vec::new, |offer| {
+                offer
+                    .kept
+                    .iter()
+                    .map(|p| KeptPartition {
+                        number: p.number,
+                        path: p.path.clone(),
+                        start_bytes: p.start_bytes,
+                        size_bytes: p.size_bytes,
+                        label: p.label.clone(),
+                        filesystem: p.filesystem.clone(),
+                        description: free_space::kept_description(p, &checked.disk.other_systems),
+                    })
+                    .collect()
+            }),
         };
         {
             let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());

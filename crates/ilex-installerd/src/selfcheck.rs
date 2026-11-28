@@ -3,13 +3,15 @@
 //! the installer VM by the `installer::` tier.
 
 use crate::{
-    answers, apply, disks, exec, finish, helper, install, luks, policy, progress, registry, repart,
+    answers, apply, disks, esp, exec, finish, helper, install, luks, policy, progress, registry,
+    repart,
     scratch::Scratch,
     secret, stagelog, stamp, sys, target,
     topology::{self, FileId, LoopRow, Roots, System, Tracer},
 };
 use anyhow::{Context, Result, ensure};
 use ilex_installer_model::{
+    plan::Mode,
     probe::{Extent, Partition},
     recovery::{TpmOutcome, TpmStatus},
 };
@@ -78,6 +80,7 @@ fn part(
         label: String::new(),
         filesystem: filesystem.into(),
         filesystem_label: label.into(),
+        uuid: String::new(),
     }
 }
 
@@ -325,12 +328,13 @@ fn check_parsers() -> Result<()> {
     // repart's plan, the registry's manifests, meminfo.
     let layout = repart::Layout {
         dir: "/x".into(),
+        free_space: false,
         formats: vec![
             ("10-esp.conf".into(), "vfat".into(), false),
             ("30-root.conf".into(), "btrfs".into(), true),
         ],
     };
-    let planned = repart::parse(REPART, &layout)?;
+    let planned = repart::parse(REPART, &layout, &[])?;
     ensure!(
         planned.len() == 2
             && planned[1].number == 2
@@ -340,7 +344,7 @@ fn check_parsers() -> Result<()> {
         "repart plan: {planned:?}"
     );
     ensure!(
-        repart::parse(&REPART.replace("create", "resize"), &layout).is_err(),
+        repart::parse(&REPART.replace("create", "resize"), &layout, &[]).is_err(),
         "repart resize accepted"
     );
     check_registry()?;
@@ -3212,10 +3216,61 @@ fn check_definition_sizes(definitions: &Path) -> Result<()> {
             "{directory} holds {files:?}, not exactly the three definitions of a layout"
         );
         // One root partition, encrypted when (and only when) asked.
-        repart::read_layout(&dir, encrypt).with_context(|| directory.to_owned())?;
+        repart::read_layout(&dir, Mode::WholeDisk, encrypt)
+            .with_context(|| directory.to_owned())?;
         ensure!(
-            repart::read_layout(&dir, !encrypt).is_err(),
+            repart::read_layout(&dir, Mode::WholeDisk, !encrypt).is_err(),
             "{directory} passes for the other kind of layout"
+        );
+    }
+    // Beside other systems: ilex's /boot and root, never an ESP (the disk's
+    // own is shared), with the sizes and settings of the whole-disk layouts.
+    for (encrypt, directory) in [(false, "free-space"), (true, "free-space-encrypted")] {
+        let dir = definitions.join(directory);
+        let files: Vec<String> = fs::read_dir(&dir)?
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        ensure!(
+            files.len() == 2
+                && files.iter().any(|f| f == "20-boot.conf")
+                && files.iter().any(|f| f == "30-root.conf"),
+            "{directory} holds {files:?}, not exactly /boot and root"
+        );
+        repart::read_layout(&dir, Mode::FreeSpace, encrypt)
+            .with_context(|| directory.to_owned())?;
+        ensure!(
+            repart::read_layout(&dir, Mode::FreeSpace, !encrypt).is_err(),
+            "{directory} passes for the other kind of layout"
+        );
+        ensure!(
+            repart::read_layout(&definitions.join("whole-disk"), Mode::FreeSpace, false).is_err(),
+            "a layout with an ESP definition passes as a free-space layout"
+        );
+        let settings = |dir: &Path, file: &str| -> Result<Vec<String>> {
+            Ok(fs::read_to_string(dir.join(file))?
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_owned)
+                .collect())
+        };
+        ensure!(
+            settings(&dir, "20-boot.conf")?
+                == settings(&definitions.join("whole-disk"), "20-boot.conf")?,
+            "{directory}: /boot differs from the whole-disk layout's"
+        );
+        ensure!(
+            settings(&dir, "30-root.conf")?
+                == settings(
+                    &definitions.join(if encrypt {
+                        "whole-disk-encrypted"
+                    } else {
+                        "whole-disk"
+                    }),
+                    "30-root.conf"
+                )?,
+            "{directory}: root differs from the whole-disk layout's"
         );
     }
     for shared in ["10-esp.conf", "20-boot.conf"] {
@@ -3237,8 +3292,13 @@ fn check_repart(config: &helper::Config, parent: &Path) -> Result<String> {
     let device = image.to_string_lossy().into_owned();
     let mut sizes = Vec::new();
     for encrypt in [false, true] {
-        let layout = repart::layout(&config.definitions, encrypt)?;
-        let plan = repart::dry_run(&layout, &device, "0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11")?;
+        let layout = repart::layout(&config.definitions, Mode::WholeDisk, encrypt)?;
+        let plan = repart::dry_run(
+            &layout,
+            &device,
+            "0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11",
+            &[],
+        )?;
         let kinds: Vec<&str> = plan.iter().map(|p| p.kind.as_str()).collect();
         ensure!(
             kinds == ["esp", "xbootldr", "root-x86-64"],
@@ -3261,7 +3321,12 @@ fn check_repart(config: &helper::Config, parent: &Path) -> Result<String> {
             end <= 40 * 1024 * 1024 * 1024,
             "the layout is larger than the disk"
         );
-        let again = repart::dry_run(&layout, &device, "0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11")?;
+        let again = repart::dry_run(
+            &layout,
+            &device,
+            "0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11",
+            &[],
+        )?;
         ensure!(plan == again, "the same seed planned different partitions");
         sizes.push(plan.iter().map(|p| p.size_bytes).sum::<u64>());
     }
@@ -3276,6 +3341,7 @@ fn check_repart(config: &helper::Config, parent: &Path) -> Result<String> {
         fs::metadata(&image)?.len() == 40 * 1024 * 1024 * 1024,
         "the dry run resized the file"
     );
+    check_free_space_repart(config, &scratch.0)?;
     Ok("repart".into())
 }
 
@@ -3386,11 +3452,423 @@ pub fn run(config: &helper::Config) -> Result<String> {
     check_answers(parent.path()).context("answers mode")?;
     check_finish(parent.path()).context("Finish and the log on a stick")?;
     check_files(parent.path()).context("files")?;
+    check_esp(parent.path()).context("the shared EFI system partition")?;
     let repart = check_repart(config, parent.path()).context("repart")?;
     let system = check_system(config).context("system")?;
     Ok(format!(
         "{model}; parsers, registry, subprocess limits, scratch, topology, installation, files, {repart}; {system}"
     ))
+}
+
+// --- installing beside other systems --------------------------------------------
+
+/// A GPT on a sparse file: `lines` are (start MiB, size MiB, type GUID).
+fn gpt_image(path: &Path, size: u64, lines: &[(u64, u64, &str)]) -> Result<Vec<Partition>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    const MIB: u64 = 1024 * 1024;
+    let _ = fs::remove_file(path);
+    fs::File::create(path)?.set_len(size)?;
+    let mut script = String::from("label: gpt\nunit: sectors\nfirst-lba: 2048\n");
+    for (start, length, kind) in lines {
+        script.push_str(&format!(
+            "start={}, size={}, type={kind}\n",
+            start * MIB / 512,
+            length * MIB / 512
+        ));
+    }
+    let mut child = Command::new("sfdisk")
+        .arg("--quiet")
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("starting sfdisk")?;
+    child
+        .stdin
+        .take()
+        .context("no stdin")?
+        .write_all(script.as_bytes())?;
+    let out = child.wait_with_output()?;
+    ensure!(
+        out.status.success(),
+        "sfdisk: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(lines
+        .iter()
+        .enumerate()
+        .map(|(i, (start, length, kind))| Partition {
+            number: i as u32 + 1,
+            path: format!("{}{}", path.display(), i + 1),
+            start_bytes: start * MIB,
+            size_bytes: length * MIB,
+            type_id: kind.to_ascii_lowercase(),
+            label: String::new(),
+            filesystem: String::new(),
+            filesystem_label: String::new(),
+            uuid: String::new(),
+        })
+        .collect())
+}
+
+/// The model's rule for where ilex goes beside other systems, against what
+/// `systemd-repart` does on real tables: the same area for each partition, the
+/// same refusal at the same size, and never a change to a partition that is
+/// there.
+fn check_free_space_repart(config: &helper::Config, dir: &Path) -> Result<()> {
+    use ilex_installer_model::free_space::place;
+    const GIB: u64 = 1024;
+    const ESP: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+    const MSR: &str = "E3C9E316-0B5C-4DB8-817D-F92DF00215AE";
+    const DATA: &str = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7";
+    const RECOVERY: &str = "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC";
+    type Case<'a> = (&'a str, u64, Vec<(u64, u64, &'a str)>);
+    let cases: Vec<Case> = vec![
+        // Windows' own layout, a gap before its recovery partition, the rest free.
+        (
+            "windows",
+            200 * GIB,
+            vec![
+                (1, 100, ESP),
+                (101, 16, MSR),
+                (117, 20 * GIB, DATA),
+                (117 + 25 * GIB, 500, RECOVERY),
+            ],
+        ),
+        // Two gaps that both fit: the smaller is taken, /boot and root together.
+        (
+            "smaller gap first",
+            200 * GIB,
+            vec![(1, 100, ESP), (101 + 80 * GIB, 1000, DATA)],
+        ),
+        (
+            "smaller gap last",
+            200 * GIB,
+            vec![(1, 100, ESP), (101 + 100 * GIB, 1000, DATA)],
+        ),
+        // The least that fits, and a MiB short of it.
+        (
+            "exactly enough",
+            32 * GIB + 200,
+            vec![(1, 100, ESP), (101 + 31 * GIB, 10, DATA)],
+        ),
+        (
+            "a MiB short",
+            32 * GIB + 200,
+            vec![(1, 100, ESP), (100 + 31 * GIB, 11, DATA)],
+        ),
+        // Free space in pieces too small for the root.
+        (
+            "pieces",
+            100 * GIB,
+            vec![
+                (1, 100, ESP),
+                (101 + 20 * GIB, 1000, DATA),
+                (101 + 40 * GIB + 1000, 1000, DATA),
+            ],
+        ),
+    ];
+    let seed = "0b5d9a3e-6a4e-4a2c-9d0e-2f7c7b1c9f11";
+    for (name, mib, lines) in cases {
+        let image = dir.join(format!("beside-{}.img", name.replace(' ', "-")));
+        let size = mib * 1024 * 1024;
+        let partitions = gpt_image(&image, size, &lines)?;
+        let table = exec::run_ok(
+            "sfdisk",
+            &["--json", &image.to_string_lossy()],
+            Duration::from_secs(30),
+        )?;
+        let extents =
+            disks::free_extents(size, disks::parse_sfdisk(&table.stdout_text()), &partitions);
+        let predicted = place(&extents);
+        for encrypt in [false, true] {
+            let layout = repart::layout(&config.definitions, Mode::FreeSpace, encrypt)?;
+            let made = repart::dry_run(
+                &layout,
+                &image.to_string_lossy(),
+                seed,
+                &repart::spans(&partitions),
+            );
+            match (&predicted, &made) {
+                (Some(p), Ok(plan)) => {
+                    let boot = plan
+                        .iter()
+                        .find(|x| x.kind == "xbootldr")
+                        .context("no /boot")?;
+                    let root = plan
+                        .iter()
+                        .find(|x| x.kind.starts_with("root"))
+                        .context("no root")?;
+                    ensure!(
+                        plan.len() == 2
+                            && boot.start_bytes >= p.boot.start_bytes
+                            && boot.start_bytes + boot.size_bytes <= p.boot.start_bytes + p.boot.size_bytes
+                            && root.start_bytes == p.root.start_bytes
+                            // The model counts whole MiB; repart fills the usable
+                            // range to its last sector.
+                            && root.size_bytes.abs_diff(p.root.size_bytes) < 1024 * 1024
+                            && plan.iter().all(|x| x.number > partitions.len() as u32),
+                        "{name}: the model says {p:?} and repart makes {plan:?}"
+                    );
+                }
+                (None, Err(_)) => {}
+                (Some(p), Err(e)) => {
+                    anyhow::bail!(
+                        "{name}: the model places ilex at {p:?} and repart refuses: {e:#}"
+                    )
+                }
+                (None, Ok(plan)) => {
+                    anyhow::bail!("{name}: the model refuses and repart plans {plan:?}")
+                }
+            }
+        }
+    }
+    // A partition of the type repart would match to ilex's own is not grown or
+    // taken: the plan is refused by repart or by the check of what it lists.
+    let image = dir.join("beside-foreign-root.img");
+    let lines = [
+        (1, 100, ESP),
+        (101, 20 * GIB, "4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709"),
+    ];
+    let partitions = gpt_image(&image, 100 * GIB * 1024 * 1024, &lines)?;
+    let layout = repart::layout(&config.definitions, Mode::FreeSpace, false)?;
+    ensure!(
+        repart::dry_run(
+            &layout,
+            &image.to_string_lossy(),
+            seed,
+            &repart::spans(&partitions)
+        )
+        .is_err(),
+        "repart was allowed to plan around a root partition of another system"
+    );
+    Ok(())
+}
+
+/// What `bootupd` does to a shared EFI system partition, and what the
+/// installation does about it: the other systems' files back byte for byte,
+/// ilex's own added, and a failed installation's additions taken out again.
+fn check_esp(parent: &Path) -> Result<()> {
+    let scratch = TestDir::new(parent, "esp")?;
+    let root = scratch.0.join("esp");
+    let put = |rel: &str, text: &str| -> Result<()> {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().context("no parent")?)?;
+        fs::write(path, text)?;
+        Ok(())
+    };
+    put("EFI/Microsoft/Boot/bootmgfw.efi", "windows boot manager")?;
+    put("EFI/Microsoft/Boot/BCD", "boot configuration")?;
+    put("EFI/BOOT/BOOTX64.EFI", "windows fallback copy")?;
+    put("EFI/BOOT/other.efi", "another loader")?;
+    put("System Volume Information/x", "windows")?;
+    let before = esp::Snapshot::take(&root)?;
+    ensure!(
+        before.file_count() == 5 && !before.has_fedora(),
+        "the snapshot"
+    );
+    // bootupd: its own directory, a fallback helper, and its shim over the
+    // fallback loader.
+    let install = |root: &Path| -> Result<()> {
+        for (rel, text) in [
+            ("EFI/fedora/shimx64.efi", "ilex shim"),
+            ("EFI/fedora/grub.cfg", "search"),
+            ("EFI/BOOT/BOOTX64.EFI", "ilex shim"),
+            ("EFI/BOOT/fbx64.efi", "fallback"),
+        ] {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().context("no parent")?)?;
+            fs::write(path, text)?;
+        }
+        Ok(())
+    };
+    install(&root)?;
+    let restored = before.restore_and_verify(&root)?;
+    ensure!(
+        restored == ["EFI/BOOT/BOOTX64.EFI"]
+            && fs::read_to_string(root.join("EFI/BOOT/BOOTX64.EFI"))? == "windows fallback copy"
+            && fs::read_to_string(root.join("EFI/fedora/shimx64.efi"))? == "ilex shim"
+            && root.join("EFI/BOOT/fbx64.efi").exists(),
+        "the fallback loader was not put back: {restored:?}"
+    );
+    // Anything else of another system's that changed, went, or appeared is an error.
+    fs::write(root.join("EFI/Microsoft/Boot/BCD"), "edited")?;
+    ensure!(
+        before.restore_and_verify(&root).is_err(),
+        "a changed file of another system was accepted"
+    );
+    fs::write(root.join("EFI/Microsoft/Boot/BCD"), "boot configuration")?;
+    fs::write(root.join("EFI/Microsoft/Boot/extra"), "new")?;
+    ensure!(
+        before.restore_and_verify(&root).is_err(),
+        "a file added to another system's directory was accepted"
+    );
+    fs::remove_file(root.join("EFI/Microsoft/Boot/extra"))?;
+    put("EFI/Other/loader.efi", "x")?;
+    ensure!(
+        before.restore_and_verify(&root).is_err(),
+        "a new loader directory of someone else's was accepted"
+    );
+    fs::remove_dir_all(root.join("EFI/Other"))?;
+    // A failure's undo: the partition is as it was.
+    before.undo(&root)?;
+    let after = esp::Snapshot::take(&root)?;
+    ensure!(
+        after.file_count() == 5
+            && !after.has_fedora()
+            && !root.join("EFI/fedora").exists()
+            && !root.join("EFI/BOOT/fbx64.efi").exists()
+            && fs::read_to_string(root.join("EFI/BOOT/BOOTX64.EFI"))? == "windows fallback copy",
+        "the undo left the partition changed"
+    );
+    check_nvram(&scratch.0)?;
+    Ok(())
+}
+
+/// A boot entry as the firmware stores it: attributes, the file path list's
+/// length, the label, a hard-disk node naming `guid`, the loader's path.
+fn boot_entry(label: &str, guid: &str, loader: &str) -> Vec<u8> {
+    let mut path = Vec::new();
+    // HD(1,GPT,guid): type 4, subtype 1, length 42.
+    path.extend_from_slice(&[4, 1, 42, 0]);
+    path.extend_from_slice(&1u32.to_le_bytes());
+    path.extend_from_slice(&0x800u64.to_le_bytes());
+    path.extend_from_slice(&0x32000u64.to_le_bytes());
+    let hex: String = guid.chars().filter(|c| *c != '-').collect();
+    let mut g: Vec<u8> = (0..16)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0))
+        .collect();
+    g[0..4].reverse();
+    g[4..6].reverse();
+    g[6..8].reverse();
+    path.extend_from_slice(&g);
+    path.extend_from_slice(&[2, 2]);
+    // File(loader): type 4, subtype 4.
+    let text: Vec<u8> = loader
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    path.extend_from_slice(&[4, 4]);
+    path.extend_from_slice(&((text.len() + 4) as u16).to_le_bytes());
+    path.extend_from_slice(&text);
+    path.extend_from_slice(&[0x7f, 0xff, 4, 0]);
+    // The variable's attributes (non-volatile, boot service, runtime), then the
+    // load option's: active.
+    let mut raw = vec![7, 0, 0, 0, 1, 0, 0, 0];
+    raw.extend_from_slice(&(path.len() as u16).to_le_bytes());
+    raw.extend(label.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+    raw.extend_from_slice(&path);
+    raw
+}
+
+fn boot_order(numbers: &[u16]) -> Vec<u8> {
+    let mut raw = vec![7, 0, 0, 0];
+    for n in numbers {
+        raw.extend_from_slice(&n.to_le_bytes());
+    }
+    raw
+}
+
+/// The firmware's variables, byte for byte: what `bootupd` replaces is put
+/// back at its own number, whatever it pointed at, and ilex's own entry goes
+/// first only when it is asked to.
+fn check_nvram(parent: &Path) -> Result<()> {
+    let dir = parent.join("efivars");
+    fs::create_dir_all(&dir)?;
+    let guid = "00000000-1111-4222-8333-444444444444";
+    let shared = esp::esp_guid(guid)?;
+    let other_disk = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+    let var = |stem: &str| dir.join(format!("{stem}-8be4df61-93ca-11d2-aa0d-00e098032b8c"));
+    let windows = boot_entry(
+        "Windows Boot Manager",
+        guid,
+        "\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+    );
+    // Another Fedora's entry on a disk that is not there any more.
+    let stale = boot_entry("Fedora", other_disk, "\\EFI\\fedora\\shimx64.efi");
+    fs::write(var("Boot0000"), &windows)?;
+    fs::write(var("Boot0004"), &stale)?;
+    fs::write(var("BootOrder"), boot_order(&[0, 4]))?;
+    fs::write(var("BootCurrent"), [0u8, 0, 0, 0, 0, 0])?;
+    let saved = esp::Nvram::read_from(&dir)?;
+    ensure!(
+        saved.vars().len() == 3 && saved.order() == ["Boot0000", "Boot0004"],
+        "reading the firmware's variables: {:?}",
+        saved.vars().keys()
+    );
+    ensure!(
+        saved.ilex_entries(&saved, &shared).is_empty(),
+        "an entry that was there is not ilex's"
+    );
+    // bootupd: it replaces the entry labelled Fedora (here at the same number)
+    // with its own, on the shared partition, first in the order; and it removes
+    // a variable.
+    let ilex = boot_entry("Fedora", guid, "\\EFI\\fedora\\shimx64.efi");
+    let bootupd = || -> Result<()> {
+        fs::remove_file(var("Boot0004")).ok();
+        fs::write(var("Boot0004"), &ilex)?;
+        fs::write(var("BootOrder"), boot_order(&[4, 0]))?;
+        fs::remove_file(var("Boot0000")).ok();
+        Ok(())
+    };
+    bootupd()?;
+    let now = esp::Nvram::read_from(&dir)?;
+    ensure!(
+        now.ilex_entries(&saved, &shared) == ["Boot0004"],
+        "ilex's entry is found by its partition and loader: {:?}",
+        now.ilex_entries(&saved, &shared)
+    );
+    // Right after bootc: everything back, ilex's entry kept but moved off the
+    // number that is another system's, and not first.
+    let done = saved.restore(&dir, &shared, true)?;
+    saved.verify_restored(&dir)?;
+    let back = esp::Nvram::read_from(&dir)?;
+    let moved = back.ilex_entries(&saved, &shared);
+    ensure!(
+        back.vars().get("Boot0004") == saved.vars().get("Boot0004")
+            && back.vars().get("Boot0000") == saved.vars().get("Boot0000")
+            && back.vars().get("BootOrder") == saved.vars().get("BootOrder")
+            && moved.len() == 1
+            && moved[0] != "Boot0004"
+            && back.vars().get(&moved[0]) == Some(&ilex)
+            && done.lines.len() >= 3,
+        "after bootc: {done:?} {moved:?}"
+    );
+    // The last stage: ilex first, then the order the firmware had.
+    let order = saved
+        .put_ilex_first(&dir, &shared)?
+        .context("ilex's entry was not found to put first")?;
+    let first = esp::Nvram::read_from(&dir)?;
+    ensure!(
+        first.order() == [moved[0].clone(), "Boot0000".into(), "Boot0004".into()]
+            && order.starts_with(&moved[0]),
+        "ilex is not first: {:?}",
+        first.order()
+    );
+    // A failure: ilex's entry is removed and the firmware is as it was found.
+    saved.restore(&dir, &shared, false)?;
+    saved.verify_restored(&dir)?;
+    ensure!(
+        esp::Nvram::read_from(&dir)? == saved,
+        "after the undo the firmware's variables are not exactly the saved ones"
+    );
+    // Entries that mention the same loader on another disk are not ilex's, and
+    // a matching label alone is not enough.
+    ensure!(
+        saved
+            .ilex_entries(&esp::Nvram::default(), &shared)
+            .is_empty(),
+        "another Fedora's entry was taken for ilex's"
+    );
+    // No efivars at all: nothing to save or to put back.
+    ensure!(
+        esp::Nvram::read_from(&parent.join("no-such-efivars"))?.is_empty(),
+        "a machine with no firmware variables"
+    );
+    Ok(())
 }
 
 // --- what Apply adds ----------------------------------------------------------
@@ -4501,6 +4979,7 @@ fn check_apply_rules() -> Result<()> {
         label: "data".into(),
         filesystem: "ext4".into(),
         filesystem_label: "keep".into(),
+        uuid: String::new(),
     };
     let then = Disk {
         id: "virtio-blank".into(),
@@ -4518,6 +4997,7 @@ fn check_apply_rules() -> Result<()> {
         partitions: vec![partition.clone()],
         free_extents: vec![],
         other_systems: vec![],
+        esps: vec![],
     };
     ensure!(
         apply::disk_difference(&then, &then.clone()).is_none(),
@@ -4837,6 +5317,7 @@ fn check_answers(parent: &Path) -> Result<()> {
         label: label.into(),
         filesystem: fs.into(),
         filesystem_label: String::new(),
+        uuid: String::new(),
     };
     let disk = |partitions: Vec<Partition>, systems: Vec<OtherSystem>| Disk {
         id: "virtio-x".into(),
@@ -4854,6 +5335,7 @@ fn check_answers(parent: &Path) -> Result<()> {
         partitions,
         free_extents: vec![],
         other_systems: systems,
+        esps: vec![],
     };
     ensure!(
         answers::existing_systems(&disk(vec![], vec![])).is_empty(),
