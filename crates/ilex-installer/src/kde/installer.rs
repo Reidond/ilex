@@ -30,10 +30,6 @@ pub mod qobject {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
 
-        include!(<QtCore/QObject>);
-        /// A QML text field, which the window hands over by reference.
-        type QObject;
-
         include!("ilex_grab.h");
         /// The `text` of a QML text field: read here, so the text does not
         /// pass through a JavaScript string for every keystroke.

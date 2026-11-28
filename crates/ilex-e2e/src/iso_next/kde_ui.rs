@@ -19,8 +19,8 @@
 //!
 //! * `iso::next_kde_welcome`: the welcome page; the layout search dialog by
 //!   keyboard; German is applied in the running KWin and its keymap is proved by
-//!   the test field (`yz` types `zy`); Enter continues to the machine page; back
-//!   to US, where `yz` stays `yz`.
+//!   the test field (`yz` types `zy`), then US (`yz` stays `yz`) and German
+//!   again; Enter continues to the machine page.
 //! * `iso::next_kde_detect_board` / `_detect_generic`: the machine page for a
 //!   detected board and for a computer nothing matches.
 //! * `iso::next_kde_kernel_argument` / `_unknown`: the boot override's notice.
@@ -30,7 +30,7 @@
 //! * `iso::next_kde_problem`: a failed image stage ends on the problem page;
 //!   Save the log by keyboard.
 //! * `iso::next_kde_frozen_back`: Alt+Left (Kirigami's own Back shortcut) while
-//!   the installation runs does not leave the window on another page.
+//!   the plan is checked does not leave the window on another page.
 
 use std::path::Path;
 use std::time::Duration;
@@ -197,23 +197,10 @@ fn welcome() -> Result<()> {
         std::thread::sleep(Duration::from_secs(1));
         ctl.save_screenshot(&artifacts.join("next-kde-welcome-german-typed.png"))?;
 
-        // Continue is enabled: Enter in the field goes on to the machine page.
-        ctl.key("Return")?;
-        let machine = wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
-        ensure!(
-            field(&machine, "selected")? == "generic.gnome"
-                && field(&machine, "origin")? == "not-recognised",
-            "the machine page after the welcome page: {machine:?}"
-        );
-        wait_page(vm, &ctl, artifacts, "kde-welcome-machine")?;
-        ctl.save_screenshot(&artifacts.join("next-kde-welcome-machine.png"))?;
-
-        // Escape goes back to the welcome page; KWin goes back to the US
-        // layout (a second reconfiguration), where `yz` stays `yz`.
-        ctl.key("Escape")?;
-        nth_marker(vm, &serial, "the welcome page again", 2, EVENT_TIMEOUT, is_page("welcome"))?;
-        std::thread::sleep(Duration::from_secs(3));
-        ctl.key("Tab")?;
+        // The layout can be changed again (a second reconfiguration): back to
+        // the US layout, where `yz` stays `yz`. The test field's text is
+        // selected and replaced.
+        ctl.key("shift+Tab")?;
         ctl.key("Return")?;
         std::thread::sleep(Duration::from_secs(2));
         ctl.type_text("english (us")?;
@@ -228,6 +215,7 @@ fn welcome() -> Result<()> {
         );
         std::thread::sleep(Duration::from_secs(3));
         ctl.key("Tab")?;
+        ctl.key("ctrl+a")?;
         ctl.type_text("yz")?;
         let tried = wait_event(vm, &serial, "try", EVENT_TIMEOUT, |w| {
             w.get("text").is_some_and(|t| t == "yz")
@@ -238,6 +226,34 @@ fn welcome() -> Result<()> {
         );
         std::thread::sleep(Duration::from_secs(1));
         ctl.save_screenshot(&artifacts.join("next-kde-welcome-us.png"))?;
+
+        // German again, and Continue is enabled with it: Enter in the field
+        // goes on to the machine page.
+        ctl.key("shift+Tab")?;
+        ctl.key("Return")?;
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.type_text("german (no dead")?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.key("Return")?;
+        nth_marker(
+            vm,
+            &serial,
+            "German again",
+            2,
+            EVENT_TIMEOUT,
+            is_event("layout", "layout", "de-nodeadkeys"),
+        )?;
+        std::thread::sleep(Duration::from_secs(3));
+        ctl.key("Tab")?;
+        ctl.key("Return")?;
+        let machine = wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
+        ensure!(
+            field(&machine, "selected")? == "generic.gnome"
+                && field(&machine, "origin")? == "not-recognised",
+            "the machine page after the welcome page: {machine:?}"
+        );
+        wait_page(vm, &ctl, artifacts, "kde-welcome-machine")?;
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-machine.png"))?;
         Ok(())
     })
 }
@@ -275,10 +291,11 @@ fn detect(
     })
 }
 
-/// The pages from the welcome page to the review page by keyboard: Enter in
-/// the layout test field, Enter on Continue (focused on the machine and disk
-/// pages), the name field focused on the administrator page.
-fn to_review(
+/// The pages from the welcome page to the administrator page filled in, by
+/// keyboard: Enter in the layout test field, Enter on Continue (focused on the
+/// machine and disk pages), the name field focused on the administrator page.
+/// Enter in its last field would ask the helper to check the choices.
+fn to_account_filled(
     vm: &mut ilex_devkit::qemu::Vm,
     ctl: &Vmctl,
     serial: &Path,
@@ -308,6 +325,18 @@ fn to_review(
     ctl.type_text(PASSWORD)?;
     std::thread::sleep(Duration::from_secs(1));
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-account-filled.png")))?;
+    Ok(())
+}
+
+/// The pages from the welcome page to the review page by keyboard.
+fn to_review(
+    vm: &mut ilex_devkit::qemu::Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+) -> Result<()> {
+    to_account_filled(vm, ctl, serial, artifacts, name)?;
     // Enter in the last field continues: the helper (the simulation) plans.
     ctl.key("Return")?;
     let review = nth_marker(
@@ -428,51 +457,63 @@ fn problem() -> Result<()> {
     })
 }
 
-/// Alt+Left is Kirigami's page row's own Back shortcut. While the installation
-/// runs the flow refuses to go back, and the window must stay on the page the
-/// flow is on: the row is put back and the flow does not move.
+/// Alt+Left is Kirigami's page row's own Back shortcut. While the plan is
+/// checked (the simulation holds the check, `plan-slow`) the flow refuses to
+/// go back, and the window must stay on the page the flow is on: the row is
+/// put back and the flow does not move.
 fn frozen_back() -> Result<()> {
-    let booted = boot("iso-next-kde-frozen-back", "generic+stalled", vec![])?;
+    let booted = boot("iso-next-kde-frozen-back", "generic+plan-slow", vec![])?;
     run(booted, "kde-frozen-back", |vm, artifacts| {
         let serial = vm.info.dir.join("serial.log");
         let ctl = Vmctl::from_info(vm.info.clone());
-        to_review(vm, &ctl, &serial, artifacts, "kde-frozen-back")?;
-        confirm_erase(vm, &ctl, &serial, artifacts, "kde-frozen-back")?;
-        nth_marker(vm, &serial, "the installing page", 1, EVENT_TIMEOUT, is_page("installing"))?;
-        // (The installing page has a spinner: it is never unchanged.)
-        std::thread::sleep(Duration::from_secs(3));
-        ctl.save_screenshot(&artifacts.join("next-kde-frozen-back-installing.png"))?;
+        to_account_filled(vm, &ctl, &serial, artifacts, "kde-frozen-back")?;
+        // Enter asks the helper to check the choices; the review page is shown
+        // while it does (its marker comes with the result, twelve seconds on).
+        ctl.key("Return")?;
+        std::thread::sleep(Duration::from_secs(2));
         let page_markers = |w: &std::collections::BTreeMap<String, String>| {
             w.contains_key("page") && !w.contains_key("event")
         };
         let pages = count(&serial, page_markers)?;
-
-        // Twice, a few seconds apart: the second one finds the row put back.
+        ctl.save_screenshot(&artifacts.join("next-kde-frozen-back-checking.png"))?;
+        // Twice, a second apart: the second one finds the row put back.
         for _ in 0..2 {
             ctl.key("alt+Left")?;
-            std::thread::sleep(Duration::from_secs(3));
+            std::thread::sleep(Duration::from_secs(1));
         }
         ctl.save_screenshot(&artifacts.join("next-kde-frozen-back-after.png"))?;
+        // The check ends where the flow was: on the review page, checked.
+        let review = nth_marker(
+            vm,
+            &serial,
+            "the review page",
+            1,
+            Duration::from_secs(60),
+            is_page("review"),
+        )?;
         ensure!(
-            count(&serial, page_markers)? == pages,
-            "a page marker came after Alt+Left: the flow went back while it was installing"
+            field(&review, "check")? == "ok",
+            "the plan was not checked: {review:?}"
         );
         ensure!(
-            count(&serial, is_page("account"))? == 1 && count(&serial, is_page("review"))? == 1,
-            "the flow was on the administrator or review page again"
+            count(&serial, page_markers)? == pages + 1
+                && count(&serial, is_page("account"))? == 1,
+            "the flow went back to the administrator page while the plan was checked"
         );
         // The window said it put its page row back (the interface's own stderr
-        // is in the journal): it had moved off the installing page.
+        // is in the journal): it had moved off the review page.
         vm.wait_ssh(Duration::from_secs(180))?;
         let found = vm.ssh_ok(
             "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
-             echo moved=$(grep -c -e 'qml: the page row showed .* while the flow is on installing: put back' /tmp/journal.txt); \
+             echo moved=$(grep -c -e 'qml: the page row showed .* while the flow is on review: put back' /tmp/journal.txt); \
              rm -f /tmp/journal.txt",
         )?;
         ensure!(
             !found.contains("moved=0"),
             "Alt+Left did not move the page row (or the window did not put it back): {found}"
         );
+        wait_page(vm, &ctl, artifacts, "kde-frozen-back-review")?;
+        ctl.save_screenshot(&artifacts.join("next-kde-frozen-back-review.png"))?;
         Ok(())
     })
 }

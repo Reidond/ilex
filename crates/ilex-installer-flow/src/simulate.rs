@@ -41,7 +41,9 @@
 //! installation whose key waits to be taken, was taken by an interface that is
 //! gone, or was confirmed already; `encrypted` makes the
 //! plan of an installation that is already running an encrypted one; `early` holds an
-//! installation in its first stage. They are
+//! installation in its first stage; `plan-slow` answers the plan check after
+//! [`PLAN_SLOW`] (a review page that stays frozen while the check runs, for a
+//! trial to press keys in). They are
 //! what the self-check and the screenshots use to reach every page and every
 //! error state; a boot can name them only with `ilex.installer.simulate` (see
 //! [`allowed`]).
@@ -268,7 +270,12 @@ struct Modifiers {
     /// For the `attach-key*` scenarios: the key's status when the interface
     /// starts.
     key_at_start: Option<KeyStatus>,
+    /// The plan check answers only after [`PLAN_SLOW`].
+    plan_slow: bool,
 }
+
+/// How long `plan-slow` holds the plan check.
+pub const PLAN_SLOW: std::time::Duration = std::time::Duration::from_secs(12);
 
 impl Modifiers {
     fn parse(words: &[&str]) -> Result<Self> {
@@ -290,6 +297,7 @@ impl Modifiers {
             slot_refuses: false,
             skip_fails: false,
             key_at_start: None,
+            plan_slow: false,
         };
         for word in words {
             match *word {
@@ -305,6 +313,7 @@ impl Modifiers {
                 "state-down-second" => modifiers.state_down = Some(1),
                 "probe-active" => modifiers.probe_active = true,
                 "vanish" => modifiers.vanish = true,
+                "plan-slow" => modifiers.plan_slow = true,
                 "apply-refused" => modifiers.apply = ApplyMode::Refuses,
                 "apply-lost" => modifiers.apply = ApplyMode::Lost,
                 "apply-slow" => modifiers.apply = ApplyMode::Slow,
@@ -877,6 +886,9 @@ impl Backend for Simulated {
     }
 
     fn plan(&self, request: &PlanRequest) -> Result<Plan, ClientError> {
+        if self.modifiers.plan_slow {
+            std::thread::sleep(PLAN_SLOW);
+        }
         let probe = self.read_probe()?;
         let checked = check_request(request, &probe).map_err(Self::refuse)?;
         if LIVE_IMAGE_NAMES.contains(&request.administrator.as_str()) {
