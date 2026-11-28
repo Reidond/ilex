@@ -676,7 +676,13 @@ fn recovery_page(
             && (field(&page, "reattached")? == "true") == give_up,
         "the recovery page of an interface that was not given the key: {page:?}"
     );
-    wait_page(vm, ctl, artifacts, &format!("{name}-recovery"))?;
+    if give_up {
+        // A window that attached to a running installation shows its progress
+        // moving under the page: it never settles, so it is only drawn.
+        drawn_while_moving(vm, ctl, artifacts, &format!("{name}-recovery"))?;
+    } else {
+        wait_page(vm, ctl, artifacts, &format!("{name}-recovery"))?;
+    }
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-recovery.png")))?;
     if give_up {
         // The field has the focus; the way out is the next stop.
@@ -733,6 +739,28 @@ fn recovery_page(
         is_event("recovery", "state", "confirmed"),
     )?;
     Ok(key)
+}
+
+/// The page is on the screen (not a blank one), though what is under it moves:
+/// the installation's progress goes on while the recovery page is shown.
+fn drawn_while_moving(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, name: &str) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = vm.exited()? {
+            bail!("the VM exited with {status} before the page was drawn");
+        }
+        if ctl
+            .screenshot()
+            .is_ok_and(|frame| super::page_drawn(&frame))
+        {
+            return Ok(());
+        }
+        if started.elapsed() > Duration::from_secs(120) {
+            let _ = ctl.save_screenshot(&artifacts.join(format!("next-{name}-failure.png")));
+            bail!("the page was not drawn within two minutes of its marker");
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 /// Wait for the installation to end and the done page: the stages' markers say
