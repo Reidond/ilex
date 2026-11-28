@@ -20,7 +20,10 @@
 //! * `iso::next_kde_welcome`: the welcome page; the layout search dialog by
 //!   keyboard; German is applied in the running KWin and its keymap is proved by
 //!   the test field (`yz` types `zy`), then US (`yz` stays `yz`) and German
-//!   again; Enter continues to the machine page.
+//!   again; then German (no dead keys) to the plain German layout and back,
+//!   which have the same layout code, told apart by a dead key (the key at
+//!   US `` ` `` types `^` or composes a circumflex); Enter continues to the
+//!   machine page.
 //! * `iso::next_kde_detect_board` / `_detect_generic`: the machine page for a
 //!   detected board and for a computer nothing matches.
 //! * `iso::next_kde_kernel_argument` / `_unknown`: the boot override's notice.
@@ -239,7 +242,7 @@ fn welcome() -> Result<()> {
         ctl.type_text("german (no dead")?;
         std::thread::sleep(Duration::from_secs(1));
         ctl.key("Return")?;
-        nth_marker(
+        let again = nth_marker(
             vm,
             &serial,
             "German again",
@@ -247,8 +250,111 @@ fn welcome() -> Result<()> {
             EVENT_TIMEOUT,
             is_event("layout", "layout", "de-nodeadkeys"),
         )?;
+        ensure!(
+            field(&again, "applied")? == "true",
+            "KWin did not take German (no dead keys) again: {again:?}"
+        );
         std::thread::sleep(Duration::from_secs(3));
+
+        // A variant and its plain layout have the same code (`de`): KWin's
+        // answer says which one it has by its description only. The key under
+        // Esc on a US keyboard (`) is `^` on German (no dead keys) and the dead
+        // circumflex on German: the first types `^e`, the second composes `ô`
+        // from `o`.
         ctl.key("Tab")?;
+        ctl.key("ctrl+a")?;
+        ctl.type_text("`e")?;
+        let variant = wait_event(vm, &serial, "try", EVENT_TIMEOUT, |w| {
+            w.get("text").is_some_and(|t| t == "^e")
+        })?;
+        ensure!(
+            field(&variant, "layout")? == "de-nodeadkeys",
+            "the test field reports {variant:?}"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-german-dead-key-off.png"))?;
+
+        // German (no dead keys) to German: `applied=true` comes only after
+        // KWin says it has the plain layout, so the keys typed right after it
+        // already make a dead key (a poll that took the old layout's code `de`
+        // for the new one would answer too early).
+        ctl.key("shift+Tab")?;
+        ctl.key("Return")?;
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.type_text("german")?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-layouts-plain.png"))?;
+        ctl.key("Return")?;
+        let plain = wait_event(vm, &serial, "layout", EVENT_TIMEOUT, |w| {
+            w.get("layout").is_some_and(|l| l == "de")
+        })?;
+        ensure!(
+            field(&plain, "applied")? == "true",
+            "KWin did not take the plain German layout: {plain:?}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        ctl.key("Tab")?;
+        ctl.key("ctrl+a")?;
+        ctl.type_text("`o")?;
+        let composed = wait_event(vm, &serial, "try", EVENT_TIMEOUT, |w| {
+            // (The field still holds the earlier `^e` when the layout changes.)
+            w.get("layout").is_some_and(|l| l == "de")
+                && w.get("text").is_some_and(|t| !t.is_empty() && t != "^e")
+        })?;
+        ensure!(
+            field(&composed, "text")? == "ô",
+            "plain German composes a circumflex, it does not type `^`: {composed:?}"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join("next-kde-welcome-german-dead-key-on.png"))?;
+
+        // And back to the variant: the plain layout's code `de` must not stand
+        // for it either.
+        ctl.key("shift+Tab")?;
+        ctl.key("Return")?;
+        std::thread::sleep(Duration::from_secs(2));
+        // German is active: the parenthesis is Shift+8 here.
+        ctl.type_text("german ")?;
+        ctl.key("shift+8")?;
+        ctl.type_text("no dead")?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.key("Return")?;
+        let back = nth_marker(
+            vm,
+            &serial,
+            "German (no dead keys) after German",
+            3,
+            EVENT_TIMEOUT,
+            is_event("layout", "layout", "de-nodeadkeys"),
+        )?;
+        ensure!(
+            field(&back, "applied")? == "true",
+            "KWin did not take German (no dead keys) after German: {back:?}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        ctl.key("Tab")?;
+        ctl.key("ctrl+a")?;
+        ctl.type_text("`u")?;
+        let literal = wait_event(vm, &serial, "try", EVENT_TIMEOUT, |w| {
+            w.get("text").is_some_and(|t| t == "^u")
+        })?;
+        ensure!(
+            field(&literal, "layout")? == "de-nodeadkeys",
+            "the test field reports {literal:?}"
+        );
+
+        // What each layout typed, for the record.
+        std::fs::write(
+            artifacts.join("next-kde-welcome-dead-keys.txt"),
+            format!(
+                "German (no dead keys): {}\nGerman: {}\nGerman (no dead keys) again: {}\n",
+                field(&variant, "text")?,
+                field(&composed, "text")?,
+                field(&literal, "text")?,
+            ),
+        )?;
+
+        // Enter in the test field goes on to the machine page.
         ctl.key("Return")?;
         let machine = wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
         ensure!(

@@ -5696,8 +5696,10 @@ the erase on the review page.
   dead keys) is chosen and **KWin takes it in the running session**
   (`applied=true`), proved by the keys the person presses: the test field turns a
   US keyboard's `yz` into `zy`; US again (`yz`, a second reconfiguration, with
-  the text selected and replaced), German again, and Enter in the field goes on
-  to the machine page (Continue is enabled). How: KWin 6.8's `KeyboardLayout`
+  the text selected and replaced), German again, then German (no dead keys) to
+  plain German and back, told apart by a dead key (the key under Esc types `^`,
+  or composes a circumflex, typed right after `applied=true`), and Enter in the
+  field goes on to the machine page (Continue is enabled). How: KWin 6.8's `KeyboardLayout`
   holds a `KConfigWatcher` for `kxkbrc`, which listens on the **session bus** for
   `org.kde.kconfig.notify.ConfigChanged` on the path `/kxkbrc` (signature
   `a{saay}`: group to key names as byte arrays); a `Layout` group in it makes KWin
@@ -5709,10 +5711,14 @@ the erase on the review page.
   `kwriteconfig6` without `--notify` are dropped silently). `kde/keyboard.rs`
   therefore writes `kxkbrc` atomically, emits that signal from the installer's own
   session-bus connection (zbus `emit_signal`) and asks `getLayoutsList` every
-  100 ms for ten seconds until KWin's current layout is the one asked for (a
-  variant by its description, `German (no dead keys)`, which is the catalogue's own
-  name for it; a plain layout also by its code). A layout KWin does not take in
-  that time is the page's refusal with Try again, as before. (The fallback of
+  100 ms for ten seconds until KWin's current layout is the one asked for: by its
+  description, `German (no dead keys)` or plain `German`, which is the catalogue's
+  own name for it (a variant and its plain layout share the code `de`, so the code
+  proves nothing); a plain layout whose description differs is taken by its code
+  only once KWin's answer is no longer what it was before the switch. Every D-Bus
+  call has a deadline inside the same ten seconds (zbus waits as long as its peer
+  takes), so a hung KWin ends in the page's refusal too. A layout KWin does not
+  take in that time is the page's refusal with Try again, as before. (The fallback of
   starting KWin with `--locale1` and having the root helper call localed's
   `SetX11Keyboard` was not needed.) The trial types the layout search under
   German too, where a US keyboard's Shift+9 is not `(`.
