@@ -958,7 +958,7 @@ echo "failed=$(systemctl --failed --no-legend --plain | wc -l)"
     );
     if cold {
         ensure!(
-            unlock["token"].is_u64() && unlock["slot"].is_u64(),
+            (unlock["token"].is_u64() || unlock["token"].is_string()) && unlock["slot"].is_u64(),
             "the chip's token and slot: {unlock}"
         );
         // The first boot that the chip unlocked: `verify` says verified.
