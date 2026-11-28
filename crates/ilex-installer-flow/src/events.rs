@@ -28,6 +28,19 @@ pub enum Event {
     Name(String),
     Password(Secret),
     Confirmation(Secret),
+    /// The encryption switch.
+    Encrypt(bool),
+    /// The security chip's switch.
+    Chip(bool),
+    /// The disk's passphrase and its confirmation.
+    Passphrase(Secret),
+    PassphraseConfirmation(Secret),
+    /// What is typed in the recovery page's field: the whole key.
+    RecoveryKey(Secret),
+    /// The recovery page's Confirm.
+    ConfirmRecovery,
+    /// The recovery page's "Continue without a recovery key".
+    ContinueWithoutKey,
     Continue,
     Disk(String),
     /// The review page's Try again: look again, then check the choices.
@@ -61,6 +74,13 @@ impl Event {
                 .parse()
                 .map_err(|_| format!("{name}: {argument:?} is not an index"))
         };
+        let switch = || -> Result<bool, String> {
+            match argument {
+                "on" => Ok(true),
+                "off" => Ok(false),
+                _ => Err(format!("{name}: {argument:?} is not on or off")),
+            }
+        };
         let page = || -> Result<PageId, String> {
             PageId::from_id(argument).ok_or_else(|| format!("{name}: no page {argument:?}"))
         };
@@ -74,6 +94,13 @@ impl Event {
             "name" => Self::Name(argument.to_owned()),
             "password" => Self::Password(Secret::new(argument)),
             "confirmation" => Self::Confirmation(Secret::new(argument)),
+            "encrypt" => Self::Encrypt(switch()?),
+            "chip" => Self::Chip(switch()?),
+            "passphrase" => Self::Passphrase(Secret::new(argument)),
+            "passphrase-confirmation" => Self::PassphraseConfirmation(Secret::new(argument)),
+            "recovery-key" => Self::RecoveryKey(Secret::new(argument)),
+            "confirm-recovery" => Self::ConfirmRecovery,
+            "skip-recovery" => Self::ContinueWithoutKey,
             "continue" => Self::Continue,
             "disk" => Self::Disk(argument.to_owned()),
             "retry" => Self::Retry,
@@ -99,7 +126,9 @@ impl Event {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Observed {
     pub page: PageId,
-    /// `Flow::check_word`: `not-run`, `running`, `ok`, `no-disk`, `failed`.
+    /// `Flow::check_word`: `not-run`, `running`, `ok`, `no-disk`, `failed`; on
+    /// the recovery page, the key's: `key` (shown), `taking` (being fetched)
+    /// or `gone` (not to be shown again).
     pub check: &'static str,
     pub probe_pending: bool,
     pub keyboard_switching: bool,
@@ -133,10 +162,30 @@ impl Observed {
 }
 
 impl Flow {
+    /// The word of what the page is made of: the plan check's, and on the
+    /// recovery page the key's.
+    fn observed_check(&self) -> &'static str {
+        if self.page() != PageId::Recovery {
+            return self.check_word();
+        }
+        match self.recovery_view() {
+            Some(view) if view.groups.is_some() => "key",
+            Some(view)
+                if view
+                    .no_key
+                    .as_ref()
+                    .is_some_and(|m| m.title == crate::recovery::WAITING_KEY) =>
+            {
+                "taking"
+            }
+            _ => "gone",
+        }
+    }
+
     pub fn observed(&self) -> Observed {
         Observed {
             page: self.page(),
-            check: self.check_word(),
+            check: self.observed_check(),
             probe_pending: self.is_probing(),
             keyboard_switching: self.keyboard_status() == KeyboardStatus::Switching,
             attaching: self.is_attaching(),
@@ -189,6 +238,28 @@ impl Flow {
                 self.set_confirmation(secret);
                 Step::Stay
             }
+            Event::Encrypt(on) => {
+                self.set_encrypt(on);
+                Step::Stay
+            }
+            Event::Chip(on) => {
+                self.set_chip(on);
+                Step::Stay
+            }
+            Event::Passphrase(secret) => {
+                self.set_passphrase(secret);
+                Step::Stay
+            }
+            Event::PassphraseConfirmation(secret) => {
+                self.set_passphrase_confirmation(secret);
+                Step::Stay
+            }
+            Event::RecoveryKey(secret) => {
+                self.set_recovery_key(secret);
+                Step::Stay
+            }
+            Event::ConfirmRecovery => self.confirm_recovery(),
+            Event::ContinueWithoutKey => self.continue_without_recovery_key(),
             Event::Continue => self.advance(),
             Event::Disk(id) => {
                 self.set_disk(&id);

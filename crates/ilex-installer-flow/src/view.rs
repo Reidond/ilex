@@ -28,6 +28,7 @@ use crate::language::{self, LANGUAGES};
 use crate::machine::Severity;
 use crate::messages::{self, Message};
 use crate::progress::Status;
+use crate::{encryption, recovery};
 
 // --- wording ---------------------------------------------------------------------
 
@@ -63,6 +64,16 @@ pub const DISK_GROUP: &str = "Disk";
 pub const DISK_AWAY: &str = "Not available";
 pub const DISK_AWAY_INTRO: &str = "ilex cannot be installed to these disks.";
 pub const DISK_MODES: &str = "How";
+
+pub const ENCRYPTION_TITLE: &str = "Encryption";
+pub const ENCRYPTION_HEADING: &str = "Encryption";
+pub const ENCRYPT_TITLE: &str = "Encrypt this disk";
+pub const ENCRYPT_SUBTITLE: &str =
+    "Recommended. The disk asks for its passphrase every time the computer starts.";
+pub const PASSPHRASE_LABEL: &str = "Passphrase";
+pub const PASSPHRASE_CONFIRMATION_LABEL: &str = "Confirm the passphrase";
+
+pub const RECOVERY_TITLE: &str = "Recovery key";
 
 pub const ACCOUNT_TITLE: &str = "Administrator";
 pub const ACCOUNT_HEADING: &str = "Administrator";
@@ -328,6 +339,45 @@ pub struct Account {
     pub password_note: Option<Note>,
 }
 
+/// A switch as the flow says it: what it is called, the line under it, where
+/// it is and whether it can be flipped.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Switch {
+    pub title: &'static str,
+    pub line: String,
+    pub on: bool,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Encryption {
+    pub chrome: Chrome,
+    pub heading: &'static str,
+    pub intro: &'static str,
+    pub encrypt: Switch,
+    /// Unlock with the security chip, where the computer can: the line under
+    /// the switch says why not where it cannot.
+    pub chip: Switch,
+    /// How many times the flow wiped the passphrase: when it changes, the
+    /// fields that hold it are cleared (the same count as the account's).
+    pub wiped: u64,
+    /// The passphrase fields, the line about the layout and the notes under
+    /// them are shown while encryption is on.
+    pub fields: bool,
+    /// The fields can be typed in (encryption is on and the helper is not
+    /// being asked).
+    pub editable: bool,
+    pub passphrase: Field,
+    pub confirmation: Field,
+    /// The keyboard layout the passphrase is typed in, in words.
+    pub layout_line: String,
+    /// Under both fields: a refusal (both fields are then invalid) or dimmed
+    /// advice.
+    pub note: Option<Note>,
+    /// While encryption is off: what that means.
+    pub off_line: Option<&'static str>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Row {
     pub title: String,
@@ -428,6 +478,85 @@ pub struct Problem {
     pub note: Option<Note>,
 }
 
+/// The recovery key's groups. The one secret the view carries: the page shows
+/// it to the person once, so its `Debug` prints nothing of it (the
+/// serialisation, which draws it, is not logged).
+#[derive(Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct KeyGroups(pub Vec<String>);
+
+impl std::fmt::Debug for KeyGroups {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeyGroups(..)")
+    }
+}
+
+/// A sentence with its heading: a refusal, or why a page has nothing to show.
+/// `text` is the two as one sentence (`Message::sentence`), for a label that
+/// has one line for both.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Said {
+    pub title: String,
+    pub detail: String,
+    pub text: String,
+}
+
+impl Said {
+    fn of(message: &Message) -> Self {
+        Self {
+            title: message.title.clone(),
+            detail: message.detail.clone(),
+            text: message.sentence(),
+        }
+    }
+}
+
+/// Going on without a recovery key, as the page offers it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Skip {
+    pub title: &'static str,
+    /// What the disk is then, and how to get a key later.
+    pub detail: &'static str,
+    pub button: Button,
+    /// The helper is asked.
+    pub skipping: bool,
+    /// Why it did not work.
+    pub problem: Option<Said>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Recovery {
+    pub chrome: Chrome,
+    pub heading: &'static str,
+    pub intro: &'static str,
+    /// The key's groups, while this interface holds the key.
+    pub key: Option<KeyGroups>,
+    /// "Write it down. It is shown only now." and where to keep it (with the
+    /// key).
+    pub warning: Option<&'static str>,
+    pub keep: Option<&'static str>,
+    /// Why there is no key: being fetched, shown before this window
+    /// restarted, or could not be fetched.
+    pub no_key: Option<Said>,
+    /// What is asked, then the field for the whole key.
+    pub ask: &'static str,
+    pub field: Field,
+    /// Under the field: the hint, or how far the typing is.
+    pub hint: String,
+    /// A refusal of the shape of what was typed (the field is then invalid).
+    pub check: Option<Said>,
+    /// The helper's refusal of what was typed.
+    pub problem: Option<Said>,
+    pub confirm: Button,
+    /// The key is with the helper: the field waits.
+    pub confirming: bool,
+    /// Going on without a key, when it is offered.
+    pub skip: Option<Skip>,
+    /// The installation goes on: its last sentence and how far it is.
+    pub progress_line: String,
+    pub overall: f64,
+}
+
 /// The erase confirmation.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Confirm {
@@ -499,9 +628,11 @@ pub struct View {
     pub welcome: Welcome,
     pub machine: Machine,
     pub disk: Disk,
+    pub encryption: Encryption,
     pub account: Account,
     pub review: Review,
     pub installing: Option<Installing>,
+    pub recovery: Option<Recovery>,
     pub done: Option<Done>,
     pub problem: Option<Problem>,
     pub confirm: Option<Confirm>,
@@ -551,14 +682,22 @@ impl Flow {
         let can_pop = !self.is_frozen()
             && !matches!(
                 page,
-                PageId::Welcome | PageId::Installing | PageId::Done | PageId::Problem
+                PageId::Welcome
+                    | PageId::Installing
+                    | PageId::Recovery
+                    | PageId::Done
+                    | PageId::Problem
             );
         Chrome {
             title,
             banner,
             next: matches!(
                 page,
-                PageId::Welcome | PageId::Machine | PageId::Disk | PageId::Account
+                PageId::Welcome
+                    | PageId::Machine
+                    | PageId::Disk
+                    | PageId::Encryption
+                    | PageId::Account
             )
             .then(|| self.next(page)),
             can_pop,
@@ -788,6 +927,98 @@ impl Flow {
         }
     }
 
+    fn encryption_view(&self) -> Encryption {
+        let editable = !self.is_frozen();
+        let on = self.encrypt();
+        let chip = self.chip_view();
+        let checks = self.encryption_checks();
+        // Only a refusal is an error; advice is dimmed text. Neither is shown
+        // while encryption is off.
+        let note = if on {
+            match checks
+                .passphrase
+                .message()
+                .or_else(|| checks.confirmation.message())
+            {
+                Some(refusal) => Some(Note {
+                    text: refusal.sentence(),
+                    error: true,
+                }),
+                None => self.passphrase_advice().map(|advice| Note {
+                    text: advice.sentence(),
+                    error: false,
+                }),
+            }
+        } else {
+            None
+        };
+        Encryption {
+            chrome: self.chrome(PageId::Encryption, ENCRYPTION_TITLE, self.blocking_banner()),
+            heading: ENCRYPTION_HEADING,
+            intro: encryption::INTRODUCTION,
+            encrypt: Switch {
+                title: ENCRYPT_TITLE,
+                line: ENCRYPT_SUBTITLE.to_owned(),
+                on,
+                enabled: editable,
+            },
+            chip: Switch {
+                title: recovery::CHIP_TITLE,
+                line: chip.line,
+                on: chip.on,
+                enabled: chip.sensitive,
+            },
+            wiped: self.secrets_wiped(),
+            fields: on,
+            editable: editable && on,
+            passphrase: Field {
+                label: PASSPHRASE_LABEL,
+            },
+            confirmation: Field {
+                label: PASSPHRASE_CONFIRMATION_LABEL,
+            },
+            layout_line: self.passphrase_layout_line(),
+            note,
+            off_line: (!on).then_some(encryption::OFF_LINE),
+        }
+    }
+
+    fn recovery_page_view(&self) -> Option<Recovery> {
+        let v = self.recovery_view()?;
+        Some(Recovery {
+            chrome: Chrome {
+                title: RECOVERY_TITLE,
+                banner: None,
+                next: None,
+                can_pop: false,
+            },
+            heading: v.heading,
+            intro: v.introduction,
+            key: v.groups.map(KeyGroups),
+            warning: v.warning,
+            keep: v.keep,
+            no_key: v.no_key.as_ref().map(Said::of),
+            ask: v.ask,
+            field: Field {
+                label: v.typed.label,
+            },
+            hint: v.typed.hint,
+            check: v.typed.check.message().map(Said::of),
+            problem: v.problem.as_ref().map(Said::of),
+            confirm: Button::of(v.confirm_label, v.confirm),
+            confirming: v.confirming,
+            skip: v.skip.map(|skip| Skip {
+                title: skip.title,
+                detail: skip.detail,
+                button: Button::of(skip.label, skip.button),
+                skipping: skip.skipping,
+                problem: skip.problem.as_ref().map(Said::of),
+            }),
+            progress_line: v.progress_line,
+            overall: v.overall,
+        })
+    }
+
     fn review_view(&self) -> Review {
         let page = self.review_page();
         let chrome = Chrome {
@@ -965,9 +1196,11 @@ impl Flow {
             welcome: self.welcome_view(),
             machine: self.machine_view_page(),
             disk: self.disk_page_view(),
+            encryption: self.encryption_view(),
             account: self.account_view(),
             review: self.review_view(),
             installing,
+            recovery: self.recovery_page_view(),
             done,
             problem,
             confirm: self.confirm_dialog().map(|c| Confirm {

@@ -18,6 +18,7 @@ use crate::backend::Backend;
 use crate::flow::{Flow, Step};
 use crate::keyboard::SessionKeyboard;
 use crate::messages::ClientError;
+use crate::secret::Secret;
 
 /// What a worker brings back.
 #[derive(Debug)]
@@ -45,6 +46,21 @@ pub enum Answer {
     LogProbed {
         generation: u64,
         result: Result<Probe, ClientError>,
+    },
+    /// The helper answered `TakeRecoveryKey`: the key is a `Secret`.
+    KeyTaken {
+        generation: u64,
+        result: Result<Secret, ClientError>,
+    },
+    /// The helper compared the key (and opened its keyslot with it).
+    KeyConfirmed {
+        generation: u64,
+        result: Result<(), ClientError>,
+    },
+    /// The helper answered `ContinueWithoutRecoveryKey`.
+    KeySkipped {
+        generation: u64,
+        result: Result<(), ClientError>,
     },
     Finished {
         generation: u64,
@@ -104,9 +120,15 @@ impl Services {
                 plan,
                 erase_disk,
                 password,
+                passphrase,
             } => Box::new(move || Answer::Applied {
                 generation,
-                result: backend.start_installation(&plan, &erase_disk, &password),
+                result: backend.start_installation(
+                    &plan,
+                    &erase_disk,
+                    &password,
+                    passphrase.as_ref(),
+                ),
             }),
             Step::RunState {
                 generation,
@@ -123,6 +145,22 @@ impl Services {
                     }
                 })
             }
+            Step::RunTakeKey { generation, plan } => Box::new(move || Answer::KeyTaken {
+                generation,
+                result: backend.take_recovery_key(&plan),
+            }),
+            Step::RunAcknowledge {
+                generation,
+                plan,
+                answer,
+            } => Box::new(move || Answer::KeyConfirmed {
+                generation,
+                result: backend.acknowledge_recovery_key(&plan, &answer),
+            }),
+            Step::RunContinueWithout { generation, plan } => Box::new(move || Answer::KeySkipped {
+                generation,
+                result: backend.continue_without_recovery_key(&plan),
+            }),
             Step::RunLogProbe { generation } => Box::new(move || Answer::LogProbed {
                 generation,
                 result: backend.probe(),
@@ -149,6 +187,11 @@ impl Flow {
             Answer::LogProbed { generation, result } => {
                 self.log_probe_finished(generation, result)
             }
+            Answer::KeyTaken { generation, result } => self.take_key_finished(generation, result),
+            Answer::KeyConfirmed { generation, result } => {
+                self.confirm_finished(generation, result)
+            }
+            Answer::KeySkipped { generation, result } => self.skip_finished(generation, result),
             Answer::Finished { generation, result } => self.finish_finished(generation, result),
         }
     }
