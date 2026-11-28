@@ -34,11 +34,12 @@
 //!   Save the log by keyboard.
 //! * `iso::next_kde_frozen_back`: Alt+Left (Kirigami's own Back shortcut) while
 //!   the plan is checked does not leave the window on another page.
-//! * `iso::next_kde_encryption`: the encryption and recovery key pages by
-//!   keyboard (simulated helper, so the pages' own behaviour is what is looked
-//!   at): the passphrase typed twice, the chip's check box, the key typed back
-//!   wrongly (refused, the field empties) and rightly, the way out when the key
-//!   cannot be shown, and the done page's instruction.
+//! * `iso::next_kde_encryption`: the recovery key page by keyboard (simulated
+//!   helper, so the page's own behaviour is what is looked at): a window that
+//!   was not given the key shows its field, a wrongly typed-back key is refused
+//!   (the emptied field is in the screenshot, not asserted), and Tab and Enter
+//!   take the way out. The passphrase is walked by `iso::next_kde_install`; the
+//!   chip, the right key and the done page by the two real installations below.
 //!
 //! And the same two installations as the GNOME edition's keyboard trials, with
 //! the **real helper** installing the edition's composition (the registry's
@@ -800,8 +801,8 @@ fn encryption() -> Result<()> {
         );
         wait_page(vm, &ctl, artifacts, "kde-encryption-recovery")?;
         ctl.save_screenshot(&artifacts.join("next-kde-encryption-recovery.png"))?;
-        // A key of the right shape and the wrong letter: refused, the field
-        // empties.
+        // A key of the right shape and the wrong letter: refused (the field
+        // empties; the screenshot records it).
         let refused = count(&serial, is_event("recovery", "state", "refused"))?;
         use ilex_devkit::installer_model::selfcheck::TEST_KEY;
         ctl.type_text(&format!("{}u", &TEST_KEY[..TEST_KEY.len() - 1]))?;

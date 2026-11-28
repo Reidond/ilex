@@ -380,7 +380,10 @@ impl qobject::Installer {
             })
             .unwrap_or_else(|_| "{}".to_owned())
         };
+        let mut json = json;
         self.set_view(QString::from(json.as_str()));
+        // The view can hold the recovery key; the QString copy is Qt's.
+        json.zeroize();
     }
 
     /// The renderer's next shot: a new flow over the scenario's helper, as a

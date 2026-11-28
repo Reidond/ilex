@@ -5764,7 +5764,8 @@ the erase on the review page.
   `<state dir>/artifacts/iso-next/next-kde-*.png`.
   `iso::next_kde_encryption` (simulated helper, `generic+chip+recovery+attach-key-shown`)
   is the recovery key page by keyboard: a window that was not given the key
-  shows its field, the wrong key is refused and the field empties, Tab reaches
+  shows its field, the wrong key is refused (the emptied field is recorded in
+  a screenshot, not asserted), Tab reaches
   "Continue without a recovery key" and Enter takes it (nothing typed reaches
   the serial console). `iso::next_kde_install` walks the encryption page (the
   passphrase typed twice) before the administrator page.
