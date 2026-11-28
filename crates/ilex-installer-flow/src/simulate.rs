@@ -28,7 +28,15 @@
 //! (`state-down-second`), whether the second look at the computer is refused
 //! because an installation is active (`probe-active`), whether the
 //! disk a plan was made for vanishes afterwards (`vanish`) and
-//! whether Restart and Power off fail (`finish-fails`); `encrypted` makes the
+//! whether Restart and Power off fail (`finish-fails`); `recovery` makes the
+//! simulated helper make the recovery key of an encrypted installation whose
+//! request asks for one (a fixed test key, [`TEST_KEY`]), hand it over once,
+//! compare two groups typed back and hold the installation in its recovery
+//! stage until they match; `chip` makes this computer eligible for the
+//! security chip (the fixtures' probes are not); `attach-key` and
+//! `attach-key-shown` and `attach-key-acked` start the interface on an
+//! installation whose key waits to be taken, was taken by an interface that is
+//! gone, or was confirmed already; `encrypted` makes the
 //! plan of an installation that is already running an encrypted one; `early` holds an
 //! installation in its first stage. They are
 //! what the self-check and the screenshots use to reach every page and every
@@ -51,6 +59,8 @@ use ilex_installer_model::plan::{
     SecretKind, TpmMode, check_request, passphrase_problem,
 };
 use ilex_installer_model::probe::{Disk, Partition, Probe};
+use ilex_installer_model::recovery::{self, KeyStatus, TpmOutcome, TpmStatus};
+use ilex_installer_model::selfcheck::TEST_KEY;
 use ilex_installer_model::state::{
     Outcome, Refusal, Stage, StageRecord, StageStatus, State, Summary,
 };
@@ -241,6 +251,13 @@ struct Modifiers {
     /// was made from) is an encrypted one. (Every plan `plan` makes follows its
     /// request.)
     encrypted: bool,
+    /// The helper makes a recovery key (for a request that asks for one).
+    recovery: bool,
+    /// This computer is eligible for the security chip.
+    chip: bool,
+    /// For the `attach-key*` scenarios: the key's status when the interface
+    /// starts.
+    key_at_start: Option<KeyStatus>,
 }
 
 impl Modifiers {
@@ -257,6 +274,9 @@ impl Modifiers {
             probe_active: false,
             vanish: false,
             encrypted: false,
+            recovery: false,
+            chip: false,
+            key_at_start: None,
         };
         for word in words {
             match *word {
@@ -279,6 +299,26 @@ impl Modifiers {
                 "apply-active" => modifiers.apply = ApplyMode::Active,
                 "bare" => modifiers.bare = true,
                 "encrypted" => modifiers.encrypted = true,
+                "recovery" => modifiers.recovery = true,
+                "chip" => modifiers.chip = true,
+                "attach-key" => {
+                    modifiers.attach = Attach::Installing;
+                    modifiers.recovery = true;
+                    modifiers.encrypted = true;
+                    modifiers.key_at_start = Some(KeyStatus::Waiting);
+                }
+                "attach-key-acked" => {
+                    modifiers.attach = Attach::Installing;
+                    modifiers.recovery = true;
+                    modifiers.encrypted = true;
+                    modifiers.key_at_start = Some(KeyStatus::Acknowledged);
+                }
+                "attach-key-shown" => {
+                    modifiers.attach = Attach::Installing;
+                    modifiers.recovery = true;
+                    modifiers.encrypted = true;
+                    modifiers.key_at_start = Some(KeyStatus::Shown);
+                }
                 "finish-fails" => modifiers.finish_fails = true,
                 "attach-installing" => modifiers.attach = Attach::Installing,
                 "attach-done" => modifiers.attach = Attach::Done,
@@ -319,6 +359,8 @@ struct Session {
     /// How many times `State` and `Probe` have been asked.
     asked: usize,
     probes: usize,
+    /// The recovery key, as the helper holds it: waiting, taken, confirmed.
+    key: Option<KeyStatus>,
 }
 
 pub struct Simulated {
@@ -394,6 +436,14 @@ impl Simulated {
             serde_json::from_str(text).with_context(|| format!("fixture {base}"))?;
         let mut probe = fixture.probe;
         if let Some(probe) = &mut probe {
+            if modifiers.chip {
+                // A computer the security chip can unlock: what `ilex-enroll`'s
+                // probe says of one.
+                probe.enrollment = serde_json::json!({
+                    "schema": 1, "secure_boot": true, "setup_mode": false, "tpm2": true,
+                    "verdict": "eligible", "reason": "pcr7-sha256"
+                });
+            }
             if modifiers.bare {
                 probe.disks.retain(|d| !d.removable || d.live_medium);
             }
@@ -416,6 +466,9 @@ impl Simulated {
                 let encrypted = modifiers.encrypted;
                 plan.request.encrypt = encrypted;
                 plan.encryption.enabled = encrypted;
+                plan.request.recovery_key = encrypted && modifiers.recovery;
+                plan.encryption.recovery_key = encrypted && modifiers.recovery;
+                plan.encryption.tpm.will_enroll = encrypted && modifiers.recovery && modifiers.chip;
                 for partition in &mut plan.partitions {
                     partition.encrypted = encrypted && partition.kind.starts_with("root");
                 }
@@ -446,7 +499,11 @@ impl Simulated {
             plan.disk.serial.clone_from(&disk.serial);
         }
         let summary = summary_of(&plan, &probe.edition.name);
+        let key = self.modifiers.key_at_start;
         let script = match attach {
+            // With a key under way the installation really goes on (it waits for
+            // the confirmation, then ends).
+            Attach::Installing if key.is_some() => Script::Success,
             Attach::Installing => Script::Stalled,
             Attach::Done => Script::Success,
             _ => Script::FailImage,
@@ -463,7 +520,7 @@ impl Simulated {
         if attach == Attach::StartingRefusedIdle {
             // A first installation: there is no earlier record under it.
             self.state = None;
-        } else if let Ok(mut state) = script_state(script, step, &plan, &summary) {
+        } else if let Ok(mut state) = script_state(script, step, &plan, &summary, key) {
             if starting {
                 // The rest of the record is an earlier installation's failure
                 // (another plan's): what an interface must not show, and must
@@ -471,6 +528,15 @@ impl Simulated {
                 state.applied = Some(EARLIER_PLAN.to_owned());
             }
             self.state = Some(state);
+        }
+        if key.is_some() {
+            // The helper is running this installation: it goes on from here.
+            let session = self.session.get_mut().unwrap_or_else(|e| e.into_inner());
+            session.key = key;
+            session.plan = Some(plan.clone());
+            session.applied = Some(plan.id.clone());
+            session.summary = Some(summary.clone());
+            session.step = Some(step + 1);
         }
         if starting {
             let session = self.session.get_mut().unwrap_or_else(|e| e.into_inner());
@@ -525,16 +591,13 @@ fn script_state(
     step: usize,
     plan: &Plan,
     summary: &Summary,
+    key: Option<KeyStatus>,
 ) -> Result<State, ClientError> {
     // An encrypted plan's list has the encrypt stage after the partition
     // stage; the script's second step is that stage there (the mount stage,
     // which follows, is over by the time the image is pulled).
     let encrypted = plan.encryption.enabled;
-    let stages: &[Stage] = if encrypted {
-        &Stage::ENCRYPTED
-    } else {
-        &Stage::UNENCRYPTED
-    };
+    let stages = Stage::of_plan(plan);
     // Which stage runs and how far, then what the tools printed.
     let (running, fraction, failing): (usize, f64, Option<Stage>) = match step {
         0 => (0, 0.3, None),
@@ -559,7 +622,21 @@ fn script_state(
     } else {
         stage
     };
-    let running = stages.iter().position(|s| *s == stage).unwrap_or(0);
+    // With a recovery key the installation waits, after the account, for two
+    // groups of it (the recovery stage), and goes on when they match.
+    let waiting_key = plan.encryption.recovery_key
+        && stage == Stage::Finalise
+        && key != Some(KeyStatus::Acknowledged);
+    let stage = if waiting_key { Stage::Recovery } else { stage };
+    let finished = finished && !waiting_key;
+    let (fraction, running) = if waiting_key {
+        (0.0, stages.iter().position(|s| *s == stage).unwrap_or(0))
+    } else {
+        (
+            fraction,
+            stages.iter().position(|s| *s == stage).unwrap_or(0),
+        )
+    };
     let mut lines: Vec<String> = Vec::new();
     match stage {
         Stage::Partition => lines.extend([
@@ -597,8 +674,12 @@ fn script_state(
         Stage::Image => "Downloading and installing ilex".to_owned(),
         Stage::Configure => "Configuring the system".to_owned(),
         Stage::Account => "Creating the administrator account".to_owned(),
+        Stage::Recovery => "Waiting for you to confirm the recovery key".to_owned(),
         _ => "Finishing and unmounting".to_owned(),
     };
+    if plan.encryption.recovery_key && step >= 2 {
+        state.security.recovery_key = key;
+    }
     state.log = lines;
     state.active = true;
     state.disk_changed = running >= 1 || (running == 0 && fraction > 0.0);
@@ -648,6 +729,19 @@ fn script_state(
             state.disk_changed = true;
             for record in &mut state.stages {
                 record.status = StageStatus::Done;
+            }
+            if plan.encryption.enabled {
+                state.security.tpm = Some(if plan.encryption.tpm.will_enroll {
+                    TpmOutcome {
+                        status: TpmStatus::EnrolledUnverified,
+                        reason: "pcr7-sha256".into(),
+                    }
+                } else {
+                    TpmOutcome {
+                        status: TpmStatus::PassphraseOnly,
+                        reason: plan.encryption.tpm.reason.clone(),
+                    }
+                });
             }
         }
         Script::FailImage if step >= 3 => {
@@ -801,16 +895,29 @@ impl Backend for Simulated {
                 .collect(),
             systems: checked.disk.other_systems.clone(),
         };
+        // As the helper decides it: a key only when asked for (and the simulated
+        // helper makes one), the chip only with a key, on an eligible computer.
+        let recovery_key =
+            checked.request.encrypt && checked.request.recovery_key && self.modifiers.recovery;
+        let eligible = probe.enrollment["verdict"] == "eligible";
+        let will_enroll = recovery_key && tpm == TpmMode::Auto && eligible;
+        let reason = if tpm == TpmMode::Off {
+            "not-requested".to_owned()
+        } else if !recovery_key {
+            "no-recovery-key".to_owned()
+        } else {
+            probe.enrollment["reason"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_owned()
+        };
         plan.encryption = PlannedEncryption {
             enabled: checked.request.encrypt,
+            recovery_key,
             tpm: PlannedTpm {
                 requested: tpm,
-                // As the helper: the installation does not enrol the TPM yet.
-                will_enroll: false,
-                reason: probe.enrollment["reason"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_owned(),
+                will_enroll,
+                reason: reason.clone(),
             },
         };
         for partition in &mut plan.partitions {
@@ -825,11 +932,11 @@ impl Backend for Simulated {
                 checked.disk.other_systems.len()
             )]
         };
-        if checked.request.encrypt && tpm == TpmMode::Auto {
-            plan.warnings.push(
-                "unlocking the disk with this computer's security chip is not available in this installer yet; the disk asks for its passphrase at every start"
-                    .to_owned(),
-            );
+        if checked.request.encrypt && tpm == TpmMode::Auto && !will_enroll {
+            plan.warnings.push(format!(
+                "unlocking the disk with this computer's security chip is not used ({}); the disk asks for its passphrase at every start",
+                recovery::tpm_reason(&reason)
+            ));
         }
         self.session().plan = Some(plan.clone());
         Ok(plan)
@@ -871,13 +978,17 @@ impl Backend for Simulated {
         }
         if let Some((plan, summary)) = session.other.clone() {
             // Another interface's installation is running.
-            return script_state(Script::Stalled, 3, &plan, &summary);
+            return script_state(Script::Stalled, 3, &plan, &summary, None);
         }
         if let (Some(step), Some(plan), Some(summary)) =
             (session.step, session.plan.clone(), session.summary.clone())
         {
             session.step = Some(step + 1);
-            return script_state(self.modifiers.script, step, &plan, &summary);
+            // The helper has made the key once the volume is open.
+            if plan.encryption.recovery_key && step >= 2 && session.key.is_none() {
+                session.key = Some(KeyStatus::Waiting);
+            }
+            return script_state(self.modifiers.script, step, &plan, &summary, session.key);
         }
         Ok(self.state.clone().unwrap_or_else(|| State::idle(0)))
     }
@@ -1012,7 +1123,55 @@ impl Backend for Simulated {
             ));
         }
         session.step = Some(1);
-        script_state(self.modifiers.script, 0, &planned, &summary)
+        session.key = None;
+        script_state(self.modifiers.script, 0, &planned, &summary, None)
+    }
+
+    fn take_recovery_key(&self, plan: &str) -> Result<Secret, ClientError> {
+        let mut session = self.session();
+        let known = session.applied.as_deref() == Some(plan)
+            && session
+                .plan
+                .as_ref()
+                .is_some_and(|p| p.encryption.recovery_key);
+        match (known, session.key) {
+            (false, _) | (_, None) => Err(Self::refuse(PlanError::new(
+                ErrorCode::NoRecoveryKey,
+                Some("plan"),
+                "this installation has no recovery key to take",
+            ))),
+            (true, Some(KeyStatus::Waiting)) => {
+                session.key = Some(KeyStatus::Shown);
+                Ok(Secret::new(TEST_KEY))
+            }
+            (true, Some(_)) => Err(Self::refuse(PlanError::new(
+                ErrorCode::RecoveryKeyTaken,
+                Some("plan"),
+                "the recovery key was handed over once and is not shown again",
+            ))),
+        }
+    }
+
+    fn acknowledge_recovery_key(&self, plan: &str, answer: &Secret) -> Result<(), ClientError> {
+        let mut session = self.session();
+        let mismatch =
+            |why: &str| Self::refuse(PlanError::new(ErrorCode::RecoveryKeyMismatch, None, why));
+        if session.applied.as_deref() != Some(plan) || session.key.is_none() {
+            return Err(Self::refuse(PlanError::new(
+                ErrorCode::NoRecoveryKey,
+                Some("plan"),
+                "this installation has no recovery key to confirm",
+            )));
+        }
+        if session.key == Some(KeyStatus::Waiting) {
+            return Err(mismatch("the recovery key has not been shown yet"));
+        }
+        let typed = recovery::parse_answer(answer.expose()).map_err(mismatch)?;
+        if !recovery::matches(TEST_KEY, &typed) {
+            return Err(mismatch("those are not the groups of the recovery key"));
+        }
+        session.key = Some(KeyStatus::Acknowledged);
+        Ok(())
     }
 
     fn finish(&self, action: &FinishAction) -> Result<Option<Saved>, ClientError> {

@@ -59,6 +59,15 @@ enum Do {
     Encrypted,
     /// On the encryption page: turn encryption off and continue.
     Unencrypted,
+    /// The encryption page's security chip switch, as a person flips it.
+    Chip(bool),
+    /// The recovery page: the two groups asked for, typed from the paper (the
+    /// simulated helper's key), typed wrongly, or the first one cut short.
+    GroupsRight,
+    GroupsWrong,
+    GroupShort,
+    /// The recovery page's Confirm.
+    ConfirmRecovery,
     /// A disk row (its id).
     Disk(&'static str),
     /// The review page's destructive button, and the dialog's two answers.
@@ -94,6 +103,9 @@ struct Shot {
     steps: &'static [Do],
 }
 
+/// The plan the simulated helper makes (its fixture's id): which two groups of
+/// the key the recovery page asks for follows from it.
+const SIMULATED_PLAN: &str = "5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e";
 const PASSWORD: &str = "correct horse battery";
 const PASSPHRASE: &str = "pluck the gentle wren, lest the winter come";
 
@@ -155,6 +167,21 @@ const SHOTS: &[Shot] = shots![
     "review-erase-cancelled", "generic", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Dismiss];
     "review-apply-refused", "generic+apply-refused", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "review-apply-not-started", "generic+apply-lost", Review, "failed", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "encryption-chip-on", "generic+chip+recovery", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue];
+    "encryption-chip-off", "generic+chip+recovery", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Chip(false)];
+    "encryption-chip-encryption-off", "generic+chip+recovery", Encryption, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypt(false)];
+    "review-chip", "generic+chip+recovery", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "review-chip-unavailable", "generic+recovery", Review, "ok", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue];
+    "recovery-key", "generic+chip+recovery+stalled", Recovery, "key", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
+    "recovery-key-short", "generic+chip+recovery+stalled", Recovery, "key", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Recovery), Do::GroupShort];
+    "recovery-key-typed", "generic+chip+recovery+stalled", Recovery, "key", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Recovery), Do::GroupsRight];
+    "recovery-key-wrong", "generic+chip+recovery+stalled", Recovery, "key", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Recovery), Do::GroupsWrong, Do::ConfirmRecovery];
+    "recovery-key-gone", "generic+attach-key-shown+chip", Recovery, "gone", "", [];
+    "recovery-key-gone-typed", "generic+attach-key-shown+chip", Recovery, "gone", "", [Do::GroupsRight];
+    "installing-key-confirmed", "generic+attach-key-acked+chip", Installing, "", "", [];
+    "done-chip", "generic+chip+recovery", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Recovery), Do::GroupsRight, Do::ConfirmRecovery, Do::Wait(PageId::Done), Do::PasswordsWiped];
+    "done-passphrase-only", "generic+recovery", Done, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::Wait(PageId::Recovery), Do::GroupsRight, Do::ConfirmRecovery, Do::Wait(PageId::Done)];
+    "done-chip-reattached", "generic+attach-key-acked+chip", Done, "", "", [Do::Wait(PageId::Done)];
     "installing-early", "generic+early", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "installing", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept];
     "installing-log", "generic+stalled", Installing, "", "", [Do::Continue, Do::Continue, Do::Continue, Do::Encrypted, Do::Name("ilexmaint"), Do::Password(PASSWORD), Do::Confirm(PASSWORD), Do::Continue, Do::Install, Do::Accept, Do::ExpandLog];
@@ -590,6 +617,50 @@ async fn shoot(job: &Job) -> Result<Summary> {
                     .await?;
                     continue;
                 }
+                Do::Chip(on) => {
+                    set_switch(&window, "chip", on)?;
+                    flush(
+                        &format!("{}: the chip switch", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::GroupsRight | Do::GroupsWrong | Do::GroupShort => {
+                    use ilex_installer_model::{recovery, selfcheck::TEST_KEY};
+                    let asked = recovery::asked(SIMULATED_PLAN);
+                    let groups = recovery::groups(TEST_KEY);
+                    let text: [String; 2] = match *step {
+                        Do::GroupsRight => [
+                            groups[asked[0] - 1].to_owned(),
+                            groups[asked[1] - 1].to_owned(),
+                        ],
+                        Do::GroupsWrong => [
+                            groups[asked[0] - 1].chars().rev().collect(),
+                            groups[asked[1] - 1].chars().rev().collect(),
+                        ],
+                        _ => ["cdef".to_owned(), String::new()],
+                    };
+                    for (slot, text) in text.iter().enumerate() {
+                        type_into(
+                            &window,
+                            PageId::Recovery,
+                            &format!("recovery-group-{}", slot + 1),
+                            text,
+                        )?;
+                        flush(
+                            &format!("{}: group {}", shot.name, slot + 1),
+                            &controller,
+                            &window,
+                            &observer,
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
+                Do::ConfirmRecovery => Msg::ConfirmRecovery,
                 Do::Encrypted | Do::Unencrypted => {
                     if matches!(*step, Do::Encrypted) {
                         type_into(&window, PageId::Encryption, "passphrase", PASSPHRASE)?;

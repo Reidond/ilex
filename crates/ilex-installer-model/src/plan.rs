@@ -70,6 +70,12 @@ pub struct PlanRequest {
     /// Defaults to `auto` with encryption and `off` without.
     #[serde(default)]
     pub tpm: Option<TpmMode>,
+    /// The caller can show a recovery key to a person and ask for two of its
+    /// groups back (an interface can; the answers file cannot). Needs
+    /// encryption. Without it the installation makes no recovery key and does
+    /// not enrol the security chip, whatever `tpm` says.
+    #[serde(default)]
+    pub recovery_key: bool,
     /// A console keymap name.
     #[serde(default = "keyboard")]
     pub keyboard: String,
@@ -394,6 +400,15 @@ pub enum ErrorCode {
     /// The disk is not the one the plan describes: another device answers to
     /// its id or the partitions on it changed since the plan was made.
     DiskChanged,
+    /// `TakeRecoveryKey` or `AcknowledgeRecoveryKey` for a plan whose
+    /// installation has no recovery key (not asked for, not made yet, or
+    /// already over).
+    NoRecoveryKey,
+    /// `TakeRecoveryKey` after the key was taken: it is handed over once.
+    RecoveryKeyTaken,
+    /// `AcknowledgeRecoveryKey` with groups that are not the key's, or before
+    /// the key was taken.
+    RecoveryKeyMismatch,
     /// A secret the plan needs has not been supplied (`SetSecret`).
     MissingSecret,
     /// The secret's file descriptor, kind or content is not acceptable.
@@ -530,6 +545,13 @@ pub fn check_request<'a>(
             ),
         ));
     }
+    if request.recovery_key && !request.encrypt {
+        return Err(PlanError::new(
+            ErrorCode::InvalidField,
+            Some("recovery_key"),
+            "a recovery key needs an encrypted disk",
+        ));
+    }
     if request.tpm == Some(TpmMode::Auto) && !request.encrypt {
         return Err(PlanError::new(
             ErrorCode::TpmNeedsEncryption,
@@ -633,6 +655,9 @@ pub struct Erase {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlannedEncryption {
     pub enabled: bool,
+    /// A recovery key will be made and shown (the request asked, encrypted).
+    #[serde(default)]
+    pub recovery_key: bool,
     pub tpm: PlannedTpm,
 }
 

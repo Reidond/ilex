@@ -46,10 +46,13 @@ use crate::disks;
 use crate::markers;
 use crate::messages::{self, ClientError, Message};
 use crate::progress::Progress;
+use crate::recovery as page;
 use crate::review::{Confirmation, Review, Row};
+use crate::secret::Secret;
 use ilex_installer_model::finish::{FinishAction, Saved, check_log_device};
 use ilex_installer_model::plan::{ErrorCode, Plan};
 use ilex_installer_model::probe::Probe;
+use ilex_installer_model::recovery::{self, KeyStatus};
 use ilex_installer_model::state::{Outcome, Stage, StageStatus, State, Summary};
 use std::collections::BTreeMap;
 
@@ -208,15 +211,88 @@ pub(super) struct Installation {
     /// Restart or power off was accepted: the machine is going down.
     finishing: Option<&'static str>,
     finish_error: Option<Message>,
+    /// The recovery key page's own state.
+    recovery: RecoveryPage,
     log: LogSave,
     log_probe_generation: u64,
     log_probe_in_flight: Option<u64>,
+}
+
+/// What the recovery key page holds: the key this interface took (and nothing
+/// when it did not: a restarted interface never has it), the two groups typed,
+/// and the requests in flight.
+#[derive(Default)]
+pub(super) struct RecoveryPage {
+    /// The key, from the helper's `TakeRecoveryKey`, until it is confirmed or
+    /// the installation ends.
+    key: Option<Secret>,
+    typed: [Secret; 2],
+    take_generation: u64,
+    taking: Option<u64>,
+    /// Times the key was asked for: the helper hands it over once, so a few
+    /// failures end the asking and say so on the page.
+    take_attempts: u32,
+    take_failed: Option<Message>,
+    confirm_generation: u64,
+    confirming: Option<u64>,
+    /// The helper's refusal of the groups, shown above them until one changes.
+    problem: Option<Message>,
 }
 
 impl Installation {
     pub(super) fn is_attaching(&self) -> bool {
         self.attaching
     }
+
+    /// The key and what was typed are wiped, and the page forgets the rest.
+    pub(super) fn clear_recovery(&mut self) {
+        let generations = (
+            self.recovery.take_generation,
+            self.recovery.confirm_generation,
+        );
+        self.recovery = RecoveryPage {
+            take_generation: generations.0,
+            confirm_generation: generations.1,
+            ..RecoveryPage::default()
+        };
+    }
+}
+
+/// One of the two groups the page asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskedGroup {
+    /// 1 to 8.
+    pub number: usize,
+    pub label: String,
+    pub check: crate::account::Check,
+}
+
+/// What the recovery key page shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecoveryView {
+    pub heading: &'static str,
+    pub introduction: &'static str,
+    /// The key's eight groups, when this interface holds the key.
+    pub groups: Option<Vec<String>>,
+    /// Why there are none: the key is being fetched, was shown before this
+    /// window restarted, or could not be fetched.
+    pub no_key: Option<Message>,
+    /// "Write it down. It is shown only now." and where to keep it (only with
+    /// the key).
+    pub warning: Option<&'static str>,
+    pub keep: Option<&'static str>,
+    /// What is asked, then the two groups.
+    pub ask: &'static str,
+    pub asked: [AskedGroup; 2],
+    /// The helper's refusal of what was typed.
+    pub problem: Option<Message>,
+    pub confirm: Control,
+    pub confirm_label: &'static str,
+    /// The groups are with the helper: the fields wait.
+    pub confirming: bool,
+    /// The installation goes on: its last sentence and how far it is.
+    pub progress_line: String,
+    pub overall: f64,
 }
 
 /// What the installing page shows.
@@ -367,6 +443,9 @@ impl Flow {
                 self.inst.failures = 0;
                 self.take_busy(state);
                 self.go(PageId::Installing);
+                if let Some(step) = self.sync_recovery() {
+                    return step;
+                }
                 self.begin_state(POLL_MS)
             }
             Ok(state) if state.ended() => {
@@ -445,6 +524,9 @@ impl Flow {
                     if was_lost {
                         self.inst.lost = None;
                         self.go(PageId::Installing);
+                    }
+                    if let Some(step) = self.sync_recovery() {
+                        return step;
                     }
                     self.begin_state(POLL_MS)
                 } else if self.did_not_begin(&state) {
@@ -617,6 +699,7 @@ impl Flow {
             Some(Outcome::Success) => {
                 self.say(markers::outcome(&Outcome::Success));
                 self.inst.phase = Phase::Succeeded;
+                self.inst.clear_recovery();
                 // Nothing needs the password again (Try again is for a failure):
                 // it is wiped now, not when the process ends, and an interface
                 // clears the fields it holds it in.
@@ -626,9 +709,259 @@ impl Flow {
             Some(failed @ Outcome::Failed { .. }) => {
                 self.say(markers::outcome(&failed));
                 self.inst.phase = Phase::Failed;
+                self.inst.clear_recovery();
                 self.go(PageId::Problem)
             }
             None => Step::Stay,
+        }
+    }
+
+    // --- the recovery key --------------------------------------------------------
+
+    /// The helper's record of the recovery key (`State.security`), and the plan
+    /// of the installation that has it.
+    fn key_status(&self) -> Option<(KeyStatus, String)> {
+        let state = self.inst.state.as_ref().filter(|s| s.active)?;
+        Some((state.security.recovery_key?, state.applied.clone()?))
+    }
+
+    /// Follow what the helper says of the key. `Waiting`: take it (the page is
+    /// shown and the key fetched; the helper hands it over once). `Shown`
+    /// (taken, not confirmed): the page is shown, with the key if this interface
+    /// took it and without if it was restarted since. `Acknowledged`: back to
+    /// the installing page. A step when the flow asks the helper for the key
+    /// (the poll goes on when its answer comes); otherwise nothing is asked.
+    fn sync_recovery(&mut self) -> Option<Step> {
+        let (status, plan) = self.key_status()?;
+        match status {
+            KeyStatus::Waiting => {
+                let r = &mut self.inst.recovery;
+                if r.key.is_none() && r.taking.is_none() && r.take_attempts < 3 {
+                    r.take_attempts += 1;
+                    r.take_generation += 1;
+                    r.taking = Some(r.take_generation);
+                    r.take_failed = None;
+                    let generation = r.take_generation;
+                    self.say(markers::recovery("taking"));
+                    self.go(PageId::Recovery);
+                    return Some(Step::RunTakeKey { generation, plan });
+                }
+                if self.page == PageId::Installing {
+                    self.go(PageId::Recovery);
+                }
+            }
+            KeyStatus::Shown => {
+                if self.page == PageId::Installing {
+                    if self.inst.recovery.key.is_none() {
+                        self.say(markers::recovery("gone"));
+                    }
+                    self.go(PageId::Recovery);
+                }
+            }
+            KeyStatus::Acknowledged => {
+                if self.page == PageId::Recovery {
+                    self.inst.clear_recovery();
+                    self.secrets_wiped += 1;
+                    self.go(PageId::Installing);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn take_key_is_current(&self, generation: u64) -> bool {
+        self.inst.recovery.taking == Some(generation)
+    }
+
+    /// The helper answered `TakeRecoveryKey`.
+    pub fn take_key_finished(
+        &mut self,
+        generation: u64,
+        result: Result<Secret, ClientError>,
+    ) -> Step {
+        if !self.take_key_is_current(generation) {
+            return Step::Stay;
+        }
+        self.inst.recovery.taking = None;
+        match result {
+            Ok(key) if recovery::is_key(key.expose()) => {
+                self.inst.recovery.key = Some(key);
+                self.say(markers::recovery("shown"));
+                self.announce_page(None);
+            }
+            Ok(_) => {
+                self.inst.recovery.take_failed = Some(page::take_failed(
+                    "the helper's key is not in the expected form",
+                ));
+                self.say(markers::recovery("failed"));
+            }
+            // Handed over before: this interface cannot have it.
+            Err(ClientError::Refused(error)) if error.code == ErrorCode::RecoveryKeyTaken => {
+                self.say(markers::recovery("gone"));
+                self.announce_page(None);
+            }
+            Err(error) => {
+                self.inst.recovery.take_failed =
+                    Some(page::take_failed(&error.message().one_line()));
+                self.say(markers::recovery("failed"));
+            }
+        }
+        if self.inst.phase == Phase::Running {
+            self.begin_state(POLL_MS)
+        } else {
+            Step::Stay
+        }
+    }
+
+    /// The two groups the page asks for (1-based numbers), the same for the
+    /// installation whichever interface asks.
+    pub fn recovery_asked(&self) -> [usize; 2] {
+        recovery::asked(
+            self.inst
+                .state
+                .as_ref()
+                .and_then(|s| s.applied.as_deref())
+                .unwrap_or(""),
+        )
+    }
+
+    /// What the recovery key page shows; `None` when it is not the page.
+    pub fn recovery_view(&self) -> Option<RecoveryView> {
+        if self.page != PageId::Recovery {
+            return None;
+        }
+        let r = &self.inst.recovery;
+        let asked = self.recovery_asked();
+        let group = |i: usize| AskedGroup {
+            number: asked[i],
+            label: page::group_label(asked[i]),
+            check: page::group_check(&r.typed[i]),
+        };
+        let groups = r.key.as_ref().map(page::key_groups);
+        let no_key = if groups.is_some() {
+            None
+        } else if r.taking.is_some() {
+            Some(Message::title(page::WAITING_KEY))
+        } else if let Some(failed) = &r.take_failed {
+            Some(failed.clone())
+        } else {
+            Some(Message::new(page::GONE_TITLE, page::GONE_DETAIL))
+        };
+        let confirming = r.confirming.is_some();
+        let progress = self.inst.progress.as_ref();
+        Some(RecoveryView {
+            heading: page::HEADING,
+            introduction: page::INTRODUCTION,
+            warning: groups.is_some().then_some(page::WRITE_IT_DOWN),
+            keep: groups.is_some().then_some(page::KEEP_IT),
+            groups,
+            no_key,
+            ask: page::ASK,
+            asked: [group(0), group(1)],
+            problem: r.problem.clone(),
+            confirm: Control::shown(self.can_confirm_recovery()),
+            confirm_label: if confirming {
+                page::CONFIRMING_LABEL
+            } else {
+                page::CONFIRM_LABEL
+            },
+            confirming,
+            progress_line: format!(
+                "{} {}",
+                page::GOES_ON,
+                self.inst.state.as_ref().map_or("", |s| s.message.as_str())
+            )
+            .trim()
+            .to_owned(),
+            overall: progress.map_or(0.0, Progress::overall),
+        })
+    }
+
+    /// Type into the field of group `slot` (0 or 1). Typing again clears the
+    /// helper's refusal. Refused while the helper is asked, or when there is
+    /// no page.
+    pub fn set_recovery_group(&mut self, slot: usize, typed: Secret) -> bool {
+        if slot > 1 || self.page != PageId::Recovery || self.inst.recovery.confirming.is_some() {
+            return false;
+        }
+        if self.inst.recovery.typed[slot] != typed {
+            self.inst.recovery.typed[slot] = typed;
+            self.inst.recovery.problem = None;
+        }
+        true
+    }
+
+    pub fn recovery_group(&self, slot: usize) -> &Secret {
+        &self.inst.recovery.typed[slot.min(1)]
+    }
+
+    /// Both groups are the right shape and nothing is outstanding.
+    pub fn can_confirm_recovery(&self) -> bool {
+        self.page == PageId::Recovery
+            && self.inst.recovery.confirming.is_none()
+            && self
+                .inst
+                .recovery
+                .typed
+                .iter()
+                .all(|t| page::group_check(t).is_valid())
+    }
+
+    /// Confirm was pressed: the groups go to the helper, which compares them.
+    pub fn confirm_recovery(&mut self) -> Step {
+        if !self.can_confirm_recovery() {
+            return Step::Stay;
+        }
+        let Some((_, plan)) = self.key_status() else {
+            return Step::Stay;
+        };
+        let asked = self.recovery_asked();
+        let answer = recovery::answer_text(&[
+            (asked[0], self.inst.recovery.typed[0].expose().to_owned()),
+            (asked[1], self.inst.recovery.typed[1].expose().to_owned()),
+        ]);
+        self.inst.recovery.confirm_generation += 1;
+        self.inst.recovery.confirming = Some(self.inst.recovery.confirm_generation);
+        self.inst.recovery.problem = None;
+        Step::RunAcknowledge {
+            generation: self.inst.recovery.confirm_generation,
+            plan,
+            answer: Secret::new(&answer),
+        }
+    }
+
+    pub fn confirm_is_current(&self, generation: u64) -> bool {
+        self.inst.recovery.confirming == Some(generation)
+    }
+
+    /// The helper answered `AcknowledgeRecoveryKey`.
+    pub fn confirm_finished(&mut self, generation: u64, result: Result<(), ClientError>) -> Step {
+        if !self.confirm_is_current(generation) {
+            return Step::Stay;
+        }
+        self.inst.recovery.confirming = None;
+        match result {
+            Ok(()) => {
+                self.say(markers::recovery("confirmed"));
+                // The helper has it: the key and what was typed go now, and the
+                // installing page is back (the next `State` agrees).
+                self.inst.clear_recovery();
+                self.secrets_wiped += 1;
+                self.go(PageId::Installing)
+            }
+            Err(ClientError::Refused(error)) if error.code == ErrorCode::RecoveryKeyMismatch => {
+                self.say(markers::recovery("refused"));
+                self.inst.recovery.problem = Some(page::mismatch());
+                self.inst.recovery.typed = Default::default();
+                self.secrets_wiped += 1;
+                Step::Stay
+            }
+            Err(error) => {
+                self.say(markers::recovery("failed"));
+                self.inst.recovery.problem =
+                    Some(page::confirm_failed(&error.message().one_line()));
+                Step::Stay
+            }
         }
     }
 
@@ -726,6 +1059,14 @@ impl Flow {
                     "On: the disk asks for its passphrase every time the computer starts".to_owned()
                 } else {
                     "Off: anyone who has the disk can read it".to_owned()
+                },
+            },
+            Row {
+                title: "Automatic unlock",
+                value: if plan.encryption.enabled {
+                    page::review_line(plan.encryption.tpm.will_enroll, &plan.encryption.tpm.reason)
+                } else {
+                    "Not applicable: the disk is not encrypted".to_owned()
                 },
             },
             Row {
@@ -988,15 +1329,35 @@ impl Flow {
             });
         }
         let encrypted = summary.is_some_and(|s| s.encrypted);
+        let tpm = self
+            .inst
+            .state
+            .as_ref()
+            .and_then(|state| state.security.tpm.as_ref());
+        let unlock = encrypted.then(|| page::done_line(tpm));
+        if encrypted {
+            rows.push(Row {
+                title: "Disk unlock",
+                value: match tpm {
+                    Some(t)
+                        if t.status
+                            == ilex_installer_model::state::TpmStatus::EnrolledUnverified =>
+                    {
+                        "Automatically, with the security chip".to_owned()
+                    }
+                    Some(t) => format!(
+                        "Passphrase at every start: {}",
+                        recovery::tpm_reason(&t.reason)
+                    ),
+                    None => "Passphrase at every start".to_owned(),
+                },
+            });
+        }
         Some(DoneView {
             heading: format!("{edition} is installed"),
             detail: format!(
                 "Remove the installation medium, then restart. {}The computer starts the new system; sign in with the administrator account you made, and create your own account there when it asks.",
-                if encrypted {
-                    "The disk is encrypted: the computer asks for its passphrase every time it starts, in the keyboard layout you chose. "
-                } else {
-                    ""
-                }
+                unlock.map_or_else(String::new, |line| format!("{line} "))
             ),
             rows,
             finishing: self.inst.finishing,
@@ -1061,6 +1422,20 @@ impl Flow {
                     .map_or(0, |p| (p.overall() * 100.0).floor() as u32);
                 format!(
                     "stage={stage} progress={percent} reattached={}",
+                    self.inst.reattached
+                )
+            }
+            PageId::Recovery => {
+                let [first, second] = self.recovery_asked();
+                format!(
+                    "key={} asked={first},{second} reattached={}",
+                    if self.inst.recovery.key.is_some() {
+                        "shown"
+                    } else if self.inst.recovery.taking.is_some() {
+                        "taking"
+                    } else {
+                        "gone"
+                    },
                     self.inst.reattached
                 )
             }

@@ -12,6 +12,7 @@
 //! * [`backend`]: the root helper as a trait ([`backend::Backend`]), with the
 //!   real implementation over D-Bus (`org.ilex.Installer1`, Linux) and
 //!   [`simulate::Simulated`], which answers from JSON fixtures.
+//! * [`recovery`]: the recovery key page and the security chip's row: wording and rules.
 //! * [`machine`], [`disks`], [`encryption`], [`account`], [`review`], [`keyboard`], [`language`]:
 //!   the content and rules of the pages made of what the helper reports and what
 //!   the live image ships.
@@ -35,6 +36,7 @@ pub mod machine;
 pub mod markers;
 pub mod messages;
 pub mod progress;
+pub mod recovery;
 pub mod review;
 pub mod secret;
 pub mod selfcheck;

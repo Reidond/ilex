@@ -44,6 +44,14 @@ pub trait Backend: Send + Sync {
     /// Restart, power off, or write the log to a stick (the [`Saved`] record).
     fn finish(&self, action: &FinishAction) -> Result<Option<Saved>, ClientError>;
 
+    /// The installation's recovery key, once: the helper hands it over a single
+    /// time (a sealed memfd) and refuses every later request.
+    fn take_recovery_key(&self, plan: &str) -> Result<Secret, ClientError>;
+
+    /// Two groups of the key typed back (`ilex_installer_model::recovery`'s
+    /// answer text). The helper compares them with the key it holds.
+    fn acknowledge_recovery_key(&self, plan: &str, answer: &Secret) -> Result<(), ClientError>;
+
     /// What the review page's destructive button does: the disk's passphrase
     /// (when the plan encrypts) and the administrator's password, then the
     /// installation.
@@ -185,6 +193,19 @@ mod dbus {
             self.document("Apply", &(plan, erase_disk))
         }
 
+        fn take_recovery_key(&self, plan: &str) -> Result<Secret, ClientError> {
+            let fd: zbus::OwnedFd = self.call_returning("TakeRecoveryKey", &(plan,))?;
+            read_key(fd.into())
+                .map_err(|e| ClientError::Other(format!("the recovery key's descriptor: {e}")))
+        }
+
+        fn acknowledge_recovery_key(&self, plan: &str, answer: &Secret) -> Result<(), ClientError> {
+            let fd = sealed_memfd(answer.expose().as_bytes())
+                .map_err(|e| ClientError::Other(format!("the groups' descriptor: {e}")))?;
+            let fd = zbus::OwnedFd::from(fd);
+            self.call_unit("AcknowledgeRecoveryKey", &(plan, fd))
+        }
+
         fn finish(&self, action: &FinishAction) -> Result<Option<Saved>, ClientError> {
             let text = self.call("Finish", &(action.text(),))?;
             match action {
@@ -194,6 +215,21 @@ mod dbus {
                 _ => Ok(None),
             }
         }
+    }
+
+    /// What the helper's `TakeRecoveryKey` returned: a memfd, read from its start
+    /// once and closed. A key is 71 characters; anything much longer is not one.
+    fn read_key(fd: std::os::fd::OwnedFd) -> std::io::Result<Secret> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::from(fd);
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        file.take(1024).read_to_end(&mut bytes)?;
+        let secret = std::str::from_utf8(&bytes)
+            .map(Secret::new)
+            .map_err(|_| std::io::Error::other("the key is not text"));
+        zeroize::Zeroize::zeroize(&mut bytes);
+        secret
     }
 
     /// A memfd holding `content`, sealed against writing and resizing: what the

@@ -14,6 +14,7 @@ use crate::language;
 use crate::machine::{MachineView, Origin};
 use crate::messages::{ClientError, plan_error};
 use crate::progress::{Progress, Status};
+use crate::recovery as page;
 use crate::secret::Secret;
 use crate::simulate::{self, Simulated};
 use anyhow::{Context, Result, bail, ensure};
@@ -226,6 +227,7 @@ pub fn run() -> Result<String> {
     chosen_disk().context("chosen_disk")?;
     wiped_secrets().context("wiped_secrets")?;
     page_views().context("page_views")?;
+    recovery_key().context("recovery_key")?;
     Ok(format!(
         "{} scenarios, {} sample layouts, {} languages",
         simulate::names().count(),
@@ -431,7 +433,8 @@ fn walk() -> Result<()> {
     ensure!(
         request.administrator == "ilexmaint"
             && request.encrypt
-            && request.tpm == Some(ilex_installer_model::plan::TpmMode::Off)
+            && request.recovery_key
+            && request.tpm == Some(ilex_installer_model::plan::TpmMode::Auto)
             && request.keyboard == "de-nodeadkeys"
             && request.language == "de_DE.UTF-8"
             && request.composition == "ms-7c35.gnome"
@@ -1360,6 +1363,14 @@ fn carry_out(flow: &mut Flow, sim: &Simulated, step: Step) -> Result<Step> {
             sim.start_installation(&plan, &erase_disk, &password, passphrase.as_ref()),
         ),
         Step::RunState { generation, .. } => flow.state_finished(generation, sim.state()),
+        Step::RunTakeKey { generation, plan } => {
+            flow.take_key_finished(generation, sim.take_recovery_key(&plan))
+        }
+        Step::RunAcknowledge {
+            generation,
+            plan,
+            answer,
+        } => flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer)),
         Step::RunLogProbe { generation } => flow.log_probe_finished(generation, sim.probe()),
         Step::RunFinish { generation, action } => {
             flow.finish_finished(generation, sim.finish(&action))
@@ -1377,6 +1388,8 @@ fn settle(flow: &mut Flow, sim: &Simulated, mut step: Step) -> Result<Step> {
                 | Step::RunPlan { .. }
                 | Step::RunApply { .. }
                 | Step::RunState { .. }
+                | Step::RunTakeKey { .. }
+                | Step::RunAcknowledge { .. }
                 | Step::RunLogProbe { .. }
                 | Step::RunFinish { .. }
         ) {
@@ -1427,7 +1440,7 @@ fn encryption() -> Result<()> {
             && PageId::Account.previous() == Some(PageId::Encryption)
             && flow.can_go_back()
             && flow.encrypt()
-            && flow.marker_fields() == "encryption=on keyboard=us",
+            && flow.marker_fields() == "encryption=on keyboard=us chip=unavailable",
         "the page after the disk page, with encryption on"
     );
     ensure!(
@@ -1509,7 +1522,7 @@ fn encryption() -> Result<()> {
             && flow.set_encrypt(false)
             && !flow.encrypt()
             && flow.can_continue()
-            && flow.marker_fields() == "encryption=off keyboard=us"
+            && flow.marker_fields() == "encryption=off keyboard=us chip=none"
             && flow.set_encrypt(true)
             && flow.can_continue(),
         "going back and turning encryption off and on"
@@ -1526,7 +1539,8 @@ fn encryption() -> Result<()> {
     let text = serde_json::to_string(&*request)?;
     ensure!(
         request.encrypt
-            && request.tpm == Some(ilex_installer_model::plan::TpmMode::Off)
+            && request.recovery_key
+            && request.tpm == Some(ilex_installer_model::plan::TpmMode::Auto)
             && !text.contains("battery")
             && !text.contains("horse"),
         "the request of an encrypted installation: {text}"
@@ -1535,7 +1549,9 @@ fn encryption() -> Result<()> {
     ensure!(
         plan.encryption.enabled
             && !plan.encryption.tpm.will_enroll
-            && plan.warnings.iter().all(|w| !w.contains("security chip"))
+            && plan.warnings.iter().any(|w| w.contains("security chip")
+                && w.contains("is not used")
+                && w.contains("passphrase at every start"))
             && plan
                 .partitions
                 .iter()
@@ -1701,7 +1717,7 @@ fn encryption() -> Result<()> {
     let done = flow.done_view().context("no done page")?;
     ensure!(
         done.detail.contains(
-            "The disk is encrypted: the computer asks for its passphrase every time it starts"
+            "The computer asks for the passphrase at every start: no recovery key was made"
         ) && flow.passphrase().is_empty()
             && flow.passphrase_confirmation().is_empty()
             && flow.password().is_empty()
@@ -3847,6 +3863,393 @@ fn page_views() -> Result<()> {
         flow.problem_view()
             .is_some_and(|p| p.finishing.is_some() && p.retry == Control::shown(false)),
         "the problem page after Restart was accepted"
+    );
+    Ok(())
+}
+
+/// A flow on the review page of an encrypted installation of `name`, with
+/// markers queued.
+fn encrypted_review(name: &str, chip: Option<bool>) -> Result<(Flow, Simulated)> {
+    let sim = Simulated::load(name)?;
+    let mut flow = Flow::new(sample_layouts()?).with_markers(config(true, false));
+    let Step::RunProbe { generation } = flow.start_probe() else {
+        bail!("a new flow does not ask for the probe");
+    };
+    flow.probe_finished(generation, sim.probe());
+    flow.window_shown("renderer=none");
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Machine)
+            && flow.advance() == Step::Goto(PageId::Disk)
+            && flow.advance() == Step::Goto(PageId::Encryption),
+        "{name}: to the encryption page"
+    );
+    if let Some(on) = chip {
+        ensure!(flow.set_chip(on), "{name}: the chip switch is refused");
+    }
+    ensure!(
+        flow.set_passphrase(Secret::new("correct horse battery"))
+            && flow.set_passphrase_confirmation(Secret::new("correct horse battery"))
+            && flow.advance() == Step::Goto(PageId::Account),
+        "{name}: past the encryption page"
+    );
+    fill_account(&mut flow, name)?;
+    let (generation, request) = run_plan(&mut flow)?;
+    ensure!(
+        flow.plan_finished(generation, sim.plan(&request)) == Step::Goto(PageId::Review),
+        "{name}: the review page"
+    );
+    Ok((flow, sim))
+}
+
+/// Carry steps out until `done` holds (at most eighty steps).
+fn drive(
+    flow: &mut Flow,
+    sim: &Simulated,
+    mut step: Step,
+    done: impl Fn(&Flow) -> bool,
+) -> Result<Step> {
+    for _ in 0..80 {
+        if done(flow) {
+            return Ok(step);
+        }
+        step = carry_out(flow, sim, step)?;
+    }
+    bail!("the flow never got there: it is on {:?}", flow.page())
+}
+
+/// A flow that was started the way a restarted interface is.
+fn restarted_on(name: &str) -> Result<(Flow, Simulated, Step)> {
+    let sim = Simulated::load(name)?;
+    let mut flow = Flow::new(sample_layouts()?).with_markers(config(true, false));
+    flow.window_shown("renderer=none");
+    let Step::RunState { generation, .. } = flow.start() else {
+        bail!("a new flow does not ask where the installation is");
+    };
+    let step = flow.state_finished(generation, sim.state());
+    Ok((flow, sim, step))
+}
+
+/// The security chip's row, the recovery key page and what the done page says
+/// of the unlocking: every state, and that the key is nowhere it must not be.
+fn recovery_key() -> Result<()> {
+    use ilex_installer_model::recovery;
+    use ilex_installer_model::selfcheck::TEST_KEY;
+    let key_groups: Vec<String> = recovery::groups(TEST_KEY)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
+    // The row: nothing to turn on where the computer cannot, a switch where it
+    // can, and the request follows it.
+    let (mut flow, _) = flow_on("generic")?;
+    flow.advance();
+    flow.advance();
+    flow.advance();
+    let row = flow.chip_view();
+    ensure!(
+        !row.sensitive
+            && !row.on
+            && row.line.starts_with("Not available: Secure Boot is off")
+            && !flow.set_chip(true)
+            && flow.marker_fields().ends_with("chip=unavailable"),
+        "the row of a computer that cannot: {row:?}"
+    );
+    flow.set_encrypt(false);
+    ensure!(
+        flow.chip_view().line == page::CHIP_NEEDS_ENCRYPTION
+            && flow.marker_fields().ends_with("chip=none"),
+        "the row without encryption"
+    );
+    let (mut flow, _) = flow_on("generic+chip")?;
+    flow.advance();
+    flow.advance();
+    flow.advance();
+    ensure!(
+        flow.chip_view().sensitive
+            && flow.chip_view().on
+            && flow.chip_view().line == page::CHIP_ON_LINE
+            && flow.marker_fields().ends_with("chip=on")
+            && flow.set_chip(false)
+            && !flow.chip_view().on
+            && flow.marker_fields().ends_with("chip=off")
+            && flow.set_chip(true),
+        "the row of a computer that can: {:?}",
+        flow.chip_view()
+    );
+
+    // The request: a recovery key whenever encrypted, the chip unless it was
+    // turned off, and the review says which.
+    let (flow, _) = encrypted_review("generic+recovery+chip", None)?;
+    let review = flow.review().context("no review")?;
+    ensure!(
+        review
+            .choices
+            .iter()
+            .any(|row| row.title == "Automatic unlock"
+                && row
+                    .value
+                    .starts_with("On: the security chip unlocks the disk")),
+        "the review's rows: {:?}",
+        review.choices
+    );
+    let (flow, _) = encrypted_review("generic+recovery+chip", Some(false))?;
+    let review = flow.review().context("no review")?;
+    ensure!(
+        review
+            .choices
+            .iter()
+            .any(|row| row.title == "Automatic unlock"
+                && row.value.contains("automatic unlock was turned off")),
+        "the review of a chip turned off: {:?}",
+        review.choices
+    );
+    let (flow, _) = encrypted_review("generic+recovery", None)?;
+    let review = flow.review().context("no review")?;
+    ensure!(
+        review
+            .choices
+            .iter()
+            .any(|row| row.title == "Automatic unlock" && row.value.contains("Secure Boot is off")),
+        "the review of a computer that cannot: {:?}",
+        review.choices
+    );
+
+    // The whole way: the key is taken, shown, wrongly confirmed, rightly
+    // confirmed, and the installation ends with the chip enrolled.
+    let (mut flow, sim) = encrypted_review("generic+recovery+chip", None)?;
+    let step = start_install(&mut flow, &sim)?;
+    let step = drive(&mut flow, &sim, step, |f| f.page() == PageId::Recovery)?;
+    let Step::RunTakeKey { .. } = &step else {
+        bail!("the recovery page without the key being asked for: {step:?}");
+    };
+    ensure!(
+        flow.recovery_view().is_some_and(|v| v.groups.is_none()
+            && v.no_key
+                .as_ref()
+                .is_some_and(|m| m.title == page::WAITING_KEY)),
+        "the key is being fetched: {:?}",
+        flow.recovery_view()
+    );
+    let poll = carry_out(&mut flow, &sim, step)?;
+    ensure!(
+        matches!(poll, Step::RunState { .. }),
+        "the poll does not go on after the key: {poll:?}"
+    );
+    let view = flow.recovery_view().context("no recovery page")?;
+    let [first, second] = flow.recovery_asked();
+    ensure!(
+        view.groups.as_ref() == Some(&key_groups)
+            && view.warning == Some(page::WRITE_IT_DOWN)
+            && view.no_key.is_none()
+            && (1..=4).contains(&first)
+            && (5..=8).contains(&second)
+            && view.asked[0].number == first
+            && view.asked[1].number == second
+            && view.confirm == Control::shown(false)
+            && flow.marker_fields() == format!("key=shown asked={first},{second} reattached=false"),
+        "the key page: {view:?}"
+    );
+    // The groups' shapes are checked before anything is sent.
+    flow.set_recovery_group(0, Secret::new("cdef"));
+    flow.set_recovery_group(1, Secret::new("cdefgh1j"));
+    let view = flow.recovery_view().context("no view")?;
+    ensure!(
+        view.asked[0]
+            .check
+            .message()
+            .is_some_and(|m| m.title == "That group is too short")
+            && view.asked[1]
+                .check
+                .message()
+                .is_some_and(|m| m.title == "A recovery key has no such letter")
+            && flow.confirm_recovery() == Step::Stay,
+        "short and wrong letters: {view:?}"
+    );
+    // The right shape, the wrong groups: the helper refuses, the fields empty.
+    let reversed = |n: usize| key_groups[n - 1].chars().rev().collect::<String>();
+    flow.set_recovery_group(0, Secret::new(&reversed(first)));
+    flow.set_recovery_group(1, Secret::new(&reversed(second)));
+    let Step::RunAcknowledge {
+        generation,
+        plan,
+        answer,
+    } = flow.confirm_recovery()
+    else {
+        bail!("the right shape was not sent");
+    };
+    ensure!(
+        flow.recovery_view().is_some_and(
+            |v| v.confirm_label == page::CONFIRMING_LABEL && v.confirm == Control::shown(false)
+        ) && !flow.set_recovery_group(0, Secret::new("x")),
+        "while the helper compares"
+    );
+    let wiped = flow.secrets_wiped();
+    let step = flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer));
+    ensure!(
+        step == Step::Stay
+            && flow.page() == PageId::Recovery
+            && flow.secrets_wiped() == wiped + 1
+            && flow.recovery_group(0).is_empty()
+            && flow.recovery_view().is_some_and(|v| v
+                .problem
+                .as_ref()
+                .is_some_and(|m| m.title == "Those are not the groups of the recovery key")
+                && v.groups.is_some()),
+        "a wrong answer: {:?}",
+        flow.recovery_view()
+    );
+    // Typing again clears the refusal; the right groups end the page.
+    flow.set_recovery_group(0, Secret::new(&key_groups[first - 1]));
+    ensure!(
+        flow.recovery_view().is_some_and(|v| v.problem.is_none()),
+        "typing does not clear the refusal"
+    );
+    flow.set_recovery_group(1, Secret::new(&key_groups[second - 1].to_uppercase()));
+    let Step::RunAcknowledge {
+        generation,
+        plan,
+        answer,
+    } = flow.confirm_recovery()
+    else {
+        bail!("the right groups were not sent");
+    };
+    let step = flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer));
+    ensure!(
+        step == Step::Goto(PageId::Installing)
+            && flow.page() == PageId::Installing
+            && flow.recovery_view().is_none()
+            && flow.recovery_group(0).is_empty(),
+        "the confirmed key: {step:?}"
+    );
+    // The key is handed over once.
+    ensure!(
+        matches!(
+            sim.take_recovery_key(&plan),
+            Err(ClientError::Refused(e)) if e.code == ErrorCode::RecoveryKeyTaken
+        ),
+        "the key was handed over twice"
+    );
+    // The poll goes on to the end; the chip is enrolled.
+    drive(&mut flow, &sim, poll, |f| f.page() == PageId::Done)?;
+    let done = flow.done_view().context("no done page")?;
+    ensure!(
+        done.detail.contains("The disk unlocks automatically")
+            && done
+                .rows
+                .iter()
+                .any(|r| r.title == "Disk unlock"
+                    && r.value == "Automatically, with the security chip"),
+        "the done page of an enrolled chip: {done:?}"
+    );
+    // Nothing the flow printed carries a group of the key.
+    let markers = flow.drain_markers().join("\n");
+    ensure!(
+        key_groups.iter().all(|g| !markers.contains(g)) && !markers.contains(TEST_KEY),
+        "the key is in the markers"
+    );
+
+    // A passphrase-only ending says why. (No key is needed to say it: the
+    // installation ends the same way without one.)
+    let (mut flow, sim) = encrypted_review("generic+recovery", None)?;
+    let step = start_install(&mut flow, &sim)?;
+    let step = drive(&mut flow, &sim, step, |f| f.page() == PageId::Recovery)?;
+    let poll = carry_out(&mut flow, &sim, step)?;
+    let [first, second] = flow.recovery_asked();
+    flow.set_recovery_group(0, Secret::new(&key_groups[first - 1]));
+    flow.set_recovery_group(1, Secret::new(&key_groups[second - 1]));
+    let Step::RunAcknowledge {
+        generation,
+        plan,
+        answer,
+    } = flow.confirm_recovery()
+    else {
+        bail!("the groups were not sent");
+    };
+    flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer));
+    drive(&mut flow, &sim, poll, |f| f.page() == PageId::Done)?;
+    let done = flow.done_view().context("no done page")?;
+    ensure!(
+        done.detail.contains(
+            "The computer asks for the passphrase at every start: Secure Boot is off, or in setup mode, on this computer."
+        ) && done.rows.iter().any(|r| r.title == "Disk unlock"
+            && r.value
+                == "Passphrase at every start: Secure Boot is off, or in setup mode, on this computer"),
+        "the done page of a passphrase-only ending: {done:?}"
+    );
+
+    // A restarted interface. The key waits: it takes it.
+    let (flow, sim, step) = restarted_on("generic+attach-key+chip")?;
+    ensure!(
+        flow.page() == PageId::Recovery && matches!(step, Step::RunTakeKey { .. }),
+        "a restarted interface does not take the waiting key: {step:?}"
+    );
+    let mut flow = flow;
+    let poll = carry_out(&mut flow, &sim, step)?;
+    ensure!(
+        matches!(poll, Step::RunState { .. })
+            && flow
+                .recovery_view()
+                .is_some_and(|v| v.groups.as_ref() == Some(&key_groups))
+            && flow.marker_fields().ends_with("reattached=true"),
+        "the key of a restarted interface"
+    );
+    // The key was taken by an interface that is gone: it is not shown again,
+    // and two groups from the paper confirm it all the same.
+    let (mut flow, sim, step) = restarted_on("generic+attach-key-shown+chip")?;
+    ensure!(
+        flow.page() == PageId::Recovery && matches!(step, Step::RunState { .. }),
+        "a restarted interface does not go to the recovery page: {step:?} on {:?}",
+        flow.page()
+    );
+    let view = flow.recovery_view().context("no recovery page")?;
+    ensure!(
+        view.groups.is_none()
+            && view.warning.is_none()
+            && view
+                .no_key
+                .as_ref()
+                .is_some_and(|m| m.title == page::GONE_TITLE && m.detail == page::GONE_DETAIL)
+            && flow.marker_fields().starts_with("key=gone asked="),
+        "the page of a key that cannot be shown: {view:?}"
+    );
+    ensure!(
+        matches!(
+            sim.take_recovery_key(&"x".repeat(32)),
+            Err(ClientError::Refused(_))
+        ),
+        "the simulated helper hands a key to another plan"
+    );
+    let [first, second] = flow.recovery_asked();
+    flow.set_recovery_group(0, Secret::new(&key_groups[first - 1]));
+    flow.set_recovery_group(1, Secret::new(&key_groups[second - 1]));
+    let Step::RunAcknowledge {
+        generation,
+        plan,
+        answer,
+    } = flow.confirm_recovery()
+    else {
+        bail!("the groups were not sent");
+    };
+    ensure!(
+        flow.confirm_finished(generation, sim.acknowledge_recovery_key(&plan, &answer))
+            == Step::Goto(PageId::Installing),
+        "the groups of a key shown before were not accepted"
+    );
+    drive(&mut flow, &sim, step, |f| f.page() == PageId::Done)?;
+    ensure!(
+        flow.done_view()
+            .is_some_and(|d| d.detail.contains("The disk unlocks automatically")),
+        "the done page after a restart"
+    );
+    // Confirmed already: the restarted interface is on the installing page, and
+    // the key is not asked for again.
+    let (flow, _, step) = restarted_on("generic+attach-key-acked+chip")?;
+    ensure!(
+        flow.page() == PageId::Installing
+            && matches!(step, Step::RunState { .. })
+            && flow.recovery_view().is_none(),
+        "a restarted interface after the confirmation: on {:?}",
+        flow.page()
     );
     Ok(())
 }

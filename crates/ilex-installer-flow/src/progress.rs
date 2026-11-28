@@ -32,7 +32,7 @@ pub fn label(stage: Stage) -> &'static str {
         Stage::Image => "Downloading and installing ilex",
         Stage::Configure => "Configuring the system",
         Stage::Account => "Creating the administrator",
-        Stage::Recovery => "Making the recovery key",
+        Stage::Recovery => "Confirming the recovery key",
         Stage::Tpm => "Setting up automatic unlock",
         Stage::Finalise => "Finishing",
         Stage::Done => "Done",
@@ -92,11 +92,10 @@ impl Progress {
             .copied()
             .filter(|stage| match stage {
                 Stage::Encrypt => encrypted,
-                // The recovery key, and the TPM with it, come in a later
-                // change: the helper reports them (and `will_enroll`) when it
-                // runs them.
-                Stage::Recovery => false,
-                Stage::Tpm => encrypted && plan.encryption.tpm.will_enroll,
+                Stage::Recovery => encrypted && plan.encryption.recovery_key,
+                Stage::Tpm => {
+                    encrypted && plan.encryption.recovery_key && plan.encryption.tpm.will_enroll
+                }
                 _ => true,
             })
             .map(|stage| Row {

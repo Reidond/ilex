@@ -9,6 +9,8 @@ mod bus;
 #[cfg(target_os = "linux")]
 mod disks;
 #[cfg(target_os = "linux")]
+mod enrol;
+#[cfg(target_os = "linux")]
 mod exec;
 #[cfg(target_os = "linux")]
 mod fault;
@@ -24,6 +26,8 @@ mod luks;
 mod policy;
 #[cfg(target_os = "linux")]
 mod progress;
+#[cfg(target_os = "linux")]
+mod recovery;
 #[cfg(target_os = "linux")]
 mod registry;
 #[cfg(target_os = "linux")]

@@ -28,7 +28,8 @@ use relm4::gtk::{self, glib};
 use relm4::prelude::*;
 
 use super::install::{
-    DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, ReviewPage, confirmation,
+    DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, RecoveryPage, ReviewPage,
+    confirmation,
 };
 use crate::serial;
 
@@ -107,6 +108,12 @@ pub enum Msg {
     Confirmation(Secret),
     /// The encryption switch.
     Encrypt(bool),
+    /// The security chip's switch.
+    Chip(bool),
+    /// What is typed in the recovery page's field `0` or `1`.
+    RecoveryGroup(usize, Secret),
+    /// The recovery page's Confirm.
+    ConfirmRecovery,
     Passphrase(Secret),
     PassphraseConfirmation(Secret),
     Continue,
@@ -165,6 +172,16 @@ pub enum Cmd {
     LogProbed {
         generation: u64,
         result: Result<Probe, ClientError>,
+    },
+    /// The helper answered `TakeRecoveryKey`: the key is a `Secret`.
+    KeyTaken {
+        generation: u64,
+        result: Result<Secret, ClientError>,
+    },
+    /// The helper compared the two groups.
+    KeyConfirmed {
+        generation: u64,
+        result: Result<(), ClientError>,
     },
     Finished {
         generation: u64,
@@ -248,6 +265,24 @@ impl App {
                     }
                 });
             }
+            Step::RunTakeKey { generation, plan } => {
+                let backend = Arc::clone(&self.backend);
+                sender.spawn_oneshot_command(move || Cmd::KeyTaken {
+                    generation,
+                    result: backend.take_recovery_key(&plan),
+                });
+            }
+            Step::RunAcknowledge {
+                generation,
+                plan,
+                answer,
+            } => {
+                let backend = Arc::clone(&self.backend);
+                sender.spawn_oneshot_command(move || Cmd::KeyConfirmed {
+                    generation,
+                    result: backend.acknowledge_recovery_key(&plan, &answer),
+                });
+            }
             Step::RunLogProbe { generation } => {
                 let backend = Arc::clone(&self.backend);
                 sender.spawn_oneshot_command(move || Cmd::LogProbed {
@@ -272,7 +307,23 @@ impl App {
         if let Some(observer) = &self.observer {
             let now = Observed {
                 page: self.flow.page(),
-                check: self.flow.check_word(),
+                // On the recovery page the word is the key's: shown (`key`),
+                // being fetched (`taking`) or not to be shown again (`gone`).
+                check: if self.flow.page() == PageId::Recovery {
+                    match self.flow.recovery_view() {
+                        Some(view) if view.groups.is_some() => "key",
+                        Some(view)
+                            if view.no_key.as_ref().is_some_and(|m| {
+                                m.title == ilex_installer_flow::recovery::WAITING_KEY
+                            }) =>
+                        {
+                            "taking"
+                        }
+                        _ => "gone",
+                    }
+                } else {
+                    self.flow.check_word()
+                },
                 probe_pending: self.flow.is_probing(),
                 keyboard_switching: self.flow.keyboard_status() == KeyboardStatus::Switching,
                 attaching: self.flow.is_attaching(),
@@ -401,6 +452,16 @@ impl Component for App {
             Msg::Encrypt(on) => {
                 self.flow.set_encrypt(on);
             }
+            Msg::Chip(on) => {
+                self.flow.set_chip(on);
+            }
+            Msg::RecoveryGroup(slot, secret) => {
+                self.flow.set_recovery_group(slot, secret);
+            }
+            Msg::ConfirmRecovery => {
+                let step = self.flow.confirm_recovery();
+                self.carry_out(step, &sender);
+            }
             Msg::Passphrase(secret) => {
                 self.flow.set_passphrase(secret);
             }
@@ -498,6 +559,14 @@ impl Component for App {
                 let step = self.flow.log_probe_finished(generation, result);
                 self.carry_out(step, &sender);
             }
+            Cmd::KeyTaken { generation, result } => {
+                let step = self.flow.take_key_finished(generation, result);
+                self.carry_out(step, &sender);
+            }
+            Cmd::KeyConfirmed { generation, result } => {
+                let step = self.flow.confirm_finished(generation, result);
+                self.carry_out(step, &sender);
+            }
             Cmd::Finished { generation, result } => {
                 let step = self.flow.finish_finished(generation, result);
                 self.carry_out(step, &sender);
@@ -527,6 +596,7 @@ pub struct Widgets {
     account: Account,
     review: ReviewPage,
     installing: InstallingPage,
+    recovery: RecoveryPage,
     done: DonePage,
     problem: ProblemPage,
     /// The erase dialog, while the flow has one open.
@@ -562,6 +632,8 @@ struct Encryption {
     page: adw::NavigationPage,
     banner: adw::Banner,
     switch: adw::SwitchRow,
+    /// Unlock with the security chip, where the computer can.
+    chip: adw::SwitchRow,
     /// The passphrase and its confirmation, in a group that is shown while
     /// encryption is on.
     group: adw::PreferencesGroup,
@@ -901,11 +973,11 @@ impl Widgets {
         passphrase_confirmation.set_enable_undo(false);
         let encrypt_group = group("", "");
         encrypt_group.add(&switch);
-        // The security chip comes with the recovery key, in a later change:
-        // the row says so rather than being missing.
+        // The security chip: on where the computer can, with one line that says
+        // why not where it cannot (`Flow::chip_view`).
         let chip = adw::SwitchRow::builder()
-            .title("Unlock automatically with this computer's security chip")
-            .subtitle("Not available yet: for now the disk asks for its passphrase every time the computer starts.")
+            .title(ilex_installer_flow::recovery::CHIP_TITLE)
+            .subtitle_lines(0)
             .name("chip")
             .active(false)
             .sensitive(false)
@@ -952,6 +1024,7 @@ impl Widgets {
         let disk = DiskPage::build(sender);
         let review = ReviewPage::build(sender);
         let installing = InstallingPage::build();
+        let recovery = RecoveryPage::build(sender, flow.secrets_wiped());
         let done = DonePage::build(sender);
         let problem_page = ProblemPage::build(sender);
         let log = LogDialog::build(sender);
@@ -964,6 +1037,7 @@ impl Widgets {
             &account_page,
             &review.page,
             &installing.page,
+            &recovery.page,
             &done.page,
             &problem_page.page,
         ] {
@@ -1008,6 +1082,10 @@ impl Widgets {
         switch.connect_active_notify({
             let input = input.clone();
             move |row| input.emit(Msg::Encrypt(row.is_active()))
+        });
+        chip.connect_active_notify({
+            let input = input.clone();
+            move |row| input.emit(Msg::Chip(row.is_active()))
         });
         passphrase.connect_changed({
             let input = input.clone();
@@ -1153,6 +1231,7 @@ impl Widgets {
                 page: encryption_page,
                 banner: encryption_banner,
                 switch,
+                chip,
                 group: passphrase_group,
                 passphrase,
                 confirmation: passphrase_confirmation,
@@ -1165,6 +1244,7 @@ impl Widgets {
             disk,
             review,
             installing,
+            recovery,
             done,
             problem: problem_page,
             confirm: None,
@@ -1193,6 +1273,7 @@ impl Widgets {
         self.sync_account(flow);
         self.review.sync(flow);
         self.installing.sync(flow);
+        self.recovery.sync(flow);
         self.done.sync(flow);
         self.problem.sync(flow);
         // No way back while the helper is asked, or once the erase was
@@ -1203,7 +1284,12 @@ impl Widgets {
         self.encryption.page.set_can_pop(free);
         self.account.page.set_can_pop(free);
         self.review.page.set_can_pop(free);
-        for page in [&self.installing.page, &self.done.page, &self.problem.page] {
+        for page in [
+            &self.installing.page,
+            &self.recovery.page,
+            &self.done.page,
+            &self.problem.page,
+        ] {
             page.set_can_pop(false);
         }
         // The dialogs are open exactly while the flow says so.
@@ -1355,6 +1441,21 @@ impl Widgets {
             }
             e.switch.set_sensitive(editable);
         }
+        // The security chip's row: a switch where the computer can, else a line
+        // that says why it cannot.
+        let chip = flow.chip_view();
+        if e.chip.is_sensitive() != chip.sensitive {
+            if !chip.sensitive {
+                release_focus(&e.page);
+            }
+            e.chip.set_sensitive(chip.sensitive);
+        }
+        if e.chip.is_active() != chip.on {
+            e.chip.set_active(chip.on);
+        }
+        if e.chip.subtitle().is_none_or(|s| s.as_str() != chip.line) {
+            e.chip.set_subtitle(&chip.line);
+        }
         let typing = editable && flow.encrypt();
         e.group.set_visible(flow.encrypt());
         e.layout.set_visible(flow.encrypt());
@@ -1479,7 +1580,7 @@ fn release_focus(page: &adw::NavigationPage) {
 /// match: the error style, and for assistive technology the rows' invalid
 /// state with the message as their error message. With no refusal every row
 /// goes back to valid, state and relation included.
-fn show_message(label: &gtk::Label, refusal: Option<&Message>, rows: &[&gtk::Widget]) {
+pub(super) fn show_message(label: &gtk::Label, refusal: Option<&Message>, rows: &[&gtk::Widget]) {
     match refusal {
         Some(message) => {
             label.set_css_classes(&["caption", "error"]);
@@ -1555,7 +1656,7 @@ fn show_stack(nav: &adw::NavigationView, want: &[PageId]) {
 /// into a `Secret`: no `String` or `GString` of it is made, so the only
 /// copies are the field's (secure) buffer and a value that is wiped when it is
 /// dropped.
-fn secret_of(row: &impl IsA<gtk::Editable>) -> Secret {
+pub(super) fn secret_of(row: &impl IsA<gtk::Editable>) -> Secret {
     let editable: &gtk::Editable = row.upcast_ref();
     // SAFETY: `gtk_editable_get_text` returns a NUL-terminated string that
     // the widget owns and keeps valid until its text changes; it is only read

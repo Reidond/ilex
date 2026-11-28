@@ -118,6 +118,9 @@ pub struct Helper {
     /// The secrets `SetSecret` was given, by plan. Held in locked memory and
     /// wiped when taken or when their plan is forgotten.
     pub(crate) secrets: Mutex<BTreeMap<(String, SecretKind), Secret>>,
+    /// The recovery key of the installation that runs: made by the
+    /// installation, taken and confirmed through the bus.
+    pub(crate) recovery: crate::recovery::Holder,
     /// Where an installation is.
     pub tracker: Tracker,
     /// One probe, plan or apply at a time: they share scratch space and the
@@ -169,6 +172,7 @@ impl Helper {
             table,
             plans: Mutex::default(),
             secrets: Mutex::default(),
+            recovery: crate::recovery::Holder::default(),
             tracker: Tracker::new(&config_run_dir),
             work: Mutex::default(),
         })
@@ -294,14 +298,25 @@ impl Helper {
                 checked.disk.other_systems.len()
             ));
         }
-        // The installation does not enrol the TPM yet (the recovery key and
-        // the enrolment are a later change): an encrypted disk asks for its
-        // passphrase at every start, whatever the computer could do.
-        if checked.request.encrypt && tpm == TpmMode::Auto {
-            warnings.push(
-                "unlocking the disk with this computer's security chip is not available in this installer yet; the disk asks for its passphrase at every start"
-                    .to_owned(),
-            );
+        // The security chip is enrolled only with a recovery key that a person
+        // has confirmed, on a computer the probe says is eligible. Say now when
+        // it will not be, and why: the disk then asks for its passphrase at
+        // every start.
+        let recovery_key = checked.request.encrypt && checked.request.recovery_key;
+        let eligible = probe.enrollment["verdict"] == "eligible";
+        let will_enroll = recovery_key && tpm == TpmMode::Auto && eligible;
+        let tpm_reason = if tpm == TpmMode::Off {
+            "not-requested".to_owned()
+        } else if !recovery_key {
+            "no-recovery-key".to_owned()
+        } else {
+            enrollment_reason
+        };
+        if checked.request.encrypt && tpm == TpmMode::Auto && !will_enroll {
+            warnings.push(format!(
+                "unlocking the disk with this computer's security chip is not used ({}); the disk asks for its passphrase at every start",
+                ilex_installer_model::recovery::tpm_reason(&tpm_reason)
+            ));
         }
         let plan = Plan {
             schema: PLAN_SCHEMA,
@@ -345,10 +360,11 @@ impl Helper {
             },
             encryption: PlannedEncryption {
                 enabled: checked.request.encrypt,
+                recovery_key,
                 tpm: PlannedTpm {
                     requested: tpm,
-                    will_enroll: false,
-                    reason: enrollment_reason,
+                    will_enroll,
+                    reason: tpm_reason,
                 },
             },
             warnings,

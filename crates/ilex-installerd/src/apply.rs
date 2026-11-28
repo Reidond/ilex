@@ -325,7 +325,11 @@ impl Helper {
         };
         locked(&self.secrets).retain(|(id, _), _| *id != plan.id);
         self.tracker
-            .begin(&plan.id, &install::stages(&plan), self.summary_of(&plan))
+            .begin(
+                &plan.id,
+                &ilex_installer_model::state::Stage::of_plan(&plan),
+                self.summary_of(&plan),
+            )
             .map_err(internal)?;
         // The plan is spent: it is the installation's now, and whatever
         // happens to it a new attempt is a new plan.

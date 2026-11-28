@@ -5,8 +5,8 @@
 //! `Flow::problem_view`, `Flow::log_state`); nothing here decides anything.
 
 use super::app::{
-    App, Msg, banner, continue_button, form, group, message_label, page, property_row, sentence,
-    sync_banner,
+    App, Msg, banner, continue_button, form, group, message_label, page, property_row, secret_of,
+    sentence, show_message, sync_banner,
 };
 use ilex_installer_flow::disks as flow_disks;
 use ilex_installer_flow::flow::{
@@ -722,6 +722,283 @@ impl InstallingPage {
         }
         set_log(&self.log, &view.log);
     }
+}
+
+// --- recovery key ----------------------------------------------------------------------
+
+/// The recovery key page: the key in groups (while this interface holds it),
+/// then the two groups asked for. What it shows is `Flow::recovery_view`.
+pub struct RecoveryPage {
+    pub page: adw::NavigationPage,
+    heading: gtk::Label,
+    intro: gtk::Label,
+    /// The key, its warning and where to keep it: shown while this interface
+    /// holds the key.
+    key_box: gtk::Box,
+    warning: gtk::Label,
+    cells: Vec<gtk::Label>,
+    keep: gtk::Label,
+    /// Why there is no key to show (being fetched, shown before a restart).
+    no_key: gtk::Label,
+    ask: gtk::Label,
+    rows: [adw::EntryRow; 2],
+    messages: [gtk::Label; 2],
+    problem: gtk::Label,
+    progress: gtk::ProgressBar,
+    line: gtk::Label,
+    pub button: gtk::Button,
+    /// The flow's wipe count the fields were last cleared at.
+    wiped: u64,
+}
+
+impl RecoveryPage {
+    pub fn build(sender: &ComponentSender<App>, wiped: u64) -> Self {
+        let heading = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["title-1"])
+            .build();
+        let intro = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["body"])
+            .build();
+        // The key, eight groups in two rows of four, numbered as the fields
+        // below name them. Not selectable: nothing copies it to a clipboard.
+        let warning = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["heading", "warning"])
+            .build();
+        let grid = gtk::Grid::builder()
+            .row_spacing(12)
+            .column_spacing(18)
+            .halign(gtk::Align::Center)
+            .build();
+        let mut cells = Vec::new();
+        for index in 0..ilex_installer_model::recovery::GROUPS {
+            let cell = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            let number = gtk::Label::builder()
+                .label(format!("{}", index + 1))
+                .css_classes(["caption", "dim-label"])
+                .build();
+            let group = gtk::Label::builder()
+                .css_classes(["title-1", "monospace"])
+                .selectable(false)
+                .build();
+            group.set_widget_name(&format!("recovery-key-group-{}", index + 1));
+            cell.append(&number);
+            cell.append(&group);
+            grid.attach(&cell, (index % 4) as i32, (index / 4) as i32, 1, 1);
+            cells.push(group);
+        }
+        let keep = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "dim-label"])
+            .build();
+        let key_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        key_box.add_css_class("card");
+        key_box.set_margin_top(6);
+        for widget in [
+            warning.upcast_ref::<gtk::Widget>(),
+            grid.upcast_ref(),
+            keep.upcast_ref(),
+        ] {
+            widget.set_margin_start(18);
+            widget.set_margin_end(18);
+            key_box.append(widget);
+        }
+        warning.set_margin_top(18);
+        keep.set_margin_bottom(18);
+        let no_key = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["body", "warning"])
+            .visible(false)
+            .build();
+        let ask = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["body"])
+            .build();
+        let make_row = |slot: usize| {
+            let row = adw::EntryRow::builder()
+                .name(format!("recovery-group-{}", slot + 1))
+                .build();
+            row.set_enable_undo(false);
+            row.set_input_purpose(gtk::InputPurpose::FreeForm);
+            row
+        };
+        let rows = [make_row(0), make_row(1)];
+        let fields = group("", "");
+        fields.add(&rows[0]);
+        fields.add(&rows[1]);
+        let messages = [message_label(), message_label()];
+        let problem = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "error"])
+            .visible(false)
+            .build();
+        let progress = gtk::ProgressBar::new();
+        let line = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["caption", "dim-label"])
+            .build();
+        let button = continue_button("Confirm");
+        let content = form_content(
+            &heading,
+            &intro,
+            &[
+                key_box.upcast_ref::<gtk::Widget>(),
+                no_key.upcast_ref(),
+                ask.upcast_ref(),
+                fields.upcast_ref(),
+                messages[0].upcast_ref(),
+                messages[1].upcast_ref(),
+                problem.upcast_ref(),
+                progress.upcast_ref(),
+                line.upcast_ref(),
+            ],
+        );
+        let page = page("Recovery key", "recovery", None, &content, Some(&button));
+        let input = sender.input_sender().clone();
+        for (slot, row) in rows.iter().enumerate() {
+            row.connect_changed({
+                let input = input.clone();
+                move |row| input.emit(Msg::RecoveryGroup(slot, secret_of(row)))
+            });
+            row.connect_entry_activated({
+                let input = input.clone();
+                move |_| input.emit(Msg::ConfirmRecovery)
+            });
+        }
+        button.connect_clicked({
+            let input = input.clone();
+            move |_| input.emit(Msg::ConfirmRecovery)
+        });
+        // The first field has the focus when the page is shown.
+        page.connect_shown({
+            let first = rows[0].clone();
+            move |_| {
+                first.grab_focus();
+            }
+        });
+        Self {
+            page,
+            heading,
+            intro,
+            key_box,
+            warning,
+            cells,
+            keep,
+            no_key,
+            ask,
+            rows,
+            messages,
+            problem,
+            progress,
+            line,
+            button,
+            wiped,
+        }
+    }
+
+    pub fn sync(&mut self, flow: &Flow) {
+        // The flow wiped the groups it holds (confirmed, refused, or the
+        // installation ended): the fields are cleared too.
+        if self.wiped != flow.secrets_wiped() {
+            self.wiped = flow.secrets_wiped();
+            for row in &self.rows {
+                row.set_text("");
+            }
+        }
+        let Some(view) = flow.recovery_view() else {
+            // Not the page: nothing of the key stays in a widget.
+            for cell in &self.cells {
+                cell.set_label("");
+            }
+            return;
+        };
+        self.heading.set_label(view.heading);
+        self.intro.set_label(view.introduction);
+        match &view.groups {
+            Some(groups) => {
+                for (cell, group) in self.cells.iter().zip(groups) {
+                    cell.set_label(group);
+                }
+                self.warning.set_label(view.warning.unwrap_or_default());
+                self.keep.set_label(view.keep.unwrap_or_default());
+                self.key_box.set_visible(true);
+            }
+            None => {
+                for cell in &self.cells {
+                    cell.set_label("");
+                }
+                self.key_box.set_visible(false);
+            }
+        }
+        match &view.no_key {
+            Some(message) => {
+                self.no_key.set_label(&sentence(message));
+                self.no_key.set_visible(true);
+            }
+            None => self.no_key.set_visible(false),
+        }
+        self.ask.set_label(view.ask);
+        // The fields are asked in the order of the numbers.
+        for (slot, (row, asked)) in self.rows.iter().zip(&view.asked).enumerate() {
+            row.set_title(&asked.label);
+            row.set_sensitive(!view.confirming);
+            show_message(
+                &self.messages[slot],
+                asked.check.message(),
+                &[row.upcast_ref::<gtk::Widget>()],
+            );
+        }
+        match &view.problem {
+            Some(problem) => {
+                self.problem.set_label(&sentence(problem));
+                self.problem.set_visible(true);
+            }
+            None => self.problem.set_visible(false),
+        }
+        self.progress.set_fraction(view.overall);
+        self.line.set_label(&view.progress_line);
+        self.button.set_label(view.confirm_label);
+        self.button.set_sensitive(view.confirm.enabled);
+    }
+}
+
+/// A page body of the same shape as `form`, with the heading and the paragraph
+/// already built (the recovery page changes them).
+fn form_content(
+    heading: &gtk::Label,
+    intro: &gtk::Label,
+    controls: &[&gtk::Widget],
+) -> gtk::ScrolledWindow {
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    content.append(heading);
+    content.append(intro);
+    for control in controls {
+        content.append(*control);
+    }
+    let clamp = adw::Clamp::builder()
+        .maximum_size(620)
+        .tightening_threshold(460)
+        .margin_top(24)
+        .margin_bottom(24)
+        .margin_start(18)
+        .margin_end(18)
+        .child(&content)
+        .build();
+    gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&clamp)
+        .build()
 }
 
 // --- done ---------------------------------------------------------------------------

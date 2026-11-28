@@ -10,6 +10,7 @@ pub mod edition;
 pub mod finish;
 pub mod plan;
 pub mod probe;
+pub mod recovery;
 pub mod selfcheck;
 pub mod state;
 

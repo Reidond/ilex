@@ -18,6 +18,7 @@
 
 use crate::{
     disks::{self, Hold},
+    enrol,
     exec::{self, Exit, Flow, Job},
     fault,
     helper::Helper,
@@ -29,6 +30,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use ilex_installer_model::{
     plan::{Plan, PlannedPartition},
+    recovery::{self, KeyStatus, TpmOutcome, TpmStatus},
     state::Stage,
 };
 use std::{
@@ -55,14 +57,9 @@ const SETFILES: Duration = Duration::from_secs(300);
 /// so.
 const WRITTEN_PER_DOWNLOADED: f64 = 2.6;
 
-/// The stages a plan's installation goes through. (The recovery key and the
-/// TPM add theirs in a later change.)
+/// The stages a plan's installation goes through.
 pub fn stages(plan: &Plan) -> Vec<Stage> {
-    if plan.request.encrypt {
-        Stage::ENCRYPTED.to_vec()
-    } else {
-        Stage::UNENCRYPTED.to_vec()
-    }
+    Stage::of_plan(plan)
 }
 
 pub struct Install {
@@ -99,6 +96,13 @@ pub struct Install {
 struct Volume {
     uuid: String,
     open: bool,
+}
+
+/// The session on the new volume that made the recovery key, and the key's
+/// slot and token.
+struct Enrolment<'a> {
+    session: ilex_enroll::Reconciled<'a>,
+    entry: ilex_enroll::Enrollment,
 }
 
 struct Output {
@@ -191,6 +195,9 @@ pub fn run(
             install.helper.tracker.fail(install.stage, &reason);
         }
     }
+    // Whatever the installation held of a recovery key is wiped now, whichever
+    // way it ended.
+    install.helper.recovery.clear();
     // The secret was moved into `install`: dropped (and wiped) here.
 }
 
@@ -215,19 +222,29 @@ impl Install {
             self.key = Some(luks::KeyFile::new(passphrase)?);
         }
         self.partition(hold)?;
+        let mut prepared = None;
         if self.plan.request.encrypt {
             self.encrypt()?;
+            // The recovery key is made while the volume is open and the
+            // passphrase still here: `ilex-enroll` unlocks the header with it.
+            if self.plan.encryption.recovery_key {
+                prepared = self.prepare_enrolment();
+            }
         }
         // Whatever the stages above held of the passphrase is wiped now: the
-        // key file overwritten, the secret's pages zeroed.
+        // key file overwritten, the secret's pages zeroed. (`prepared` keeps
+        // its own copy, for the recovery key and the security chip, and wipes
+        // it when it goes out of scope below.)
         self.key = None;
         self.passphrase = None;
+        let mut enrolment = prepared.as_ref().and_then(|p| self.make_recovery_key(p));
         self.mount()?;
         self.image()?;
         let deployment =
             target::find_deployment(&self.target).context("looking for what bootc deployed")?;
         self.configure(&deployment)?;
         self.account(&deployment)?;
+        self.recovery_and_chip(&deployment, prepared.as_ref(), enrolment.as_mut())?;
         self.finalise(&deployment)
     }
 
@@ -816,7 +833,7 @@ impl Install {
         make_dir_mode(&setup, 0o755)?;
         write_file(
             &setup.join("setup.json"),
-            target::setup_record(&self.plan).as_bytes(),
+            target::setup_record(&self.plan, None).as_bytes(),
             0o644,
         )?;
         // The encrypted root's line of /etc/crypttab: the shape Anaconda
@@ -1054,13 +1071,235 @@ impl Install {
         Ok(())
     }
 
+    // --- recovery key and security chip ---------------------------------------
+
+    /// Open `ilex-enroll`'s view of the new volume. A failure is not the
+    /// installation's: the disk is encrypted and opens with its passphrase, so
+    /// the installation goes on without a recovery key and says why.
+    fn prepare_enrolment(&mut self) -> Option<enrol::Prepared> {
+        let mut log = self.logs.stage(Stage::Recovery).ok()?;
+        let result = (|| -> Result<enrol::Prepared> {
+            let volume = self
+                .volume
+                .as_ref()
+                .context("the encrypted volume is not known")?;
+            let passphrase = self
+                .passphrase
+                .as_ref()
+                .context("the passphrase is not available for the recovery key")?;
+            let scratch = self
+                .helper
+                .config
+                .run_dir
+                .join("enroll")
+                .join(&self.plan.id);
+            let _ = fs::remove_dir_all(&scratch);
+            let prepared = enrol::Prepared::new(
+                &volume.uuid,
+                passphrase,
+                &scratch,
+                self.plan.encryption.tpm.will_enroll,
+            )?;
+            prepared.preflight()?;
+            Ok(prepared)
+        })();
+        match result {
+            Ok(prepared) => {
+                log.line("the volume is ready for a recovery key");
+                Some(prepared)
+            }
+            Err(error) => {
+                log.line(&format!("no recovery key can be made: {error:#}"));
+                None
+            }
+        }
+    }
+
+    /// Add the recovery key to the volume and offer it to the interface. Not
+    /// in the log, the plan or the state: only that it was made.
+    fn make_recovery_key<'a>(&mut self, prepared: &'a enrol::Prepared) -> Option<Enrolment<'a>> {
+        let mut log = self.logs.stage(Stage::Recovery).ok()?;
+        let result = (|| -> Result<Enrolment<'a>> {
+            let mut session = prepared.session()?;
+            let (entry, key) = session.recovery(false)?;
+            let key = secret::Secret::from_bytes(key.bytes())?;
+            ensure!(
+                std::str::from_utf8(key.expose()).is_ok_and(recovery::is_key),
+                "the recovery key is not in the form this installer shows"
+            );
+            self.helper.recovery.offer(&self.plan.id, key);
+            self.helper
+                .tracker
+                .set_security(|security| security.recovery_key = Some(KeyStatus::Waiting));
+            Ok(Enrolment { session, entry })
+        })();
+        match result {
+            Ok(enrolment) => {
+                log.line(&format!(
+                    "added a recovery key (token {}, keyslot {}); it is shown to the person while the image downloads",
+                    enrolment.entry.token, enrolment.entry.slot
+                ));
+                Some(enrolment)
+            }
+            Err(error) => {
+                log.line(&format!("no recovery key was made: {error:#}"));
+                None
+            }
+        }
+    }
+
+    /// After the account: wait for the person to confirm two groups of the
+    /// key, then enrol the security chip, and write what happened where the
+    /// installed system reads it (`setup.json` and `enrollment.json`). Neither
+    /// step fails the installation: the system is installed and opens with its
+    /// passphrase, and the outcome says so.
+    fn recovery_and_chip(
+        &mut self,
+        deployment: &target::Deployment,
+        prepared: Option<&enrol::Prepared>,
+        mut enrolment: Option<&mut Enrolment<'_>>,
+    ) -> Result<()> {
+        if !self.plan.encryption.enabled {
+            return Ok(());
+        }
+        let planned = self.plan.encryption.tpm.clone();
+        let mut outcome = TpmOutcome {
+            status: TpmStatus::PassphraseOnly,
+            reason: planned.reason.clone(),
+        };
+        if self.plan.encryption.recovery_key {
+            let mut log = self.begin(
+                Stage::Recovery,
+                "Waiting for you to confirm the recovery key",
+            )?;
+            let confirmed = match enrolment.as_deref_mut() {
+                Some(e) => {
+                    log.line("waiting for two groups of the recovery key to be typed back");
+                    let heard = self.helper.recovery.wait_acknowledged(&mut || {});
+                    if heard {
+                        match e.session.acknowledge(e.entry) {
+                            Ok(()) => {
+                                log.line("the recovery key is confirmed and recorded");
+                                true
+                            }
+                            Err(error) => {
+                                log.line(&format!("the confirmation was not recorded: {error:#}"));
+                                outcome.reason = "enrollment-failed".into();
+                                false
+                            }
+                        }
+                    } else {
+                        log.line("the confirmation was abandoned");
+                        outcome.reason = "enrollment-failed".into();
+                        false
+                    }
+                }
+                None => {
+                    log.line("there is no recovery key to confirm");
+                    outcome.reason = "recovery-key-failed".into();
+                    false
+                }
+            };
+            self.end(Stage::Recovery, &mut log);
+            // The security chip, when the plan said it would be enrolled.
+            let capability = ilex_enroll::eligibility(&deployment.path);
+            if planned.will_enroll {
+                let mut log = self.begin(Stage::Tpm, "Setting up automatic unlock")?;
+                if let (true, Some(e)) = (confirmed, enrolment.as_deref_mut()) {
+                    if capability.2 == "pcr7-sha256" {
+                        match e.session.enroll_tpm(false) {
+                            Ok(entry) => {
+                                log.line(&format!(
+                                    "enrolled the security chip (token {}, keyslot {}) to PCR 7 of the SHA-256 bank, no PIN",
+                                    entry.token, entry.slot
+                                ));
+                                outcome = TpmOutcome {
+                                    status: TpmStatus::EnrolledUnverified,
+                                    reason: capability.2.to_owned(),
+                                };
+                            }
+                            Err(error) => {
+                                log.line(&format!("the security chip was not enrolled: {error:#}"));
+                                outcome.reason = "enrollment-failed".into();
+                            }
+                        }
+                    } else {
+                        log.line(&format!(
+                            "the security chip is not enrolled: {}",
+                            capability.2
+                        ));
+                        outcome.reason = capability.2.to_owned();
+                    }
+                } else if !confirmed {
+                    log.line("the security chip is not enrolled without a confirmed recovery key");
+                }
+                self.end(Stage::Tpm, &mut log);
+            }
+            if let (Some(e), Some(p)) = (enrolment, prepared) {
+                self.record_enrolment(deployment, p, e, &outcome, &capability)?;
+            }
+        }
+        self.helper
+            .tracker
+            .set_security(|security| security.tpm = Some(outcome.clone()));
+        // `setup.json`, as phase 0 keeps it: what was asked for, what this
+        // computer could do and what the installation did.
+        let verdict = ilex_enroll::probe().verdict;
+        let setup = deployment.path.join("etc/ilex/setup.json");
+        write_file(
+            &setup,
+            target::setup_record(&self.plan, Some((verdict, &outcome))).as_bytes(),
+            0o644,
+        )?;
+        Ok(())
+    }
+
+    /// The record the installed system reads (`ilex-security-verify`,
+    /// `ilexctl security repair`): `enrollment.json` in the new `/var`, the
+    /// volume's `crypttab` line with the security chip's option.
+    fn record_enrolment(
+        &self,
+        deployment: &target::Deployment,
+        prepared: &enrol::Prepared,
+        enrolment: &mut Enrolment<'_>,
+        outcome: &TpmOutcome,
+        capability: &(
+            ilex_enroll::Probe,
+            std::collections::BTreeMap<String, String>,
+            &'static str,
+        ),
+    ) -> Result<()> {
+        let mut log = self.logs.stage(Stage::Recovery)?;
+        let value = &mut enrolment.session.state.value;
+        value["probe"] = serde_json::to_value(&capability.0)?;
+        value["target_tools"] = serde_json::to_value(&capability.1)?;
+        value["reason"] = serde_json::json!(outcome.reason);
+        if outcome.status != TpmStatus::EnrolledUnverified {
+            value["state"] = serde_json::json!("unavailable");
+        }
+        let lib = deployment.var.join("lib/ilex");
+        make_dir_mode(&deployment.var.join("lib"), 0o755)?;
+        make_dir_mode(&lib, 0o755)?;
+        let record = lib.join("security/enrollment.json");
+        ilex_enroll::write_state(&record, &enrolment.session.state.value)
+            .context("writing the enrolment record into the new /var")?;
+        log.line("the enrolment record is in the new system's /var/lib/ilex/security");
+        // The line `ilex-enroll`'s own completion writes for the root volume.
+        match ilex_enroll::local::configure_crypttab(&deployment.path, prepared.uuid()) {
+            Ok(()) => log.line("/etc/crypttab names the security chip for the root volume"),
+            Err(error) => log.line(&format!("/etc/crypttab was not changed: {error:#}")),
+        }
+        let _ = fs::remove_dir_all(&prepared.scratch);
+        Ok(())
+    }
+
     // --- finalise --------------------------------------------------------
 
     fn finalise(&mut self, deployment: &target::Deployment) -> Result<()> {
         let mut log = self.begin(Stage::Finalise, "Finishing and unmounting")?;
         self.copy_logs(&mut log, deployment);
         self.stamp(&mut log, deployment)?;
-        self.relabel(&mut log, deployment, &["var/log"])?;
+        self.relabel(&mut log, deployment, &["var/log", "var/lib/ilex"])?;
         self.checked(&mut log, "sync", &[], TOOL)?;
         // Free space the new file systems can discard; not every device
         // supports it, and none of it matters for the install.

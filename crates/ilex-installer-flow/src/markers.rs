@@ -170,6 +170,22 @@ pub fn encryption(on: bool) -> String {
     )
 }
 
+/// The person turned the security chip's switch on or off.
+pub fn chip(on: bool) -> String {
+    format!(
+        "ILEX-INSTALLER event=chip chip={}",
+        if on { "on" } else { "off" }
+    )
+}
+
+/// The recovery key's page: `taking` (asking the helper for the key), `shown`
+/// (this interface holds it and draws it), `gone` (it was shown to an
+/// interface that no longer exists), `confirmed`, `refused` (the helper said
+/// the groups are not the key's) or `failed`. Never a letter of the key.
+pub fn recovery(state: &str) -> String {
+    format!("ILEX-INSTALLER event=recovery state={state}")
+}
+
 /// The disk the person had chosen is not offered any more.
 pub fn disk_gone(id: &str) -> String {
     format!("ILEX-INSTALLER event=disk-gone disk={}", one_word(id))

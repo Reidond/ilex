@@ -2,6 +2,7 @@
 //! The helper keeps the same document at `/run/ilex-installer/state.json`.
 
 use crate::plan::PlanError;
+pub use crate::recovery::{KeyStatus, TpmOutcome, TpmStatus};
 use serde::{Deserialize, Serialize};
 
 pub const STATE_SCHEMA: u32 = 1;
@@ -58,7 +59,8 @@ impl Stage {
     /// The stages of an encrypted whole-disk installation, in order: the
     /// partition stage also makes the LUKS2 volume (`systemd-repart` formats it
     /// as it makes the partition), and the encrypt stage then opens it and
-    /// checks what was made. (The recovery key and the TPM add theirs later.)
+    /// checks what was made. (An installation with a recovery key adds its two:
+    /// [`Stage::of_plan`].)
     pub const ENCRYPTED: [Stage; 7] = [
         Stage::Partition,
         Stage::Encrypt,
@@ -68,6 +70,32 @@ impl Stage {
         Stage::Account,
         Stage::Finalise,
     ];
+
+    /// The stages the installation of `plan` goes through, in order. An
+    /// encrypted one with a recovery key adds `recovery` (the key is made as the
+    /// volume exists and waited for after the account) and, when the security
+    /// chip will be enrolled, `tpm`.
+    pub fn of_plan(plan: &crate::plan::Plan) -> Vec<Stage> {
+        if !plan.encryption.enabled {
+            return Self::UNENCRYPTED.to_vec();
+        }
+        let mut stages = vec![
+            Stage::Partition,
+            Stage::Encrypt,
+            Stage::Mount,
+            Stage::Image,
+            Stage::Configure,
+            Stage::Account,
+        ];
+        if plan.encryption.recovery_key {
+            stages.push(Stage::Recovery);
+            if plan.encryption.tpm.will_enroll {
+                stages.push(Stage::Tpm);
+            }
+        }
+        stages.push(Stage::Finalise);
+        stages
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +213,23 @@ pub struct State {
     /// finds a record that is not that plan's, knows nothing was written.
     #[serde(default)]
     pub refusal: Option<Refusal>,
+    /// The recovery key and the security chip of an encrypted installation.
+    #[serde(default)]
+    pub security: Security,
+}
+
+/// Where the recovery key and the security chip stand: what a restarted
+/// interface needs to show the recovery page again (or not) and what the done
+/// page says. Never a secret.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Security {
+    /// The recovery key of this installation, when it has one: waiting to be
+    /// taken, taken (shown) and waiting for two groups, or acknowledged.
+    #[serde(default)]
+    pub recovery_key: Option<KeyStatus>,
+    /// How the security chip step ended, once it has: enrolled or not, and why.
+    #[serde(default)]
+    pub tpm: Option<TpmOutcome>,
 }
 
 impl State {
@@ -206,6 +251,7 @@ impl State {
             summary: None,
             starting: None,
             refusal: None,
+            security: Security::default(),
         }
     }
 

@@ -86,6 +86,26 @@ impl Installer {
         serde_json::to_string(&state).map_err(|e| failed(e.into()))
     }
 
+    /// The installation's recovery key, once: a sealed memfd holding it. Refused
+    /// when the installation has none or the key was handed over before.
+    async fn take_recovery_key(&self, plan: String) -> Result<OwnedFd, Error> {
+        let helper = Arc::clone(&self.helper);
+        let fd = blocking::unblock(move || helper.take_recovery_key(&plan)).await?;
+        Ok(fd.into())
+    }
+
+    /// Two groups of the recovery key typed back, as a sealed memfd of
+    /// `<number> <group>` lines. The helper compares them with the key; the
+    /// installation does not rely on the key (and does not enrol the security
+    /// chip) before they match.
+    async fn acknowledge_recovery_key(&self, plan: String, groups: OwnedFd) -> Result<(), Error> {
+        let helper = Arc::clone(&self.helper);
+        let fd: std::os::fd::OwnedFd = groups.into();
+        blocking::unblock(move || helper.acknowledge_recovery_key(&plan, fd))
+            .await
+            .map_err(Error::from)
+    }
+
     /// Where an installation is; a restarted interface re-attaches with this.
     async fn state(&self) -> Result<String, Error> {
         serde_json::to_string(&self.helper.state()).map_err(|e| failed(e.into()))

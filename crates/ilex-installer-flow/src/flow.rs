@@ -21,6 +21,10 @@
 //!                                    flow.confirm_install() or flow.cancel_install()
 //!   Step::RunApply{..}            -> Backend::start_installation on a worker, then
 //!                                    flow.apply_finished(generation, result)
+//!   Step::RunTakeKey{..}          -> Backend::take_recovery_key on a worker, then
+//!                                    flow.take_key_finished(generation, result)
+//!   Step::RunAcknowledge{..}      -> Backend::acknowledge_recovery_key on a worker, then
+//!                                    flow.confirm_finished(generation, result)
 //!   Step::RunLogProbe{..}         -> Backend::probe for the log dialog, then
 //!                                    flow.log_probe_finished(generation, result)
 //!   Step::RunFinish{..}           -> Backend::finish on a worker, then
@@ -73,7 +77,10 @@
 //! (the maintenance administrator) and `review`, where the choices checked by
 //! `Plan` are shown and the destructive button begins the installation. After
 //! it come the pages no one goes back from: `installing` (the stages, from the
-//! helper's `State`), `done` and `problem`.
+//! helper's `State`), `recovery` (the recovery key of an encrypted installation,
+//! shown while the image downloads and confirmed with two groups; it takes the
+//! place of `installing` for as long as the key is waiting for the person),
+//! `done` and `problem`.
 //!
 //! The installation's own steps (`install`, `confirm_install`, `apply_finished`,
 //! `state_finished`, `restart`, `power_off`, `choose_log_device`, `save_log`,
@@ -89,6 +96,7 @@ use crate::language::{self, Language};
 use crate::machine::{MachineChoice, MachineView};
 use crate::markers;
 use crate::messages::{self, ClientError, Message};
+use crate::recovery;
 use crate::review::Confirmation;
 use crate::secret::Secret;
 use ilex_installer_model::finish::FinishAction;
@@ -100,8 +108,8 @@ use std::collections::BTreeSet;
 mod installation;
 
 pub use installation::{
-    Control, DoneView, InstallingView, LogChoice, LogSave, Phase, ProblemIcon, ProblemKind,
-    ProblemView, ReviewBody, ReviewPage,
+    AskedGroup, Control, DoneView, InstallingView, LogChoice, LogSave, Phase, ProblemIcon,
+    ProblemKind, ProblemView, RecoveryView, ReviewBody, ReviewPage,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -113,6 +121,7 @@ pub enum PageId {
     Account,
     Review,
     Installing,
+    Recovery,
     Done,
     Problem,
 }
@@ -130,7 +139,7 @@ impl PageId {
 
     /// Every page, in the order a navigation stack builds them: the walk, then
     /// the pages an installation ends on (nobody goes back from those).
-    pub const ALL: [PageId; 9] = [
+    pub const ALL: [PageId; 10] = [
         Self::Welcome,
         Self::Machine,
         Self::Disk,
@@ -138,13 +147,18 @@ impl PageId {
         Self::Account,
         Self::Review,
         Self::Installing,
+        Self::Recovery,
         Self::Done,
         Self::Problem,
     ];
 
-    /// Installing, done and problem: Back and Continue do not exist there.
+    /// Installing, recovery, done and problem: Back and Continue do not exist
+    /// there.
     pub fn is_closing(self) -> bool {
-        matches!(self, Self::Installing | Self::Done | Self::Problem)
+        matches!(
+            self,
+            Self::Installing | Self::Recovery | Self::Done | Self::Problem
+        )
     }
 
     /// The page's place among [`PageId::ALL`].
@@ -163,6 +177,7 @@ impl PageId {
             Self::Account => "account",
             Self::Review => "review",
             Self::Installing => "installing",
+            Self::Recovery => "recovery",
             Self::Done => "done",
             Self::Problem => "problem",
         }
@@ -178,6 +193,7 @@ impl PageId {
             Self::Account => "Administrator",
             Self::Review => "Review",
             Self::Installing => "Installing",
+            Self::Recovery => "Recovery key",
             Self::Done => "Done",
             Self::Problem => "Problem",
         }
@@ -286,6 +302,18 @@ pub enum Step {
     /// `delay_ms`, and give the answer to [`Flow::state_finished`]. At most one
     /// is outstanding.
     RunState { generation: u64, delay_ms: u64 },
+    /// Fetch the installation's recovery key from the helper
+    /// (`Backend::take_recovery_key`; it hands the key over once) and give the
+    /// answer to [`Flow::take_key_finished`].
+    RunTakeKey { generation: u64, plan: String },
+    /// Give the helper the two groups the person typed
+    /// (`Backend::acknowledge_recovery_key`; `answer` is the model's answer
+    /// text) and give the answer to [`Flow::confirm_finished`].
+    RunAcknowledge {
+        generation: u64,
+        plan: String,
+        answer: Secret,
+    },
     /// Call `Backend::probe` for the log dialog (which sticks there are) and
     /// give the answer to [`Flow::log_probe_finished`].
     RunLogProbe { generation: u64 },
@@ -392,6 +420,9 @@ pub struct Flow {
     /// Whether the disk is encrypted (on until the person turns it off), and
     /// the passphrase that unlocks it, typed twice.
     encrypt: bool,
+    /// Unlock with the security chip when the computer can (on until the person
+    /// turns it off; there is nothing to turn off on a computer that cannot).
+    chip: bool,
     passphrase: Secret,
     passphrase_confirmation: Secret,
     administrator: String,
@@ -437,6 +468,7 @@ impl Flow {
             secrets_wiped: 0,
             inst: installation::Installation::default(),
             encrypt: true,
+            chip: true,
             passphrase: Secret::default(),
             passphrase_confirmation: Secret::default(),
             administrator: String::new(),
@@ -840,7 +872,11 @@ impl Flow {
                 self.probe().is_some() && self.account_checks().all_valid() && !self.is_checking()
             }
             // The review page has its own button (`install`), not Continue.
-            PageId::Review | PageId::Installing | PageId::Done | PageId::Problem => false,
+            PageId::Review
+            | PageId::Installing
+            | PageId::Recovery
+            | PageId::Done
+            | PageId::Problem => false,
         }
     }
 
@@ -880,7 +916,11 @@ impl Flow {
                     self.run_plan()
                 }
             }
-            PageId::Review | PageId::Installing | PageId::Done | PageId::Problem => Step::Stay,
+            PageId::Review
+            | PageId::Installing
+            | PageId::Recovery
+            | PageId::Done
+            | PageId::Problem => Step::Stay,
         }
     }
 
@@ -1071,9 +1111,11 @@ impl Flow {
             "administrator": self.administrator,
         });
         if self.encrypt {
-            // Unlocking with the security chip comes with the recovery key (a
-            // later change); until then the disk asks for its passphrase.
-            document["tpm"] = json!("off");
+            // An interface shows the recovery key (the answers file cannot), so
+            // an encrypted installation of this interface has one; the security
+            // chip is enrolled on a computer that can, unless turned off.
+            document["recovery_key"] = json!(true);
+            document["tpm"] = json!(if self.chip { "auto" } else { "off" });
         }
         PlanRequest::parse(&document.to_string()).map_err(|e| messages::plan_error(&e))
     }
@@ -1378,6 +1420,61 @@ impl Flow {
         true
     }
 
+    /// Whether this computer can unlock the disk with its security chip, as
+    /// the helper's probe says (`ilex-enroll`'s verdict), and if not, its
+    /// reason code.
+    pub fn chip_eligible(&self) -> Option<Result<(), String>> {
+        let enrollment = &self.probe()?.enrollment;
+        Some(if enrollment["verdict"] == "eligible" {
+            Ok(())
+        } else {
+            Err(enrollment["reason"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_owned())
+        })
+    }
+
+    /// The security chip's row on the encryption page.
+    pub fn chip_view(&self) -> recovery::ChipView {
+        match (self.encrypt, self.chip_eligible()) {
+            (false, _) => recovery::ChipView {
+                sensitive: false,
+                on: false,
+                line: recovery::CHIP_NEEDS_ENCRYPTION.to_owned(),
+            },
+            (true, Some(Ok(()))) => recovery::ChipView {
+                sensitive: !self.is_frozen(),
+                on: self.chip,
+                line: recovery::CHIP_ON_LINE.to_owned(),
+            },
+            (true, Some(Err(reason))) => recovery::ChipView {
+                sensitive: false,
+                on: false,
+                line: recovery::chip_unavailable_line(&reason),
+            },
+            (true, None) => recovery::ChipView {
+                sensitive: false,
+                on: false,
+                line: "Looking at this computer…".to_owned(),
+            },
+        }
+    }
+
+    /// Refused (`false`) while the helper is being asked, or where the switch
+    /// is not offered.
+    pub fn set_chip(&mut self, on: bool) -> bool {
+        if self.is_frozen() || !self.chip_view().sensitive {
+            return false;
+        }
+        if self.chip != on {
+            self.chip = on;
+            self.invalidate_check();
+            self.say(markers::chip(on));
+        }
+        true
+    }
+
     /// Refused (`false`) while the helper is being asked. The secret is moved
     /// in; the one it replaces is wiped.
     pub fn set_passphrase(&mut self, secret: Secret) -> bool {
@@ -1491,6 +1588,7 @@ impl Flow {
         self.confirmation = Secret::default();
         self.passphrase = Secret::default();
         self.passphrase_confirmation = Secret::default();
+        self.inst.clear_recovery();
         self.secrets_wiped += 1;
     }
 
@@ -1574,13 +1672,21 @@ impl Flow {
                 None => "disk=none offered=pending".to_owned(),
             },
             PageId::Encryption => format!(
-                "encryption={} keyboard={}",
+                "encryption={} keyboard={} chip={}",
                 if self.encrypt { "on" } else { "off" },
-                markers::one_word(&self.keyboard.requested)
+                markers::one_word(&self.keyboard.requested),
+                match (self.encrypt, self.chip_eligible()) {
+                    (true, Some(Ok(()))) if self.chip => "on",
+                    (true, Some(Ok(()))) => "off",
+                    (true, Some(Err(_))) => "unavailable",
+                    _ => "none",
+                }
             ),
             PageId::Account => format!("administrator={}", markers::one_word(&self.administrator)),
             PageId::Review => format!("check={}", self.check_word()),
-            PageId::Installing | PageId::Done | PageId::Problem => self.installation_fields(),
+            PageId::Installing | PageId::Recovery | PageId::Done | PageId::Problem => {
+                self.installation_fields()
+            }
         }
     }
 

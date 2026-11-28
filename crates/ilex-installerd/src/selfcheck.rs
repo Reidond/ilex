@@ -9,7 +9,10 @@ use crate::{
     topology::{self, FileId, LoopRow, Roots, System, Tracer},
 };
 use anyhow::{Context, Result, ensure};
-use ilex_installer_model::probe::{Extent, Partition};
+use ilex_installer_model::{
+    probe::{Extent, Partition},
+    recovery::{TpmOutcome, TpmStatus},
+};
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
@@ -3375,6 +3378,7 @@ pub fn run(config: &helper::Config) -> Result<String> {
     check_claims(parent.path()).context("the exclusive open of a disk")?;
     check_secrets().context("secrets")?;
     check_luks().context("the encrypted volume")?;
+    check_recovery_holder().context("the recovery key's hand-over")?;
     check_jobs(parent.path()).context("the tools an installation runs")?;
     check_state(parent.path()).context("the installation's state")?;
     check_target(parent.path()).context("the target system's files")?;
@@ -4224,7 +4228,7 @@ fn check_target(parent: &Path) -> Result<()> {
     let mut encrypted = fixture_plan()?;
     encrypted.request.encrypt = true;
     encrypted.encryption.enabled = true;
-    let record: serde_json::Value = serde_json::from_str(&target::setup_record(&encrypted))?;
+    let record: serde_json::Value = serde_json::from_str(&target::setup_record(&encrypted, None))?;
     ensure!(
         record["security"]["tpm"]
             == serde_json::json!({"requested": "auto", "capability": "unknown", "reason": "not-attempted", "status": "passphrase-only"})
@@ -4233,8 +4237,8 @@ fn check_target(parent: &Path) -> Result<()> {
     );
     encrypted.request.tpm = Some(ilex_installer_model::plan::TpmMode::Off);
     ensure!(
-        serde_json::from_str::<serde_json::Value>(&target::setup_record(&encrypted))?["security"]["tpm"]
-            ["requested"]
+        serde_json::from_str::<serde_json::Value>(&target::setup_record(&encrypted, None))?["security"]
+            ["tpm"]["requested"]
             == "off",
         "the TPM mode the person turned off is not recorded"
     );
@@ -4242,9 +4246,49 @@ fn check_target(parent: &Path) -> Result<()> {
         install::stages(&encrypted).len() == 7 && install::stages(&fixture_plan()?).len() == 6,
         "the stages of an encrypted and of an unencrypted installation"
     );
+    // With a recovery key: its stage after the account, and the chip's when it
+    // will be enrolled; what the installation did is what setup.json then says.
+    encrypted.request.tpm = Some(ilex_installer_model::plan::TpmMode::Auto);
+    encrypted.encryption.recovery_key = true;
+    ensure!(
+        install::stages(&encrypted).len() == 8
+            && install::stages(&encrypted)[6] == ilex_installer_model::state::Stage::Recovery,
+        "the stages of an encrypted installation with a recovery key"
+    );
+    encrypted.encryption.tpm.will_enroll = true;
+    ensure!(
+        install::stages(&encrypted).len() == 9
+            && install::stages(&encrypted)[7] == ilex_installer_model::state::Stage::Tpm,
+        "the stages of an installation that enrols the security chip"
+    );
+    for (outcome, want) in [
+        (
+            TpmOutcome {
+                status: TpmStatus::EnrolledUnverified,
+                reason: "pcr7-sha256".into(),
+            },
+            serde_json::json!({"requested": "auto", "capability": "eligible", "reason": "pcr7-sha256", "status": "enrolled-unverified"}),
+        ),
+        (
+            TpmOutcome {
+                status: TpmStatus::PassphraseOnly,
+                reason: "secure-boot-off".into(),
+            },
+            serde_json::json!({"requested": "auto", "capability": "eligible", "reason": "secure-boot-off", "status": "passphrase-only"}),
+        ),
+    ] {
+        let record: serde_json::Value = serde_json::from_str(&target::setup_record(
+            &encrypted,
+            Some(("eligible", &outcome)),
+        ))?;
+        ensure!(
+            record["security"]["tpm"] == want,
+            "setup.json for {outcome:?}: {record}"
+        );
+    }
     // The reserved record of the Anaconda path, key for key.
     let plan = fixture_plan()?;
-    let record: serde_json::Value = serde_json::from_str(&target::setup_record(&plan))?;
+    let record: serde_json::Value = serde_json::from_str(&target::setup_record(&plan, None))?;
     ensure!(
         record
             == serde_json::json!({
@@ -4254,7 +4298,7 @@ fn check_target(parent: &Path) -> Result<()> {
                 "profile": {"id": null, "schema": null},
                 "security": {"capabilities": {}, "tpm": {"requested": "unspecified", "capability": "unknown", "status": "not-configured"}},
             })
-            && target::setup_record(&plan).ends_with("}\n"),
+            && target::setup_record(&plan, None).ends_with("}\n"),
         "setup.json: {record}"
     );
     // No line for `/`.
@@ -5605,6 +5649,102 @@ fn check_answers(parent: &Path) -> Result<()> {
     ensure!(
         answers::read_file(root).is_err() && started.elapsed() < Duration::from_secs(5),
         "a FIFO was read, or waited for"
+    );
+    Ok(())
+}
+
+/// The recovery key between the installation and the interface: handed over
+/// once, confirmed by two groups the helper compares, waited for.
+fn check_recovery_holder() -> Result<()> {
+    use crate::recovery::Holder;
+    use ilex_installer_model::{
+        plan::ErrorCode,
+        recovery::{self, KeyStatus},
+        selfcheck::TEST_KEY,
+    };
+    let plan = "a".repeat(32);
+    let holder = Holder::default();
+    fn code<T>(result: Result<T, ilex_installer_model::plan::PlanError>) -> Option<ErrorCode> {
+        result.err().map(|error| error.code)
+    }
+    let answer = |lines: &[(usize, &str)]| -> Result<secret::Secret> {
+        let lines: Vec<(usize, String)> = lines.iter().map(|(n, g)| (*n, (*g).into())).collect();
+        secret::Secret::from_bytes(recovery::answer_text(&lines).as_bytes())
+    };
+    ensure!(
+        code(holder.take(&plan)) == Some(ErrorCode::NoRecoveryKey)
+            && code(holder.acknowledge(&plan, &answer(&[(2, "klnrtuvc"), (6, "ijklnrtu")])?))
+                == Some(ErrorCode::NoRecoveryKey),
+        "a key nobody made was handed over"
+    );
+    holder.offer(&plan, secret::Secret::from_bytes(TEST_KEY.as_bytes())?);
+    ensure!(
+        holder.status() == Some(KeyStatus::Waiting)
+            && code(holder.take(&"b".repeat(32))) == Some(ErrorCode::NoRecoveryKey),
+        "another plan's key was taken"
+    );
+    // Confirming a key that was not shown is refused: nobody could have read it.
+    ensure!(
+        code(holder.acknowledge(&plan, &answer(&[(2, "klnrtuvc"), (6, "ijklnrtu")])?))
+            == Some(ErrorCode::RecoveryKeyMismatch),
+        "a key that was not shown was confirmed"
+    );
+    // Handed over once, as a sealed memfd with the key and nothing else.
+    let fd = holder.take(&plan).map_err(|e| anyhow::anyhow!(e.message))?;
+    let taken = secret::Secret::from_memfd(fd, 4096)?;
+    ensure!(
+        taken.expose() == TEST_KEY.as_bytes() && holder.status() == Some(KeyStatus::Shown),
+        "the key that was handed over"
+    );
+    drop(taken);
+    ensure!(
+        code(holder.take(&plan)) == Some(ErrorCode::RecoveryKeyTaken),
+        "the key was handed over twice"
+    );
+    // Wrong groups change nothing; the person tries again.
+    for wrong in [
+        &[(2, "klnrtuvc"), (6, "ijklnrtv")][..],
+        &[(1, "klnrtuvc"), (6, "ijklnrtu")][..],
+        &[(2, "klnrtuvc")][..],
+    ] {
+        ensure!(
+            code(holder.acknowledge(&plan, &answer(wrong)?))
+                == Some(ErrorCode::RecoveryKeyMismatch)
+                && holder.status() == Some(KeyStatus::Shown),
+            "wrong groups {wrong:?} were taken"
+        );
+    }
+    ensure!(
+        code(holder.acknowledge(&plan, &secret::Secret::from_bytes(b"\xff\xfe")?))
+            == Some(ErrorCode::RecoveryKeyMismatch),
+        "groups that are not text were taken"
+    );
+    // The installation's wait ends when the key is confirmed, and not before.
+    let holder = std::sync::Arc::new(holder);
+    let waiting = std::thread::spawn({
+        let holder = std::sync::Arc::clone(&holder);
+        move || holder.wait_acknowledged(&mut || {})
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    ensure!(
+        !waiting.is_finished(),
+        "the wait ended before the key was confirmed"
+    );
+    holder
+        .acknowledge(&plan, &answer(&[(2, "KLNR-tuvc"), (6, "ijklnrtu")])?)
+        .map_err(|e| anyhow::anyhow!(e.message))?;
+    ensure!(
+        waiting
+            .join()
+            .map_err(|_| anyhow::anyhow!("the waiting thread panicked"))?
+            && holder.status() == Some(KeyStatus::Acknowledged),
+        "the wait did not end with the confirmation"
+    );
+    // Cleared (the installation is over): nothing is left, and a wait ends.
+    holder.clear();
+    ensure!(
+        holder.status().is_none() && !holder.wait_acknowledged(&mut || {}),
+        "a key was left after the installation"
     );
     Ok(())
 }

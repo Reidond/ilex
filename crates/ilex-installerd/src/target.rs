@@ -5,7 +5,10 @@
 
 use crate::topology::{self, Mount};
 use anyhow::{Context, Result, bail, ensure};
-use ilex_installer_model::plan::{Plan, PlanRequest, PlannedPartition};
+use ilex_installer_model::{
+    plan::{Plan, PlanRequest, PlannedPartition},
+    recovery::TpmOutcome,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
@@ -143,22 +146,31 @@ pub fn expected_origin(target_reference: &str) -> String {
 /// tracks, no profile, and the TPM record. An unencrypted installation says
 /// nothing was configured. An encrypted one says what phase 0's own completion
 /// says of a disk that unlocks with its passphrase alone: `passphrase-only`,
-/// with what was asked for, and a reason that says this installer did not try
-/// the TPM (enrolling it, and the recovery key, are a later change).
-pub fn setup_record(plan: &Plan) -> String {
-    let tpm = if plan.encryption.enabled {
-        json!({
+/// with what was asked for, and a reason. The configure stage writes it before
+/// anything is known of the security chip (`not-attempted`); the stage after
+/// the account writes it again with what the installation did ([`TpmOutcome`])
+/// and the computer's verdict.
+pub fn setup_record(plan: &Plan, tpm_outcome: Option<(&str, &TpmOutcome)>) -> String {
+    let tpm = match (plan.encryption.enabled, tpm_outcome) {
+        // What the installation did, as `ilex-enroll`'s completion records it:
+        // the computer's verdict, the reason code, and enrolled or not.
+        (true, Some((capability, outcome))) => json!({
+            "requested": plan.request.tpm_mode(),
+            "capability": capability,
+            "reason": outcome.reason,
+            "status": outcome.status,
+        }),
+        (true, None) => json!({
             "requested": plan.request.tpm_mode(),
             "capability": "unknown",
             "reason": "not-attempted",
             "status": "passphrase-only",
-        })
-    } else {
-        json!({
+        }),
+        (false, _) => json!({
             "requested": "unspecified",
             "capability": "unknown",
             "status": "not-configured",
-        })
+        }),
     };
     let record = json!({
         "schema": 1,

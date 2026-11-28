@@ -211,6 +211,8 @@ impl Answers {
             mode: self.install.mode,
             encrypt: self.encryption.enabled,
             tpm: self.encryption.tpm,
+            // Nothing in an unattended installation shows a key to a person.
+            recovery_key: false,
             keyboard: self.system.keyboard.clone().unwrap_or(defaults.keyboard),
             language: self.system.language.clone().unwrap_or(defaults.language),
             time_zone: self.system.time_zone.clone().unwrap_or(defaults.time_zone),

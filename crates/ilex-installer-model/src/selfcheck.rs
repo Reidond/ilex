@@ -683,8 +683,9 @@ password = "hunter2"
         "the outcome's wire form"
     );
     finish_rules()?;
+    recovery_rules()?;
     Ok(
-        "table rules, editions, detection, selection, requests, answers, secrets, stages, finish"
+        "table rules, editions, detection, selection, requests, answers, secrets, stages, finish, recovery key"
             .into(),
     )
 }
@@ -830,6 +831,125 @@ fn finish_rules() -> Result<()> {
         error.code == ErrorCode::InstallTarget,
         "the target that is a fixed disk is refused as {:?}",
         error.code
+    );
+    Ok(())
+}
+
+/// The recovery key's shape, which groups are asked and what matches.
+pub const TEST_KEY: &str =
+    "cdefghij-klnrtuvc-dbcdefgh-ijklnrtu-vcbdefgh-ijklnrtu-vcdefghi-jklnrtuv";
+
+fn recovery_rules() -> Result<()> {
+    use crate::recovery::{self, GroupProblem};
+    ensure!(
+        recovery::is_key(TEST_KEY)
+            && recovery::groups(TEST_KEY).len() == recovery::GROUPS
+            && TEST_KEY.len() == recovery::KEY_CHARS,
+        "a recovery key of systemd's shape"
+    );
+    for not in [
+        "",
+        "cdefghij-klnrtuvc",
+        &TEST_KEY.replace('c', "a"),
+        &TEST_KEY.to_ascii_uppercase(),
+        &format!("{TEST_KEY}-cdefghij"),
+        &TEST_KEY.replace('-', ""),
+    ] {
+        ensure!(!recovery::is_key(not), "{not:?} is not a recovery key");
+    }
+    // What a person types for a group: the paper's hyphens, spaces and capitals
+    // are forgiven; the wrong length and letters the key never has are not.
+    ensure!(
+        recovery::normalize(" CDEF-ghij ") == "cdefghij"
+            && recovery::group_problem("cdefghij").is_none()
+            && recovery::group_problem("CDEF GHIJ").is_none()
+            && recovery::group_problem("") == Some(GroupProblem::Empty)
+            && recovery::group_problem("cdef") == Some(GroupProblem::Short)
+            && recovery::group_problem("cdefghijk") == Some(GroupProblem::Long)
+            && recovery::group_problem("cdefghia") == Some(GroupProblem::NotInKey)
+            && recovery::group_problem("cdefgh1j") == Some(GroupProblem::NotInKey),
+        "typing a group"
+    );
+    // Which two groups: one from each half, always the same for a seed.
+    for seed in ["", "a", "plan-1", "0123456789abcdef0123456789abcdef"] {
+        let [first, second] = recovery::asked(seed);
+        ensure!(
+            (1..=4).contains(&first) && (5..=8).contains(&second),
+            "the groups asked for {seed:?}: {first} {second}"
+        );
+        ensure!(recovery::asked(seed) == [first, second], "not repeatable");
+    }
+    let asks: std::collections::BTreeSet<_> = (0..40)
+        .map(|i| recovery::asked(&format!("plan-{i}")))
+        .collect();
+    ensure!(asks.len() > 4, "the question never changes: {asks:?}");
+    // The answer's text and what matches.
+    let text = recovery::answer_text(&[(2, "klnrtuvc".into()), (6, "IJKL-nrtu".into())]);
+    let answer = recovery::parse_answer(&text).map_err(anyhow::Error::msg)?;
+    ensure!(
+        answer == [(2, "klnrtuvc".to_owned()), (6, "ijklnrtu".to_owned())]
+            && recovery::matches(TEST_KEY, &answer),
+        "a right answer: {answer:?}"
+    );
+    for (wrong, why) in [
+        (
+            vec![(2, "klnrtuvc".to_owned()), (6, "ijklnrtv".to_owned())],
+            "one letter",
+        ),
+        (
+            vec![(2, "klnrtuvc".to_owned()), (5, "ijklnrtu".to_owned())],
+            "another group",
+        ),
+        (vec![(2, "klnrtuvc".to_owned())], "one group only"),
+        (
+            vec![(2, "klnrtuvc".to_owned()), (2, "klnrtuvc".to_owned())],
+            "the same twice",
+        ),
+        (
+            vec![(0, "cdefghij".to_owned()), (9, "ijklnrtu".to_owned())],
+            "no such groups",
+        ),
+        (
+            vec![(2, "klnrtuv".to_owned()), (6, "ijklnrtu".to_owned())],
+            "a short group",
+        ),
+    ] {
+        ensure!(!recovery::matches(TEST_KEY, &wrong), "{why} matched");
+    }
+    for bad in [
+        "",
+        "2",
+        "x klnrtuvc\n6 ijklnrtu\n",
+        "2 klnrtuvc\n2 klnrtuvc\n",
+        "9 klnrtuvc\n1 cdefghij\n",
+        "1 cdefghij\n2 klnrtuvc\n3 dbcdefgh\n",
+    ] {
+        ensure!(recovery::parse_answer(bad).is_err(), "{bad:?} parsed");
+    }
+    // Every reason a security chip is not used has a sentence.
+    for code in [
+        "secure-boot-off",
+        "no-tpm",
+        "pcr7-unmeasured",
+        "tool-mismatch",
+        "unlock-stack-missing",
+        "not-requested",
+        "no-recovery-key",
+        "recovery-key-failed",
+        "enrollment-failed",
+    ] {
+        ensure!(
+            !recovery::tpm_reason(code).starts_with("reason code"),
+            "no sentence for {code}"
+        );
+    }
+    ensure!(
+        serde_json::to_value(recovery::KeyStatus::Shown)? == json!("shown")
+            && serde_json::to_value(recovery::TpmStatus::EnrolledUnverified)?
+                == json!("enrolled-unverified")
+            && serde_json::to_value(recovery::TpmStatus::PassphraseOnly)?
+                == json!("passphrase-only"),
+        "the status words are setup.json's"
     );
     Ok(())
 }

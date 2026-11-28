@@ -8,7 +8,8 @@ use crate::sys;
 use anyhow::{Context, Result};
 use ilex_installer_model::plan::PlanError;
 use ilex_installer_model::state::{
-    LOG_TAIL_LINES, Outcome, Refusal, STATE_SCHEMA, Stage, StageRecord, StageStatus, State, Summary,
+    LOG_TAIL_LINES, Outcome, Refusal, STATE_SCHEMA, Security, Stage, StageRecord, StageStatus,
+    State, Summary,
 };
 use std::{
     fs,
@@ -152,6 +153,12 @@ impl Tracker {
         copy
     }
 
+    /// The recovery key's or the security chip's step moved: said in `State()`
+    /// (never a secret) for an interface that was restarted.
+    pub fn set_security(&self, change: impl FnOnce(&mut Security)) {
+        self.update(|state| change(&mut state.security));
+    }
+
     pub fn set_plan(&self, id: &str) {
         self.update(|state| state.plan = Some(id.to_owned()));
     }
@@ -214,6 +221,7 @@ impl Tracker {
         next.started = Some(sys::unix_time());
         next.updated = sys::unix_time();
         next.summary = Some(summary);
+        next.security = Security::default();
         next.stages = stages
             .iter()
             .map(|&stage| StageRecord {

@@ -87,6 +87,15 @@ impl Secret {
         Ok(secret)
     }
 
+    /// A secret of these bytes, in pages of its own (the recovery key, which
+    /// `systemd-cryptenroll` makes and the helper keeps until it is shown).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        ensure!(!bytes.is_empty(), "the secret is empty");
+        let mut secret = Self::map(bytes.len())?;
+        secret.bytes_mut().copy_from_slice(bytes);
+        Ok(secret)
+    }
+
     /// Whole pages of their own for `len` bytes, locked before anything is
     /// read into them. (A failed `mlock` is tolerated, as before: the live
     /// system has no swap but zram, and the helper runs as root.)
