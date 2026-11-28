@@ -1,0 +1,18 @@
+[package]
+name = "ilex-installer-flow"
+description = "The ilex installer's flow, shared by every interface: pages, validation, messages, progress and the root helper's D-Bus client (no GTK or Qt)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ilex-installer-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+zbus = "6"

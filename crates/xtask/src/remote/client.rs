@@ -171,7 +171,10 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
         let archive = archive.take().context("missing local kache archive")?;
         inputs.insert("kache".into(), staged.file(&archive)?);
     }
-    if matches!(&command, Command::Test(a) if a.filters.iter().any(|f| f.contains("iso")))
+    // The Anaconda ISO is staged for its own `iso::` trials only: the next
+    // installer's `iso::next…` filters also contain "iso" (and are refused by
+    // `validate` before this point).
+    if matches!(&command, Command::Test(a) if a.filters.iter().any(|f| f.contains("iso") && !crate::iso_next::is_next_filter(f)))
         && let Some(iso) = std::env::var_os("ILEX_ISO").filter(|s| !s.is_empty())
     {
         let iso = PathBuf::from(iso);
@@ -486,11 +489,20 @@ fn validate(ws: &Workspace, command: &Command) -> Result<()> {
         );
     }
     if let Command::Iso(args) = command {
+        ensure!(!args.next, "{}", crate::iso_next::REMOTE_UNSUPPORTED);
         // CI is deliberately absent from the remote environment. Apply the
         // existing local-only testing-tag rule before crossing that boundary.
         ilex_devkit::installer::table(&ws.root, args.testing_tag.as_deref())?;
     }
     if let Command::Test(args) = command {
+        ensure!(
+            !args
+                .filters
+                .iter()
+                .any(|f| crate::iso_next::is_next_filter(f)),
+            "{}",
+            crate::iso_next::REMOTE_UNSUPPORTED
+        );
         let native: Vec<_> = args
             .filters
             .iter()

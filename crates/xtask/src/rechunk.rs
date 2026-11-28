@@ -172,7 +172,7 @@ pub fn candidate_fingerprint(ws: &Workspace, image: &str) -> Result<String> {
 /// output of the image and the git tree hashes of the image inputs at `HEAD`.
 pub fn fingerprint(ws: &Workspace, image: &str) -> Result<String> {
     let selection = image_selection(image)?;
-    let inputs = selection_inputs(&selection);
+    let inputs = selection_inputs(ws, &selection)?;
     let mut rpm_command = Command::new("podman");
     rpm_command.args(["run", "--rm", "--network=none", "--entrypoint", "rpm"]);
     ilex_devkit::ownership::remote_container_args(ws, &mut rpm_command)?;

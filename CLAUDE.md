@@ -20,6 +20,7 @@ ilexctl test ephemeral::   # build if needed, boot in QEMU, assert over SSH
 ilexctl vm run                 # interactive ephemeral VM of this checkout's image (--gui: a window)
                                # on Windows: ephemeral VM on the builder, native window with --gui
 ilexctl vm run --gui --print-image # show the selected image without building
+ilexctl test installer::       # the next installer's root helper, on its live image (no ISO)
 ilexctl info               # resource identity, selection and available configurations
 ```
 
@@ -1606,8 +1607,10 @@ bootc's 1,917.62 MiB, a 60.24 MiB increase within the then-current 128 MiB budge
 Image builds compile through [kache](https://github.com/kunobi-ninja/kache), a
 compiler cache keyed by the content of each rustc invocation's inputs. The
 Containerfile's builder stage installs a pinned release tarball (v2.0.0,
-sha256-checked; v2 needs both `kache` and `kache-engine`) and runs
-`cargo build` with `RUSTC_WRAPPER=kache`. The store is the podman cache mount
+sha256-checked; v2 needs both `kache` and `kache-engine`) and builds the
+declared Rust packages (`build/image-crates.toml`, through
+`build/build-image-crates.py`) with `RUSTC_WRAPPER=kache` and a scrubbed
+environment (no `CARGO*`, `RUST*` or `KACHE*` variable of the caller). The store is the podman cache mount
 `ilex-kache`, shared by every worktree; the target directory is fresh per
 build, so nothing trusts mtimes and one worktree's binaries can't leak into
 another's image. The step ends with `kache stats --last-build`: crates
@@ -2309,6 +2312,28 @@ binary v2.1.1, empty token and PR comments disabled; cosign-installer v4.1.3 is
 pinned to `756fe2d284c7292c4e9b62c8a28f1e5629c59532`. `build-publisher.sh` builds
 with `--locked` and discovers the executable from Cargo metadata before the
 key-bearing step. No Cargo, rustc, kache or build script runs with the key.
+That includes the one thing the publisher used to ask cargo for: the root
+image's crate closure for the fingerprint (`cargo metadata` starts rustc, so a
+`RUSTC_WRAPPER` such as kache, and can fetch from crates.io). `build-publisher.sh`
+runs `ilexctl info --image-crates` in its keyless step (the build script's
+three printing modes under python3, `cargo fetch --locked`, then
+`cargo metadata --offline --locked`) and records the closure in
+`$RUNNER_TEMP/image-crates`, bound to the checkout's source digest, exporting
+`ILEX_IMAGE_CRATES`. `ilexctl publish` (anything but a loopback registry
+with a throwaway key) refuses to start without that file, reads it, checks the
+digest and forbids cargo for the rest of the process: the only code that
+starts cargo (`fingerprint::closure` and `fetch_dependencies`) fails once the
+record is in use, so `rechunk::fingerprint` cannot reach it. The log line is
+`image crates (signing process): N crates read from … ; cargo, rustc and kache
+are not run by this process`. `publish-root.sh` and `publish-machines.sh` also
+start the publisher with `.github/no-cargo.sh`'s shims first on `PATH`
+(`cargo`, `rustc`, `rustup`, `rustdoc`, `kache` exit 97 with an error), so a
+regression is a red step before a signature exists. Their `signing()` helper
+also unsets `CARGO`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER` and
+`RUSTDOC`, which could point a toolchain somewhere other than the shims. `ilexctl doctor
+--self-check-recorded-crates <image>` runs the same call with `ILEX_IMAGE_CRATES`
+set and prints the fingerprint it gets without cargo; it must equal
+`doctor --self-check-fingerprint <image>`'s `rechunk_fingerprint`.
 The key/password are step environment values; the installer and cache post
 steps have none. Guard subprocesses explicitly remove them. The trusted signing
 shell, prebuilt publisher and required git/podman/skopeo/cosign tools retain
@@ -2501,7 +2526,11 @@ main-only because its network install exercises the published target, not the
 branch candidate. PR/fork events cannot reach signing.
 
 The sole local publishing override is an explicitly allowed loopback registry,
-never ghcr, even with `CI=true`. Run a checkout-specific `registry:2` container
+never ghcr. `--allow-local-registry` is refused whenever `CI` or
+`GITHUB_ACTIONS` is set (to any non-empty value): a throwaway-registry run
+derives the crate closure with cargo and must not share an environment with
+signing secrets. A registry counts as loopback only for `localhost`,
+`127.0.0.1` or `[::1]`, with or without a port. Run a checkout-specific `registry:2` container
 on a free local port, generate a throwaway cosign v2 key pair in a scratch
 directory, then use `--allow-local-registry --repository localhost:<port>/ilex`
 and `--verification-key <scratch>/cosign.pub` with `publish --as`. Set only that
@@ -2913,6 +2942,2611 @@ TPM hardware qualification.
 For the profile trial, set `ILEX_PRIVATE_FINGERPRINTS` to a fresh private
 directory outside the artifacts. Seal the successful export with
 `encrypted/privacy.py --seal-profile-export` before attaching screenshots.
+
+## The next installer
+
+`installer/next/` is the live installer of ilex's own installer, which will
+replace Anaconda: no Anaconda, Cockpit, Firefox or Python chooser, and an
+interface of its own, described in "The next installer's interface" below. It
+has the welcome, machine and administrator pages and ends there: the interface
+installs nothing yet. (The root helper below installs, through its bus methods
+and from an answers volume; the pages for it come later.) The Anaconda network
+installer above is unchanged and stays the released one: `installer/next` is
+excluded from its fingerprint (`ilexctl iso --due`).
+
+```sh
+ilexctl iso --next [--edition gnome] [--output-dir D]  # <state dir>/iso-next/ilex-installer-gnome.iso
+ilexctl test iso::next                                  # boots it: Secure Boot, both boot entries, fallback, restarts, serial faults
+```
+
+**Linux only for now.** From native Windows, `ilexctl iso --next` and
+`ilexctl test iso::next` are refused with a message before anything is sent:
+the builder returns only `<state dir>/iso` (the Anaconda ISO) and stages only
+`ILEX_ISO`, while this ISO is written to `<state dir>/iso-next` and read from
+`ILEX_ISO_NEXT`, so it would never reach the machine. The worker refuses them
+too, and an `iso::next` filter no longer makes the client stage the Anaconda
+ISO. Run these two on a Linux host (or in the builder's shell). Nobody has run
+the Windows paths of this change: no Windows host was available.
+
+- **Editions.** One ISO per edition, as Fedora ships Silverblue (GNOME) and
+  Kinoite (KDE). The identifier (`gnome`) names the image stage, the files
+  below `installer/next/editions/<id>/` (package lists, the session script and
+  other overlay files) and the ISO. What a person reads as its name is the
+  `display-name` in `installer/next/editions.toml`, the only place it lives;
+  the build writes it into the image as `/usr/share/ilex-installer/edition.json`.
+  The owner chose **ilex Glabra** for the GNOME edition (identifier `gnome`) and
+  **ilex Kingiana** for the future KDE edition (identifier `kde`), both holly species.
+- **Build.** `installer/next/Containerfile` is `fedora-bootc:45`, the shared
+  live-boot packages (`packages.txt`: dracut's `dmsquash-live`, and what
+  image-builder's `generic-iso` needs inside the container) and the edition's,
+  installed without weak dependencies, with the same GPU/audio firmware and
+  Vulkan removals as the Anaconda installer's image (in the install layer,
+  ended by `rpm --verifydb`: removing in a later layer left rpm's database
+  corrupt on one build host). `rootfs/` and the
+  edition's `rootfs/` are copied over it (ordinary `COPY`), then the initramfs
+  is rebuilt generic with `dmsquash-live`. The same `image-builder … generic-iso`
+  path as the Anaconda ISO builds it (`localhost/ilex-installer-next:<slug>.<edition>`
+  is the image; the helper container, osbuild cache and 2 GiB check are shared).
+  `bootloader-update.service` and the sleep targets are masked.
+- **Interface.** `crates/ilex-installer` is built by the Containerfile's builder
+  stage with kache, exactly like the OS image's crates (the pinned kache
+  release must be bumped in both Containerfiles). Its GTK 4 + libadwaita
+  interface (relm4) sits behind the `gui` cargo feature, off by default, so
+  `cargo clippy --workspace` needs no `gtk4-devel`: lint it with
+  `cargo clippy -p ilex-installer --features gui --all-targets` where
+  `gtk4-devel` and `libadwaita-devel` are installed. `ilex-installer
+  --self-check` needs no display: it runs the flow's rules on the simulation's
+  fixtures, reads the edition record and the image's keyboard catalogue and
+  fails when the live image is incomplete; the session unit runs it first.
+- **Session.** `ilex-installer-session.service` opens a logind session for the
+  unprivileged `ilex-installer` user (sysusers.d, PAM service `ilex-installer`
+  on tty1), so GNOME Kiosk (mutter) gets seat0's DRM and input devices without
+  root. The PAM service admits only that user and requires `pam_systemd`: a
+  session without logind would half-work, so its start must fail. The edition's
+  `session` script runs `ilex-installer --self-check`, removes any Wayland
+  socket left by an earlier attempt (logind keeps the runtime directory for a
+  few seconds, so a compositor that died leaves `wayland-0` behind), starts
+  `gnome-kiosk`, waits until the socket has a listener (`ss -xl`, not merely a
+  file; up to a minute), then starts `ilex-installer` as its only window.
+  Nothing may end the session: whichever process ends, with any status (a window
+  closed by the compositor exits 0), the script stops the other and exits
+  non-zero, and the window refuses a close request (`--windowed`, for
+  development, still closes). The unit is `Restart=always`, three starts in five
+  minutes. There is no `OnFailure=` (it fires after every failed attempt, not
+  only the last): `ilex-installer-fallback.service`, enabled at boot, watches
+  the session unit and, once, when it is `failed` for good (its start limit),
+  prints on tty1 what failed and where to look (Ctrl+Alt+F2 has a root shell, an
+  agetty autologin) and the `ILEX-INSTALLER-FALLBACK` marker. It polls every two
+  seconds and is not subject to a start limit (`StartLimitIntervalSec=0` in its
+  `[Unit]` section, the only place systemd reads it), so a slow boot cannot make
+  it miss the end state. The session script bounds its `--self-check` with
+  `timeout` like every other call. Fedora 45's `kmscon` is masked and the
+  virtual terminals get agetty: kmscon is a DRM client of seat0 and takes the
+  GPU on tty1 before the compositor can. `autovt@tty1.service` is masked too, so
+  that no getty can replace the fallback message when the person presses
+  Ctrl+Alt+F2 and back to a tty1 without a session (logind starts `autovt@ttyN`
+  on such a switch). That is defence in depth: on this image the message
+  survived the round trip with the mask removed, and with the watcher stopped
+  too, and no getty started (VT 1 is always allocated, which logind reads as
+  busy; only the reserved VT 2 is started regardless). While the session runs,
+  logind finds it on tty1 and starts nothing; the tty2 shell is unaffected.
+  (Ctrl+Alt+F2 reaches it from the fallback screen, and from the page too.
+  GNOME Kiosk turns VT switching off unless started with `--enable-vt-switch`
+  (without it the chord never reaches logind), which the session script
+  passes; the compositor then asks logind to change VT, and the polkit rule
+  below allows `org.freedesktop.login1.chvt` to the installer's own active
+  local session. Both are needed.)
+  Blanking, locking and sleep are off (dconf defaults, a
+  logind drop-in and masked sleep targets): an installation must not stop when
+  the screen would lock.
+- **SSH.** The live image keeps fedora-bootc's `sshd`, but a drop-in condition,
+  `ConditionFileNotEmpty=/root/.ssh/authorized_keys` (also on `sshd@.service`,
+  the socket-activated template), lets it start only once something has
+  provisioned root's key before it: a real boot has no key on it and an open
+  port is no use. Two harnesses provision one. The `iso::next` harness passes
+  the SMBIOS credential `ssh.authorized_keys.root` (systemd-tmpfiles writes
+  the file from it) for diagnostics and the polkit report; bcvk, which does not
+  use that credential, passes its key as a `tmpfiles.extra` credential
+  (`f+~ /root/.ssh/authorized_keys`), so bcvk VMs of this image accept SSH too.
+  Testing the file rather than either credential admits both and nothing else.
+  `iso::next_serial_backpressure` and `_unavailable` boot without the credential
+  and check that nothing answers on the forwarded port.
+  **The trust boundary is the boot chain or physical access**, not the key
+  file: whoever controls the firmware or hypervisor (SMBIOS credentials), the
+  kernel command line (a GRUB edit can add a credential) or the machine itself
+  can make root's key non-empty, or just boot a shell; sshd adds no way in for
+  anyone who could not already do that, and an unprovisioned boot listens on no
+  SSH port.
+- **What the session can reach.** The live session is an active local session
+  on seat0, which polkit's defaults treat as the person at the machine, so the
+  image is cut down to what the installer needs. Removed (nothing requires
+  them): `udisks2` (an active session may mount any block device without a
+  password), `fwupd` and its plugins, `passim`, `avahi`. Masked: the
+  `bootc-fetch-apply-updates` and `rpm-ostree` units (including the `countme`
+  metrics timer), `systemd-homed`, `sssd` and `geoclue` (activatable for
+  gnome-settings-daemon; nothing in the live image uses location). `systemd-resolved` answers no
+  LLMNR or multicast DNS (it listened on 5355 on every address). A polkit rule,
+  `00-ilex-installer.rules`, denies every action to the `ilex-installer` user
+  except `org.freedesktop.login1.chvt`, which it allows for `subject.local &&
+  subject.active` (Ctrl+Alt+F2 reaches the tty2 root shell from the page); a
+  page that needs another action (a restart button, the network page) adds it
+  to that file in its own change and to `POLKIT_ALLOWED` in the trial. `iso::next_boot`
+  checks all of this on the running guest and writes `next-surface.txt` beside
+  the other artifacts (for the installer's session on seat0, not the user
+  manager's own `manager-early` session; its seat, VT, class and state are
+  asserted, and so is that `geoclue.service` and `autovt@tty1.service` are
+  masked): `pkcheck` against the session's own process for every
+  action (only `login1.chvt` is authorized), a control that moves the rule away and back
+  (two actions the defaults allow are then authorized, and denied again once it
+  is restored), the system bus names, the listening sockets (nothing beyond
+  loopback but the harness's sshd) and the running services. **What remains,
+  measured on this image (2026-11-26):** the session is denied every polkit
+  action; the system bus still offers `systemd1`, `login1`, `hostname1`,
+  `locale1`, `timedate1`, `resolve1`, `timesync1`, `oom1`, `sysupdate1`,
+  `home1` and `nm_dispatcher`/`nm_priv_helper` (all gated by polkit, and so
+  denied for this user, or inert), and the names `home1` and
+  `org.projectatomic.rpmostree1`, which are only activatable and whose units
+  are masked, NetworkManager and `wpa_supplicant` (the
+  Wi-Fi support later pages use; their polkit actions are denied until the
+  network page adds its own), `PolicyKit1`, `RealtimeKit1`, `ColorManager`
+  (colord, started by the compositor) and `GeoClue2` (still listed as an
+  activatable name, but its unit is masked and `iso::next_boot` requires it);
+  the listeners are loopback-only
+  (resolver stub on 127.0.0.53 and .54, chrony on 323) plus sshd on 22 when a
+  key was provisioned. The services running are chronyd, colord, dbus-broker,
+  gssproxy, irqbalance, NetworkManager, polkit, rtkit, sshd (with a key),
+  hostnamed, journald, localed, logind, oomd, resolved, udevd, userdbd and the
+  installer's own two units. `gssproxy`, `irqbalance` and `rtkit` expose
+  nothing to the session and stay as fedora-bootc ships them.
+- **Boot entries.** "Install ilex" and "Install ilex (basic graphics)"
+  (`nomodeset`); the second makes the session set `GSK_RENDERER=cairo` and
+  `LIBGL_ALWAYS_SOFTWARE=1`. Both carry `rd.lvm=0 rd.md=0 rd.luks=0 rd.dm=0` (also
+  baked into the initramfs): the live system activates no LVM volume group,
+  assembles no MD array, opens no LUKS volume and sets up no DM RAID set, so a
+  disk with an old installation is offered. The ISO's volume label is
+  `ilex-installer-<edition>`.
+- **SELinux: the live ISO boots enforcing, with labels.** `getenforce` says
+  `Enforcing`, PID 1 is `init_t`, the policy is Fedora's `targeted` (the
+  image's own `/etc/selinux/config`) and the kernel command line has no
+  `enforcing=` at all. Two things made that possible, both in the ISO build and
+  neither in the image: image-builder's `generic-iso` puts `enforcing=0` in the
+  kernel options of both GRUB stages (`org.osbuild.grub2.iso` and its legacy
+  twin) and its `os-tree` pipeline is `org.osbuild.container-deploy` and
+  nothing else, so the squashfs carried no `security.selinux` xattr at all (the
+  one `org.osbuild.selinux` stage of the manifest labels the build root) and
+  every process ran as `kernel_t` on `unlabeled_t` files. The image cannot ship
+  the labels itself: `setfiles` in a `podman build` step sets them, but
+  containers/storage does not keep `security.selinux` in a layer.
+  `installer/next/osbuild-selinux` (a Python script, only the standard library)
+  is therefore the `osbuild` image-builder runs for this ISO: it reads the
+  manifest image-builder pipes in, inserts an `org.osbuild.selinux` stage after
+  the deployment in `os-tree` (`file_contexts` of the image's own policy,
+  `etc/selinux/targeted/contexts/files/file_contexts`, the whole tree), removes
+  `enforcing=0` from the two GRUB stages, and hands the result to `osbuild` as
+  its standard input (an anonymous `memfd`) with the same `--checkpoint build
+  --checkpoint os-tree` the Anaconda ISO's wrapper passes. A manifest that is
+  not what it expects (no `os-tree`, not exactly one deployment, a selinux stage
+  already there, not exactly two `enforcing=0`) is an error, not a pass-through.
+  `crates/xtask/src/iso.rs` takes the wrapper as a parameter (`Osbuild`: the
+  script and the state directory its executable copy goes in); the Anaconda ISO
+  keeps `installer/image-builder/osbuild-cache` and `image-builder-bin`, the
+  next ISO uses `image-builder-bin-next`, and in the helper container (an
+  older image-builder on the host) the copy is bind-mounted over the container's
+  own wrapper. The squashfs now carries the labels (`/usr/bin/bootc` is
+  `install_exec_t`, `/usr/lib/systemd/systemd` `init_exec_t`, `/etc/passwd`
+  `passwd_file_t`).
+  **The policy module** is `installer/next/rootfs/usr/share/selinux/packages/ilex-installer.cil`,
+  installed by `semodule -n -i` in the Containerfile like the OS image's
+  `ilex-homed.cil`. Its rules are the answer to denials the trials recorded and
+  nothing else (the file says which): no permissive domain and no `dontaudit`,
+  which would hide the records the trials count. There are two. The helper's
+  file is labelled `install_exec_t` (`filecon`), so systemd's own
+  `type_transition init_t install_exec_t:process install_t` runs it, and its
+  answers program, in `install_t`: the domain Fedora gives its installers
+  (Anaconda and initial-setup run in it, and `bootc` is `install_exec_t`), which
+  has the `mac_admin` that bootc's `chcon` probe of an undefined label needs
+  and is an unconfined domain like `unconfined_service_t`. As
+  `unconfined_service_t`, where an unlabeled program lands, `bootc` is denied
+  `capability2 mac_admin` twice (the probe) and then stops with `Failed to enter
+  install_t`, because Fedora lets `init_t` make that transition and not
+  `unconfined_service_t`; the alternative of allowing that domain `mac_admin` or
+  the transition would grant it to every service without a policy of its own,
+  and `BOOTC_SETENFORCE0_FALLBACK` is a switch to permissive. The second rule,
+  `allow install_t install_t:file mounton`, is the one Fedora grants
+  `unconfined_t` for the `(mkfs)` child of `systemd-repart`, which mounts over
+  its own `/proc/<pid>/mounts`. Nothing else was denied through a whole
+  installation (probe, plan, wipe, repart, mkfs, mounts, `bootc`, `useradd`,
+  `chpasswd`, `setfiles`, the `EXT4_IOC_CHECKPOINT` ioctl and the stamp's
+  `ro,noload` mount, the answers volume's read-only mount, `/run/ilex-installer`
+  records, `finalise`), run as the unattended and the interactive trials run it.
+  The installer's own units and programs (the session script, GNOME Kiosk,
+  the interface, the fallback watcher) have no types of their own: systemd
+  starts them from `/usr/libexec` and `/usr/bin` (`bin_t`), which Fedora runs as
+  `unconfined_service_t` (`type_transition init_t bin_t:process
+  unconfined_service_t`), and the user session of `ilex-installer` is
+  `unconfined_t` like any Fedora login. What SELinux confines on the live ISO is
+  therefore Fedora's own services (logind, polkit, udev, resolved, journald,
+  oomd, sshd, rtkit, the system bus) and the helper's domain; the isolation of
+  the installer's session from root is the unprivileged user, the bus policy and
+  polkit, as before. `iso::next_boot` records the domains of the running
+  processes in `next-surface.txt`.
+  **`/usr/libexec/ilex-installer/selinux-report`** says what SELinux made of the
+  boot, for a person on tty2, the serial log and the trials: one
+  `ILEX-INSTALLER-SELINUX mode=… policy=… pid1=… cmdline=… denials=N` line and
+  one `ILEX-INSTALLER-SELINUX-AVC …` line per record of the audit log of this
+  boot (AVC, USER_AVC and SELINUX_ERR, from journald's audit socket; the
+  kernel's own copy counts too when it holds more). `denials=unknown` means it
+  could not read them. `ilex-installerd --answers` runs it when it ends, success
+  or failure, and prints its lines to the console and the serial port (a
+  machine that powers itself off cannot be asked afterwards).
+  **Every `iso::next` trial ends with it** (`crates/ilex-e2e/src/selinux.rs`):
+  `Enforcing`, no `enforcing=0`/`selinux=0` on the command line, PID 1 in
+  `init_t`, the `targeted` policy and **zero denials** or the trial fails with
+  every record printed; the report is kept as `<trial>-selinux.txt` in
+  `<state dir>/artifacts/iso-next/`. Over SSH where the guest has the harness's
+  key; from the answers program's own console lines for the unattended runs
+  (including every refused one); from tty2's shell, with the output on the second
+  UART, for the two serial trials that boot without a key. A control in
+  `iso::next_boot` provokes one denial (`runcon` into `httpd_t`, whose entrypoint
+  `/usr/bin/true` is not) and requires the report to count it, so a report that
+  always says 0 cannot pass. The disk-booted `installer::policy`, `::install`
+  and `::interrupted` trials boot the live image enforcing too (they no longer
+  `setenforce 0`) and end with the same check. The ephemeral `installer::probe`,
+  `::plan`, `::ui` and `::finish` VMs are bcvk's: a virtiofs root cannot carry labels, so
+  SELinux is off there (`getenforce` says `Disabled`, asserted) and the ISO's
+  trials are what shows the helper under enforcing.
+  **Measured 2026-11-27** against the same image built without the labelling
+  (the permissive ISO of the commit before): the ISO is 1,501,024,256 bytes
+  against 1,499,465,728 (+1.49 MiB: the xattrs in the squashfs, the module, the
+  wrapper's stage); power-on to the drawn page 21.0, 22.0 and 21.0 seconds
+  against 19.0, 23.0 and 22.0 (no change beyond the run-to-run spread), the
+  guest's uptime at the page 7.2, 7.6 and 7.2 seconds against 5.8, 7.2 and 7.0
+  (about 0.7 s for the policy load and `systemd`'s re-execution), memory in use
+  at the page the same (617-628 MiB against 624-634 MiB). Before, every boot
+  logged about 155 permissive denials (all from `kernel_t` on `unlabeled_t`);
+  now it logs none, and the whole `iso::next` tier (29 trials, the two loop ones
+  included) and the `installer::` tier (7) end with `denials=0`. That covers
+  `Finish`'s `save-log` too: `iso::next_problem` has the helper, as `install_t`,
+  mount a real USB stick `nodev,nosuid,noexec` in a private mount namespace,
+  write the tarball and unmount it, with no denial, as the helper's other mounts.
+- **Serial markers.** The session script and the interface print marker lines
+  to the journal and to `/dev/ttyS0` (the user is in `dialout`):
+  `ILEX-INSTALLER-SESSION compositor=… graphics=default|basic secure-boot=0|1`,
+  `ILEX-INSTALLER page=welcome edition=… language=… keyboard=… renderer=…
+  scale=… uptime=…` once the window is mapped (and one `ILEX-INSTALLER page=…`
+  line for every page shown after it, see the interface's section), `ILEX-INSTALLER-STATS mem_total_kib=…` fifteen seconds
+  later, `ILEX-INSTALLER-SESSION ended child=compositor|installer status=…`
+  when the session ends and `ILEX-INSTALLER-FALLBACK session=failed result=…`
+  at the give-up. The session script prints them through `ilex-installer
+  --marker LINE`, so one implementation owns the serial write. It never delays
+  the interface: the port is touched only by a disposable worker thread, which
+  the caller waits for 200 ms and then abandons (even a non-blocking open and
+  write can end in a `close()` that waits for the UART's `closing_wait`), and
+  markers are skipped, not queued, while an abandoned worker lives, as
+  `installer/chooser/diagnostics.py` does for the Anaconda chooser. Two fixed
+  credentials (SMBIOS, `io.systemd.credential:`) are test-only:
+  `ilex.installer.fault=session` makes the session script fail, and
+  `ilex.installer.serial-test=unavailable|backpressure` points the mirror at a
+  missing device or at a pty with stopped output (`tcflow(TCOOFF)`), reporting
+  each faulted write (`ILEX-INSTALLER-SERIAL mode=… status=… seconds=…`) on the
+  second UART, `/dev/ttyS1`. They can only stop the installer from starting or
+  silence its mirror. A third, `ilex.installer.echo-test=1`, lets the
+  interface print what is typed in its keyboard layout's test field (see "The
+  next installer's interface"); the session unit also has `LimitCORE=0`.
+- **Tests.** `iso::next_boot`, `iso::next_basic_graphics`, `iso::next_fallback`,
+  `iso::next_restart`, `iso::next_serial_backpressure`,
+  `iso::next_serial_unavailable`, `iso::next_serial_stall`,
+  `iso::next_ssh_tmpfiles`, `iso::next_helper_usb`,
+  `iso::next_helper_cdrom`, `iso::next_welcome`, `iso::next_detect_board`,
+  `iso::next_detect_generic`, `iso::next_kernel_argument`,
+  `iso::next_kernel_argument_unknown` and `iso::next_account` are registered
+  only when a filter names
+  `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO);
+  `iso::next_helper_loop` and `iso::next_unattended_loop` only when a filter
+  names `next_helper_loop` or `next_unattended_loop` (they need `mke2fs`,
+  `sfdisk` and a second copy of the ISO on the host, which no other trial
+  does).
+  `cargo ilexctl test iso::next` builds the ISO (or uses
+  `ILEX_ISO_NEXT=<path>`) and needs no OS image. Markers are matched as
+  complete lines by their first word and a key, never as substrings, and a
+  missing field is an error with the console in it, not a panic. Every one of
+  these trials, and the disk-booted `installer::` ones, ends with the SELinux
+  check of `crates/ilex-e2e/src/selinux.rs` (see "SELinux" above): enforcing and
+  not one denial, or the trial fails and prints them.
+  - The two boot trials start the ISO under QEMU/KVM with Secure Boot required
+    (the secure fixture path with `security_launch=qualification_fixture`: it
+    requires provisioning, that is KVM with SMM and a Secure Boot firmware
+    pair, and fails without it, but does not require the host to be
+    *qualified* by the `security::` tier and never promotes it; a disposable
+    1 GiB disk, no TPM, `ILEX_ISO_NEXT_MEMORY` defaults to 4G). They assert the
+    markers (including `secure-boot=1` read by the guest and cairo for the basic
+    entry), wait for a settled QMP screenshot that is libadwaita's light window
+    with content, and record timing, memory and ISO size in
+    `<state dir>/artifacts/iso-next/next-<entry>.json` beside the screenshots.
+    The basic graphics entry is chosen in GRUB with real key input over a USB
+    keyboard (`LinuxProvider::with_usb_keyboard`). The default entry also
+    writes `next-surface.txt` (below) and fails on any polkit action beyond
+    the allowlist in `iso_next.rs` (`login1.chvt` only). After the page it
+    replaces the rule with the deny-everything one the image had before and
+    presses Ctrl+Alt+F2 (the kernel's active VT must stay `tty1`: polkit
+    refuses logind's `chvt`), restores the rule and presses it again (the
+    active VT, read from the guest, must be `tty2`), types a command into tty2's root shell that only a live root shell
+    can answer (`echo ILEX-TTY2-ANSWER-$((6*7))-$(id -un)`), reads the answer
+    back from `/dev/vcs2` over SSH and checks a QMP screenshot of light text on
+    a dark screen, then presses Ctrl+Alt+F1 and requires the page again, the
+    session unit `active` and no getty on tty1. It then has root run `chvt 2`
+    and `chvt 1` over SSH with the same requirements.
+  - `iso::next_fallback` makes the session fail (fixed credential), requires
+    exactly three failures, then exactly one `ILEX-INSTALLER-FALLBACK` (it
+    waits eight seconds for a second), and reads the message back from the
+    VT's own text, `/dev/vcs1`, over the harness's SSH key; a QMP screenshot
+    must be light text on a dark screen, not a drawn page and not black. It then
+    sends Ctrl+Alt+F2 and Ctrl+Alt+F1 (the kernel's active VT, read from the
+    guest, must be `tty2` then `tty1`) and requires the same message, no login
+    prompt, no getty on tty1 and no second `ILEX-INSTALLER-FALLBACK`.
+  - `iso::next_restart` sends Alt+F4 (the page stays, no restart), kills the
+    compositor with SIGKILL (its socket stays behind; the next attempt must
+    report no stale socket and bring the page up, `NRestarts=1`), then kills
+    the client (`NRestarts=2`), and requires that the fallback never fires:
+    three starts in five minutes are the unit's limit.
+  - `iso::next_ssh_tmpfiles` boots without the harness's credential and gives
+    its key the way bcvk does (a `tmpfiles.extra` credential), and requires
+    sshd to start and accept it.
+  - `iso::next_serial_backpressure`, `_unavailable` and `_stall` boot with
+    `ilex.installer.serial-test`; the first two without the SSH key. The page
+    comes up (readiness is read from `/dev/ttyS1`) and every faulted marker
+    write is reported there, in under a second, as a complete
+    `ILEX-INSTALLER-SERIAL` line with `message=ILEX-INSTALLER-SESSION` and
+    `message=ILEX-INSTALLER` among them, as the injected failure (a pty with
+    stopped output, no device) or, for `stall` (the worker hangs for three
+    seconds, as a UART that never drains would in `close()`), as having met the
+    200 ms deadline (`budget`) or been skipped behind the stuck worker
+    (`busy`); the first three never reach the faulted console, and without a
+    key the forwarded SSH port sends no banner. `stall` has the harness's key
+    and, over it, runs `ilex-installer --marker` with two lines in one process
+    under the same credential (`systemd-run -p ImportCredential=…`): the audit
+    lines must be `budget` then `busy`: the skip-while-stuck path, which the
+    page's own markers (fifteen seconds apart) never reach. What no trial
+    reproduces is a real UART's `closing_wait`: `stall` stands in for it.
+  - `iso::next_helper_usb` and `iso::next_helper_cdrom` run the root helper
+    (`ilex-installerd`, see below) on the real ISO: Secure Boot on KVM, the ISO
+    written to a removable USB disk (`/dev/sda`, writable like a real stick,
+    its writes in a temporary overlay) or attached as an optical drive
+    (`/dev/sr0`), beside the VM's own 40 GiB disk, a 41 GiB disk and a 2 GiB
+    disk, all blank. After the page is drawn the trial saves the live system's
+    layout (`losetup`, every mount table, the device-mapper tree, `lsblk`,
+    SELinux mode and labels) as `next-helper-<medium>-layout.txt`, then calls
+    the helper as `ilex-installer` over the system bus: `Probe` must offer the
+    three blank disks with no reason and no note, and (stick) list the boot
+    medium as the one `live_medium` disk (an optical drive is no candidate, so
+    nothing is `live_medium`); `Plan` on the 40 GiB disk must succeed against
+    the registry (retried for 90 s while the guest's link comes up; it needs
+    `ghcr.io`) with the manifest digest pinned; `Plan` on the stick is refused
+    `live-medium` and on the 2 GiB disk `disk-too-small`; a second `Probe` must
+    answer the same; the three blank disks are looked at before the first plan
+    and after the last and must have no partition table, no signature and no
+    partition both times, and the same checksum of their first and last 4 MiB
+    (a plan writes nothing); the stick carries neither a reason nor a note (a
+    note would be a failed scan of its EFI partition);
+    `ilex-installerd --self-check` must pass on the ISO's own files; no scan
+    or self-check directory may be left in `/run/ilex-installer` after the plans
+    and the self-check; and the ISO must have booted SELinux enforcing with no
+    denial in the audit log of the whole trial: the helper's activation by the
+    bus, its probes (the disk-safety trace's reads), the plans (`skopeo
+    inspect` over the network) and the ESP mounts under `/run/ilex-installer`
+    ran in the helper's own domain. The mounts and the numbers the tracer
+    follows are the ISO's real ones; the container-image tier cannot show them.
+  - `iso::next_helper_loop` boots the same ISO as a **file on another disk**,
+    the way GRUB's loopback with dracut's `iso-scan/filename=` does, and
+    nothing is attached as a medium. The VM's own disk is a GPT with one ext4
+    partition (`ISOHOST`, `/boot/isos/ilex.iso`), built without privileges
+    (`mke2fs -d -E offset=`, `sfdisk`; only the ext4 features GRUB's driver
+    reads); the boot loader is the ISO's own signed shim and GRUB, taken from
+    its `/EFI`, served as a small read-only FAT disk (`VmConfig::esp_dir`,
+    QEMU's `fat:`) with a `grub.cfg` of one entry that loops the file and boots
+    the kernel inside it with the ISO's own arguments plus the
+    `iso-scan/filename=` (`root=live:CDLABEL=…` stays: iso-scan makes the loop
+    device carry the ISO's label). Firmware connects only the disk it boots
+    from, so the config says `connectefi pciroot` first; a boot from the host
+    disk's own ESP, as on a stick or with Ventoy, needs no such line.
+    `ILEX_ISO_NEXT_LOOP_ARGS` adds kernel arguments (`console=ttyS0 rd.debug`
+    shows dracut's own account of a boot that stops early). The trial asserts
+    the same things as the others: the host disk is the one `live_medium`
+    disk, with no reason and no note, and a plan on it is refused
+    `live-medium`; the three blank disks, found by their sizes (virtio names
+    follow the firmware's order), are offered, planned and checked as above.
+    The live disk is identified by its size, which must be the host disk's
+    (the fixture records it), not by being the one left when the others are
+    accounted for; and `losetup` must report a loop device whose backing name
+    is the file-system-relative `/boot/isos/ilex.iso` while `test -e` of that
+    name fails in the guest, so the trial fails if dracut ever changes the
+    name and the helper's search below the file system's mounts stops being
+    what carries it. A stick and the loader's FAT disk never share
+    `bootindex=1`: with both, the stick is first and the FAT disk second.
+    **What dracut leaves** (recorded in `next-helper-loop-layout.txt`): the
+    host disk's ext4 read-only at `/run/initramfs/isoscan` (`/dev/vdb1`), `loop0`
+    on the ISO file (`/boot/isos/ilex.iso`, device `253:17`) mounted at
+    `/run/initramfs/live`, `loop1` on `/LiveOS/squashfs.img` as from a stick,
+    the overlay root, no device-mapper device. The kernel prints **both** loop
+    devices' names relative to their file system's root, though the mounts that
+    carry them are in every table: `stat` of `/boot/isos/ilex.iso` fails, and
+    `stat` of `/run/initramfs/isoscan/boot/isos/ilex.iso` is `253:17` inode 14,
+    what losetup records. The helper refused every disk on this layout until it
+    looked for the recorded numbers below the visible mounts of the device (see
+    the trace below): a file system that can hold a device node and a name no
+    path confirms left the file unresolved.
+- **CI.** `publish.yml`'s `iso_next` input starts only the `installer-next` job
+  and skips the image pipeline and the Anaconda ISO jobs. The run has a
+  concurrency group of its own (`iso-next-<hash of the ref>`, also on main: it
+  neither waits for nor replaces a real publish), is passed `main=false`, and
+  receives no signing secrets: the route job's `sign` output is true only for
+  runs that can sign (push and nightly on main, or a manual run of main that is
+  neither `iso_next` nor `v1_disk`). The workflow has no `pull_request` trigger,
+  and the job additionally requires `workflow_dispatch`, has `contents: read`
+  and reads no secret, so PRs and forks reach neither it nor the key. It builds
+  the ISO in the same privileged Fedora 45 container as the `iso` job, keeps it
+  as the `installer-next-iso` artifact, boots it with Secure Boot (the `iso::next`
+  trials, with the same provisioning-only requirement as locally:
+  a runner without KVM SMM fails them) and keeps `installer-next-evidence`.
+  Nothing releases or publishes it. Runs without `iso_next` are unchanged.
+- **Fingerprints.** The root image's fingerprint (the early `ilex.root-inputs`
+  key and the content fingerprint, `ilex_tooling_linux::fingerprint`) hashes
+  the crates in the dependency closure of the packages the root image builds,
+  not all of `crates/`. Those packages are **declared in one place**,
+  `build/image-crates.toml` (`[[build]]` entries: `packages`, and
+  `no-default-features`; any other key or a package name that is not a plain
+  name is an error). The Containerfile's builder stage builds them by running
+  one script, `python3 -I -S build/build-image-crates.py
+  build/image-crates.toml`, which reads that file, runs exactly those `cargo
+  build --release --locked` commands with `RUSTC_WRAPPER=kache` (in a scrubbed
+  environment, see below) and stages the binaries and completions under `/out`. `image_crates` reads the same
+  declaration (no Containerfile parsing) and walks `cargo metadata --offline
+  --locked --filter-platform x86_64-unknown-linux-gnu` from the named packages
+  over normal and build dependencies (`cargo fetch --locked` runs first: the
+  only step that may use the network).
+  Every package without a registry or git source, workspace member or `path =`
+  dependency, is hashed by its directory; one outside the checkout, or at its
+  root, fails the fingerprint. Registry and git packages are covered by
+  `Cargo.lock`. Today that is `ilexctl` (built
+  with `--no-default-features`), `ilex-agent`, `ilex-enroll` and `drupe`; the
+  installer, the e2e harness, `xtask`, the devkit, the vmctl and the tooling
+  crates are not inputs, so editing them no longer rebuilds, re-signs and
+  republishes every root. Nothing is listed by hand but the declaration: a new
+  dependency of a built package enters the set by itself. The declaration, the
+  script and the Containerfile are inputs themselves (`build/` and
+  `Containerfile` are hashed whole), so editing the declaration changes every
+  root's key. A crate added in a dirty working tree (not at HEAD yet) is covered
+  by the dirty entries. **`Cargo.toml` and `Cargo.lock` stay hashed whole**:
+  any dependency change in any workspace crate (adding `ilex-installer` added
+  708 lines, a GTK bump would again) edits `Cargo.lock` and therefore changes
+  every root's fingerprint once, although the shipped binaries are unchanged.
+  The Anaconda ISO fingerprint (`INSTALLER_INPUTS` in `xtask/src/iso.rs`) also
+  hashes `Cargo.lock`, `Cargo.toml` and `crates/xtask/src/iso.rs`, so those
+  make that ISO due the same way; `installer/next` and the new crate do not.
+  The first main run after this change rebuilds every root and the ISO once
+  (the input set itself changed).
+  **What keeps the build and the closure the same.** Nothing parses shell: the
+  root image's Rust build is kept so narrow that a text check sees all of it,
+  and what a text check cannot see is checked by running the script. Every
+  keyless derivation of the closure (`ilexctl changed`, `build`,
+  `info --image-crates`, `build-publisher.sh`, not only `doctor --self-check`)
+  runs the three guards, the declaration's parser and the script itself (below)
+  before `cargo fetch`; each refusal names the line (drift detection, not
+  adversary-proofing). The signing process reads the recorded closure and
+  never derives it, so it runs neither the script nor cargo.
+  - `check_containerfile` splits the Containerfile into stages (`\`
+    continuations joined, full-line comments dropped). A stage **builds the
+    Rust packages** when any logical line names `cargo`, `rustc`, `rustup`,
+    `rustdoc`, a word that starts with `rust` (`RUSTFLAGS`,
+    `rust-toolchain.toml`; not `ca-trust`) or `image-crates`. Such a stage may
+    contain only: its `FROM quay.io/fedora/fedora:45` (the builder image the
+    root key hashes), `ARG KACHE_*`, `WORKDIR /src`, three pinned `COPY`s
+    (`Cargo.toml Cargo.lock`, `crates/`, the script with its declaration),
+    `RUN [--mount=type=cache…] dnf -y install …` of plain words, the pinned
+    kache download, and the one `RUN [--mount=type=cache…] python3 -I -S
+    build/build-image-crates.py build/image-crates.toml`, exactly once. The
+    mounts are cache mounts at the dnf, cargo registry and kache store targets
+    only. Anything else is refused without being understood: a second `cargo
+    build`, `RUN sh build/x.sh`, `ENV`/`ARG RUSTFLAGS` (or any `CARGO_*`), a
+    `RUN … >> build/image-crates.toml`, a heredoc `COPY`, `COPY .cargo/`, `COPY
+    rust-toolchain.toml`, a `config.toml` copied into cargo's home, a bind
+    mount, `WORKDIR`, `USER`, `SHELL`, `ONBUILD`, another builder image, a
+    second stage that installs cargo, an exec-form or heredoc `RUN`.
+  - `check_build_script` pins the script. From the line `PACKAGE =
+    re.compile(...)` to the end it equals
+    `crates/ilex-tooling-linux/src/build-image-crates.pinned.py` (code lines;
+    comments and blank lines are free; edit both files together). That part
+    reads the declaration (`declared()`: which keys it accepts, that
+    `no-default-features` is read under that name), makes every cargo argv in
+    one function (`cargo_commands`: `--release --locked`, `-p` for each
+    declared package, `--no-default-features` when declared, nothing else),
+    runs its output at one place, starts cargo with `cargo_environment()`,
+    refuses to build while `cargo_configs()` lists any file, and holds every
+    other program the script runs (kache, `install`, the completions). Above it
+    stay the two lists a routine edit changes (`BINARIES`, `COMPLETIONS`), with
+    six imports and nothing that runs a program (`subprocess`, `os.system`,
+    `os.exec*`, `os.spawn*`, `os.popen`), loads or evaluates code (`runpy`,
+    `importlib`, `exec`, `eval`, `__import__`, `compile`, `ctypes`), changes the
+    environment or the directory (`environ`, `putenv`, `chdir`) or names the
+    toolchain outside comments.
+  - `check_build_files` scans every file under `build/` (the declaration and
+    the script have their own checks) and refuses the toolchain's name outside
+    comments, except the one message in `build/image_tree.py` that tells a
+    developer to run `cargo ilexctl build`.
+  - What no line can show (a line above the pinned part that rebinds what the
+    pinned part calls, such as `tomllib.load = ...`) is checked by running the
+    script, in `derived_image_builds` on every derivation. `--commands
+    DECLARATION` prints the argv lists `main` will run (from the same function);
+    the derivation compares them with what the declaration implies. `--environment`
+    prints what cargo and kache start with: the script drops every `CARGO*`,
+    `RUST*` and `KACHE*` variable of the caller (so `RUSTFLAGS`,
+    `CARGO_BUILD_TARGET`, `RUSTUP_TOOLCHAIN` cannot turn on a cfg, a target or
+    a toolchain the closure does not cover) and sets only `RUSTC_WRAPPER=kache`
+    and the read-only host store. `--configs` prints every `.cargo/config` and
+    `.cargo/config.toml` cargo would read (the working directory, each parent,
+    cargo's home), and the build stops when it lists any: `[build]`
+    target/rustflags, `[env]` and `[patch]` there would change what is built
+    and nothing the fingerprint hashes. The tracked `.cargo/config.toml` (the
+    `ilexctl` alias) is not copied into the builder stage.
+  - The closure derivation (`cargo fetch` and `cargo metadata`) runs with the
+    `*RUSTFLAGS`, `*RUSTDOCFLAGS` and `CARGO_BUILD_TARGET` variables removed,
+    as the build does, so a developer's shell resolves the closure CI does.
+  **Out of scope** (this finds drift, not an adversary): a spelling that never
+  writes `cargo`, `rustc`, `rustup`, `rustdoc` or a word starting with `rust`
+  (`c""argo`, a variable that holds the name, a script generated at build time),
+  a base image that already has cargo configuration or another toolchain, and
+  `build.rs` scripts of the crates. Review any script a `RUN` adds.
+  `ilexctl doctor --self-check` runs the fixtures, each refused for the exact
+  line it changes: the Containerfile's (4 accepted, 62 refused: every shell
+  bypass the earlier parser's reviews found, a `RUN sh build/x.sh`, `RUSTFLAGS`
+  and its relatives in `ENV`/`ARG`, edits of the declaration, copies of
+  `.cargo`/`rust-toolchain`/`config.toml`, mounts, another base image, the
+  script run twice or never or on another declaration), the script's (2
+  accepted, 44 refused: an extra `-p`, `--workspace`, `--features`, `--target`,
+  `--config`, a second `subprocess.run`, another helper, `os.system`/`exec*`/
+  `spawn*`, `runpy`/`importlib`/`exec`/`eval`, an unscrubbed or wrongly
+  scrubbed environment, the declaration's flag read under `no_default_features`,
+  a build appended while reading it, another key allowed, a looser package
+  pattern, a reader rebound above the pinned part, a configuration check that
+  misses a parent or cargo's home), the derivation's (2 accepted, 4 refused:
+  the checks `changed`, `build`, `info --image-crates` and `build-publisher.sh`
+  run, on a scratch checkout: a binary added to `BINARIES` passes; the
+  underscore key and an appended build are refused by the pinned text, a
+  rebound `tomllib.load` and `os.path.lexists` only by running the script), the
+  `build/` scan's (3 accepted, 6 refused) and the declaration's (1 accepted, 12
+  refused). It checks that the checkout's own Containerfile, script and
+  `build/` pass the same derivation: the real script's `--commands`,
+  `--environment` (with `RUSTFLAGS`, `CARGO_BUILD_TARGET` and 14 other
+  variables planted) and `--configs` (a configuration planted in the working
+  directory, a parent and cargo's home), and it checks the derivation's scrub. It also runs the closure
+  fixtures (a path dependency in the checkout, one outside, one at the root,
+  registry and git packages, a dev edge) and the recorded-closure fixtures; a
+  regression is a failed check.
+- **A VM that never starts.** About one boot in a hundred on the Boat hosts
+  (2 of 208 trial boots over 13 runs of the whole `iso::next` set, in a
+  different trial each time) never ran the guest: the serial log stayed empty
+  for the whole deadline and a rerun passed. The cause was QEMU, not the ISO:
+  its VNC server asks for a default audio backend, QEMU 11 probes PipeWire
+  first, and libpipewire's `pw_thread_loop_stop` intermittently never returns
+  when no daemon is there (main thread in `pthread_join` inside `qemu_init`,
+  QMP socket present but silent, vCPU threads at 0 s CPU). The `-audiodev none`
+  that removes the probe belongs to the VM harness (`ilex_devkit::qemu`) and is
+  described with it, not here. The trials only report such a hang quickly and
+  say what QEMU was doing:
+  a guest whose serial console stays empty for 60 s after QEMU created it fails
+  with "the guest wrote nothing on the serial console … it never started"
+  (OVMF prints within about five seconds), instead of waiting out the 420 s
+  marker deadline; `iso::next_ssh_tmpfiles` waits for that first byte before
+  its 300 s SSH wait; and any failed `iso::next` trial writes
+  `next-<trial>-qemu-state.txt` beside its screenshot: QMP status, each CPU's
+  instruction pointer, per-thread CPU time over two seconds and kernel wait
+  points (plus a gdb backtrace when gdb is installed), the size and age of the
+  serial files (and the tail of `firmware.log`, which exists when the VM was
+  started with `ILEX_VM_FIRMWARE_LOG=1`), `qemu.log`, and the host's load,
+  pressure and steal time. Each trial prints its duration. The
+  `seconds_power_on_to_page` in `next-<entry>.json` starts when QEMU has
+  started, not before the wait for a VM slot (it used to include that wait:
+  40 to 220 s for a boot that takes 30).
+- **Measured** 2026-11-25 on a Boat sandbox (16 vCPU, 32 GiB, nested KVM, the
+  GNOME edition). After the review fixes (2026-11-26) the ISO is 1,494,851,584
+  bytes (1.39 GiB): 438 MiB under the Anaconda network ISO's 1.82 GiB and 0.61
+  GiB under the 2 GiB limit, and the image has 698 packages, 1,826 MiB
+  installed (the first build: 1,494,847,488 bytes, 706 packages, 1,850 MiB;
+  largest: llvm-libs 146 MiB,
+  python3-botocore 121, kernel-core 102, kernel-modules 80, mesa-dri-drivers 53,
+  podman 53; `largest-packages.txt` lists ten). `iso --next` took 14 minutes
+  with the base images and RPMs already local, mostly image-builder; the
+  interface's builder stage took 1 minute 42 seconds with a cold kache (0 of 136
+  crates restored, `gtk4` the slowest at 33 seconds). Booted under QEMU/KVM with
+  Secure Boot, 2 vCPUs and 4 GiB, the window was up 5 to 25 seconds after the
+  kernel started (6 to 8 on a quiet host; GRUB's 10 second countdown comes
+  before that, and the basic entry's key press skips it). GTK draws with
+  `GskGLRenderer` (llvmpipe) on the default entry and `GskCairoRenderer` on the
+  basic one. Fifteen seconds after the window the guest used 595 to 626 MiB
+  (default) or 503 to 520 MiB (basic), with 3.2 GiB available; at 2 GiB it used
+  513 and 410 MiB and had 1.3 GiB available. GNOME Kiosk was not compared with
+  cage.
+
+## The next installer's root helper
+
+The next installer (a Rust interface per shell on its own live ISO, replacing
+Anaconda) is built beside the released Anaconda ISO. Its live image is
+`installer/next/`; this section covers the shared model and the root helper
+only: it probes, plans and, on `Apply`, installs a signed composition to a whole
+disk (no encryption yet). Everything up to the first write is checked again at
+`Apply`; the interface that asks a person for the answers is not here.
+
+`crates/ilex-installer-model` holds what the host that writes the composition
+table and the installer that reads it must agree on: the table types
+(`Table`, `Machine`, `Shell`, `Composition`, `Profile`) and their validator,
+editions, DMI detection and the choice order, and the probe, plan, answers and
+state schemas. The types moved out of `ilex-tooling-core`; `ilex_devkit::installer`
+still re-exports them and `ilex_devkit::installer_model` is the crate. The host
+still builds the table with `installer::table`, and its serialization is
+byte-identical (field order and names are the file format), so the Anaconda ISO's
+`compositions.json`, `iso.yaml` and release notes do not change. The installer
+fingerprint does change once, because its inputs include `ilex-tooling-core`'s
+`installer.rs` and `config.rs`, the model crate and the Cargo files.
+
+- **Editions.** One ISO installs one shell. `edition.json` (written into the live
+  image from `installer/next/editions.toml`, where the display name lives) names
+  it; the identifier is the shell. `Table::for_edition` keeps the compositions
+  whose shell list is exactly the edition default's, in order: the table's default
+  when it starts with the edition's shell, else the edition's first generic
+  composition. A composition that merely starts with the edition's shell
+  (`generic.gnome.ilex` for the GNOME edition) belongs to another edition and is
+  not offered. There is no desktop choice; a machine gets the default's shell
+  list or nothing. A table with neither an edition record nor `--edition` is the
+  Anaconda path's: its default composition's shell (GNOME). `--table` brings the
+  `edition.json` beside it; a record that exists but cannot be read stops the
+  helper, only an absent one means the Anaconda path.
+- **Detection** is `installer/chooser/ilex-installer-choice` ported with the same
+  meaning: exact, case-sensitive comparison of the four SMBIOS strings (stripped
+  as Python's `strip` does); a vendor or model alone never matches; two
+  matching machines fall back to the default and say so; a recognised machine
+  without a composition falls back with its own reason. `Table::detect` is the
+  chooser's own rule on a whole table; the helper uses `detect_for_edition`, which
+  runs it on the whole catalogue and maps the result into the edition, so two
+  machines matching the same computer are a conflict even when one has no
+  composition in this edition, and a machine that has none here is reported
+  as such. The choice order is the last `ilex.composition=<tag>` kernel argument,
+  then `/run/ilex-installer/choice` (a tag or the schema-1 record), then
+  detection. An unknown tag is an error that lists the offers. `Selected::serial_line`
+  keeps `ILEX-COMPOSITION <tag> (<reason>) installs <ref>`; the interface prints it.
+- **`ilex-installerd`** is a root service on the system bus, `org.ilex.Installer1`
+  at `/org/ilex/Installer1` (zbus), started at boot by `ilex-installerd.service`
+  (`Type=dbus`, `Restart=on-failure` within a start limit, no core files,
+  `PrivateMounts=yes`, a 0700 runtime directory) and by bus activation if a
+  caller gets there first. Its bus policy (`org.ilex.Installer1.conf`) lets root
+  own the name and call it and `ilex-installer` call it; anyone else, including
+  introspection, gets `Access denied`. The shell on tty2 is a root autologin, so
+  it is allowed like root. With the helper stopped, the installer's call starts
+  it and a refused user is denied (the tier checks both); dbus-broker starts an
+  activatable service for any call to its name before it applies the policy, so
+  a refused call still starts the helper, which is harmless: it is started at
+  boot anyway and answers only the allowed. Every method takes and returns JSON text and none takes
+  a path, an image reference, a kernel argument or a command. A crashed helper
+  restarts and forgets its plans and secrets, and reports an installation it did
+  not end as failed (see **Apply** below). `Probe()` reports the helper
+  and edition, firmware (UEFI, Secure Boot, setup mode), `ilex-enroll`'s probe
+  verbatim, the DMI identity and detection, the boot-argument selection (or its
+  error), this edition's catalogue, the disks and memory. A disk has a stable id
+  (`/dev/disk/by-id`: `nvme-eui.*`, `wwn-*`, then any other name that starts with
+  a hardware prefix (`nvme-`, `ata-`, `scsi-`, `usb-`, `mmc-`, `virtio-`, `ccw-`,
+  `ieee1394-`), then the bus path, then the kernel name; **never a link that
+  describes what is on the disk** (`lvm-pv-uuid-*`, `dm-name-*`, `dm-uuid-*`,
+  `md-uuid-*`, `md-name-*`), which sorts ahead of `virtio-`, `usb-` and `scsi-`
+  and disappears when `wipefs` erases the signature, so that `systemd-repart`
+  then found no disk to write), model, serial, size, bus, `removable`, the partition table,
+  partitions, free extents (whole MiB between partitions, inside GPT's usable
+  range) and other systems found: EFI loader directories, Windows, BitLocker,
+  Linux, LUKS and Apple filesystems; **a signature on the whole disk itself**
+  (a file system, LUKS, an LVM physical volume, a swap area or any other
+  signature with no partition table: `partition` is empty and the description
+  says `on the whole disk`), and **an EFI system partition that could not be
+  read** (`unreadable-esp`: it may hold any loader). Zram, loop, optical, read-only and
+  network-attached devices (nbd, iSCSI, Fibre Channel, SRP, NVMe over fabrics)
+  are not disks. An NVMe disk is local only when sysfs shows every controller
+  behind it on PCIe: with native multipath (Fedora's default) `device` is the
+  NVMe subsystem, so the helper reads the `transport` of its `nvme<digits>`
+  controllers (not its namespaces or other entries) and of `multipath/*/device`;
+  a fabric, a controller whose transport cannot be read or reads empty, and a
+  namespace with no controller found all count as the network. Two flags keep
+  the running system's own disks out of reach, and they follow one rule
+  (`crates/ilex-installerd/src/topology.rs`): **a disk is offered as a target
+  only if the helper has positively traced every current use of block storage
+  and none reaches that disk.** The uses are every mount of every mount
+  namespace (the live medium's or not), every `/proc/swaps` entry, every bound
+  loop device (mounted or not), every zram writeback device and every external
+  file system journal. Each is followed to whole disks through the kernel's own
+  tree, never the text of a source, a device node's name or a path's prefix:
+  - a device number (`/sys/dev/block/M:m`) or a device node to a kernel name,
+    a partition to its disk, a stacked device (device-mapper, MD: Ventoy's
+    `/dev/mapper/ventoy`) down through `slaves/`, and the
+    devices a file system names in its options (`logdev=`, `rtdev=`,
+    `journal_path=`). A device node is the device its `st_rdev` says (`stat`,
+    through any `/dev/disk/by-*` link, for `UUID=`/`LABEL=`/`PARTUUID=`/
+    `PARTLABEL=` sources too), never the one its name suggests: anyone with
+    `mknod` can name a node anything;
+  - a swap area by its `Type` in `/proc/swaps`: a `partition` must stat as a
+    block device and is that device; a `file` cannot be placed (the kernel
+    lists only its name, and it is on some block file system) and is
+    untraceable;
+  - a multi-device btrfs to every member (`/sys/fs/btrfs/<uuid>/devices/`);
+  - zram: `/sys/block/zram<N>/backing_dev` of **every** zram device (not only
+    those that are swap areas or mounted), because zram claims its writeback
+    device exclusively and the device shows no `holders/` or `slaves/` link.
+    `none`, empty or no such file (a kernel without writeback) is no use; a
+    device that cannot be found or a file that cannot be read is unresolved;
+  - ext4 journals: `/proc/fs/jbd2/` has an entry per journal, `<device>-<inode>`
+    for one inside its file system and `<device>` (`!` for `/`) for one on a
+    device of its own, which no mount option shows. An entry that is itself a
+    block device name is an external journal and is traced; one that is
+    `<device>-<digits>` of a known device is internal; any other is unresolved;
+  - a loop device to its backing file as the kernel recorded it: the helper
+    reads `losetup --json --list --output NAME,BACK-FILE,BACK-INO,BACK-MAJ:MIN`
+    (the kernel's `lo_device` and `lo_inode`, an empty column meaning unknown)
+    and does not place the file by its name. A number with a major names the
+    block device the file's file system is on, so a mount that was detached
+    lazily, a deleted file or a name that now means another file changes which
+    disk is in use. An anonymous number is the mount that carries it: tmpfs,
+    ramfs, network file systems and virtiofs hold no local disk, a block file
+    system is traced, `overlay` (its bytes are in its layers) and the kernel's
+    interfaces are not places a file can be traced from, and `devtmpfs` holds
+    device nodes, so it counts only for a file confirmed to be one. A block
+    device node backing a loop (`losetup /dev/sdb1`) shows the device of `/dev`
+    and the node's inode: once `stat` of the name returns that same
+    `(dev, ino)`, its `st_rdev` is followed too. A btrfs subvolume's own number
+    appears in no mount table: the file is then found by name, confirmed by
+    `(dev, ino)` and by a name with no link or `..` in it
+    (`canonicalize(path) == path`; the text of any other name would send the
+    lookup to other mounts), and the btrfs mounts that contain it are traced.
+    **Locating the file.** The kernel prints the name of a file dracut opened
+    in the initramfs relative to its file system's root (`/LiveOS/squashfs.img`,
+    `/boot/isos/ilex.iso`), so no path in the helper's namespace is the name.
+    The file is looked for by the name and then at the name below the mount
+    point of each visible mount of the device number the kernel recorded
+    (`/run/initramfs/isoscan` + `/boot/isos/ilex.iso`): only a path that
+    `stat`s to exactly the recorded `(dev, ino)` locates it (an inode a loop
+    device holds open is not reused, so the numbers are the file's, never a
+    namesake's), and its type is then known: a regular file resolves, a block
+    node is followed through its `st_rdev`. A path is a way to the file and
+    never changes what the numbers say, so locating can only turn an unresolved
+    use into a resolved one, and does so only with an exact match.
+    **A file no name locates** (deleted, hidden by a mount, its file system's
+    mounts all detached) may still be a block device node of any disk, which no
+    number says (`mknod /tmp/n b 8 1; losetup -f /tmp/n; rm /tmp/n`); it is resolved only
+    where a node cannot have been opened as a device (every mount that carries
+    the file system is `nodev`: the mount's own options, not the file system's)
+    or cannot be there after the fact (an image: iso9660, udf, squashfs, erofs,
+    found among the mounts or, for a file system that was detached, by the
+    signature lsblk reads from its device); everywhere else the use is
+    unresolved. Every loop device sysfs says is bound must also be in losetup's
+    table, and each bound loop device is a use of its file's disk whether or not
+    anything mounts it;
+  - a mount is **not** block-backed only if its file system type is on an
+    explicit list of in-memory, kernel-interface (`proc`, `sysfs`, `cgroup2`,
+    `devpts`, `devtmpfs`, `mqueue`, ...), layered (`overlay`: each layer is a
+    mount of its own) and network (`nfs`, `cifs`, `9p`, `virtiofs`, ...) types,
+    and a desktop session's FUSE services **at their paths**: `fuse.portal` at
+    `/run/user/<uid>/doc` and `fuse.gvfsd-fuse` at `/run/user/<uid>/gvfs`.
+    Every other type (btrfs, zfs, FUSE block file systems, the same FUSE type
+    anywhere else, a type nobody has heard of) must be traced to a device.
+  Which tables are read: the helper runs with `PrivateMounts=yes`, so it sees
+  only the host mounts that propagate to it, and none made under a
+  `--make-private` subtree. It reads its own table, the host's
+  (`/proc/1/mountinfo`) and that of every other mount namespace a process is in
+  (`/proc/<pid>/ns/mnt`, one table per namespace, processes oldest first). The
+  host's and its own must be readable or the probe fails; another namespace's
+  table that cannot be read is a use that was not seen (unresolved). A
+  namespace counts as read only once one of its processes' tables has been, so a
+  process that exits first hides nothing of the others in its namespace. A
+  task that is exiting is a process that is gone, not a table that cannot be
+  read: its `ns/mnt` answers `ENOENT`, `ESRCH` or `EACCES`, and its `mountinfo`
+  `EINVAL` (no namespace proxy left), confirmed by looking at `ns/mnt` again. The ESP scan stays in its own
+  `unshare --mount`. Paths (the btrfs subvolume lookup, a loop file's name) are
+  resolved in the helper's own namespace only.
+  What cannot be traced (a device number sysfs does not list, a source that
+  names no device, a loop device with no file name, inode or device in losetup's
+  table or missing from it, a file the name does not confirm on a file system
+  that can hold a device node, an unknown file system type, a swap file, a
+  directory that exists but cannot be listed) is never guessed at: every disk
+  is `in_use` with the reason that the installer cannot tell whether it holds
+  the medium it started from or is in use. Only a directory that is not there
+  lists nothing; any other failure to read one is a failure to trace. A mount
+  table or `/proc/swaps` line the helper cannot parse, and a table, `/proc/swaps`
+  or `losetup` that cannot be read, fail the probe (a dropped line would hide a
+  use). The two flags:
+  - `live_medium`: the disk reached through the live system's own mounts:
+    `/run/initramfs/live` and `/run/initramfs/isoscan` (dracut's, with the host
+    disk of an ISO file), `/run/rootfsbase` (the root image's squashfs), any
+    iso9660 or udf mount and a root on dracut's `live-*` device-mapper devices,
+    with the loop and device-mapper chains behind them. It does not depend on
+    those mounts still being there: anyone may `umount -l /run/initramfs/live`,
+    and the disk is found through the loop device's recorded number.
+    **The real ISO's layout** (booted from a USB stick under QEMU with Secure
+    Boot, `iso::next_helper_usb`, and as an optical drive,
+    `iso::next_helper_cdrom`; the evidence is kept in the artifacts): its
+    squashfs holds the root tree directly, so dracut's dmsquash-live mounts an
+    **overlay root** (`LiveOS_rootfs`, `lowerdir=/run/rootfsbase`, upper and work
+    directories in `/run`, which is tmpfs) over `/run/rootfsbase` (squashfs on
+    `loop0`). The ISO's file system is at `/run/initramfs/live` (iso9660 on
+    `/dev/sda1`, the stick's first partition, or `/dev/sr0`), and `loop0`'s file
+    is `/LiveOS/squashfs.img`, a name the kernel prints relative to its file
+    system's root, so no name in the helper's namespace confirms it; it is
+    located below the iso9660 mount that carries its device number
+    (`/run/initramfs/live/LiveOS/squashfs.img` is `7:0` inode 4102, what losetup
+    records), or, once that mount is gone, resolved by the signature lsblk reads
+    from the device. There is **no
+    device-mapper device and no other loop device**: the `live-rw` snapshot
+    over `rootfs.img` (whose copy-on-write file is `/overlay (deleted)` on the
+    initramfs' own file system, which no mount carries) is dracut's layout for
+    an image with `LiveOS/rootfs.img`, which this ISO never has; the helper
+    would refuse every disk under it, as it does for any file that could be a
+    device node. The live ISO boots SELinux enforcing, and the helper runs in
+    `install_t` (see "SELinux" below), so none of this is read or written
+    outside what that domain may do.
+  - `in_use`: why the running system is using the disk otherwise, one sentence
+    each: a mounted partition (a btrfs's other devices, an XFS log device), an
+    entry of `/proc/swaps`, a loop device attached to a file or block node on
+    it (mounted or not), a zram writeback or an ext4 journal on it, or a device
+    stacked on it or a partition (non-empty `holders/`: LVM, MD, dm-crypt). A
+    disk that carries an old Linux
+    installation is therefore offered only while the live system has not
+    activated its volume group or array, so the live image activates none:
+    `rd.lvm=0 rd.md=0 rd.luks=0 rd.dm=0` is on both boot entries and baked
+    into the initramfs (dracut's `--kernel-cmdline`, for a bootloader that
+    brings its own command line; `rd.dm=0` is DM RAID only, not the
+    device-mapper dmsquash-live uses), and `/etc/lvm/lvmlocal.conf`
+    (`event_activation = 0`, an empty `auto_activation_volume_list`) and
+    `/etc/mdadm.conf` (`AUTO -all`) quiet udev once the system is up. Activating
+    one by hand (`vgchange -ay`) makes its disks `in-use` again until it is
+    deactivated from the tty2 shell; the helper never deactivates anything.
+  **The backstop.** The trace follows what the kernel lists; the kernel's own
+  claim on a disk is the authority on what it holds. In every probe, for each
+  candidate whole disk that is not the live medium and for which the trace found
+  no use, the helper opens the disk `O_RDONLY|O_EXCL` (after checking that the
+  node is the block device with the number sysfs gives) and closes it at once.
+  On a block device `O_EXCL` claims it as a mounted file system or a swap area
+  does, and the kernel answers `EBUSY` while anything holds the disk **or any of
+  its partitions**: a partition mounted (even by a mount that was unmounted
+  lazily and is still held by a process), swap, a file system journal, a zram
+  backing device, a device-mapper, MD or multi-device btrfs/f2fs member, and
+  whatever else claims a block device. `EBUSY` makes the disk `in_use` ("held
+  open exclusively by the running system ... though none of what the installer
+  traced says what"); it is retried for half a second so that a claim somebody
+  else holds only for an instant (a `mkfs` or file system check run from tty2,
+  a partition rescan) does not make a disk flicker (`Probe` and `Plan` never
+  overlap: the helper does one at a time, and its own ESP scan has ended before
+  the next disk is claimed); any other failure to open it is a reason too.
+  `Plan` opens the chosen disk again after the registry and `systemd-repart`
+  have answered, immediately before it returns, and refuses (`in-use`) if the
+  kernel now says it is held. That re-check only narrows the window between the
+  plan and the write: **`Apply` claims the disk again right before it writes**
+  and does not rely on an earlier answer (see **Apply** below for how long it
+  holds the claim and why). Holding a whole disk exclusively makes the kernel
+  refuse exclusive opens of its partitions (`mkfs`, `cryptsetup`, `mount` on
+  `/dev/sdXN` fail with `EBUSY` while the whole-disk claim is open).
+  The exclusive open does **not** replace the trace: a loop device attached to a
+  block device node (`losetup /dev/sdb1`) claims nothing, which is what the
+  trace of loop devices is for. **Known limit of both:** a writer that never
+  claims the disk is invisible to the trace (it lists mounts, swap, loop
+  devices, zram and journals, none of which it is) and to the exclusive open
+  (nothing is claimed for it to conflict with): `dd of=/dev/sdX`, a virtual
+  machine given the disk directly, or a program that writes to the node. The
+  helper offers such a disk as free, and only the person running those can
+  prevent the damage.
+  **The threat model** is accident: the helper protects against wiping the live
+  medium or storage in use by mistake, including after ordinary administrator
+  actions on tty2 (mounting, `swapon`, `losetup`, `umount -l`, activating a
+  volume group). A deliberate root saboteur (spoofing a FUSE subtype, crafting
+  device nodes and deleting them) is out of scope, though a gap is closed where
+  that is cheap and fails closed (the tmpfs/`nodev` rule, the `st_rdev` rule and
+  the FUSE paths above). `Apply`, which writes to a disk, opens it exclusively too.
+  An ESP is mounted read-only (`noexec,nodev,nosuid`) by a child of the helper
+  (`--scan-esp`) inside `unshare --mount`, at a per-call mount point in a
+  private 0700 directory the helper made under its runtime directory (never a
+  symlink, owner-checked, removed empty): the mount exists in that child's mount
+  namespace only, so neither the host, the daemon, another probe nor the
+  `--self-check` shares it, and an unmount failure is reported (in `notes`, and as
+  a plan warning) rather than ignored. An ESP that cannot be read says so and the
+  list of other systems may be incomplete.
+  `Plan(request)` takes `composition`, `disk`, `mode`, and
+  optionally `encrypt` (on), `tpm` (`auto` with encryption, else `off`),
+  `recovery_key` (off: an interface that can show a key to a person sets it; the
+  answers file cannot, and needs encryption),
+  `keyboard` (`us`), `language` (`en_US.UTF-8`), `time_zone` (`Etc/UTC`),
+  `host_name` (`ilex`) and `administrator`; unknown fields are refused. It
+  probes afresh and refuses, with a JSON `{code, field, message}` as the error
+  message: a BIOS boot (`unsupported-firmware`: the installer is UEFI only), a
+  composition outside the edition (`vm` is named as never installed
+  on hardware), `free-space` mode (a later PR), a disk id not in the probe, the
+  live medium, a disk in use (`in-use`), a disk under `MIN_DISK_BYTES` (512 MiB ESP
+  + 1 GiB `/boot` + 30 GiB root + alignment, to be set from a measured install),
+  TPM without encryption, an administrator name that is reserved, and a malformed
+  or unavailable language, keymap, zone or host name. An administrator name is
+  at most 31 bytes (as systemd and `build/compose.py` limit them) and may not be
+  any name the live image defines in `/etc/passwd`, `/etc/group` or `sysusers.d`,
+  a `systemd-` name, one of the installed image's own (`ilex-homed`, `gamemode`,
+  `sshd`, `tss`, `chrony`, ...) or a daily-profile name. A time zone is a zone
+  file of the zoneinfo tree that starts with the TZif magic (so not `zone.tab` or
+  `leapseconds`), outside `posix/` and `right/` and not `posixrules`. A language
+  is a UTF-8 glibc locale name (`ll[l]_TT.UTF-8`, `C.UTF-8`, an optional `@modifier`);
+  that is a syntax check only, because the live image carries no list of the
+  locales the installed system can generate (glibc's `SUPPORTED` is not in it), so
+  a well-formed name for a locale the system lacks falls back to the C locale there.
+  A refusal names its field and may repeat that field's own (non-secret) value
+  (`unknown time zone X`); a request that is not valid JSON of the schema is
+  refused with a message that never quotes a value of the document, only a
+  position and the name of a missing or unknown field, because a caller may have
+  put anything, a secret included, in a mistyped field. The tier sends a secret in
+  an unknown field, a mistyped field and an unknown mode and requires that it
+  never comes back. `Plan` resolves the tag with `skopeo inspect --raw` to the
+  manifest digest (it hashes exactly the returned bytes), reads the download
+  size and `org.opencontainers.image.version`/`revision` from the config, and runs
+  `systemd-repart --dry-run=yes --empty=force --seed=<plan seed>` on the shipped
+  layout directory itself: `/usr/lib/ilex-installer/repart/whole-disk` or
+  `whole-disk-encrypted`, each a complete layout (one root partition) that
+  repart is pointed at as it is, never assembled or copied. The registry is
+  untrusted until the signature is checked at pull, so its answers are checked
+  before use: a digest must be `sha256:` and 64 lower-case hex digits before it
+  reaches skopeo, a child manifest fetched by digest must hash to that digest, an
+  image manifest must have a config and layers with sizes (added with checked
+  arithmetic), only `manifest unknown` and `name unknown` (any case) mean the image
+  is absent, text shown from it has no control characters, and every tool's output
+  is bounded (a tool that prints more is stopped and the call fails). The plan holds
+  a 128-bit id, the seed that makes Apply create the same UUIDs, the normalised
+  request, the image (`target` tag and pinned `source@digest`), the partitions, what
+  is erased and the other systems it destroys, the planned unlock method with the
+  probe's reason code, and warnings. The registry answer is metadata: signatures
+  are enforced when the image is pulled. `State()` reports the stage (`idle` until
+  Apply exists), the latest plan id and a record at `/run/ilex-installer/state.json`.
+  The helper keeps the last eight plans in memory. `ilex-installerd --self-check`
+  prints `ILEX-INSTALLERD-CHECK OK: …` after exercising the model's rules and
+  the parsers on fixtures (manifests a registry could send, the live medium and
+  disks in use in a sysfs tree of the kernel's shape, scratch directories, output
+  limits, zone and name files), the shipped definitions against the model's sizes,
+  `systemd-repart` on a sparse file (both layouts, repeatable with a seed) and
+  a real probe of the system. `--table`, `--edition`, `--definitions` and
+  `--run-dir` are for development; `--dmi-dir`, `--efi-dir` and `--cmdline` are
+  hidden and exist for the `installer::` tier.
+- **Answers** (`answers.toml` on a volume labelled `ILEX-ANSWERS`, or
+  `ILEXANSWERS` on a FAT volume) have their
+  schema and syntax checks in the model: `[install]` (`composition`, `disk`,
+  `mode`, `confirm-erase` repeating the disk id, `reinstall`, false unless
+  given), `[encryption]` (`enabled`,
+  `tpm`, `passphrase`), `[system]` and `[administrator]` (`name`, `password`).
+  Secrets never print (and each one's text is zeroed when it is dropped), and a
+  TOML error names the line and column but never the
+  text (toml's own message quotes the line). The administrator's password may not
+  contain a line break or NUL; the passphrase is refused by the same rule as every
+  passphrase (empty, over 512 bytes, a control character: what the boot prompt
+  cannot take). Answers that encrypt (the default) need `[encryption] passphrase`;
+  answers mode hands it to the helper as a sealed memfd with `SetSecret`, as the
+  interface does, and `tpm` left at its default (`auto`) gets the plan's note that
+  the security chip is not used yet.
+  The volume is read and the answers applied by **answers mode** below.
+- **Apply** (`SetSecret(plan, kind, fd)`, `Apply(plan, erase_disk)`, `State()`
+  and the signals `Progress(stage, fraction, message)` and `Finished(outcome)`,
+  `crates/ilex-installerd/src/{apply,install,secret,policy,target,progress}.rs`)
+  installs what a plan describes to a whole disk: `partition → [encrypt →]
+  mount → image → configure → account → finalise`, the plan's 9.1 order (the
+  recovery key and the TPM, which it also lists, come in a later change; an
+  encrypted installation is described in **Encryption** below). `SetSecret` takes
+  the administrator's password (`admin-password`) and, for a plan that encrypts,
+  the disk's passphrase (`disk-passphrase`) as the file descriptor of a **sealed memfd**
+  (`F_SEAL_SEAL|SHRINK|GROW|WRITE`, 4 KiB at most; anything that is not one is
+  refused without saying what it held), reads it once into memory of its own
+  (an anonymous mapping of whole pages that nothing else shares, `mlock`ed, kept
+  out of core dumps and not inherited by a child; wiped, unlocked and unmapped
+  when dropped, so unlocking one secret never unlocks another's page), and keeps
+  it for that plan only (a plan that is forgotten, or a helper that restarts,
+  loses it). `SetSecret` is refused (`installation-active`) while an installation
+  runs. The helper, and answers mode, which holds the password for a moment too,
+  have no core dumps
+  and are not traceable (`PR_SET_DUMPABLE=0`); the password reaches `chpasswd` on
+  its standard input and no argument, log line, state field or message ever holds
+  it (the tier greps the helper's files, the journal and the target for it).
+  - **Before the first write**, in this order, each refusal naming its code
+    (`ErrorCode`) and field and leaving every disk byte for byte as it was:
+    the plan is one this helper made and is under 15 minutes old by the helper's
+    own `CLOCK_BOOTTIME` (which counts the time a machine is suspended and which
+    neither a wall clock set back nor an NTP step moves; not the wall clock the
+    plan document carries) (`unknown-plan`,
+    `plan-expired`); whole-disk mode needs `erase_disk` to repeat the disk's id
+    (`invalid-field`); the administrator's password was set, and the disk's
+    passphrase when the plan encrypts (`missing-secret`, naming `admin-password` or
+    `disk-passphrase`);
+    **the image's signature is accepted by the installer's policy** (`signature`):
+    `bootc` verifies when it pulls, which is after the disk has been erased, so the
+    pinned `repository@sha256:...` goes first through `skopeo copy` (containers-image,
+    the code `bootc` calls) into a scratch directory, which checks the policy and the
+    signatures before it fetches a layer and is stopped at the first one, and what it
+    fetched is thrown away. The image is accepted only after skopeo says `Getting
+    image source signatures` (which it prints once the policy has let the image
+    through) and a layer or the config follows, with no error line before it: an
+    error line ends every chance of acceptance, however many `Copying blob` lines
+    come after it, and a run that ends in success without those words is no
+    verdict. A rejection says so; a network failure is `registry`,
+    not a verdict. Then a fresh probe still shows the same disk (id,
+    path, model, serial, size, bus, partition table, partitions: `disk-changed`),
+    not the live medium and not in use; **the helper claims the whole disk
+    exclusively** (`O_EXCL`; `in-use` otherwise); with the claim held, the disk
+    is probed again (the held disk is not claimed a second time and its ESP not
+    mounted) and `systemd-repart`'s dry run with the plan's seed must equal the
+    plan's partitions exactly. The disk must also have a `/dev/disk/by-id` name
+    that leads to the device held (`unknown-disk` otherwise: see the next item).
+    Only then is the plan forgotten (it is the installation's now, and a second
+    `Apply` of it is `unknown-plan`), the first stage recorded and the
+    installation thread started; `Apply` returns the state as it begins. While it
+    runs, `Probe`, `Plan`, `SetSecret` and a second `Apply` are refused
+    (`installation-active`).
+  - **How long the claim is held.** From the last look until the moment before
+    the partition stage's first tool, and not a moment longer. `systemd-repart`
+    262 (the live image's) formats a new partition through its own device node
+    (`Formatting /dev/vda1 as vfat`), which the kernel refuses while any other
+    open of the whole disk holds it exclusively: under a held claim it failed with
+    `mkfs.vfat: unable to open /dev/vda1: Device or resource busy` and `Failed to
+    reread partition table: Device or resource busy` (measured on the live image
+    in a VM with `O_EXCL` held from another process). It uses no loop device. Nor
+    can a later stage hold it: `mount`, `mkfs` and `bootc` open the partitions
+    exclusively. So the stage is recorded and `disk_changed` set first, the claim
+    ends, and the stage runs `wipefs --all`, waits until sysfs lists no partition,
+    **settles udev** (`udevadm settle`: the links of what was on the disk go only
+    now) and checks that the disk's `/dev/disk/by-id` name still leads to the disk
+    that was wiped (otherwise it stops before `systemd-repart` with a sentence, not
+    an `ENOENT`), and runs `systemd-repart`, whose JSON must
+    equal the plan's partitions (their device nodes aside: repart names a
+    partition after the path of the disk it is given); the new partitions are
+    then found by their UUIDs
+    and checked against sysfs (a block device, the planned number, the planned
+    disk as parent, the planned size) before anything is mounted. A process that
+    claims the disk in that window makes the tools fail closed, with the stage and
+    the disk marked. **The disk is addressed by its `/dev/disk/by-id/<id>` name
+    from the moment the claim ends** (`wipefs` and `systemd-repart` get that
+    path, never the kernel's name), and `Apply` refuses a disk that has no such
+    name (a virtio disk with no serial number has only a bus path:
+    `unknown-disk`). The link is checked to lead to
+    the very device the claim is on, in `Apply` and again just before the claim
+    is released; a disk swapped out in the instant after, whatever kernel name
+    its replacement takes, has another id, so the name leads nowhere and the
+    tools find nothing to write. `wipefs --all` is there because `systemd-repart
+    --empty=force` on a disk that already has partitions wipes the table but not
+    the kernel's partitions and then cannot add the first one (`Failed to create
+    new partition '/dev/vda1': Device or resource busy`, reproduced by running it
+    twice): whole-disk mode on a used disk, the case it exists for, needs the
+    kernel to forget them first, and the stage waits until sysfs lists none.
+  - **The stages.** `mount` mounts the ESP at `boot/efi`, `/boot` and the root
+    (btrfs, no subvolumes, as `bcvk to-disk` makes) under `/run/ilex-installer/target`
+    in the helper's private mount namespace. `image` runs `bootc install
+    to-filesystem --source-imgref registry:<repository>@<digest> --target-imgref
+    <repository>:<tag> --enforce-container-sigpolicy --skip-finalize`. The pull
+    is of the digest the plan pinned (measured: installing the digest of an older
+    image under the current tag deployed the older image, `ostree.manifest-digest`
+    of the deployment being the pinned one; the machine tracks the tag).
+    Three properties of the live system matter and are the ISO's: `bootupd`
+    chooses its components from how the **live system** booted, so it must be
+    UEFI (`bootupctl --auto` on a direct-kernel BIOS boot installs GRUB for BIOS
+    and fails without a BIOS boot partition); SELinux is **enforcing**, as it
+    boots (the helper runs in `install_t`, the domain bootc needs to write the
+    labels of the target's policy, and `bootc` is `install_exec_t`: from the
+    unlabeled live root it ran as `kernel_t`, and a labeled one with the helper
+    in `unconfined_service_t` stops at `Failed to enter install_t`, see the
+    policy module); and the live root must
+    not be an ostree host (bootc asks `ostree --repo=/ostree/repo rev-parse
+    --single` and stops at "Multiple commit objects found" if the live image was
+    installed to a disk, as the `installer::` trials do, hence the harness hides
+    `/sysroot/ostree`). Afterwards the deployment must be the only one, its origin
+    must be `ostree-image-signed:docker://<target>` (the container signature
+    policy is enforced for updates) and the manifest digest the pinned one.
+    `configure` writes, with `systemd-firstboot --root=<deployment> --force`,
+    `locale.conf`, `vconsole.conf` (keymap and, from systemd's own map, the X11
+    layout `XKBLAYOUT`), `localtime` and `hostname`; `/etc/ilex/setup.json` as the
+    Anaconda path writes it (schema 1, the composition, the image the machine
+    tracks, no profile, TPM `not-configured`); no line for `/` in `fstab` (bootc
+    writes one for `/boot`); and checks the default target is `graphical.target`
+    for a composition with a shell (the image says so itself; the stage repairs it
+    if a composition ever ships without). `account` bind-mounts the stateroot's
+    `var` at the deployment's `/var` (the deployment's is an empty mount point)
+    and mounts a `proc` at its `/proc`, runs `useradd --root <deployment>
+    --create-home --groups wheel` and `chpasswd --root <deployment>` (password on
+    standard input), and unmounts both. The `/proc` is not decoration: both tools
+    chroot, and without it libselinux cannot see that SELinux is on, so
+    `pam_unix` asks whether `passwd` may change a password and is refused
+    (`chpasswd` fails with "Authentication token manipulation error"; reproduced
+    on the unlabeled ISO, where the helper ran as `kernel_t`; it works with
+    SELinux disabled, or with `/proc`). Under enforcing the helper runs in
+    `install_t`, which is unconfined, and nothing here is denied. It then verifies the `passwd`,
+    `shadow` (a hash) and `group` entries and relabels what the helper wrote with
+    `setfiles -c <the deployment's compiled policy> -F -r <deployment>` against
+    the deployment's own `file_contexts` (`/etc/passwd`, `shadow`, ...,
+    `/etc/ilex`, `/var/home` with the stateroot as the root of the lookup). `-c`
+    matters: without it `setfiles` validates every context against the policy the
+    live system has loaded, which can be older than the target's, and one type it
+    lacks (the flatpak helper's, measured) fails the whole file with "context ...
+    is invalid" and "Invalid argument". `finalise` copies the stage logs and
+    `plan.json` (no secrets) to the new system's `/var/log/ilex-installer/`,
+    relabels them, `sync`s, `fstrim`s, and unmounts everything of the target,
+    deepest first, including the `/run/bootc/storage` mount `bootc` leaves; it
+    fails if a mount is left. Each tool runs with a clean environment in its own
+    process group under a deadline and `PR_SET_PDEATHSIG`, so a helper that dies
+    takes the tool that writes to the disk with it.
+  - **Encryption** (`crates/ilex-installerd/src/luks.rs`, the `encrypt` stage of
+    `install.rs`; `SetSecret(plan, "disk-passphrase", fd)`). A plan with `encrypt:
+    true` uses the shipped `whole-disk-encrypted` layout and needs the passphrase
+    as well as the password (`missing-secret` naming `disk-passphrase` without
+    it). `SetSecret` takes it as it takes the password (a sealed memfd, read once
+    into memory of its own) and refuses what the boot prompt cannot take
+    (`invalid-secret`, field `fd`: empty, over 512 bytes, a control character, so
+    no line break or tab, not UTF-8, or a plan that does not encrypt); the model's
+    `passphrase_problem` states that rule once for the helper, the interface and
+    the answers file. **The passphrase reaches the tools as a descriptor, never an
+    argument.** `luks::KeyFile` copies it into a memfd of its own (mode 0600, the
+    bytes exactly, no newline, close-on-exec) and `Job::inherit` makes that one
+    descriptor survive `exec` in the child alone, so `systemd-repart` gets
+    `--key-file=/proc/self/fd/N` and `cryptsetup` `--key-file /proc/self/fd/N`; the
+    file is overwritten with zeros and emptied, and the secret's pages are wiped,
+    as soon as the encrypt stage is over (or the installation fails). `partition`
+    makes the volume (`Encrypt=key-file`: repart formats the root inside it).
+    `encrypt` reads its UUID (`cryptsetup luksUUID`), **checks the header the
+    installed system's unlock stack was qualified against** (`luks::check_header`
+    on `cryptsetup luksDump --dump-json-metadata`: LUKS2, one `crypt` segment of
+    `aes-xts-plain64`, one keyslot with a 512-bit payload key derived with
+    `argon2id`, no token; the output of a job is cut at 300 characters a line, so
+    the JSON is read with `exec::run`), opens it `--type luks2 --allow-discards`
+    as `luks-<uuid>` (the name the initramfs gives it and `ilex-enroll` expects)
+    and checks that it holds the planned file system. `mount` mounts that device,
+    not the partition. `bootc install to-filesystem` gets `--karg=rd.luks.uuid=<uuid>`
+    and `--karg=vconsole.keymap=<keymap>`: the image's initramfs is generic and
+    carries no crypttab, so without the first it would never ask; the second is
+    systemd's own `vconsole.keymap=`, which `systemd-vconsole-setup` in the
+    initramfs applies before `systemd-ask-password` asks, so that **the prompt is
+    in the layout the passphrase was typed in** (the image's initramfs has every
+    kbd keymap and no Plymouth: the prompt is text on the console, not a splash).
+    For that to hold, a layout chosen after the passphrase or the password was
+    typed empties them in the flow (`set_keyboard` wipes the secrets; the fields
+    follow `secrets_wiped`), so they are typed again in the layout that is used.
+    Measured: bootc adds no LUKS argument of its own to the boot entry, which
+    reads `root=UUID=<btrfs> rootflags=subvol=/ rw boot=UUID=<boot> rhgb quiet
+    rd.luks.options=tpm2-device=auto rd.luks.uuid=<luks uuid>
+    vconsole.keymap=<keymap> ostree=...` (the fourth is the image's, from
+    `kargs.d`). `configure` writes `/etc/crypttab` (`luks-<uuid> UUID=<uuid> none
+    discard`, mode 0600: the shape Anaconda writes, with no key file, which
+    `ilex-enroll`'s layout check requires) next to `vconsole.conf`. `/var` is the
+    stateroot's directory in the root file system, so it is inside the volume; the
+    layout has no swap (the live system's zram is not the target's). `finalise`
+    closes the volume after everything is unmounted, and a failure closes it too
+    (`cleanup`). `/etc/ilex/setup.json` says what phase 0's completion says of a
+    disk that unlocks with its passphrase alone: `security.tpm` is `{requested,
+    capability: "unknown", reason: "not-attempted", status: "passphrase-only"}`.
+    That is what a request without a recovery key gets (an answers file, and any
+    client that does not ask for one): the plan warns that the chip is not used and
+    says why (the probe's reason first: `secure-boot-off`, `no-tpm`, ...; on a
+    computer that could, `no-recovery-key`). **The recovery key and the security chip** are the next
+    paragraph.
+  - **The recovery key and the security chip**
+    (`crates/ilex-installerd/src/{enrol,recovery}.rs`, the `recovery` and `tpm`
+    stages; `ilex_installer_model::recovery`). A request with `recovery_key: true`
+    (an interface sets it whenever the disk is encrypted) makes `ilex-enroll`'s
+    library add a systemd recovery key as the volume exists: `enrol::Prepared`
+    opens the volume as `/dev/disk/by-uuid/<LUKS uuid>` with the passphrase (its
+    own copy, wiped when the installation ends), and the same
+    `Reconciled::{recovery, acknowledge, enroll_tpm}` the Anaconda completion and
+    `ilexctl security repair` call do the rest, so one implementation decides what
+    "eligible" is and what the token must bind. The record of that session
+    (`enrollment.json`) is kept under `/run/ilex-installer/enroll/<plan>/` while
+    `bootc` needs the new file systems empty, and written into the deployment's
+    `/var/lib/ilex/security/` after the account (mode 0600, relabelled), where
+    `ilex-security-verify` and `ilexctl security verify/repair` read it unchanged;
+    `/etc/crypttab` gets `tpm2-device=auto` for the root line (`ilex-enroll`'s own
+    `configure_crypttab`) and `setup.json`'s `security.tpm` says `{requested,
+    capability: <the probe's verdict>, reason, status}`. The key is **handed over
+    once**: `TakeRecoveryKey(plan)` returns it as a sealed memfd (a second call is
+    `recovery-key-taken`), `State.security.recovery_key` says `waiting`, `shown`,
+    `acknowledged` or `declined` (never the key), and
+    `AcknowledgeRecoveryKey(plan, key)` takes the **whole key** typed back (a
+    sealed memfd of its text; the paper's hyphens, spaces and capitals are
+    forgiven). As phase 0's local completion does, **the helper compares all eight
+    groups** with the key it holds (`recovery-key-mismatch`: the person tries
+    again) **and opens the key's own keyslot with what was typed**
+    (`Device::authenticate_slot`, through a verifier the installation hands the
+    holder with the key: the volume's one `Device`, shared) before it calls the
+    key acknowledged. A key that is mis-copied in any group, or a volume that
+    refuses the key it was given (`internal`), is never recorded as confirmed: the
+    record is the one `ilexctl security repair` relies on. An interface that was
+    restarted after it took the key, and cannot show it again, can still confirm
+    it from the paper. **`ContinueWithoutRecoveryKey(plan)`** (the same bus
+    policy as the others) is the way out of a page that cannot finish: a window
+    that died between `TakeRecoveryKey` and drawing, a lost reply, three failed
+    takes or a keyslot that refuses the key would otherwise leave the `recovery`
+    stage waiting for ever with the work lock held (`Finish` refused). It is
+    refused with `no-recovery-key` for another plan and `recovery-key-confirmed`
+    once the key was confirmed, and is a no-op the second time. It wipes the key,
+    makes `State` say `declined` and ends the stage as `passphrase-only` /
+    `recovery-key-failed`: no chip is enrolled (the `tpm` stage still runs and
+    logs why), the keyslot nobody saw stays in the volume and is recorded as phase
+    0 records a key that was made and never confirmed (`enrollment.json`:
+    `recovery` unacknowledged with its `slot` and `token`, the library's
+    `recovery_attempt` kept, `state: unavailable`, `reason: recovery-key-failed`;
+    no receipt), so that `sudo ilex-enroll complete --root / --reissue-recovery`
+    on the installed system reconciles that slot as manual cleanup and makes a key
+    to replace it; `setup.json` says the same, and the installation finishes. The
+    key is in no
+    state file, plan, stage log, saved-log tarball or target log: the helper holds
+    it in locked pages of their own until it is confirmed or given up. The installation goes
+    on while the key is shown (the image takes ten to twenty minutes); after the
+    account the `recovery` stage waits for the confirmation, then, only when the
+    plan says `will_enroll` (a key was asked for, `tpm` is `auto`, and the probe
+    says the computer is eligible: Secure Boot on, setup mode off, TPM 2.0, a
+    SHA-256 PCR 7 equal to the event log's replay, the qualified tool pair) **and**
+    the target agrees (`ilex_enroll::eligibility` on the deployment: its tools
+    and its unlock stack), the `tpm` stage enrols the chip (PCR 7, SHA-256, no
+    PIN, read back from the header) and the result is `enrolled-unverified`; the
+    first boot the chip opens makes it `verified`. Every other ending is
+    `passphrase-only` with a reason code, and **neither step ever fails the
+    installation**: `secure-boot-off`, `no-tpm`, `pcr7-unmeasured`,
+    `tool-mismatch`, `unlock-stack-missing`, `not-requested` (`tpm: off`),
+    `no-recovery-key` (answers mode: **an unattended installation makes no
+    recovery key and does not enrol the chip**, because nothing could show the key
+    and a key nobody saw is not one a person can rely on; `sudo ilex-enroll
+    complete --root /` issues one and enrols later), `recovery-key-failed` (no key
+    could be made, or the person went on without confirming it) and
+    `enrollment-failed`. The passphrase slot always stays. The stages of such an
+    installation are `partition, encrypt, mount, image, configure, account,
+    recovery, [tpm,] finalise` (`Stage::of_plan`).
+  - **State, progress, logs.** Each stage is recorded in
+    `/run/ilex-installer/state.json` (mode 0600, written to a file of its own and
+    renamed) **before it writes anything**, and a stage whose record cannot be
+    written does not begin. `State()` carries `active`, `stages` (each with its
+    status and times: the progress page's list), `stage`, `progress` (0 to 1
+    within the stage, never going back), `message`, the last 40 lines of what
+    the current stage's tools printed, `disk_changed`, `applied` (the plan),
+    `summary` (the edition's name, the composition, the image's version and
+    digest and the target disk's id and name, from the plan: what an interface
+    that restarted says on its closing pages, and which disk is the
+    installation's), `starting`, `refusal` and `outcome`; documents from before `Apply` still parse. **`starting`
+    is the plan id of an `Apply` that has taken the work lock and is checking**
+    (the image's signature is verified over the network, the disk is probed,
+    claimed and probed again, which takes as long as the registry does): it is
+    set when `Apply` takes the lock, cleared when it refuses (a guard, so also
+    for a panic) and replaced by `active` atomically in `begin`, and a helper
+    that finds it in the file a crashed one left reads it as not set. For that
+    window every other field is still the previous installation's (its outcome
+    included), so an interface that asks must treat `starting` like `active`
+    and not read the rest (`State::busy()`). **`refusal`** is the latest `Apply`
+    that took the lock and was refused (`{plan, error}`: the plan's id and the
+    refusal the caller got, with nothing written): recorded before `starting`
+    is cleared, cleared when the next `Apply` takes the lock and by `begin`,
+    never recorded for an installation that began, and kept by a successor
+    helper (it says which plan was refused and why, and claims nothing runs). An
+    interface that waited for the plan in `starting` finds it there. The
+    `iso::next_reattach` trial holds the window open with the fixed credential
+    `ilex.installer.fault=slow-apply` (a minute, after the lock and before any
+    check; it can only make the installer slower). The pull's bar is the
+    bytes in use on the target against 2.6 times the download size (measured:
+    4,150 MiB in use for 1,688 MiB of layers, 2.46), never above 0.97 until
+    `bootc` ends. `Progress`
+    is sent at most every half second and at each stage's start; `Finished`
+    once. Every tool's output goes to `/run/ilex-installer/log/<plan>/NN-<stage>.log`
+    (0700/0600, command lines and exit codes included); the plan the installation
+    was applied from is kept beside them as `plan.json` (the request names the
+    administrator, never the password).
+  - **Failure and a helper that dies.** A failed stage names itself and the tool in
+    `outcome` (`bootc exited 1: <its last line>`), unmounts what is mounted and
+    leaves the partitions as they are with `disk_changed` true; **there is no
+    resuming and no in-place retry**: a retry is a new `Plan` (which lists the
+    leftover ilex partitions as what it erases), a new `SetSecret` and a new
+    `Apply`. A helper that is killed in the middle is started again by systemd
+    (`Restart=on-failure`; its tools died with it), reads the state file, reports
+    the installation as failed in the stage it was in (`the installer's helper
+    stopped ... the disk was already changed`), has no plans or secrets, mounts
+    nothing and starts nothing by itself. (The plan says the unit does not restart
+    mid-installation; it does, so that `State()` still answers and the interface
+    can show the problem.)
+  - **Finish(action)** ends the session: `restart`, `poweroff` or
+    `save-log:<device id>`. The text is parsed by the model
+    (`FinishAction::parse`, which never quotes what it refuses: `invalid-field`
+    on `action`); the method takes the helper's work lock and is refused with
+    `installation-active` while an installation runs. Restart and power off ask
+    systemd (`systemctl --no-block reboot|poweroff`, run by the root helper: the
+    installer's session user has no polkit action for either and the polkit rule
+    still denies it every other). `save-log` writes **a tarball of the last
+    installation's stage logs and `plan.json`, `state.json`, `lsblk.txt` and a
+    `MANIFEST.txt` (member names fixed by the helper, the last 4 MiB of any one
+    log, 48 MiB at most; no secret is ever passed where a tool could print it)
+    to a USB stick** and answers `{file, device, label, bytes}`. The rule for the
+    device (the model's `check_log_device`, which an interface applies to list the
+    sticks it offers) is, in this order: the device is a disk of a **fresh**
+    probe (`unknown-disk`); not the medium the installer started from
+    (`live-medium`); not the disk the last installation was written to
+    (`install-target`, by the id the state's `summary` recorded **and**, when
+    that id still leads to a device, by device number); **removable**
+    (`not-removable`: a fixed disk is never a place for the log); not in use by
+    the running system and claimable (`in-use`, the same trace and exclusive open
+    every disk gets before it is offered); and with a partition (first in table
+    order) of at least 8 MiB holding FAT, exFAT, ext2/3/4 or NTFS
+    (`no-file-system`: a stick with no partition table is refused, as are LUKS
+    and Linux swap). After that the helper checks against sysfs that the
+    partition is the partition of that disk with the number the probe read, opens
+    it exclusively once to see that nothing holds it, builds the tarball in its
+    private scratch directory (a ustar writer of its own: names are fixed, never
+    a path from the bus) and runs itself (`--write-log`, hidden) under
+    `unshare --mount --propagation private`: the child checks the node's device
+    number, mounts the partition `rw,nodev,nosuid,noexec,sync`, checks in
+    `mountinfo` that what is mounted is that device, creates the file
+    (`ilex-installer-log-<first 8 of the plan>-<unix time>.tar`, `O_EXCL`,
+    `O_NOFOLLOW`, never over an existing file: `-1`, `-2` follow), syncs it and the
+    file system and unmounts; the mount existed in that namespace only. Only the
+    installer's user and root may call it (the bus policy is the other methods').
+    `--self-check` covers the grammar, the rule on a fixture probe, the tar writer
+    (read back by the model's own reader and by GNU `tar`, bad names refused), the
+    writer's refusals and a real write to ext4 and FAT loop devices (the first
+    file, the second under another name, the bytes and mode on the stick, nothing
+    left mounted).
+- **Answers mode** (`ilex-installerd --answers [--then poweroff]`, started by
+  `ilex-installer-answers.service`): an installation with no interface, decided
+  **at boot only**. `ilex-installer-answers-gate.service` (one-shot, once per
+  boot) runs `ilex-installerd --answers-gate`, which waits for udev to settle
+  (`udevadm settle`, 30 s at most) and lists the block devices with `lsblk`: a
+  volume labelled `ILEX-ANSWERS` (12 characters, so not a FAT or exFAT label) or
+  `ILEXANSWERS` (11, the FAT-sized alias; FAT labels match in either case) with a
+  file system makes it write `/run/ilex-answers-volume` (the volumes' device
+  numbers, one `major:minor` per line, written whole or not at all) and print
+  `gate=present`. The interface's session is ordered after
+  the gate (`After=`, `Wants=`) and skipped by `ConditionPathExists=!` that
+  file; the answers unit has the opposite condition. So it is the boot's
+  decision and not the volume's label that skips the session: a restart of the
+  session never skips because of a stick plugged in later. There is no
+  `Conflicts=` on the session (with one, a boot with the volume never started the
+  answers unit), and nothing stops a running session. **A volume that appears
+  after the boot is ignored**: a udev rule only starts
+  `ilex-installer-answers-late@<device>.service`, which runs `--answers-late` and
+  prints `ILEX-INSTALLER-ANSWERS ignored=late volume=<device> ...` (not for the
+  volume the gate found: its device number is in the marker). It starts and stops
+  nothing. If answers mode fails **before `Apply`** (a refusal; nothing was
+  written), it removes the marker and starts the session, so the screen is not
+  left empty and `handover=interface` is printed; after `Apply` has started it
+  leaves the machine as it is with the reason on the console. **tty1 is never left
+  empty by a failure that wrote nothing, whatever the failure was**: the answers
+  unit `Wants=` (not `Requires=`) the helper and the gate, since a dependency
+  that failed would make systemd cancel the unit's start job and the program
+  would never run to hand over; the process is hardened (`PR_SET_DUMPABLE=0`, no
+  core files) inside `answers::run`, so that failing to is a failure before
+  `Apply` like any other; and the unit has `OnFailure=` the hand-over unit
+  `ilex-installer-answers-handover.service`, which removes the marker and starts
+  the session with `rm` and `systemctl` (nothing of the answers program) however
+  the unit ended (killed, crashed, never got to its first call), unless
+  `/run/ilex-answers-applying` exists: the program writes that flag just before
+  it calls `Apply` and removes it again **only when the helper itself refused**:
+  one of its own structured errors, whose name is
+  `org.ilex.Installer1.Error.<Kind>` and whose message parses as the model's
+  `PlanError` (`answers::structured_refusal`; the helper makes those before it
+  writes anything) **and whose code is not `installation-active`**, which says
+  that an installation is *running* (see below). **Any other end of the `Apply` call keeps the flag**: the bus
+  reporting no reply or a vanished peer, a closed connection, a helper that
+  crashes before it answers, a reply in another shape (none says whether the
+  installation thread had started). The run then counts as applied: the
+  interface is not started over a disk that may be written, no hand-over runs,
+  and the console shows `result=failed Apply: no refusal came back, so the
+  installation may have begun and the interface is not started (...)` with
+  what the bus said after it. **`installation-active` never lowers the flag and
+  never hands over**, from any call (`Probe`, `Plan`, `SetSecret` or `Apply`): it
+  ends the run with `answers::KeepsInterfaceOut` (`result=failed ...; an
+  installation is running, so the interface is not started over it`), and the run
+  makes sure the flag exists so that systemd's hand-over stays out as well. This is
+  the operator's own path: after `systemctl reset-failed ilex-installer-answers`
+  and a start (what the unit's comment documents) while the installation the first
+  run began still runs in the helper, the new run used to delete the leftover
+  flag at its start and then hand the screen to the interface. A run now deletes a
+  flag it finds at its start **only when `State()` says no installation is
+  active** (`answers::settle_leftover`); when one is, or `State()` itself fails,
+  the flag stays, nothing is read, planned or handed over, and the run fails with
+  that reason. A helper that
+  cannot start, and a process killed before it asks anything, therefore both end
+  in the interface; a helper killed as `Apply` starts the installation ends
+  with the failure on the console and no interface. (`iso::next_unattended_handover`
+  makes each with the fixed credential
+  `ilex.installer.fault=helper|answers|apply`, which the helper's and the
+  answers units import and which can only make the installer fail; `apply` makes
+  the helper SIGKILL itself right after it has started the installation thread;
+  `image` (not a hand-over case: `iso::next_unattended_reboot` and `_retry`) makes
+  the image stage fail before `bootc` is run, the disk wiped and the new `/boot`
+  mounted, the helper staying up.
+  `ilex-installerd --self-check` runs `answers::settle` over a structured
+  refusal, `installation-active`, a bus `NoReply`, a closed connection, a client
+  failure, a bus error that carries a refusal's document and a helper-named error
+  with no document, and `answers::settle_leftover` over an idle helper, a running
+  installation and a helper that cannot be asked.)
+  It then reads **the volume the boot recorded and no other**: the marker must
+  name exactly one device, and the listing taken now (this unit waits for the
+  network, so it is some time after the gate) must be exactly that device (a stick
+  swapped for another, one removed or a second one plugged in meanwhile is a
+  refusal, handed over like any other); its node's number, `mountinfo` and the
+  mounted file system's own device number must all be the recorded one. It mounts
+  the volume read-only (`ro,nodev,nosuid,noexec`, in the
+  unit's private mount namespace; ext4, ext3, ext2, XFS, **FAT (`vfat`)**,
+  ISO 9660 or UDF by the type blkid reports: an exFAT volume is found and
+  refused by name, because nobody has exercised the exFAT driver here), checks
+  that what is mounted is the device chosen (its number in `mountinfo`), reads
+  `answers.toml` (opened with `O_NOFOLLOW|O_NONBLOCK`, checked as a regular file
+  on the opened descriptor, 64 KiB at most), unmounts, and calls the helper's own
+  methods as root: `Probe`, `Plan` (the answers' composition, else the boot
+  choice; **a boot choice that failed** (`ilex.composition=` naming nothing
+  offered) **is an error, not a fall-back to detection**), `SetSecret` (a sealed
+  memfd made here), `Apply`, then `State` once a second. More than one answers
+  volume is refused (which was meant cannot be known). It also refuses
+  an answers file that is not valid (by line and column, never its text), a
+  whole-disk request whose `confirm-erase` is not the disk, **a disk that has no
+  `/dev/disk/by-id` name** (an id that is a bus path or a kernel name: whatever
+  disk is in that slot, or a by-id link that describes the disk's contents),
+  **answers that already installed the disk** (see below), **a disk that already
+  holds an ilex installation (a partition labelled `ilex-...`) or another system
+  (the probe's `other_systems`: Windows, Linux, LUKS, an EFI loader, a signature
+  on the whole disk, an EFI system partition that could not be read) unless
+  `[install] reinstall = true`** (the message names what is there, and the
+  console says `reinstall=true erases: ...` when it is allowed), a volume that is on the disk
+  it would erase (the device resolved when the answers were read, compared by
+  device number with the disk, its partitions and the volume's own disk in sysfs;
+  a node that has gone is a refusal), and `[encryption] enabled = true` until
+  encryption exists. Every line it prints starts `ILEX-INSTALLER-ANSWERS`
+  with `key=value` words (`gate=`, `volume= fs=`, `plan=ready disk= composition=
+  image= partitions=`, `apply=started`, `stage= progress= message=`, `ignored=`,
+  `handover=`, and last `result=success` or `result=failed <reason>`), to the
+  journal, the console and, without waiting
+  for it, `/dev/ttyS0`. On success with `--then poweroff` (the unit's) it powers
+  the machine off, so that it does not boot its medium again. One attempt per
+  boot (`StartLimitBurst=1`). The password is read into memory that is wiped and
+  never printed, and the process is hardened like the helper.
+  **The machine that boots the installer again.** After `reinstall = true` the
+  machine powers off, and if both sticks stay in and the firmware later tries USB
+  first, the same answers would erase the fresh installation, every boot. So the
+  installation stamps what it made: the finalise stage writes
+  `/boot/ilex-install-request.sha256` (the partition labelled `ilex-boot`; root's,
+  mode 600, labelled by the target's own policy), once the image and the account
+  are in place, so an installation that did not get that far has no stamp **of its
+  own digest** (only the provisional one below, which holds the digests it carried)
+  and may be run again. **The stamp holds every digest that must not erase the
+  installation, one 64-digit digest (`target::request_digest`: SHA-256 of the
+  request as the plan records it, defaults resolved) per line, oldest first**
+  (`stamp.rs`): the digests of the disk's *previous* stamp, which the helper reads
+  in `Apply` before the disk is claimed and wiped (an unreadable one is logged
+  and not carried: the person confirmed the erase, and answers mode itself refuses
+  such a disk), **kept in `/run/ilex-installer-earlier` (root's file, mode 600,
+  like the record below) as the last thing before the disk is wiped**, and read
+  back by the finalise stage of whatever installation ends in this boot: a
+  failure after the wipe (the pull, say) leaves a new `ilex-boot` with no stamp,
+  so a retry in the same boot used to carry nothing, and the old answers could
+  later erase the retried installation. (A failure to keep them ends the
+  installation in the partition stage with the disk as it was; no digest to keep
+  writes nothing, so a retry's empty read never blots out what the first attempt
+  kept.) That record lives in `/run`, so it does not survive a reboot, and the
+  wipe takes the disk's own stamp with it: **the stamp is therefore also written
+  provisionally, as soon as the new `ilex-boot` exists and is mounted and before
+  the image stage** (`stamp::provisional`, written at the end of the mount
+  stage): the same lists, **without this request's own digest where it is only
+  seen** (the answers' record in `/run/ilex-answers-seen`), so a reboot
+  between the wipe and a later successful installation (the pull failed, the
+  person powered off, the stick stayed in) still finds on the disk the digests
+  the wipe took and the answers refused in favour of this installation, while the
+  answers being installed, unattended ones alone included, are not "already
+  installed" and stay retryable. A digest the disk's own stamp (or this boot's
+  record of wiped stamps) held is **kept whole, even when it is this request's
+  own**: the digest holds no password, so a person's installation through the
+  interface whose plan equals answers A's has A's digest, and A, refused for this
+  disk, must stay refused after the reboot (the stamp left empty, a stick with A
+  would wipe the partial installation, or a later installation, which would carry
+  nothing). Unattended answers whose digest the stamp holds never reach `Apply`,
+  so what the interface installs is never retryable answers. A full list of 256
+  carried digests loses none to this rule. No digest to keep (the answers alone,
+  nothing carried) writes no file. It is a new file renamed into place (mode 600,
+  root's) and the file system is synced (`syncfs`) **and its journal
+  checkpointed** (`EXT4_IOC_CHECKPOINT` with no flags on the mounted `/boot`,
+  Linux 5.14: `jbd2_journal_flush`, which writes the journal's blocks to their
+  places, flushes the device's cache and empties the journal), because answers
+  mode reads with `ro,noload`: `syncfs` commits the journal with a flush but then
+  writes the stamp's directory entry and inode to their places with no flush after
+  them and leaves the transaction in the journal, so a power cut on a device with a
+  volatile write cache could lose them and leave a disk that reads as "no stamp".
+  A failure to write it, or to checkpoint, ends the installation (the disk is
+  already wiped, and going on without the protection is worse; there is no
+  fallback to `syncfs` alone: where the ioctl is missing, mounting `/boot` again
+  would do the same). **A reset between `wipefs` and this write (seconds, the
+  partition and mount stages) loses the carried digests**: only
+  `/run/ilex-installer-earlier` covers that window, and it survives failures in
+  the same boot, not a reset. The finalise stage overwrites the file with the finished
+  stamp as a new file renamed over it (never truncated and written in place: a
+  reset leaves the provisional stamp or the finished one, not an empty file),
+  labelled by the target's policy and then checkpointed (the label is a journalled
+  change of the inode too). `bootc install
+  to-filesystem` accepts the file: bootc 1.17's empty-root check
+  (`require_empty_rootdir`) does not look inside a directory that is a mount point,
+  and the image stage reads the file back after `bootc` and requires it to be what
+  was written (`installer::install` asserts the log line, and that the journal of `/boot` was checkpointed once after the provisional stamp and once after the finished one). The digests
+  answers mode **recorded in this boot** in
+  `/run/ilex-answers-seen` (root's file, mode 600, opened without following a
+  link and checked on the descriptor; gone at the next boot); and this
+  installation's own, last. Each digest is listed once **at the place of its last
+  mention**: a digest that comes again (answers seen that the earlier stamp held,
+  an installation's own digest that the stamp or the record held) is *moved* to the
+  newest place, never left among the oldest where the cut of at most 256 digests
+  (the oldest are dropped) could take it, so the newest installation's own digest
+  is always the last line.
+  Answers mode records the digest of its request **as soon as it has one**,
+  whatever becomes of it: refused for the stamp, for a disk that holds a system,
+  for the registry, for the helper's refusal. A person who then installs through
+  the interface does not make those answers look new, and neither does a second
+  interactive installation, which carries what the first one's stamp held (an
+  overwritten stamp used to let the original `reinstall = true` answers erase an
+  installation made by hand on the next USB-first boot). Only the digest of a
+  request that was built can be recorded: answers that fail before that
+  (an invalid file, no helper to ask for the probe, a boot choice that names
+  nothing) leave nothing, because there is no request to name.
+  Answers mode mounts the partition read-only without journal replay
+  (`ro,noload`: nothing is written), in its private namespace, before `Plan`,
+  reads the stamp, unmounts, and **refuses when the digest of the request now
+  being made is any line** (`these answers already installed <disk> ...: remove
+  the stick, or edit the answers`), whatever `reinstall` says, handing over to
+  the interface. A partition labelled `ilex-boot` with an ext4 file system that
+  cannot be mounted, or a stamp with a line that is not a digest (or no line), is
+  a refusal too (what cannot be read is not "no stamp"); no such partition, or
+  none with a stamp, is no stamp. **The digest is of the request, not of the
+  answers file**: the file holds the administrator's password in plaintext,
+  `/boot` can be read by anyone with the disk, and a fast hash of a file whose
+  only unknown is a short password would let them guess it. The consequence is
+  that answers differing only in the password are the same request; any other
+  change (host name, user name, composition, disk...) is new answers.
+- **The live image** gains the helper and `ilex-enroll` (built in the same
+  builder stage), `compositions.json` generated like the Anaconda ISO's, the
+  bus policy, the unit and the repart definitions under
+  `installer/next/rootfs`, `ilex-enroll tool-manifest` as
+  `/usr/lib/ilex/security/tools.json` (image-builder drops the RPM database)
+  and the packages the helper runs (`dosfstools`, `e2fsprogs`, `btrfs-progs`,
+  `skopeo`, `kbd`, `tzdata`, `cryptsetup`, `tpm2-tss`; fedora-bootc has them all,
+  so they add no size, and listing them keeps a base change from dropping one). `ilexctl iso --next`
+  shares its image stage with the tier (`iso_next::build_image`).
+
+`ilexctl test installer::` boots that image (`ILEX_INSTALLER_IMAGE` names one;
+otherwise it is built, without the OS image or an ISO) as an ephemeral VM with
+an SSH server added in a layer of the harness's own (tagged
+`localhost/ilex-installer-next-test:<slug>.<image id>` and labelled with the
+checkout's owner, like the images the tooling builds), the kiosk session masked
+and eight disks: a blank 40 GiB disk, a 48 GiB disk carrying a fake dual-boot
+layout (an ESP with Windows and Ubuntu loader directories, a reserved partition,
+a LUKS volume and a labelled ext4 partition), a 36 GiB disk carrying an old Linux
+installation (`/boot`, an LVM volume group with two volumes, an MD RAID 1 array),
+an 8 GiB disk, and four the running
+system uses: an ISO mounted by its `/dev/disk/by-label` name as given, an ISO file
+on a mounted partition attached to a loop device and mounted where dracut mounts
+the medium (iso-scan), a device-mapper device over a partition holding an ISO
+(Ventoy), and a disk with a mounted partition, active swap and a device stacked
+on a partition. It calls the helper with `busctl` as `ilex-installer`. The tests
+share the VM and one of them restarts the helper with fixtures, so the group runs
+them one at a time; `--test-threads 1` is not needed. `installer::probe` runs the
+self-check beside a loop of probes, compares the probe with what the guest
+reports, checks the disks (free extents and other systems included, the three
+live media and the disk in use), shows that the event of the old installation's
+disk appearing activates neither its volume group nor its array, then that the
+same event does activate both once the image's LVM and MD configuration is moved
+aside (so the first check proves something) and that the disk, now held, is
+refused (`in-use`) and offered again once the configuration is back, then shows
+that the uses the mount table does not show are traced or refused, each
+reproduced with real devices, mounts and processes:
+a loop device on a partition's device node (the kernel records the
+device of `/dev` and the node's inode; the disk is `in_use` and a plan on it is
+refused); an unmounted loop device on a file whose file system was unmounted
+lazily (the kernel then names the file `/x.img`, which `/` contains; its disk is
+`in_use`, and since the file might be a block device node of any disk, which
+the numbers do not say, every other disk is refused as well); dracut's live
+layout with its host disk mount, its medium mount and then both unmounted
+lazily (the host disk stays the live medium from the loop device's recorded
+numbers; the host disk's own mount detached leaves a file on an ext4 the
+helper cannot confirm, and every disk is refused; with only the medium's mount
+gone nothing else changes); a block device node copied to a tmpfs that is not
+`nodev`, attached to a loop device and deleted (every disk refused); zram
+writing back to a disk (`in_use`, the kernel's exclusive claim shown beside it);
+an ext4 whose journal is on a disk of its own (the mount options say nothing;
+`/proc/fs/jbd2` does; both disks `in_use`); a partition mounted under a
+`--make-private` subtree, which the helper's own mount namespace never sees
+(shown from `nsenter` into the helper's namespace; found through
+`/proc/1/mountinfo`); and a file system unmounted lazily that a process still
+holds, listed by no table, which only the exclusive open of the disk refuses
+(the reason names the claim; the other disks stay offered). The disks nothing
+uses stay offered throughout, beside the live media, the disk in use and the
+zram swap a booted system may have (swap on RAM is a use of RAM, never of a
+disk; the real ISO under QEMU had no swap at all),
+and a plan on a refused disk is refused `in-use`; then points the unit at SMBIOS and command-line
+fixtures to exercise detection through the bus (MS-7C35 by system and by board
+alone, case, a vendor alone, the boot override and an unknown one), requires
+`Access denied` for `nobody` and `daemon` on every method and on introspection,
+and stops the helper to check that the installer's call activates it and a refused
+user is denied. `installer::plan` first points the helper at an absent
+firmware directory (a BIOS boot is refused), then at a present one: whole-disk
+plans for the blank disk plain and encrypted, the pinned digest against an
+independent resolution in the guest, the layout disk and its five systems in the
+warning, the old installation's disk (plannable, its volumes among what would
+be erased, nothing activated), a refusal with its code and field for every way a request can be
+refused (the live media, the disk in use, the reserved and system names, the
+language, zone and keymap, the malformed requests, and the rest), a secret never
+quoted back, no disk changed and no scratch file left behind. The registry,
+`systemd-repart` and internal errors cannot be provoked by a request; the
+registry's classification is exercised in the self-check on fixtures of what a
+registry answers. Planning needs the registry (`ghcr.io/reidond/ilex:generic.gnome`).
+A VM cannot carry another board's firmware identity, and libblkid only takes a
+real BitLocker header for BitLocker: the `--self-check` covers conflicting
+machines, the BitLocker and NTFS classification, the parsers of what the kernel
+prints (a mount or swap line they cannot read fails), the trace of every mount,
+swap entry and loop device (a lazily unmounted medium, a loop on a block node,
+a file no name locates on a `nodev`, an image and an ordinary file
+system, a file found below the host disk's mount by the recorded numbers (and
+not found: another inode, another device, nothing there, no mount of that
+device; found as a device node), an unmounted loop, btrfs by UUID and of two devices and through a link,
+an unknown file system type, swap by `st_rdev`, a swap file, zram writeback,
+ext4 journals, a directory that cannot be listed, FUSE services at and away from
+their paths, the tables of other mount namespaces, the exclusive open's retry,
+each beside the mounts a live system has: `/dev`, `/run` and `/tmp` with their
+options, zram swap, the real ISO's overlay layout, and dracut's other layout
+with its deleted copy-on-write file, which is refused) and a live ISO's own
+mount layout; exiting tasks (a vanished process hides nothing of its
+namespace, `EINVAL` from an exiting task's `mountinfo` is a task that is gone,
+any other failure is not); the live ISO's own boot is `iso::next_helper_usb`,
+`iso::next_helper_cdrom` and, as a file on another disk, `iso::next_helper_loop`.
+
+Three more `installer::` trials write disks, so each boots **UEFI VMs of its own**
+(not the group's bcvk ephemeral VM, which boots a kernel directly: `bootupctl
+--auto` there chooses BIOS, see **Apply**): the live image is written to a disk
+with `bcvk to-disk` (one-time per image: 6.5 minutes on a 16-vCPU Boat sandbox; the
+harness's layer adds sshd and a bootc install configuration, and the live
+image's own `/etc/containers/policy.json` must leave the local transports open
+for bcvk's inner install), booted under OVMF beside a sparse 41 GiB target and a
+3 GiB sentinel disk (all three with serial numbers, so that each has a
+`/dev/disk/by-id/virtio-ilex-disk-N` name), and called as `ilex-installer` over the
+bus. The installed
+target is then booted in a VM of its own. `installer::policy` is every refusal
+before the first write, each followed by proof that nothing was written (the
+first and last 16 MiB of both disks and `lsblk` are unchanged, no log directory
+exists, `State` is idle): no secret, an unsealed or empty memfd, a password with
+a line break, an unknown kind, a passphrase for an unencrypted plan, a secret for
+an unknown plan, `nobody` and `daemon` refused by the bus, no confirmation, the
+wrong disk's id or a path, an unknown plan, a key that is not ilex's, no
+signature found, a plan older than its validity (the helper restarted with
+`--plan-valid-seconds 5`, **and the wall clock stepped back two hours** while it
+ages: the plan is expired all the same), a restarted helper that has forgotten
+its plans, a disk partitioned since the plan, a partition mounted since the plan,
+and two races that only the helper's **own claim** can catch: the helper is
+restarted with the hidden `--pause-before-hold <file>` (which does nothing unless
+that file exists), `Apply` is let to probe the disk, find it free and stop at the
+pause (`<file>.reached`), the whole disk is opened `O_EXCL` by another process (then,
+with a fresh plan, a partition is mounted), and `Apply` is let go on: it must
+refuse with `in-use` and the message `... cannot be claimed ...` that only the hold
+produces (the probe's backstop says "in use by the running system"), the disks
+unchanged; at the end the password is in none of the helper's files nor the journal
+(counted exactly: both counts are 0). `installer::install` installs `generic.gnome`
+with a German keyboard, locale, zone and host name and an administrator whose
+password has spaces, colons and quotes; watches `Apply`, `Plan`, `Probe` and
+`SetSecret` be refused during the pull, `State` and `/run/ilex-installer/state.json`
+agree, stages only move forward, the pull's bar rises without ever being full
+early, and the signals (`busctl monitor --json`, parsed message by message) carry
+`Progress` for the six stages in order, each with a fraction in 0..1, and
+**exactly one `Finished`, with the success**; a second `Apply` of the finished plan
+is `unknown-plan` (it was forgotten when the installation began); reads the
+target from the live system (a mount that fails fails the check; the leak counts
+for the password, in the helper's files, the target's logs and the journal, are
+read as exact numbers and must be 0; one deployment, origin
+`ostree-image-signed:docker://ghcr.io/reidond/ilex:generic.gnome`, the pinned
+digest in the commit's metadata, `hostname`, `locale.conf`, `vconsole.conf` with
+`XKBLAYOUT`, `localtime`, no `/` line in `fstab`, `graphical.target`,
+`setup.json` key for key, the account and `wheel`, labels `shadow_t`,
+`passwd_file_t`, `user_home_dir_t`, the copied logs); boots it and asserts
+`bootc status` (digest, tracked tag, `containerPolicy`), the answers as `hostnamectl`,
+`timedatectl` and `localectl` report them, running with no failed unit, GDM, the
+administrator's SSH login **with the password** and `sudo`, a wrong password
+refused, a stamp on `/boot` of the two digests the test put in
+`/run/ilex-answers-seen` before `Apply` (as answers mode leaves them when it
+hands over) and then the request's own, root's, mode 600, no AVC and `restorecon -n -v -r /etc /var/home /var/log/ilex-installer`
+(and `/boot`, `/boot/efi`) with exit status 0 and nothing to relabel,
+`/boot/ilex-install-request.sha256` (root's, mode 600, one 64-digit line),
+`bootc upgrade --check`, and keeps
+`installed-layout.txt` (`lsblk -f`, the kernel command line, `fstab`, `crypttab`,
+mounts, swap, `bootc status`, the partition table; the Anaconda trial records the
+same) and a screenshot of GDM. `installer::interrupted` first puts an `ilex-boot`
+partition with a stamp of two digests on the target (an earlier installation's;
+the live system's `sfdisk` and `mkfs.ext4`), then kills the helper
+(`SIGKILL`) in the middle of the pull and asserts the state it leaves (failed in
+`image`, `disk_changed`, no tool running, no resume; what the dead helper had
+mounted lived in its own mount namespace, which died with it, so that nothing
+is held is what the probe after the restart says of the disk: not in use, by the
+trace and by the exclusive open), that its
+old plan is gone, that a new plan lists what the dead installation left among
+what it erases, and that a new `Apply` on the same disk installs a system that
+boots with the administrator able to log in. In the middle of the pull the
+helper has kept the two digests in `/run/ilex-installer-earlier` (root, mode
+600); after the kill the disk's new `ilex-boot` holds the **provisional stamp**,
+exactly the two old digests (root's, mode 600: written before the pull, and not the
+request being installed), while that record still lists them (it outlives the
+helper); **the live system is then stopped without a shutdown and booted again**
+(`/run/ilex-installer-earlier` is gone, and the disk's stamp, read as answers mode
+reads it, still names both digests); and the retried installation, in that new
+boot, leaves a stamp on the booted disk that is exactly the two old digests and
+its own.
+`installer::encrypted` and `installer::encrypted_german` (each a VM of its own,
+the live image booted as a disk with the target, a sentinel and a USB stick for
+the log) install `generic.gnome` onto a whole disk with LUKS2 and unlock it at
+its real boot prompt. The plan (a request that leaves the security chip at
+`auto`, no recovery key) names the encrypted root partition alone and warns that
+the chip is not used (with the probe's reason: `secure-boot-off`); then, before the first write and with every disk byte for byte as it
+was: no passphrase (`missing-secret`, field `disk-passphrase`), a passphrase with
+a line break, a tab or 513 bytes, an unsealed one and one for a plan that does not
+encrypt (`invalid-secret`, field `fd`). The installation's stages are
+`partition, encrypt, mount, image, configure, account, finalise`, each announced
+on the bus. From the live system the trial reads the disk: LUKS2 with one keyslot
+derived with `argon2id`, a 512-bit `aes-xts-plain64` payload key and no token, the
+passphrase opens it (`--test-passphrase`) and a wrong or empty one does not, a
+btrfs inside, exactly three partitions (ESP, `/boot`, the volume: no swap) and no
+swap, `/var` inside the volume and none on `/boot`, the deployment's
+`/etc/crypttab` (`luks-<uuid> UUID=<uuid> none discard`, mode 0600),
+`vconsole.conf`, `setup.json` (`passphrase-only`, `not-requested`: the trial asks for `tpm: off`, and the computer's verdict is `unavailable`) and the boot
+entry's arguments (`rd.luks.uuid=`, `vconsole.keymap=`, the image's
+`rd.luks.options=tpm2-device=auto`, a `root=UUID=`), nothing left open or mounted,
+and that **the passphrase is nowhere it must not be**: not in the helper's
+`/run/ilex-installer` (state, logs, the plan), the journal, `dmesg`, any process's
+arguments, the log the helper saves to the stick through `Finish(save-log:…)` (its
+eleven files, the tarball scanned as files and as raw bytes), the target's
+`/var/log/ilex-installer` or `/etc`. The disk is then booted, the prompt is
+found as a person finds it (the screen has text on it that stopped changing but
+for the cursor, after GRUB's `Booting` line on the serial console: the installed
+system's kernel is quiet and has no serial console) and the passphrase is typed
+through QMP, in the keys of the layout it was typed in. The US run's passphrase
+has spaces, quotes, a colon and an ampersand; **the German run's, `Süß-Zebra-yoga-2026`,
+is made of keys that are other keys on a US keyboard** (`y` and `z`, `ü`, `ß` and
+the hyphen are `z` and `y`, `[`, `-` and `/`), so a prompt that was not in the
+layout (`vconsole.keymap=de-nodeadkeys`) could not open the volume. The booted
+system must pass every `installer::install` assertion and show the root, `/var`
+and `/sysroot` on `/dev/mapper/luks-<uuid>` over the partition of the disk, no
+swap, the same header, `discards` in effect, the keymap loaded, no failed unit,
+the image's unlock stack's own record that it opened the volume
+(`/run/ilex/root-unlock.json`: `method` `fallback`, the volume's UUID, no token
+or slot), the keymap in the initramfs it came from, and the passphrase in no log
+of the installed system. The helper's `--self-check` (`check_luks`) covers what
+needs no disk: the header rules (a second keyslot, PBKDF2, another cipher, a
+256-bit key, a token, a fixed-size or second segment each refused), the UUID, the
+`crypttab` line and kernel arguments, the key file read by a child through its
+inherited descriptor and not by one that was not given it, mode 0600, emptied when
+dropped, and the passphrase rules. Measured on a 16-vCPU Boat sandbox (2026-11-27):
+the installation 320 to 370 s, each trial about 12 minutes from the live image's
+disk.
+Measured on a 16-vCPU Boat sandbox (2026-11-27, each trial run on its own): the
+five `installer::` trials together 1,420 s with the live image's disk built in that
+run (`installer::install` alone about 250 s: the pull and deployment 3 to 4.3
+minutes, every other stage together under 10 seconds), `iso::next_unattended` 315 s,
+`_fat` 20 s, `_late` 42 s, `_repeat` 643 s, `_handover` 188 s, `_reboot` 413 s,
+`_reboot_same_plan` 423 s, `_retry` 293 s, `iso::next_unattended_loop` 268 s, and
+the Anaconda ISO's own `iso::install` 11 minutes (2026-11-26). A guest of the
+`iso::next_unattended*` trials that writes nothing on its serial console in the
+first 60 seconds is a failed trial, not a flake to start again: the shared
+`ensure_firmware_output` rule of the `iso::next` tier (see "A VM that never
+starts") fails it with what QEMU was doing, and the harness's `-audiodev none`
+removed the hang that caused such guests.
+`iso::next_unattended` (opt-in with the other `iso::next` trials) boots the real
+ISO under UEFI with Secure Boot beside a target disk and an ext4 volume labelled
+`ILEX-ANSWERS`, follows `ILEX-INSTALLER-ANSWERS` lines on the serial console to
+`result=success` and the power-off, requires that no interface drew a page, boots
+the installed disk and asserts what `installer::install` asserts. Each disk has a
+serial number, so that it has a `/dev/disk/by-id` name (QEMU: a `virtio-blk-pci`
+device with `serial=`). The answers volume's image is hashed before each boot and
+after: the helper reads it read-only. It first boots the ISO, each time on a VM of
+its own that must write nothing, with: an answers file that is not valid (refused by
+line, never by text, with a password in the broken line), after which the interface
+must start (`handover=interface`: a refusal that wrote nothing does not leave the
+screen empty), on a VM **without** serial numbers, whose helper names the target
+by its bus path; answers that name that bus path (`result=failed ... by-id`); one
+whose `confirm-erase` is not the disk; and a target that already holds an ilex
+installation (a GPT with a partition labelled `ilex-root` and an EFI-system-typed
+partition with no file system, made with `sfdisk`: the second is an ESP that cannot
+be read, which counts as another system) under answers without `reinstall = true`
+(refused, naming both, with the partition table as it was); and a target that is, whole, **an LVM physical volume** (a
+label written into the second sector by the harness, which `blkid` is asked to
+take for one: no partition table), likewise refused without `reinstall = true`,
+with its signature still on it, the `lvm-pv-uuid-*` link present beside
+`virtio-ilex-disk-N` and the probe naming the disk by the latter. The installation
+then runs **over that LVM physical volume with `reinstall = true`** (it is what
+the disk's by-id link wiping used to break) and the console must say
+`reinstall=true erases: ... LVM2_member ...`; the installed system's
+`/boot/ilex-install-request.sha256` is a stamp of one 64-digit digest (root, mode 600).
+`iso::next_unattended_repeat` installs onto a blank disk with `reinstall = true`
+(stamp: the answers' digest A), then boots the ISO **again with the same sticks**
+and requires that the console refuse (`already installed`, no `plan=ready`, no
+`apply=started`), that the interface start, that the stamp read in the guest
+(read-only) be A and `/run/ilex-answers-seen` hold the same digest, and that the
+whole 41 GiB target be byte for byte what the installation left (its SHA-256
+from the host before and after). A third boot, with the host name changed and
+`reinstall` off, is not refused for the stamp but at the reinstall rule and
+writes nothing; the boot's record holds that request's digest E (and the stamp
+is still A). **In that guest a person then installs through the interface**:
+`Plan`, `SetSecret` (a sealed memfd from `python3`) and `Apply` over the bus as
+root, then `State` until it succeeds, which is not answers mode and records
+nothing; the stamp on the new `/boot` must be exactly `[A, E, I]` (the earlier
+stamp's digest carried across the wipe, the digest answers mode had seen, then
+the installation's own). The guest powers off and the target's SHA-256 is taken;
+the **original sticks** (`reinstall = true`) then boot again and must be refused
+(`already installed`) and the disk be byte for byte what the installation by hand
+left; and the edited answers made `reinstall = true` are refused the same way
+(their digest was only seen, never installed), the disk again untouched.
+`iso::next_unattended_reboot` installs with `reinstall = true` (stamp A), boots
+the **same sticks with the fixed credential `ilex.installer.fault=image`** (the
+helper fails the image stage; the answers are refused, `already installed`, and
+the interface starts) and has a person install through the bus: the helper wipes
+the disk (the stamp goes with it), mounts the new `/boot` and fails in the image
+stage with `fault=image`. The new `/boot` must then hold the provisional stamp,
+**exactly A** (carried from the stamp the wipe took and seen in the boot; the
+person's own request is not in it), read as answers mode reads it, and
+`/run/ilex-installer-earlier` holds A. The machine is stopped without a shutdown
+(QEMU ends: the stamp must be readable with no journal replay) and the original
+sticks boot again with `/run` new: refused (`already installed`), the stamp read
+from the disk alone is still exactly A and the 41 GiB disk is byte for byte what
+the failed installation left (the partial installation is not wiped).
+`iso::next_unattended_reboot_same_plan` is the same with a person whose plan
+**equals** the answers' request (the host name, language, keyboard and time zone of
+the answers, another password: the digest holds no password, so their digest is
+A): the new `/boot` must still hold exactly A (a stamp that took A out because it
+is the request being installed leaves none), `/run/ilex-installer-earlier` holds
+A, and after the power cut the same sticks are refused and the disk is untouched.
+`iso::next_unattended_retry` boots `reinstall = true` answers over a blank disk
+with the same fault: the unattended installation wipes the disk, mounts the new
+`/boot` and fails in the image stage (`plan=ready`, `apply=started`,
+`result=failed ... fault=image`, no hand-over to the interface); the new `/boot`
+has **no stamp** (these answers' own digest, the only one the boot's record
+holds, is not kept), the machine is stopped without a shutdown, and the same
+sticks boot again with no fault: they are not refused as already installed, erase
+the failed installation's partitions (`reinstall=true erases:`), install and
+power off; the installed disk boots on the planned digest and its stamp is one
+digest, its own.
+`iso::next_unattended_encrypted` installs from answers that encrypt (a German
+keyboard, a passphrase whose keys differ from a US keyboard's, in plaintext in
+the file as the documentation says) with no interface: the helper's `SetSecret`
+of the passphrase, the plan's note that the security chip is not used on the
+console (with the probe's reason, or `no-recovery-key` on a computer that could: nothing
+in an unattended installation can show a key),
+no secret of the answers on the console, the answers volume unchanged;
+the disk is then booted, its prompt answered with the German keys through QMP, and
+the installed system must pass the assertions of `installer::encrypted_german`.
+`iso::next_security` and `iso::next_security_off` are the security tier of the new
+installer, on KVM with enrolled OVMF and a **persistent swtpm** (T6's `VmSpec`, as
+`security::firmware` boots): a platform that cannot provide Secure Boot with SMM or
+the TPM leaves the run **unqualified** (`next-security-result.json`, stage
+`platform`) and failed, and nothing is turned off to pass. A person at the
+interface (a script: `Plan` with a recovery key and `tpm: auto`, `SetSecret` of
+the passphrase and the password, `Apply`) installs encrypted; the plan's
+encryption says `will_enroll` with `pcr7-sha256` on the secure VM and
+`secure-boot-off` on the other (with the warning only there). The key is taken
+through a small raw D-Bus client (`iso_next/rawbus.py`: busctl cannot keep the
+descriptor a method returns) once, and a second request is refused
+(`recovery-key-taken`); `State` says `shown`, never the key; keys that differ from it
+in one letter of group 1, 4 or 8, the two groups the first design asked for, and
+a part of the key are refused (`recovery-key-mismatch`) and leave `shown`; the
+whole key (in capitals, with spaces) is accepted. The installation ends in `recovery, tpm, finalise` (no
+`tpm` stage when Secure Boot is off) with `recovery_key: acknowledged` and the
+chip `enrolled-unverified` / `pcr7-sha256`, or `passphrase-only` /
+`secure-boot-off`, with the SELinux check as every trial (enforcing, zero
+denials); the helper's run directory, journal, `dmesg`, process list, install log
+and the **log saved to a USB stick** (a tarball, scanned raw and extracted) hold
+neither the passphrase nor the key. `iso::next_security` then starts the disk
+cold **with nobody at the keyboard**: it reaches SSH, `luksDump` shows exactly one
+`systemd-tpm2` token (PCR 7, SHA-256, no PIN, no public-key, signature or pcrlock
+field), one `systemd-recovery` token and three keyslots, `crypttab` names
+`tpm2-device=auto`, `setup.json` says `enrolled-unverified`, `enrollment.json`
+(mode 0600, the only file in `/var/lib/ilex/security`) says the recovery key is
+acknowledged, `/run/ilex/root-unlock.json` says `tpm2` and `ilexctl security
+verify` says `verified`, and the installed system passes `check_installed`.
+Another cold boot of the same disk on **a fresh TPM** (same PCR 7, nothing the
+chip sealed) shows the prompt, and **the recovery key typed at it** opens the disk
+(the unlock record says `fallback`); the key and the passphrase open their slots
+(`--test-passphrase`) and are in no log, `/etc`, `/var/lib` or journal of the
+installed system. `iso::next_security_off` does the same with Secure Boot off: no
+chip token, two keyslots, `setup.json` `passphrase-only` / `secure-boot-off`, the
+record `unavailable`, and the recovery key typed at the prompt opens the disk.
+`iso::next_security_declined` is the way out: on the secure VM the person's window
+takes the key and goes away. The same wrong keys are refused;
+`ContinueWithoutRecoveryKey` for another plan is refused (`no-recovery-key`) and
+for the plan is accepted (`State` says `declined`; confirming or taking the key
+afterwards is refused, a second call is a no-op); the stages are `recovery, tpm,
+finalise` and the installation ends `passphrase-only` / `recovery-key-failed`
+with the chip not enrolled. The disk, started cold on the secure VM, asks for the
+passphrase (typed at its prompt); `luksDump` shows two keyslots, the
+`systemd-recovery` token (the one `enrollment.json` names) and no TPM token,
+`setup.json` is `passphrase-only` / `recovery-key-failed`, `enrollment.json`
+records `recovery` unacknowledged with its `slot`/`token`, `recovery_attempt`,
+`state: unavailable` and no `tpm`, `ilexctl security verify` says `pending` /
+`fallback-unlock-deferred` as it does for any disk without a chip, and the
+passphrase and the unseen key open their slots.
+Every file any of the three trials saves on the host is scanned for the
+passphrase, the password and the key.
+`iso::next_unattended_handover` boots with the fixed
+credential `ilex.installer.fault=helper` (the helper exits before it takes its bus
+name) and then `=answers` (the unattended process kills itself with `SIGKILL`
+after reading the answers and before it asks the helper anything): in both the
+session unit must become active, the gate's marker be gone, Apply's flag never
+raised, the disk untouched and the answers volume unchanged; for `answers` the
+unit must end `failed` by `signal` with no `result=` line, and the console say
+`handover=interface by=systemd`. A third boot with `=apply` (the helper kills
+itself as `Apply` has started the installation thread, so the call is never
+answered) must show the opposite: `plan=ready`, then `result=failed Apply: no
+refusal came back` and `the interface is not started`, no `apply=started` and no
+`handover=`, the gate's marker and Apply's flag still there, the answers unit
+`failed`, the session unit `inactive` 45 seconds later and systemd's hand-over
+unit skipped by its condition (the disk is not asserted untouched: the thread may
+have begun). A fourth boot with no fault restarts the unit **while the
+installation runs**: once the console says `stage=image` the answers unit is
+`SIGKILL`ed (the helper's installation goes on and the flag stays), then
+`systemctl reset-failed` and a start. The new run must print `result=failed ...
+an installation is running`, with no second `plan=ready` or `apply=started` and no
+`handover=`; the gate's marker and the flag are still there, the answers unit is
+`failed`, systemd's hand-over is skipped by its condition, the session unit is
+`inactive` 45 seconds later, and the helper's `State` still says the first run's
+installation is active.
+`iso::next_unattended_fat` boots with a **FAT** stick labelled `ILEXANSWERS` (made
+with `mkfs.fat` and `mcopy`; the host needs `dosfstools` and `mtools`) whose answers
+name the right disk with a wrong confirmation: the console must say `volume=...
+fs=vfat` and refuse at that rule, the label list has `ILEXANSWERS` and not
+`ILEX-ANSWERS`, the target is blank and the stick's image is unchanged.
+`iso::next_unattended_late` boots with no answers volume, waits for the interface,
+and adds a virtio disk to a PCIe root port that was left empty (QMP
+`blockdev-add` and `device_add`) whose ext4 volume labelled `ILEX-ANSWERS` holds
+answers that would install onto the blank target: the console must say
+`ignored=late`, and for the next 20 seconds nothing else: no `plan=`, `apply=`,
+`stage=` or `result=` line, the session unit is `active` with the same main PID
+and restart count, the answers unit never ran, the helper's `State` is idle and
+the target is blank.
+`iso::next_unattended_loop` (opt-in, named explicitly like `next_helper_loop`)
+runs the same installation with the ISO as a **file on another disk** (iso-scan,
+see `iso::next_helper_loop`), so that the live-medium logic is exercised on the
+install path as well: the VM's own disk is the host disk that holds the file, the
+blank target and the answers volume are attached beside it, and the harness finds
+each by its size. After the refusals above (but the existing-installation one,
+which the CD-ROM trial makes), answers that name the host disk
+(the probe's `live_medium` disk, whose size must be the host disk's) are refused
+as `LiveMedium` before anything starts (`apply=started` never appears); the
+SHA-256 of the host disk's file is taken before the first boot and must be the
+same after that refusal and again after the installation and power-off (the live
+system boots from a file on it and writes nothing to it), and the target is blank
+after each refusal. Then the answers that name the blank target install, the
+installed disk boots alone and every `installer::install` assertion holds.
+
+## The next installer's interface
+
+`crates/ilex-installer-flow` is the installer's flow, shared by every interface;
+`crates/ilex-installer` is the GNOME edition's GTK 4 + libadwaita (relm4)
+application over it. The KDE edition's Kirigami interface (Qt Quick through
+cxx-qt, a later change) drives the same flow crate: nothing in it knows a
+toolkit, a compositor or a thread. This version installs a whole disk, encrypted
+unless the person turns that off: the welcome, machine, disk, encryption and
+administrator pages, the review with its confirmation, the installing page and
+the three pages an installation ends on (done, problem). Nothing is written to a
+disk before the person has confirmed the erase on the review page.
+
+- **The flow crate.** No GTK or Qt types, no `async`.
+  - `flow::Flow` is a state machine with no I/O, and **every rule lives
+    there**, so that GTK and Kirigami cannot disagree about one: the pages in
+    order (`PageId`: the walk `welcome`, `machine`, `disk`, `encryption`, `account`, `review`,
+    then `installing`, `done` and `problem`, which nobody goes back from), what
+    each needs before Continue works (`can_continue`), what Continue does. Every
+    method that can need the helper or the compositor returns a `Step` the
+    interface carries out on a worker: `RunProbe { generation }`, `RunPlan {
+    generation, request }`, `SwitchKeyboard { generation, layout }`,
+    `RunApply { generation, plan, erase_disk, password, passphrase }`, `RunState {
+    generation, delay_ms }`, `RunLogProbe { generation }`, `RunFinish {
+    generation, action }`, `Confirm(dialog)` (show it; the answer goes to
+    `confirm_install` or `cancel_install`), `Goto(page)` (returned whenever the
+    page changed and nothing else is asked) or `Stay`. The interface calls
+    `start` once (it asks the helper where an installation is first, see
+    re-attaching below; `start_probe` is the first look at the computer on
+    its own), the setters of the page it shows (`set_language`, `set_keyboard`
+    (a no-op for the layout that is asked for already), `select_machine`,
+    `set_disk`, `set_administrator`, `set_password(Secret)`,
+    `set_confirmation(Secret)`), `can_continue`, `advance`, `back`, `retry`, the
+    installation's methods below, and gives each answer back with its generation
+    (`probe_finished`, `plan_finished`, `keyboard_switched`, `apply_finished`,
+    `state_finished`, `log_probe_finished`, `finish_finished`). It never calls
+    the helper itself, so GTK drives it from relm4 messages and commands and
+    Kirigami will from cxx-qt signals and a worker thread. A `Secret` that
+    `RunApply` carries is a copy for the worker (wiped when dropped); the flow
+    keeps its own.
+    - *Answers are numbered.* The flow numbers every request and remembers the
+      one probe, plan and layout switch in flight; an answer to any other
+      number (late, repeated, out of order, before any request, or while a plan
+      is checked) returns `Stay` and changes nothing: the probe, the view, the
+      person's configuration and the stale-look flag stay as they were.
+      `start_probe` is refused while the plan is checked (a retry's own look
+      included) and while another probe is outstanding, so there are never two
+      competing probes. While the helper is asked for the plan
+      (`is_checking`) the setters refuse, so the answer describes what the
+      flow still holds, Back is off and a second request cannot be started:
+      the plan the flow ends up with, and the id a later change applies it by,
+      is always the latest answer's. The administrator page does not continue
+      (`can_continue`) until the computer has been looked at: after Back and a
+      banner's Try again it waits for the new look.
+    - *The session's layout.* `set_keyboard` records what was asked for and
+      returns `SwitchKeyboard` unless the compositor is on it already or a
+      switch is under way; that one finishes first and the latest request is
+      asked for next (so the compositor ends on the last layout chosen whatever
+      order answers come in). `keyboard_status` is `Applied`, `Switching` or
+      `Failed(message)`; Continue on the welcome page is off until it is
+      `Applied`, and a failure is shown with a Try again (`retry_keyboard`). The
+      `keyboard` in the plan request is the requested layout, which by then
+      is the applied one.
+    - *Looking again.* A refusal that a new look at the computer could mend (a
+      disk gone or in use, a helper that restarted) marks the look stale: the
+      closing page's Try again (`retry`) and Continue after such a result both
+      return `RunProbe` first, then the check follows by itself from
+      `probe_finished`, with the person's configuration kept while the new look
+      still offers it, and a look that resets the choice invalidates the
+      earlier check. A BIOS boot or a failed probe that is found after the
+      person left the welcome page is `blocking_problem()` on every page
+      (`can_retry_probe` says whether the banner's Try again can mend it;
+      `can_retry` whether the closing page's can: not for a BIOS boot, which
+      only a restart mends).
+    - *The flow prints.* Every serial-console line is queued by the flow when
+      its cause is accepted, and the interface only prints what
+      `Flow::drain_markers()` hands it after each call: the page marker when
+      the page changes (the first one when the interface says the window is on
+      screen, `window_shown`, with its own `renderer=… scale=…` words and the
+      uptime), the machine page again (marker, composition line, notice) when a
+      probe answers while it is shown, `ILEX-COMPOSITION` only when
+      `select_machine` accepts a different configuration (or a look resets it),
+      the language event only when `set_language` changes it, `result=stale`
+      for an answer that was ignored, and the layout test field's text only
+      through `try_text` when the flow's own gate is open (`echo_try`: the test
+      credential or a simulated session; an interface reads the field only
+      then). `Flow::with_markers(MarkerConfig)` turns it on; a flow without it
+      (the renderer, the self-check) queues nothing.
+    - *The disk.* The disk page lists the probe's disks (`disks::DiskView`):
+      the ones that can be installed to first (not the live medium, not in
+      use, at least the helper's minimum), each with its model, size, bus,
+      serial, what is on it (the partitions and every other system the probe
+      found) and a warning for a removable one; then the others, each with its
+      reason. The first disk that can be installed to is chosen until the person
+      chooses (`set_disk`); a later look keeps the person's disk while it is still
+      offered, otherwise the default moves on and an earlier check is dropped.
+      The way of installing is the whole disk (the other, beside what is
+      there, is listed as unavailable). The request that `Plan` takes names
+      that disk, `whole-disk` and `encrypt` as the encryption page left it (with
+      `tpm: "off"` when it is on: the installation does not enrol the security chip
+      yet, so the plan has nothing to warn of). Nothing to install to is the
+      page's own problem (`disk_problem`) with Try again (`start_probe`).
+    - *Encryption.* `encryption.rs` holds the page's rules and words. The
+      disk is encrypted unless the person turns the switch off (`set_encrypt`).
+      With it on, Continue waits for a passphrase typed twice
+      (`set_passphrase`, `set_passphrase_confirmation`, `Secret`s like the
+      password): `encryption_checks` refuses one the model's `passphrase_problem`
+      refuses (empty, over 512 bytes, a control character: what the boot prompt
+      cannot take) and a confirmation that differs, and `passphrase_advice` only
+      advises (under 12 characters) without refusing. The page names the layout the
+      passphrase is typed in (`passphrase_layout_line`: the session's, and what
+      the installed computer's console is put in before it asks). A disabled
+      "security chip" row is a switch where the helper's probe says the computer
+      is eligible (`chip_view`, on unless turned off: `tpm` is `auto` or `off` in
+      the request, and `recovery_key` is `true` whenever the disk is encrypted)
+      and one line saying why not where it is not
+      (`recovery::chip_unavailable_line`, from the probe's reason code). The
+      passphrase goes to the helper only in `RunApply` and only when the plan
+      encrypts (`SetSecret(disk-passphrase)` first), never into a request, a marker
+      (`ILEX-INSTALLER page=encryption encryption=on keyboard=us`,
+      `event=encryption encryption=off`) or a log; the flow wipes it with the
+      password after a success and when the computer restarts. The review page has
+      an Encryption row and an Automatic unlock row, and the done page says
+      "unlocks automatically" or "asks for the passphrase at every start:
+      <reason>" (`State.security.tpm`, so that an interface that restarted says
+      it too).
+    - *The recovery key.* While the image downloads, a `Waiting` key in
+      `State.security` puts the flow on the `recovery` page and asks the helper for
+      the key once (`Step::RunTakeKey`): the page shows its eight groups, "Write it
+      down. It is shown only now.", and **one field for the whole key**, typed from
+      the paper (`flow/src/recovery.rs` has the words and `key_check`, which
+      counts and checks the letters group by group; the model's `recovery` module
+      has the shape and the comparison, and the helper decides). Confirm sends the
+      key as the paper has it (`Step::RunAcknowledge`); a refusal says so and
+      empties the field; success goes back to the installing page. An interface
+      that was restarted finds `shown` (taken, not confirmed): the page cannot show
+      the key again and says so, and still takes the whole key from the paper;
+      `acknowledged` and `declined` go straight to the installing page. **Going on
+      without a recovery key** (`RecoveryView.skip`, `Step::RunContinueWithout`,
+      `Flow::continue_without_recovery_key`) is offered exactly when the page
+      cannot finish: the key was taken by a window that is gone (or whose answer
+      was lost), the key could not be fetched in three tries, or the helper could
+      not carry out the confirmation (the volume refused a key that was typed
+      right). It says what the disk is then (it unlocks with its passphrase
+      only, the chip will not unlock it, and the data cannot be recovered without
+      the passphrase) and how to get a key later (`sudo ilex-enroll complete
+      --root / --reissue-recovery`); the done page repeats the command for
+      `recovery-key-failed`. The key is a `Secret` wiped when the page is
+      left, and in no marker (`ILEX-INSTALLER page=recovery key=shown|taking|gone
+      skip=true|false`, `event=recovery state=…`: `taking`, `shown`, `refused`,
+      `confirmed`, `declining`, `declined`, `failed`).
+    - *The installation.* The review page (`Flow::review`, from the plan:
+      the choices in words, the disk, the partitions that will be created, the
+      image as target, version, digest and download size, `Everything on <model>
+      <serial> will be erased[, including N other systems found on it]`) has one
+      destructive button. `install()` only asks for the confirmation dialog
+      (`Step::Confirm`; the choices freeze, Back is off); `cancel_install()` undoes
+      it; **`confirm_install()` is the only call that gives the helper the
+      password and the disk's id** (`RunApply`: `SetSecret`, then `Apply`, see
+      `Backend::start_installation`). A refusal of `Apply` (the plan is older than
+      15 minutes or forgotten, the disk changed, the image's signature) returns to
+      the review with its sentence and Try again, which looks at the computer
+      again first. An `installation-active` refusal drops the plan and asks
+      `State`; an idle answer checks the choices again, so Erase is never
+      offered on a plan the helper refused. While any such `State` is asked the
+      flow is frozen (`is_frozen`): no Back, Continue, Try again or look at the
+      computer starts beside it. If the answer to `Apply` is lost (the bus, a helper that died as
+      the installation began) the flow asks `State` before it says anything: what
+      the helper says is what happened (`not-started` goes back to the review,
+      under way continues, silence is the lost page); while `State` says
+      `starting` for this plan the helper has neither begun nor refused, so the
+      flow keeps asking and says nothing yet. **Another plan's installation**
+      (`active`, or `starting`, for a plan this interface did not apply) is
+      followed on the installing page (`reattached`): "did not start" would send
+      the person back to the review while a disk is written. Then the interface asks
+      `State` about every second (`RunState`; `Progress` and `Finished` are not
+      subscribed to: `State` is the one call that carries the last log lines and
+      the one a restarted interface re-attaches with), and the flow follows the
+      helper's record alone: `installing_view` (the stages as rows with their
+      status and fraction, the overall bar weighted by how long each stage takes,
+      the helper's last sentence, the last lines of the log), then an outcome puts
+      the flow on `done` (which wipes the password the flow held: nothing needs it
+      again) or `problem` (which keeps it, for Try again). A helper that does not
+      answer `State` is
+      waited for (8 requests: systemd starts it again within a second or two and
+      the new one reports the installation as failed in the stage it was in);
+      only longer silence is the problem page's `lost` kind, which keeps asking
+      more slowly and moves on by itself when the helper is back.
+    - *Re-attaching.* `start()` asks `State` first. An installation that is
+      running, or whose `Apply` is still checking (`starting`: the installing page
+      with every stage waiting, `Starting the installation` and no log, never the
+      previous installation's outcome that the rest of the record still holds),
+      puts the flow on `installing`; **the plan whose installation the flow has
+      not seen begin** (`starting`, or the plan whose `Apply` answer was lost
+      when the helper then fell silent) is remembered, and a `State` that is not
+      busy and whose record is not that plan's (`applied`) means its `Apply`
+      ended without beginning (refused, or the helper stopped while it checked:
+      a successor reads `starting` as unset): nothing was written, and the
+      record under it (an earlier failure or success, or an idle helper) is
+      **never** taken for its outcome and never the lost-helper page. An
+      interface that has its choices goes back to the review (the sentence, the
+      refusal the helper recorded for that plan when it has one, and Try again);
+      a restarted one has none, and starts from the welcome page with the sentence
+      in its banner (`notice=not-started` on the page marker, until Continue) and
+      a look at the computer. One that ended while the interface
+      was away on `done` or `problem` (the pages are drawn from the state alone,
+      whose `summary` names the edition, composition, version and disk); an idle
+      helper begins the first look at the computer. **A helper that cannot be
+      asked** (it is not up, or is restarting) shows its problem on the welcome
+      page and looks at nothing: a probe that succeeded now could hide an
+      installation whose outcome nobody read, so Try again (`start_probe`) asks
+      `State` again until it has been answered once, and only then looks at the
+      computer. A refusal of `Probe`, `Plan` or `Apply` that says
+      `installation-active` asks `State` the same way, on whichever page the
+      person is; from the review page an answer of an idle helper resumes the check
+      that was interrupted (a spinner is never left), and a `State` that cannot be
+      asked puts the problem on the review page itself, with a Try again that asks
+      `State` first and then checks (the Erase button is never left grey with
+      nothing said). Until the answer arrives nothing of the pages is shown and the
+      first page's marker (with the toolkit's words) is held for it. Try again on a
+      re-attached problem page starts again from the welcome page: the password
+      and the choices went with the old interface.
+    - *The disk the person accepted.* Continuing from the disk page chooses the
+      selected disk, whether it was picked or preselected (`disk_chosen`). A later
+      look at the computer (Try again) keeps it while it is still offered; when it
+      is gone (unplugged, in use now) the flow never switches silently: it
+      returns to the disk page (`Step::Goto(Disk)`, the check is over) with
+      `disk_notice` (`The disk you chose is no longer available`, until a disk is
+      chosen or Continue is pressed) and the first disk that can be installed to
+      preselected, and prints `event=disk-gone disk=<id>`.
+    - *What a view says, what an interface draws.* The wording that depends on the
+      state and which buttons are shown or pressable is the flow's, so that GTK
+      and Kirigami cannot disagree: `review_page` (`ReviewBody::Waiting`: the
+      check or `Starting the installation`; `Problem` with its icon and Try again;
+      `Checked` with the review, whose `notes` are `Found on the disk` and `Note`
+      rows, and the destructive button as a `Control`), `ProblemView`'s `retry`,
+      `save_log` and `restart` (`Control { visible, enabled }`: Try again and
+      Restart stay shown and go grey while a Restart or a log is under way, Save
+      the log is for a failure only), `DiskChoice::lines` (`Not available: …`),
+      `InstallingView::waiting` (`The installer's helper is not answering` and
+      what is done about it, `helper_silent`), and `PageId::stack`: the pages a
+      navigation view holds when a page shows, the walk up to it, or the page
+      alone for `installing`, `done` and `problem`, between which the flow moves
+      in any order (Lost, then Done or Installing). An interface makes its stack
+      that one (push or pop for a step, replace otherwise; never pop to a page the
+      view does not hold). The flow also wipes the passwords it holds when an
+      installation succeeds and when Restart or Power off is accepted from the
+      problem page, and says so (`secrets_wiped`, a counter): the interface
+      clears the fields it holds them in.
+    - *The closing pages.* `done_view` (what was installed, Restart and Power off
+      through `restart()` and `power_off()`, which ask `Finish` once and then
+      say `Restarting…` or `Powering off…`, or why not), `problem_view` (the stage
+      that failed in words, the helper's reason as one sentence and what it means
+      for the disk, the last lines of the log; Try again, Save the log, Restart).
+      Try again after a failure (`retry_install`) looks at the computer, checks
+      the same choices and shows the review page, where the erase is confirmed
+      **again**; every stage can be run again from the start. Save the log
+      (`choose_log_device`: a probe; `log_state`: `Looking`, `Choosing` with every
+      removable disk that is not the medium the installer started from nor the
+      installation's disk and, for each, the sentence that says why the log
+      cannot go there (the model's rule, the helper's), `Saving`, `Saved`,
+      `Failed`; `save_log(id)` only for a stick the list says can take it).
+  - `backend::Backend` is the root helper as a trait with blocking calls (make
+    them from a worker thread): `probe`, `plan` and `state` over
+    `org.ilex.Installer1` (`DbusBackend`: zbus, the system bus,
+    `zbus::block_on`, connecting on first use and again after a failure, so the
+    interface starts before the bus or the helper is up and shows the problem;
+    a helper refusal arrives as `ClientError::Refused(PlanError)`, the bus's own
+    errors as `HelperUnavailable` or `AccessDenied`; everything that says the
+    helper or the bus is gone, `Disconnected`, `TimedOut`, `Spawn.*` and
+    `org.freedesktop.systemd1.*` included, is `HelperUnavailable` and makes the
+    next call connect afresh). `set_secret`, `apply`, `state` and `finish` are
+    implemented too: the password crosses as a **sealed memfd** (`memfd_create`,
+    written, then sealed against writing and resizing, close-on-exec), never as
+    text. `Secret` holds a password wiped on drop and never in a request,
+    a marker or a log, with a redacted `Debug`: the interface reads a field once
+    into a `Secret` and carries it as one in its message enums (derived `Debug`
+    prints nothing of it) up to the flow's setters.
+  - `simulate::Simulated` is the same trait over JSON fixtures
+    (`crates/ilex-installer-flow/fixtures/*.json`, compiled in: `generic`,
+    `ms-7c35`, `ms-7c35-board`, `conflict`, `no-composition`, `boot-override`,
+    `bad-override`, `bios`, `no-disk`, `helper-down`, `registry-down`,
+    `installing`). Each holds a complete `Probe`, a `Plan` to return and
+    optionally a refusal, a failing probe or an installation's `State`; the
+    simulation still applies the model's own `check_request` to every request
+    and the helper's live-image account names, so a refusal on a page is the
+    real rule's, and its `Apply`, `State` and `Finish` apply the helper's rules
+    too (the plan and the confirming disk id, the password set first,
+    `check_log_device`). A name may carry modifiers (`generic+fail-image+sticks`)
+    that say how the installation `Apply` starts goes (`success`, `stalled`,
+    `early`, `fail-image`, `fail-partition`, `helper-stopped`, `lost`), what the
+    helper is in when the interface starts (`attach-installing`, `attach-done`,
+    `attach-failed`, `attach-starting`: an `Apply` that is checking over an
+    earlier plan's failure; `attach-starting-refused` and
+    `attach-starting-refused-idle`: the same for three questions, after which
+    that `Apply` was refused, over the failure with the refusal recorded, or
+    over an idle first installation with none), how `Apply` answers
+    (`apply-refused`, `apply-lost`, `apply-slow`: the answer is lost and the
+    helper says `starting` for a few questions, then installs; `apply-lost-other`:
+    the answer is lost and the helper installs another plan; `apply-active`: it
+    refuses because an installation is active), whether the helper is silent for
+    a while and then back (`lost-then-done`, `lost-then-running`), whether the
+    first (`state-down`) or the second (`state-down-second`) `State` fails,
+    whether the second look at the computer is refused as active
+    (`probe-active`), whether the disk a plan was made for is gone from
+    every later probe (`vanish`), which
+    sticks are plugged in (`sticks`, `bare`), and whether a log write or a
+    restart fails (`log-fails`, `finish-fails`): they are how the self-check and
+    the screenshots reach every page and every error state. `ilex-installer --simulate [SCENARIO]` runs the application on
+    them, and is refused unless the kernel command line carries
+    `ilex.installer.simulate` (optionally `=<scenario>`, which the session then
+    runs without a flag) or `ILEX_INSTALLER_SIMULATE_ALLOW` is set (the
+    development and self-check containers): a released ISO cannot be talked
+    into pretending by anyone who cannot already edit its boot line.
+  - `messages` is every sentence a refusal or failure becomes, in one place
+    (`Message { title, detail }`, `plan_error`, `ClientError::message`, the
+    "No disk can be installed to" text, the Continue and "Checking…" labels);
+    `markers` the serial-console lines the trials assert on (below);
+    `machine::MachineView` is the machine page's content made from the probe;
+    `account` the administrator page's rules; `progress::Progress` the stages
+    of an installation as rows (`for_plan`, `from_state(&State)` for an interface
+    that restarted, `apply(&State)`, `overall`) for the installing page; `keyboard` and `language` the catalogues.
+    The model stays the one definition of every rule the helper also applies:
+    names (`is_user_name`, `is_reserved_user`, the catalogue's public profile
+    names), tags, detection and `check_request`.
+  - `selfcheck::run` exercises all of it on the fixtures (the keyboard
+    parser, every language, every refusal's wording, the name and password
+    rules, each scenario's machine page, the walk from the welcome page to the
+    checked plan, the helper's refusal of a name, BIOS, a missing helper, no
+    usable disk, a registry that does not answer, an unknown boot argument, the
+    progress rows of an installation; stale, repeated and unsolicited answers
+    of every request kind, the frozen choices while the plan is checked, no
+    second probe during a check or a retry's look, the administrator page
+    waiting for a pending look, serialised layout switches and their failures,
+    Try again looking first and keeping the configuration, no Try again for a
+    BIOS boot, a BIOS answer after the first page, every marker line the flow
+    queues in order with the test field's gate, and how each D-Bus error name
+    is classified; the disk page's listing, choice and defaults, the review's
+    content, the dialog and its cancellation, what is given to the helper and
+    when, every refusal of `Apply`, a lost answer to it in each way it can end,
+    the installation followed to the done page, a failed image stage, a stage
+    that fails before the disk was written, a helper that stopped, a helper that
+    never answers, re-attaching in each state, Restart and Power off, the log
+    dialog's states and the helper's rules as the simulation applies them, the
+    installation's marker lines in order, an `Apply` that is checking (kept
+    waiting through a lost answer; an interface restarted in that window; an old
+    failure never read as its outcome), a helper that cannot be asked at
+    start-up and Try again asking `State` until it answers, a refusal that says
+    an installation is active, the disk the person accepted when a later look
+    finds it gone or finds another in front of it, the passwords wiped, and the
+    views' buttons and wording)
+    and `selfcheck::system` reads the live image's keyboard catalogue.
+- **The pages.** `AdwNavigationView`, a header bar with the automatic Back
+  button (and Escape), Continue at the bottom right of every page. Every control
+  is reachable with Tab and has a visible label; the error style of a refused
+  field is also its accessible invalid state, with the message as its error
+  message. Enter in a text field (the layout test field, the name, the
+  passwords) continues when the page is valid and does nothing otherwise; Enter
+  anywhere else keeps its own meaning (opens a list, toggles a row, presses the
+  focused button). There is deliberately no window default widget: one takes
+  Enter away from the combo rows. The machine page starts on Continue, the
+  administrator page on the name. No window buttons: the session's only window
+  cannot be closed. The real ISO's trials drive the welcome, machine and
+  administrator pages by keyboard; AT-SPI has not been used to walk them.
+  - *Welcome.* The installed system's language (a short table of UTF-8 locales:
+    the live image has no list of the locales the installed system can
+    generate, so the model checks syntax only) and the keyboard layout, with a
+    field to try it. The layout catalogue is what the image ships: kbd's
+    console keymaps converted from xkeyboard-config
+    (`/usr/lib/kbd/keymaps/xkb/<layout>[-<variant>].map.gz`, which the helper's
+    own existence check accepts by construction) named by xkeyboard-config's
+    `evdev.lst`; `us` is the default. Choosing one switches the session through
+    GNOME Kiosk's own interface, `org.gnome.Kiosk.InputSources.SetInputSources`
+    on the session bus (`[("xkb", "de+nodeadkeys")]`), and reads
+    `SelectedInputSource` back before reporting it applied (Kiosk applies the
+    sources a moment after the call returns). The flow serialises the switches
+    and keeps Continue off until the compositor has confirmed the requested
+    layout; if it never does, the page says so, with Try again. It is the compositor's interface,
+    not localed's, so it needs no polkit action: the session's polkit rule is
+    unchanged. The `keyboard` request field is the console keymap name, so the
+    session's layout and the installed system's agree. A BIOS boot or a helper
+    that does not answer stops the installer with a sentence (and Try again for
+    the helper) on this page, and on every later page the answer can still
+    arrive on: each page's banner shows `blocking_problem()`. The field to try
+    the layout is not read, logged or printed on a normal boot: people type their
+    intended passwords there.
+  - *This computer.* From the probe: this computer's SMBIOS strings, the
+    edition's catalogue as one radio row per machine (the description before its
+    first `: ` is the title), and what the model decided: the detected machine
+    preselected; no match, two matches (named) and a machine without a
+    composition in this edition fall back to the default and say so; an
+    `ilex.composition=` boot argument is preselected and said to come from the
+    boot options; an unknown tag shows the model's error (with its list of
+    offers) and keeps the detection's choice. A configuration named before the
+    installer started is said to come from where it did (the boot options'
+    `ilex.composition=`, or a choice file). There is no desktop choice. The
+    page prints `ILEX-COMPOSITION <tag> (<reason>) installs <image>` when it is
+    shown and when the person picks another configuration, in the format the
+    selection trials have always read.
+  - *Administrator.* The maintenance and recovery account's name (the model's
+    `is_user_name`, `is_reserved_user` and the catalogue's profile names, with
+    the helper's own refusal of a name the live image defines shown beside the
+    field) and a password twice: no policy beyond what `chpasswd` can take (no
+    control characters, at most 255 bytes), and a hint under eight characters.
+    The password never enters a request, a marker or a log. The fields are
+    frozen while the helper checks the choices, and a refusal that is corrected
+    clears the fields' error style, invalid state and error-message relation.
+    The text of a password field is read only when it changes, once, straight
+    from the toolkit's secure buffer into a `Secret`; nothing reads it again to
+    compare. None of the three text rows (the layout test field and both
+    password rows) keeps an undo history (`enable-undo` off): GtkText would
+    keep unwiped copies of what is typed, the visible text included when
+    "show" is on. The interface process sets `RLIMIT_CORE` to 0 and
+    `PR_SET_DUMPABLE` to 0 before its window exists, and the session unit has
+    `LimitCORE=0` (the compositor sees the keystrokes too): no core file of
+    either, and no other process of the same user can attach to the interface.
+    Computer name and time zone are not asked yet (the model's defaults apply).
+  - *Disk.* A radio row per disk that can be installed to (model, then size,
+    bus and serial, what is on it and a warning for a removable disk), the
+    ones that cannot in a group of their own, greyed, each with its reason, and
+    the way of installing (whole disk, the other greyed). Continue is focused
+    (Enter takes the default disk); nothing is written. Without a disk, the
+    page says why of every disk with Try again.
+  - *Review.* Continue on the administrator page calls `Plan` with the choices
+    on the chosen disk. The page shows the answer in groups (the choices, the
+    disk, the partitions that will be created, the image's tag, version, digest
+    and download size, what else is on the disk and any warning of the helper),
+    the sentence `Everything on <model> <serial> will be erased…` in the error
+    colour and the destructive button `Erase <model> and install`, which has the
+    focus (Enter opens the dialog; nothing is written by it). Or why nothing can
+    be installed (every disk's reason, a registry that does not answer, the
+    helper's refusal, a refused `Apply`) with Try again, which looks at the
+    computer again before it checks (a disk that was unplugged, a medium that was
+    ejected) and keeps the person's configuration while it is still offered. The
+    dialog (`AdwAlertDialog`) names the disk, says that it cannot be undone and
+    that the image downloads about N GiB; **its default and close response is
+    Cancel** (Escape cancels), the destructive response is the other button: a
+    keyboard install Tabs to it and presses Enter.
+  - *Installing.* The heading names the edition, an overall bar, the helper's
+    sentence, a row per stage with an icon (pending, a spinner, a check, an
+    error) and a bar for the running one, and an expander that opens the last
+    lines of the log. A helper that does not answer for a few requests is said
+    in a banner. There is no Back and no Cancel.
+  - *Done.* What was installed (edition, configuration, version, the disk),
+    Restart (focused) and Power off; the machine is going down once the helper
+    has accepted, and a refusal is said under the buttons.
+  - *Problem.* The stage that failed and the helper's reason in a sentence, what
+    it means for the disk (nothing was written, or the disk was changed and what
+    was on it is gone), the last lines of the log, Try again (focused), **Save the
+    log to a USB stick** and Restart. The dialog lists the sticks (the ones the
+    log cannot go to are greyed with the helper's sentence), puts the focus on
+    the first stick that can take it (Enter writes), says where the file went
+    (or why not) and closes with Enter. After a helper that stopped, the page is
+    the one its successor's record makes; when the helper stays silent, the page
+    says so, with Try again (which asks again) and Restart.
+- **Markers.** The formats are `ilex_installer_flow::markers`'s, so every
+  interface prints the ones the trials read. Every page prints
+  `ILEX-INSTALLER page=<id> edition=…` plus its own words when it is shown
+  (`language=` and `keyboard=` on the welcome page; `selected=`, `origin=`
+  (`detected`, `not-recognised`, `conflict`, `no-composition`, `chosen`,
+  `bad-override`), `detected=`, `offered=` and `choices=<the rows shown, in
+  order>` on the machine page; `disk=`, `offered=` and `unavailable=` on the disk
+  page; `check=` on the review page; `stage=`, `progress=` (percent of the
+  whole) and `reattached=` on the installing page; `composition=` and
+  `reattached=` on the done page; `kind=` (`failed`, `lost`), `stage=`, `retry=`
+  and `reattached=` on the problem page), and `ILEX-INSTALLER
+  event=…` lines: `probe result=ok|failed|stale`, `language`, `layout
+  layout=<id> applied=true|false`, `notice severity=… text=<the machine page's
+  notice>`, `plan result=ok|refused|failed|stale` (`stale`, also on a layout
+  answer: the answer to a request that is not the one in flight, which changed
+  nothing), `disk disk=<id>`, `attach result=idle|installing|done|failed|
+  unavailable` (where the interface found the installation when it started),
+  `confirm state=shown|cancelled|accepted`, `install result=started|refused
+  code=<code>|unknown|not-started`, `stage stage=<name> status=running|done|
+  failed` (only a change), `outcome result=success|failed [stage=<name>]`, `lost
+  failures=<n>`, `finish action=restart|poweroff|save-log result=ok|refused
+  code=…|failed` and `log state=looking|choosing|saving|saved|failed offered=<n>
+  usable=<n>` (never a device's id, a password or a field's text). **No field's content is
+  ever printed.** The one exception is only for a test: `try layout=<id>
+  text=<what was typed in the layout test field>` is printed, and the field is
+  read at all, only when the fixed public test credential
+  `ilex.installer.echo-test=1` (SMBIOS, `io.systemd.credential:`, imported by the
+  session unit) is present or the session is simulated; on a normal boot nothing
+  of that field reaches the journal or the serial console. The session serial
+  mirror and its faults are unchanged.
+- **`--self-check --render DIR [--dark]`** draws every page and error state to
+  PNG files with GTK's renderer from the window's widget tree at the surface's
+  own scale (`<state>-<light|dark>-<scale>x.png`, 71 states): the welcome page
+  in German, BIOS, without a helper and with a layout the compositor did not
+  take; the machine page for every kind of detection result and for a BIOS
+  boot found there; the disk page with the default and another disk chosen,
+  with no disk, without a helper and on a BIOS boot; the administrator page
+  empty, with each refusal and valid; the review page (another machine, another
+  disk, no disk, no registry, after Back, with the erase dialog open, after the
+  dialog was cancelled, after a refused `Apply` and after one whose answer was
+  lost and nothing began); the installing page early, stalled in the image
+  stage, with the log open and re-attached; the done page, restarting, with a
+  refused restart and re-attached; the problem page for a failed image stage, a
+  failure before the disk was written, a helper that stopped, a helper that is
+  lost, a refused restart, restarting (the passwords gone from the fields),
+  re-attached, after Try again, and the log dialog with
+  sticks, with none, after a write and after a failed write; and the states
+  that moved the navigation view: a helper that comes back after the problem
+  page (to the installing page and to the done page), the installing page
+  re-attached while `Apply` was checking and after a lost answer to it, the
+  welcome page of a helper that could not be asked at start-up and after Try
+  again found a failure, the welcome page of a restarted interface whose
+  `Apply` was refused (over an earlier failure, and on a first installation),
+  the installing page that follows another plan's installation after a lost
+  answer, the review page after an `installation-active` refusal (checked again,
+  with a `State` that fails, and after Try again; and after an `Apply` refused
+  as active with a `State` that fails), and the disk page after the chosen disk
+  vanished. It
+  runs the application's own pages with the same messages the person's input
+  sends (the passwords are typed into the fields themselves), against the
+  fixtures. Each shot is taken only when the application reports the page and
+  the state the shot names (no probe, check or layout switch under way) and
+  the navigation view shows that page; a shot that never gets there fails with
+  what was seen. A machine without the system's keyboard catalogue draws with
+  the self-check's sample (as `--self-check --render` already says it may). It
+  needs only a display: GNOME Kiosk's
+  `--headless --virtual-monitor 1920x1200` is enough, with the scale from a
+  `monitors.xml` for the virtual monitor (`MetaVendor` / `MetaVirtualMonitor`,
+  connector `Meta-0`, serial `0x00`). `installer::ui` does that in the live
+  image's VM: the flow's rules, `--simulate` refused on a real boot, and 213
+  images (light and dark at 1x, light at 1.5x, 1280x800 and 1920x1200) that
+  must all be PNGs of their size, drawn and mostly different, kept under
+  `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
+  these files. They are not an accessibility walk: AT-SPI driving of the pages
+  is not done.
+- **On the real ISO** (`iso::next_*`, Secure Boot on KVM, real key input over
+  QMP, the real helper): `iso::next_welcome` opens the layout list with the
+  keyboard, searches it, chooses German (no dead keys), waits for GNOME Kiosk to
+  apply it, types `yz` into the test field and requires `zy` (the two keys swap
+  between the US and German layouts: the switch is real and at run time; the
+  trial passes the echo credential, the others do not), then continues with
+  Enter. The other trials type a password-like text into that field and
+  require that it is never printed. `iso::next_detect_board` gives the VM only the
+  MSI MEG X570 UNIFY's baseboard SMBIOS strings and requires `ms-7c35.gnome`
+  preselected as `detected`; `iso::next_detect_generic` a VM nothing matches and
+  requires `generic.gnome` as `not-recognised`; both require the edition to
+  offer exactly two configurations. `iso::next_kernel_argument` types
+  `ilex.composition=invalid-first-choice ilex.composition=ms-7c35.gnome` into
+  GRUB's editor and requires the last to win, `chosen`, and the model's own
+  serial line; `iso::next_kernel_argument_unknown` an unoffered tag: `bad-override`
+  with the detection's choice kept, the two rows of the edition's offers shown
+  and the notice naming both offered tags. `iso::next_account` types the disk,
+  encryption and administrator pages with the keyboard on a VM with a 40 GiB disk
+  (the encryption page: encryption `on` and the layout in its marker, Enter on an
+  empty passphrase and on a mismatched confirmation do not continue, then the
+  passphrase typed twice), presses Enter
+  in the last field and requires the real helper's `Plan` (the image's manifest is
+  read from the registry, so the guest needs `ghcr.io`) to succeed, the review page to
+  report `check=ok`, and the password and the passphrase to be nowhere on the
+  serial console or in the guest's journal (read over SSH, with patterns that do
+  not match their own command line). Screenshots of each are kept in the artifacts.
+  - `iso::next_keyboard_install` is a **complete interactive installation by
+    keyboard alone** (QMP key events, 6 GiB of RAM in the guest, with
+    the real helper, the real registry and the signature policy): every page to
+    the review (the encryption page with its passphrase typed twice), the erase
+    dialog cancelled with Escape (the helper has applied
+    nothing), then confirmed (Tab to the destructive answer, Enter), the
+    installing page to the success of every stage, the done page, Power off; the
+    password is typed with its spaces, colon and quotes, and neither it nor the
+    passphrase is on the serial console or in the journal. **The recovery key
+    page:** the interface is stopped (`SIGSTOP`) while the helper makes the key,
+    the trial takes the key from the helper (the helper hands it over once) and
+    lets the interface go on, which finds the key taken: the page of a restarted
+    window (`key=gone skip=true`, no key on screen), which asks for the whole key
+    from the paper; the whole key with its last letter changed is refused by the
+    helper (`event=recovery state=refused`, the field empty) and the right key
+    confirmed (`state=confirmed`), with no screenshot of a page that has the key
+    typed on it. `iso::next_keyboard_skip` is the same installation where the
+    person cannot confirm: Tab reaches "Continue without a recovery key" and
+    Return takes it (`state=declined`, back on the installing page); the disk
+    asks for the passphrase and `setup.json` says `recovery-key-failed`, with the
+    key's keyslot in `enrollment.json` unconfirmed (`booted_encrypted_key_given_up`).
+    The key is not on the console, in the journal or in the helper's run directory.
+    The disk it installed asks for the passphrase at its boot prompt (typed
+    through QMP: the VM has no usable security chip) and then boots
+    on its own with the root on the LUKS2 volume, a second keyslot and the recovery
+    token, `crypttab` naming `tpm2-device=auto`, `setup.json` `passphrase-only`
+    with the probe's reason and the enrolment record `unavailable`, the key
+    opening its slot and in no file of the installed system, and every
+    `installer::install` assertion holds (`check_installed`: the digest the
+    helper recorded, the origin that enforces the signature policy, the
+    administrator's password and `sudo`, the defaults, the system `running`, no
+    failed unit, GDM) beside the encrypted-root assertions of
+    `installer::encrypted`. A screenshot of each page is kept. (`iso::next_reattach`
+    and `iso::next_problem` turn the encryption off on its page, with the switch and a
+    click on Continue: they are about the helper restarting and failing, and an
+    encrypted installation would stop them at the recovery key page.)
+  - `iso::next_reattach` (booted with `ilex.installer.fault=slow-apply`): the
+    harness reads `State` over SSH until it says `starting` over the previous
+    record (the interface that asked is still on the review page, waiting for an
+    answer it will never read). First the disk is changed behind that `Apply`
+    (`sfdisk` writes a partition table to the target from the guest, and the
+    start limit is reset) and the interface is killed: the session's first page
+    is the installing page (`reattached=true`, `stage=starting progress=0`, every
+    stage waiting, never the welcome page). When the minute is over the helper
+    refuses the `Apply` (`DiskChanged`, recorded in `State.refusal` under the
+    plan's id, nothing begun, nothing written: the disk's head is hashed before
+    and after), and the restarted interface goes to the welcome page with the
+    sentence (`page=welcome … notice=not-started` and `event=install
+    result=not-started`; no problem page, no lost page, no outcome, no stage
+    marker) and looks at the computer; the next walk-through (the second
+    `from_welcome`) is confirmed, and a new plan's `Apply` checks. That window the
+    interface is killed in once more, then the compositor in the image stage (the
+    session unit allows three starts in five minutes, and `systemctl
+    reset-failed` before each kill clears that counter): each time the first page
+    the session shows is the installing page (`reattached=true`), the helper's
+    installation is the plan that was being checked and keeps going, and the done
+    page follows with the helper's `success`.
+  - `iso::next_problem` boots the ISO as a USB stick beside the target, a fixed
+    spare disk, a FAT stick and an empty stick, with the fixed credential
+    `ilex.installer.fault=image` (the image stage fails before `bootc` runs: the
+    disk was wiped, nothing deployed). The problem page names the image stage;
+    the helper refuses `Finish(save-log:…)` for the installation's disk
+    (`install-target`), the live medium (`live-medium`), the fixed disk
+    (`not-removable`), the empty stick (`no-file-system`) and a name that is not a
+    device (`unknown-disk`), a malformed action (`invalid-field`) and any other
+    user (the bus), and none of those writes anything (the heads of the disks are
+    hashed before and after). By keyboard the log is saved to the FAT stick (the
+    dialog offers both sticks and lists only the FAT one as usable); the file is
+    read back from the stick's image, holds the stage logs, `plan.json`,
+    `state.json` and `lsblk.txt` and none of the password. Try again returns to
+    the review (a new plan), the erase is confirmed and the stage fails again; a
+    third attempt has the helper killed as it begins to partition, and the problem
+    page is what its successor recorded.
+  - `installer::finish` (no ISO) drives `Finish`'s refusals through the bus.
+- **Not done here.** Strings are English constants (no gettext catalogue); the
+  installed system's computer name and time zone, the display's scale, the
+  network, encryption and recovery-key pages, the free-space mode, the daily
+  profile page, Cancel during the image stage and a screen reader's walk of the
+  pages are later changes. No new polkit action and no change to the bus policy
+  was needed: Restart and Power off are the root helper's, and the helper's
+  methods are all the installer's user's.
 
 ## Conventions
 

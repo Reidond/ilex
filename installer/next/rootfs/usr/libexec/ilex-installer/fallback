@@ -1,0 +1,37 @@
+#!/bin/bash
+# What a person sees on tty1 when the installer session failed three times.
+# Runs as root from boot. It watches the session unit and acts once, when the
+# unit has given up (ActiveState=failed after its start limit): a unit that
+# restarts is "activating" between attempts, so a state of "failed" is final.
+# It writes to tty1 itself (the unit sets up no terminal, so it cannot disturb
+# a session that is about to restart).
+unit=ilex-installer-session.service
+while :; do
+    state=$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)
+    [ "$state" = failed ] && break
+    sleep 2
+done
+result=$(systemctl show "$unit" --property=Result --value 2>/dev/null)
+
+exec > /dev/tty1 2>&1
+printf '\033c'
+cat <<'MESSAGE'
+
+  ilex installer
+
+  The installer could not start its graphical session.
+
+  What to try:
+    - Restart, and choose "Install ilex (basic graphics)" in the boot menu.
+    - Press Ctrl+Alt+F2 for a shell and run
+        journalctl -b -u ilex-installer-session
+      to see what failed.
+
+  Nothing has been written to any disk.
+
+MESSAGE
+# The same fact for whoever watches the serial console (never blocks: the
+# interface's marker command bounds its own serial write).
+timeout 2 ilex-installer --marker "ILEX-INSTALLER-FALLBACK session=failed result=${result:-unknown}" >/dev/null 2>&1 \
+    || timeout 1 sh -c "echo 'ILEX-INSTALLER-FALLBACK session=failed result=unknown' > /dev/ttyS0" 2>/dev/null || true
+exec sleep infinity

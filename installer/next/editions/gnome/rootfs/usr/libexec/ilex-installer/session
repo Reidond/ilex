@@ -1,0 +1,102 @@
+#!/bin/bash
+# The GNOME edition's session: GNOME Kiosk as the compositor and ilex-installer
+# as its only window. Runs as the unprivileged ilex-installer user inside the
+# logind session ilex-installer-session.service opened on tty1.
+#
+# Neither process may end while the session lives. Whichever does, for any
+# reason and with any status (a window closed by the compositor exits 0), the
+# session has failed: the other is stopped, this script exits non-zero and the
+# unit starts the session again, three times at most (see the unit).
+set -u
+
+# Marker lines for the serial console. ilex-installer writes them to the
+# journal and, through a worker it abandons after 200 ms, to /dev/ttyS0, so a
+# UART that never drains cannot delay the session; `timeout` bounds even that.
+marker() {
+    timeout 2 ilex-installer --marker "$1" 2>/dev/null || echo "$1"
+}
+
+# Test-only fault, from the fixed credential ilex.installer.fault.
+if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "$CREDENTIALS_DIRECTORY/ilex.installer.fault" ] \
+    && [ "$(cat "$CREDENTIALS_DIRECTORY/ilex.installer.fault")" = session ]; then
+    marker "ILEX-INSTALLER-SESSION fault=session"
+    exit 1
+fi
+
+# The page's inputs (edition record, DMI) must be readable before anything
+# starts; this prints ILEX-INSTALLER-SELFCHECK on the serial console. Bounded
+# like every other call here: a hung check is a failed attempt, not a stuck unit.
+timeout 20 ilex-installer --self-check || { marker "ILEX-INSTALLER-SESSION self-check failed"; exit 1; }
+
+# Basic graphics: the boot entry's nomodeset leaves the display on the
+# firmware's framebuffer, so GTK draws on the CPU too.
+graphics=default
+if grep -qw nomodeset /proc/cmdline; then
+    graphics=basic
+    export GSK_RENDERER=cairo
+    export LIBGL_ALWAYS_SOFTWARE=1
+fi
+
+# Did the firmware verify the boot chain? (efivarfs: 4 attribute bytes, then
+# the value.) Reported for whoever reads the serial console.
+secure_boot=unknown
+sb_var=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+if [ -r "$sb_var" ]; then
+    secure_boot=$(od -An -t u1 -j4 -N1 "$sb_var" | tr -d ' ')
+fi
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=GNOME
+export GSETTINGS_BACKEND=dconf
+runtime=${XDG_RUNTIME_DIR:?}
+# The session bus pam_systemd's user manager provides.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"
+
+# logind keeps the user's runtime directory for a few seconds after a session
+# ends, which is the time between two attempts: a compositor that died leaves
+# its socket (and lock) behind, and a client would find it "ready" and connect
+# to nobody. Whatever is here now is stale: nothing of this user runs yet.
+socket=$runtime/wayland-0
+rm -f "$socket" "$socket.lock"
+
+# A listening socket, not merely a socket file: the compositor creates the
+# file before it listens, and a stale one has no listener at all.
+socket_listening() {
+    [ -S "$socket" ] && ss -xlH 2>/dev/null | grep -qF -- " $socket "
+}
+
+marker "ILEX-INSTALLER-SESSION compositor=gnome-kiosk graphics=$graphics secure-boot=$secure_boot"
+
+# GNOME Kiosk turns VT switching off unless asked: with it off, Ctrl+Alt+F2
+# never reaches logind and the root shell on tty2 is out of reach from the page.
+# The polkit rule lets logind accept the compositor's request (and only that).
+gnome-kiosk --wayland --no-x11 --enable-vt-switch &
+compositor=$!
+installer=
+# Whatever is left is stopped with the script (and, failing that, by the unit's
+# stop timeout): the next attempt must not find a compositor still holding seat0.
+trap 'kill "$compositor" $installer 2>/dev/null' EXIT
+
+# Wait for the compositor to listen (a slow boot with software rendering can
+# take a while: a minute is allowed before the attempt is given up).
+for _ in $(seq 600); do
+    socket_listening && break
+    kill -0 "$compositor" 2>/dev/null || { marker "ILEX-INSTALLER-SESSION compositor exited before listening"; exit 1; }
+    sleep 0.1
+done
+socket_listening || { marker "ILEX-INSTALLER-SESSION compositor is not listening after a minute"; exit 1; }
+
+WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland ilex-installer &
+installer=$!
+
+wait -n -p ended "$compositor" "$installer"
+status=$?
+case $ended in
+    "$compositor") child=compositor ;;
+    "$installer") child=installer ;;
+    *) child=unknown ;;
+esac
+marker "ILEX-INSTALLER-SESSION ended child=$child status=$status"
+# A clean exit is a failure too: nothing here is allowed to end the session.
+[ "$status" -ne 0 ] || status=1
+exit "$status"

@@ -89,6 +89,10 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     if args.stage {
         return stage(ws, &args, &repository);
     }
+    // From here on this process may hold the signing key, so it never runs
+    // cargo, rustc or kache: the root image's crate closure comes from the file
+    // a keyless step recorded.
+    use_recorded_image_crates(ws, args.allow_local_registry)?;
     cmd::require("cosign")?;
     for var in ["COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD"] {
         if std::env::var_os(var).is_none_or(|v| v.is_empty()) {
@@ -214,6 +218,30 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     registry::github_output("image", &pinned)?;
     registry::github_output("tags", &format!("{moving_tag},{date_tag},{sha_tag}"))?;
     Ok(())
+}
+
+/// Name of the file recorded by `cargo ilexctl info --image-crates` in a step
+/// that holds no signing credentials (`.github/build-publisher.sh`).
+const IMAGE_CRATES_ENV: &str = "ILEX_IMAGE_CRATES";
+
+/// The signing path's only way to the root image's crate closure: read
+/// `ILEX_IMAGE_CRATES`, check it belongs to this checkout, and forbid cargo for
+/// the rest of the process (`fingerprint::use_recorded_image_crates`), so
+/// `rechunk::fingerprint` cannot reach `cargo metadata`. Everything except a
+/// loopback registry, whose throwaway key is not a secret, must have the file.
+pub(crate) fn use_recorded_image_crates(ws: &Workspace, loopback_registry: bool) -> Result<()> {
+    match std::env::var_os(IMAGE_CRATES_ENV).filter(|value| !value.is_empty()) {
+        Some(path) => ilex_devkit::fingerprint::use_recorded_image_crates(ws, path.as_ref()),
+        None if loopback_registry => {
+            eprintln!(
+                "image crates: derived with cargo ({IMAGE_CRATES_ENV} is not set; loopback registry, throwaway key)"
+            );
+            Ok(())
+        }
+        None => bail!(
+            "{IMAGE_CRATES_ENV} is not set: a publisher that can sign never runs cargo, so it reads the root image's crates from the record `ilexctl info --image-crates` wrote in a step without the key"
+        ),
+    }
 }
 
 /// A signed CI image must record the exact clean commit of this run. Each

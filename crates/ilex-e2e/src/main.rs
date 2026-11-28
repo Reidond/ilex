@@ -28,13 +28,19 @@ mod graphical;
 #[cfg(target_os = "linux")]
 mod homed;
 #[cfg(target_os = "linux")]
+mod installer;
+#[cfg(target_os = "linux")]
 mod iso;
+#[cfg(target_os = "linux")]
+mod iso_next;
 #[cfg(target_os = "linux")]
 mod security;
 #[cfg(target_os = "windows")]
 mod security_windows;
 #[cfg(target_os = "linux")]
 mod encrypted;
+#[cfg(target_os = "linux")]
+mod selinux;
 #[cfg(target_os = "linux")]
 mod tool;
 #[cfg(target_os = "linux")]
@@ -96,6 +102,23 @@ fn main() {
     if filters.iter().any(|f| f.contains("iso")) {
         trials.extend(iso::trials());
     }
+    // The next installer's live ISO has trials of its own, named explicitly:
+    // `iso::` alone (the release gate) must not boot an ISO it was not given.
+    if filters.iter().any(|f| f.contains("iso::next")) {
+        trials.extend(iso_next::trials());
+    }
+    // The ISO as a file on another disk needs a host tool or two more and a
+    // second copy of the ISO: only a filter that names it asks for it.
+    if filters.iter().any(|f| f.contains("next_helper_loop")) {
+        trials.push(iso_next::loop_trial());
+    }
+    if filters.iter().any(|f| f.contains("next_unattended_loop")) {
+        trials.push(iso_next::unattended_loop_trial());
+    }
+    // The next installer's root helper: a VM of its live image, no ISO.
+    if filters.iter().any(|f| f.contains("installer::")) {
+        trials.extend(installer::trials());
+    }
     // Security is opt-in, but an explicitly selected unqualified host fails.
     if filters.iter().any(|f| f.contains("security")) {
         trials.extend(security::trials());
@@ -117,7 +140,7 @@ fn main() {
             .count()
     };
     if !args.list
-        && will_run("iso::") > 0
+        && will_run("iso::") > will_run("iso::next")
         && let Err(error) = iso::preflight()
     {
         eprintln!("{error:#}");
@@ -127,12 +150,22 @@ fn main() {
     apps::expect(will_run("apps::"));
     // `tool::installed_system` boots a disk of its own, not the tier's VM.
     tool::expect(will_run("tool::") - will_run("tool::installed_system"));
+    // `installer::policy`, `::install`, `::encrypted`, `::encrypted_german` and
+    // `::interrupted` write disks in VMs of their own.
+    installer::expect(
+        will_run("installer::")
+            - will_run("installer::policy")
+            - will_run("installer::install")
+            - will_run("installer::encrypted")
+            - will_run("installer::interrupted"),
+    );
 
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| libtest_mimic::run(&args, trials)));
     // Safety net: nothing may outlive the run.
     ephemeral::shutdown();
     apps::shutdown();
     tool::shutdown();
+    installer::shutdown();
     match outcome {
         Ok(conclusion) => conclusion.exit(),
         Err(panic) => panic::resume_unwind(panic),

@@ -212,7 +212,7 @@ pub fn machine_manifest(root: &Path, name: &str) -> Result<toml::Table> {
     Ok(table)
 }
 
-pub type DmiMatch = BTreeMap<String, String>;
+pub use ilex_installer_model::DmiMatch;
 
 /// Installer-only SMBIOS rules. Keep in step with build/compose.py.
 pub fn machine_matches(name: &str, table: &toml::Table) -> Result<Vec<DmiMatch>> {

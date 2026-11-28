@@ -80,6 +80,30 @@ pub fn manifest(directory: &str, name: &str, file: &str) -> Result<toml::Table> 
     config::manifest(&workspace()?.root.join(directory).join(name).join(file))
 }
 
+/// The layout of an installed system, as the parity record keeps it: the file
+/// systems (through the volume of an encrypted root), the kernel command line,
+/// `fstab` and `crypttab`, what is mounted and swapped, the subvolumes, `bootc status`, the boot entries and the
+/// partition table. The Anaconda installer's install and the next installer's
+/// are each recorded with it, and their differences are listed in the pull
+/// request that adds the second.
+pub const LAYOUT_RECORD: &str = r#"set +e
+echo '=== lsblk -f'; lsblk -f
+echo '=== /proc/cmdline'; cat /proc/cmdline
+echo '=== /etc/fstab'; cat /etc/fstab
+echo '=== /etc/crypttab'; cat /etc/crypttab 2>&1
+echo '=== findmnt'; findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS
+echo '=== swap'; swapon --show; zramctl 2>&1
+echo '=== btrfs subvolumes of /sysroot'; btrfs subvolume list /sysroot 2>&1
+echo '=== bootc status'; bootc status
+echo '=== efibootmgr'; efibootmgr -v 2>&1 | head -20
+echo '=== partition table'
+source=$(findmnt -no SOURCE /sysroot | sed 's/\[.*//')
+# The whole disk below the root, through a partition and, when the root is
+# encrypted, a device-mapper volume.
+disk=$(lsblk -srn -o NAME,TYPE "$source" | awk '$2 == "disk" { print $1; exit }')
+sfdisk -d "/dev/$disk" 2>&1
+"#;
+
 pub fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }

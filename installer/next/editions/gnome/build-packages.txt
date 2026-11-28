@@ -1,0 +1,4 @@
+# What compiles the GNOME edition's interface (builder stage only).
+pkgconf-pkg-config
+gtk4-devel
+libadwaita-devel

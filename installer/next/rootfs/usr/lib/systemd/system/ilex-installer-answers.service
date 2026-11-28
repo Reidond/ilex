@@ -1,0 +1,56 @@
+[Unit]
+Description=ilex unattended installation from the answers volume
+Documentation=https://github.com/Reidond/ilex
+# Only when the gate found an answers volume at this boot. It drives the
+# helper's own methods as root, as an interface would.
+#
+# Wants=, not Requires=: with Requires=, a helper that fails to start (or a
+# gate that fails) makes systemd cancel this unit's start job, so that the
+# program never runs, never reaches its own hand-over to the interface, and
+# the gate's file keeps the session from starting: an empty tty1. With Wants=
+# the unit starts after them whatever became of them, and the program fails at
+# its first call and hands over.
+Wants=ilex-installerd.service ilex-installer-answers-gate.service network-online.target
+After=ilex-installerd.service ilex-installer-answers-gate.service dbus.socket network-online.target
+ConditionPathExists=/run/ilex-answers-volume
+# And whatever else ends this unit (the program killed, crashing, or failing
+# before it has begun to write: it makes no difference how) the interface is
+# started by systemd itself, unless Apply was called: see the hand-over unit.
+OnFailure=ilex-installer-answers-handover.service
+# No interface: an unattended installation has nobody to answer it. The
+# session is ordered after the gate and skipped by the same file; it is not
+# stopped by this unit (there is no Conflicts= on it: with one, a boot that
+# had the volume never started this unit). If the answers cannot be applied and
+# nothing was written, the program removes the file and starts the session, so
+# the screen is never left empty.
+# One attempt per boot. A failure leaves the machine as it is for whoever
+# looks (the reason is on the console, the serial port and in the journal);
+# starting it again is `systemctl reset-failed ilex-installer-answers; systemctl
+# start ...`, and the helper makes a fresh plan every time. While an
+# installation of this boot is still running (the helper goes on with it
+# whatever happens to this unit) the new run changes nothing: it finds the flag
+# the first one raised, asks the helper's State(), is told one is active, keeps
+# the flag, plans nothing, starts no interface and fails with that reason.
+StartLimitIntervalSec=infinity
+StartLimitBurst=1
+
+[Service]
+Type=simple
+# The answers volume is mounted read-only inside this unit's private mount
+# namespace for the moment it takes to read it, and nowhere else.
+PrivateMounts=yes
+LimitCORE=0
+# It may hold a plaintext password for the moment it is read and passes it to
+# the helper as a sealed memfd: nothing about it is printed.
+# Test-only fault (the fixed credential ilex.installer.fault=answers makes this
+# program kill itself before it asks the helper for anything); it can only make
+# the installer fail.
+ImportCredential=ilex.installer.fault
+ExecStart=/usr/libexec/ilex-installer/ilex-installerd --answers --then poweroff
+# A pull takes as long as the network does: the helper's own deadlines apply.
+TimeoutStartSec=infinity
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

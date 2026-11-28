@@ -1,0 +1,24 @@
+[Unit]
+Description=ilex installer: is there an answers volume at boot?
+Documentation=https://github.com/Reidond/ilex
+# Once per boot, after udev has settled (the program waits for it itself): if
+# a volume labelled ILEX-ANSWERS (or ILEXANSWERS, the name a FAT volume can
+# carry) is here, leave /run/ilex-answers-volume. The interface's session is
+# ordered after this unit and does not start while that file exists; the
+# unattended installation (ilex-installer-answers.service) starts when it does.
+# Nothing else decides this: a volume that appears after the boot is ignored
+# (ilex-installer-answers-late@.service says so) and stops nothing.
+After=systemd-udevd.service systemd-udev-trigger.service local-fs.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+LimitCORE=0
+ExecStart=/usr/libexec/ilex-installer/ilex-installerd --answers-gate
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

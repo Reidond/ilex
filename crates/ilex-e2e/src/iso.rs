@@ -208,7 +208,7 @@ fn selection(
         .clone())
 }
 
-fn smbios(
+pub(crate) fn smbios(
     table: &installer::Table,
     machine: Option<&str>,
     board_only: bool,
@@ -531,8 +531,9 @@ fn wait_serial(vm: &mut Vm, serial: &Path, wanted: &str) -> Result<()> {
     }
 }
 
-/// Edit the produced ISO's GRUB entry with actual keyboard input. Read its
-/// generated config to find the linux line; never modify or repack the ISO.
+/// Edit the produced ISO's GRUB entry with actual keyboard input, the way the
+/// Anaconda chooser's trial always has: `ilex.composition=` twice, the first
+/// naming no composition, so that the last one is seen to win.
 fn kernel_argument(
     iso: &Path,
     work: &Path,
@@ -543,6 +544,33 @@ fn kernel_argument(
     serial: &Path,
 ) -> Result<()> {
     installer::validate_tag(tag)?;
+    edit_kernel_line(
+        iso,
+        work,
+        &format!(" ilex.composition=invalid-first-choice ilex.composition={tag}"),
+        ctl,
+        artifacts,
+        "05-grub-edit.png",
+        vm,
+        serial,
+    )
+}
+
+/// Append `arguments` to the first entry's kernel line of the ISO's GRUB menu
+/// with actual keyboard input, then boot it. The caller waited for the menu's
+/// countdown. Read its generated config to find the linux line; never modify
+/// or repack the ISO. The text typed is checked by the caller's markers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn edit_kernel_line(
+    iso: &Path,
+    work: &Path,
+    arguments: &str,
+    ctl: &Vmctl,
+    artifacts: &Path,
+    screenshot: &str,
+    vm: &mut Vm,
+    serial: &Path,
+) -> Result<()> {
     // The caller waited for the menu countdown. Stop it before reading the
     // ISO, so even slow storage cannot let the default entry boot mid-edit.
     grub_key(ctl, "up")?;
@@ -581,9 +609,7 @@ fn kernel_argument(
         grub_key(ctl, "down")?;
     }
     grub_key(ctl, "end")?;
-    for character in
-        format!(" ilex.composition=invalid-first-choice ilex.composition={tag}").chars()
-    {
+    for character in arguments.chars() {
         let key = if character == ' ' {
             "space".into()
         } else {
@@ -592,14 +618,14 @@ fn kernel_argument(
         grub_key(ctl, &key)?;
     }
     std::thread::sleep(Duration::from_millis(500));
-    ctl.save_screenshot(&artifacts.join("05-grub-edit.png"))?;
+    ctl.save_screenshot(&artifacts.join(screenshot))?;
     grub_key(ctl, "f10")?; // GRUB's single-key equivalent of Ctrl+X.
     Ok(())
 }
 
 /// GRUB polls firmware input and drops the desktop typing path's 10 ms key
 /// presses. Use vmctl's QMP transport with 100 ms physical key holds and a gap.
-fn grub_key(ctl: &Vmctl, combo: &str) -> Result<()> {
+pub(crate) fn grub_key(ctl: &Vmctl, combo: &str) -> Result<()> {
     let keys = ilex_vmctl::keys::parse_combo(combo)?
         .into_iter()
         .map(|key| serde_json::json!({"type": "qcode", "data": key}))
@@ -1058,6 +1084,11 @@ fn installed_system(
     // not just the first-boot journal (the apps timer is suppressed here).
     report.check("installer logs are saved", installer_logs(&vm, artifacts));
 
+    report.check(
+        "the installed layout is recorded",
+        vm.ssh_ok(common::LAYOUT_RECORD)
+            .and_then(|text| qemu::write_artifact(artifacts, "installed-layout.txt", &text)),
+    );
     report.check(
         "bootc tracks the target image",
         bootc_status(&vm, artifacts, target, digest),

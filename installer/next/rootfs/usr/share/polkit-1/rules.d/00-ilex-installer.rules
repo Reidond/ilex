@@ -1,0 +1,27 @@
+// The installer's session is an active local session, which polkit's defaults
+// treat as the person at the machine: without a rule it may mount any block
+// device (udisks2), reboot, change the clock, hostname and locale, create
+// colord devices and more, all without a password. The interface does none of
+// that: it is a client of the install helper, and an unprivileged user that
+// can drive the machine is exactly what the helper's own checks exist to stop.
+// So this user is denied every action but the ones named below. A page that
+// needs another (a restart button, the network page) adds it to this file,
+// naming the action, in the change that adds the page; the iso::next trials
+// list what polkit authorizes for this session and fail on any action that is
+// not named here.
+//
+// Changing VT: Ctrl+Alt+F2 reaches the root shell on tty2 (the one place a
+// person can look at a stuck installer without a network). The compositor
+// holds the keyboard and, started with --enable-vt-switch (GNOME Kiosk's
+// default is no VT switching), asks logind to switch, so logind needs this
+// action: only for the person at the machine's own active session, never
+// remote.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "ilex-installer") {
+        if (action.id == "org.freedesktop.login1.chvt" &&
+            subject.local && subject.active) {
+            return polkit.Result.YES;
+        }
+        return polkit.Result.NO;
+    }
+});

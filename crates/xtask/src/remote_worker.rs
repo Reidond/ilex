@@ -61,9 +61,21 @@ pub fn run(args: Args) -> Result<()> {
             println!("{}", disk.display());
             Ok(())
         }
-        Command::Iso(a) => crate::iso::run(&ws, a),
+        Command::Iso(a) => {
+            // The Windows client refuses these first; a sender that does not
+            // must not get an ISO it cannot collect.
+            ensure!(!a.next, "{}", crate::iso_next::REMOTE_UNSUPPORTED);
+            crate::iso::run(&ws, a)
+        }
         Command::Tool(a) => crate::tool::run(&ws, a),
-        Command::Test(a) => crate::test::run(&ws, a),
+        Command::Test(a) => {
+            ensure!(
+                !a.filters.iter().any(|f| crate::iso_next::is_next_filter(f)),
+                "{}",
+                crate::iso_next::REMOTE_UNSUPPORTED
+            );
+            crate::test::run(&ws, a)
+        }
         Command::Vm(a) => crate::vm::run_remote(&ws, a),
         Command::ImportKache { .. } => {
             anyhow::bail!("cache import is handled by the builder runner")

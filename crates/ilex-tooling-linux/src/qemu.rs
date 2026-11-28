@@ -431,9 +431,41 @@ pub struct VmConfig {
     /// Use an xHCI USB keyboard for firmware input. Some OVMF builds lose
     /// navigation/modifier keys from virtio-keyboard before the OS boots.
     pub usb_keyboard: bool,
+    /// Attach `cdrom` as a USB mass-storage disk (a stick the ISO was written
+    /// to: `/dev/sdX` with its partitions, removable) instead of an optical
+    /// drive (`/dev/sr0`).
+    pub usb_medium: bool,
     /// Extra raw disks, attached read-write after the main one (an installer
     /// finds its kickstart on one labelled `OEMDRV`).
     pub extra_disks: Vec<PathBuf>,
+    /// Raw images attached as removable USB sticks (`/dev/sdX`, read-write,
+    /// serial `ILEXSTICK<n>`) beside the ISO's stick or alone: where an
+    /// installer's log goes. They are not boot devices.
+    pub extra_usb_disks: Vec<PathBuf>,
+    /// Give each disk a serial number (`ilex-disk-0` for the main disk, then
+    /// `ilex-disk-1`, `ilex-disk-2`, ... for the extra ones), which udev turns
+    /// into a `/dev/disk/by-id/virtio-<serial>` name. Without one a virtio disk has
+    /// no by-id name at all (its id is its PCI slot), and an installation that
+    /// writes a disk by that name has no name to write it by.
+    pub disk_serials: bool,
+    /// With [`disk_serials`](Self::disk_serials): the last this many extra disks
+    /// get none, so that they have no `/dev/disk/by-id` name (a disk whose only
+    /// stable name is its bus path).
+    pub bare_disks: usize,
+    /// A PCIe root port with nothing in it (`ilexhp`), which a disk can be
+    /// added to while the guest runs (QMP `device_add ... bus=ilexhp`): the
+    /// stick someone plugs in after the boot.
+    pub hotplug_port: bool,
+    /// A directory served read-only as a small FAT disk (QEMU's `fat:`), first
+    /// in the boot order: an EFI system partition whose `EFI/BOOT/BOOTX64.EFI`
+    /// is the boot loader. For booting an ISO that is a *file* on another disk
+    /// (GRUB's loopback, as Ventoy and iso-scan boots do), which no attached
+    /// ISO shows. It is attached last, so the other disks keep their names.
+    pub esp_dir: Option<PathBuf>,
+    /// Give the guest the harness's SSH key as the `ssh.authorized_keys.root`
+    /// credential (the default). An image that keeps its SSH server off
+    /// unless that credential exists can be booted without it.
+    pub ssh_credential: bool,
     /// Extra SMBIOS structures; double commas inside values for QEMU.
     pub smbios: Vec<String>,
     /// Keep the UEFI variable store here, copying the firmware's template when
@@ -461,7 +493,14 @@ impl VmConfig {
             cdrom: None,
             secondary_serial: false,
             usb_keyboard: false,
+            usb_medium: false,
             extra_disks: Vec::new(),
+            extra_usb_disks: Vec::new(),
+            disk_serials: false,
+            bare_disks: 0,
+            hotplug_port: false,
+            esp_dir: None,
+            ssh_credential: true,
             smbios: Vec::new(),
             efi_vars: None,
         }
@@ -644,10 +683,28 @@ impl Vm {
                 vars.display()
             ))
             .arg("-drive")
-            .arg(format!(
-                "if=virtio,format={drive_format},file={}",
-                drive_file.display()
-            ));
+            .arg(if config.disk_serials {
+                // A serial number is a property of the device (QEMU's legacy
+                // `-drive serial=` is refused for qcow2), so the disk is a
+                // device of its own, created where the legacy one would be.
+                format!(
+                    "if=none,id=ilexd0,format={drive_format},file={}",
+                    drive_file.display()
+                )
+            } else {
+                format!(
+                    "if=virtio,format={drive_format},file={}",
+                    drive_file.display()
+                )
+            });
+        // The devices of disks that have serial numbers: created after every
+        // other device (below), as QEMU creates a legacy `if=virtio` drive's
+        // device, so that they keep the PCI slots (and the names, and what
+        // firmware sees of them) a disk without a serial number has.
+        let mut serial_devices: Vec<String> = Vec::new();
+        if config.disk_serials {
+            serial_devices.push("virtio-blk-pci,drive=ilexd0,serial=ilex-disk-0".into());
+        }
         if security.is_some() {
             qemu.args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
         }
@@ -664,17 +721,85 @@ impl Vm {
                     "tpm-tis,tpmdev=tpm0",
                 ]);
         }
-        if let Some(iso) = &config.cdrom {
-            qemu.arg("-drive").arg(format!(
-                "media=cdrom,readonly=on,file={}",
-                std::path::absolute(iso)?.display()
-            ));
+        // A stick (and its controller, `ilexusb`) exists only with an ISO to
+        // put on it; `usb_medium` alone adds nothing.
+        let usb_stick = config.usb_medium && config.cdrom.is_some();
+        if usb_stick || !config.extra_usb_disks.is_empty() {
+            // The controller the sticks are on.
+            qemu.args(["-device", "qemu-xhci,id=ilexusb"]);
         }
-        for extra in &config.extra_disks {
+        if let Some(iso) = &config.cdrom {
+            if usb_stick {
+                // A stick: the whole ISO as a removable USB disk, first in
+                // the boot order, on a controller of its own. The guest can
+                // write to it, as to a real stick (a read-only disk is not
+                // offered as a target at all); its writes go to a temporary
+                // overlay, never to the ISO.
+                qemu.arg("-drive")
+                    .arg(format!(
+                        "if=none,id=medium,media=disk,format=raw,snapshot=on,file={}",
+                        std::path::absolute(iso)?.display()
+                    ))
+                    .args([
+                        "-device",
+                        "usb-storage,bus=ilexusb.0,drive=medium,removable=on,bootindex=1",
+                    ]);
+            } else {
+                qemu.arg("-drive").arg(format!(
+                    "media=cdrom,readonly=on,file={}",
+                    std::path::absolute(iso)?.display()
+                ));
+            }
+        }
+        for (n, stick) in config.extra_usb_disks.iter().enumerate() {
             qemu.arg("-drive").arg(format!(
-                "if=virtio,format=raw,file={}",
-                std::path::absolute(extra)?.display()
+                "if=none,id=stick{n},media=disk,format=raw,file={}",
+                std::path::absolute(stick)?.display()
             ));
+            qemu.args([
+                "-device",
+                &format!(
+                    "usb-storage,bus=ilexusb.0,drive=stick{n},removable=on,serial=ILEXSTICK{n}"
+                ),
+            ]);
+        }
+        let serialed = config.extra_disks.len().saturating_sub(config.bare_disks);
+        for (index, extra) in config.extra_disks.iter().enumerate() {
+            if config.disk_serials && index < serialed {
+                let n = index + 1;
+                qemu.arg("-drive").arg(format!(
+                    "if=none,id=ilexd{n},format=raw,file={}",
+                    std::path::absolute(extra)?.display()
+                ));
+                serial_devices.push(format!(
+                    "virtio-blk-pci,drive=ilexd{n},serial=ilex-disk-{n}"
+                ));
+            } else {
+                qemu.arg("-drive").arg(format!(
+                    "if=virtio,format=raw,file={}",
+                    std::path::absolute(extra)?.display()
+                ));
+            }
+        }
+        if config.hotplug_port {
+            qemu.args([
+                "-device",
+                "pcie-root-port,id=ilexhp,bus=pcie.0,chassis=9,slot=9",
+            ]);
+        }
+        if let Some(dir) = &config.esp_dir {
+            // Two devices never share a boot index: with a stick (first) the
+            // loader disk comes second, and without one it is first.
+            let bootindex = if usb_stick { 2 } else { 1 };
+            qemu.arg("-drive")
+                .arg(format!(
+                    "if=none,id=esp,format=raw,readonly=on,file=fat:{}",
+                    std::path::absolute(dir)?.display()
+                ))
+                .args([
+                    "-device",
+                    &format!("virtio-blk-pci,drive=esp,bootindex={bootindex}"),
+                ]);
         }
         let gl = config.gl && config.display != Display::None;
         let vga = if gl { "virtio-vga-gl" } else { "virtio-vga" };
@@ -684,7 +809,9 @@ impl Vm {
                 config.width, config.height
             ))
             .args(["-device", "virtio-tablet-pci"]);
-        if config.usb_keyboard {
+        if config.usb_keyboard && usb_stick {
+            qemu.args(["-device", "usb-kbd,bus=ilexusb.0"]);
+        } else if config.usb_keyboard {
             qemu.args(["-device", "qemu-xhci", "-device", "usb-kbd"]);
         } else {
             qemu.args(["-device", "virtio-keyboard-pci"]);
@@ -697,12 +824,13 @@ impl Vm {
             } else {
                 format!("user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22")
             })
-            .args(["-device", "virtio-net-pci,netdev=net0,id=internet"])
-            .arg("-smbios")
-            .arg(format!(
+            .args(["-device", "virtio-net-pci,netdev=net0,id=internet"]);
+        if config.ssh_credential {
+            qemu.arg("-smbios").arg(format!(
                 "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root={}",
                 base64(key.public.as_bytes())
             ));
+        }
         if std::env::var_os("ILEX_VM_FIRMWARE_LOG").is_some_and(|v| !v.is_empty()) {
             qemu.arg("-debugcon")
                 .arg(format!("file:{}", dir.join("firmware.log").display()))
@@ -742,6 +870,9 @@ impl Vm {
         // then loads and probes none (strace: no audio module, no connect to a
         // PipeWire or PulseAudio socket).
         qemu.args(["-audiodev", "none,id=ilex-noaudio"]);
+        for device in &serial_devices {
+            qemu.args(["-device", device]);
+        }
         // QEMU refuses a VNC server next to a GL display ("Display vnc is
         // incompatible with the GL context").
         if !gl {

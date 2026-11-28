@@ -46,6 +46,29 @@ cannot decrypt one, ilex keeps the encrypted receipt and all existing slots,
 and marks them for manual cleanup. Ordinary TPM completion and repair can
 proceed using the acknowledged recovery key.
 
+The interface installer (`ilex-installerd`, shown on its own recovery key page)
+keeps the same rule instead of a weaker one. The key is handed to the interface
+once; the person types the **whole** key back (hyphens, spaces and capitals are
+forgiven); the helper compares all eight groups, then opens the key's own
+keyslot with what was typed (`authenticate_slot`) before calling
+`Reconciled::acknowledge`. A key that is mis-copied in any group, or one the
+volume refuses, is never recorded as `acknowledged`, so `ilexctl security repair`
+can rely on it as it does after Anaconda's completion. A person whose key cannot
+be shown (the window that took it is gone, the helper could not hand it over, the
+volume refused it) can choose **Continue without a recovery key**
+(`ContinueWithoutRecoveryKey`): the installation finishes `passphrase-only` with
+the reason `recovery-key-failed` and enrols no TPM. The keyslot nobody saw stays
+in the volume and in `enrollment.json` as this document describes an
+unconfirmed key (`recovery.acknowledged: false`, its `slot` and `token`, the
+library's `recovery_attempt`, `state: unavailable`; the receipt does not outlive
+the installer's scratch). On the installed system,
+`sudo ilex-enroll complete --root / --reissue-recovery` reconciles that slot as
+manual cleanup and makes a key to replace it; without `--reissue-recovery` it
+asks for the key that was "previously displayed", which nobody has. The command
+talks only on tty8: after starting it (from a terminal or a text console), press
+Ctrl+Alt+F8 and follow the prompts there; Ctrl+Alt+F1 or F2 returns. The
+installer's page and its done page say the same.
+
 Add `--reissue-recovery` to request a new key or resume an interrupted explicit
 reissue. Reissue keeps the previously confirmed key and its acknowledgement
 until you confirm the replacement. It retains the disk passphrase and earlier
@@ -71,9 +94,20 @@ keyring token and distinct correct/incorrect credential descriptors.
 
 Eligibility requires SecureBoot=1, SetupMode=0, TPM2, a nonzero SHA-256 PCR 7
 matching event-log replay, the qualified systemd 262 format, matching live/target
-RPM versions and the target unlock-stack marker. The initial allowlist is
+RPM versions and the target unlock-stack marker. The allowlist is
 systemd/systemd-udev `262.1-1.fc45.x86_64` and cryptsetup/cryptsetup-libs
-`2.8.8-1.fc45.x86_64`; another pair stays passphrase-only until qualified.
+`2.8.8-1.fc45.x86_64` or `2.8.9-1.fc45.x86_64`; another pair stays
+passphrase-only until qualified. 2.8.9 (Fedora's bootc from 2026-11-27) was
+joined by the new installer's `iso::next_security`, which enrolls and unlocks
+with it on KVM with enrolled OVMF and a persistent swtpm, and was then
+requalified through this document's own tiers on KVM / 6 GiB / two vCPUs with
+the live ISO and the rebuilt candidate both on 2.8.9 (every probe and token
+record names it): `security::encrypted_install` (first boot opened by the chip,
+`tpm2`), `security::encrypted_existing_space` (including repair cut after
+actual header writes) and `security::encrypted_interrupted` passed.
+`security::upgrade_rollback` needs a signed, published rollback image pinned by
+digest whose tools equal the installer's; until a published image carries 2.8.9
+only CI's installer release can run it.
 Both builds record package versions and SHA-256 hashes of the helper, enrollment
 and unlock executables, TPM token plugin, cryptsetup library and TSS ESAPI.
 Runtime verifies these files against `/usr/lib/ilex/security/tools.json` before

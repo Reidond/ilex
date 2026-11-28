@@ -1,0 +1,33 @@
+; The live installer's SELinux policy: what Fedora's targeted policy denies on
+; the installer's own paths and nothing else. The live ISO boots enforcing, its
+; files carry the policy's own labels (installer/next/osbuild-selinux), and its
+; units and programs have no types of their own: systemd starts the session
+; script, GNOME Kiosk, the interface and the root helper from /usr/libexec and
+; /usr/bin (bin_t), which Fedora runs as unconfined_service_t. Each rule below
+; answers a denial the trials recorded and says which.
+
+; The root helper is the installer: it partitions, makes file systems, mounts,
+; runs `bootc install to-filesystem` and labels the target. Fedora has a domain
+; for exactly that, install_t (anaconda and initial-setup run in it), and
+; systemd enters it by itself when a unit runs a program labelled
+; install_exec_t (`type_transition init_t install_exec_t:process install_t`).
+; Without this label the helper runs as unconfined_service_t and bootc stops:
+; it tries to set a label the loaded policy does not define (the denied
+; `capability2 mac_admin` of its `chcon` probe, which only install_t has) and,
+; failing that, to enter install_t itself, which unconfined_service_t may not
+; ("Failed to enter install_t (running as unconfined_service_t)"). install_t is
+; an unconfined domain like unconfined_service_t: this adds no authority to
+; anything but the helper, and the interface, the session script and the
+; compositor stay as Fedora runs a service without a policy of its own.
+(filecon "/usr/libexec/ilex-installer/ilex-installerd" file
+    (system_u object_r install_exec_t ((s0) (s0))))
+
+; systemd-repart makes each file system in a child ("(mkfs)") that mounts over
+; its own /proc/<pid>/mounts, so that mkfs does not mistake the host's mounts
+; for the new file system's. The inode takes the process's own label, and
+; Fedora's targeted policy gives unconfined_t the right to mount on its own
+; /proc files (`allow unconfined_t unconfined_t:file mounton`), but not its
+; unconfined siblings: iso::next_unattended recorded
+; `{ mounton } comm="(mkfs)" path="/proc/<pid>/mounts" scontext=install_t
+; tcontext=install_t tclass=file`. The same grant, for the same domain.
+(allow install_t install_t (file (mounton)))

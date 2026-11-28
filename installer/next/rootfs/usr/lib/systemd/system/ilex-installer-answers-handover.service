@@ -1,0 +1,28 @@
+[Unit]
+Description=ilex installer: hand the screen to the interface
+Documentation=https://github.com/Reidond/ilex
+# Started by OnFailure= of ilex-installer-answers.service, so it runs however
+# that unit ended: its program failing and handing over by itself (this then
+# does it again, harmlessly), killed, crashed, or never started. It is done by
+# systemd with commands that need nothing of the answers program, so that a
+# machine with an answers stick it cannot use never sits on an empty tty1:
+# the gate's file is removed (the session is skipped while it exists) and the
+# session is started.
+#
+# Not when the program called Apply: from then on the helper may be writing to
+# the disk, and the installation, not the interface, owns the screen (the
+# flag is written just before Apply and removed if Apply refuses, except with
+# installation-active: that is an installation running, not a refusal that
+# wrote nothing; a run that finds the flag at its start deletes it only when
+# the helper says none is active).
+ConditionPathExists=!/run/ilex-answers-applying
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rm -f /run/ilex-answers-volume
+ExecStart=/usr/bin/systemctl --no-block start ilex-installer-session.service
+# The line for a person at the console and for the serial log (optional).
+ExecStart=-/usr/libexec/ilex-installer/ilex-installerd --answers-handed-over
+StandardOutput=journal+console
+StandardError=journal+console

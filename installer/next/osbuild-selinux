@@ -1,0 +1,100 @@
+#!/usr/bin/python3 -I
+"""osbuild wrapper for the next installer's live ISO: label the live root.
+
+`cargo ilexctl iso --next` puts this where image-builder finds `osbuild`
+(see `crates/xtask/src/iso.rs`, `run_image_builder`). Like the wrapper the
+Anaconda ISO uses (`installer/image-builder/osbuild-cache`) it keeps the build
+root and the deployed OS tree in the checkout's store (`--checkpoint`). It
+also rewrites the manifest image-builder generates (osbuild reads it on
+standard input) in two ways, because the live ISO has to boot SELinux
+enforcing and generic-iso gives it neither labels nor the mode:
+
+1. The `os-tree` pipeline is `org.osbuild.container-deploy` and nothing else:
+   the container's files are copied into a tree and squashed with no labelling
+   stage between (the one `org.osbuild.selinux` stage of the manifest labels
+   the build root). Containers/storage keeps no `security.selinux` xattr in
+   a layer, so the image cannot ship labels either. This inserts an
+   `org.osbuild.selinux` stage after the deployment with the image's own
+   `file_contexts`, so the squashfs carries the labels.
+2. `enforcing=0` is in the kernel options both GRUB stages get (image-builder's
+   default for a generic ISO). It is removed from them; the policy's own
+   `SELINUX=enforcing` (`/etc/selinux/config`) then decides, and a person at
+   the GRUB prompt can still add `enforcing=0` to look at a denial.
+
+A manifest that lacks what this expects (no `os-tree` pipeline, no deployment
+in it, no kernel options that carry `enforcing=0`) is an error, not something
+to pass on: an ISO built without the labels or with the old option would boot
+permissive and unlabeled and nothing else would say so before the trials.
+"""
+
+import json
+import os
+import sys
+
+OSBUILD = "/usr/bin/osbuild"
+# Where fedora-bootc keeps the compiled policy's file contexts, relative to
+# the tree the stage labels.
+FILE_CONTEXTS = "etc/selinux/targeted/contexts/files/file_contexts"
+KERNEL_STAGES = ("org.osbuild.grub2.iso", "org.osbuild.grub2.iso.legacy")
+
+
+def fail(message):
+    print(f"osbuild-selinux: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def transform(manifest):
+    pipelines = {p.get("name"): p for p in manifest.get("pipelines", [])}
+    tree = pipelines.get("os-tree")
+    if tree is None:
+        fail("the manifest has no os-tree pipeline")
+    stages = tree.setdefault("stages", [])
+    deployed = [i for i, s in enumerate(stages) if s.get("type") == "org.osbuild.container-deploy"]
+    if len(deployed) != 1:
+        fail(f"os-tree has {len(deployed)} container-deploy stages, expected one")
+    if any(s.get("type") == "org.osbuild.selinux" for s in stages):
+        fail("os-tree already has a selinux stage: image-builder changed, review this wrapper")
+    # Every file of the tree, once everything is in it. Nothing is excluded:
+    # the squashfs is the whole of it.
+    stages.insert(
+        deployed[0] + 1,
+        {"type": "org.osbuild.selinux", "options": {"file_contexts": FILE_CONTEXTS}},
+    )
+
+    removed = 0
+    for pipeline in manifest["pipelines"]:
+        for stage in pipeline.get("stages", []):
+            if stage.get("type") not in KERNEL_STAGES:
+                continue
+            opts = stage.get("options", {}).get("kernel", {}).get("opts")
+            if opts is None:
+                fail(f"{stage['type']} in {pipeline.get('name')} has no kernel options")
+            kept = [o for o in opts if o != "enforcing=0"]
+            removed += len(opts) - len(kept)
+            opts[:] = kept
+    if removed != 2:
+        fail(f"removed {removed} enforcing=0 options from the GRUB stages, expected 2 (one per stage)")
+    # Whatever else carries it (a custom entry that spells it out) is as wrong.
+    if "enforcing=0" in json.dumps(manifest):
+        fail("the manifest still names enforcing=0")
+    return manifest
+
+
+def main():
+    manifest = json.load(sys.stdin)
+    text = json.dumps(transform(manifest)).encode()
+    # The new manifest becomes osbuild's standard input: an anonymous file,
+    # gone with the process, so nothing is left to clean up if image-builder
+    # kills this one.
+    fd = os.memfd_create("manifest")
+    os.write(fd, text)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.dup2(fd, 0)
+    os.close(fd)
+    # image-builder 89 does not expose osbuild's checkpoint flags. Preserve the
+    # expensive build root and deployed OS tree in this checkout's mounted store.
+    os.execv(OSBUILD, [OSBUILD, "--checkpoint", "build", "--checkpoint", "os-tree", *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    main()

@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use ilex_tooling_core::*;
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -219,6 +219,13 @@ pub fn validate_config(ws: &Workspace, config: &VmConfig) -> Result<VmSpec> {
 pub struct LinuxProvider {
     ws: Workspace,
     identity: CheckoutIdentity,
+    usb_keyboard: bool,
+    usb_medium: bool,
+    usb_sticks: Vec<PathBuf>,
+    esp_dir: Option<PathBuf>,
+    disk_serials: bool,
+    hotplug_port: bool,
+    smbios: Vec<String>,
 }
 pub struct LinuxVm {
     spec: VmSpec,
@@ -237,7 +244,72 @@ impl LinuxVm {
 impl LinuxProvider {
     pub fn new(ws: Workspace) -> Result<Self> {
         let identity = ws.identity()?;
-        Ok(Self { ws, identity })
+        Ok(Self {
+            ws,
+            identity,
+            usb_keyboard: false,
+            usb_medium: false,
+            usb_sticks: Vec::new(),
+            esp_dir: None,
+            disk_serials: false,
+            hotplug_port: false,
+            smbios: Vec::new(),
+        })
+    }
+    /// Give the guest an xHCI USB keyboard instead of a virtio one, for
+    /// firmware that loses navigation keys from virtio-keyboard (GRUB menus
+    /// driven through QMP). Off by default: it changes no existing launch.
+    #[must_use]
+    pub fn with_usb_keyboard(mut self, enabled: bool) -> Self {
+        self.usb_keyboard = enabled;
+        self
+    }
+    /// Attach the spec's ISO as a USB stick (`/dev/sdX`, removable) instead of
+    /// an optical drive. Off by default: it changes no existing launch.
+    #[must_use]
+    pub fn with_usb_medium(mut self, enabled: bool) -> Self {
+        self.usb_medium = enabled;
+        self
+    }
+    /// Attach these raw images as removable USB sticks, read-write (see
+    /// [`qemu::VmConfig::extra_usb_disks`]): where an installer writes a log.
+    /// None by default.
+    #[must_use]
+    pub fn with_usb_sticks(mut self, sticks: Vec<PathBuf>) -> Self {
+        self.usb_sticks = sticks;
+        self
+    }
+    /// Serve a directory as a small FAT disk, first in the boot order (see
+    /// [`qemu::VmConfig::esp_dir`]): the boot loader of a medium that is a
+    /// file on another disk. Off by default: it changes no existing launch.
+    #[must_use]
+    pub fn with_esp_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.esp_dir = Some(dir.into());
+        self
+    }
+    /// Give the extra disks serial numbers, so that they have
+    /// `/dev/disk/by-id` names (see [`qemu::VmConfig::disk_serials`]). Off by
+    /// default: it changes no existing launch.
+    #[must_use]
+    pub fn with_disk_serials(mut self, enabled: bool) -> Self {
+        self.disk_serials = enabled;
+        self
+    }
+    /// An empty PCIe root port a disk can be added to while the guest runs
+    /// (see [`qemu::VmConfig::hotplug_port`]). Off by default.
+    #[must_use]
+    pub fn with_hotplug_port(mut self, enabled: bool) -> Self {
+        self.hotplug_port = enabled;
+        self
+    }
+    /// Extra SMBIOS structures (`-smbios` values, such as a systemd credential:
+    /// `type=11,value=io.systemd.credential:name=value`) added to the guest (see
+    /// [`qemu::VmConfig::smbios`]); a boot from a spec does not read the
+    /// `VmConfig` the spec was made from. None by default.
+    #[must_use]
+    pub fn with_smbios(mut self, structures: Vec<String>) -> Self {
+        self.smbios = structures;
+        self
     }
 }
 impl VmProvider for LinuxProvider {
@@ -376,6 +448,13 @@ impl VmProvider for LinuxProvider {
             }
         }
         config.cdrom = vm.spec.iso.clone();
+        config.usb_keyboard = self.usb_keyboard;
+        config.usb_medium = self.usb_medium;
+        config.extra_usb_disks.clone_from(&self.usb_sticks);
+        config.esp_dir = self.esp_dir.clone();
+        config.disk_serials = self.disk_serials;
+        config.hotplug_port = self.hotplug_port;
+        config.smbios.clone_from(&self.smbios);
         config.efi_vars = vm.spec.firmware_state.clone();
         config.extra_disks = vm
             .spec

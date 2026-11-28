@@ -5,6 +5,7 @@ pub mod executor;
 pub mod fingerprint;
 pub mod git;
 pub mod image;
+mod image_crates_guard;
 pub mod machine;
 pub mod main_claim;
 pub mod ownership;

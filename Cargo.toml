@@ -14,6 +14,8 @@ ilex-tooling-qmp = { path = "crates/ilex-tooling-qmp" }
 ilex-tooling-linux = { path = "crates/ilex-tooling-linux" }
 ilex-tooling-windows = { path = "crates/ilex-tooling-windows" }
 ilex-devkit = { path = "crates/ilex-devkit" }
+ilex-installer-model = { path = "crates/ilex-installer-model" }
+ilex-installer-flow = { path = "crates/ilex-installer-flow" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

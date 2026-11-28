@@ -1,0 +1,13 @@
+# The GNOME edition: GNOME Kiosk (mutter 51) with GTK 4 and libadwaita.
+gnome-kiosk
+gtk4
+libadwaita
+dconf
+# The keyboard layouts the welcome page offers: xkeyboard-config's names for
+# them (kbd's console keymaps, which the helper checks, are in the shared list).
+xkeyboard-config
+# Software rendering for machines and VMs without a GPU driver, and the
+# default fonts (libadwaita's interface font and a fallback).
+mesa-dri-drivers
+adwaita-sans-fonts
+default-fonts-core-sans

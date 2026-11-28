@@ -10,6 +10,10 @@ pub struct Args {
     /// Print the installer's published composition tag
     #[arg(long, conflicts_with_all = ["json", "capabilities"])]
     pub installer: bool,
+    /// Derive the root image's crate closure with cargo and print the record
+    /// the signing publisher reads instead (CI runs it before the key exists)
+    #[arg(long, conflicts_with_all = ["publications", "installer", "json", "capabilities"])]
+    pub image_crates: bool,
     /// Versioned identity, source digest, paths and capabilities
     #[arg(long)]
     pub json: bool,
@@ -37,6 +41,12 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&capabilities(ws)?)?);
     }
     match args {
+        Args {
+            image_crates: true, ..
+        } => {
+            print!("{}", ilex_devkit::fingerprint::image_crates_record(ws)?);
+            Ok(())
+        }
         Args {
             publications: true, ..
         } => {

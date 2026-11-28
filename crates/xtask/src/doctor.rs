@@ -24,6 +24,10 @@ pub struct Args {
     /// Report real local image/source fingerprints for a same-tree comparison
     #[arg(long)]
     pub self_check_fingerprint: Option<String>,
+    /// Compute an image's fingerprint the way the signing process does: from
+    /// the closure recorded in `ILEX_IMAGE_CRATES`, with cargo forbidden
+    #[arg(long, value_name = "IMAGE")]
+    pub self_check_recorded_crates: Option<String>,
     #[arg(long)]
     pub json: bool,
     /// Require a capability, e.g. firmware_enforcement, persistent_tpm, screenshot
@@ -40,6 +44,16 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
         .as_deref()
         .map(|image| fingerprint_report(ws, image))
         .transpose()?;
+    if let Some(image) = args.self_check_recorded_crates.as_deref() {
+        // The same call the publisher makes before it reads a signing key.
+        crate::publish::use_recorded_image_crates(ws, false)?;
+        let fingerprint = crate::rechunk::fingerprint(ws, image)?;
+        println!(
+            "{}",
+            serde_json::json!({"recorded_crates_fingerprint": fingerprint})
+        );
+        return Ok(());
+    }
     let builds = if args.self_check_build {
         Some(build::run(ws)?)
     } else {
@@ -105,7 +119,7 @@ pub(crate) fn fingerprint_report(ws: &Workspace, image: &str) -> Result<serde_js
         use sha2::{Digest, Sha256};
         let mut legacy = Sha256::new();
         let mut current = Sha256::new();
-        for path in ilex_devkit::fingerprint::selection_inputs(&selection) {
+        for path in ilex_devkit::fingerprint::selection_inputs(ws, &selection)? {
             legacy.update(format!(
                 "tree {path} {}\n",
                 git::tree_hash(&ws.root, &path)?
@@ -114,7 +128,7 @@ pub(crate) fn fingerprint_report(ws: &Workspace, image: &str) -> Result<serde_js
         ilex_devkit::fingerprint::hash_inputs(
             ws,
             &mut current,
-            ilex_devkit::fingerprint::selection_inputs(&selection),
+            ilex_devkit::fingerprint::selection_inputs(ws, &selection)?,
         )?;
         ensure!(
             legacy.finalize() == current.finalize(),
@@ -367,6 +381,10 @@ fn self_check(ws: &Workspace) -> Result<serde_json::Value> {
     );
     result["stale_claim_release_and_reassignment"] = true.into();
     result["concurrent_main_claims_have_one_owner"] = true.into();
+    // Containerfile guard, declaration, closure walk and recorded-closure
+    // fixtures; each refusal is an expected failure, so a regression here is
+    // a failed check.
+    result["fingerprint_fixtures"] = ilex_devkit::fingerprint::self_check(ws)?;
     // Ensure the source checkout remains readable; no source mutation above.
     let _ = git::head_sha(&ws.root)?;
     fs::remove_dir_all(&dir)?;

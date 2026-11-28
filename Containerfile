@@ -45,8 +45,9 @@ RUN cd accountsservice-26.27.3 && \
 # Builder: compile the Rust binaries on Fedora 45 so they link against the
 # same glibc as the image.
 FROM quay.io/fedora/fedora:45 AS build
+# python3 runs build/build-image-crates.py below (the image has no Python).
 RUN --mount=type=cache,id=ilex-dnf,target=/var/cache/libdnf5,sharing=locked \
-    dnf -y install --setopt=keepcache=1 cargo gcc
+    dnf -y install --setopt=keepcache=1 cargo gcc python3
 
 # kache: a compiler cache keyed by the content of each rustc invocation's
 # inputs, so a crate built in any worktree (or on the host) is restored here
@@ -73,39 +74,31 @@ WORKDIR /src
 # build scripts.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+# The packages this image builds are declared in build/image-crates.toml, and
+# only build/build-image-crates.py runs the Rust toolchain on them: this is the
+# one place in this file that does, apart from installing it above. The image
+# fingerprint derives its crate closure from the same declaration, so a build
+# step added here would ship crates it does not hash: `ilexctl doctor
+# --self-check` refuses a Containerfile that names the toolchain anywhere else.
+# This stage may hold only the lines it has now (its FROM, ARG KACHE_*, the
+# toolchain's dnf install, the pinned kache download, WORKDIR, these three
+# COPYs and the one RUN of the script): a new RUN, ENV, COPY or mount here, or
+# a mention of the toolchain in another stage, is refused, so that a build
+# step, RUSTFLAGS or a cargo configuration cannot slip in beside the
+# declaration. The script itself starts cargo with a scrubbed environment and
+# refuses to build while any cargo configuration file is visible.
+COPY build/build-image-crates.py build/image-crates.toml build/
 # Every compile goes through kache, whose store is a podman cache mount shared
 # by all worktrees. There is no shared target directory any more: each build
 # compiles into a fresh /src/target and kache restores what an earlier build
 # (or the host) already compiled, by content rather than by mtime. `ilexctl
 # build` also mounts the host's own kache store at /kache-host, read-only; it
 # is used when present, so a plain `podman build` and CI work without it. The
-# daemon is stopped before the step ends so it flushes what it queued.
+# script stops the daemon before it ends so it flushes what it queued, then
+# stages the binaries and completions under /out.
 RUN --mount=type=cache,id=ilex-cargo,target=/root/.cargo/registry \
-    --mount=type=cache,id=ilex-kache,target=/root/.cache/kache,sharing=locked <<'EOF'
-set -euo pipefail
-export RUSTC_WRAPPER=kache
-if [ -f /kache-host/index.db ]; then
-    export KACHE_READONLY_STORE=/kache-host
-fi
-cargo build --release --locked -p ilexctl --no-default-features
-cargo build --release --locked -p drupe -p ilex-enroll
-kache daemon stop || true
-kache stats --last-build --root /src
-install -Dm755 target/release/ilexctl /out/usr/bin/ilexctl
-for shell in bash zsh fish; do
-    case "$shell" in
-        bash) completion=/usr/share/bash-completion/completions/ilexctl ;;
-        zsh) completion=/usr/share/zsh/site-functions/_ilexctl ;;
-        fish) completion=/usr/share/fish/vendor_completions.d/ilexctl.fish ;;
-    esac
-    mkdir -p "/out$(dirname "$completion")"
-    target/release/ilexctl completion "$shell" > "/out$completion"
-    chmod 0644 "/out$completion"
-done
-install -Dm755 target/release/ilex-enroll /out/usr/bin/ilex-enroll
-install -Dm755 target/release/drupe /out/usr/bin/drupe
-install -Dm755 target/release/drupe-enter /out/usr/libexec/drupe/drupe-enter
-EOF
+    --mount=type=cache,id=ilex-kache,target=/root/.cache/kache,sharing=locked \
+    python3 -I -S build/build-image-crates.py build/image-crates.toml
 
 FROM quay.io/fedora/fedora-bootc:45
 

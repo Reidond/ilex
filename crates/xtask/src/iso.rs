@@ -15,6 +15,9 @@
 //! writes `iso_due=` to `$GITHUB_OUTPUT`) by looking at the latest
 //! `installer-*` release: none yet, `installer/` (or this module) changed
 //! since it, or it is a week old (to pick up Fedora and Anaconda fixes).
+//!
+//! `--next` builds the live installer of the next installer instead (no
+//! Anaconda; see `iso_next`). It is built beside this ISO and never released.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,12 +41,17 @@ const INSTALLER_INPUTS: &[&str] = &[
     "crates/xtask/src/iso.rs",
     "crates/ilex-tooling-core/src/installer.rs",
     "crates/ilex-tooling-core/src/config.rs",
+    // The catalogue's types and their validator write compositions.json.
+    "crates/ilex-installer-model",
     "crates/ilex-enroll",
     "Cargo.toml",
     "Cargo.lock",
     "rootfs/etc/containers/registries.d/ilex.yaml",
     "rootfs/etc/pki/containers/ilex.pub",
 ];
+/// Paths below [`INSTALLER_INPUTS`] that belong to another product: the next
+/// installer (`iso --next`) has its own build and is never part of this ISO.
+const FINGERPRINT_EXCLUDED: &[&str] = &["installer/next"];
 /// The line of a release's notes that says what the installer was built from.
 const FINGERPRINT_LINE: &str = "installer-fingerprint: ";
 /// Release tags are `installer-YYYYMMDD` (with a `-N` suffix on a second one
@@ -59,8 +67,15 @@ pub struct Args {
     #[arg(long)]
     pub testing_tag: Option<String>,
     /// Check that every offered composition and its signature tag exist
-    #[arg(long, conflicts_with_all = ["due", "testing_tag"])]
+    #[arg(long, conflicts_with_all = ["due", "testing_tag", "next"])]
     pub check_registry: bool,
+    /// Build the next installer's live ISO (no Anaconda) instead of this
+    /// network installer; written to `<state dir>/iso-next`, never released
+    #[arg(long, conflicts_with_all = ["due", "testing_tag", "check_registry"])]
+    pub next: bool,
+    /// With `--next`: the edition to build (see `installer/next/editions.toml`)
+    #[arg(long, default_value = crate::iso_next::DEFAULT_EDITION, requires = "next")]
+    pub edition: String,
     /// Don't build: say whether a new ISO is due, from the latest
     /// `installer-*` release of `--repository`
     #[arg(long)]
@@ -74,6 +89,18 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
+    if args.next {
+        cmd::require("podman")?;
+        let iso = crate::iso_next::build(
+            ws,
+            &crate::iso_next::Build {
+                edition: &args.edition,
+                output_dir: args.output_dir.as_deref(),
+            },
+        )?;
+        println!("{}", iso.display());
+        return Ok(());
+    }
     if args.check_registry {
         let table = installer::table(&ws.root, args.testing_tag.as_deref())?;
         if !check_registry(&table)? {
@@ -104,7 +131,7 @@ pub struct Build<'a> {
     pub output_dir: Option<&'a Path>,
 }
 
-fn validated_table(root: &Path, testing_tag: Option<&str>) -> Result<installer::Table> {
+pub(crate) fn validated_table(root: &Path, testing_tag: Option<&str>) -> Result<installer::Table> {
     let mut table = installer::table(root, testing_tag)?;
     let output = cmd::output(
         Command::new("python3")
@@ -188,7 +215,7 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
         fs::remove_dir_all(&build_dir)?;
     }
     fs::create_dir_all(&build_dir)?;
-    run_image_builder(ws, &installer, &build_dir)?;
+    run_image_builder(ws, &installer, &build_dir, ISO_NAME, OSBUILD_CACHE)?;
 
     // image-builder puts the ISO in a subdirectory; the release wants it flat.
     let built = find_iso(&build_dir)?;
@@ -225,7 +252,7 @@ pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
     Ok(iso)
 }
 
-fn copy_sources(source: &Path, target: &Path) -> Result<()> {
+pub(crate) fn copy_sources(source: &Path, target: &Path) -> Result<()> {
     fs::create_dir_all(target)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -241,7 +268,7 @@ fn copy_sources(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hash = Sha256::new();
     std::io::copy(&mut file, &mut hash)?;
@@ -277,7 +304,7 @@ fn release_notes(fingerprint: &str, sha256: &str, table: &installer::Table) -> S
     notes
 }
 
-fn table_bytes(table: &installer::Table) -> Result<Vec<u8>> {
+pub(crate) fn table_bytes(table: &installer::Table) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(table)?;
     bytes.push(b'\n');
     Ok(bytes)
@@ -348,6 +375,14 @@ fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> Result<()> {
             .collect::<std::io::Result<Vec<_>>>()?;
         entries.sort();
         for entry in entries {
+            let relative = entry
+                .strip_prefix(root)
+                .unwrap_or(&entry)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if FINGERPRINT_EXCLUDED.contains(&relative.as_str()) {
+                continue;
+            }
             hash_tree(root, &entry, hash)?;
         }
     } else {
@@ -451,13 +486,46 @@ fn host_image_builder() -> Option<u32> {
         .and_then(|v| v.trim().split('.').next()?.parse().ok())
 }
 
+/// The `osbuild` image-builder runs: a wrapper that keeps the build root and
+/// the deployed tree in the checkout's store, and, for the next installer, also
+/// labels the live root (see `installer/next/osbuild-selinux`).
+#[derive(Clone, Copy)]
+pub(crate) struct Osbuild {
+    /// The script, relative to the checkout.
+    pub script: &'static str,
+    /// Where its executable copy goes, below the state directory.
+    pub dir: &'static str,
+}
+
+/// The Anaconda network installer's: checkpoints only.
+pub(crate) const OSBUILD_CACHE: Osbuild = Osbuild {
+    script: "installer/image-builder/osbuild-cache",
+    dir: "image-builder-bin",
+};
+
 /// Run `image-builder build … generic-iso`: directly when the one on `PATH`
 /// is new enough (CI), otherwise inside a privileged Fedora 45 container that
 /// shares this host's container storage, so a dev machine with an older
 /// image-builder (or none) works the same.
-fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<()> {
+pub(crate) fn run_image_builder(
+    ws: &Workspace,
+    installer: &str,
+    out_dir: &Path,
+    output_name: &str,
+    osbuild: Osbuild,
+) -> Result<()> {
     let cache = ws.ensure_state()?.join("image-builder-cache");
     fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
+    // The wrapper's executable copy (checkouts on Windows carry no exec bits).
+    let bin = ws.ensure_state()?.join(osbuild.dir);
+    fs::create_dir_all(&bin)?;
+    let wrapper = bin.join("osbuild");
+    fs::copy(ws.root.join(osbuild.script), &wrapper)?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+    }
     let build_args = |out: &str, cache_path: &str| -> Vec<String> {
         [
             "build",
@@ -470,7 +538,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
             "--bootc-default-fs",
             "ext4",
             "--output-name",
-            ISO_NAME,
+            output_name,
             "--output-dir",
             out,
             "generic-iso",
@@ -481,18 +549,6 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
 
     if host_image_builder().is_some_and(|v| v >= MIN_IMAGE_BUILDER) {
         // Keep the native path equivalent without installing a host wrapper.
-        let bin = ws.ensure_state()?.join("image-builder-bin");
-        fs::create_dir_all(&bin)?;
-        let wrapper = bin.join("osbuild");
-        fs::copy(
-            ws.root.join("installer/image-builder/osbuild-cache"),
-            &wrapper,
-        )?;
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
-        }
         let mut paths = vec![bin];
         paths.extend(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
@@ -546,6 +602,12 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
         .arg("--volume")
         .arg(format!("{}:/out", out_dir.display()))
         .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"]);
+    if osbuild.script != OSBUILD_CACHE.script {
+        // The helper image carries the checkpoint-only wrapper; this one is
+        // ours (and needs the container's python3, which osbuild requires).
+        run.arg("--volume")
+            .arg(format!("{}:/usr/local/bin/osbuild:ro", wrapper.display()));
+    }
     ilex_devkit::ownership::remote_container_args(ws, &mut run)?;
     run.arg(&helper)
         .args([
@@ -559,7 +621,7 @@ fn run_image_builder(ws: &Workspace, installer: &str, out_dir: &Path) -> Result<
 }
 
 /// The `.iso` image-builder wrote somewhere below `dir`.
-fn find_iso(dir: &Path) -> Result<PathBuf> {
+pub(crate) fn find_iso(dir: &Path) -> Result<PathBuf> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         for entry in fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {

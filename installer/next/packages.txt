@@ -1,0 +1,41 @@
+# Installed in every edition's live image (dnf, weak dependencies off).
+# Live boot: dmsquash-live for the initramfs, and what image-builder's
+# generic-iso needs inside the container to assemble the ISO.
+dracut-live
+dracut-config-generic
+grub2-efi-x64-cdboot
+isomd5sum
+squashfs-tools
+xorrisofs
+# The session: logind sessions, the Wi-Fi support later pages use, tty2's shell,
+# and `ss`, which the session script uses to see that the compositor listens.
+NetworkManager-wifi
+util-linux
+iproute
+# The root helper (ilex-installerd) probes with lsblk/sfdisk (util-linux), plans
+# with systemd-repart (systemd-udev), which formats through mkfs.vfat, mkfs.ext4
+# and mkfs.btrfs even in a dry run, reads the registry with skopeo and checks
+# console keymaps and zone names against kbd and tzdata. cryptsetup and
+# tpm2-tss are what ilex-enroll's eligibility probe measures. fedora-bootc
+# already has all of them (they add no size); they are listed so that a change
+# to the base cannot drop a tool the helper needs.
+dosfstools
+e2fsprogs
+btrfs-progs
+skopeo
+kbd
+tzdata
+cryptsetup
+tpm2-tss
+
+# What `Apply` runs: bootc (with bootupd and ostree) installs the image, the
+# shadow-utils tools make the administrator, systemd's firstboot and
+# policycoreutils' setfiles configure and label the deployment, and
+# efibootmgr is what bootupd writes the boot entry with. fedora-bootc has them
+# all; they are listed so that a change to the base cannot drop one.
+bootc
+bootupd
+ostree
+shadow-utils
+policycoreutils
+efibootmgr

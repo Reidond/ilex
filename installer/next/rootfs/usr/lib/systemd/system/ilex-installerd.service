@@ -1,0 +1,42 @@
+[Unit]
+Description=ilex installer helper
+Documentation=https://github.com/Reidond/ilex
+After=dbus.socket
+Requires=dbus.socket
+# A crash or two does not end the installation session (the interface
+# re-attaches with State()); systemd's default start limit (five starts in ten
+# seconds) stops a helper that keeps crashing, and it stays down and reported.
+
+[Service]
+Type=dbus
+BusName=org.ilex.Installer1
+ExecStart=/usr/libexec/ilex-installer/ilex-installerd
+RuntimeDirectory=ilex-installer
+# Root's own: nothing in it is for another user (plans' scratch, the state
+# record, and later the key files an installation hands to its tools).
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+LimitCORE=0
+# Test-only faults, from the fixed credential ilex.installer.fault: `helper`
+# makes the helper exit as soon as it starts, `apply` makes it kill itself as
+# Apply has started the installation (the call is never answered), `image` makes
+# the installation's image stage fail before bootc is run. They can only make the
+# installer fail.
+ImportCredential=ilex.installer.fault
+# The helper's mounts (an ESP mounted read-only to name its loaders, and
+# anything a later stage mounts) stay out of the host's mount namespace. The
+# host's mounts reach the helper only as far as they propagate: one made under
+# a private subtree does not, so the helper reads the host's own table
+# (/proc/1/mountinfo) and every other mount namespace's to see what is in use.
+PrivateMounts=yes
+# Apply records each stage in /run/ilex-installer/state.json before it writes
+# anything. A helper that dies mid-installation (and the tools it started die
+# with it) is started again here and reports what it finds: an installation
+# that was not ended, failed in the stage it was in, with the disk marked
+# changed. It never resumes: the next attempt is a new plan, a new secret and a
+# new Apply. Its plans and secrets are not kept: they are memory only.
+Restart=on-failure
+RestartSec=1s
+
+[Install]
+WantedBy=multi-user.target

@@ -330,7 +330,7 @@ pub fn report_boot() -> Result<()> {
     Ok(())
 }
 
-fn configure_crypttab(root: &Path, uuid: &str) -> Result<()> {
+pub fn configure_crypttab(root: &Path, uuid: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let path = root.join("etc/crypttab");
     let metadata = fs::symlink_metadata(&path)?;
