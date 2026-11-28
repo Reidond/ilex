@@ -709,7 +709,8 @@ pub(crate) fn booted_encrypted(
 }
 
 /// [`booted_encrypted`] for an installation that made a recovery key (an
-/// interface's request) on a computer that could not use the security chip:
+/// interface's request) on a computer that could not use the security chip
+/// (the installer's VM has no TPM, or no Secure Boot):
 /// a second keyslot and the recovery token, the `tpm2-device=auto` option in
 /// `crypttab`, `setup.json` and the enrolment record saying `passphrase-only`
 /// and why, and the volume opened with the passphrase typed at the prompt.
@@ -807,7 +808,8 @@ echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} 
         let setup: Value = serde_json::from_str(field(&out, "setup_tpm")?)?;
         ensure!(
             setup["status"] == "passphrase-only"
-                && setup["reason"] == "secure-boot-off"
+                // The installer's VM has Secure Boot and no TPM, or neither.
+                && matches!(setup["reason"].as_str(), Some("no-tpm" | "secure-boot-off"))
                 && setup["capability"] == "unavailable"
                 && setup["requested"] == "auto",
             "setup.json's security.tpm: {setup}"
