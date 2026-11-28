@@ -382,6 +382,12 @@ umount /run/stick
         "the saved log has nothing in it: {scan}"
     );
     ok(&vm, "sync")?;
+    // The whole installation ran enforcing: nothing was denied.
+    selinux::check(
+        &vm,
+        &bench.artifacts,
+        &format!("installer-{}", variant.name),
+    )?;
     drop(vm);
 
     // --- the disk, booted ----------------------------------------------------
