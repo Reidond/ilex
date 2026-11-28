@@ -556,7 +556,7 @@ fn encrypted_inspected(text: &str, plan: &Plan, variant: &Variant) -> Result<Fou
                 "composition": "generic.gnome",
                 "image": plan.image.target,
                 "profile": {"id": null, "schema": null},
-                "security": {"capabilities": {}, "tpm": {"requested": "off", "capability": "unknown", "reason": "not-attempted", "status": "passphrase-only"}},
+                "security": {"capabilities": {}, "tpm": {"requested": "off", "capability": "unavailable", "reason": "not-requested", "status": "passphrase-only"}},
             }),
         "setup.json: {setup}"
     );

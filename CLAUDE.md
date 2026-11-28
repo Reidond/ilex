@@ -4113,7 +4113,7 @@ passphrase opens it (`--test-passphrase`) and a wrong or empty one does not, a
 btrfs inside, exactly three partitions (ESP, `/boot`, the volume: no swap) and no
 swap, `/var` inside the volume and none on `/boot`, the deployment's
 `/etc/crypttab` (`luks-<uuid> UUID=<uuid> none discard`, mode 0600),
-`vconsole.conf`, `setup.json` (`passphrase-only`, `not-attempted`) and the boot
+`vconsole.conf`, `setup.json` (`passphrase-only`, `not-requested`: the trial asks for `tpm: off`, and the computer's verdict is `unavailable`) and the boot
 entry's arguments (`rd.luks.uuid=`, `vconsole.keymap=`, the image's
 `rd.luks.options=tpm2-device=auto`, a `root=UUID=`), nothing left open or mounted,
 and that **the passphrase is nowhere it must not be**: not in the helper's
