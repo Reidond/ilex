@@ -399,6 +399,11 @@ fn from_welcome(
         // Continue is the button at the bottom right of every page (the focus
         // is nowhere after the passphrase fields went away, and Tab from
         // nowhere starts at the header's Back button).
+        // The pointer is moved in first: a surface that appeared since the last
+        // click (the interface was restarted) gets no `enter` for a pointer that
+        // did not move.
+        ctl.move_to(1000, 600)?;
+        std::thread::sleep(Duration::from_millis(500));
         ctl.click(1226, 770, ilex_vmctl::Button::Left, 1)?;
     }
     nth_marker(
