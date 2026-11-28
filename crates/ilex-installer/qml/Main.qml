@@ -179,6 +179,12 @@ Kirigami.ApplicationWindow {
 
     onViewChanged: {
         syncStack();
+        if (installer.rendering) {
+            // The renderer waits for the row to show the flow's page: what it
+            // last reported must be the row as it is after this change, not
+            // what an earlier shot left (the same page, one step behind).
+            Qt.callLater(reportPage);
+        }
         if (ready) {
             const mark = view.epoch + "/" + view.account.wiped;
             if (wipeMark !== null && wipeMark !== mark) {
