@@ -950,8 +950,10 @@ impl RecoveryPage {
         self.ask.set_label(view.ask);
         // The fields are asked in the order of the numbers.
         for (slot, (row, asked)) in self.rows.iter().zip(&view.asked).enumerate() {
+            // The fields stay as they are while the helper compares (an
+            // insensitive field would give up the focus, and a refusal would
+            // leave a person with none): the flow ignores what is typed meanwhile.
             row.set_title(&asked.label);
-            row.set_sensitive(!view.confirming);
             show_message(
                 &self.messages[slot],
                 asked.check.message(),
