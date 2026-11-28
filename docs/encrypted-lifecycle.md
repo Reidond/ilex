@@ -63,7 +63,9 @@ kernel release, kernel hash and regenerated initramfs hash. The release job
 always tests a fresh encrypted install from the verified production digest
 under the shipped signature policy. When a baseline exists, the job also tests
 the lifecycle through that unmodified published target. It seals the required
-results before releasing the ISO. The ordinary network install test also checks
+results before releasing the ISO. The release job uploads the security
+tier's public evidence as `release-security-evidence` even when the step fails;
+the sealed lifecycle export exists only for a passing run. The ordinary network install test also checks
 the production registry and composition. The lifecycle imports v1 and v2 into
 an isolated registry with a throwaway verification key. Its manifest digests
 identify those delivered test images. The release scope is the default

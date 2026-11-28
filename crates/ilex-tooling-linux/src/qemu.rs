@@ -119,9 +119,9 @@ pub fn default_disk_path(ws: &Workspace, image: &str, format: DiskFormat) -> Pat
 fn digest_pinned(image: &str) -> bool {
     image.rsplit_once('@').is_some_and(|(name, digest)| {
         !name.is_empty()
-            && digest.strip_prefix("sha256:").is_some_and(|hex| {
-                hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
-            })
+            && digest
+                .strip_prefix("sha256:")
+                .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
     })
 }
 

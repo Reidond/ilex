@@ -238,7 +238,8 @@ qemu-img create -q -f qcow2 "${!#}" 1M
     );
     let seen = fs::read_to_string(&calls)?;
     ensure!(
-        seen.lines().any(|line| line == format!("bcvk-source {alias}"))
+        seen.lines()
+            .any(|line| line == format!("bcvk-source {alias}"))
             && !seen.contains(&pinned)
             && !seen.lines().any(|line| line == "tag"),
         "digest-pinned source did not reach bcvk through its receipted alias: {seen}"

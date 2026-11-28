@@ -245,7 +245,11 @@ and verifies the published installer composition from its pre-promotion
 snapshot, or the previous distinct signed composition for an ISO-only refresh.
 Installer release always requires a fresh encrypted install of the verified
 published digest and also requires the lifecycle when a baseline exists.
-The gate seals the required evidence before upload.
+The gate seals the required evidence before upload. The release job also seals
+and uploads `security/` alone (`release-security-evidence`, public: no
+encrypted tier, no private fingerprint) whether or not the step passed, since
+the sealed lifecycle export exists only for a passing step. The upload action's
+`seal` input selects that separate marker.
 See the [encrypted lifecycle runbook](docs/encrypted-lifecycle.md) for the
 CI baseline, native Gen2 console fixture, and owner-run MS-7C35 qualification.
 
@@ -362,6 +366,15 @@ ID-verified checkout-owned local alias: its inner containers-storage transport
 otherwise parses the ID as a registry name. The disk key remains the original
 immutable ID. The alias retains only an additional local name for the existing
 image; no registry upload or extra image contents are created.
+A digest-pinned reference (`ghcr.io/reidond/ilex@sha256:…`, which the release
+job's published image is) resolves to its image ID and takes the same alias.
+bcvk's guest copies the image into its own storage under the name it was given,
+and containers-image refuses a digest-named destination for a pulled image
+(`Copying this image would require changing layer representation ... Destination
+specifies a digest`, bcvk exit 125). The tag alias keeps the manifest digest, so
+the guest still boots the pinned manifest and `bootc status` must still report
+it. The 28 November 2026 first `installer-release` run died there, silently, in
+`security-control-startup-self-check.sh`, 36 seconds after the startup check.
 
 CI runs the tier on the tested candidate, probes the actual runner each
 time, requires KVM with SMM, and enforces a 45-minute guest-tier deadline.
@@ -370,7 +383,14 @@ unrun tier is labelled **UNQUALIFIED** in the summary. `test=true` forces it.
 A runner without KVM SMM, or a KVM entry failure, leaves the tier
 unqualified; nothing retries with another accelerator.
 Serial logs, firmware identity, versions, PCR replay, timing and cleanup
-evidence are retained under `artifacts/security/` (CI: `security-evidence`).
+evidence are retained under `artifacts/security/` (CI: `security-evidence`;
+the release job: `release-security-evidence`, uploaded on failure too).
+The three security scripts (`security-tier.sh`, `security-startup-self-check.sh`,
+`security-control-startup-self-check.sh`) source `.github/diagnose.sh`: a
+command that fails under `set -e` is named in the job log with its exit status
+and location, and the nested runs' `command.log` and `result.json` tails are
+printed. A nested run that ends before the injected EFI-control launch is
+reported as such, not as a missing marker file.
 Startup failure collection authorizes the fixture's runtime path independently
 of a running VM handle. It copies `swtpm.log` and `swtpm-setup.log` before
 cleanup/retry; manufacturing captures both stdout and stderr, and emulator
@@ -1674,8 +1694,10 @@ The remote executor preserves this provenance across source transfer.
 Machine cache hits also require current owner/source labels, so documentation
 changes refresh provenance even when the base and machine content are unchanged.
 
-Immutable-ID disk inputs use a versioned local alias because bcvk's inner
-transport cannot parse `sha256:...` as a local image ID. The shared ownership
+Immutable-ID disk inputs, and digest-pinned references that resolve to an
+image ID, use a versioned local alias because bcvk's inner
+transport cannot parse `sha256:...` as a local image ID and its guest cannot
+copy into a digest-named destination. The shared ownership
 helper leases that alias in the Podman store through installation, validates
 the full source ID before tagging, and binds reuse to a store/owner/alias/ID
 allocation receipt in `<state>/image-aliases/`. Explicit source labels may be
@@ -1683,7 +1705,8 @@ foreign/CI labels and are retained. An existing same-ID alias without a receipt
 is refused; an inspection/store error never means absence. Earlier unreceipted
 aliases are not adopted. `disk --self-check` injects inspect/exists exit 125,
 unreceipted same-ID aliases, mismatched owners/IDs and cross-output concurrency
-through the actual CLI with private stubs. CI retains its JSON alongside the
+through the actual CLI with private stubs, and requires a digest-pinned source
+to reach bcvk through the receipted alias, never under its digest name. CI retains its JSON alongside the
 security evidence; real image-ID disk installation and guest boots remain e2e.
 
 State/runtime roots carry `.ilex-owner.json` schema/owner receipts, and disk
