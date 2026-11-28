@@ -623,6 +623,7 @@ pub(crate) fn unlock(vm: &mut Vm, keys: &str, artifacts: &Path, name: &str) -> R
     let started = Instant::now();
     let discover = std::env::var_os("ILEX_ENCRYPTED_DISCOVER").is_some();
     let mut previous: Option<Vec<u8>> = None;
+    let mut booted_at: Option<Instant> = None;
     let mut still = 0u32;
     let mut taken = 0u32;
     loop {
@@ -648,7 +649,17 @@ pub(crate) fn unlock(vm: &mut Vm, keys: &str, artifacts: &Path, name: &str) -> R
             let booted = fs::read_to_string(&serial)
                 .unwrap_or_default()
                 .contains("Booting `");
-            if !discover && booted && still >= 3 && light_pixels(&frame.rgb) > 200 {
+            // GRUB's own `Booting` line is text on a still screen too, for as long
+            // as the kernel and the initramfs take to load from a cold disk: the
+            // prompt is looked for only once the boot has had time to get past it.
+            if booted && booted_at.is_none() {
+                booted_at = Some(Instant::now());
+            }
+            if !discover
+                && booted_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(45))
+                && still >= 3
+                && light_pixels(&frame.rgb) > 200
+            {
                 ctl.save_screenshot(&artifacts.join(format!("{name}-prompt.png")))?;
                 break;
             }

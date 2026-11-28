@@ -2439,9 +2439,10 @@ fn plan_body(vm: &EphemeralVm) -> Result<()> {
             Some("disk"),
         ),
         (
-            "free space",
+            // A disk with no partition table has nothing beside which to install.
+            "free space on a blank disk",
             Box::new(|r| r["mode"] = json!("free-space")),
-            "unsupported-mode",
+            "free-space-unavailable",
             Some("mode"),
         ),
         (
@@ -2687,7 +2688,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
 /// How many states the renderers draw, and how many pictures that is in three
 /// configurations (light, dark, light at 150%). One number for both interfaces:
 /// the states are `ilex_installer_flow::shots::SHOTS`.
-const SHOTS: usize = 118;
+const SHOTS: usize = 126;
 const IMAGES: usize = SHOTS * 3;
 
 /// Run `script` (the interface's `--self-check`, a refused `--simulate` and its
@@ -2768,7 +2769,7 @@ fn check_ui(
         seen.len()
     );
     ensure!(
-        distinct.len() >= 230,
+        distinct.len() >= 255,
         "only {} of {} images differ: pages are not drawing their own states",
         distinct.len(),
         seen.len()

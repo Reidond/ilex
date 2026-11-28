@@ -47,6 +47,7 @@ use crate::common;
 use crate::selinux;
 
 pub(crate) mod encrypted;
+pub(crate) mod free_space;
 
 const GIB: u64 = 1 << 30;
 /// The disk that is installed to: sparse, larger than the least a plan wants.
@@ -90,6 +91,15 @@ pub fn trials() -> Vec<Trial> {
             encrypted::run(&encrypted::GERMAN)
         }),
         run("installer::interrupted", interrupted),
+        run("installer::free_space", || {
+            free_space::beside(&free_space::PLAIN)
+        }),
+        run("installer::free_space_encrypted", || {
+            free_space::beside(&free_space::ENCRYPTED)
+        }),
+        run("installer::free_space_refusals", free_space::refusals),
+        run("installer::free_space_failure", free_space::failure),
+        run("installer::free_space_answers", free_space::answers),
     ]
 }
 
@@ -116,6 +126,11 @@ struct Bench {
     /// Images attached to the live VM as removable USB sticks (where a log is
     /// saved), when the trial has any.
     sticks: Vec<PathBuf>,
+    /// A firmware variable store the VMs of the trial share (a disk's boot
+    /// entries survive the VM that wrote them), when the trial has one.
+    efi_vars: Option<PathBuf>,
+    /// Extra SMBIOS structures (systemd credentials) for the live VM.
+    smbios: Vec<String>,
     artifacts: PathBuf,
     name: &'static str,
 }
@@ -145,14 +160,19 @@ impl Bench {
             sentinel,
             bare,
             sticks: Vec::new(),
+            efi_vars: None,
+            smbios: Vec::new(),
             artifacts,
             name,
         })
     }
 
-    /// Boot the live image from its disk (UEFI, a throwaway overlay) with the
-    /// target and the sentinel attached, and wait for the helper.
-    fn boot_live(&self) -> Result<Vm> {
+    /// The live VM's configuration: the live image's disk, then the target, the
+    /// sentinel and the bare disk, the sticks. The installed disk is booted
+    /// with the same one (the live disk too, so that its devices keep their
+    /// places and the firmware boot entry an installation made still names the
+    /// disk it was made for).
+    fn live_config(&self) -> VmConfig {
         let mut config = VmConfig::new(format!("inst-{}", self.name), &self.live);
         config.memory = MEMORY.into();
         config.extra_disks = vec![
@@ -166,6 +186,15 @@ impl Bench {
         config.disk_serials = true;
         config.bare_disks = 1;
         config.extra_usb_disks = self.sticks.clone();
+        config.efi_vars = self.efi_vars.clone();
+        config.smbios.extend(self.smbios.iter().cloned());
+        config
+    }
+
+    /// Boot the live image from its disk (UEFI, a throwaway overlay) with the
+    /// target and the sentinel attached, and wait for the helper.
+    fn boot_live(&self) -> Result<Vm> {
+        let config = self.live_config();
         let mut vm = Vm::boot(&self.ws, &config)?;
         vm.wait_ssh(Duration::from_secs(420))
             .context("the live image did not accept the harness's SSH key")?;

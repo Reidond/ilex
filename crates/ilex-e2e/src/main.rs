@@ -155,7 +155,8 @@ fn main() {
             - will_run("installer::policy")
             - will_run("installer::install")
             - will_run("installer::encrypted")
-            - will_run("installer::interrupted"),
+            - will_run("installer::interrupted")
+            - will_run("installer::free_space"),
     );
 
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| libtest_mimic::run(&args, trials)));
