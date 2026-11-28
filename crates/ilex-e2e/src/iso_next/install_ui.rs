@@ -636,7 +636,9 @@ fn no_password(vm: &mut Vm, serial: &Path, key: Option<&str>) -> Result<()> {
 /// The recovery key page, driven the way a person who cannot be shown the key
 /// again drives it: the trial takes the key from the helper while the interface
 /// is stopped (the helper hands it over once, so this window finds it taken: the
-/// page that a restarted window shows, with the way out offered). Then either the
+/// page that a restarted window shows, with the way out offered; with `give_up`
+/// the window is killed instead and the session's new one attaches to an
+/// installation whose key was taken). Then either the
 /// whole key is typed wrongly (the helper refuses it and the field empties) and
 /// rightly, or, with `give_up`, Tab reaches "Continue without a recovery key"
 /// and Return gives the key up. The key is in the trial's memory only; no
@@ -652,7 +654,14 @@ fn recovery_page(
     // Stopped before the helper has made the key (it does after the volume is
     // open, some seconds after `Apply`), continued once the trial has the key.
     let key = security::take_key(vm).context("the trial taking the key")?;
-    vm.ssh_ok("pkill -CONT -x ilex-installer")?;
+    if give_up {
+        // A window that died after the key was taken, before it could draw it:
+        // this one is killed (it is stopped) and the session starts another,
+        // which finds the key taken.
+        vm.ssh_ok(&format!("{RESET_START_LIMIT}; {KILL_INSTALLER}"))?;
+    } else {
+        vm.ssh_ok("pkill -CONT -x ilex-installer")?;
+    }
     let page = nth_marker(
         vm,
         serial,
@@ -662,7 +671,9 @@ fn recovery_page(
         is_page("recovery"),
     )?;
     ensure!(
-        field(&page, "key")? == "gone" && field(&page, "skip")? == "true",
+        field(&page, "key")? == "gone"
+            && field(&page, "skip")? == "true"
+            && (field(&page, "reattached")? == "true") == give_up,
         "the recovery page of an interface that was not given the key: {page:?}"
     );
     wait_page(vm, ctl, artifacts, &format!("{name}-recovery"))?;
@@ -672,6 +683,7 @@ fn recovery_page(
         ctl.key("Tab")?;
         std::thread::sleep(Duration::from_secs(1));
         ctl.save_screenshot(&artifacts.join(format!("next-{name}-recovery-skip-focused.png")))?;
+        let installing = count(serial, is_page("installing"))?;
         ctl.key("Return")?;
         nth_marker(
             vm,
@@ -686,7 +698,7 @@ fn recovery_page(
             vm,
             serial,
             "the installing page after going on without the key",
-            2,
+            installing + 1,
             EVENT_TIMEOUT,
             is_page("installing"),
         )?;

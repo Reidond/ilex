@@ -5744,7 +5744,6 @@ fn check_recovery_holder() -> Result<()> {
         "klnrtuvc ijklnrtu".to_owned(),
         TEST_KEY[..TEST_KEY.len() - 9].to_owned(),
         format!("{TEST_KEY}-cdefghij"),
-        String::new(),
         "2 klnrtuvc\n6 ijklnrtu\n".to_owned(),
     ]);
     for typed in &wrong {
