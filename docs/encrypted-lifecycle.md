@@ -1,7 +1,11 @@
 # Encrypted upgrade and rollback qualification
 
-Qualify one exact installer ISO, a supported rollback image (v1), and a distinct
-update image (v2). Keep the same installed disk,
+Qualify one exact installer ISO (the GNOME edition's live installer, ilex
+Glabra), a supported rollback image (v1), and a distinct update image (v2). The
+installer's root helper installs v1 from the registry by its dated or revision tag
+(`ILEX_ENCRYPTED_UPGRADE_TAG`), with a recovery key and the security chip; the
+checklists below that name Anaconda's pages describe the owner-run Gen2 fixture,
+which has not been ported to the live installer. Keep the same installed disk,
 firmware identity, and TPM. Fedora shim, Secure Boot, LUKS2 root, automatic
 SHA-256 PCR 7 unlock without a PIN, and a homed LUKS/btrfs home are required.
 The normal comparison expects equivalent PCR 7 measurements on each backend.
@@ -21,9 +25,10 @@ guest is off.
 ```sh
 free -h
 export ILEX_VM_SLOTS=1
-export ILEX_ISO=/absolute/path/to/ilex-installer.iso
+export ILEX_ISO_NEXT=/absolute/path/to/ilex-glabra-installer.iso
 export ILEX_IMAGE=localhost/ilex:checkout-candidate
 export ILEX_ENCRYPTED_UPGRADE_FROM='ghcr.io/reidond/ilex@sha256:<v1-digest>'
+export ILEX_ENCRYPTED_UPGRADE_TAG='generic.gnome_<YYYYMMDD or sha-xxxxxxx of v1>'
 podman pull "$ILEX_ENCRYPTED_UPGRADE_FROM"
 # Requires a positive KVM SMM probe and successful guest qualification.
 cargo ilexctl doctor security

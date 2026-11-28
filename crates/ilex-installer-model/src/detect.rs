@@ -1,6 +1,6 @@
 //! Machine detection and the order in which a composition is chosen. This is a
-//! port of the Anaconda chooser's `detect` and `apply` (installer/chooser/
-//! ilex-installer-choice): exact, case-sensitive SMBIOS comparison; a conflict
+//! port of the Anaconda installer's chooser (retired when the live installer
+//! replaced it): exact, case-sensitive SMBIOS comparison; a conflict
 //! falls back to the default and is named; an unknown tag is an error that
 //! lists the offers; the serial line keeps its format.
 

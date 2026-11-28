@@ -7,6 +7,12 @@ Microsoft UEFI CA template, and a local per-VM vTPM. The Windows backend
 uses the same `VmSpec`, `VmProvider`, `VmControl` and exact-profile
 `SecurityQualification` as Linux.
 
+> The Gen2 install trials still drive the Anaconda installer (its chooser and
+> kickstart) and have not been ported to the live installers, which replaced
+> Anaconda. `ILEX_ISO` needs an Anaconda ISO built before that swap; the
+> release no longer carries one under that name (`ilex-installer.iso` is now
+> the GNOME live installer's file).
+
 ```powershell
 $env:ILEX_ISO = 'C:\fixtures\ilex-installer.iso'
 $env:ILEX_ISO_SHA256 = '<SHA-256 from the matching release>'

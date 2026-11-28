@@ -74,9 +74,28 @@ const TARGET_REF: &str = "ghcr.io/reidond/ilex:generic.gnome";
 /// The raw D-Bus client the guest runs (see the file's own comment).
 const RAWBUS: &str = include_str!("rawbus.py");
 
+/// The disk passphrase and the administrator's password an installation uses.
+/// The trials use public constants; the encrypted release gates type the
+/// passphrase at a virtual keyboard that has the letters and the hyphen only,
+/// so they bring their own.
+#[derive(Clone, Copy)]
+pub(crate) struct Credentials<'a> {
+    pub passphrase: &'a str,
+    pub password: &'a str,
+    /// The public profile the installation chooses as its daily user (the
+    /// installer's Daily user page), if any.
+    pub daily_profile: Option<&'a str>,
+}
+
+const TRIAL: Credentials<'static> = Credentials {
+    passphrase: US.passphrase,
+    password: PASSWORD,
+    daily_profile: None,
+};
+
 /// Which of the trials this is.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Variant {
+pub(crate) enum Variant {
     /// Secure Boot on, the key confirmed, the chip enrolled.
     Confirmed,
     /// Secure Boot off: the key confirmed, no chip.
@@ -129,7 +148,7 @@ pub(super) struct Edit<'a> {
 
 /// A VM of the trial: the provider that made it, its spec (the identity of its
 /// disk and TPM bundle) and the directory of its files.
-pub(super) struct Machine {
+pub(crate) struct Machine {
     provider: LinuxProvider,
     vm: LinuxVm,
     spec: VmSpec,
@@ -153,7 +172,7 @@ impl Drop for Machine {
 impl Machine {
     /// The ISO over a blank target (and a stick for the log), UEFI, with
     /// Secure Boot as asked and a persistent TPM.
-    pub(super) fn boot_iso(
+    pub(crate) fn boot_iso(
         edition: Edition,
         root: &Path,
         secure: bool,
@@ -222,13 +241,13 @@ impl Machine {
         Ok(machine)
     }
 
-    pub(super) fn vm(&mut self) -> Result<&mut Vm> {
+    pub(crate) fn vm(&mut self) -> Result<&mut Vm> {
         self.vm.running_mut()
     }
 
     /// Power the guest off, wait for QEMU, and stop (the TPM bundle and the
     /// disk stay).
-    pub(super) fn power_off(&mut self) -> Result<()> {
+    pub(crate) fn power_off(&mut self) -> Result<()> {
         let vm = self.vm.running_mut()?;
         let _ = vm.ssh("systemctl poweroff");
         let started = Instant::now();
@@ -240,6 +259,15 @@ impl Machine {
             std::thread::sleep(Duration::from_secs(2));
         }
         self.provider.stop(&mut self.vm)
+    }
+
+    /// Hand a powered-off machine to another harness: its spec (and with it the
+    /// identity of its disk and TPM bundle) and its directory. Nothing is
+    /// destroyed; the new owner destroys the bundle and removes the directory.
+    pub(crate) fn release(self) -> (VmSpec, PathBuf) {
+        let released = (self.spec.clone(), self.root.clone());
+        std::mem::forget(self);
+        released
     }
 
     /// The installed disk started again, without the ISO: with the same TPM
@@ -304,6 +332,7 @@ const INSTALL_SCRIPT: &str = r#"import base64, fcntl, json, os, subprocess, sys,
 BUS = "org.ilex.Installer1"
 disk, admin = sys.argv[1], sys.argv[2]
 password, passphrase = base64.b64decode(sys.argv[3]), base64.b64decode(sys.argv[4])
+daily = sys.argv[5] if len(sys.argv) > 5 else None
 
 def call(*args, fds=()):
     return subprocess.run(
@@ -324,8 +353,11 @@ def secret(plan, kind, value):
     if ran.returncode != 0:
         sys.exit(f"SetSecret failed: {ran.stdout}{ran.stderr}")
 
-request = json.dumps({"composition": "generic.gnome", "disk": disk, "mode": "whole-disk", "encrypt": True,
-                      "tpm": "auto", "recovery_key": True, "host_name": "ilexsec", "administrator": admin})
+request = {"composition": "generic.gnome", "disk": disk, "mode": "whole-disk", "encrypt": True,
+           "tpm": "auto", "recovery_key": True, "host_name": "ilexsec", "administrator": admin}
+if daily:
+    request["daily"] = {"kind": "profile", "id": daily}
+request = json.dumps(request)
 deadline = time.time() + 120
 while True:
     ran = call("Plan", "s", request)
@@ -514,6 +546,22 @@ fn install(
     name: &str,
     secrets: &mut Vec<String>,
 ) -> Result<String> {
+    let key = install_running(machine, variant, artifacts, name, secrets, TRIAL)?;
+    machine.power_off().context("powering the installer off")?;
+    Ok(key)
+}
+
+/// [`install`], with the credentials of the caller, and with the installer
+/// still running when it returns, so that the caller can look at the disk it
+/// wrote before powering it off.
+pub(crate) fn install_running(
+    machine: &mut Machine,
+    variant: Variant,
+    artifacts: &Path,
+    name: &str,
+    secrets: &mut Vec<String>,
+    credentials: Credentials<'_>,
+) -> Result<String> {
     let secure = variant.secure_boot();
     let started = Instant::now();
     let vm = machine.vm()?;
@@ -553,11 +601,15 @@ fn install(
         qemu::base64(ACK_SCRIPT.as_bytes()),
     ))?;
     vm.ssh_ok(&format!(
-        "nohup sh -c 'python3 /run/sec-install.py {} {} {} {} > /run/sec-install.log 2>&1; echo EXIT=$? >> /run/sec-install.log' > /dev/null 2>&1 &",
+        "nohup sh -c 'python3 /run/sec-install.py {} {} {} {}{} > /run/sec-install.log 2>&1; echo EXIT=$? >> /run/sec-install.log' > /dev/null 2>&1 &",
         crate::installer::apply::shell(disk),
         crate::installer::apply::shell(ADMIN),
-        qemu::base64(PASSWORD.as_bytes()),
-        qemu::base64(US.passphrase.as_bytes()),
+        qemu::base64(credentials.password.as_bytes()),
+        qemu::base64(credentials.passphrase.as_bytes()),
+        credentials
+            .daily_profile
+            .map(|profile| format!(" {}", crate::installer::apply::shell(profile)))
+            .unwrap_or_default(),
     ))?;
     vm.wait_for(
         "the plan",
@@ -791,7 +843,7 @@ fn install(
 
     // The helper and its logs hold neither secret.
     let scan = vm.ssh_ok(&with_secrets(
-        US.passphrase,
+        credentials.passphrase,
         &key,
         r#"set -u
 count() { grep -rlaF -e "$PASS" -e "$KEY" "$@" 2>/dev/null | wc -l; }
@@ -828,8 +880,7 @@ echo "key_files=$(ls /run/ilex-enroll 2>/dev/null | tr '\n' ' ')"
         "a receipt is left: {scan}"
     );
     // The log saved to a stick: a tarball, scanned as it is and extracted.
-    save_log_and_scan(vm, &key)?;
-    machine.power_off().context("powering the installer off")?;
+    save_log_and_scan(vm, credentials.passphrase, &key)?;
     Ok(key)
 }
 
@@ -838,7 +889,7 @@ fn busctl_state(vm: &Vm) -> Result<Value> {
 }
 
 /// `Finish(save-log:…)` onto the stick, and the tarball looked at.
-fn save_log_and_scan(vm: &Vm, key: &str) -> Result<()> {
+fn save_log_and_scan(vm: &Vm, passphrase: &str, key: &str) -> Result<()> {
     let probe = document(&ssh(vm, &busctl("root", "Probe", &[]))?, "Probe")?;
     let stick = probe["disks"]
         .as_array()
@@ -860,7 +911,7 @@ fn save_log_and_scan(vm: &Vm, key: &str) -> Result<()> {
     let file = saved["file"].as_str().context("the saved file")?.to_owned();
     vm.ssh_ok("sync")?;
     let scan = vm.ssh_ok(&with_secrets(
-        US.passphrase,
+        passphrase,
         key,
         &format!(
             r#"set -u

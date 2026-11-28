@@ -1,3 +1,0 @@
-#!/bin/bash
-# Keep the session leader intact through bounded browser/compositor cleanup.
-exec /usr/bin/python3 -I -S /usr/libexec/ilex-installer/chooser-session kiosk "$@"

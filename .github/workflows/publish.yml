@@ -9,11 +9,11 @@ on:
   workflow_dispatch:
     inputs:
       iso:
-        description: Build the installer ISO even if it isn't due (on main it is released; from a branch it is kept as an artifact)
+        description: Build the installer ISOs even if they aren't due (on main they are released; from a branch they are kept as artifacts)
         type: boolean
         default: false
       iso_next:
-        description: Only build the next installer's live ISOs (GNOME and KDE editions) and boot-test them (kept as artifacts, never released; the image pipeline is skipped)
+        description: Only build the live installer ISOs (GNOME and KDE editions) and boot-test them (kept as artifacts, never released; the image pipeline is skipped)
         type: boolean
         default: false
       test:
@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       encrypted_install:
-        description: Qualify encrypted installation, recovery, privacy, upgrade and rollback (6 GiB)
+        description: Qualify the encrypted upgrade of an installed, published baseline to the candidate, and its rollback (6 GiB)
         type: boolean
         default: false
       encrypted_upgrade_from:
@@ -38,10 +38,6 @@ on:
       encrypted_update_kernel:
         description: Optional exact Fedora kernel for the disposable encrypted CI update image
         type: string
-      encrypted_lifecycle_only:
-        description: Run the encrypted lifecycle by itself for a focused qualification
-        type: boolean
-        default: false
 
 permissions: {}
 
@@ -72,7 +68,7 @@ jobs:
             group="v1-disk-${hash%% *}"
             if [ "$main" = true ]; then group=v1-disk-refs/heads/main; fi
           elif [ "$ISO_NEXT" = true ]; then
-            # The next installer's ISO builds and boots in a group of its own,
+            # The live installer ISOs build and boot in a group of their own,
             # on main too: it must neither wait for nor replace a real publish.
             group="iso-next-${hash%% *}"
           elif [ "$main" = true ]; then
@@ -105,7 +101,6 @@ jobs:
       encrypted_install: ${{ inputs.encrypted_install || false }}
       encrypted_upgrade_from: ${{ inputs.encrypted_upgrade_from || '' }}
       encrypted_update_kernel: ${{ inputs.encrypted_update_kernel || '' }}
-      encrypted_lifecycle_only: ${{ inputs.encrypted_lifecycle_only || false }}
     secrets:
       COSIGN_PRIVATE_KEY: ${{ needs.route.outputs.sign == 'true' && secrets.COSIGN_PRIVATE_KEY || '' }}
       COSIGN_PASSWORD: ${{ needs.route.outputs.sign == 'true' && secrets.COSIGN_PASSWORD || '' }}

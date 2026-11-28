@@ -159,97 +159,62 @@ ilexctl info               # resource identity, selection and available configur
   Logs retain command line and mount state, plus prior finalization journal
   on failure. The defect predates the stack: fix it with the common shipped
   image, rather than a phase-0-only fixture workaround.
-- `iso::` is opt-in and slow: `ilexctl test iso::` builds the network
-  installer (`ILEX_ISO=<path>` reuses one with `compositions.json` beside it).
-  `welcome` accepts the unknown machine's chooser default with Enter;
-  `chooser` boots the MSI identity, checks rejected HTTP requests inside the
-  VM, then selects generic with Shift+Tab, arrows and Tab before Enter.
-  Both check the actual `%pre` choice over serial. `detect_board` checks the
-  chooser's default using only the baseboard identity. `kernel_argument`
-  edits GRUB with real key input on the untouched ISO and asserts the chooser
-  was skipped; the OEMDRV `install` trial also asserts that it was skipped.
-  GRUB needs 100 ms key holds; vmctl's fast desktop typing drops characters
-  there. The harness waits for its menu countdown, stops it before reading
-  the ISO with xorriso, then waits for the editor's final command to be drawn
-  before sending cursor movement and text. The earlier menu instructions
-  appear while GRUB is still drawing and cannot establish input readiness.
-  That trial uses a USB keyboard: Ubuntu's OVMF drops navigation/modifier
-  input from `virtio-keyboard` in GRUB even though Linux accepts it normally.
-  The chooser HTTP probes are enabled only by the harness's public
-  `ilex.chooser.self-check=1` systemd credential (SMBIOS), then the person-facing
-  form is still submitted with real key events.
-  Lifecycle trials close Firefox with Ctrl+Shift+W and Enter at its quit
-  confirmation, crash it, delay real
-  browser/compositor teardown by four seconds, and force escalation of a hung
-  teardown. The latter faults use the fixed public `ilex.chooser.lifecycle`
-  SMBIOS credential (`crash`, `delay`, `hung`); there is no HTTP control API.
-  Normal/fault handoffs check `ILEX-CHOOSER-HANDOFF` before `%pre`: the actual
-  old PID identities and logind session are absent at Anaconda's ExecStartPre.
-  `chooser_serial_unavailable` and `chooser_serial_backpressure` exercise
-  the shipped diagnostic path with a missing sink and a private PTY stopped
-  by `tcflow(TCOOFF)`. Fixed public SMBIOS credential
-  `ilex.chooser.serial-test=unavailable|backpressure` selects these faults.
-  A second virtual UART observes server/kiosk readiness, HTTP probe completion,
-  the teardown gate and `%pre` independently of the faulted sink; each actual
-  mirror must report ENOENT/EAGAIN and finish in under one second. QMP
-  screenshots record the chooser and the resulting stock Anaconda page.
-  `install` installs onto a blank disk and checks the exact registry digest,
-  enforcing origin from first boot, sigpolicy's already-verified journal,
-  `bootc upgrade --check`, setup handoff, system `running`, no failed units
-  and GDM. These assertions test the published image, not the branch image.
-  `ILEX_ISO_MACHINE=ms-7c35` supplies that machine's SMBIOS identity;
-  `ILEX_ISO_EXPECT=generic.gnome` pre-answers via the kickstart choice file.
-  Build locally with `ilexctl iso --testing-tag latest` before composition
-  tags exist: the selected composition stays visible, while every entry
-  installs signed legacy `:latest`. This flag is forbidden whenever `CI` or
-  `GITHUB_ACTIONS` is set. CI supplies `ILEX_ISO_DIGEST`; registry resolution
-  and exact booted/tracked comparisons are mandatory for the install trial.
-  `ILEX_ISO_TARGET`, when supplied, must agree with the ISO catalogue.
-  `ILEX_ISO_INSTALL_TIMEOUT` overrides the install's default 1800-second limit
-  for a heavily contended host (positive seconds, e.g. `3600`); it does not
-  change chooser teardown deadlines or any installed-image assertion.
-  Screenshots and serial logs land in `<state dir>/artifacts/iso/`: the settled
-  unknown-machine chooser (`01-chooser.png`), detected/changed choices
-  (`03-chooser-detected.png`, `04-chooser-generic.png`), web welcome
-  (`02-welcome.png` after accepting the chooser), graphical
-  unattended progress (`06-installing.png`) and first boot (`07-gdm.png`).
-  Welcome timing recognises the web page's blue header and light content;
-  progress capture keeps light, nonblank pages (progress hides the header).
-  Selection assertions still read serial, not pixels. The graphical kickstart
-  uses `Etc/UTC`: WebUI 90 rejects bare `UTC` as an incomplete timezone.
-  The frozen legacy `:latest` predates the `reject` policy default: its local
-  testing-tag install boots with an enforcing origin and passes the handoff/GDM
-  checks, but `bootc upgrade --check` refuses its old insecure default. Keep
-  that assertion; testing the fixed published composition awaits the stack's
-  first publication. A passing candidate-image CI run does not turn that
-  legacy-payload installation into a passing update check.
+- `iso::next…` boot the live installer ISOs (see "Installer ISOs" and "The next
+  installer"). They are opt-in and slow: `ilexctl test iso::next_boot` builds the
+  GNOME edition's ISO unless `ILEX_ISO_NEXT=<path>` names one, and `iso::next_kde…`
+  builds the KDE edition's (`ILEX_ISO_NEXT_KDE`). They install the published
+  composition of their edition, so what they qualify is the installer and the
+  registry's image, not this branch's image. The release gate names the digest it
+  verified in the registry (`ILEX_ISO_DIGEST` for `generic.gnome`,
+  `ILEX_ISO_DIGEST_KDE` for `generic.kde`): every install trial then requires the
+  plan to have pinned exactly that digest, besides its checks that the booted
+  digest is the planned one with the container policy enforced, the system
+  `running`, no failed unit and the display manager up.
 - Publishing (`ilexctl publish`) and the installer release only happen in CI.
   Never push to ghcr or create releases from a dev machine.
 
 ## Linux security qualification
 
-Phase 0 PR 18 adds the reusable `ilex-enroll` library/CLI, Anaconda's local
-end-of-install recovery/enrollment step and generic initramfs unlock plumbing.
-The implementation and exact-ISO gates are in
-[`docs/installer-enrollment.md`](docs/installer-enrollment.md). Enrollment
-stays pending until a later boot supplies direct method evidence; PR 19 owns
-verification/repair. `security::encrypted_install` requires T6 qualification
-for its exact 6 GiB/two-vCPU profile and tests a disposable signed local
-candidate. It must not be reported as a passing released-image install.
+Phase 0 PR 18 added the reusable `ilex-enroll` library/CLI and generic initramfs
+unlock plumbing; the live installer's root helper drives the same library for its
+recovery key and security chip stages. The implementation and exact-ISO gates are in
+[`docs/installer-enrollment.md`](docs/installer-enrollment.md). Enrollment stays
+pending until a later boot supplies direct method evidence; PR 19 owns
+verification/repair.
 
-`security::upgrade_rollback` uses the same exact-ISO encrypted fixture and
-checks that each deployment boots the expected kernel and initramfs. It tests
-unattended and recovery-key boots, the LUKS header, authenticated homed data
-and an edited file from the selected home profile on each deployment. CI pins
-and verifies the published installer composition from its pre-promotion
-snapshot, or the previous distinct signed composition for an ISO-only refresh.
-Installer release always requires a fresh encrypted install of the verified
-published digest and also requires the lifecycle when a baseline exists.
-The gate seals the required evidence before upload. The release job also seals
-and uploads `security/` alone (`release-security-evidence`, public: no
-encrypted tier, no private fingerprint) whether or not the step passed, since
-the sealed lifecycle export exists only for a passing step. The upload action's
-`seal` input selects that separate marker.
+`security::encrypted_install` installs `ILEX_IMAGE`, a published, signed
+`ghcr.io/reidond/ilex@sha256:…`, through the GNOME edition's live ISO
+(`ILEX_ISO_NEXT`): the real root helper, driven over its bus as the interface
+drives it, makes an encrypted installation with a recovery key and the security
+chip on a Secure Boot VM with a persistent TPM. The installer installs by the
+composition's tag, so the installation must pin exactly `ILEX_IMAGE`'s digest or
+the tier fails. It then boots the installed disk: automatic TPM unlock, a PCR
+mismatch, the recovery key, no TPM, an authenticated repair and a cold restart. It
+requires T6 qualification for its exact 6 GiB/two-vCPU profile. An unpublished
+candidate cannot be installed by the installer, so the candidate is qualified by the
+lifecycle's upgrade below.
+
+`security::upgrade_rollback` installs a baseline the same way, then upgrades it to
+`ILEX_IMAGE` and rolls back, checking that each deployment boots the expected kernel
+and initramfs. The baseline is `ILEX_ENCRYPTED_UPGRADE_FROM` (a signed digest) and
+`ILEX_ENCRYPTED_UPGRADE_TAG` (its dated or revision tag, which
+`.github/encrypted-baseline.sh` finds): the harness writes that tag as the live
+catalogue's `testing-tag` and restarts the helper, which installs it for the composition,
+verified by the shipped policy. The update is pushed to a disposable signed registry
+the guest reaches at `10.0.2.2` (the candidate image in the `encrypted_install`
+workflow run, the published digest in the release gate). It tests unattended and
+recovery-key boots, the LUKS header, authenticated homed data and an edited file from
+the selected home profile on each deployment (the installation chooses the public
+profile `andriishafar` on the installer's Daily user page, which writes it into
+`setup.json`). CI pins and verifies
+the published installer composition from its pre-promotion snapshot, or the previous
+distinct signed composition for an ISO-only refresh. Installer release always
+requires a fresh encrypted install of the verified published digest and also requires
+the lifecycle when a baseline exists. The gate seals the required evidence before
+upload. The release job also seals and uploads `security/` alone
+(`release-security-evidence`, public: no encrypted tier, no private fingerprint)
+whether or not the step passed, since the sealed lifecycle export exists only for a
+passing step. The upload action's `seal` input selects that separate marker.
 See the [encrypted lifecycle runbook](docs/encrypted-lifecycle.md) for the
 CI baseline, native Gen2 console fixture, and owner-run MS-7C35 qualification.
 
@@ -259,7 +224,11 @@ After passphrase or recovery-key fallback, `sudo ilexctl security repair`
 requests a disk credential on local tty8. It defers without a prompt when
 Secure Boot or TPM support is unavailable. A replacement is pending until
 a subsequent boot proves automatic unlock. The encrypted QEMU tier also
-interrupts repair between actual LUKS keyslot and token writes.
+interrupts repair between actual LUKS keyslot and token writes. The earlier
+tiers that drove Anaconda's kickstart (existing free space, interrupted
+completion, the installer profile setup) went with Anaconda: the live
+installer's own trials (`installer::`, `iso::next_security…`) cover its
+equivalents, and the installer's free-space and profile pages bring theirs.
 
 PR 17's consumer checks and backend requirements are documented in
 [`docs/security-probes.md`](docs/security-probes.md). Guest probes also require
@@ -288,8 +257,10 @@ the booted-guest tier passes. `ilexctl doctor security --self-check` runs
 `security::firmware` against this checkout's image (`ILEX_IMAGE` can select
 the CI candidate). Secure guests require KVM with SMM; there is no software
 emulation route, and a failed KVM/SMM probe is unqualified. On Windows the security
-subcommand selects native Gen2 and accepts the exact signed installer via
-`ILEX_ISO`.
+subcommand selects native Gen2 and accepts an installer ISO via `ILEX_ISO`. Its
+install fixture still drives Anaconda's kickstart; it has not been ported to the
+live installer (no Windows host was available), so it needs an ISO built before
+this swap.
 
 The shared `VmSpec` remains the contract for part 4: `secure_boot=required`
 and `tpm=persistent { bundle_id }`, with a writable owned disk, UEFI and no
@@ -1098,9 +1069,6 @@ that stop job queued, the login's script must log that it waits (in the journal)
 once the stop is released the login must get a compositor and shell of its own and
 the desktop, with no "Could not start systemd managed Plasma session" in the journal.
 Screenshots land in `<state dir>/artifacts/graphical*/`.
-The Anaconda installer's catalogue offers only the installer composition's shell
-list (GNOME), so KDE compositions are not offered there and its release does not
-wait for their tags; KDE installs arrive with the KDE installer edition.
 
 ### This PC: `ms-7c35`
 
@@ -1217,7 +1185,7 @@ Another RPM version fails the build for review/removal of this backport.
 Flatpak's malcontent dependency also brings AccountsService to shell-free
 images; the same package-pinned daemon patch applies there.
 
-Keep Anaconda's distinctly named local wheel administrator for maintenance.
+Keep the installer's distinctly named local administrator for maintenance.
 Create the daily account locally from that account:
 
 ```sh
@@ -1409,37 +1377,9 @@ confined for the shell-owned Clocks/Weather integration settings.
 `publish.yml` runs only metadata checks by default; `apps=true` additionally
 qualifies `apps::install` and reports whether it ran in the run summary.
 
-The network installer always attempts `ilexctl apps sync`, with a 30-minute
-workload deadline and a 15-second forced-kill grace period. Its `--nochroot`
-`%post` uses private mount/PID namespaces with `unshare --fork --kill-child=KILL`;
-PID 1 exiting kills its descendants, including detached process groups.
-The chroot gets tmpfs `/dev` and `/run`, only null/zero/full/random/urandom
-character devices, a fresh `/proc`, read-only `/sys` and a read-only resolver
-file. No block devices or installer runtime sockets/state enter the chroot.
-The payload's helper and Flatpak use its own `/var`.
-A bootc post-install chroot lacks `/dev/null` (Rust's captured subprocesses
-fail with ENOENT). Flatpak/OSTree also needs `/proc/sys/kernel/random/boot_id`;
-the helper explicitly supplies the runtime filesystems rather than relying
-on Anaconda's partial setup.
-The temporary mounts disappear with the namespaces. Cleanup waits at most five
-seconds to verify no processes remain in the recorded PID namespace, caller
-runtime mount IDs match and the live installer's apps status is unchanged.
-Snapshot reads/parses must succeed; errors cannot count as empty evidence.
-It records the result under
-`/var/lib/ilex/apps/installer-result` and diagnostics in Anaconda's log. A
-transient failure is non-fatal and the boot timer retries. `iso::install`
-checks the marker, complete state and every system app's Flathub origin with
-the timer suppressed, proving preload rather than a post-boot download.
-Before assertions it requires serial copies of `ilex-apps.log` from the target
-and Anaconda's live `/tmp/program.log` and `/tmp/anaconda.log`, before their final
-copy to the target. It saves those logs and the apps/cleanup state beside the
-screenshots. Installer serial output is retained on timeouts too.
-The test compares runtime mount IDs before/after preload, allowing Anaconda's
-existing `/proc` mount while requiring the preload's binds to stay private.
-As with all ISO assertions, this qualifies the published payload: until that
-payload declares apps, it explicitly reports preload as not applicable and
-does not establish the new chroot path. The native installer can invoke the
-same sync command later.
+The live installer preloads no apps: the root `ilex-apps.timer` installs a shell's
+or machine's Flatpaks after the first boot, and an offline install never holds up
+the display manager.
 
 Machines accept the same optional `[apps] flatpak` and `rpm` lists as shells
 (generic has no machine additions). Machine app RPMs join its transaction;
@@ -2419,10 +2359,12 @@ The all-composition guard runs before cosign; any missing offered tag or
 signature tag, including the default's, makes `installer-target.sh` return
 `available=false` successfully. Installation and release are skipped, the ISO
 remains due, and the next full main run/nightly retries.
-Once all offered tags/signature tags exist, the job verifies `generic.gnome`'s
-resolved digest with the committed public key, installs that exact ISO with
-`iso::`, and verifies the same tag/digest/signature again before the independent
-installer ancestry guard and release. The first installation test therefore
+Once all offered tags/signature tags exist, the job verifies the resolved digest of
+`generic.gnome` (this run's published digest) and of `generic.kde` (the registry's
+current one) with the committed public key, installs each edition's exact ISO
+(`iso::next_keyboard_install`, `iso::next_kde_security`) and runs the encrypted gates
+through Glabra's, and verifies the same tags/digests/signatures again before the
+independent installer ancestry guard and release. The first installation test therefore
 waits for the full offered inventory, possibly until a later run.
 An unchanged root permits the intentionally skipped publish job; a publication
 guard skip, failure or failed image test prevents installer release. Missing
@@ -2445,10 +2387,9 @@ shells layer is 776 packages (712 MiB downloaded, 2.85 GB) against GNOME's 473
 (458 MiB, 1.91 GB); the root is 4,945 MiB (1,378 RPMs) against 4,054 MiB
 (1,075); rebuilding from the shells layer takes 366 s against
 254 s, rechunk 716 s against 430 s, `ephemeral::` 405 to 561 s against
-353 s; the machine layer takes 290 s to build and 451 s to test. The Anaconda
-catalogue does not offer the KDE compositions (it offers the installer
-composition's shell list only), so `ilexctl iso --check-registry` and the
-installer release neither require nor wait for their tags.
+353 s; the machine layer takes 290 s to build and 451 s to test. The KDE
+compositions are offered by the Kingiana ISO, so `ilexctl iso --check-registry`
+and the installer release require their tags and signature tags as well.
 
 The second full run resolves v1 from `generic.gnome`, with no legacy read. It
 snapshots that root and each layer independently. Unchanged content skips
@@ -2460,8 +2401,9 @@ config/tested ID, exact CI revision, signature verification, `root publication
 result: generic.gnome published=true` and `machine publication summary: 1
 published, 0 skipped`. Real-key/ghcr signing, production ancestry/swap outputs,
 unchanged-main skips/recovery (including the pre-build root-input skips),
-v1-disk follow-up, production installer-target verification, `iso::`
-installation and guarded ISO release await
+v1-disk follow-up, production installer-target verification, the editions'
+install gates (`iso::next_keyboard_install`, `iso::next_kde_security`), the encrypted
+gates on the published digest and the guarded ISO release await
 the first main execution. Branch tests cannot establish those paths.
 
 After publication, the independent v1-disk run installs the installer composition
@@ -2619,271 +2561,103 @@ Verify a published composition with
 ghcr.io/reidond/ilex:generic.gnome`. The private key is a repository secret; losing
 it requires deploying a new public key to machines before they can update.
 
-### Installer ISO
+### Installer ISOs
 
-The installer is a **network installer** published as a GitHub Release: it
-carries no ilex image, so one small ISO stays current by itself and fits
-GitHub's limit of 2 GiB per release asset (an ISO with the ~5 GB image in it
-was 2.6 GiB). Download it, write it to a USB stick and boot it; Anaconda's web
-interface asks for language and keyboard, network, date and time, installation
-method, storage, an account, then review and install. It installs the newest selected ilex composition
-over a (wired) network connection and the machine updates itself from there:
+The installer is a pair of **live ISOs**, one per edition, released together as
+one GitHub Release (`installer-YYYYMMDD`): **ilex Glabra** (GNOME,
+`ilex-glabra-installer.iso`) and **ilex Kingiana** (KDE Plasma,
+`ilex-kingiana-installer.iso`), each with its `.sha256`. `ilex-installer.iso`
+and its checksum are a transition alias: Glabra's exact bytes under the name the
+previous (Anaconda) installer released, until the owner retires the link. Write
+one to a USB stick and boot it; the interface of its edition shows the detected
+machine, asks for the disk, encryption (a recovery key and the security chip) and
+an administrator account, and installs the newest signed composition of its
+edition (`generic.gnome`, `generic.kde`, or the detected machine's, such as
+`ms-7c35.gnome`) over a wired network connection. The machine updates itself from
+there. An answers volume installs unattended. How the ISO, the session, the root
+helper and the interfaces work is in "The next installer" below.
 
 ```
-https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso
-https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso.sha256
+https://github.com/Reidond/ilex/releases/latest/download/ilex-glabra-installer.iso
+https://github.com/Reidond/ilex/releases/latest/download/ilex-glabra-installer.iso.sha256
+https://github.com/Reidond/ilex/releases/latest/download/ilex-kingiana-installer.iso
+https://github.com/Reidond/ilex/releases/latest/download/ilex-kingiana-installer.iso.sha256
+https://github.com/Reidond/ilex/releases/latest/download/ilex-installer.iso     (Glabra's bytes)
 ```
-
-Because it always installs the newest image it doesn't follow every publish.
-On every run, `ilexctl iso --due` decides, in the `installer-due` job (the `iso`
-job reads its `iso_due=`): a new ISO is due when there is no `installer-*`
-release yet, when installer inputs differ from the latest one (its notes carry
-an `installer-fingerprint:` line), or when the
-latest one is 7 days old (Fedora and Anaconda fixes). A manual run with `iso`
-checked (`-f iso=true`) builds one regardless. `iso` constructs it in parallel
-with image CI and uploads `installer-iso` (ISO, checksum, catalogue and notes) on every
-branch, including main. On main only, `installer-release` downloads that exact
-artifact after successful image tests and either actual publication or an
-unchanged root. It cannot run after a failed dependency, a cancelled run or a
-green publication guard skip (`published=false`). An unchanged root accepts
-only the intentionally skipped publisher with `changed=false`. Branches stop
-at the artifact: no `iso::` tier and no release, since the tier installs the
-published image rather than the branch image.
-
-The installer generates `compositions.json` from the published compositions
-whose ordered shell list equals the installer composition's (every machine of the
-GNOME list today), their descriptions and the machines' match rules. This
-Anaconda ISO is the GNOME edition: compositions of another shell list (KDE) are
-not offered, and do not make the installer release wait for their tags. They
-arrive with that shell's own installer edition. The default is `image.toml`'s
-`installer` (`generic.gnome`); its ordered shells also determine the detected
-machine's composition. `base` and shell-free machines are excluded. The boot menu has one entry, **Install ilex**.
-Selection precedence: the last `ilex.composition=<tag>` kernel argument, then
-`/run/ilex-installer/choice` (a kickstart can write it before including the
-defaults), then DMI detection. An unknown override fails with the offered tags;
-no match, conflict or unavailable default shell list falls back to the default.
-The helper prints `ILEX-COMPOSITION`, generates a validated `bootc` include
-and updates the installer's os-release, which the web interface shows in its
-title and the review screen's **Operating system** line.
-
-For a local graphical install, the first screen shows the detected computer,
-machine configurations and published desktop lists. The detected machine and
-the default desktop list are preselected (generic when nothing matches).
-Desktop lists unavailable for a machine are disabled. Tab/Shift+Tab move
-between groups and Continue, arrows select within a group, and Enter continues.
-The screen closes, then Anaconda starts on the same VT: choose language,
-network/time, storage and account, and review the chosen operating system
-before writing the disk. To revise the machine or desktop after continuing,
-restart the installer. On the MSI PC, choose **Any x86-64 machine** to install
-generic instead.
-
-`ilex-installer-chooser.service`, before both Anaconda startup units, runs
-`/usr/libexec/ilex-installer/chooser-session`: a Python standard-library server
-on IPv4 loopback only, a fresh GNOME Kiosk Wayland session on VT 6 and Firefox
-with Anaconda's own profile. The page uses the bundled WebUI stylesheet, with
-a small CSS fallback. Three exact token-prefixed routes serve the page, CSS
-and form; no request supplies a filesystem path or a command. A random port,
-per-session 128-bit token, Host/Origin checks, CSP and a strict 4 KiB form
-limit protect the root server. Only a machine/ordered-desktop pair in the
-validated generated table can be selected. The server atomically writes
-`/run/ilex-installer/choice` as schema-1 JSON (`schema`, `composition`) and
-exits on its first valid submission; `apply` revalidates it. Plain tag files
-remain accepted for kickstarts. This extensible record contains no profile
-choice, passwords, passphrases or recovery material. The chooser never collects
-them; neither its URLs nor the generated table contain them.
-
-The chooser is skipped for `ilex.composition=`, `inst.ks`, `inst.text`,
-`inst.cmdline`, `inst.webui.remote`, `inst.rdp`, or an OEMDRV kickstart found at
-`/run/install/ks.cfg`. Kiosk/server failure falls through to detection; `%pre`
-waits for an activating chooser before reading its answer. The private URL
-file is removed during session cleanup. The supervisor leaves Anaconda's
-`run-in-new-session` launcher alive while its child closes the browser and
-compositor, so the launcher can wait and close PAM. Teardown has a 15-second
-grace period, then bounded TERM/KILL of the actual session process group and
-tracked descendants, orphan reaping, and explicit retirement of that logind
-session/scope. PID start times protect against signalling a reused PID.
-Both Anaconda units require the chooser and recheck the old processes/session
-in ExecStartPre. If teardown cannot be verified, startup fails closed rather
-than racing a seat still owned by the chooser; ordinary browser failure still
-cleans up and falls back to detection. Diagnostics keep their ordinary
-journal/Anaconda output. Console mirrors share `diagnostics.py`: open with
-`O_NONBLOCK|O_NOCTTY`, attempt at most 4096 bytes once, and skip unavailable,
-backpressured or partial output without retrying or draining. Each disposable
-worker gets a 200 ms wait budget and, if needed, SIGKILL plus a separate
-200 ms reap budget. This also isolates a UART driver's last-close wait from
-the control path; the real console's termios and queued output are untouched.
-Server startup, HTTP self-check, kiosk lifecycle/error messages, the startup
-gate and `apply`'s ttyS0/tty0 mirrors all use this helper. Normal journal I/O
-is retained; the budgets apply to optional console workers, not every OS I/O
-operation. No hardware serial port or successful serial write is required
-for a handoff.
-`ILEX-CHOOSER default=… offered=…` on serial records
-the offered defaults without logging the capability URL.
-
-On **Create account**, create a separate **maintenance/recovery administrator**
-such as `ilexmaint`, and keep its credentials for administration and recovery.
-Reserve `andriishafar` for the owner's daily homed account; never use the selected
-daily username for maintenance. The maintenance user is a traditional local
-account. A separate daily user managed by systemd-homed and created at
-first boot is planned for a later PR; that setup is not delivered here.
-The stock account page is retained without patching the web interface's bundles.
-
-Storage offers erase-all and use-free-space installation, with a reclaim-space
-dialog to shrink or delete existing partitions for dual boot. Check the storage
-selection and review before starting installation. The UI exposes Anaconda's
-storage options; this PR qualifies the ordinary bootc install only.
-
-Locally, Firefox in GNOME Kiosk displays Cockpit's Anaconda application.
-`webui-cockpit-ws.service` serves it on `127.0.0.1:80` with a root bridge
-(`--local-session`); it is not exposed to the network by default. Remote browser
-installation is opt-in with `inst.webui.remote` and
-`inst.webui.remote.pin=<PIN>` on the boot command line, using HTTPS. Do not put
-that PIN in shared logs or screenshots. Anaconda's network geolocation may
-preselect language and time zone; `inst.geoloc=0` disables that lookup.
-
-The installer reserves `/etc/ilex/setup.json` on the target, schema 1, with
-the selected composition/image, null profile ID/schema, requested TPM mode
-`unspecified`, actual capability `unknown` and status `not-configured`.
-The catalogue reserves empty `profiles` and `security-capabilities` objects.
-The final encrypted-install completion updates TPM capability/status and adds
-private local recovery acknowledgement and PCR-7 enrollment. Encrypted home
-setup and profile provisioning remain later work. See `installer/setup/README.md`
-for extension rules; future helpers below `installer/` enter the fingerprint.
-
-The fingerprint covers all of `installer/` (including the reserved setup helper
-directory), the ISO/table-generation code, generated catalogue/menu and the
-committed registry configuration/public key. Adding a publication or match rule
-makes an ISO due. There are no `--source`/`--target` overrides; local
-`--testing-tag <tag>` maps all entries to one signed ilex tag and is labelled
-in both the catalogue and release notes. It is forbidden in CI.
-The release job has `packages: read`, logs in using the job token and a private
-auth file shared by skopeo and cosign, and installs cosign v2 through the same
-pinned cosign-installer action as publication. Before default-target cosign
-verification, `ilexctl iso --check-registry` checks every offered tag and
-its digest's legacy cosign signature tag. Explicit manifest/name absence for
-any tag or signature tag, including the default's signature tag, exits 3;
-`installer-target.sh` then sets `available=false` and exits successfully,
-skipping installation and release. This can happen on the first publication
-because `installer-release` does not wait for `machines`. The still-due ISO is
-retried on the next full main run/nightly. Denied/transport errors exit 1 and
-fail the job. This is a presence guard, not cryptographic verification of every
-offered tag.
-
-Once that guard passes, the job resolves the default tag and verifies the
-immutable `<repository>@<digest>` with
-`cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true`.
-A present but damaged or wrong-key default signature fails red at verification;
-it does not take the missing-signature-tag deferral path. The installer itself
-requires the ilex signature for whichever image it installs. The inventory is
-checked again before release; disappearance after a successful installation
-is an error rather than a deferral.
-
-The job prepares KVM/QEMU/libvirt with `vm-prep.sh`, restores its apt package
-cache (v2 also includes `xorriso`, `e2fsprogs`, `openssh-client` and `ovmf`),
-checks disk space and the ISO checksum, then runs
-`ILEX_ISO=<downloaded artifact> ilexctl test iso::` with the verified tag and
-`ILEX_ISO_DIGEST`. No ilex container is built by that invocation. Before any
-selected ISO trial runs, the harness checks all host commands (`xorriso`,
-`qemu-system-x86_64`, `qemu-img`, `mkfs.ext4`, `skopeo`, `ssh`, `ssh-keygen`)
-and reports missing prerequisites with package hints. The tier boots
-Anaconda, installs onto a sparse blank 40 GiB disk, boots it, and asserts the
-booted and tracked `generic.gnome` registry reference, the exact verified
-digest, system `running`, no failed units and GDM up. It requires KVM and 6 GiB
-for the installer VM, on the same runner selection as other tiers; it adds
-about 15 minutes only when an ISO was built. Main runs serialize publication,
-so the target tag stays stable between verification and installation. Before
-release it also re-reads that tag, requires the same digest, verifies its signature again and
-rechecks the ISO checksum. A changed/deleted tag cannot release the artifact.
-
-Only a successful `iso::` step can create `installer-YYYYMMDD` (`-N` suffix if
-needed), marked latest, with `GITHUB_TOKEN` and `contents: write`. A failed or
-skipped installation creates no release; the previous release remains latest.
-The ISO stays in `installer-iso`, and available screenshots/serial logs/journals
-are retained as `installer-test-evidence` on success or failure (three days).
-The next fresh full main run retries an installer still due. Before the first
-published `generic.gnome`, a local production-target installation cannot run;
-local testing uses an explicitly labelled `--testing-tag latest` build instead.
-
-Immediately before creating a release, `installer-release` applies the same ancestry
-guard independently of base publication. `.github/installer-revision.sh` reads
-the newest published, non-prerelease `installer-*` release and resolves its
-actual tag to a commit (the release was created with `--target GITHUB_SHA`).
-It does not trust `target_commitish`, which could name a moving branch. The
-previous installer commit must precede/equal the run, and the run must
-precede/equal main. An old re-run skips green before `gh release create
---latest`; read/API errors or rewritten published history fail red. With no
-installer release yet, only the run-to-main condition applies. This guards
-image signing/tag movement and installer release creation, not the builds or
-unsigned candidate staging that happen before them.
 
 ```sh
-ilexctl iso                # build; the ISO, its .sha256 and release-notes.md land in <state dir>/iso/
-ilexctl iso --due          # is a new ISO due? (reads the latest installer release; needs gh)
+ilexctl iso                      # both editions: <state dir>/iso/<asset>.iso, .sha256, the alias, compositions.json, release-notes.md
+ilexctl iso --edition kde        # one edition (repeatable)
+ilexctl iso --due                # is a new release due? (reads the latest installer release; needs gh)
+ilexctl iso --check-registry     # does every offered composition and its signature tag exist?
 ```
 
-- `installer/Containerfile` is `fedora-bootc:45` plus `anaconda-core`,
-  `anaconda-tui` and `anaconda-webui` (Cockpit and Firefox). The `anaconda`
-  metapackage would select GTK on this base's basic Fedora identity.
-  `slitherer`, a second browser with QtWebEngine, is excluded and both it and
-  `anaconda-gui` are checked absent. `NetworkManager-wifi` is explicit, keeping
-  the Wi-Fi support formerly pulled in by GTK; wired networking is recommended.
-  Its kickstart
-  (`installer/interactive-defaults.ks`) installs `registry:ghcr.io/reidond/ilex:<selected tag>`
-  (`--source-imgref`; pykickstart requires the transport) and tracks
-  `ghcr.io/reidond/ilex:<selected tag>` (`--target-imgref`). The installer drops GPU
-  firmware and Vulkan drivers before it builds its initramfs. The local web ISO
-  measured 1,953,595,392 bytes (1.82 GiB) and 694 seconds to build on 2026-11-16
-  (`--testing-tag latest`); `firefox-langpacks` remains installed. `ilexctl iso`
-  fails if the ISO reaches 2 GiB.
-- The installer base is not cached between runs (an `ilex-installer-base`
-  package was tried, and saved ~11 of 22 minutes per build): the weekly rebuild
-  exists to pick up Fedora and Anaconda fixes, which a cached base would pin,
-  and the build is now rare.
-- `image-builder` needs root, the `generic-iso` type needs **image-builder
-  ≥ 89** (Fedora 45 `updates`; 87 only has the unattended,
-  disk-wiping `bootc-installer` type) and storage that isn't overlayfs. The CI
-  job starts its own rootful, privileged `fedora:45` container with
-  `sudo podman run` on the runner, after unloading Ubuntu's
-  `bwrap-userns-restrict` AppArmor profile: it attaches to any
-  `/usr/bin/bwrap` by path, even inside an unconfined container, and its
-  `unpriv_bwrap` child denies the setuid/chown/sys_admin osbuild's sandbox
-  needs ("mount: … permission denied"). `/var/lib/containers`, `/var/cache/image-builder` and
-  `TMPDIR` live on volumes under `/mnt`. `ilexctl iso` does the same locally: when
-  the `image-builder` on `PATH` is older than 89 (or missing) it builds
-  `installer/image-builder/Containerfile` and runs image-builder from that
-  container against this host's container storage. The installer and fallback
-  image-builder helper tags both include the checkout slug.
-- Anaconda is branded by `/.buildstamp`, the file it takes its
-  product name, version and "final release" flag from (`Product=ilex`,
-  `Version=45`, `IsFinal=True`). Without it the installer calls itself
-  "anaconda bluesky" with a red pre-release banner. The web interface reads
-  the installer's `/etc/os-release`: `NAME="ilex"` for its welcome heading,
-  `PRETTY_NAME` for its title, about box and review. This is a real `/etc` file,
-  replacing the symlink; Fedora's `ID`/`VERSION_ID` and `/usr/lib/os-release`
-  stay unchanged. `%pre` refines `PRETTY_NAME` with the selected machine,
-  desktops and tag. The Fedora logo is Fedora's artwork; ilex has none yet.
-- Anaconda reads `interactive-defaults.ks` only when it has no kickstart: an
-  unattended install has to `%include /usr/share/anaconda/interactive-defaults.ks`
-  (without it Anaconda falls back to an RPM install from a mirror). The defaults
-  also set `xconfig --startxonboot` (Anaconda otherwise picks `multi-user.target`
-  for a bootc deployment, so no GDM) and drop the `/` line Anaconda writes into
-  `/etc/fstab` (with it `systemd-remount-fs.service` fails on the ostree root and
-  the machine boots `degraded`).
-- The installer VM of the `iso::` tier gets 6 GiB: pulling from the registry
-  streams the layers into the new root. (With the image embedded in the ISO,
-  importing it from the installer's container storage unpacked layers into
-  its RAM-backed `/var/tmp` and needed 16 GiB; 6 GiB failed with "no space
-  left on device".) The installed system still calls itself "Fedora Linux 45"
-  (its os-release) and its hostname is `fedora` until one is set.
-- Kickstart's `bootc` command cannot pass `--enforce-container-sigpolicy`.
-  The installer enables it through `/usr/lib/bootc/install/90-ilex-installer.toml`
-  instead, so the target origin records `signature: containerPolicy` from the
-  initial installation. Its own policy rejects everything except signed ilex
-  images, using the same committed public key and registry signature config.
-  Unverified pulls still apply `policy.json`: signed ilex images are accepted
-  and unsigned ones rejected while that policy is present. Origin enforcement
-  via `containerPolicy` additionally refuses a singleton insecure default in
-  the selected policy. OSTree-remote verification does not apply that ban.
+- **Build.** `installer/next/Containerfile` is `fedora-bootc:45` plus one edition's
+  compositor and interface; the same `image-builder … generic-iso` path turns it
+  into the ISO (`installer/next/osbuild-selinux` labels the live root). The ISO and
+  asset names come from the edition's `display-name` in
+  `installer/next/editions.toml` (`ilex Glabra` → `ilex-glabra-installer`); the
+  identifier (`gnome`, `kde`) stays the internal name. Each edition builds in its
+  own work directory (`<out>/<edition>/`); the ISOs and their checksums land flat in
+  `<out>`. `ilexctl iso` fails when an ISO reaches 2 GiB (GitHub's limit for a release
+  asset). Linux only for now: from native Windows `iso`, `test iso::next…` and the
+  encrypted gates are refused with a message (the builder collects no ISO directory
+  and stages no `ILEX_ISO_NEXT`).
+- **When a release is due.** `installer-due` runs `ilexctl iso --due` on every main
+  run: a release is due when there is no `installer-*` release yet, when an
+  edition's inputs differ from the `installer-fingerprint-<edition>:` line of the
+  latest release's notes (one line per edition: `installer-fingerprint-gnome:`,
+  `installer-fingerprint-kde:`), or when the latest release is 7 days old (Fedora
+  fixes). A manual run with `iso` checked (`-f iso=true`) builds regardless. An
+  edition's fingerprint hashes `installer/next` (without the other editions'
+  directories), `installer/setup`, the crates the live image compiles
+  (`ilex-installer`, `ilex-installerd`, `ilex-installer-flow`,
+  `ilex-installer-model`, `ilex-enroll`, `Cargo.toml`, `Cargo.lock`), the catalogue
+  (publications, machine match rules, public profiles), the boot menu, the display
+  name and the registry configuration and public key. Adding a publication or a
+  match rule makes both editions due. Machine, shell and image changes that leave
+  the catalogue alone do not.
+- **CI.** The `iso` job builds both ISOs in a rootful, privileged Fedora 45
+  container (after unloading Ubuntu's `bwrap-userns-restrict` AppArmor profile, which
+  denies osbuild's bubblewrap sandbox) and uploads them as the `installer-iso`
+  artifact (the alias is made from Glabra's file at release time). A branch run
+  stops there. On main, `installer-release` waits for `build`, `upgrade`, `publish`
+  and the `other-roots` calls to settle (a failed `base` does not block the release;
+  the KDE edition installs `:generic.kde`, which another call of the run publishes),
+  then: (1) `installer-target.sh` checks, for every offered composition of both
+  editions, that the tag and its legacy cosign signature tag exist (explicit absence
+  sets `available=false` and skips the install gates and the release green; the ISOs
+  stay due and the next full run retries; denied or transport errors fail red), and
+  verifies each edition's default digest with the committed public key: `generic.gnome`
+  against this run's published digest (or its unchanged snapshot), `generic.kde`
+  against what the registry has now (`INSTALLER_SNAPSHOT=current`); (2) the exact
+  downloaded ISOs are checked against their checksums and each installs its own
+  composition: `iso::next_keyboard_install` (Glabra) and `iso::next_kde_security`
+  (Kingiana: an encrypted installation, the recovery key confirmed and the chip
+  enrolled; its other pages are walked against a simulated helper), a person at the
+  keyboard of the interface, with the real helper, on a blank disk in KVM, with
+  `ILEX_ISO_DIGEST` / `ILEX_ISO_DIGEST_KDE` set to the digest verified above, so that
+  the plan must have pinned exactly that digest, the installed machine booting it
+  and tracking the composition's tag with the container policy enforced; (3) the
+  encrypted gates install through Glabra's ISO: `security::encrypted_install` of the
+  verified published digest and, when a baseline exists, `security::upgrade_rollback`;
+  (4) `release-installer.sh` rechecks both targets (a tag that moved or lost its
+  signature fails), the checksums, makes the alias and its checksum, applies the
+  installer ancestry guard (`installer-revision.sh` reads the newest published
+  `installer-*` release's tag commit; the run must follow it and precede or equal
+  main; an old re-run skips green) and creates the release with `GITHUB_TOKEN`
+  (`contents: write`, `packages: read`), marked latest. The job runs only on main in
+  Actions, never from a branch, and no build job holds a secret. Any failed or
+  skipped gate creates no release and the previous one stays latest. Sealed
+  evidence (`encrypted-release-lifecycle-evidence`, public `release-security-evidence`,
+  `installer-test-evidence`) is kept even on failure.
+- **Signature enforcement.** The helper installs with `bootc install
+  --enforce-container-sigpolicy` and the live image's own policy
+  (`installer/next/rootfs/etc/containers/policy.json`): the default rejects
+  everything, and from a registry only ilex images signed with the committed public
+  key are accepted, so the target origin records `signature: containerPolicy` from
+  the initial installation. Origin enforcement via `containerPolicy` additionally
+  refuses a singleton insecure default in the selected policy.
   The image retains a safety net for machines installed otherwise:
   `ilex-sigpolicy.service` (enabled by the preset, `ConditionPathExists=
   /run/ostree-booted`, ordered before the updater) runs `ilexctl system
@@ -2931,13 +2705,26 @@ ilexctl iso --due          # is a new ISO due? (reads the latest installer relea
 
 ### Installer profile setup
 
-The pre-Anaconda chooser offers an installed public profile, a custom
-daily user, or No daily profile. No daily profile is the default and uses
-Anaconda's standard account and storage options. For daily setup, enable
-LUKS2 in Anaconda and create a distinct local maintenance administrator
-such as `ilexmaint`. The installer reserves a selected profile's username for
-the daily home. On a machine without eligible TPM enrollment, unlock the
-installed disk with the install passphrase or saved recovery key.
+The installer's **Daily user** page (after the administrator page, see "The next
+installer") asks for the daily account: No daily profile (the default), each public
+profile of the image's catalogue, or a user name of the person's choice with an
+optional capacity (2–1048576 GiB, 20 when empty: the limits and the name rule of
+`ilexctl home setup --name/--disk-size`). Answers mode has the same choice in an
+optional `[daily]` table. It writes the hand-off (the contract is
+[installer/setup/README.md](installer/setup/README.md)): `profile` is
+`{"id": <profile>, "schema": 1}` for a public profile, `{"id": null, "schema":
+null, "mode": "custom"}` for a custom user (its name and capacity are not in
+`setup.json`: the login prompt's `/etc/issue.d/90-ilex-home-setup.issue` names the
+command with its `--name` and `--disk-size`) and `{"id": null, "schema": null}` for
+none, which writes no issue line. No password is asked for the daily user: `homectl`
+asks at the first start. A daily user needs an **encrypted root** (the page offers
+only No daily profile while encryption is off, and turning encryption off drops
+the choice), and the daily user's name may not be the maintenance administrator's
+(the administrator page refuses a name that is the daily user's, the daily user
+page refuses the administrator's, and the helper's `Plan` refuses both, as it
+refuses an account the live image defines or a system account). On the encrypted
+root, unlock the installed disk with the install passphrase or the saved recovery
+key when the machine has no eligible TPM enrollment.
 
 On first boot, sign in to the maintenance account and run
 `sudo ilexctl home setup` in a terminal. For a custom daily user, supply
@@ -2948,72 +2735,33 @@ After creation, enter the daily password to verify the home and resume.
 Setup runs offline and leaves the
 maintenance login available on error. The selected public profile is applied
 as the daily user on the first authenticated login. Profile apps remain opt-in.
-See [the handoff contract](installer/setup/README.md).
 
-The next installer asks the same question on its own **Daily user** page,
-after the administrator page (see "The next installer"): No daily profile (the
-default), each public profile of the image's catalogue, or a user name of the
-person's choice with an optional capacity (2–1048576 GiB, 20 when empty: the
-limits and the name rule of `ilexctl home setup --name/--disk-size`). It writes
-the hand-off exactly as the Anaconda path does for each choice: `profile` is
-`{"id": <profile>, "schema": 1}` for a public profile, `{"id": null, "schema":
-null, "mode": "custom"}` for a custom user (its name and capacity are not in
-`setup.json`, as they never were: the login prompt's
-`/etc/issue.d/90-ilex-home-setup.issue` names the command with its `--name` and
-`--disk-size`) and `{"id": null, "schema": null}` for none, which writes no
-issue line. No password is asked for the daily user: `homectl` asks at the
-first start. The rules copied from the Anaconda path (its
-`validate_storage` and `validate_users`): a daily user needs an **encrypted
-root** (the page offers only No daily profile while encryption is off, and
-turning encryption off drops the choice), and the daily user's name may not be
-the maintenance administrator's (the administrator page refuses a name that is
-the daily user's, the daily user page refuses the administrator's, and the
-helper's `Plan` refuses both, as it refuses an account the live image defines
-or a system account). `iso::next_unattended_daily` installs once with each of the
-two choices through the answers (below) and checks `setup.json` key for key, the
-login prompt's line and that `ilexctl home setup` reads the hand-off.
-
-The local acceptance trials are `iso::chooser`, `iso::profile_chooser`,
-`security::installer_no_profile` and `security::installer_profile_setup`.
-Run them with `cargo ilexctl test FILTER -- --test-threads 1`.
-The profile setup trial uses an exact ISO and an isolated, signed candidate
-selected with the installed machine and GNOME.
-It exercises passphrase-only boot, a blocked setup retry, a local
-username collision, password login as the installer-created maintenance
-account, refusal of malformed maintenance hashes, custom capacity
-correction, damaged-home refusal, transaction
-reconciliation and authenticated profile application without network
-access. It does not establish Secure Boot or
-TPM hardware qualification.
-For the profile trial, set `ILEX_PRIVATE_FINGERPRINTS` to a fresh private
-directory outside the artifacts. Seal the successful export with
-`encrypted/privacy.py --seal-profile-export` before attaching screenshots.
+`iso::next_unattended_daily` installs once with each of the two choices through the
+answers (below) and checks `setup.json` key for key, the login prompt's line and
+that `ilexctl home setup` reads the hand-off. It replaces the Anaconda trials of this
+flow (`iso::profile_chooser`, `security::installer_profile_setup`,
+`security::installer_no_profile`), which went with Anaconda.
 
 ## The next installer
 
-`installer/next/` is the live installer of ilex's own installer, which will
-replace Anaconda: no Anaconda, Cockpit, Firefox or Python chooser, and an
-interface of its own, described in "The next installer's interface" below. It
-has the welcome, machine and administrator pages and ends there: the interface
-installs nothing yet. (The root helper below installs, through its bus methods
-and from an answers volume; the pages for it come later.) The Anaconda network
-installer above is unchanged and stays the released one: `installer/next` is
-excluded from its fingerprint (`ilexctl iso --due`).
+`installer/next/` is ilex's own installer: the two live ISOs of "Installer ISOs"
+above (no Anaconda, Cockpit, Firefox or Python chooser). Each boots a session
+of its edition's compositor with an interface of its own, described in "The next
+installer's interface" below, over a root helper that installs, through its bus
+methods or from an answers volume. (The directory and the `iso::next…` trials keep
+the name they had while Anaconda was still the released installer.)
 
 ```sh
-ilexctl iso --next [--edition gnome|kde] [--output-dir D]  # <state dir>/iso-next/ilex-installer-<edition>.iso
+ilexctl iso [--edition gnome|kde] [--output-dir D]      # <state dir>/iso/ilex-<glabra|kingiana>-installer.iso (+ .sha256, the alias, notes)
 ilexctl test iso::next                                  # boots the GNOME edition's: Secure Boot, both boot entries, fallback, restarts, serial faults
 ilexctl test iso::next_kde                              # boots the KDE edition's: both boot entries, KWin's session, restarts
 ```
 
-**Linux only for now.** From native Windows, `ilexctl iso --next` and
-`ilexctl test iso::next` are refused with a message before anything is sent:
-the builder returns only `<state dir>/iso` (the Anaconda ISO) and stages only
-`ILEX_ISO`, while this ISO is written to `<state dir>/iso-next` and read from
-`ILEX_ISO_NEXT`, so it would never reach the machine. The worker refuses them
-too, and an `iso::next` filter no longer makes the client stage the Anaconda
-ISO. Run these two on a Linux host (or in the builder's shell). Nobody has run
-the Windows paths of this change: no Windows host was available.
+**Linux only for now.** From native Windows, `ilexctl iso`, `ilexctl test iso::next…`
+and the encrypted gates are refused with a message before anything is sent: the
+builder collects no ISO directory and stages no `ILEX_ISO_NEXT`. Run them on a
+Linux host (or in the builder's shell). Nobody has run the Windows paths of this
+change: no Windows host was available.
 
 - **Editions.** One ISO per edition, as Fedora ships Silverblue (GNOME) and
   Kinoite (KDE). The identifier (`gnome`, `kde`) names the image stage, the files
@@ -3168,8 +2916,8 @@ the Windows paths of this change: no Windows host was available.
   assembles no MD array, opens no LUKS volume and sets up no DM RAID set, so a
   disk with an old installation is offered. The ISO's volume label is
   `ilex-installer-<edition>`.
-- **The KDE edition (ilex Kingiana).** `ilexctl iso --next --edition kde` builds
-  `ilex-installer-kde.iso` through the same image-builder path, from the
+- **The KDE edition (ilex Kingiana).** `ilexctl iso --edition kde` builds
+  `ilex-kingiana-installer.iso` through the same image-builder path, from the
   edition's own stage (`installer/next/editions/kde/`). Everything below the
   compositor is shared with the GNOME edition and nothing of `rootfs/` is
   copied: the session unit, the PAM service, the polkit rule, the user, the
@@ -3299,7 +3047,7 @@ the Windows paths of this change: no Windows host was available.
     and the guards are unchanged). The 28 new packages of `Cargo.lock` (+300
     lines: cxx, cxx-qt and its generators, `qt-build-utils`, `clang-format`,
     `codespan-reporting`, a second `thiserror`) do change it, because
-    `Cargo.lock` is hashed whole: every root and the Anaconda ISO are due once
+    `Cargo.lock` is hashed whole: every root and the installer ISOs are due once
     when this lands, as when `ilex-installer` was added. `installer/next` itself
     stays out of both.
   - **Measured** 2026-11-27 on a Boat sandbox (16 vCPU, nested KVM), Fedora 45
@@ -3374,13 +3122,13 @@ the Windows paths of this change: no Windows host was available.
   the wrapper names such stages on standard error), removes
   `enforcing=0` from the two GRUB stages, and hands the result to `osbuild` as
   its standard input (an anonymous `memfd`) with the same `--checkpoint build
-  --checkpoint os-tree` the Anaconda ISO's wrapper passes. A manifest that is
+  --checkpoint os-tree` the earlier checkpoint-only wrapper passed. A manifest that is
   not what it expects (no `os-tree`, not exactly one deployment, a selinux stage
   already there, not exactly two `enforcing=0`) is an error, not a pass-through.
   `crates/xtask/src/iso.rs` takes the wrapper as a parameter (`Osbuild`: the
-  script and the state directory its executable copy goes in); the Anaconda ISO
-  keeps `installer/image-builder/osbuild-cache` and `image-builder-bin`, the
-  next ISO uses `image-builder-bin-next`, and in the helper container (an
+  script and the state directory its executable copy goes in); the helper
+  container's own checkpoint-only `installer/image-builder/osbuild-cache` is
+  replaced by it (copied to `image-builder-bin-next`), and in the helper container (an
   older image-builder on the host) the copy is bind-mounted over the container's
   own wrapper. The squashfs now carries the labels (`/usr/bin/bootc` is
   `install_exec_t`, `/usr/lib/systemd/systemd` `init_exec_t`, `/etc/passwd`
@@ -3491,7 +3239,7 @@ the Windows paths of this change: no Windows host was available.
   `iso::next_detect_generic`, `iso::next_kernel_argument`,
   `iso::next_kernel_argument_unknown` and `iso::next_account` are registered
   only when a filter names
-  `iso::next` (so `iso::`, the Anaconda release gate, never boots this ISO;
+  `iso::next` (so a filter that names no `iso::next…` never boots this ISO;
   the KDE edition's `iso::next_kde…` only when a filter names that, see above);
   `iso::next_helper_loop` and `iso::next_unattended_loop` only when a filter
   names `next_helper_loop` or `next_unattended_loop` (they need `mke2fs`,
@@ -3627,7 +3375,7 @@ the Windows paths of this change: no Windows host was available.
     the trace below): a file system that can hold a device node and a name no
     path confirms left the file unresolved.
 - **CI.** `publish.yml`'s `iso_next` input starts only the `installer-next` job
-  and skips the image pipeline and the Anaconda ISO jobs. The run has a
+  and skips the image pipeline and the release jobs. The run has a
   concurrency group of its own (`iso-next-<hash of the ref>`, also on main: it
   neither waits for nor replaces a real publish), is passed `main=false`, and
   receives no signing secrets: the route job's `sign` output is true only for
@@ -3676,11 +3424,9 @@ the Windows paths of this change: no Windows host was available.
   708 lines, the KDE edition's cxx-qt 300 more, a GTK bump would again) edits
   `Cargo.lock` and therefore changes
   every root's fingerprint once, although the shipped binaries are unchanged.
-  The Anaconda ISO fingerprint (`INSTALLER_INPUTS` in `xtask/src/iso.rs`) also
-  hashes `Cargo.lock`, `Cargo.toml` and `crates/xtask/src/iso.rs`, so those
-  make that ISO due the same way; `installer/next` and the new crate do not.
-  The first main run after this change rebuilds every root and the ISO once
-  (the input set itself changed).
+  The installer ISOs' fingerprints (`INSTALLER_INPUTS` in `xtask/src/iso.rs`) hash
+  `Cargo.lock`, `Cargo.toml`, `installer/next` and the crates the live image
+  compiles, so those make the ISOs due.
   **What keeps the build and the closure the same.** Nothing parses shell: the
   root image's Rust build is kept so narrow that a text check sees all of it,
   and what a text check cannot see is checked by running the script. Every
@@ -3810,7 +3556,7 @@ the Windows paths of this change: no Windows host was available.
   installed (the first build: 1,494,847,488 bytes, 706 packages, 1,850 MiB;
   largest: llvm-libs 146 MiB,
   python3-botocore 121, kernel-core 102, kernel-modules 80, mesa-dri-drivers 53,
-  podman 53; `largest-packages.txt` lists ten). `iso --next` took 14 minutes
+  podman 53; `largest-packages.txt` lists ten). `iso` took 14 minutes
   with the base images and RPMs already local, mostly image-builder; the
   interface's builder stage took 1 minute 42 seconds with a cold kache (0 of 136
   crates restored, `gtk4` the slowest at 33 seconds). Booted under QEMU/KVM with
@@ -3825,8 +3571,8 @@ the Windows paths of this change: no Windows host was available.
 
 ## The next installer's root helper
 
-The next installer (a Rust interface per shell on its own live ISO, replacing
-Anaconda) is built beside the released Anaconda ISO. Its live image is
+The installer (a Rust interface per shell on its own live ISO) replaced Anaconda.
+Its live image is
 `installer/next/`; this section covers the shared model and the root helper
 only: it probes, plans and, on `Apply`, installs a signed composition to a whole
 disk (no encryption yet). Everything up to the first write is checked again at
@@ -3839,10 +3585,9 @@ editions, DMI detection and the choice order, and the probe, plan, answers and
 state schemas. The types moved out of `ilex-tooling-core`; `ilex_devkit::installer`
 still re-exports them and `ilex_devkit::installer_model` is the crate. The host
 still builds the table with `installer::table`, and its serialization is
-byte-identical (field order and names are the file format), so the Anaconda ISO's
-`compositions.json`, `iso.yaml` and release notes do not change. The installer
-fingerprint does change once, because its inputs include `ilex-tooling-core`'s
-`installer.rs` and `config.rs`, the model crate and the Cargo files.
+byte-identical (field order and names are the file format). The installer
+fingerprint's inputs include `ilex-tooling-core`'s `installer.rs` and `config.rs`,
+the model crate and the Cargo files.
 
 - **Editions.** One ISO installs one shell. `edition.json` (written into the live
   image from `installer/next/editions.toml`, where the display name lives) names
@@ -4768,7 +4513,7 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   `/usr/lib/ilex/security/tools.json` (image-builder drops the RPM database)
   and the packages the helper runs (`dosfstools`, `e2fsprogs`, `btrfs-progs`,
   `skopeo`, `kbd`, `tzdata`, `cryptsetup`, `tpm2-tss`; fedora-bootc has them all,
-  so they add no size, and listing them keeps a base change from dropping one). `ilexctl iso --next`
+  so they add no size, and listing them keeps a base change from dropping one). `ilexctl iso`
   shares its image stage with the tier (`iso_next::build_image`).
 
 `ilexctl test installer::` boots that image (`ILEX_INSTALLER_IMAGE` names one;

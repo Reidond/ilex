@@ -52,13 +52,27 @@ else
     fi
 fi
 
+installed_by=
 if [[ -n "$reference" ]]; then
     cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true "$reference" >/dev/null
-    printf 'Encrypted lifecycle baseline (%s) **%s**.\n' "$origin" "$reference" >> "$GITHUB_STEP_SUMMARY"
+    # The live installer installs an image by registry tag: the baseline's dated
+    # or revision companion tag (every published digest has both), which the
+    # installer's own policy verifies again at the pull.
+    owner=${repo#ghcr.io/}
+    owner=${owner%/ilex}
+    installed_by=$(gh api --paginate "/users/$owner/packages/container/ilex/versions?per_page=100" |
+        jq -sr --arg tag "$tag" --arg digest "${reference#"$repo@"}" '
+            add | map(select(.name == $digest)) | (.[0].metadata.container.tags // []) |
+            map(select(startswith($tag + "_") and (.[($tag | length) + 1:] |
+                test("^([0-9]{8}|sha-[0-9a-f]{7,40})$")))) | sort | first // empty') ||
+        fail 'Could not read the rollback baseline tags from GHCR.'
+    [[ -n "$installed_by" ]] ||
+        fail "The rollback baseline has no dated or revision tag of $tag, so the installer cannot install it."
+    printf 'Encrypted lifecycle baseline (%s) **%s**, installed by tag %s.\n' "$origin" "$reference" "$installed_by" >> "$GITHUB_STEP_SUMMARY"
 else
     printf 'Encrypted fresh-install qualification only (%s).\n' "$origin" >> "$GITHUB_STEP_SUMMARY"
 fi
-printf 'reference=%s\n' "$reference" >> "$GITHUB_OUTPUT"
+printf 'reference=%s\ntag=%s\n' "$reference" "$installed_by" >> "$GITHUB_OUTPUT"
 mkdir -p "${ILEX_ARTIFACTS:?evidence directory required}/security"
-jq -n --arg reference "$reference" --arg origin "$origin" --arg snapshot "$snapshot" --arg target "$target" \
-    '{$reference, $origin, $snapshot, $target}' > "$ILEX_ARTIFACTS/security/encrypted-baseline.json"
+jq -n --arg reference "$reference" --arg tag "$installed_by" --arg origin "$origin" --arg snapshot "$snapshot" --arg target "$target" \
+    '{$reference, $tag, $origin, $snapshot, $target}' > "$ILEX_ARTIFACTS/security/encrypted-baseline.json"

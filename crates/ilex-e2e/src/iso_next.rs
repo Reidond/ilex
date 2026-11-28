@@ -113,7 +113,7 @@ mod install_ui;
 mod kde;
 mod kde_ui;
 mod loop_file;
-mod security;
+pub(crate) mod security;
 mod ui;
 mod unattended;
 mod vm_state;
@@ -250,7 +250,7 @@ impl Entry {
 /// both (the boot, the basic graphics entry, a compositor that dies) and some
 /// of their own (KWin's session has the installer as its only client).
 #[derive(Clone, Copy, PartialEq)]
-enum Edition {
+pub(crate) enum Edition {
     Gnome,
     Kde,
 }

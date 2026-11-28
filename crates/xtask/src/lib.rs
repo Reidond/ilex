@@ -17,7 +17,6 @@ mod doctor;
 mod identity;
 mod info;
 mod iso;
-mod iso_next;
 mod migrate;
 mod prepare_publish;
 mod publish;
@@ -62,7 +61,7 @@ pub enum CheckoutCmd {
     Publish(publish::Args),
     /// Record a machine fingerprint before testing its immutable image ID
     PreparePublish(prepare_publish::Args),
-    /// Build the network installer ISO (releases are CI-only)
+    /// Build the live installer ISOs, one per edition (releases are CI-only)
     Iso(iso::Args),
     /// Show this checkout's slug, image, VM names and state directories
     Info(info::Args),

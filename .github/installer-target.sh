@@ -19,8 +19,12 @@ if cargo ilexctl iso --check-registry; then :; else
     exit "$rc"
 fi
 bash .github/publication-tag.sh "$tag"
-[[ "$expected" = - || "$expected" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
+[[ "$expected" = - || "$expected" = current || "$expected" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
 digest=$(bash .github/publish-head.sh digest "$repo:$tag")
+# `current`: a composition this run does not publish itself (the other edition's
+# root): whatever the registry has now, if it is there and signed. The recheck
+# before the release still requires it to be unchanged.
+if [ "$expected" = current ] && [ "$digest" != - ]; then expected=$digest; fi
 if [ "$digest" = - ] || [ "$digest" != "$expected" ]; then
     echo "::error::installer target moved: expected $expected, current $digest"; exit 2
 fi

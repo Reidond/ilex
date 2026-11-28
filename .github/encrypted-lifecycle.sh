@@ -3,7 +3,7 @@
 # Artifacts remain private until the calling job seals the export.
 set -euo pipefail
 : "${ILEX_IMAGE:?candidate (v2) is required}"
-: "${ILEX_ISO:?exact installer ISO is required}"
+: "${ILEX_ISO_NEXT:?exact installer ISO (the GNOME edition's) is required}"
 : "${ILEX_ARTIFACTS:?private evidence root is required}"
 : "${ILEX_PRIVATE_FINGERPRINTS:?private fingerprint directory is required}"
 tier=encrypted-upgrade-rollback
@@ -26,6 +26,12 @@ if [[ ! "${ILEX_ENCRYPTED_UPGRADE_FROM:-}" =~ ^ghcr\.io/reidond/ilex@sha256:[0-9
     echo '::error::Set ILEX_ENCRYPTED_UPGRADE_FROM to the supported signed rollback image, pinned by digest.'
     exit 1
 fi
+# The live installer installs the baseline by this registry tag (a dated or
+# revision companion of the digest), and the shipped policy verifies it.
+[[ "${ILEX_ENCRYPTED_UPGRADE_TAG:-}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || {
+    echo '::error::Set ILEX_ENCRYPTED_UPGRADE_TAG to the registry tag the rollback image is installed by.'
+    exit 1
+}
 cosign verify --key rootfs/etc/pki/containers/ilex.pub --insecure-ignore-tlog=true "$ILEX_ENCRYPTED_UPGRADE_FROM" >/dev/null
 podman pull --quiet "$ILEX_ENCRYPTED_UPGRADE_FROM"
 if [[ -n "${ILEX_ENCRYPTED_UPDATE_KERNEL:-}" ]]; then

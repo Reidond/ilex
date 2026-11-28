@@ -1,18 +1,23 @@
-//! Exact-ISO encrypted install. A disposable signed local registry delivers the
-//! candidate; it never publishes to ghcr or relaxes the shipped reject policy.
+//! The encrypted release gates, `security::encrypted_install` and
+//! `security::upgrade_rollback`: an encrypted installation by the live installer
+//! of the GNOME edition (the real root helper, a recovery key and the security
+//! chip, on a Secure Boot VM with a persistent TPM), then the installed system's
+//! boots: automatic TPM unlock, PCR mismatch, recovery key, no TPM, and for the
+//! lifecycle an upgrade and a rollback. A disposable signed local registry
+//! delivers only the lifecycle's update; nothing publishes to ghcr or relaxes
+//! the shipped reject policy.
 use crate::common;
 use anyhow::{Context, Result, bail, ensure};
 use ilex_devkit::{
     Workspace, cmd,
-    core::{Capability, Requirement, TpmLifecycle, VmProvider, VmSpec},
+    core::{Requirement, TpmLifecycle, VmProvider, VmSpec},
     provider::{LinuxProvider, LinuxVm},
-    qemu::{self, VmConfig},
-    security,
+    qemu, security,
 };
 use ilex_enroll::Secret;
 use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -31,13 +36,11 @@ use std::{
 };
 
 const GUEST: &str = include_str!("encrypted/guest.py");
-pub(crate) const LOCAL_SOURCE: &str = include_str!("encrypted/source.py");
 const PRIVACY: &str = include_str!("encrypted/privacy.py");
 const DIAGNOSTICS: &str = include_str!("encrypted/diagnostics.py");
 const LOG_STREAM: &str = include_str!("encrypted/log_stream.py");
 #[path = "encrypted/lifecycle.rs"]
 mod lifecycle;
-mod profile_setup;
 
 #[derive(Clone, Debug, Serialize)]
 struct GuestFailure {
@@ -132,366 +135,10 @@ ILEX_STATE"#,
 }
 
 pub fn trials() -> Vec<Trial> {
-    let mut trials = vec![
-        common::trial("security::encrypted_install", || run(false, false, false)),
-        common::trial("security::encrypted_existing_space", || {
-            run(true, false, false)
-        }),
-        common::trial("security::encrypted_interrupted", || {
-            run(false, true, false)
-        }),
-        common::trial("security::installer_profile_setup", || {
-            run_fixture(false, false, true, false, FixtureCase::ProfileSetup)
-        }),
-        common::trial(
-            "security::installer_no_profile",
-            crate::iso::install_no_profile,
-        ),
+    vec![
+        common::trial("security::encrypted_install", || run_fixture(false)),
         common::trial("security::upgrade_rollback", lifecycle::run),
-    ];
-    if std::env::var_os("ILEX_ENROLLMENT_LOCAL_DIAGNOSTICS").is_some() {
-        trials.push(common::trial(
-            "security::enrollment_diagnostic_install",
-            || run(false, false, true),
-        ));
-        trials.push(common::trial(
-            "security::enrollment_diagnostic_existing_space",
-            || run(true, false, true),
-        ));
-        trials.push(common::trial(
-            "security::enrollment_diagnostic_interrupted",
-            || run(false, true, true),
-        ));
-        trials.push(common::trial(
-            "security::enrollment_diagnostic_layout_refusal",
-            || run_layout(false, false, true, true),
-        ));
-    }
-    if std::env::var_os("ILEX_ENROLLMENT_CHECKPOINT").is_some() {
-        // Explicit local diagnosis, outside CI's security::encrypted_ filter.
-        // Even successful boot proofs cannot promote an incomplete ISO gate.
-        trials.push(common::trial("security::enrollment_checkpoint", checkpoint));
-    }
-    trials
-}
-
-fn restore_files(source: &Path, target: &Path) -> Result<()> {
-    for file in evidence_files(source)? {
-        let destination = target.join(file.strip_prefix(source)?);
-        fs::create_dir_all(
-            destination
-                .parent()
-                .context("checkpoint file has no parent")?,
-        )?;
-        fs::copy(file, destination)?;
-    }
-    Ok(())
-}
-
-fn checkpoint() -> Result<()> {
-    ilex_enroll::harden()?;
-    let ws = common::workspace()?;
-    let state_dir = ws.ensure_state()?.canonicalize()?;
-    let source = PathBuf::from(
-        std::env::var_os("ILEX_ENROLLMENT_CHECKPOINT").context("checkpoint required")?,
-    )
-    .canonicalize()?;
-    ensure!(
-        source.starts_with(&state_dir),
-        "checkpoint must belong to this checkout's state"
-    );
-    let receipt: Value = serde_json::from_slice(&fs::read(source.join("checkpoint.json"))?)?;
-    let run = receipt["run"].as_str().context("checkpoint run missing")?;
-    let (pid, nonce) = run.split_once('-').context("invalid checkpoint run")?;
-    ensure!(
-        run.len() < 80
-            && !pid.is_empty()
-            && !nonce.is_empty()
-            && pid.bytes().all(|b| b.is_ascii_digit())
-            && nonce.bytes().all(|b| b.is_ascii_digit())
-            && source.file_name().and_then(|p| p.to_str()) == Some(run),
-        "invalid checkpoint run"
-    );
-    ensure!(
-        receipt["owner"] == ws.identity()?.owner
-            && receipt["stage"] == "checkpoint-complete"
-            && receipt["qemu_exit_status"] == 0,
-        "owned cleanly stopped installer checkpoint required"
-    );
-    ensure!(
-        !Path::new("/proc").join(pid).exists(),
-        "original test process must finish before checkpoint diagnosis"
-    );
-    let work = state_dir.join("encrypted-fixtures").join(run);
-    let bundle = state_dir.join("security").join(run);
-    ensure!(
-        !work.exists() && !bundle.exists(),
-        "checkpoint diagnosis must not overwrite active fixture state"
-    );
-    let original_manifest: Value =
-        serde_json::from_slice(&fs::read(source.join("bundle/bundle.json"))?)?;
-    ensure!(
-        original_manifest["owner"] == receipt["owner"]
-            && original_manifest["run"] == run
-            && original_manifest["disk"].as_str() == work.join("root.qcow2").to_str(),
-        "checkpoint bundle identity differs"
-    );
-    let purpose = original_manifest["purpose"]
-        .as_str()
-        .context("checkpoint purpose missing")?;
-    ensure!(
-        matches!(
-            purpose,
-            "encrypted-install" | "encrypted-space" | "encrypted-interrupted"
-        ),
-        "unsupported checkpoint purpose"
-    );
-    let interrupted = purpose == "encrypted-interrupted";
-    fs::create_dir(&work)?;
-    fs::set_permissions(&work, fs::Permissions::from_mode(0o700))?;
-    let mut bundle_created = false;
-    let mut restored = false;
-    let mut cleanup_spec = None;
-    let mut core_proven = false;
-    let mut interruption_proven = false;
-    let mut stage = "restore";
-    let mut credentials = Value::Null;
-    let artifacts = work.join("evidence");
-    let published = qemu::artifact_dir(&ws, &format!("enrollment-checkpoint-{purpose}"))?;
-    clear_evidence(&published)?;
-    let mut result = (|| -> Result<()> {
-        restore_files(&source.join("work"), &work)?;
-        fs::create_dir(&bundle)?;
-        bundle_created = true;
-        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o700))?;
-        restore_files(&source.join("bundle"), &bundle)?;
-        restored = true;
-        let expected: Value = serde_json::from_slice(&fs::read(artifacts.join("candidate.json"))?)?;
-        ensure!(
-            expected["interrupt_completion"] == interrupted,
-            "checkpoint interruption mode differs"
-        );
-        let seed = work.join("oemdrv.img");
-        let passphrase = Secret::read(File::open(work.join("seed/passphrase"))?.into())?;
-        let recovery = recovery_secret(&seed, &work)?;
-        credentials = fingerprints(&[&passphrase, &recovery]);
-        let recorded: Value =
-            serde_json::from_slice(&extract(&seed, &artifacts, "credentials.json")?)?;
-        ensure!(
-            recorded == credentials,
-            "checkpoint credential fingerprints differ"
-        );
-        let installer_probe: Value =
-            serde_json::from_slice(&extract(&seed, &artifacts, "probe.json")?)?;
-        ensure!(
-            installer_probe["verdict"] == "eligible",
-            "checkpoint installer was not eligible"
-        );
-        let replay = security::replay_pcr7(&extract(&seed, &artifacts, "eventlog.bin")?)?;
-        ensure!(
-            installer_probe["pcr7"] == replay.sha256,
-            "checkpoint installer replay differs"
-        );
-        let tokens: Value = serde_json::from_slice(&extract(&seed, &artifacts, "tokens.json")?)?;
-        let disk = work.join("root.qcow2");
-        let mut config = VmConfig::new(
-            original_manifest["purpose"]
-                .as_str()
-                .context("checkpoint purpose missing")?,
-            &disk,
-        );
-        config.snapshot = false;
-        config.memory = "6G".into();
-        let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
-        spec.run = run.to_string();
-        spec.secure_boot = Requirement::Required;
-        spec.tpm = TpmLifecycle::Persistent {
-            bundle_id: run.to_string(),
-        };
-        cleanup_spec = Some(spec.clone());
-        let provider = LinuxProvider::new(ws.clone())?;
-        let caps = provider.probe(&spec)?;
-        caps.require(Capability::FirmwareEnforcement)?;
-        caps.require(Capability::PersistentTpm)?;
-        fs::write(
-            artifacts.join("checkpoint-backend.json"),
-            serde_json::to_vec_pretty(&caps)?,
-        )?;
-        let vm = provider.create(spec.clone())?;
-        let mut fixture = Fixture {
-            provider,
-            vm,
-            spec,
-            console: None,
-        };
-        if !interrupted {
-            stage = "first_installed_boot";
-            fixture.disk_boot()?;
-            let booted = assertions(&mut fixture, &artifacts, &expected, &installer_probe);
-            fixture.logs(&artifacts, "checkpoint-installed")?;
-            booted?;
-            core_proven = true;
-            guest_privacy(
-                fixture.vm.running_mut()?,
-                &artifacts,
-                "checkpoint-after-finalisation",
-                &credentials,
-            )?;
-            stage = "cold_restart";
-            poweroff(&mut fixture, &artifacts, "checkpoint-installed")?;
-            fixture.disk_boot()?;
-            let cold = artifacts.join("cold");
-            fs::create_dir_all(&cold)?;
-            assertions(&mut fixture, &cold, &expected, &installer_probe)?;
-            guest_privacy(
-                fixture.vm.running_mut()?,
-                &cold,
-                "checkpoint-cold",
-                &credentials,
-            )?;
-            poweroff(&mut fixture, &artifacts, "checkpoint-cold")?;
-            stage = "same_tpm_policy_mismatch";
-            same_tpm_mismatch(
-                &ws,
-                &mut fixture,
-                &artifacts,
-                &passphrase,
-                &credentials,
-                &installer_probe,
-                &tokens,
-            )?;
-        }
-        // The frozen original disk has never had an installed boot. It is
-        // backing-only for these separate first-boot mismatch/recovery guests.
-        let frozen = source.join("work/root.qcow2");
-        stage = "pcr_mismatch_first_boot";
-        fallback(
-            &ws,
-            &frozen,
-            &fixture.spec,
-            &work,
-            &artifacts,
-            &passphrase,
-            &credentials,
-            &installer_probe,
-            &tokens,
-            &expected,
-            "pcr-mismatch",
-            None,
-        )?;
-        stage = "recovery_key_boot";
-        fallback(
-            &ws,
-            &frozen,
-            &fixture.spec,
-            &work,
-            &artifacts,
-            &recovery,
-            &credentials,
-            &installer_probe,
-            &tokens,
-            &expected,
-            "recovery",
-            Some(&passphrase),
-        )?;
-        if interrupted {
-            stage = "interrupted_completion_repair";
-            let (reissued, repaired_tokens) = interrupted_repair(
-                &mut fixture,
-                &artifacts,
-                &passphrase,
-                &mut credentials,
-                &tokens,
-                &expected,
-            )?;
-            stage = "reissued_recovery_key_boot";
-            fallback(
-                &ws,
-                &disk,
-                &fixture.spec,
-                &work,
-                &artifacts,
-                &reissued,
-                &credentials,
-                &installer_probe,
-                &repaired_tokens,
-                &expected,
-                "reissued-recovery",
-                None,
-            )?;
-            interruption_proven = true;
-        } else {
-            stage = "no_tpm_fallback";
-            fallback(
-                &ws,
-                &disk,
-                &fixture.spec,
-                &work,
-                &artifacts,
-                &passphrase,
-                &credentials,
-                &installer_probe,
-                &tokens,
-                &expected,
-                "no-tpm",
-                None,
-            )?;
-        }
-        fixture.provider.destroy_owned(&mut fixture.vm)?;
-        stage = "post_install_gates_complete";
-        Ok(())
-    })();
-    // Preserve only privacy-checked metadata on a partial diagnostic. Raw
-    // failure logs/screens remain private, as for the full installer gate.
-    if credentials.is_array() {
-        let export = (|| -> Result<()> {
-            artifact_privacy(&[&artifacts, &raw_logs(&artifacts)?], &credentials)?;
-            for file in evidence_files(&artifacts)? {
-                if !matches!(
-                    file.extension().and_then(|s| s.to_str()),
-                    Some("json" | "bin")
-                ) {
-                    continue;
-                }
-                let target = published.join(file.strip_prefix(&artifacts)?);
-                fs::create_dir_all(target.parent().context("checkpoint export has no parent")?)?;
-                fs::copy(file, target)?;
-            }
-            let privacy = artifact_privacy(&[&published], &credentials)?;
-            fs::write(
-                published.join("final-artifact-privacy.json"),
-                serde_json::to_vec_pretty(&privacy)?,
-            )?;
-            Ok(())
-        })();
-        if export.is_err() {
-            clear_evidence(&published)?;
-            result = Err(anyhow::anyhow!("checkpoint privacy/export failed"));
-            stage = "privacy_export";
-            core_proven = false;
-        }
-    }
-    if bundle_created && bundle.exists() {
-        if let Some(spec) = cleanup_spec {
-            security::destroy_bundle(&ws, &spec).context("owned checkpoint cleanup failed")?;
-        } else {
-            // No VM was created: this is only our incomplete restore.
-            fs::remove_dir_all(&bundle)?;
-        }
-    }
-    fs::remove_dir_all(&work)?;
-    fs::write(
-        published.join("result.json"),
-        serde_json::to_vec_pretty(&json!({
-        "qualification":"unqualified", "scope":"owned completed-installer checkpoint; this diagnosis cannot qualify the original live finalisation privacy gate",
-            "core_boot_proof":if core_proven {"passed"} else if interrupted {"not-applicable-interrupted"} else {"unproven"}, "interruption_boot_proof":if interruption_proven {"passed"} else {"unproven"}, "post_install_gates":if result.is_ok() {"passed"} else {"unqualified"},
-            "stage":stage, "source_run":run, "source_harness":receipt["source_head"], "restored_original_tpm_and_vars":restored,
-            "diagnostic":result.as_ref().err().map(failure_code), "error":result.as_ref().err().map(|_|"private diagnostic details suppressed")
-        }))?,
-    )?;
-    bail!(
-        "checkpoint diagnostic completed at {stage}; full encrypted installer qualification remains unqualified"
-    )
+    ]
 }
 
 pub(crate) struct Registry {
@@ -517,7 +164,9 @@ impl Drop for Registry {
         }
     }
 }
-pub(crate) fn registry(ws: &Workspace, image: &str, work: &Path) -> Result<(Registry, Value)> {
+/// A disposable signed registry the guest reaches at 10.0.2.2: the update of
+/// the lifecycle is pushed to it (the installer itself installs from ghcr).
+pub(crate) fn registry(ws: &Workspace, work: &Path) -> Result<Registry> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     drop(listener);
@@ -545,20 +194,13 @@ pub(crate) fn registry(ws: &Workspace, image: &str, work: &Path) -> Result<(Regi
         port,
         work: work.to_owned(),
     };
-    let key = work.join("cosign");
     cmd::run(
         Command::new("cosign")
             .args(["generate-key-pair", "--output-key-prefix"])
-            .arg(&key)
+            .arg(work.join("cosign"))
             .env("COSIGN_PASSWORD", ""),
     )?;
-    let manifest = registry.push(image, "test")?;
-    registry.sign(
-        manifest["digest"]
-            .as_str()
-            .context("fixture digest missing")?,
-    )?;
-    Ok((registry, manifest))
+    Ok(registry)
 }
 
 impl Registry {
@@ -730,201 +372,6 @@ impl Drop for Fixture {
             eprintln!("encrypted fixture cleanup failed: {e:#}");
         }
     }
-}
-
-fn seed(work: &Path, config: &Value, maintenance: Option<&Secret>) -> Result<(PathBuf, Secret)> {
-    let dir = work.join("seed");
-    fs::create_dir(&dir)?;
-    let mut passphrase = vec![0u8; 48];
-    File::open("/dev/urandom")?.read_exact(&mut passphrase)?;
-    for byte in &mut passphrase {
-        *byte = b'a' + *byte % 26;
-    }
-    fs::write(dir.join("passphrase"), &passphrase)?;
-    if let Some(maintenance) = maintenance {
-        fs::write(dir.join("maintenance-password"), maintenance.bytes())?;
-    }
-    fs::write(dir.join("config.json"), serde_json::to_vec(config)?)?;
-    fs::write(dir.join("guest.py"), GUEST)?;
-    fs::write(dir.join("source.py"), LOCAL_SOURCE)?;
-    fs::write(dir.join("privacy.py"), PRIVACY)?;
-    fs::write(dir.join("diagnostics.py"), DIAGNOSTICS)?;
-    fs::write(dir.join("log_stream.py"), LOG_STREAM)?;
-    // Test-only transport: no recovery plaintext is written to host media.
-    let private_key = work.join("recovery.pem");
-    ensure!(
-        Command::new("openssl")
-            .args([
-                "genpkey",
-                "-algorithm",
-                "RSA",
-                "-pkeyopt",
-                "rsa_keygen_bits:2048",
-                "-out"
-            ])
-            .arg(&private_key)
-            .output()?
-            .status
-            .success(),
-        "private fixture key generation failed"
-    );
-    ensure!(
-        Command::new("openssl")
-            .args(["pkey", "-in"])
-            .arg(&private_key)
-            .args(["-pubout", "-out"])
-            .arg(dir.join("recovery.pub"))
-            .output()?
-            .status
-            .success(),
-        "fixture public key generation failed"
-    );
-    if config["published_source"] != true {
-        fs::copy(work.join("cosign.pub"), dir.join("test.pub"))?;
-    }
-    // Start the private console driver before the shipped completion %post.
-    // The source override changes only the test registry and keeps target and
-    // signature enforcement. No passphrase bytes occur in ks.cfg or scripts.
-    let ks = r#"%post --nochroot --erroronfail
-python3 -I -S /run/ilex-encrypted-test/seed/guest.py layout-retry-probe
-python3 -I -S /run/ilex-encrypted-test/seed/guest.py tpm-slot-budget-probe
-python3 -I -S /run/ilex-encrypted-test/seed/guest.py drive > /run/ilex-encrypted-test/driver.log 2>&1 &
-%end
-%include /usr/share/anaconda/interactive-defaults.ks
-graphical
-lang en_US.UTF-8
-keyboard us
-timezone Etc/UTC --utc
-rootpw --lock
-zerombr
-ignoredisk --only-use=vda
-clearpart --all --initlabel --drives=vda
-bootloader --append="console=ttyS0,115200n8"
-%include /run/ilex-encrypted-test/storage.ks
-poweroff
-%pre --erroronfail
-mkdir -p /run/ilex-seed-boot
-mount /dev/disk/by-label/OEMDRV /run/ilex-seed-boot
-cp /run/ilex-seed-boot/guest.py /run/ilex-encrypted-guest.py
-umount /run/ilex-seed-boot
-python3 -I -S /run/ilex-encrypted-guest.py prepare
-%end
-%post --nochroot --erroronfail
-python3 -I -S /run/ilex-encrypted-test/seed/guest.py finish
-%end
-"#;
-    let ks = if config["preserve_data"] == true {
-        ks.replace(
-            "clearpart --all --initlabel --drives=vda",
-            "clearpart --none",
-        )
-    } else {
-        ks.to_owned()
-    };
-    let ks = if config["profile_setup"] == true {
-        let composition = config["composition"]
-            .as_str()
-            .context("fixture composition missing")?;
-        ilex_devkit::installer::validate_tag(composition)?;
-        let choice = json!({"schema":1, "composition":composition, "profile":"andriishafar"});
-        let offline = if config["profile_offline"] == true {
-            r#"%post --nochroot --erroronfail
-# The image is installed by now. Exercise the shipped preload's offline
-# failure path without changing how Anaconda obtains the signed payload.
-set -eu
-ip -4 route flush default
-ip -6 route flush default
-if ip route get 1.1.1.1 >/dev/null 2>&1; then exit 1; fi
-# Locale configuration is complete. Let localed remove its private tmp
-# directory before the strict credential scan traverses the live /tmp.
-systemctl stop systemd-localed.service
-%end
-"#
-        } else {
-            ""
-        };
-        format!(
-            r#"%pre --erroronfail
-install -d -m 0755 /run/ilex-installer
-cat > /run/ilex-installer/choice <<'PROFILE_SELECTION'
-{choice}
-PROFILE_SELECTION
-%end
-{offline}%include /run/ilex-encrypted-test/maintenance.ks
-{ks}
-"#
-        )
-    } else {
-        ks
-    };
-    fs::write(dir.join("ks.cfg"), ks)?;
-    let seed = work.join("oemdrv.img");
-    File::create(&seed)?.set_len(32 << 20)?;
-    cmd::run(
-        Command::new("mkfs.ext4")
-            .args(["-q", "-F", "-L", "OEMDRV", "-d"])
-            .arg(&dir)
-            .arg(&seed),
-    )?;
-    let secret = Secret::read(ilex_enroll::secret_fd(&passphrase)?)?;
-    passphrase.fill(0);
-    Ok((seed, secret))
-}
-
-fn recovery_secret(seed: &Path, work: &Path) -> Result<Secret> {
-    recovery_secret_named(seed, work, "recovery.oaep")
-}
-
-fn recovery_secret_named(seed: &Path, work: &Path, name: &str) -> Result<Secret> {
-    let output = Command::new("debugfs")
-        .arg("-R")
-        .arg(format!("cat /{name}"))
-        .arg(seed)
-        .output()?;
-    ensure!(
-        output.status.success() && output.stdout.len() == 256,
-        "private recovery envelope missing"
-    );
-    let envelope = work.join(name);
-    fs::write(&envelope, output.stdout)?;
-    let mut child = Command::new("openssl")
-        .args(["pkeyutl", "-decrypt", "-inkey"])
-        .arg(work.join("recovery.pem"))
-        .args(["-in"])
-        .arg(envelope)
-        .args([
-            "-pkeyopt",
-            "rsa_padding_mode:oaep",
-            "-pkeyopt",
-            "rsa_oaep_md:sha256",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let secret = Secret::read(
-        child
-            .stdout
-            .take()
-            .context("private recovery pipe missing")?
-            .into(),
-    )?;
-    ensure!(
-        child.wait()?.success() && secret.bytes().len() == 71,
-        "private recovery decryption failed"
-    );
-    ensure!(
-        secret
-            .bytes()
-            .iter()
-            .enumerate()
-            .all(|(i, b)| if i % 9 == 8 {
-                *b == b'-'
-            } else {
-                b"cbdefghijklnrtuv".contains(b)
-            }),
-        "invalid recovery credential; details suppressed"
-    );
-    Ok(secret)
 }
 
 fn fingerprints(secrets: &[&Secret]) -> Value {
@@ -1119,9 +566,8 @@ fn diagnostics(artifacts: &Path, output: &Path, credentials: &Value) -> Result<(
         "no-tpm-luksDump.txt",
         "no-tpm-failed-units.txt",
         "host-fixture-error.txt",
-        "installer-leak-scan.json",
-        "installer-finaliser-leak-scan.json",
         "installer-probe.json",
+        "probe.json",
     ] {
         command.arg(artifacts.join(file));
     }
@@ -1158,187 +604,171 @@ fn guest_privacy(vm: &qemu::Vm, artifacts: &Path, label: &str, credentials: &Val
     Ok(())
 }
 
-fn extract(seed: &Path, artifacts: &Path, file: &str) -> Result<Vec<u8>> {
-    let output = Command::new("debugfs")
-        .args(["-R", &format!("cat /public/{file}")])
-        .arg(seed)
-        .output()?;
-    ensure!(
-        output.status.success() && !output.stdout.is_empty(),
-        "installer evidence missing: {file}"
-    );
-    fs::write(artifacts.join(format!("installer-{file}")), &output.stdout)?;
-    Ok(output.stdout)
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct FailureSnapshot {
-    schema: u8,
-    phase: String,
-    drive_step: String,
-    errno: Option<u16>,
-    helper_errno: Option<u16>,
-    uinput_loaded: bool,
-    tty8_mode: Option<u8>,
-    target_exists: bool,
-    layout: String,
-    helper_errors: Vec<String>,
-    passphrase_prompt: bool,
-    recovery_prompt: bool,
-    confirmation_prompt: bool,
-    ready_prompt: bool,
-}
-
-fn failure_snapshot(seed: &Path, published: &Path) -> Result<()> {
-    // Failure evidence bypasses the full privacy gate only after strict field,
-    // code and numeric validation. Never export raw debugfs output or errors.
-    let output = Command::new("debugfs")
-        .args(["-R", "cat /public/failure.json"])
-        .arg(seed)
-        .output()?;
-    ensure!(output.status.success() && output.stdout.len() <= 4096);
-    let snapshot: FailureSnapshot = serde_json::from_slice(&output.stdout)?;
-    ensure!(snapshot.schema == 1);
-    ensure!(
-        [
-            "prepare",
-            "drive",
-            "finish",
-            "finalise",
-            "layout-retry-probe",
-            "tpm-slot-budget-probe",
-        ]
-        .contains(&snapshot.phase.as_str())
-    );
-    ensure!(
-        [
-            "not-started",
-            "wait-enrollment-start",
-            "uinput-load",
-            "uinput-open",
-            "uinput-create",
-            "input-observe",
-            "wait-passphrase",
-            "capture-before-input",
-            "enter-passphrase",
-            "wait-recovery",
-            "export-recovery",
-            "interrupt-completion",
-            "check-interrupted-slots",
-            "bind-interrupted-target",
-            "verify-interrupted-target-binds",
-            "order-interrupted-target-binds",
-            "acknowledge-recovery",
-            "finish-tpm-with-reserved-slot",
-            "wait-ready",
-            "capture-confirmation",
-            "wait-final-scan",
-            "inject-missing-uuid-link",
-            "leave-one-lvm-slot",
-            "retry-legacy-unbound-state",
-            "interrupt-lvm-key-display",
-            "mistype-lvm-confirmation-with-full-header",
-            "prepare-acknowledged-btrfs-recovery",
-            "leave-one-btrfs-slot-for-tpm",
-            "refuse-btrfs-reissue-with-one-free-slot",
-            "fill-luks2-keyslots",
-            "refuse-full-slot-reissue",
-            "retry-with-acknowledged-key",
-        ]
-        .contains(&snapshot.drive_step.as_str())
-    );
-    ensure!(
-        [
-            "not-present",
-            "encrypted",
-            "unencrypted",
-            "error",
-            "unavailable"
-        ]
-        .contains(&snapshot.layout.as_str())
-    );
-    ensure!(snapshot.errno.is_none_or(|value| value <= 4095));
-    ensure!(snapshot.helper_errno.is_none_or(|value| value <= 4095));
-    ensure!(snapshot.tty8_mode.is_none_or(|value| value <= 3));
-    ensure!(snapshot.helper_errors.len() <= 14);
-    ensure!(snapshot.helper_errors.iter().all(|code| {
-        [
-            "var-unencrypted",
-            "root-layout",
-            "boot-encrypted",
-            "crypttab",
-            "swap",
-            "text-console",
-            "tty-required",
-            "tool-failed",
-            "memory-lock",
-            "btrfs-devices",
-            "luks-backing",
-            "btrfs-inspect",
-            "mount-selection",
-            "mount-id",
-        ]
-        .contains(&code.as_str())
-    }));
-    fs::write(
-        published.join("failure.json"),
-        serde_json::to_vec_pretty(&snapshot)?,
-    )?;
-    Ok(())
-}
-
-fn install(
-    fixture: &mut Fixture,
-    artifacts: &Path,
-    deadline: Duration,
-    interrupted: bool,
-) -> Result<()> {
-    fixture.provider.start(&mut fixture.vm)?;
-    let vm = fixture.vm.running_mut()?;
-    let ctl = Vmctl::from_info(vm.info.clone());
-    let start = Instant::now();
-    let mut screenshots = [false; 2];
-    loop {
-        let serial = fs::read_to_string(vm.info.dir.join("serial.log")).unwrap_or_default();
-        ensure!(
-            !serial.contains("ILEX-ENCRYPTED-FAILED"),
-            "private encrypted fixture failed; secret diagnostics suppressed"
-        );
-        for (index, (marker, file)) in [
-            ("ILEX-ENCRYPTED-COMPLETION-SAFE-SCREEN", "completion.png"),
-            (
-                "ILEX-ENCRYPTED-RECOVERY-SAFE-SCREEN",
-                "recovery-confirmed.png",
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if !screenshots[index] && serial.contains(marker) {
-                // Guest waits for this explicit nonsecret acknowledgement.
-                // No timeout or failure screenshot may capture the visible key.
-                ctl.save_screenshot(&artifacts.join(file))?;
-                ctl.key("shift")?;
-                screenshots[index] = true;
-            }
-        }
-        if let Some(status) = vm.exited()? {
-            ensure!(
-                status.success()
-                    && serial.contains("ILEX-ENCRYPTED-DONE")
-                    && screenshots == [true, !interrupted],
-                "encrypted ISO installation did not finish"
-            );
-            break;
-        }
-        ensure!(
-            start.elapsed() < deadline,
-            "encrypted installer deadline exceeded; qualification remains unqualified"
-        );
-        thread::sleep(Duration::from_secs(2));
+/// A random lowercase secret of 48 letters: what a virtual keyboard can type
+/// at the console prompts, and the length the evidence seal expects.
+fn random_secret() -> Result<Secret> {
+    let mut bytes = [0u8; 48];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    for byte in &mut bytes {
+        *byte = b'a' + *byte % 26;
     }
-    Ok(())
+    let secret = Secret::read(ilex_enroll::secret_fd(&bytes)?)?;
+    bytes.fill(0);
+    Ok(secret)
+}
+
+/// What the installation of the live installer leaves for the post-install
+/// gates.
+struct Installed {
+    fixture: Fixture,
+    /// The recovery key the helper handed over once and the person confirmed.
+    recovery: Secret,
+    /// `ilex-enroll probe --json` of the live installer.
+    probe: Value,
+    /// `ilex-enroll status --json` of the disk the installation wrote, before
+    /// anything booted it.
+    tokens: Value,
+    /// The manifest digest the installation pinned.
+    digest: String,
+}
+
+/// An encrypted installation by the live installer of the GNOME edition (the
+/// ISO named by `ILEX_ISO_NEXT`): the real root helper, driven over its bus as
+/// the interface drives it, on a Secure Boot VM with a persistent TPM, a
+/// recovery key and the chip. With `testing_tag` the helper installs that tag
+/// of the registry (a signed image of an earlier release) instead of the
+/// composition's own.
+fn install_with_helper(
+    ws: &Workspace,
+    work: &Path,
+    artifacts: &Path,
+    passphrase: &Secret,
+    password: &Secret,
+    testing_tag: Option<&str>,
+    lifecycle: bool,
+) -> Result<Installed> {
+    use crate::iso_next::{
+        Edition,
+        security::{Credentials, Machine, Variant, install_running},
+    };
+    let mut machine = Machine::boot_iso(Edition::Gnome, work, true, artifacts)?;
+    let result = (|| -> Result<(Secret, Value, Value, String)> {
+        if let Some(tag) = testing_tag {
+            ensure!(
+                tag.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+                "unexpected installer image tag"
+            );
+            let vm = machine.vm()?;
+            vm.wait_ssh(Duration::from_secs(600))
+                .context("the live system did not come up")?;
+            // The catalogue's testing tag (what a local `--testing-tag` build
+            // writes) installs that tag for every composition: the signed
+            // image of the release being upgraded from. Signatures are still
+            // verified by the shipped policy.
+            vm.ssh_ok(&format!(
+                r#"set -eu
+python3 -I -S - '{tag}' <<'PY'
+import json, sys
+path = '/usr/share/ilex-installer/compositions.json'
+table = json.load(open(path))
+table['testing-tag'] = sys.argv[1]
+with open(path, 'w') as out:
+    json.dump(table, out, indent=2)
+PY
+systemctl restart ilex-installerd.service"#
+            ))?;
+        }
+        let (pass, pw) = (
+            std::str::from_utf8(passphrase.bytes())?,
+            std::str::from_utf8(password.bytes())?,
+        );
+        let mut secrets = vec![pass.to_owned(), pw.to_owned()];
+        let name = "encrypted-install";
+        let key = install_running(
+            &mut machine,
+            Variant::Confirmed,
+            artifacts,
+            name,
+            &mut secrets,
+            Credentials {
+                passphrase: pass,
+                password: pw,
+                // The lifecycle's homes apply this public profile: the
+                // installer's Daily user page writes the choice into
+                // `setup.json`.
+                daily_profile: lifecycle.then_some("andriishafar"),
+            },
+        )?;
+        secrets.fill(String::new());
+        let recovery = Secret::read(ilex_enroll::secret_fd(key.as_bytes())?)?;
+        ensure!(
+            recovery.bytes().len() == 71,
+            "the recovery key is not in the form systemd makes"
+        );
+        // What the installation pinned.
+        let log = fs::read_to_string(artifacts.join(format!("next-{name}-install.txt")))?;
+        let plan: Value = serde_json::from_str(
+            log.lines()
+                .find_map(|l| l.strip_prefix("PLAN "))
+                .context("no plan in the install log")?,
+        )?;
+        let digest = plan["digest"]
+            .as_str()
+            .context("the plan has no digest")?
+            .to_owned();
+        let probe: Value = serde_json::from_slice(&fs::read(
+            artifacts.join(format!("next-{name}-probe.json")),
+        )?)?;
+        // The header the installation wrote, before a first boot touches it.
+        let tokens: Value = serde_json::from_str(&machine.vm()?.ssh_ok(
+            r#"set -eu
+device=$(blkid -t TYPE=crypto_LUKS -o device | head -n 1)
+test -b "$device"
+uuid=$(cryptsetup luksUUID "$device")
+udevadm settle
+ilex-enroll status --json --device "/dev/disk/by-uuid/$uuid""#,
+        )?)?;
+        // The installed system's console: the harness reads its prompts from
+        // the serial port and types the credentials of the fallback boots to
+        // it, so the kernel's last `console=` has to be the port (as the
+        // Anaconda fixture's `bootloader --append` made it). Only the boot
+        // entry changes; nothing PCR 7 measures does.
+        machine.vm()?.ssh_ok(
+            r#"set -eu
+device=/dev/disk/by-partlabel/ilex-boot
+test -b "$device"
+mkdir -p /run/target-boot
+mount "$device" /run/target-boot
+trap 'umount /run/target-boot' EXIT
+entries=$(find /run/target-boot -path '*/entries/ostree-*.conf')
+test -n "$entries"
+for entry in $entries; do
+    sed -i '/^options /s/$/ console=ttyS0,115200n8/' "$entry"
+    grep -q '^options .*console=ttyS0,115200n8$' "$entry"
+done
+sync"#,
+        )?;
+        machine.power_off().context("powering the installer off")?;
+        Ok((recovery, probe, tokens, digest))
+    })();
+    let (recovery, probe, tokens, digest) = result?;
+    let (spec, root) = machine.release();
+    ensure!(root == work, "the installation's files moved");
+    let provider = LinuxProvider::new(ws.clone())?;
+    let vm = provider.create(spec.clone())?;
+    Ok(Installed {
+        fixture: Fixture {
+            provider,
+            vm,
+            spec,
+            console: None,
+        },
+        recovery,
+        probe,
+        tokens,
+        digest,
+    })
 }
 
 fn guest_json(vm: &qemu::Vm, artifacts: &Path, file: &str, script: &str) -> Result<Value> {
@@ -1414,7 +844,7 @@ fn fallback(
     let disk = work.join(format!("{mode}.qcow2"));
     cmd::run(
         Command::new("qemu-img")
-            .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b"])
+            .args(["create", "-q", "-f", "qcow2", "-F", "raw", "-b"])
             .arg(source)
             .arg(&disk),
     )?;
@@ -1481,7 +911,6 @@ fn fallback(
         original_tokens,
         expected,
         mode,
-        family == "s",
         local_diagnostic,
     );
     if mode == "no-tpm"
@@ -1559,7 +988,6 @@ fn check_fallback(
     original_tokens: &Value,
     expected: &Value,
     mode: &str,
-    preserve_data: bool,
     local_diagnostic: bool,
 ) -> Result<()> {
     fixture.private_console()?;
@@ -1812,9 +1240,6 @@ fn check_fallback(
         vm.ssh_ok("ilex-enroll layout --root /")?;
     }
     vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; test -z \"$(systemctl --failed --no-legend --plain)\"")?;
-    if preserve_data {
-        preserved_data(vm, artifacts)?;
-    }
     guest_privacy(vm, artifacts, mode, credentials)?;
     Ok(())
 }
@@ -2203,285 +1628,6 @@ exec /usr/bin/ilexctl security verify'
     Ok(())
 }
 
-fn interrupted_repair(
-    fixture: &mut Fixture,
-    artifacts: &Path,
-    passphrase: &Secret,
-    credentials: &mut Value,
-    original_tokens: &Value,
-    expected: &Value,
-) -> Result<(Secret, Value)> {
-    fixture.disk_boot()?;
-    fixture.private_console()?;
-    let vm = fixture.vm.running_mut()?;
-    let ctl = Vmctl::from_info(vm.info.clone());
-    let start = Instant::now();
-    loop {
-        let serial = fs::read_to_string(vm.info.dir.join("serial.log"))
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if serial.contains("please enter")
-            && (serial.contains("passphrase") || serial.contains("password"))
-        {
-            break;
-        }
-        ensure!(
-            vm.exited()?.is_none() && start.elapsed() < Duration::from_secs(1800),
-            "interrupted install did not retain fallback prompt"
-        );
-        thread::sleep(Duration::from_secs(2));
-    }
-    ctl.save_screenshot(&artifacts.join("interrupted-first-boot-prompt.png"))?;
-    fixture
-        .console
-        .as_mut()
-        .context("private console unavailable")?
-        .credential(passphrase)?;
-    vm.wait_ssh(Duration::from_secs(1800))?;
-    let bootc = guest_json(
-        vm,
-        artifacts,
-        "interrupted-bootc.json",
-        "bootc status --json",
-    )?;
-    ensure!(
-        bootc["status"]["booted"]["image"]["imageDigest"] == expected["digest"]
-            && bootc["spec"]["image"]["signature"] == "containerPolicy",
-        "interrupted boot did not use the exact enforcing candidate"
-    );
-    vm.ssh_ok("set -eu; test \"$(getenforce)\" = Enforcing; ilex-enroll layout --root /")?;
-    let state = guest_json(
-        vm,
-        artifacts,
-        "interrupted-first-boot-state.json",
-        "cat /var/lib/ilex/security/enrollment.json",
-    )?;
-    ensure!(
-        state["state"] == "recovery-incomplete"
-            && state["recovery"]["acknowledged"] == false
-            && state["tpm"].is_null(),
-        "interrupted install claimed completed recovery/TPM enrollment"
-    );
-    let unlock = guest_json(
-        vm,
-        artifacts,
-        "interrupted-first-boot-unlock.json",
-        "cat /run/ilex/root-unlock.json",
-    )?;
-    ensure!(
-        unlock["method"] == "fallback",
-        "interrupted boot lacks password-agent fallback evidence"
-    );
-    let uuid = state["uuid"].as_str().context("interrupted UUID missing")?;
-    ensure!(uuid.len() == 36 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
-    let token_command = format!("ilex-enroll status --json --device /dev/disk/by-uuid/{uuid}");
-    let before = guest_json(
-        vm,
-        artifacts,
-        "interrupted-first-boot-tokens.json",
-        &token_command,
-    )?;
-    ensure!(
-        before == *original_tokens,
-        "interrupted boot left half-enrolled slots or tokens"
-    );
-    vm.ssh_ok("python3 -I -S -c 'import pathlib; assert sorted(p.name for p in pathlib.Path(\"/var/lib/ilex/security\").iterdir()) == [\".pending-recovery.json\", \"enrollment.json\"]'")?;
-    vm.ssh_ok("install -Dm600 /var/lib/ilex/security/.pending-recovery.json /run/ilex-encrypted-test/acknowledged-receipt")?;
-    guest_privacy(vm, artifacts, "interrupted-after-finalisation", credentials)?;
-    let console = fixture
-        .console
-        .as_mut()
-        .context("private console unavailable")?;
-    let resumed = confirm_interrupted_key(vm, &ctl, console, passphrase, None)?;
-    ensure!(
-        credentials[1]["sha256"] == security::hash(resumed.bytes()),
-        "ordinary retry did not show the pending key again"
-    );
-    let resumed_state = guest_json(
-        vm,
-        artifacts,
-        "interrupted-resumed-state.json",
-        "cat /var/lib/ilex/security/enrollment.json",
-    )?;
-    ensure!(
-        resumed_state["recovery"]["displayed_and_acknowledged"] == true
-            && resumed_state["recovery"]["slot"] == state["recovery"]["slot"]
-            && resumed_state["recovery"]["token"] == state["recovery"]["token"],
-        "ordinary retry did not acknowledge the original pending slot"
-    );
-    vm.ssh_ok("test ! -e /var/lib/ilex/security/.pending-recovery.json")?;
-    let resumed_tokens = guest_json(
-        vm,
-        artifacts,
-        "interrupted-retry-tokens.json",
-        &token_command,
-    )?;
-    let resumed_slots = resumed_tokens["slots"]
-        .as_array()
-        .context("missing resumed slots")?;
-    let before_slots = before["slots"]
-        .as_array()
-        .context("missing original slots")?;
-    let tpm_expected = expected["local_diagnostic"] != true;
-    ensure!(
-        before_slots.iter().all(|slot| resumed_slots.contains(slot))
-            && resumed_slots.len() == before_slots.len() + usize::from(tpm_expected),
-        "ordinary retry changed more than the pending TPM slot"
-    );
-    ensure!(
-        resumed_tokens["tokens"]
-            .as_array()
-            .is_some_and(|tokens| tokens
-                .iter()
-                .filter(|token| token["type"] == "systemd-recovery")
-                .eq(before["tokens"].as_array().unwrap())),
-        "ordinary retry changed the recovery token"
-    );
-    // Recreate a stop after acknowledgement was committed and before unlink.
-    // The next ordinary completion must retire the receipt without display.
-    vm.ssh_ok(r#"set -eu
-mv /run/ilex-encrypted-test/acknowledged-receipt /var/lib/ilex/security/.pending-recovery.json
-chvt 8
-systemd-run --quiet --remain-after-exit --unit=ilex-fixture-ack-retry /usr/bin/ilex-enroll complete --root /
-timeout 90 sh -c 'until grep -aFq "Re-enter the disk passphrase" /dev/vcs8; do sleep 1; done'
-"#)?;
-    type_at_vt(vm, console, passphrase)?;
-    vm.ssh_ok(r#"set -eu
-timeout 120 sh -c 'until grep -aFq "Installation completion is ready." /dev/vcs8; do ! grep -aFq "Write this recovery key" /dev/vcs8 || exit 1; sleep 1; done'
-test ! -e /var/lib/ilex/security/.pending-recovery.json
-"#)?;
-    ctl.key("ret")?;
-    vm.ssh_ok(r#"set -eu
-timeout 30 sh -c 'until test "$(systemctl show -p SubState --value ilex-fixture-ack-retry)" = exited; do sleep 1; done'
-test "$(systemctl show -p Result --value ilex-fixture-ack-retry)" = success
-systemctl stop ilex-fixture-ack-retry
-"#)?;
-    let receipt_retry = guest_json(
-        vm,
-        artifacts,
-        "acknowledged-receipt-retry-tokens.json",
-        &token_command,
-    )?;
-    ensure!(
-        receipt_retry == resumed_tokens,
-        "acknowledged receipt cleanup changed LUKS slots or tokens"
-    );
-    let recovery = confirm_interrupted_key(
-        vm,
-        &ctl,
-        console,
-        passphrase,
-        Some(&artifacts.join("interrupted-reissue-confirmed.png")),
-    )?;
-    ensure!(
-        recovery.bytes() != resumed.bytes(),
-        "explicit reissue reused the confirmed key"
-    );
-    credentials
-        .as_array_mut()
-        .context("missing credentials")?
-        .push(json!({"length":71,"sha256":security::hash(recovery.bytes())}));
-    fs::write(
-        artifacts.join("installer-credentials.json"),
-        serde_json::to_vec_pretty(credentials)?,
-    )?;
-    let after = guest_json(
-        vm,
-        artifacts,
-        "interrupted-reissue-tokens.json",
-        &token_command,
-    )?;
-    for field in ["slots", "tokens"] {
-        let retained = after[field]
-            .as_array()
-            .context("missing reissue inventory")?;
-        ensure!(
-            resumed_tokens[field]
-                .as_array()
-                .context("missing prior inventory")?
-                .iter()
-                .all(|entry| retained.contains(entry)),
-            "reissue removed an existing LUKS {field} entry"
-        );
-    }
-    let repaired = guest_json(
-        vm,
-        artifacts,
-        "interrupted-repaired-state.json",
-        "cat /var/lib/ilex/security/enrollment.json",
-    )?;
-    ensure!(
-        repaired["recovery"]["acknowledged"] == true
-            && repaired["recovery"]["slot"] != state["recovery"]["slot"],
-        "explicit reissue did not preserve the original recovery story"
-    );
-    guest_privacy(vm, artifacts, "interrupted-repaired", credentials)?;
-    fixture.logs(artifacts, "interrupted-repaired")?;
-    poweroff(fixture, artifacts, "interrupted-repaired")?;
-    Ok((recovery, after))
-}
-
-fn confirm_interrupted_key(
-    vm: &qemu::Vm,
-    ctl: &Vmctl,
-    console: &mut PrivateConsole,
-    passphrase: &Secret,
-    screenshot: Option<&Path>,
-) -> Result<Secret> {
-    let (unit, flag) = if screenshot.is_some() {
-        ("ilex-interrupted-reissue", "--reissue-recovery")
-    } else {
-        ("ilex-interrupted-retry", "")
-    };
-    vm.ssh_ok(&format!("chvt 8; systemd-run --quiet --remain-after-exit --unit={unit} /usr/bin/ilex-enroll complete --root / --tty /dev/tty8 {flag}"))?;
-    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Re-enter the disk passphrase\" /dev/vcs8; do sleep 1; done'")?;
-    type_at_vt(vm, console, passphrase)?;
-    vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Press Enter when it is saved offline.\" /dev/vcs8; do sleep 1; done'")?;
-    // Capture cells privately, move the key into locked host memory and erase
-    // the transient buffers. Neither cells nor the key become an artifact or
-    // screenshot; matched bytes/subprocess output are never formatted.
-    let mut cells = vm.ssh("cat /dev/vcs8")?;
-    ensure!(cells.status.success(), "private local recovery read failed");
-    let key = cells
-        .stdout
-        .windows(71)
-        .find(|w| {
-            w.iter().enumerate().all(|(i, b)| {
-                if i % 9 == 8 {
-                    *b == b'-'
-                } else {
-                    b"cbdefghijklnrtuv".contains(b)
-                }
-            })
-        })
-        .context("recovery key not shown locally")?;
-    let recovery = Secret::read(ilex_enroll::secret_fd(key)?)?;
-    cells.stdout.fill(0);
-    cells.stderr.fill(0);
-    ctl.key("ret")?;
-    vm.ssh_ok("timeout 120 sh -c 'until grep -aFq \"Enter the saved recovery key to confirm\" /dev/vcs8; do sleep 1; done'")?;
-    type_at_vt(vm, console, &recovery)?;
-    vm.ssh_ok("timeout 1800 sh -c 'until grep -aFq \"Installation completion is ready.\" /dev/vcs8; do sleep 1; done'")?;
-    let mut cleared = vm.ssh("cat /dev/vcs8")?;
-    let key_visible = cleared
-        .stdout
-        .windows(recovery.bytes().len())
-        .any(|w| w == recovery.bytes());
-    let readable = cleared.status.success();
-    cleared.stdout.fill(0);
-    cleared.stderr.fill(0);
-    ensure!(
-        readable && !key_visible,
-        "recovery screen was not cleared; screenshot suppressed"
-    );
-    if let Some(path) = screenshot {
-        ctl.save_screenshot(path)?;
-    }
-    ctl.key("ret")?;
-    vm.ssh_ok(&format!("timeout 120 sh -c 'until test \"$(systemctl show -p SubState --value {unit})\" = exited; do sleep 1; done'; test \"$(systemctl show -p Result --value {unit})\" = success; systemctl stop {unit}"))?;
-    Ok(recovery)
-}
-
 fn same_tpm_mismatch(
     ws: &Workspace,
     fixture: &mut Fixture,
@@ -2706,10 +1852,6 @@ fn assertions(
         check = "installed_enrollment_self_check";
         vm.ssh_ok("ilex-enroll --self-check")
             .context("installed enrollment self-check")?;
-        if expected["preserve_data"] == true {
-            check = "installed_existing_data";
-            preserved_data(vm, artifacts)?;
-        }
         check = "installed_storage_topology";
         vm.ssh_ok(&format!("grep 'UUID={uuid}' /etc/crypttab | grep -q tpm2-device=auto; ! grep -q headless /proc/cmdline"))?;
         let topology = vm.ssh_ok("set -eu; lsblk --json --output NAME,TYPE,FSTYPE,UUID,MOUNTPOINTS; cat /etc/crypttab; cat /proc/cmdline; cat /proc/swaps; for path in /sysroot /var /boot /boot/efi; do findmnt --target \"$path\"; done")?;
@@ -2769,95 +1911,21 @@ fn clear_evidence(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-fn preserved_data(vm: &qemu::Vm, artifacts: &Path) -> Result<()> {
-    vm.ssh_ok(
-        r#"set -eu
-device=/dev/disk/by-partlabel/ilex-e2e-keep
-test -b "$device"
-mkdir -p /run/ilex-preserved-check
-mount -o ro "$device" /run/ilex-preserved-check
-trap 'umount /run/ilex-preserved-check' EXIT
-test "$(cat /run/ilex-preserved-check/sentinel)" = ilex-public-sentinel-v1
-"#,
-    )?;
-    fs::write(
-        artifacts.join("preserved-data.json"),
-        b"{\"sentinel_preserved\":true,\"partition\":\"ilex-e2e-keep\"}\n",
-    )?;
-    Ok(())
-}
-
-fn run(preserve_data: bool, interrupted: bool, local_diagnostic: bool) -> Result<()> {
-    run_layout(preserve_data, interrupted, local_diagnostic, false)
-}
-
-fn run_layout(
-    preserve_data: bool,
-    interrupted: bool,
-    local_diagnostic: bool,
-    layout_refusal: bool,
-) -> Result<()> {
-    run_fixture(
-        preserve_data,
-        interrupted,
-        local_diagnostic,
-        layout_refusal,
-        FixtureCase::Standard,
-    )
-}
-
-enum FixtureCase {
-    Standard,
-    ProfileSetup,
-    UpgradeRollback,
-}
-
-fn run_fixture(
-    preserve_data: bool,
-    interrupted: bool,
-    local_diagnostic: bool,
-    layout_refusal: bool,
-    case: FixtureCase,
-) -> Result<()> {
+/// The release gates' tiers. Both install through the live installer of the
+/// GNOME edition (`ILEX_ISO_NEXT`), whose helper installs from the registry:
+///
+/// * `security::encrypted_install` (`lifecycle` false): `ILEX_IMAGE` is the
+///   published, signed `ghcr.io/reidond/ilex@sha256:…` the installer's tag
+///   resolves to; the installation must pin exactly that digest.
+/// * `security::upgrade_rollback` (`lifecycle` true): the baseline
+///   (`ILEX_ENCRYPTED_UPGRADE_FROM`, a signed digest, and `ILEX_ENCRYPTED_UPGRADE_TAG`,
+///   the registry tag the installer installs it by) is installed, then
+///   upgraded to `ILEX_IMAGE` and rolled back.
+fn run_fixture(lifecycle: bool) -> Result<()> {
     ilex_enroll::harden()?;
-    let profile_setup = matches!(case, FixtureCase::ProfileSetup);
-    let lifecycle = matches!(case, FixtureCase::UpgradeRollback);
-    let selected_profile = profile_setup || lifecycle;
-    let published_install = std::env::var_os("ILEX_ENCRYPTED_PUBLISHED_INSTALL").is_some();
-    ensure!(
-        !published_install
-            || (matches!(case, FixtureCase::Standard)
-                && !preserve_data
-                && !interrupted
-                && !local_diagnostic
-                && !layout_refusal),
-        "published encrypted qualification requires the ordinary clean-disk case"
-    );
-    ensure!(
-        !local_diagnostic || std::env::var_os("CI").is_none(),
-        "local diagnostic is outside the hosted qualification"
-    );
-    ensure!(
-        !profile_setup || std::env::var_os("ILEX_PRIVATE_FINGERPRINTS").is_some(),
-        "set ILEX_PRIVATE_FINGERPRINTS to a private directory for the profile evidence seal"
-    );
     let ws = common::workspace()?;
-    let tier = if profile_setup {
-        "installer-profile-setup"
-    } else if lifecycle {
+    let tier = if lifecycle {
         "encrypted-upgrade-rollback"
-    } else if layout_refusal {
-        "enrollment-diagnostic-layout-refusal"
-    } else if local_diagnostic && interrupted {
-        "enrollment-diagnostic-interrupted"
-    } else if local_diagnostic && preserve_data {
-        "enrollment-diagnostic-existing-space"
-    } else if local_diagnostic {
-        "enrollment-diagnostic-install"
-    } else if interrupted {
-        "encrypted-interrupted"
-    } else if preserve_data {
-        "encrypted-existing-space"
     } else {
         "encrypted-install"
     };
@@ -2902,328 +1970,114 @@ fn run_fixture(
             artifacts.join("final-artifact-privacy.json"),
             serde_json::to_vec_pretty(&scan)?,
         )?;
-        if !local_diagnostic || profile_setup {
-            save_private_fingerprints(tier, export_fingerprints)?;
-        }
+        save_private_fingerprints(tier, export_fingerprints)?;
         *stage = "complete";
         Ok(())
     };
     let mut active_fixture = None;
     let mut result = (|| -> Result<()> {
-        let iso = PathBuf::from(std::env::var_os("ILEX_ISO").context("ILEX_ISO required")?);
-        ensure!(iso.is_file(), "exact installer ISO missing");
-        let disk = work.join("root.qcow2");
-        cmd::run(
-            Command::new("qemu-img")
-                .args(["create", "-q", "-f", "qcow2"])
-                .arg(&disk)
-                .arg("40G"),
-        )?;
-        let mut config = VmConfig::new(
-            if profile_setup {
-                "profile-setup"
-            } else if lifecycle {
-                "encrypted-upgrade"
-            } else if layout_refusal {
-                "ed-l"
-            } else {
-                match (local_diagnostic, interrupted, preserve_data) {
-                    (true, true, _) => "ed-i",
-                    (true, false, true) => "ed-s",
-                    (true, false, false) => "ed-a",
-                    (false, true, _) => "encrypted-interrupted",
-                    (false, false, true) => "encrypted-space",
-                    (false, false, false) => "encrypted-install",
-                }
-            },
-            &disk,
+        let iso = PathBuf::from(
+            std::env::var_os("ILEX_ISO_NEXT").context("ILEX_ISO_NEXT required: the GNOME ISO")?,
         );
-        config.snapshot = false;
-        config.memory = "6G".into();
-        config.cdrom = Some(iso.clone());
-        let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
-        spec.run = run.clone();
-        if !local_diagnostic {
-            spec.secure_boot = Requirement::Required;
-            spec.tpm = TpmLifecycle::Persistent {
-                bundle_id: run.clone(),
-            };
-        }
-        let provider = LinuxProvider::new(ws.clone())?;
-        let caps = provider.probe(&spec)?;
-        fs::write(
-            artifacts.join("backend.json"),
-            serde_json::to_vec_pretty(&caps)?,
-        )?;
-        if !local_diagnostic {
-            caps.require(Capability::FirmwareEnforcement)?;
-            caps.require(Capability::PersistentTpm)?; // Exact 6 GiB / 2 vCPU profile.
-        }
+        ensure!(iso.is_file(), "exact installer ISO missing");
         stage = "fixture";
         let image = common::image()?;
-        let v1 = if lifecycle {
-            std::env::var("ILEX_ENCRYPTED_UPGRADE_FROM")
-                .context("set ILEX_ENCRYPTED_UPGRADE_FROM to the qualifying rollback image")?
-        } else {
-            image.clone()
-        };
-        let (registry, mut expected) = if published_install {
-            let digest = image
+        let digest_of = |reference: &str| -> Result<String> {
+            reference
                 .strip_prefix("ghcr.io/reidond/ilex@")
                 .filter(|digest| lifecycle::valid_digest(digest))
-                .context("published encrypted qualification needs the verified digest")?;
-            (
-                None,
-                json!({
-                    "source":image, "digest":digest, "published_source":true
-                }),
-            )
-        } else {
-            let (registry, expected) = registry(&ws, &v1, &work)?;
-            (Some(registry), expected)
+                .map(str::to_owned)
+                .with_context(|| {
+                    format!("the encrypted gates need a signed ghcr.io/reidond/ilex@sha256:… reference, not {reference}")
+                })
         };
-        let mut update = lifecycle
-            .then(|| {
-                registry
-                    .as_ref()
-                    .context("lifecycle registry missing")?
-                    .push(&image, "update")
-            })
-            .transpose()?;
-        if let Some(update) = &mut update {
+        let (mut expected, registry, mut update, testing_tag) = if lifecycle {
+            let v1 = std::env::var("ILEX_ENCRYPTED_UPGRADE_FROM")
+                .context("set ILEX_ENCRYPTED_UPGRADE_FROM to the qualifying rollback image")?;
+            let tag = std::env::var("ILEX_ENCRYPTED_UPGRADE_TAG").context(
+                "set ILEX_ENCRYPTED_UPGRADE_TAG to the registry tag of the rollback image",
+            )?;
+            let digest = digest_of(&v1)?;
+            let registry = registry(&ws, &work)?;
+            let mut update = registry.push(&image, "update")?;
             let inputs = lifecycle::record_inputs(&artifacts, &v1, &image)?;
-            expected["boot_payload"] = inputs["baseline"]["boot_payload"].clone();
             update["boot_payload"] = inputs["update"]["boot_payload"].clone();
             update["fixture_kernel"] = inputs["update"]["fixture_kernel"].clone();
-        }
-        expected["preserve_data"] = json!(preserve_data);
-        expected["interrupt_completion"] = json!(interrupted);
-        expected["local_diagnostic"] = json!(local_diagnostic);
-        expected["layout_refusal"] = json!(layout_refusal);
-        if selected_profile {
-            let labels = ilex_devkit::machine::image_machine_label(&v1)?;
-            let machine = labels
-                .as_deref()
-                .context("candidate machine label missing")?;
-            let catalogue: ilex_devkit::installer::Table =
-                serde_json::from_slice(&fs::read(iso.with_file_name("compositions.json"))?)?;
-            let composition = format!("{machine}.gnome");
-            ensure!(
-                catalogue
-                    .compositions
-                    .iter()
-                    .any(|row| row.tag == composition)
-                    && catalogue.profiles.contains_key("andriishafar"),
-                "the installed composition and profile must be offered by the exact ISO"
-            );
-            expected["composition"] = json!(composition);
-            expected["profile_setup"] = json!(true);
-            expected["profile_offline"] = json!(profile_setup);
-        }
-        let tpm_slot_budget = !lifecycle && !local_diagnostic && !interrupted && !preserve_data;
-        expected["tpm_slot_budget"] = json!(tpm_slot_budget);
+            let expected = json!({
+                "source": v1, "digest": digest, "published_source": true,
+                "boot_payload": inputs["baseline"]["boot_payload"],
+            });
+            (expected, Some(registry), Some(update), Some(tag))
+        } else {
+            let digest = digest_of(&image)?;
+            let expected = json!({"source": image, "digest": digest, "published_source": true});
+            (expected, None, None, None)
+        };
+        expected["preserve_data"] = json!(false);
+        expected["interrupt_completion"] = json!(false);
+        expected["local_diagnostic"] = json!(false);
+        expected["layout_refusal"] = json!(false);
+        expected["tpm_slot_budget"] = json!(false);
         fs::write(
             artifacts.join("candidate.json"),
             serde_json::to_vec_pretty(&expected)?,
         )?;
-        let maintenance = selected_profile.then(profile_setup::secret).transpose()?;
-        let (seed_path, passphrase) = seed(&work, &expected, maintenance.as_ref())?;
-        credentials = if let Some(maintenance) = &maintenance {
-            fingerprints(&[&passphrase, maintenance])
-        } else {
-            fingerprints(&[&passphrase])
-        };
-        spec.additional_disks.push(ilex_devkit::core::AttachedDisk {
-            path: seed_path.clone(),
-            format: ilex_devkit::core::DiskFormat::Raw,
-            blank_bytes: None,
-            read_only: false,
-        });
-        let vm = provider.create(spec.clone())?;
-        let fixture = active_fixture.insert(Fixture {
-            provider,
-            vm,
-            spec,
-            console: None,
-        });
+        let passphrase = random_secret()?;
+        let maintenance = random_secret()?;
         stage = "installation";
-        let deadline = Duration::from_secs(
-            std::env::var("ILEX_ENCRYPTED_INSTALL_TIMEOUT")
-                .unwrap_or_else(|_| "10800".into())
-                .parse()?,
+        let installed = install_with_helper(
+            &ws,
+            &work,
+            &artifacts,
+            &passphrase,
+            &maintenance,
+            testing_tag.as_deref(),
+            lifecycle,
         );
-        let installed = install(fixture, &artifacts, deadline, interrupted);
-        let installer_logs = fixture.logs(&artifacts, "installer");
-        if installed.is_err() {
-            fixture.provider.stop(&mut fixture.vm)?;
-            // A missing/invalid snapshot adds no public data and never masks
-            // the original failed qualification.
-            let _ = failure_snapshot(&seed_path, &published);
-            for file in ["leak-scan.json", "finaliser-leak-scan.json"] {
-                let _ = extract(&seed_path, &artifacts, file);
-            }
-        }
-        installed?;
-        installer_logs?;
-        fixture.provider.stop(&mut fixture.vm)?;
+        let Installed {
+            fixture,
+            recovery,
+            probe: installer_probe,
+            tokens: original_tokens,
+            digest,
+        } = installed?;
+        let fixture = active_fixture.insert(fixture);
         stage = "installer_evidence";
-        let recovery =
-            recovery_secret(&seed_path, &work).context("read installer recovery envelope")?;
-        let mut installed_secrets = vec![&passphrase, &recovery];
-        installed_secrets.extend(maintenance.as_ref());
+        ensure!(
+            digest == expected["digest"].as_str().unwrap_or_default(),
+            "the installer pinned {digest}, not the image under test"
+        );
+        // The credentials of this run, as the evidence seal wants them.
+        let mut installed_secrets = vec![&passphrase, &recovery, &maintenance];
         credentials = fingerprints(&installed_secrets);
-        if layout_refusal {
-            let interrupted = recovery_secret_named(&seed_path, &work, "layout-interrupted.oaep")?;
-            ensure!(
-                interrupted.bytes() == recovery.bytes(),
-                "LVM retry did not resume the pending key in the last slot"
-            );
-            let proof: Value =
-                serde_json::from_slice(&extract(&seed_path, &artifacts, "layout-retry.json")?)?;
-            ensure!(
-                proof["discovery_failure_retryable"] == true
-                    && proof["legacy_uuid_bound"] == true
-                    && proof["display_interrupted_before_acknowledgement"] == true
-                    && proof["mistype_with_no_free_slot"] == true,
-                "unsupported-layout retry proof incomplete"
-            );
-            let full: Value =
-                serde_json::from_slice(&extract(&seed_path, &artifacts, "full-slot.json")?)?;
-            ensure!(
-                full["occupied_slots"] == 32
-                    && full["reissue_refused_before_prompt"] == true
-                    && full["ordinary_completion_passed"] == true
-                    && full["acknowledged_recovery_unchanged"] == true
-                    && full["luks_header_unchanged"] == true,
-                "full-slot recovery retry proof incomplete"
-            );
-        }
-        if tpm_slot_budget {
-            let proof: Value =
-                serde_json::from_slice(&extract(&seed_path, &artifacts, "tpm-slot-budget.json")?)?;
-            ensure!(
-                proof["before"]["slots"]
-                    .as_array()
-                    .is_some_and(|slots| slots.len() == 31)
-                    && proof["reissue_refused_before_prompt"] == true
-                    && proof["header_unchanged"] == true
-                    && proof["ordinary_tpm_completion_passed"] == true,
-                "one-free-slot TPM completion proof incomplete"
-            );
-        }
+        fs::write(
+            artifacts.join("installer-credentials.json"),
+            serde_json::to_vec_pretty(&credentials)?,
+        )?;
         let mut export_fingerprints: Vec<_> = installed_secrets
-            .into_iter()
+            .drain(..)
             .map(private_fingerprint)
             .collect();
-        let recorded: Value =
-            serde_json::from_slice(&extract(&seed_path, &artifacts, "credentials.json")?)?;
         ensure!(
-            recorded == credentials,
-            "private credential fingerprints differ"
+            installer_probe["verdict"] == "eligible",
+            "installer probe unavailable"
         );
-        let installer_probe: Value =
-            serde_json::from_slice(&extract(&seed_path, &artifacts, "probe.json")?)?;
-        if local_diagnostic {
-            ensure!(
-                installer_probe["secure_boot"] != true && installer_probe["tpm2"] == false,
-                "local diagnostic guest must use nonsecure firmware and no TPM"
-            );
-        } else {
-            ensure!(
-                installer_probe["verdict"] == "eligible",
-                "installer probe unavailable"
-            );
-            let replay = security::replay_pcr7(&extract(&seed_path, &artifacts, "eventlog.bin")?)?;
-            ensure!(
-                installer_probe["pcr7"] == replay.sha256,
-                "installer PCR replay mismatch"
-            );
-            fs::write(
-                artifacts.join("installer-replay.json"),
-                serde_json::to_vec_pretty(&replay)?,
-            )?;
-        }
-        for file in [
-            "layout.json",
-            "enrollment.json",
-            "setup.json",
-            "versions.txt",
-            "leak-scan.json",
-            "finaliser-leak-scan.json",
-            "tokens.json",
-            "preload-check.json",
-        ] {
-            extract(&seed_path, &artifacts, file)?;
-        }
-        let scan: Value =
-            serde_json::from_slice(&fs::read(artifacts.join("installer-leak-scan.json"))?)?;
-        let final_scan: Value = serde_json::from_slice(&fs::read(
-            artifacts.join("installer-finaliser-leak-scan.json"),
-        )?)?;
-        if interrupted {
-            ensure!(
-                final_scan["target_mounts_retained"] == true
-                    && final_scan["target_directories_checked"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0),
-                "interrupted shutdown did not retain the target scan roots"
-            );
-        }
-        for scan in [scan, final_scan] {
-            ensure!(
-                scan["secret_found"] == false
-                    && scan["journal_scanned"] == true
-                    && scan["read_errors"] == 0
-                    && scan["credentials_checked"] == if selected_profile { 3 } else { 2 },
-                "private guest secret scan failed"
-            );
-        }
-        let original_tokens: Value =
-            serde_json::from_slice(&fs::read(artifacts.join("installer-tokens.json"))?)?;
-        if profile_setup {
-            stage = "profile_setup_no_tpm";
-            let preload: Value =
-                serde_json::from_slice(&fs::read(artifacts.join("installer-preload-check.json"))?)?;
-            ensure!(
-                preload["apps_result"]
-                    .as_i64()
-                    .is_some_and(|status| status != 0),
-                "offline app preload did not exercise the failure path"
-            );
-            let daily = profile_setup::secret()?;
-            let maintenance = maintenance
-                .as_ref()
-                .context("installer maintenance credential missing")?;
-            credentials = fingerprints(&[&passphrase, &recovery, maintenance, &daily]);
-            let profile_result = profile_setup::run(
-                fixture,
-                &artifacts,
-                &passphrase,
-                &daily,
-                maintenance,
-                &credentials,
-                &expected,
-            );
-            if profile_result.is_err() {
-                let _ = fixture.logs(&artifacts, "profile");
-            }
-            profile_result?;
-            export_fingerprints.push(private_fingerprint(&daily));
-            return finish(
-                fixture,
-                &iso,
-                &credentials,
-                &export_fingerprints,
-                &mut stage,
-            );
-        }
-        if let Some(update) = update {
+        fs::write(
+            artifacts.join("installer-probe.json"),
+            serde_json::to_vec_pretty(&installer_probe)?,
+        )?;
+        fs::write(
+            artifacts.join("installer-tokens.json"),
+            serde_json::to_vec_pretty(&original_tokens)?,
+        )?;
+        let disk = match &fixture.spec.boot {
+            ilex_devkit::core::BootSource::Disk { path, .. } => path.clone(),
+            other => bail!("the installed VM boots from {other:?}"),
+        };
+        if let Some(update) = update.take() {
             stage = "encrypted_lifecycle";
             let home_password = lifecycle::home_password()?;
-            let maintenance = maintenance
-                .as_ref()
-                .context("installer maintenance credential missing")?;
-            credentials = fingerprints(&[&passphrase, &recovery, maintenance, &home_password]);
+            credentials = fingerprints(&[&passphrase, &recovery, &maintenance, &home_password]);
             export_fingerprints.push(private_fingerprint(&home_password));
             fs::write(
                 artifacts.join("home-credentials.json"),
@@ -3251,51 +2105,21 @@ fn run_fixture(
                 &mut stage,
             );
         }
-        if local_diagnostic && !interrupted {
-            stage = "diagnostic_fallback";
-            fallback(
-                &ws,
-                &disk,
-                &fixture.spec,
-                &work,
-                &artifacts,
-                if layout_refusal {
-                    &recovery
-                } else {
-                    &passphrase
-                },
-                &credentials,
-                &installer_probe,
-                &original_tokens,
-                &expected,
-                if layout_refusal {
-                    "layout-recovery"
-                } else {
-                    "no-tpm"
-                },
-                None,
-            )?;
-            fixture.provider.destroy_owned(&mut fixture.vm)?;
-            stage = "diagnostic_complete";
-            return Ok(());
-        }
-        if !local_diagnostic {
-            stage = "pcr_mismatch_first_boot";
-            fallback(
-                &ws,
-                &disk,
-                &fixture.spec,
-                &work,
-                &artifacts,
-                &passphrase,
-                &credentials,
-                &installer_probe,
-                &original_tokens,
-                &expected,
-                "pcr-mismatch",
-                None,
-            )?;
-        }
+        stage = "pcr_mismatch_first_boot";
+        fallback(
+            &ws,
+            &disk,
+            &fixture.spec,
+            &work,
+            &artifacts,
+            &passphrase,
+            &credentials,
+            &installer_probe,
+            &original_tokens,
+            &expected,
+            "pcr-mismatch",
+            None,
+        )?;
         stage = "recovery_key_boot";
         fallback(
             &ws,
@@ -3311,79 +2135,51 @@ fn run_fixture(
             "recovery",
             Some(&passphrase),
         )?;
-        if interrupted {
-            stage = "interrupted_completion_repair";
-            let (reissued, repaired_tokens) = interrupted_repair(
-                fixture,
-                &artifacts,
-                &passphrase,
-                &mut credentials,
-                &original_tokens,
-                &expected,
-            )?;
-            export_fingerprints.push(private_fingerprint(&reissued));
-            stage = "reissued_recovery_key_boot";
-            fallback(
-                &ws,
-                &disk,
-                &fixture.spec,
-                &work,
-                &artifacts,
-                &reissued,
-                &credentials,
-                &installer_probe,
-                &repaired_tokens,
-                &expected,
-                "reissued-recovery",
-                None,
-            )?;
-        } else {
-            stage = "first_installed_boot";
-            fixture.disk_boot()?;
-            let booted = assertions(fixture, &artifacts, &expected, &installer_probe);
-            fixture.logs(&artifacts, "installed")?;
-            booted?;
-            guest_privacy(
-                fixture.vm.running_mut()?,
-                &artifacts,
-                "installed-after-finalisation",
-                &credentials,
-            )?;
-            stage = "cold_restart";
-            poweroff(fixture, &artifacts, "installed")?;
-            fixture.disk_boot()?;
-            let cold = artifacts.join("cold");
-            fs::create_dir_all(&cold)?;
-            assertions(fixture, &cold, &expected, &installer_probe)?;
-            guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
-            fixture.logs(&artifacts, "cold")?;
-            poweroff(fixture, &artifacts, "cold")?;
-            stage = "same_tpm_policy_mismatch";
-            same_tpm_mismatch(
-                &ws,
-                fixture,
-                &artifacts,
-                &passphrase,
-                &credentials,
-                &installer_probe,
-                &original_tokens,
-            )?;
-            stage = "no_tpm_fallback";
-            fallback(
-                &ws,
-                &disk,
-                &fixture.spec,
-                &work,
-                &artifacts,
-                &passphrase,
-                &credentials,
-                &installer_probe,
-                &original_tokens,
-                &expected,
-                "no-tpm",
-                None,
-            )?;
-        }
+        stage = "first_installed_boot";
+        fixture.disk_boot()?;
+        let booted = assertions(fixture, &artifacts, &expected, &installer_probe);
+        fixture.logs(&artifacts, "installed")?;
+        booted?;
+        guest_privacy(
+            fixture.vm.running_mut()?,
+            &artifacts,
+            "installed-after-finalisation",
+            &credentials,
+        )?;
+        stage = "cold_restart";
+        poweroff(fixture, &artifacts, "installed")?;
+        fixture.disk_boot()?;
+        let cold = artifacts.join("cold");
+        fs::create_dir_all(&cold)?;
+        assertions(fixture, &cold, &expected, &installer_probe)?;
+        guest_privacy(fixture.vm.running_mut()?, &cold, "cold", &credentials)?;
+        fixture.logs(&artifacts, "cold")?;
+        poweroff(fixture, &artifacts, "cold")?;
+        stage = "same_tpm_policy_mismatch";
+        same_tpm_mismatch(
+            &ws,
+            fixture,
+            &artifacts,
+            &passphrase,
+            &credentials,
+            &installer_probe,
+            &original_tokens,
+        )?;
+        stage = "no_tpm_fallback";
+        fallback(
+            &ws,
+            &disk,
+            &fixture.spec,
+            &work,
+            &artifacts,
+            &passphrase,
+            &credentials,
+            &installer_probe,
+            &original_tokens,
+            &expected,
+            "no-tpm",
+            None,
+        )?;
         finish(
             fixture,
             &iso,
@@ -3455,7 +2251,7 @@ fn run_fixture(
             result = Err(error.context("publishing privacy-checked evidence"));
         }
     }
-    // Credentials, signing key, seed, disk and unverified diagnostics are never
+    // Credentials, signing key, disk and unverified diagnostics are never
     // artifacts. Cleanup failure must not leave a passing result behind.
     if let Err(error) = fs::remove_dir_all(&work) {
         stage = "cleanup";
@@ -3471,7 +2267,7 @@ fn run_fixture(
     fs::write(
         published.join("result.json"),
         serde_json::to_vec_pretty(
-            &json!({"qualification": if result.is_ok() && !local_diagnostic {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|_|"private failure details suppressed"), "failure_summary":failure_summary, "storage":if preserve_data {"existing-free-space"} else if interrupted {"interrupted-completion"} else {"automatic-empty-disk"}, "scope":if local_diagnostic {"local nonsecure guest with no TPM"} else {"exact ISO, signed local candidate, installed boot; physical hardware remains unqualified"}}),
+            &json!({"qualification": if result.is_ok() {"passed"} else {"unqualified"}, "stage":stage, "elapsed_seconds":start.elapsed().as_secs_f64(), "error":result.as_ref().err().map(|_|"private failure details suppressed"), "failure_summary":failure_summary, "storage":"automatic-empty-disk", "scope":"exact live installer ISO, published signed image, installed boot; physical hardware remains unqualified"}),
         )?,
     )?;
     result.map_err(|_| {

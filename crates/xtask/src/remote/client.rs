@@ -1,5 +1,5 @@
 use super::{Command, Job, Operation, source};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use ilex_devkit::core::{TransferChunk, TransferOperation};
 use ilex_devkit::{Workspace, core::digest};
 use ilex_tooling_windows::transport::{self, Transport};
@@ -170,19 +170,6 @@ pub fn execute(ws: &Workspace, mut command: Command) -> Result<Option<PathBuf>> 
     if let Command::ImportKache { archive, .. } = &mut command {
         let archive = archive.take().context("missing local kache archive")?;
         inputs.insert("kache".into(), staged.file(&archive)?);
-    }
-    // The Anaconda ISO is staged for its own `iso::` trials only: the next
-    // installer's `iso::next…` filters also contain "iso" (and are refused by
-    // `validate` before this point).
-    if matches!(&command, Command::Test(a) if a.filters.iter().any(|f| f.contains("iso") && !crate::iso_next::is_next_filter(f)))
-        && let Some(iso) = std::env::var_os("ILEX_ISO").filter(|s| !s.is_empty())
-    {
-        let iso = PathBuf::from(iso);
-        inputs.insert("iso".into(), staged.file(&iso)?);
-        inputs.insert(
-            "catalogue".into(),
-            staged.file(&iso.with_file_name("compositions.json"))?,
-        );
     }
     let environment = ENVIRONMENT
         .iter()
@@ -488,20 +475,14 @@ fn validate(ws: &Workspace, command: &Command) -> Result<()> {
             "ephemeral VM shell needs a terminal or a command after --"
         );
     }
-    if let Command::Iso(args) = command {
-        ensure!(!args.next, "{}", crate::iso_next::REMOTE_UNSUPPORTED);
-        // CI is deliberately absent from the remote environment. Apply the
-        // existing local-only testing-tag rule before crossing that boundary.
-        ilex_devkit::installer::table(&ws.root, args.testing_tag.as_deref())?;
+    if matches!(command, Command::Iso(_)) {
+        bail!("{}", crate::iso::REMOTE_UNSUPPORTED);
     }
     if let Command::Test(args) = command {
         ensure!(
-            !args
-                .filters
-                .iter()
-                .any(|f| crate::iso_next::is_next_filter(f)),
+            !args.filters.iter().any(|f| crate::iso::needs_iso(f)),
             "{}",
-            crate::iso_next::REMOTE_UNSUPPORTED
+            crate::iso::REMOTE_UNSUPPORTED
         );
         let native: Vec<_> = args
             .filters

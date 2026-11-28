@@ -97,13 +97,8 @@ fn main() {
     {
         trials.extend(config::trials());
     }
-    // Opt-in: builds an installer ISO and runs an install (tens of minutes),
-    // so it only exists when a filter asks for it (`cargo ilexctl test iso::`).
-    if filters.iter().any(|f| f.contains("iso")) {
-        trials.extend(iso::trials());
-    }
-    // The next installer's live ISO has trials of its own, named explicitly:
-    // `iso::` alone (the release gate) must not boot an ISO it was not given.
+    // The live installer's ISOs have trials of their own, named explicitly:
+    // `iso::` alone must not boot an ISO it was not given.
     if filters.iter().any(|f| f.contains("iso::next")) {
         trials.extend(iso_next::trials());
     }
@@ -149,13 +144,6 @@ fn main() {
             })
             .count()
     };
-    if !args.list
-        && will_run("iso::") > will_run("iso::next")
-        && let Err(error) = iso::preflight()
-    {
-        eprintln!("{error:#}");
-        std::process::exit(1);
-    }
     ephemeral::expect(will_run("ephemeral::"));
     apps::expect(will_run("apps::"));
     // `tool::installed_system` boots a disk of its own, not the tier's VM.

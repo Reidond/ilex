@@ -1,23 +1,31 @@
-//! `cargo ilexctl iso`: build the ilex installer ISO.
+//! `ilexctl iso`: build the live installer ISOs, one per edition.
 //!
-//! A network installer: `image-builder` turns `installer/Containerfile` (a
-//! fedora-bootc image with Anaconda in it) into the ISO, and the kickstart
-//! defaults make Anaconda install the newest installer composition from `image.toml`
-//! straight from the registry (`--source-imgref registry:…`) and track it
-//! afterwards (`--target-imgref`). The ISO carries no ilex image, so it stays
-//! current by itself and fits GitHub's 2 GiB limit per release asset.
+//! `installer/next/Containerfile` is fedora-bootc plus one edition's
+//! compositor and interface (no Anaconda, Cockpit or Firefox), and
+//! `image-builder … generic-iso` turns it into a live ISO. Each edition installs
+//! its own composition (`generic.gnome`, `generic.kde`) from the registry, so
+//! an ISO carries no ilex image: it stays current by itself and fits GitHub's
+//! 2 GiB limit per release asset.
 //!
-//! Next to the ISO this writes `ilex-installer.iso.sha256` and
-//! `release-notes.md`; the workflow publishes the three as a GitHub Release
-//! (main only), and a branch run uploads them as a workflow artifact.
+//! The identifier (`gnome`, `kde`) names the image stage, its files below
+//! `installer/next/editions/` and the work directory. What a person reads as the
+//! edition's name is `installer/next/editions.toml`'s `display-name` (`ilex
+//! Glabra`, `ilex Kingiana`), the only place it lives; the build writes it into
+//! the image as `edition.json`, and the ISO and release asset are named after it
+//! (`ilex-glabra-installer.iso`).
 //!
-//! `--due` builds nothing: it says whether a new ISO is worth building (and
+//! `ilexctl iso` writes, below `--output-dir` (default `<state dir>/iso`), each
+//! edition's ISO and its `.sha256`, `ilex-installer.iso` (the transition alias:
+//! the GNOME edition's exact bytes, the name the Anaconda installer released
+//! under) and its checksum, `compositions.json` and `release-notes.md`. The
+//! workflow publishes them as a GitHub Release (main only); a branch run keeps
+//! them as a workflow artifact.
+//!
+//! `--due` builds nothing: it says whether a new release is worth building (and
 //! writes `iso_due=` to `$GITHUB_OUTPUT`) by looking at the latest
-//! `installer-*` release: none yet, `installer/` (or this module) changed
-//! since it, or it is a week old (to pick up Fedora and Anaconda fixes).
-//!
-//! `--next` builds the live installer of the next installer instead (no
-//! Anaconda; see `iso_next`). It is built beside this ISO and never released.
+//! `installer-*` release: none yet, an edition's inputs differ from the
+//! `installer-fingerprint-<edition>:` line of its notes, or it is a week old
+//! (to pick up Fedora fixes).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,18 +37,31 @@ use sha2::{Digest, Sha256};
 
 use crate::registry;
 
-/// Basename of the ISO that is built and released.
-const ISO_NAME: &str = "ilex-installer";
+/// The edition built when none is named.
+pub const DEFAULT_EDITION: &str = "gnome";
+/// The KDE edition (`ilex Kingiana`): its `iso::next_kde…` trials boot its ISO.
+pub const KDE_EDITION: &str = "kde";
+/// The name the Anaconda installer released under. It stays a release asset
+/// with the GNOME edition's bytes until the owner retires the old link.
+const ALIAS: &str = "ilex-installer";
+/// A release asset has to stay under GitHub's limit of 2 GiB.
+const ISO_LIMIT: u64 = 2 << 30;
 /// Repo paths (relative to the checkout) that make one ISO differ from the
-/// next.
+/// next. `installer/next` is read per edition (the other editions' directories
+/// and `editions.toml` are left out; the edition's own display name is hashed).
 const INSTALLER_INPUTS: &[&str] = &[
     "users",
     "build/compose.py",
     "build/image_tree.py",
-    "installer",
+    "installer/next",
+    "installer/setup",
     "crates/xtask/src/iso.rs",
     "crates/ilex-tooling-core/src/installer.rs",
     "crates/ilex-tooling-core/src/config.rs",
+    // What the live image's Containerfile compiles.
+    "crates/ilex-installer",
+    "crates/ilex-installerd",
+    "crates/ilex-installer-flow",
     // The catalogue's types and their validator write compositions.json.
     "crates/ilex-installer-model",
     "crates/ilex-enroll",
@@ -49,34 +70,41 @@ const INSTALLER_INPUTS: &[&str] = &[
     "rootfs/etc/containers/registries.d/ilex.yaml",
     "rootfs/etc/pki/containers/ilex.pub",
 ];
-/// Paths below [`INSTALLER_INPUTS`] that belong to another product: the next
-/// installer (`iso --next`) has its own build and is never part of this ISO.
-const FINGERPRINT_EXCLUDED: &[&str] = &["installer/next"];
-/// The line of a release's notes that says what the installer was built from.
-const FINGERPRINT_LINE: &str = "installer-fingerprint: ";
+/// The line of a release's notes that says what an edition's ISO was built
+/// from: `installer-fingerprint-gnome: sha256:…`.
+const FINGERPRINT_LINE: &str = "installer-fingerprint-";
 /// Release tags are `installer-YYYYMMDD` (with a `-N` suffix on a second one
 /// the same day).
 const RELEASE_TAG_PREFIX: &str = "installer-";
+/// Boot menu: label of the volume (at most 32 bytes in ISO 9660) and the two
+/// entries the plan sets. The second leaves the display to the firmware's
+/// framebuffer; the session then draws on the CPU (`GSK_RENDERER=cairo`).
+/// Both tell the initramfs not to activate LVM, assemble MD arrays, open LUKS
+/// volumes or set up DM RAID: whatever an earlier installation left on a disk
+/// stays inactive, so the disk is offered (the helper refuses a disk the
+/// running system holds).
+const MENU: &str = "# Generated by cargo ilexctl iso.\nlabel: \"ilex-installer-{edition}\"\ngrub2:\n  timeout: 10\n  entries:\n    - name: \"Install ilex\"\n      linux: ${kernelpath} ${root} quiet rd.lvm=0 rd.md=0 rd.luks=0 rd.dm=0\n      initrd: ${initrdpath}\n    - name: \"Install ilex (basic graphics)\"\n      linux: ${kernelpath} ${root} quiet rd.lvm=0 rd.md=0 rd.luks=0 rd.dm=0 nomodeset\n      initrd: ${initrdpath}\n";
+/// The `osbuild` of the ISO: checkpoints, and the labels the live root needs
+/// to boot SELinux enforcing.
+const OSBUILD: Osbuild = Osbuild {
+    script: "installer/next/osbuild-selinux",
+    dir: "image-builder-bin-next",
+};
 
 #[derive(clap::Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Args {
-    /// Directory the ISO is written to (default: `<state dir>/iso`)
+    /// Directory the ISOs, checksums and release notes are written to
+    /// (default: `<state dir>/iso`)
     #[arg(long)]
     pub output_dir: Option<PathBuf>,
-    /// Local only: install this signed ilex tag for every composition
-    #[arg(long)]
-    pub testing_tag: Option<String>,
+    /// The edition to build (repeatable; default: every edition of
+    /// `installer/next/editions.toml`)
+    #[arg(long = "edition", conflicts_with_all = ["due", "check_registry"])]
+    pub editions: Vec<String>,
     /// Check that every offered composition and its signature tag exist
-    #[arg(long, conflicts_with_all = ["due", "testing_tag", "next"])]
+    #[arg(long, conflicts_with = "due")]
     pub check_registry: bool,
-    /// Build the next installer's live ISO (no Anaconda) instead of this
-    /// network installer; written to `<state dir>/iso-next`, never released
-    #[arg(long, conflicts_with_all = ["due", "testing_tag", "check_registry"])]
-    pub next: bool,
-    /// With `--next`: the edition to build (see `installer/next/editions.toml`)
-    #[arg(long, default_value = crate::iso_next::DEFAULT_EDITION, requires = "next")]
-    pub edition: String,
-    /// Don't build: say whether a new ISO is due, from the latest
+    /// Don't build: say whether a new release is due, from the latest
     /// `installer-*` release of `--repository`
     #[arg(long)]
     pub due: bool,
@@ -89,58 +117,163 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
-    if args.next {
-        cmd::require("podman")?;
-        let iso = crate::iso_next::build(
-            ws,
-            &crate::iso_next::Build {
-                edition: &args.edition,
-                output_dir: args.output_dir.as_deref(),
-            },
-        )?;
-        println!("{}", iso.display());
-        return Ok(());
-    }
     if args.check_registry {
-        let table = installer::table(&ws.root, args.testing_tag.as_deref())?;
+        let table = table(&ws.root)?;
         if !check_registry(&table)? {
             std::process::exit(3);
         }
         return Ok(());
     }
     if args.due {
-        let table = validated_table(&ws.root, args.testing_tag.as_deref())?;
-        return due(ws, &args, &table);
+        return due(ws, &args);
     }
     cmd::require("podman")?;
-    let iso = build(
-        ws,
-        &Build {
-            testing_tag: args.testing_tag.as_deref(),
-            output_dir: args.output_dir.as_deref(),
-        },
-    )?;
-    println!("{}", iso.display());
+    let ids = if args.editions.is_empty() {
+        edition_ids(&ws.root)?
+    } else {
+        args.editions.clone()
+    };
+    let out_dir = output_dir(ws, args.output_dir.as_deref())?;
+    let mut built = Vec::new();
+    for id in &ids {
+        let iso = build(
+            ws,
+            &Build {
+                edition: id,
+                output_dir: Some(&out_dir),
+            },
+        )?;
+        built.push((edition(&ws.root, id)?, iso));
+    }
+    write_release_files(ws, &out_dir, &built)?;
+    for (_, iso) in &built {
+        println!("{}", iso.display());
+    }
     Ok(())
 }
 
-/// What to build an ISO from.
 pub struct Build<'a> {
-    pub testing_tag: Option<&'a str>,
+    pub edition: &'a str,
     /// Where the ISO goes (default `<state dir>/iso`).
     pub output_dir: Option<&'a Path>,
 }
 
-pub(crate) fn validated_table(root: &Path, testing_tag: Option<&str>) -> Result<installer::Table> {
-    with_profiles(root, installer::table(root, testing_tag)?)
+/// One edition as `editions.toml` declares it.
+struct Edition {
+    id: String,
+    display_name: String,
+    /// The ISO's and the release asset's base name: `ilex-glabra-installer`.
+    asset: String,
 }
 
-/// The next installer's table (every edition's compositions).
-pub(crate) fn validated_table_next(root: &Path) -> Result<installer::Table> {
-    with_profiles(root, installer::table_next(root)?)
+/// Does this `ilexctl test` filter select the live installer's `iso::next…`
+/// trials (which boot an edition's ISO)?
+pub fn is_next_filter(filter: &str) -> bool {
+    filter.contains("iso::next")
 }
 
-fn with_profiles(root: &Path, mut table: installer::Table) -> Result<installer::Table> {
+/// Does it select the KDE edition's `iso::next_kde…` trials (which boot the KDE
+/// ISO, `ILEX_ISO_NEXT_KDE`)? Every other `iso::next…` filter boots the GNOME
+/// edition's (`ILEX_ISO_NEXT`).
+pub fn is_kde_filter(filter: &str) -> bool {
+    filter.contains("iso::next_kde")
+}
+
+/// Does this filter need an ISO built by the host (Linux only for now)? The
+/// encrypted gates install through the GNOME edition's.
+pub fn needs_iso(filter: &str) -> bool {
+    is_next_filter(filter)
+        || filter.contains("encrypted_install")
+        || filter.contains("upgrade_rollback")
+}
+
+/// Why the remote (native Windows) path refuses `iso` and the trials that boot
+/// an ISO: the builder returns only the files of one flat output directory and
+/// stages no `ILEX_ISO_NEXT`. Run them on a Linux host.
+pub const REMOTE_UNSUPPORTED: &str = "the live installer ISOs (`iso`, `test iso::next`, the encrypted install gates) are not supported from native Windows yet: the builder collects no ISO directory and `ILEX_ISO_NEXT` is never staged. Run them on a Linux host";
+
+/// File name (without extension) of an edition's ISO.
+fn asset_name(display_name: &str) -> String {
+    let mut name = String::new();
+    for c in display_name.chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c.to_ascii_lowercase());
+        } else if !name.ends_with('-') && !name.is_empty() {
+            name.push('-');
+        }
+    }
+    format!("{}-installer", name.trim_end_matches('-'))
+}
+
+fn edition_ids(root: &Path) -> Result<Vec<String>> {
+    let table = ilex_devkit::config::manifest(&root.join("installer/next/editions.toml"))?;
+    Ok(table.keys().cloned().collect())
+}
+
+fn edition(root: &Path, id: &str) -> Result<Edition> {
+    let valid = id.starts_with(|c: char| c.is_ascii_lowercase())
+        && id.len() <= 16
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid {
+        bail!("invalid edition {id:?}: expected [a-z][a-z0-9-]{{0,15}}");
+    }
+    let table = ilex_devkit::config::manifest(&root.join("installer/next/editions.toml"))?;
+    let known: Vec<&String> = table.keys().collect();
+    let entry = table.get(id).and_then(|e| e.as_table()).with_context(|| {
+        format!("unknown edition {id:?}; installer/next/editions.toml has {known:?}")
+    })?;
+    for key in entry.keys() {
+        if key != "display-name" {
+            bail!("installer/next/editions.toml [{id}]: unknown key {key:?}");
+        }
+    }
+    let display_name = entry
+        .get("display-name")
+        .and_then(|v| v.as_str())
+        .with_context(|| format!("installer/next/editions.toml [{id}] needs a display-name"))?;
+    if display_name.trim() != display_name
+        || display_name.is_empty()
+        || display_name.len() > 64
+        || display_name.chars().any(char::is_control)
+    {
+        bail!(
+            "installer/next/editions.toml [{id}]: display-name must be 1-64 characters, trimmed, without control characters"
+        );
+    }
+    if !root.join("installer/next/editions").join(id).is_dir() {
+        bail!("edition {id}: installer/next/editions/{id}/ is missing");
+    }
+    Ok(Edition {
+        id: id.into(),
+        display_name: display_name.into(),
+        asset: asset_name(display_name),
+    })
+}
+
+/// The edition record the interface reads from the live image.
+fn edition_json(edition: &Edition) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": 1,
+        "edition": edition.id,
+        "display-name": edition.display_name,
+    }))?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn output_dir(ws: &Workspace, requested: Option<&Path>) -> Result<PathBuf> {
+    let out_dir = requested.map_or_else(|| ws.state_dir().join("iso"), Path::to_path_buf);
+    ilex_devkit::ownership::ensure_directory(&out_dir, &ws.identity()?)?;
+    Ok(std::path::absolute(&out_dir)?)
+}
+
+/// The catalogue the root helper offers: every edition's compositions (the
+/// helper narrows it to its own edition), with the public profiles the image
+/// catalogue validates.
+pub(crate) fn table(root: &Path) -> Result<installer::Table> {
+    let mut table = installer::table_next(root)?;
     let output = cmd::output(
         Command::new("python3")
             .args([
@@ -155,109 +288,9 @@ fn with_profiles(root: &Path, mut table: installer::Table) -> Result<installer::
             .current_dir(root),
     )
     .context("validating installer profiles with the image catalogue")?;
-    table.profiles = serde_json::from_str(&output).context("reading validated installer profiles")?;
+    table.profiles =
+        serde_json::from_str(&output).context("reading validated installer profiles")?;
     Ok(table)
-}
-
-/// Build the installer container and the ISO and return the path of the ISO;
-/// its checksum and the release notes are written next to it.
-pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
-    ws.ensure_state()?;
-    let table = validated_table(&ws.root, spec.testing_tag)?;
-    let out_dir = spec
-        .output_dir
-        .map_or_else(|| ws.state_dir().join("iso"), Path::to_path_buf);
-    // Preserve existing outputs until a replacement is ready. In particular,
-    // generated/ is a build context and must survive image-builder startup.
-    ilex_devkit::ownership::ensure_directory(&out_dir, &ws.identity()?)?;
-    let out_dir = std::path::absolute(&out_dir)?;
-    let generated = out_dir.join("generated");
-    fs::create_dir_all(&generated)?;
-    fs::write(generated.join("compositions.json"), table_bytes(&table)?)?;
-    fs::write(generated.join("iso.yaml"), installer::BOOT_MENU)?;
-    fs::copy(
-        ws.root.join("rootfs/etc/containers/registries.d/ilex.yaml"),
-        generated.join("ilex.yaml"),
-    )?;
-    fs::copy(
-        ws.root.join("rootfs/etc/pki/containers/ilex.pub"),
-        generated.join("ilex.pub"),
-    )?;
-    // The installer has its own small Rust build stage; no dependency on a
-    // previously built OS image and no host binary copied into the ISO.
-    for file in ["Cargo.toml", "Cargo.lock"] {
-        fs::copy(ws.root.join(file), generated.join(file))?;
-    }
-    // Workspace members must be visible for --locked workspace resolution.
-    copy_sources(&ws.root.join("crates"), &generated.join("crates"))?;
-    let installer = format!("localhost/ilex-installer:{}", ws.slug);
-    let transaction = ilex_devkit::ownership::ImageTransaction::new(ws, &installer)?;
-    let (identity, source) = ws.source_identity()?;
-    let context = ws.root.join("installer");
-    cmd::run(
-        Command::new("podman")
-            // Host networking: in CI this runs podman inside a container,
-            // where the nested bridge network has no DNS.
-            .args(["build", "--network=host", "--file"])
-            .arg(context.join("Containerfile"))
-            .args([
-                "--build-context",
-                &format!("generated={}", generated.display()),
-            ])
-            .args(["--tag", transaction.temporary()])
-            .args([
-                "--label",
-                &format!("ilex.checkout-owner={}", identity.owner),
-            ])
-            .arg(&context),
-    )?;
-    anyhow::ensure!(
-        ws.source_identity()?.1.digest == source.digest,
-        "source changed during installer build; refusing promotion"
-    );
-    transaction.promote(ws)?;
-
-    // image-builder turns the installer container into the ISO.
-    let build_dir = out_dir.join("build");
-    if build_dir.exists() {
-        fs::remove_dir_all(&build_dir)?;
-    }
-    fs::create_dir_all(&build_dir)?;
-    run_image_builder(ws, &installer, &build_dir, ISO_NAME, OSBUILD_CACHE)?;
-
-    // image-builder puts the ISO in a subdirectory; the release wants it flat.
-    let built = find_iso(&build_dir)?;
-    let iso = out_dir.join(format!("{ISO_NAME}.iso"));
-    if built != iso {
-        fs::rename(&built, &iso).with_context(|| format!("moving {}", built.display()))?;
-    }
-    let size = fs::metadata(&iso)?.len();
-    let sha256 = sha256_file(&iso)?;
-    fs::write(
-        out_dir.join(format!("{ISO_NAME}.iso.sha256")),
-        format!("{sha256}  {ISO_NAME}.iso\n"),
-    )?;
-    fs::write(
-        out_dir.join("release-notes.md"),
-        release_notes(&installer_fingerprint(ws, &table)?, &sha256, &table),
-    )?;
-    fs::copy(
-        generated.join("compositions.json"),
-        out_dir.join("compositions.json"),
-    )?;
-    eprintln!(
-        "built {} ({:.2} GiB, sha256 {sha256})",
-        iso.display(),
-        size as f64 / (1u64 << 30) as f64
-    );
-    // A release asset has to stay under 2 GiB.
-    if size >= 2 << 30 {
-        bail!(
-            "the ISO is {:.2} GiB; a GitHub release asset has to be under 2 GiB",
-            size as f64 / (1u64 << 30) as f64
-        );
-    }
-    Ok(iso)
 }
 
 pub(crate) fn copy_sources(source: &Path, target: &Path) -> Result<()> {
@@ -283,15 +316,223 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     Ok(crate::rechunk::hex(&hash.finalize()))
 }
 
-fn release_notes(fingerprint: &str, sha256: &str, table: &installer::Table) -> String {
-    let mut notes = format!(
-        "Network installer for ilex. Write `{ISO_NAME}.iso` to a USB stick and boot it: the first screen \
-         shows the detected machine and lets you choose the machine configuration and desktop. Press Enter to accept the defaults. \
-         Anaconda's web interface then asks for the disk and a maintenance/recovery administrator account and installs the chosen signed composition over the network \
-         (a wired connection is needed) and the machine updates itself from there.\n\n\
-         SHA-256 of `{ISO_NAME}.iso`: `{sha256}`\n\n{FINGERPRINT_LINE}{fingerprint}\n"
+pub(crate) fn table_bytes(table: &installer::Table) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(table)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Build the edition's live image (the container the ISO is made from) and
+/// return its reference. The `installer::` tier boots this image without
+/// building an ISO.
+pub fn build_image(ws: &Workspace, spec: &Build) -> Result<String> {
+    ws.ensure_state()?;
+    let edition = edition(&ws.root, spec.edition)?;
+    let work = output_dir(ws, spec.output_dir)?.join(&edition.id);
+
+    // The builder stage compiles the interface from this snapshot of the
+    // workspace; stale copies of removed crates must not survive.
+    let generated = work.join("generated");
+    fs::create_dir_all(&generated)?;
+    fs::write(generated.join("edition.json"), edition_json(&edition)?)?;
+    fs::write(
+        generated.join("compositions.json"),
+        table_bytes(&table(&ws.root)?)?,
+    )?;
+    fs::write(
+        generated.join("iso.yaml"),
+        MENU.replace("{edition}", &edition.id),
+    )?;
+    // What the installation verifies the image against besides the policy
+    // (installer/next/rootfs/etc/containers/policy.json): the registry
+    // configuration that makes the signatures findable, and the public key.
+    // The same files the installed system ships.
+    for (from, to) in [
+        ("rootfs/etc/containers/registries.d/ilex.yaml", "ilex.yaml"),
+        ("rootfs/etc/pki/containers/ilex.pub", "ilex.pub"),
+    ] {
+        fs::copy(ws.root.join(from), generated.join(to))?;
+    }
+    for file in ["Cargo.toml", "Cargo.lock"] {
+        fs::copy(ws.root.join(file), generated.join(file))?;
+    }
+    let crates = generated.join("crates");
+    if crates.exists() {
+        fs::remove_dir_all(&crates)?;
+    }
+    copy_sources(&ws.root.join("crates"), &crates)?;
+
+    let image = format!("localhost/ilex-installer-next:{}.{}", ws.slug, edition.id);
+    let transaction = ilex_devkit::ownership::ImageTransaction::new(ws, &image)?;
+    let (identity, source) = ws.source_identity()?;
+    let context = ws.root.join("installer/next");
+    cmd::run(
+        Command::new("podman")
+            // Host networking: in CI this runs podman inside a container,
+            // where the nested bridge network has no DNS.
+            .args(["build", "--network=host", "--file"])
+            .arg(context.join("Containerfile"))
+            .args([
+                "--build-context",
+                &format!("generated={}", generated.display()),
+            ])
+            .args(["--build-arg", &format!("EDITION={}", edition.id)])
+            .args(["--tag", transaction.temporary()])
+            .args([
+                "--label",
+                &format!("ilex.checkout-owner={}", identity.owner),
+            ])
+            .arg(&context),
+    )?;
+    anyhow::ensure!(
+        ws.source_identity()?.1.digest == source.digest,
+        "source changed during the installer build; refusing promotion"
     );
-    notes.push_str(&format!("\nDefault: `{}`. Override with `ilex.composition=<tag>` at boot. The chooser is skipped for this override and for kickstart, text and remote installs.\n\nOffered compositions:\n", table.default));
+    transaction.promote(ws)?;
+    Ok(image)
+}
+
+/// Build the edition's live image and its ISO and return the ISO's path; its
+/// checksum and package sizes are written next to it.
+pub fn build(ws: &Workspace, spec: &Build) -> Result<PathBuf> {
+    let image = build_image(ws, spec)?;
+    let edition = edition(&ws.root, spec.edition)?;
+    let out_dir = output_dir(ws, spec.output_dir)?;
+    let work = out_dir.join(&edition.id);
+    let build_dir = work.join("build");
+    if build_dir.exists() {
+        fs::remove_dir_all(&build_dir)?;
+    }
+    fs::create_dir_all(&build_dir)?;
+    run_image_builder(ws, &image, &build_dir, &edition.asset, OSBUILD)?;
+
+    // image-builder puts the ISO in a subdirectory; the release wants it flat.
+    let built = find_iso(&build_dir)?;
+    let iso = out_dir.join(format!("{}.iso", edition.asset));
+    if built != iso {
+        fs::rename(&built, &iso).with_context(|| format!("moving {}", built.display()))?;
+    }
+    let size = fs::metadata(&iso)?.len();
+    let sha256 = sha256_file(&iso)?;
+    fs::write(
+        out_dir.join(format!("{}.iso.sha256", edition.asset)),
+        format!("{sha256}  {}.iso\n", edition.asset),
+    )?;
+    if let Err(error) = largest_packages(&image, &work.join("largest-packages.txt")) {
+        eprintln!("ilexctl: could not list the largest packages: {error:#}");
+    }
+    let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+    eprintln!(
+        "built {} ({:.2} GiB, limit {:.0} GiB; sha256 {sha256})",
+        iso.display(),
+        gib(size),
+        gib(ISO_LIMIT),
+    );
+    if size >= ISO_LIMIT {
+        bail!(
+            "the ISO is {:.2} GiB; a GitHub release asset has to be under 2 GiB",
+            gib(size)
+        );
+    }
+    Ok(iso)
+}
+
+/// The ten largest installed packages of the live image, for reports.
+fn largest_packages(image: &str, to: &Path) -> Result<()> {
+    let listing = cmd::output(Command::new("podman").args([
+        "run",
+        "--rm",
+        "--network=none",
+        image,
+        "rpm",
+        "-qa",
+        "--queryformat",
+        "%{SIZE} %{NAME}-%{VERSION}-%{RELEASE}\\n",
+    ]))?;
+    let mut sizes: Vec<(u64, &str)> = listing
+        .lines()
+        .filter_map(|line| {
+            let (size, name) = line.split_once(' ')?;
+            Some((size.parse().ok()?, name))
+        })
+        .collect();
+    sizes.sort_by(|a, b| b.cmp(a));
+    let mut text = String::new();
+    for (size, name) in sizes.iter().take(10) {
+        text.push_str(&format!(
+            "{:>9.1} MiB  {name}\n",
+            *size as f64 / (1u64 << 20) as f64
+        ));
+    }
+    text.push_str(&format!(
+        "{} packages, {:.0} MiB installed\n",
+        sizes.len(),
+        sizes.iter().map(|(s, _)| *s).sum::<u64>() as f64 / (1u64 << 20) as f64
+    ));
+    fs::write(to, text)?;
+    Ok(())
+}
+
+/// The alias, `compositions.json` and the release notes, once the editions'
+/// ISOs exist.
+fn write_release_files(ws: &Workspace, out_dir: &Path, built: &[(Edition, PathBuf)]) -> Result<()> {
+    let table = table(&ws.root)?;
+    fs::write(out_dir.join("compositions.json"), table_bytes(&table)?)?;
+    let mut sums = Vec::new();
+    for (edition, iso) in built {
+        let fingerprint = installer_fingerprint(ws, &table, edition)?;
+        sums.push((edition, fingerprint, sha256_file(iso)?));
+    }
+    // The GNOME edition's exact bytes under the Anaconda installer's name.
+    if let Some((edition, iso)) = built.iter().find(|(e, _)| e.id == DEFAULT_EDITION) {
+        let alias = out_dir.join(format!("{ALIAS}.iso"));
+        let _ = fs::remove_file(&alias);
+        if fs::hard_link(iso, &alias).is_err() {
+            fs::copy(iso, &alias)?;
+        }
+        let sha256 = sums
+            .iter()
+            .find(|(e, ..)| e.id == edition.id)
+            .map(|(_, _, sum)| sum.clone())
+            .context("the default edition's checksum")?;
+        fs::write(
+            out_dir.join(format!("{ALIAS}.iso.sha256")),
+            format!("{sha256}  {ALIAS}.iso\n"),
+        )?;
+    }
+    fs::write(
+        out_dir.join("release-notes.md"),
+        release_notes(&table, &sums),
+    )?;
+    Ok(())
+}
+
+fn release_notes(table: &installer::Table, built: &[(&Edition, String, String)]) -> String {
+    let mut notes = String::from(
+        "Live installers for ilex, one per edition. Write the ISO of the edition you want to a USB stick and boot it: \
+         the installer shows the detected machine, asks for the disk, encryption and an administrator account, \
+         and installs the newest signed composition of its edition over the network (a wired connection is needed); \
+         the machine updates itself from there.\n\n",
+    );
+    for (edition, _, sha256) in built {
+        notes.push_str(&format!(
+            "- **{}** (`{}.iso`), SHA-256 `{sha256}`\n",
+            edition.display_name, edition.asset
+        ));
+    }
+    notes.push_str(&format!(
+        "- `{ALIAS}.iso` is the same file as the GNOME edition's, kept under the name the previous installer used.\n\n"
+    ));
+    for (edition, fingerprint, _) in built {
+        notes.push_str(&format!(
+            "{FINGERPRINT_LINE}{}: {fingerprint}\n",
+            edition.id
+        ));
+    }
+    notes.push_str(&format!(
+        "\nDefault: `{}`. Offered compositions (each edition offers its own):\n",
+        table.default
+    ));
     for entry in &table.compositions {
         notes.push_str(&format!(
             "- `{}`: {}\n",
@@ -304,22 +545,12 @@ fn release_notes(fingerprint: &str, sha256: &str, table: &installer::Table) -> S
             notes.push_str(&format!("- `{name}`: {rule:?}\n"));
         }
     }
-    if let Some(tag) = &table.testing_tag {
-        notes.push_str(&format!(
-            "\n**Testing build: installs `{tag}` for every entry.**\n"
-        ));
-    }
     notes
 }
 
-pub(crate) fn table_bytes(table: &installer::Table) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec_pretty(table)?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
 /// Presence guard only. The installer verifies the signature itself; CI also
-/// verifies the default digest with cosign before and after its install gate.
+/// verifies each edition's default digest with cosign before and after its
+/// install gate.
 fn check_registry(table: &installer::Table) -> Result<bool> {
     cmd::require("skopeo")?;
     let mut available = true;
@@ -362,20 +593,42 @@ fn check_registry(table: &installer::Table) -> Result<bool> {
     Ok(available)
 }
 
-/// What the installer is built from: a hash of [`INSTALLER_INPUTS`].
-fn installer_fingerprint(ws: &Workspace, table: &installer::Table) -> Result<String> {
+/// What an edition's ISO is built from: a hash of [`INSTALLER_INPUTS`] and the
+/// edition's own files.
+fn installer_fingerprint(
+    ws: &Workspace,
+    table: &installer::Table,
+    edition: &Edition,
+) -> Result<String> {
     let mut hash = Sha256::new();
     hash.update(table_bytes(table)?);
-    hash.update(installer::BOOT_MENU.as_bytes());
+    hash.update(MENU.replace("{edition}", &edition.id).as_bytes());
+    hash.update(edition.display_name.as_bytes());
+    // Left out of the tree hash: the editions' list (its entry is above) and
+    // the other editions' own directories.
+    let mut excluded = vec!["installer/next/editions.toml".to_owned()];
+    for id in edition_ids(&ws.root)? {
+        if id != edition.id {
+            excluded.push(format!("installer/next/editions/{id}"));
+        }
+    }
     for input in INSTALLER_INPUTS {
         hash.update(input.as_bytes());
-        hash_tree(&ws.root, &ws.root.join(input), &mut hash)?;
+        hash_tree(&ws.root, &ws.root.join(input), &excluded, &mut hash)?;
     }
     Ok(format!("sha256:{}", crate::rechunk::hex(&hash.finalize())))
 }
 
 /// Hash the names and contents of everything below `path`, in sorted order.
-fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> Result<()> {
+fn hash_tree(root: &Path, path: &Path, excluded: &[String], hash: &mut Sha256) -> Result<()> {
+    let relative = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if excluded.contains(&relative) {
+        return Ok(());
+    }
     if path.is_dir() {
         let mut entries = fs::read_dir(path)
             .with_context(|| format!("reading {}", path.display()))?
@@ -383,19 +636,10 @@ fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> Result<()> {
             .collect::<std::io::Result<Vec<_>>>()?;
         entries.sort();
         for entry in entries {
-            let relative = entry
-                .strip_prefix(root)
-                .unwrap_or(&entry)
-                .to_string_lossy()
-                .replace('\\', "/");
-            if FINGERPRINT_EXCLUDED.contains(&relative.as_str()) {
-                continue;
-            }
-            hash_tree(root, &entry, hash)?;
+            hash_tree(root, &entry, excluded, hash)?;
         }
     } else {
-        let name = path.strip_prefix(root).unwrap_or(path);
-        hash.update(name.to_string_lossy().replace('\\', "/").as_bytes());
+        hash.update(relative.as_bytes());
         hash.update(b"\0");
         hash.update(fs::read(path).with_context(|| format!("reading {}", path.display()))?);
         hash.update(b"\0");
@@ -403,9 +647,9 @@ fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> Result<()> {
     Ok(())
 }
 
-/// `--due`: is a new ISO worth building? Prints the answer and the reason and
-/// writes `iso_due=true|false`.
-fn due(ws: &Workspace, args: &Args, table: &installer::Table) -> Result<()> {
+/// `--due`: is a new release worth building? Prints the answer and the reason
+/// and writes `iso_due=true|false`.
+fn due(ws: &Workspace, args: &Args) -> Result<()> {
     let repository = args
         .repository
         .clone()
@@ -416,8 +660,9 @@ fn due(ws: &Workspace, args: &Args, table: &installer::Table) -> Result<()> {
         })
         .context("which GitHub repository? pass --repository or set GITHUB_REPOSITORY")?;
     cmd::require("gh")?;
-    let (is_due, reason) = iso_due(ws, &repository, args.max_age_days, table)?;
-    eprintln!("installer ISO due: {is_due} ({reason})");
+    let table = table(&ws.root)?;
+    let (is_due, reason) = iso_due(ws, &repository, args.max_age_days, &table)?;
+    eprintln!("installer ISOs due: {is_due} ({reason})");
     registry::github_output("iso_due", &is_due.to_string())
 }
 
@@ -448,19 +693,30 @@ fn iso_due(
         return Ok((true, "no installer release yet".into()));
     };
     let tag = latest["tag_name"].as_str().unwrap_or("?");
+    let notes = latest["body"].as_str().unwrap_or("");
 
-    let current = installer_fingerprint(ws, table)?;
-    let published = latest["body"]
-        .as_str()
-        .unwrap_or("")
-        .lines()
-        .find_map(|l| l.strip_prefix(FINGERPRINT_LINE));
-    eprintln!(
-        "installer fingerprint: {current} (release {tag}: {})",
-        published.unwrap_or("none")
-    );
-    if published != Some(current.as_str()) {
-        return Ok((true, format!("the installer changed since {tag}")));
+    // Every edition's inputs against the fingerprint its release recorded.
+    let mut changed = Vec::new();
+    for id in edition_ids(&ws.root)? {
+        let current = installer_fingerprint(ws, table, &edition(&ws.root, &id)?)?;
+        let key = format!("{FINGERPRINT_LINE}{id}: ");
+        let published = notes.lines().find_map(|l| l.strip_prefix(key.as_str()));
+        eprintln!(
+            "installer fingerprint ({id}): {current} (release {tag}: {})",
+            published.unwrap_or("none")
+        );
+        if published != Some(current.as_str()) {
+            changed.push(id);
+        }
+    }
+    if !changed.is_empty() {
+        return Ok((
+            true,
+            format!(
+                "the {} installer changed since {tag}",
+                changed.join(" and the ")
+            ),
+        ));
     }
 
     let Some(created) = latest["published_at"]
@@ -475,15 +731,14 @@ fn iso_due(
     } else {
         (
             false,
-            format!("{tag} is {age_days} days old and the installer is unchanged"),
+            format!("{tag} is {age_days} days old and the installers are unchanged"),
         )
     })
 }
 
-/// The `generic-iso` image type (Anaconda inside the installer container,
-/// kickstart from the container) needs image-builder 89 (Fedora 45 updates);
-/// version 87's only installer type is the unattended,
-/// disk-wiping `bootc-installer`.
+/// The `generic-iso` image type (a live container with dmsquash-live) needs
+/// image-builder 89 (Fedora 45 updates); version 87's only installer type is
+/// the unattended, disk-wiping `bootc-installer`.
 const MIN_IMAGE_BUILDER: u32 = 89;
 
 /// Major version of the image-builder on `PATH`, if there is one.
@@ -495,27 +750,21 @@ fn host_image_builder() -> Option<u32> {
 }
 
 /// The `osbuild` image-builder runs: a wrapper that keeps the build root and
-/// the deployed tree in the checkout's store, and, for the next installer, also
-/// labels the live root (see `installer/next/osbuild-selinux`).
+/// the deployed tree in the checkout's store, and labels the live root (see
+/// `installer/next/osbuild-selinux`).
 #[derive(Clone, Copy)]
-pub(crate) struct Osbuild {
+struct Osbuild {
     /// The script, relative to the checkout.
-    pub script: &'static str,
+    script: &'static str,
     /// Where its executable copy goes, below the state directory.
-    pub dir: &'static str,
+    dir: &'static str,
 }
-
-/// The Anaconda network installer's: checkpoints only.
-pub(crate) const OSBUILD_CACHE: Osbuild = Osbuild {
-    script: "installer/image-builder/osbuild-cache",
-    dir: "image-builder-bin",
-};
 
 /// Run `image-builder build … generic-iso`: directly when the one on `PATH`
 /// is new enough (CI), otherwise inside a privileged Fedora 45 container that
 /// shares this host's container storage, so a dev machine with an older
 /// image-builder (or none) works the same.
-pub(crate) fn run_image_builder(
+fn run_image_builder(
     ws: &Workspace,
     installer: &str,
     out_dir: &Path,
@@ -542,7 +791,7 @@ pub(crate) fn run_image_builder(
             "--bootc-ref",
             installer,
             // image-builder wants a default root filesystem for the installer
-            // container; it isn't used for the machines Anaconda installs.
+            // container; it isn't used for the machines the installer writes.
             "--bootc-default-fs",
             "ext4",
             "--output-name",
@@ -609,13 +858,11 @@ pub(crate) fn run_image_builder(
         .arg(format!("{}:/var/cache/image-builder", cache.display()))
         .arg("--volume")
         .arg(format!("{}:/out", out_dir.display()))
-        .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"]);
-    if osbuild.script != OSBUILD_CACHE.script {
-        // The helper image carries the checkpoint-only wrapper; this one is
-        // ours (and needs the container's python3, which osbuild requires).
-        run.arg("--volume")
-            .arg(format!("{}:/usr/local/bin/osbuild:ro", wrapper.display()));
-    }
+        .args(["--env", "TMPDIR=/var/cache/image-builder/tmp"])
+        // Ours replaces the helper image's checkpoint-only wrapper (and needs
+        // the container's python3, which osbuild requires).
+        .arg("--volume")
+        .arg(format!("{}:/usr/local/bin/osbuild:ro", wrapper.display()));
     ilex_devkit::ownership::remote_container_args(ws, &mut run)?;
     run.arg(&helper)
         .args([
@@ -629,7 +876,7 @@ pub(crate) fn run_image_builder(
 }
 
 /// The `.iso` image-builder wrote somewhere below `dir`.
-pub(crate) fn find_iso(dir: &Path) -> Result<PathBuf> {
+fn find_iso(dir: &Path) -> Result<PathBuf> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         for entry in fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {

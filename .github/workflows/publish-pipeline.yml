@@ -40,21 +40,24 @@
 # nothing waits for it) installs the new :generic.gnome to a disk and puts it in the
 # Actions cache for the next run's upgrade tier.
 #
-# The installer ISO is a network installer: it carries no ilex image and installs
-# the newest :generic.gnome from ghcr, so it needn't follow every publish. It is built
-# (and, on main, released as a GitHub Release) when `cargo ilexctl iso --due` says
-# so: no installer release yet, `installer/` (or the ISO code for ilexctl) changed
-# since the latest one, or the latest one is a week old (Fedora and Anaconda
-# fixes). A manual run with `iso` checked builds it regardless.
+# The installer ISOs (`installer/next`, one per edition: ilex Glabra on GNOME and
+# ilex Kingiana on KDE Plasma) are live installers that carry no ilex image and
+# install the newest signed composition of their edition (:generic.gnome,
+# :generic.kde) from ghcr, so they needn't follow every publish. They are built
+# (and, on main, released as one GitHub Release) when `cargo ilexctl iso --due`
+# says so: no installer release yet, an edition's inputs (`installer/next`, the
+# crates its image compiles) changed since the latest one, or the latest one is
+# a week old (Fedora fixes). A manual run with `iso` checked builds them
+# regardless. The release gate installs each edition's published, verified
+# digest from its ISO, and the encrypted gates (`security::encrypted_install`,
+# `security::upgrade_rollback`) install through the GNOME edition's ISO.
 #
-# The next installer (installer/next, no Anaconda) has its own job, on request
-# only: a manual run with `iso_next` checked builds its live ISOs (the GNOME
-# edition's and the KDE edition's), boots them with Secure Boot and keeps them
-# as the `installer-next-iso` and `installer-next-kde-iso` artifacts. That run
-# does nothing else, and no run ever releases or publishes these ISOs. publish.yml
-# gives it a concurrency group of its own (`iso-next-<ref hash>`, on main too:
-# it neither waits for nor replaces a real publish), treats it as not-main and
-# passes it no signing secrets, since it signs nothing.
+# A manual run with `iso_next` checked builds the ISOs on their own, boots them
+# with Secure Boot and keeps them as the `installer-next-iso` and
+# `installer-next-kde-iso` artifacts. That run does nothing else and releases or
+# publishes nothing. publish.yml gives it a concurrency group of its own
+# (`iso-next-<ref hash>`, on main too: it neither waits for nor replaces a real
+# publish), treats it as not-main and passes it no signing secrets.
 #
 # Runner: `vars.ILEX_RUNNER` (repository variable) or ubuntu-26.04. One
 # setting moves every job to a larger or self-hosted runner.
@@ -71,11 +74,11 @@ on:
         required: false
     inputs:
       iso:
-        description: Build the installer ISO even if it isn't due (on main it is released; from a branch it is kept as an artifact)
+        description: Build the installer ISOs even if they aren't due (on main they are released; from a branch they are kept as artifacts)
         type: boolean
         default: false
       iso_next:
-        description: Only build the next installer's live ISOs (GNOME and KDE editions) and boot-test them (kept as artifacts, never released; the image pipeline is skipped)
+        description: Only build the live installer ISOs (GNOME and KDE editions) and boot-test them (kept as artifacts, never released; the image pipeline is skipped)
         type: boolean
         default: false
       test:
@@ -100,10 +103,6 @@ on:
       encrypted_update_kernel:
         description: Optional exact Fedora kernel for the disposable encrypted CI update image
         type: string
-      encrypted_lifecycle_only:
-        description: Run the encrypted lifecycle by itself for a focused qualification
-        type: boolean
-        default: false
 
       main:
         type: boolean
@@ -130,7 +129,7 @@ env:
 
 jobs:
   snapshot:
-    # `iso_next` asks for the next installer's ISO alone: with no snapshot,
+    # `iso_next` asks for the live installer ISOs alone: with no snapshot,
     # build, upgrade and everything that needs them are skipped.
     if: ${{ !inputs.v1_disk && !inputs.iso_next }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
@@ -222,11 +221,6 @@ jobs:
         if: inputs.encrypted_install && inputs.v1_disk
         run: |
           echo '::error::encrypted_install requires the build/qualification job; v1_disk is a separate cache-only run.'
-          exit 1
-      - name: Reject a lifecycle-only run without encrypted qualification
-        if: inputs.encrypted_lifecycle_only && !inputs.encrypted_install
-        run: |
-          echo '::error::encrypted_lifecycle_only requires encrypted_install=true.'
           exit 1
       - uses: actions/checkout@v7
 
@@ -385,7 +379,7 @@ jobs:
           key: ${{ steps.stack.outputs.debs }}
 
       - name: e2e tests (ephemeral)
-        if: ${{ !inputs.encrypted_lifecycle_only && (steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install) }}
+        if: ${{ steps.changed.outputs.changed == 'true' || inputs.test || inputs.apps || inputs.encrypted_install }}
         env:
           # Always the rechunked image: the one staged above.
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
@@ -418,20 +412,19 @@ jobs:
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
         run: bash .github/encrypted-baseline.sh
 
-      - name: Build exact ISO for encrypted candidate gate
-        if: inputs.encrypted_install
+      # The encrypted gates install through the GNOME edition's live installer,
+      # whose root helper installs from the registry: a candidate that is not
+      # published yet cannot be installed. What this run qualifies is the
+      # upgrade of an installed, published baseline to the candidate, and the
+      # rollback (`security::upgrade_rollback`); the fresh encrypted installation
+      # of the published digest is the release gate's.
+      - name: Build the GNOME edition's ISO for the encrypted lifecycle
+        if: inputs.encrypted_install && steps.encrypted-baseline.outputs.reference != ''
         timeout-minutes: 40
         run: bash .github/encrypted-iso.sh
 
-      - name: Exact encrypted installer qualification
-        if: inputs.encrypted_install && !inputs.encrypted_lifecycle_only
-        timeout-minutes: 180
-        env:
-          ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
-        run: bash .github/encrypted-tier.sh
-
       - name: Prepare private lifecycle evidence
-        if: inputs.encrypted_install && inputs.encrypted_lifecycle_only
+        if: inputs.encrypted_install
         run: |
           private=$(mktemp -d "$RUNNER_TEMP/ilex-fingerprints.XXXXXXXX")
           echo "ILEX_PRIVATE_FINGERPRINTS=$private" >> "$GITHUB_ENV"
@@ -443,16 +436,9 @@ jobs:
           ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
           ILEX_ENCRYPTED_UPGRADE_FROM: ${{ steps.encrypted-baseline.outputs.reference }}
+          ILEX_ENCRYPTED_UPGRADE_TAG: ${{ steps.encrypted-baseline.outputs.tag }}
           ILEX_ENCRYPTED_UPDATE_KERNEL: ${{ inputs.encrypted_update_kernel }}
         run: bash .github/encrypted-lifecycle.sh
-
-      - name: Qualify a fresh encrypted install when no rollback image exists
-        if: inputs.encrypted_install && inputs.encrypted_lifecycle_only && steps.encrypted-baseline.outputs.reference == ''
-        timeout-minutes: 85
-        env:
-          ILEX_IMAGE: ${{ steps.stage.outputs.image_id }}
-          ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
-        run: timeout --signal=TERM --kill-after=30s 80m cargo ilexctl test security::encrypted_install -- --exact --test-threads 1
 
       - name: Report unchanged security tier as unqualified
         if: steps.changed.outputs.changed != 'true' && !inputs.test && !inputs.encrypted_install
@@ -463,18 +449,11 @@ jobs:
         id: qualification-scan
         env:
           ENCRYPTED_INSTALL: ${{ inputs.encrypted_install }}
-          LIFECYCLE_ONLY: ${{ inputs.encrypted_lifecycle_only }}
           BASELINE: ${{ steps.encrypted-baseline.outputs.reference }}
         run: |
           scope=false
-          if [[ "$ENCRYPTED_INSTALL" == true ]]; then
-            if [[ "$LIFECYCLE_ONLY" == true ]]; then
-              if [[ -n "$BASELINE" ]]; then scope=lifecycle; else scope=fresh; fi
-            elif [[ -n "$BASELINE" ]]; then
-              scope=true
-            else
-              scope=installer
-            fi
+          if [[ "$ENCRYPTED_INSTALL" == true && -n "$BASELINE" ]]; then
+            scope=lifecycle
             case "$ILEX_PRIVATE_FINGERPRINTS" in "$RUNNER_TEMP"/ilex-fingerprints.*) ;; *) exit 1 ;; esac
             python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/qualification-evidence.seal" "$scope" "$ILEX_PRIVATE_FINGERPRINTS"
           else
@@ -486,27 +465,20 @@ jobs:
         if: always() && env.ILEX_PRIVATE_FINGERPRINTS != ''
         run: |
           case "$ILEX_PRIVATE_FINGERPRINTS" in "$RUNNER_TEMP"/ilex-fingerprints.*) ;; *) exit 1 ;; esac
-          for tier in encrypted-install encrypted-existing-space encrypted-interrupted encrypted-upgrade-rollback; do
+          for tier in encrypted-install encrypted-upgrade-rollback; do
             rm -f -- "$ILEX_PRIVATE_FINGERPRINTS/$tier.json"
           done
           rmdir -- "$ILEX_PRIVATE_FINGERPRINTS"
 
       - name: Keep security qualification evidence
-        if: steps.qualification-scan.outcome == 'success' && !inputs.encrypted_lifecycle_only
+        if: steps.qualification-scan.outcome == 'success' && steps.qualification-scan.outputs.scope == 'false'
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: security-evidence
           encrypted: ${{ steps.qualification-scan.outputs.scope }}
 
-      - name: Keep encrypted installer public evidence
-        if: steps.qualification-scan.outcome == 'success' && inputs.encrypted_install && !inputs.encrypted_lifecycle_only
-        uses: ./.github/actions/upload-qualification-evidence
-        with:
-          name: encrypted-installer-evidence
-          encrypted: ${{ steps.qualification-scan.outputs.scope }}
-
-      - name: Keep sealed focused encrypted evidence
-        if: steps.qualification-scan.outcome == 'success' && inputs.encrypted_lifecycle_only
+      - name: Keep sealed encrypted lifecycle evidence
+        if: steps.qualification-scan.outcome == 'success' && steps.qualification-scan.outputs.scope == 'lifecycle'
         uses: ./.github/actions/upload-qualification-evidence
         with:
           name: encrypted-lifecycle-evidence
@@ -1109,9 +1081,9 @@ jobs:
             while read -r id; do gh cache delete --repo "$GITHUB_REPOSITORY" "$id"; done
           gh cache list --repo "$GITHUB_REPOSITORY" --key v1-disk-
 
-  # Is a new installer ISO due? Its own job, next to the others: the ISO carries
-  # no ilex image, so it needn't wait for the publish, and `installer/` can
-  # change alone. Reads the latest installer release.
+  # Are new installer ISOs due? Its own job, next to the others: the ISOs carry
+  # no ilex image, so they needn't wait for the publish, and `installer/next`
+  # can change alone. Reads the latest installer release.
   installer-due:
     if: ${{ !inputs.v1_disk && !inputs.iso_next && (inputs.main || inputs.iso) && (!inputs.encrypted_install || inputs.iso) }}
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
@@ -1120,26 +1092,27 @@ jobs:
       iso_due: ${{ steps.isodue.outputs.iso_due }}
     steps:
       - uses: actions/checkout@v7
-      - name: Is a new installer ISO due?
+      - name: Are new installer ISOs due?
         id: isodue
         run: cargo ilexctl iso --due
         env:
           GH_TOKEN: ${{ github.token }}
 
-  # The network installer ISO, built when `cargo ilexctl iso --due` says so (see
-  # the top of this file) or on a manual run with `iso` checked. It carries no
-  # ilex image, so it doesn't depend on what the publish job published. On main
-  # it becomes an artifact first. installer-release waits for publication,
-  # verifies the signed target and installs this exact ISO before releasing.
-  # Branch runs build the artifact only: iso:: would install the published
-  # target, not the branch's image. Construction stays parallel with image CI.
+  # The live installer ISOs of both editions, built when `cargo ilexctl iso
+  # --due` says so (see the top of this file) or on a manual run with `iso`
+  # checked. They carry no ilex image, so they don't depend on what the publish
+  # job published. On main they become an artifact first. installer-release
+  # waits for publication, verifies each edition's signed target and installs
+  # these exact ISOs before releasing. Branch runs build the artifact only: the
+  # install trials would install the published target, not the branch's image.
+  # Construction stays parallel with image CI.
   iso:
     needs: installer-due
     if: >-
       !inputs.v1_disk && (inputs.iso ||
       (inputs.main && needs.installer-due.outputs.iso_due == 'true'))
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     outputs:
       tag: ${{ steps.composition.outputs.tag }}
     permissions:
@@ -1169,15 +1142,14 @@ jobs:
       # user-namespace restriction; if the build still fails, print the
       # kernel's AppArmor denials. The job runs on the host and starts its
       # own rootful, privileged Fedora 45 container with podman.
-      # Container storage, image-builder's cache, the ISO and TMPDIR live on
+      # Container storage, image-builder's cache, the ISOs and TMPDIR live on
       # the runner's big disk under /mnt, off overlayfs (podman can't nest
       # overlay on overlay). `generic-iso` needs image-builder 89, which Fedora
       # 45 provides in updates.
       #
-      # The installer's base (Anaconda, the initramfs) is rebuilt every time on
-      # purpose: the weekly build exists to pick up Fedora and Anaconda fixes,
-      # which a cached base would pin.
-      - name: Build the installer ISO
+      # The live images are rebuilt every time on purpose: the weekly build
+      # exists to pick up Fedora fixes, which a cached base would pin.
+      - name: Build the installer ISOs
         run: |
           if [ -e /etc/apparmor.d/bwrap-userns-restrict ]; then
             sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
@@ -1204,35 +1176,49 @@ jobs:
                 cargo ilexctl iso --output-dir /mnt/ilex-state/iso
               '
           ls -l /mnt/ilex/state/iso/
+          for edition in gnome kde; do
+            cat "/mnt/ilex/state/iso/$edition/largest-packages.txt" || true
+          done
 
-      # A branch run stops here: the ISO to inspect, no installation/release.
+      # A branch run stops here: the ISOs to inspect, no installation/release.
       - name: What main would release
         if: ${{ !inputs.main }}
         run: |
-          size=$(stat -c %s /mnt/ilex/state/iso/ilex-installer.iso)
-          echo "ISO: $size bytes ($((size / 1048576)) MiB; a release asset has to be under 2048 MiB)"
-          cat /mnt/ilex/state/iso/ilex-installer.iso.sha256
+          dir=/mnt/ilex/state/iso
+          for iso in "$dir"/ilex-*-installer.iso; do
+            size=$(stat -c %s "$iso")
+            echo "$(basename "$iso"): $size bytes ($((size / 1048576)) MiB; a release asset has to be under 2048 MiB)"
+            cat "$iso.sha256"
+          done
           tag="installer-$(date -u +%Y%m%d)"
           echo "A run on main would create the release $tag:"
-          echo "  https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/ilex-installer.iso"
-          echo "and make this link point at it:"
-          echo "  https://github.com/$GITHUB_REPOSITORY/releases/latest/download/ilex-installer.iso"
-          echo "--- release notes:"; cat /mnt/ilex/state/iso/release-notes.md
+          for asset in ilex-glabra-installer.iso ilex-kingiana-installer.iso ilex-installer.iso; do
+            echo "  https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$asset"
+          done
+          echo "and make these links point at it:"
+          echo "  https://github.com/$GITHUB_REPOSITORY/releases/latest/download/ilex-glabra-installer.iso"
+          echo "  https://github.com/$GITHUB_REPOSITORY/releases/latest/download/ilex-kingiana-installer.iso"
+          echo "--- release notes:"; cat "$dir/release-notes.md"
 
-      - name: Keep the ISO (not a release)
+      # Both editions' ISOs and checksums, the catalogue and the notes. The
+      # `ilex-installer.iso` alias is the GNOME edition's exact bytes: the
+      # release job makes it from the downloaded ISO.
+      - name: Keep the ISOs (not a release)
         uses: actions/upload-artifact@v4
         with:
           name: installer-iso
           path: |
-            /mnt/ilex/state/iso/ilex-installer.iso
-            /mnt/ilex/state/iso/ilex-installer.iso.sha256
+            /mnt/ilex/state/iso/ilex-glabra-installer.iso
+            /mnt/ilex/state/iso/ilex-glabra-installer.iso.sha256
+            /mnt/ilex/state/iso/ilex-kingiana-installer.iso
+            /mnt/ilex/state/iso/ilex-kingiana-installer.iso.sha256
             /mnt/ilex/state/iso/compositions.json
             /mnt/ilex/state/iso/release-notes.md
           compression-level: 0
           retention-days: 3
 
-  # The next installer's live ISOs (installer/next; no Anaconda), one per
-  # edition (GNOME's and KDE's), built and boot-tested on request only
+  # The live installer ISOs (installer/next), one per edition (GNOME's and
+  # KDE's), built and boot-tested on request only
   # (`iso_next`). Never released or published: each ISO is a workflow artifact,
   # and the job has no write permission. The image pipeline does not run beside
   # it.
@@ -1270,8 +1256,8 @@ jobs:
 
       # The same rootful, privileged Fedora 45 container as the `iso` job (see
       # there for why bubblewrap's AppArmor profile is unloaded), building
-      # installer/next/Containerfile and its ISO: the GNOME edition's, then the
-      # KDE edition's (each with an output directory of its own: they share no
+      # installer/next/Containerfile and its ISOs: the GNOME edition's, then the
+      # KDE edition's (each with a work directory of its own: they share no
       # generated files or package list).
       - name: Build the live installer ISOs
         run: |
@@ -1296,19 +1282,18 @@ jobs:
                 dnf -y install image-builder
                 image-builder version
                 git config --global --add safe.directory /src
-                cargo ilexctl iso --next --output-dir /mnt/ilex-state/iso-next
-                cargo ilexctl iso --next --edition kde --output-dir /mnt/ilex-state/iso-next-kde
+                cargo ilexctl iso --output-dir /mnt/ilex-state/iso
               '
-          for edition in gnome kde; do
-            dir=/mnt/ilex/state/iso-next
-            [ "$edition" = kde ] && dir=/mnt/ilex/state/iso-next-kde
-            ls -l "$dir"
-            cat "$dir/largest-packages.txt" || true
-            size=$(stat -c %s "$dir/ilex-installer-$edition.iso")
+          dir=/mnt/ilex/state/iso
+          ls -l "$dir"
+          for pair in gnome:ilex-glabra-installer kde:ilex-kingiana-installer; do
+            edition=${pair%%:*}
+            iso="$dir/${pair#*:}.iso"
+            size=$(stat -c %s "$iso")
             {
-              echo "next installer ISO ($edition): $size bytes ($((size / 1048576)) MiB; the Anaconda network installer measured 1863 MiB; a release asset has to be under 2048 MiB)"
+              echo "installer ISO ($edition, $(basename "$iso")): $size bytes ($((size / 1048576)) MiB; a release asset has to be under 2048 MiB)"
               echo '```'
-              cat "$dir/largest-packages.txt" || true
+              cat "$dir/$edition/largest-packages.txt" || true
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           done
@@ -1318,9 +1303,9 @@ jobs:
         with:
           name: installer-next-iso
           path: |
-            /mnt/ilex/state/iso-next/ilex-installer-gnome.iso
-            /mnt/ilex/state/iso-next/ilex-installer-gnome.iso.sha256
-            /mnt/ilex/state/iso-next/largest-packages.txt
+            /mnt/ilex/state/iso/ilex-glabra-installer.iso
+            /mnt/ilex/state/iso/ilex-glabra-installer.iso.sha256
+            /mnt/ilex/state/iso/gnome/largest-packages.txt
           compression-level: 0
           retention-days: 3
 
@@ -1329,9 +1314,9 @@ jobs:
         with:
           name: installer-next-kde-iso
           path: |
-            /mnt/ilex/state/iso-next-kde/ilex-installer-kde.iso
-            /mnt/ilex/state/iso-next-kde/ilex-installer-kde.iso.sha256
-            /mnt/ilex/state/iso-next-kde/largest-packages.txt
+            /mnt/ilex/state/iso/ilex-kingiana-installer.iso
+            /mnt/ilex/state/iso/ilex-kingiana-installer.iso.sha256
+            /mnt/ilex/state/iso/kde/largest-packages.txt
           compression-level: 0
           retention-days: 3
 
@@ -1347,9 +1332,9 @@ jobs:
 
       - name: Boot the GNOME edition's ISO with Secure Boot (both boot entries), the fallback, restarts and serial faults
         env:
-          ILEX_ISO_NEXT: /mnt/ilex/state/iso-next/ilex-installer-gnome.iso
+          ILEX_ISO_NEXT: /mnt/ilex/state/iso/ilex-glabra-installer.iso
         run: |
-          (cd /mnt/ilex/state/iso-next && sha256sum --check ilex-installer-gnome.iso.sha256)
+          (cd /mnt/ilex/state/iso && sha256sum --check ilex-glabra-installer.iso.sha256)
           sg libvirt -c 'cargo ilexctl test iso::next -- --test-threads 1'
           cat "$ILEX_ARTIFACTS"/iso-next/next-*.json
 
@@ -1363,9 +1348,9 @@ jobs:
       - name: Boot the KDE edition's ISO with Secure Boot (both boot entries), restarts and the pages
         if: ${{ !cancelled() }}
         env:
-          ILEX_ISO_NEXT_KDE: /mnt/ilex/state/iso-next-kde/ilex-installer-kde.iso
+          ILEX_ISO_NEXT_KDE: /mnt/ilex/state/iso/ilex-kingiana-installer.iso
         run: |
-          (cd /mnt/ilex/state/iso-next-kde && sha256sum --check ilex-installer-kde.iso.sha256)
+          (cd /mnt/ilex/state/iso && sha256sum --check ilex-kingiana-installer.iso.sha256)
           sg libvirt -c 'cargo ilexctl test iso::next_kde -- --test-threads 1'
           cat "$ILEX_ARTIFACTS"/iso-next/next-kde-*.json
 
@@ -1378,11 +1363,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  # Only due/forced ISOs incur this ~15 minute KVM installation. !cancelled()
-  # permits publish's intentional unchanged skip, but not a failed dependency
-  # or a green guard skip (published=false). First main waits for its new tag.
+  # Only due/forced ISOs incur these KVM installations. !cancelled() permits
+  # publish's intentional unchanged skip, but not a failed dependency or a green
+  # guard skip (published=false). First main waits for its new tags. It also
+  # waits for the other roots to settle (their result decides nothing here):
+  # the KDE edition installs :generic.kde, which the other-roots call publishes,
+  # and a tag that moves under the gate fails the release's recheck.
   installer-release:
-    needs: [iso, build, upgrade, publish]
+    needs: [iso, build, upgrade, publish, other-roots]
     if: >-
       !cancelled() && github.repository == 'Reidond/ilex' && inputs.main &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) &&
@@ -1390,10 +1378,14 @@ jobs:
       ((needs.publish.result == 'success' && needs.publish.outputs.published == 'true') ||
        (needs.publish.result == 'skipped' && needs.build.outputs.installer_changed == 'false'))
     runs-on: ${{ vars.ILEX_RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 240
+    timeout-minutes: 330
     permissions:
       contents: write
       packages: read
+    env:
+      # The KDE edition's composition (the GNOME edition's is the installer
+      # composition of image.toml, `needs.iso.outputs.tag`).
+      INSTALLER_TAG_KDE: generic.kde
     steps:
       - uses: actions/checkout@v7
 
@@ -1430,15 +1422,25 @@ jobs:
             echo "IMAGE_REPO=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ilex"
           } >> "$GITHUB_ENV"
 
-      - name: Verify the installer's published target
+      - name: Verify the GNOME edition's published target
         id: target
         env:
           INSTALLER_TAG: ${{ needs.iso.outputs.tag }}
           INSTALLER_SNAPSHOT: ${{ needs.publish.outputs.published == 'true' && needs.build.outputs.digest || needs.build.outputs.snapshot }}
         run: bash .github/installer-target.sh
 
+      # The KDE root is published by another call of this run (or an earlier
+      # one): its target is what the registry has now, signed, and the same
+      # script rechecks it before the release.
+      - name: Verify the KDE edition's published target
+        id: target-kde
+        env:
+          INSTALLER_TAG: ${{ env.INSTALLER_TAG_KDE }}
+          INSTALLER_SNAPSHOT: current
+        run: bash .github/installer-target.sh
+
       - name: apt's packages from the cache
-        if: steps.target.outputs.available == 'true'
+        if: steps.target.outputs.available == 'true' && steps.target-kde.outputs.available == 'true'
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/apt-debs
@@ -1446,26 +1448,41 @@ jobs:
           restore-keys: ${{ env.APT_DEBS }}
 
       - name: Prepare the installer test's VM stack
-        if: steps.target.outputs.available == 'true'
+        if: steps.target.outputs.available == 'true' && steps.target-kde.outputs.available == 'true'
         run: |
           df -h / /mnt
           test -c /dev/kvm
           nohup bash .github/vm-prep.sh ephemeral > /dev/null 2>&1 &
 
-      - name: Install and boot this ISO
+      # Each edition installs its own composition from its own ISO with the real
+      # root helper, by a person at the keyboard of its interface (the GNOME
+      # edition's plain installation; the KDE edition's encrypted one, since the
+      # rest of its Kirigami pages are walked against a simulated helper), and
+      # the installed machine has to boot the exact digest verified above,
+      # tracking the composition's tag with the container signature policy
+      # enforced.
+      - name: Install and boot the GNOME edition's ISO
         id: install
-        if: steps.target.outputs.available == 'true'
+        if: steps.target.outputs.available == 'true' && steps.target-kde.outputs.available == 'true'
+        timeout-minutes: 60
         env:
-          ILEX_ISO: ${{ env.ISO_DIR }}/ilex-installer.iso
-          ILEX_ISO_TARGET: ${{ steps.target.outputs.target }}
+          ILEX_ISO_NEXT: ${{ env.ISO_DIR }}/ilex-glabra-installer.iso
           ILEX_ISO_DIGEST: ${{ steps.target.outputs.digest }}
-          # iso:: needs no locally built ilex container. This explicit reference
-          # stops ilexctl from building its default image before the ISO tier.
-          ILEX_IMAGE: ${{ steps.target.outputs.target }}
         run: |
-          (cd "$ISO_DIR" && sha256sum --check ilex-installer.iso.sha256)
+          (cd "$ISO_DIR" && sha256sum --check ilex-glabra-installer.iso.sha256)
           bash .github/vm-prep.sh wait vm-stack
-          sg libvirt -c 'cargo ilexctl test iso::'
+          sg libvirt -c 'cargo ilexctl test iso::next_keyboard_install -- --exact --test-threads 1'
+
+      - name: Install and boot the KDE edition's ISO
+        id: install-kde
+        if: steps.target.outputs.available == 'true' && steps.target-kde.outputs.available == 'true'
+        timeout-minutes: 60
+        env:
+          ILEX_ISO_NEXT_KDE: ${{ env.ISO_DIR }}/ilex-kingiana-installer.iso
+          ILEX_ISO_DIGEST_KDE: ${{ steps.target-kde.outputs.digest }}
+        run: |
+          (cd "$ISO_DIR" && sha256sum --check ilex-kingiana-installer.iso.sha256)
+          sg libvirt -c 'cargo ilexctl test iso::next_kde_security -- --exact --test-threads 1'
 
       - name: Keep installer test evidence
         if: ${{ !cancelled() && steps.install.outcome != 'skipped' && steps.install.outcome != '' }}
@@ -1478,7 +1495,7 @@ jobs:
 
       - name: Select and verify the published rollback baseline
         id: encrypted-baseline
-        if: success() && steps.install.outcome == 'success'
+        if: success() && steps.install.outcome == 'success' && steps.install-kde.outcome == 'success'
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1489,32 +1506,37 @@ jobs:
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
         run: bash .github/encrypted-baseline.sh
 
+      # The encrypted gates install through the GNOME edition's ISO, with the
+      # real root helper, a recovery key and the security chip: a fresh
+      # installation of the verified published digest, and, when a baseline
+      # exists, an installed baseline upgraded to it and rolled back.
       - name: Qualify encrypted release installation and rollback
         id: encrypted-release
-        if: success() && steps.install.outcome == 'success'
+        if: success() && steps.install.outcome == 'success' && steps.install-kde.outcome == 'success'
         timeout-minutes: 220
         env:
-          ILEX_ISO: ${{ env.ISO_DIR }}/ilex-installer.iso
+          ILEX_ISO_NEXT: ${{ env.ISO_DIR }}/ilex-glabra-installer.iso
           ILEX_IMAGE: ${{ env.IMAGE_REPO }}@${{ steps.target.outputs.digest }}
           ILEX_ENCRYPTED_UPGRADE_FROM: ${{ steps.encrypted-baseline.outputs.reference }}
+          ILEX_ENCRYPTED_UPGRADE_TAG: ${{ steps.encrypted-baseline.outputs.tag }}
           ILEX_ARTIFACTS: ${{ runner.temp }}/security-artifacts
           ILEX_SECURITY_MEMORY: 6G
         run: |
           set -euo pipefail
-          (cd "$ISO_DIR" && sha256sum --check ilex-installer.iso.sha256)
+          (cd "$ISO_DIR" && sha256sum --check ilex-glabra-installer.iso.sha256)
           podman pull --quiet "$ILEX_IMAGE"
           export ILEX_PRIVATE_FINGERPRINTS
           ILEX_PRIVATE_FINGERPRINTS=$(mktemp -d "$RUNNER_TEMP/ilex-fingerprints.XXXXXXXX")
           trap 'rm -f -- "$ILEX_PRIVATE_FINGERPRINTS/encrypted-install.json" "$ILEX_PRIVATE_FINGERPRINTS/encrypted-upgrade-rollback.json"; rmdir -- "$ILEX_PRIVATE_FINGERPRINTS"' EXIT
           bash .github/security-tier.sh
-          ILEX_ENCRYPTED_PUBLISHED_INSTALL=1 timeout --signal=TERM --kill-after=30s 85m \
+          timeout --signal=TERM --kill-after=30s 85m \
             cargo ilexctl test security::encrypted_install -- --exact --test-threads 1
           scope=fresh
           if [[ -n "$ILEX_ENCRYPTED_UPGRADE_FROM" ]]; then
             bash .github/encrypted-lifecycle.sh
             scope=release
           fi
-          python3 - "$ILEX_ARTIFACTS" "${ILEX_IMAGE##*@}" "$ISO_DIR/ilex-installer.iso.sha256" "$ILEX_ENCRYPTED_UPGRADE_FROM" <<'PY'
+          python3 - "$ILEX_ARTIFACTS" "${ILEX_IMAGE##*@}" "$ISO_DIR/ilex-glabra-installer.iso.sha256" "$ILEX_ENCRYPTED_UPGRADE_FROM" <<'PY'
           import json, pathlib, sys
           evidence = pathlib.Path(sys.argv[1])
           fresh = evidence / 'encrypted-install'
@@ -1558,10 +1580,11 @@ jobs:
           seal: ${{ runner.temp }}/security-evidence.seal
 
       - name: Publish the release
-        if: success() && steps.target.outputs.available == 'true' && steps.install.outcome == 'success' && steps.encrypted-release.outcome == 'success'
+        if: success() && steps.target.outputs.available == 'true' && steps.target-kde.outputs.available == 'true' && steps.install.outcome == 'success' && steps.install-kde.outcome == 'success' && steps.encrypted-release.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           INSTALLER_TAG: ${{ needs.iso.outputs.tag }}
           VERIFIED_DIGEST: ${{ steps.target.outputs.digest }}
-          INSTALL_RESULT: ${{ steps.install.outcome }}
+          VERIFIED_DIGEST_KDE: ${{ steps.target-kde.outputs.digest }}
+          INSTALL_RESULT: ${{ steps.install.outcome == 'success' && steps.install-kde.outcome == 'success' && 'success' || 'failure' }}
         run: bash .github/release-installer.sh

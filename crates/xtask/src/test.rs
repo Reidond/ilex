@@ -40,14 +40,14 @@ pub struct Args {
 }
 
 pub fn run(ws: &Workspace, args: Args) -> Result<()> {
-    // The next installer's live ISO and live image carry no OS image:
+    // The live installer's ISOs and live image carry no OS image:
     // `iso::next…` and `installer::` alone need neither the checkout's image
     // nor a build of it.
     let installer_only = !args.filters.is_empty()
         && args
             .filters
             .iter()
-            .all(|f| crate::iso_next::is_next_filter(f) || f.contains("installer::"));
+            .all(|f| crate::iso::is_next_filter(f) || f.contains("installer::"));
     let image = if installer_only {
         None
     } else {
@@ -70,41 +70,16 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     if let Some(image) = &image {
         test.env("ILEX_IMAGE", image);
     }
-    // `iso::` exercises the installer and its published payload, independently of this image.
-    // `iso::next…` boots the next installer's live ISO instead, which has no payload.
-    if args.filters.iter().any(|f| {
-        (f.contains("iso") && !crate::iso_next::is_next_filter(f))
-            || f.contains("encrypted_")
-            || f.contains("installer_profile_setup")
-            || f.contains("installer_no_profile")
-            || f.contains("security::upgrade")
-    }) {
-        prepare_iso(ws, &mut test)?;
-    }
     // Each edition's ISO is built only when a filter asks for its trials.
     if args
         .filters
         .iter()
-        .any(|f| crate::iso_next::is_next_filter(f) && !crate::iso_next::is_kde_filter(f))
+        .any(|f| crate::iso::needs_iso(f) && !crate::iso::is_kde_filter(f))
     {
-        prepare_iso_next(
-            ws,
-            &mut test,
-            crate::iso_next::DEFAULT_EDITION,
-            "ILEX_ISO_NEXT",
-        )?;
+        prepare_iso_next(ws, &mut test, crate::iso::DEFAULT_EDITION, "ILEX_ISO_NEXT")?;
     }
-    if args
-        .filters
-        .iter()
-        .any(|f| crate::iso_next::is_kde_filter(f))
-    {
-        prepare_iso_next(
-            ws,
-            &mut test,
-            crate::iso_next::KDE_EDITION,
-            "ILEX_ISO_NEXT_KDE",
-        )?;
+    if args.filters.iter().any(|f| crate::iso::is_kde_filter(f)) {
+        prepare_iso_next(ws, &mut test, crate::iso::KDE_EDITION, "ILEX_ISO_NEXT_KDE")?;
     }
     // The helper's tier boots the GNOME edition's live image; `ui_kde` alone
     // needs only the KDE edition's.
@@ -121,16 +96,16 @@ pub fn run(ws: &Workspace, args: Args) -> Result<()> {
     cmd::run(&mut test)
 }
 
-/// Build the next installer's live image (unless `ILEX_INSTALLER_IMAGE` names
+/// Build the live installer's image (unless `ILEX_INSTALLER_IMAGE` names
 /// one) for `installer::`: the root helper's tier boots it without an ISO.
 fn prepare_installer_image(ws: &Workspace, test: &mut Command) -> Result<()> {
     if std::env::var_os("ILEX_INSTALLER_IMAGE").is_some_and(|p| !p.is_empty()) {
         return Ok(());
     }
-    let image = crate::iso_next::build_image(
+    let image = crate::iso::build_image(
         ws,
-        &crate::iso_next::Build {
-            edition: crate::iso_next::DEFAULT_EDITION,
+        &crate::iso::Build {
+            edition: crate::iso::DEFAULT_EDITION,
             output_dir: None,
         },
     )?;
@@ -144,10 +119,10 @@ fn prepare_installer_image_kde(ws: &Workspace, test: &mut Command) -> Result<()>
     if std::env::var_os("ILEX_INSTALLER_IMAGE_KDE").is_some_and(|p| !p.is_empty()) {
         return Ok(());
     }
-    let image = crate::iso_next::build_image(
+    let image = crate::iso::build_image(
         ws,
-        &crate::iso_next::Build {
-            edition: crate::iso_next::KDE_EDITION,
+        &crate::iso::Build {
+            edition: crate::iso::KDE_EDITION,
             output_dir: None,
         },
     )?;
@@ -155,7 +130,7 @@ fn prepare_installer_image_kde(ws: &Workspace, test: &mut Command) -> Result<()>
     Ok(())
 }
 
-/// Build an edition's live ISO of the next installer (unless `variable`,
+/// Build an edition's live ISO (unless `variable`,
 /// `ILEX_ISO_NEXT` for the GNOME edition and `ILEX_ISO_NEXT_KDE` for the KDE
 /// one, names one already) for its `iso::next…` trials.
 fn prepare_iso_next(
@@ -167,33 +142,14 @@ fn prepare_iso_next(
     if std::env::var_os(variable).is_some_and(|p| !p.is_empty()) {
         return Ok(());
     }
-    let iso = crate::iso_next::build(
+    let iso = crate::iso::build(
         ws,
-        &crate::iso_next::Build {
+        &crate::iso::Build {
             edition,
             output_dir: None,
         },
     )?;
     test.env(variable, iso);
-    Ok(())
-}
-
-/// Build the installer ISO (unless `ILEX_ISO` names one already) and tell the
-/// harness what it is and what the installed machine must track. The
-/// installer carries no image: it installs the published installer composition, so what
-/// `iso::` checks is the installer and that image, not the one under test.
-fn prepare_iso(ws: &Workspace, test: &mut Command) -> Result<()> {
-    if std::env::var_os("ILEX_ISO").is_some_and(|p| !p.is_empty()) {
-        return Ok(());
-    }
-    let iso = crate::iso::build(
-        ws,
-        &crate::iso::Build {
-            testing_tag: None,
-            output_dir: None,
-        },
-    )?;
-    test.env("ILEX_ISO", iso);
     Ok(())
 }
 

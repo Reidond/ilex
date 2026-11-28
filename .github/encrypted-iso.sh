@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build job uses rootless storage for the candidate. osbuild needs the same
-# rootful, privileged Fedora builder as the existing ISO job, in separate state.
+# rootful, privileged Fedora builder as the ISO job, in separate state. Only the
+# GNOME edition's ISO (ilex Glabra) is built: the encrypted gates install
+# through it.
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true ]] || { echo 'hosted CI only' >&2; exit 1; }
 if [[ -e /etc/apparmor.d/bwrap-userns-restrict ]]; then
@@ -21,6 +23,6 @@ sudo -n podman run --rm --privileged --security-opt label=disable \
     quay.io/fedora/fedora:45 bash -euc '
         dnf -y install git cargo gcc podman skopeo image-builder
         git config --global --add safe.directory /src
-        cargo ilexctl iso --output-dir /mnt/ilex-state/iso
+        cargo ilexctl iso --edition gnome --output-dir /mnt/ilex-state/iso
     '
-echo "ILEX_ISO=$root/state/iso/ilex-installer.iso" >> "$GITHUB_ENV"
+echo "ILEX_ISO_NEXT=$root/state/iso/ilex-glabra-installer.iso" >> "$GITHUB_ENV"

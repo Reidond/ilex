@@ -1,5 +1,13 @@
 # LUKS2 installer enrollment (phase 0 PR 18)
 
+> The live installer replaced Anaconda. Its root helper drives this library for
+> its recovery key and security chip stages (CLAUDE.md, "The next installer's root
+> helper"), and `security::encrypted_install` / `security::upgrade_rollback` install
+> through it. The Anaconda-specific text below (the storage page, the tty8
+> completion, the kickstart fixture, the interrupted-completion, existing-space and
+> profile-setup tiers) describes the retired harness and is kept for the library's
+> own behaviour: layout rules, evidence, repair and the privacy gates.
+
 Anaconda still owns partitioning and deployment. Select LUKS2 encryption in
 its storage page and keep a separate maintenance administrator. The chooser
 handles public composition data only. ESP and `/boot` remain outside LUKS;

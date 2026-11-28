@@ -1509,6 +1509,21 @@ pub(crate) fn check_installed(save: &dyn Fn(&str, &str), vm: &Vm, e: &Expected<'
                 booted["image"]["imageDigest"],
                 e.digest
             );
+            // The release gate names the digest it verified in the registry
+            // (`ILEX_ISO_DIGEST`, the KDE edition's `ILEX_ISO_DIGEST_KDE`): the
+            // plan has to have pinned exactly that one.
+            let variable = if e.target.ends_with(".kde") {
+                "ILEX_ISO_DIGEST_KDE"
+            } else {
+                "ILEX_ISO_DIGEST"
+            };
+            if let Some(verified) = std::env::var(variable).ok().filter(|v| !v.is_empty()) {
+                ensure!(
+                    e.digest == verified,
+                    "the installer pinned {}, not the verified published digest {verified}",
+                    e.digest
+                );
+            }
             ensure!(
                 booted["image"]["image"]["image"] == e.target,
                 "tracking {}",

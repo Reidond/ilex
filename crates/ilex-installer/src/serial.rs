@@ -5,8 +5,7 @@
 //! and writing once still leaves `close()`: a UART driver drains its output
 //! there and waits up to its `closing_wait` (30 seconds by default) when the
 //! line is flow-controlled. So the port is only ever touched by a disposable
-//! worker, which the caller waits for at most [`BUDGET`], as
-//! `installer/chooser/diagnostics.py` does for the Anaconda chooser: a worker
+//! worker, which the caller waits for at most [`BUDGET`]: a worker
 //! stuck in `close()` is abandoned (it holds nothing the interface needs), and
 //! further markers are skipped, not queued behind it, until it is gone.
 //!

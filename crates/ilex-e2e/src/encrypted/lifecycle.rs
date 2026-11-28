@@ -1,4 +1,4 @@
-//! One encrypted Anaconda install, two signed deployments, one persistent TPM.
+//! One encrypted install by the live installer, two signed deployments, one persistent TPM.
 use super::*;
 
 const BOOT_EVIDENCE: &str = include_str!("lifecycle-boot.py");
@@ -9,7 +9,7 @@ pub(super) fn run() -> Result<()> {
     for program in ["openssl", "cosign", "mkfs.ext4", "debugfs"] {
         cmd::require(program)?;
     }
-    run_fixture(false, false, false, false, FixtureCase::UpgradeRollback)
+    run_fixture(true)
 }
 
 pub(super) fn valid_digest(value: &str) -> bool {

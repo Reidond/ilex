@@ -61,18 +61,17 @@ pub fn run(args: Args) -> Result<()> {
             println!("{}", disk.display());
             Ok(())
         }
-        Command::Iso(a) => {
+        Command::Iso(_) => {
             // The Windows client refuses these first; a sender that does not
             // must not get an ISO it cannot collect.
-            ensure!(!a.next, "{}", crate::iso_next::REMOTE_UNSUPPORTED);
-            crate::iso::run(&ws, a)
+            anyhow::bail!("{}", crate::iso::REMOTE_UNSUPPORTED)
         }
         Command::Tool(a) => crate::tool::run(&ws, a),
         Command::Test(a) => {
             ensure!(
-                !a.filters.iter().any(|f| crate::iso_next::is_next_filter(f)),
+                !a.filters.iter().any(|f| crate::iso::needs_iso(f)),
                 "{}",
-                crate::iso_next::REMOTE_UNSUPPORTED
+                crate::iso::REMOTE_UNSUPPORTED
             );
             crate::test::run(&ws, a)
         }
