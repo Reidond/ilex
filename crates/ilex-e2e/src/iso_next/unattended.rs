@@ -507,6 +507,159 @@ pub(super) fn run_encrypted() -> Result<()> {
     Ok(())
 }
 
+/// `iso::next_unattended_daily`: the daily user chosen in the answers (`[daily]`
+/// with a public profile, then with a user name of the person's choice) on an
+/// encrypted installation, each a whole install from the real ISO. The
+/// installed disk's `/etc/ilex/setup.json` must be what the Anaconda path
+/// writes for that choice, key for key, the login prompt must say what to run,
+/// and `ilexctl home setup` must read the record (it refuses only because
+/// this is no terminal, after it has found the profile or the custom choice,
+/// and creates nothing).
+pub(super) fn run_daily() -> Result<()> {
+    let cases = [
+        (
+            "unattended-daily-profile",
+            "[daily]\nprofile = \"andriishafar\"\n",
+            serde_json::json!({"id": "andriishafar", "schema": 1}),
+            "Sign in as the maintenance administrator and run sudo ilexctl home setup.\n",
+            // The profile names its user and capacity: an option is refused.
+            "ilexctl home setup --name other",
+            "The named profile sets its username and capacity",
+        ),
+        (
+            "unattended-daily-custom",
+            "[daily]\nname = \"ilexdaily\"\ndisk-size = 3\n",
+            serde_json::json!({"id": null, "schema": null, "mode": "custom"}),
+            "Sign in as the maintenance administrator and run sudo ilexctl home setup --name ilexdaily --disk-size 3.\n",
+            // A custom choice needs its name: it says so.
+            "ilexctl home setup",
+            "Choose a daily username",
+        ),
+    ];
+    for (name, daily, profile, issue, probe, refusal) in cases {
+        daily_install(name, daily, &profile, issue, probe, refusal)
+            .with_context(|| name.to_owned())?;
+    }
+    Ok(())
+}
+
+fn daily_install(
+    name: &str,
+    daily: &str,
+    profile: &serde_json::Value,
+    issue: &str,
+    probe: &str,
+    refusal: &str,
+) -> Result<()> {
+    let ws = common::workspace()?;
+    let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
+    let root = fixtures(name)?;
+    let layout = Layout::new(Source::Cdrom, &root, &iso_path()?)?;
+    let target = "virtio-ilex-disk-0";
+    let volume = answers_volume(&root, &format!("{}\n{daily}", answers_encrypted(target)))?;
+    let mut guest = boot(
+        &root,
+        &layout,
+        Setup {
+            volume: Some(&volume.path),
+            serials: true,
+            ..Setup::default()
+        },
+    )?;
+    let vm = guest.vm.running_mut()?;
+    let serial = vm.info.dir.join("serial.log");
+    let started = Instant::now();
+    let console = match install(vm, &serial, &artifacts, name) {
+        Ok(console) => console,
+        Err(error) => {
+            diagnostics(vm, &artifacts, name);
+            return Err(anyhow::anyhow!("{error:#}"));
+        }
+    };
+    let _ = fs::write(artifacts.join(format!("next-{name}-serial.txt")), &console);
+    println!(
+        "iso::next {name}: installed and powered off in {:?}",
+        started.elapsed()
+    );
+    ensure!(
+        count_markers(&console, "ILEX-INSTALLER", Some("page")) == 0,
+        "an interface drew a page during an unattended installation"
+    );
+    drop(guest);
+    volume.unchanged()?;
+
+    // The disk, booted: the prompt is answered with the German keys.
+    let mut config = VmConfig::new(format!("{}-d", layout.purpose()), layout.target(&root));
+    config.snapshot = true;
+    config.memory = "4G".into();
+    let mut installed = Vm::boot(&ws, &config)?;
+    encrypted::unlock(
+        &mut installed,
+        GERMAN.keys,
+        &artifacts,
+        &format!("next-{name}"),
+    )
+    .context("unlocking the installed disk at its prompt")?;
+    installed
+        .wait_ssh(PAGE_TIMEOUT)
+        .context("the unlocked disk did not come up")?;
+    // What the Anaconda path writes for this choice, key for key.
+    let record = installed.ssh_ok("cat /etc/ilex/setup.json")?;
+    let _ = qemu::write_artifact(&artifacts, &format!("next-{name}-setup.json"), &record);
+    let value: serde_json::Value = serde_json::from_str(&record)?;
+    let keys: Vec<&str> = value
+        .as_object()
+        .context("setup.json is not an object")?
+        .keys()
+        .map(String::as_str)
+        .collect();
+    ensure!(
+        keys == ["composition", "image", "profile", "schema", "security"]
+            && value["schema"] == 1
+            && value["composition"] == "generic.gnome"
+            && value["image"] == "ghcr.io/reidond/ilex:generic.gnome"
+            && value["profile"] == *profile
+            && value["security"]["capabilities"] == serde_json::json!({})
+            && value["security"]["tpm"]["status"] == "passphrase-only",
+        "setup.json of the daily user choice: {record}"
+    );
+    installed.ssh_ok(
+        "set -eu; test \"$(getenforce)\" = Enforcing; test \"$(stat -c %a /etc/ilex/setup.json)\" = 644; test \"$(stat -c %a /etc/issue.d/90-ilex-home-setup.issue)\" = 644",
+    )?;
+    let line = installed.ssh_ok("cat /etc/issue.d/90-ilex-home-setup.issue")?;
+    ensure!(
+        line.trim_end() == issue.trim_end(),
+        "the login prompt's line: {line:?}"
+    );
+    // `ilexctl home setup` reads the record: it refuses for what the record
+    // says (a profile names its user; a custom choice wants its name), and
+    // with what the line names it goes as far as asking for a terminal. Nothing
+    // is created.
+    let said = installed.ssh_ok(&format!(
+        "set -u; systemctl is-active --quiet systemd-homed; if out=$({probe} </dev/null 2>&1); then echo accepted; else echo \"$out\"; fi"
+    ))?;
+    ensure!(said.contains(refusal), "ilexctl home setup said: {said}");
+    let command = line
+        .trim_end()
+        .rsplit("run sudo ")
+        .next()
+        .context("the line names no command")?
+        .trim_end_matches('.')
+        .to_owned();
+    let said = installed.ssh_ok(&format!(
+        "set -u; if out=$({command} </dev/null 2>&1); then echo accepted; else echo \"$out\"; fi"
+    ))?;
+    ensure!(
+        said.contains("Open a terminal as the maintenance administrator"),
+        "`{command}` said: {said}"
+    );
+    installed.ssh_ok(
+        "set -eu; test ! -e /var/lib/ilex/home-setup/state.json; test -z \"$(systemctl --failed --no-legend --plain)\"; if getent passwd ilexdaily andriishafar; then exit 1; fi",
+    )?;
+    println!("iso::next {name}: the hand-off reads as the Anaconda path's");
+    Ok(())
+}
+
 fn fixtures(name: &str) -> Result<PathBuf> {
     let ws = common::workspace()?;
     let root = ws.state_dir().join("iso-next-fixtures").join(name);

@@ -517,6 +517,33 @@ fn to_account_filled(
     Ok(())
 }
 
+/// The daily user page, reached after Enter in the administrator page's last
+/// field: nothing is chosen, and Enter on Continue (which has the focus) asks
+/// for the plan.
+fn to_profile_done(
+    vm: &mut ilex_devkit::qemu::Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+) -> Result<()> {
+    let profile = nth_marker(
+        vm,
+        serial,
+        "the daily user page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("profile"),
+    )?;
+    ensure!(
+        field(&profile, "daily")? == "none",
+        "the daily user page: {profile:?}"
+    );
+    wait_page(vm, ctl, artifacts, &format!("{name}-profile"))?;
+    ctl.key("Return")?;
+    Ok(())
+}
+
 /// The pages from the welcome page to the review page by keyboard.
 fn to_review(
     vm: &mut ilex_devkit::qemu::Vm,
@@ -526,8 +553,11 @@ fn to_review(
     name: &str,
 ) -> Result<()> {
     to_account_filled(vm, ctl, serial, artifacts, name)?;
-    // Enter in the last field continues: the helper (the simulation) plans.
+    // Enter in the last field continues to the daily user page (nothing
+    // chosen, Continue focused): Enter there has the helper (the simulation)
+    // plan.
     ctl.key("Return")?;
+    to_profile_done(vm, ctl, serial, artifacts, name)?;
     let review = nth_marker(
         vm,
         serial,
@@ -718,10 +748,12 @@ fn frozen_back() -> Result<()> {
         let serial = vm.info.dir.join("serial.log");
         let ctl = Vmctl::from_info(vm.info.clone());
         to_account_filled(vm, &ctl, &serial, artifacts, "kde-frozen-back")?;
-        // Enter asks the helper to check the choices: the administrator page
-        // says "Checking..." and the flow is frozen until the answer, twelve
-        // seconds on (the review page comes with it).
+        // Enter goes on to the daily user page, and Enter there asks the helper
+        // to check the choices: the page says "Checking..." and the flow is
+        // frozen until the answer, twelve seconds on (the review page comes
+        // with it).
         ctl.key("Return")?;
+        to_profile_done(vm, &ctl, &serial, artifacts, "kde-frozen-back")?;
         std::thread::sleep(Duration::from_secs(2));
         let page_markers = |w: &std::collections::BTreeMap<String, String>| {
             w.contains_key("page") && !w.contains_key("event")
@@ -749,15 +781,17 @@ fn frozen_back() -> Result<()> {
             "the plan was not checked: {review:?}"
         );
         ensure!(
-            count(&serial, page_markers)? == pages + 1 && count(&serial, is_page("account"))? == 1,
+            count(&serial, page_markers)? == pages + 1
+                && count(&serial, is_page("account"))? == 1
+                && count(&serial, is_page("profile"))? == 1,
             "a page marker came besides the review page's while the plan was checked"
         );
         // The window said it put its page row back (the interface's own stderr
-        // is in the journal): it had moved off the administrator page.
+        // is in the journal): it had moved off the daily user page.
         vm.wait_ssh(Duration::from_secs(180))?;
         let found = vm.ssh_ok(
             "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
-             echo moved=$(grep -c -e 'qml: the page row showed .* while the flow is on account: put back' /tmp/journal.txt); \
+             echo moved=$(grep -c -e 'qml: the page row showed .* while the flow is on profile: put back' /tmp/journal.txt); \
              rm -f /tmp/journal.txt",
         )?;
         ensure!(
@@ -961,6 +995,7 @@ fn ui_install(
         ctl.type_text(apply::PASSWORD)?;
         std::thread::sleep(Duration::from_secs(1));
         ctl.key("Return")?;
+        to_profile_done(vm, &ctl, &serial, artifacts, name)?;
         let review = nth_marker(
             vm,
             &serial,

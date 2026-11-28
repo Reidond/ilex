@@ -29,6 +29,16 @@ material, tokens or private keys in this record or the installer catalogue.
 The catalogue's `profiles` map contains public IDs, their schema and display
 names. Selecting a profile does not change the OCI tag.
 
+The next installer's helper (`ilex-installerd`, the interface's **Daily user**
+page or an answers file's `[daily]`) writes the same record in its configure
+stage from the plan's daily-user choice, with exactly these fields: a public
+profile is `{"id", "schema": 1}`, a custom user is `{"id": null, "schema": null,
+"mode": "custom"}` and none is `{"id": null, "schema": null}`. A custom user's
+name and capacity are not in the record; `/etc/issue.d/90-ilex-home-setup.issue`
+names `sudo ilexctl home setup --name NAME [--disk-size GiB]` for it. A daily
+user needs an encrypted root, and its name may not be the maintenance
+administrator's.
+
 Keep future installer enrollment/completion helpers below `installer/` so
 their bytes enter the installer fingerprint automatically. If a helper is
 shared from another source directory, add that directory to

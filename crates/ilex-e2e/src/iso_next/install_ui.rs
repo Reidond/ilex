@@ -327,11 +327,12 @@ fn from_welcome(
     encrypted: bool,
 ) -> Result<()> {
     let before = |page: &'static str| count(serial, is_page(page));
-    let (machines, disks, encryptions, accounts, reviews) = (
+    let (machines, disks, encryptions, accounts, profiles, reviews) = (
         before("machine")?,
         before("disk")?,
         before("encryption")?,
         before("account")?,
+        before("profile")?,
         before("review")?,
     );
     continue_to_machine(ctl)?;
@@ -435,6 +436,22 @@ fn from_welcome(
     ctl.key("Tab")?;
     ctl.type_text(PASSWORD)?;
     std::thread::sleep(Duration::from_secs(1));
+    ctl.key("Return")?;
+    // The daily user page: nothing chosen, and Continue has the focus (Enter
+    // presses it): the helper then checks the choices.
+    let profile = nth_marker(
+        vm,
+        serial,
+        "the daily user page",
+        profiles + 1,
+        EVENT_TIMEOUT,
+        is_page("profile"),
+    )?;
+    ensure!(
+        field(&profile, "daily")? == "none",
+        "the daily user page: {profile:?}"
+    );
+    wait_page(vm, ctl, artifacts, &format!("{name}-profile"))?;
     ctl.key("Return")?;
     let review = nth_marker(
         vm,

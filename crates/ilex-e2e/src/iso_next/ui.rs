@@ -648,7 +648,16 @@ fn observe_account(vm: &mut Vm, artifacts: &Path) -> Result<()> {
     ctl.type_text(PASSWORD)?;
     std::thread::sleep(Duration::from_secs(1));
     ctl.save_screenshot(&artifacts.join("next-account-filled.png"))?;
-    // Enter in the last field continues: the helper plans.
+    // Enter in the last field continues to the daily user page, where nothing
+    // is chosen and Continue has the focus: Enter then has the helper plan.
+    ctl.key("Return")?;
+    let profile = wait_page_marker(vm, &serial, "profile", EVENT_TIMEOUT)?;
+    ensure!(
+        field(&profile, "daily")? == "none",
+        "the daily user page: {profile:?}"
+    );
+    wait_page(vm, &ctl, artifacts, "account-profile")?;
+    ctl.save_screenshot(&artifacts.join("next-account-profile.png"))?;
     ctl.key("Return")?;
     let plan = wait_event(vm, &serial, "plan", Duration::from_secs(240), |_| true)?;
     ensure!(

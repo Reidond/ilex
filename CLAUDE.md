@@ -2950,6 +2950,29 @@ maintenance login available on error. The selected public profile is applied
 as the daily user on the first authenticated login. Profile apps remain opt-in.
 See [the handoff contract](installer/setup/README.md).
 
+The next installer asks the same question on its own **Daily user** page,
+after the administrator page (see "The next installer"): No daily profile (the
+default), each public profile of the image's catalogue, or a user name of the
+person's choice with an optional capacity (2–1048576 GiB, 20 when empty: the
+limits and the name rule of `ilexctl home setup --name/--disk-size`). It writes
+the hand-off exactly as the Anaconda path does for each choice: `profile` is
+`{"id": <profile>, "schema": 1}` for a public profile, `{"id": null, "schema":
+null, "mode": "custom"}` for a custom user (its name and capacity are not in
+`setup.json`, as they never were: the login prompt's
+`/etc/issue.d/90-ilex-home-setup.issue` names the command with its `--name` and
+`--disk-size`) and `{"id": null, "schema": null}` for none, which writes no
+issue line. No password is asked for the daily user: `homectl` asks at the
+first start. The rules copied from the Anaconda path (its
+`validate_storage` and `validate_users`): a daily user needs an **encrypted
+root** (the page offers only No daily profile while encryption is off, and
+turning encryption off drops the choice), and the daily user's name may not be
+the maintenance administrator's (the administrator page refuses a name that is
+the daily user's, the daily user page refuses the administrator's, and the
+helper's `Plan` refuses both, as it refuses an account the live image defines
+or a system account). `iso::next_unattended_daily` installs once with each of the
+two choices through the answers (below) and checks `setup.json` key for key, the
+login prompt's line and that `ilexctl home setup` reads the hand-off.
+
 The local acceptance trials are `iso::chooser`, `iso::profile_chooser`,
 `security::installer_no_profile` and `security::installer_profile_setup`.
 Run them with `cargo ilexctl test FILTER -- --test-threads 1`.
@@ -4153,7 +4176,11 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   schema and syntax checks in the model: `[install]` (`composition`, `disk`,
   `mode`, `confirm-erase` repeating the disk id, `reinstall`, false unless
   given), `[encryption]` (`enabled`,
-  `tpm`, `passphrase`), `[system]` and `[administrator]` (`name`, `password`).
+  `tpm`, `passphrase`), `[system]` and `[administrator]` (`name`, `password`)
+  and, optionally, `[daily]`: `profile` (a public profile of the image) or `name`
+  with an optional `disk-size` in GiB, the daily user `ilexctl home setup` creates
+  at the first start (no password; it needs `[encryption]` on, and a name that is
+  not the administrator's).
   Secrets never print (and each one's text is zeroed when it is dropped), and a
   TOML error names the line and column but never the
   text (toml's own message quotes the line). The administrator's password may not
@@ -4281,7 +4308,8 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     `locale.conf`, `vconsole.conf` (keymap and, from systemd's own map, the X11
     layout `XKBLAYOUT`), `localtime` and `hostname`; `/etc/ilex/setup.json` as the
     Anaconda path writes it (schema 1, the composition, the image the machine
-    tracks, no profile, TPM `not-configured`); no line for `/` in `fstab` (bootc
+    tracks, the daily-user choice as the chooser records it, TPM `not-configured`)
+    and, for a daily user, `/etc/issue.d/90-ilex-home-setup.issue`; no line for `/` in `fstab` (bootc
     writes one for `/boot`); and checks the default target is `graphical.target`
     for a composition with a shell (the image says so itself; the stage repairs it
     if a composition ever ships without). `account` bind-mounts the stateroot's
@@ -5047,6 +5075,14 @@ in an unattended installation can show a key),
 no secret of the answers on the console, the answers volume unchanged;
 the disk is then booted, its prompt answered with the German keys through QMP, and
 the installed system must pass the assertions of `installer::encrypted_german`.
+`iso::next_unattended_daily` installs twice from encrypting answers with a `[daily]`
+table (the public profile `andriishafar`, then the custom name `ilexdaily` with 3 GiB),
+boots each disk, unlocks it with the German keys and asserts that `/etc/ilex/setup.json`
+is the Anaconda path's record for that choice key for key (`profile` as above,
+`security.tpm.status` `passphrase-only`), that the login prompt's issue line names the
+right command, and that `ilexctl home setup` reads it: the profile refuses `--name`,
+the custom choice asks for its name, and the line's own command goes as far as asking
+for a terminal, creating nothing.
 `iso::next_security` and `iso::next_security_off` are the security tier of the new
 installer, on KVM with enrolled OVMF and a **persistent swtpm** (T6's `VmSpec`, as
 `security::firmware` boots): a platform that cannot provide Secure Boot with SMM or
@@ -5157,7 +5193,7 @@ application over it (the `gui` feature) and holds the KDE edition's Qt Quick +
 Kirigami one (the `kde` feature; see "The KDE edition" above). Both drive the
 same flow crate: nothing in it knows a toolkit, a compositor or a thread. This
 version installs a whole disk, encrypted unless the person turns that off: the
-welcome, machine, disk, encryption and administrator pages, the review with its
+welcome, machine, disk, encryption, administrator and daily user pages, the review with its
 confirmation, the installing page and the three pages an installation ends on
 (done, problem). Nothing is written to a disk before the person has confirmed
 the erase on the review page.
@@ -5165,7 +5201,7 @@ the erase on the review page.
 - **The flow crate.** No GTK or Qt types, no `async`.
   - `flow::Flow` is a state machine with no I/O, and **every rule lives
     there**, so that GTK and Kirigami cannot disagree about one: the pages in
-    order (`PageId`: the walk `welcome`, `machine`, `disk`, `encryption`, `account`, `review`,
+    order (`PageId`: the walk `welcome`, `machine`, `disk`, `encryption`, `account`, `profile`, `review`,
     then `installing`, `done` and `problem`, which nobody goes back from), what
     each needs before Continue works (`can_continue`), what Continue does. Every
     method that can need the helper or the compositor returns a `Step` the
@@ -5201,7 +5237,7 @@ the erase on the review page.
       same by name, for QML. `runner::Services::job(step)` turns a `Step` into a
       blocking `Job` that returns an `Answer`, and `Flow::answer` gives it to the
       right method with its generation (GTK's `carry_out` and `update_cmd` are
-      these). `shots::SHOTS` is the table of the 104 states the renderers draw (the
+      these). `shots::SHOTS` is the table of the 118 states the renderers draw (the
       steps from a fixture scenario's start to the page, check and dialog a shot
       names); each toolkit's renderer turns a `Do` into its own input.
       `Flow::observed()` says what is on screen in the flow's words, for a
@@ -5218,7 +5254,7 @@ the erase on the review page.
       (`is_checking`) the setters refuse, so the answer describes what the
       flow still holds, Back is off and a second request cannot be started:
       the plan the flow ends up with, and the id a later change applies it by,
-      is always the latest answer's. The administrator page does not continue
+      is always the latest answer's. The administrator and daily user pages do not continue
       (`can_continue`) until the computer has been looked at: after Back and a
       banner's Try again it waits for the new look.
     - *The session's layout.* `set_keyboard` records what was asked for and
@@ -5488,7 +5524,7 @@ the erase on the review page.
     "No disk can be installed to" text, the Continue and "Checking…" labels);
     `markers` the serial-console lines the trials assert on (below);
     `machine::MachineView` is the machine page's content made from the probe;
-    `account` the administrator page's rules; `progress::Progress` the stages
+    `account` the administrator page's rules; `daily` the daily user page's rules and wording; `progress::Progress` the stages
     of an installation as rows (`for_plan`, `from_state(&State)` for an interface
     that restarted, `apply(&State)`, `overall`) for the installing page; `keyboard` and `language` the catalogues.
     The model stays the one definition of every rule the helper also applies:
@@ -5592,7 +5628,16 @@ the erase on the review page.
     the way of installing (whole disk, the other greyed). Continue is focused
     (Enter takes the default disk); nothing is written. Without a disk, the
     page says why of every disk with Try again.
-  - *Review.* Continue on the administrator page calls `Plan` with the choices
+  - *Daily user.* Radio rows (No daily profile, each public profile of the
+    catalogue by its display name, a user name of the person's choice) and, for
+    the last, a name field and an optional capacity field in GiB, each with its
+    refusal beside it (the name rule of `ilexctl home setup --name`, a system
+    account, the administrator's name; a capacity of 2 to 1048576). Without an
+    encrypted disk only the first row is offered, with a line that says why. The
+    helper's refusal of the name (an account the live image defines) comes back
+    to this page. Nothing is asked of the person for a password. Continue
+    (focused) calls `Plan`; the review shows a `Daily user` row.
+  - *Review.* Continue on the daily user page calls `Plan` with the choices
     on the chosen disk. The page shows the answer in groups (the choices, the
     disk, the partitions that will be created, the image's tag, version, digest
     and download size, what else is on the disk and any warning of the helper),
@@ -5656,12 +5701,14 @@ the erase on the review page.
   mirror and its faults are unchanged.
 - **`--self-check --render DIR [--dark]`** draws every page and error state to
   PNG files with GTK's renderer from the window's widget tree at the surface's
-  own scale (`<state>-<light|dark>-<scale>x.png`, 104 states): the welcome page
+  own scale (`<state>-<light|dark>-<scale>x.png`, 118 states): the welcome page
   in German, BIOS, without a helper and with a layout the compositor did not
   take; the machine page for every kind of detection result and for a BIOS
   boot found there; the disk page with the default and another disk chosen,
   with no disk, without a helper and on a BIOS boot; the administrator page
-  empty, with each refusal and valid; the encryption page (on, typed, a short
+  empty, with each refusal and valid; the daily user page (none, a profile, a custom
+  user empty and typed, each refusal of its name and capacity, without encryption,
+  and the helper's refusal); the encryption page (on, typed, a short
   passphrase, a mismatch, a character a prompt cannot take, off, in German, after
   Back, without a helper, and with the security chip on, off, and needing
   encryption); the review page (with the chip's line, and where the computer
@@ -5702,13 +5749,13 @@ the erase on the review page.
   `--headless --virtual-monitor 1920x1200` is enough, with the scale from a
   `monitors.xml` for the virtual monitor (`MetaVendor` / `MetaVirtualMonitor`,
   connector `Meta-0`, serial `0x00`). `installer::ui` does that in the live
-  image's VM: the flow's rules, `--simulate` refused on a real boot, and 312
+  image's VM: the flow's rules, `--simulate` refused on a real boot, and 354
   images (light and dark at 1x, light at 1.5x, 1280x800 and 1920x1200) that
   must all be PNGs of their size, drawn and mostly different, kept under
   `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
   these files. They are not an accessibility walk: AT-SPI driving of the pages
   is not done.
-  The KDE edition's interface draws the **same 104 states** (the same
+  The KDE edition's interface draws the **same 118 states** (the same
   `shots::SHOTS`) with `ilex-installer --self-check --render DIR [--dark]`
   (`kde::render`): the real window (`Main.qml`, 1280x800 logical, with `rendering`
   on) under KWin, and a driver thread that plays the person: it sends the events
@@ -5729,7 +5776,7 @@ the erase on the review page.
   only for a filter that names it, in a VM of its own from `ILEX_INSTALLER_IMAGE_KDE`,
   built by `ilexctl test` when unset) runs it in the guest in the same three
   configurations and holds the KDE edition to the same rules as `installer::ui`:
-  104 shots in each, 312 images of their sizes, mostly different (the count is
+  118 shots in each, 354 images of their sizes, mostly different (the count is
   one constant, `SHOTS`, for both).
 - **On the real KDE ISO** (`iso::next_kde_*`, registered with the other KDE
   trials: Secure Boot on KVM, real key input over QMP, KWin, the real session

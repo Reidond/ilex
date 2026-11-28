@@ -2687,7 +2687,7 @@ fn ui(vm: &EphemeralVm) -> Result<()> {
 /// How many states the renderers draw, and how many pictures that is in three
 /// configurations (light, dark, light at 150%). One number for both interfaces:
 /// the states are `ilex_installer_flow::shots::SHOTS`.
-const SHOTS: usize = 104;
+const SHOTS: usize = 118;
 const IMAGES: usize = SHOTS * 3;
 
 /// Run `script` (the interface's `--self-check`, a refused `--simulate` and its
