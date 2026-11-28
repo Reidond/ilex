@@ -59,11 +59,13 @@ case "$1 ${2:-}" in
   '--version ') echo 'podman version 0.0.0 (fixture)' ;;
   'info --format') echo info >> "$CHECK_ROOT/calls"; echo "$CHECK_ROOT/store" ;;
   'image exists')
-    if [ "$last" = "$CHECK_SOURCE" ]; then exit 0; fi
+    if [ "$last" = "$CHECK_SOURCE" ] || [ "$last" = "${CHECK_PINNED:-}" ]; then exit 0; fi
     if [ "$CHECK_MODE" = exists-error ]; then exit 125; fi
     test -f "$CHECK_ROOT/alias-id" ;;
   'image inspect')
-    if [ "$last" = "$CHECK_SOURCE" ]; then
+    if [ "$last" = "${CHECK_PINNED:-}" ]; then
+      if [ "$4" = '{{.Digest}}' ]; then echo "$CHECK_DIGEST"; else echo "${CHECK_SOURCE#sha256:}"; fi
+    elif [ "$last" = "$CHECK_SOURCE" ]; then
       if [ "$4" = '{{.Digest}}' ]; then echo "$CHECK_DIGEST"; exit 0; fi
       if [ "$CHECK_MODE" = source-error ]; then echo 'injected source inspect error' >&2; exit 125; fi
       if [ "$CHECK_MODE" = source-mismatch ]; then echo wrong; else echo "${CHECK_SOURCE#sha256:}"; fi
@@ -81,6 +83,7 @@ esac
         r#"#!/bin/bash
 set -eu
 echo bcvk >> "$CHECK_ROOT/calls"
+echo "bcvk-source ${@: -2:1}" >> "$CHECK_ROOT/calls"
 if [ "$CHECK_MODE" = gated ]; then
   touch "$CHECK_ROOT/started"
   deadline=$((SECONDS + 20))
@@ -104,11 +107,11 @@ qemu-img create -q -f qcow2 "${!#}" 1M
         &std::env::var_os("PATH").context("PATH missing")?,
     ));
     let path = std::env::join_paths(paths)?;
-    let command = |mode: &str, out: &str, runtime: &str| {
+    let command_for = |image: &str, mode: &str, out: &str, runtime: &str| {
         let mut c = Command::new(&exe);
         c.current_dir(&ws.root)
             .arg("--ilexctl-in-checkout")
-            .args(["disk", "--image", &source, "--size", "1M", "--out"])
+            .args(["disk", "--image", image, "--size", "1M", "--out"])
             .arg(root.join(out))
             .env("ILEX_ROOT", &ws.root)
             .env("ILEX_STATE_DIR", root.join("state"))
@@ -116,6 +119,7 @@ qemu-img create -q -f qcow2 "${!#}" 1M
             .env("PATH", &path)
             .env("CHECK_ROOT", &root)
             .env("CHECK_SOURCE", &source)
+            .env("CHECK_PINNED", format!("registry.invalid/ilex@{digest}"))
             .env("CHECK_DIGEST", &digest)
             .env("CHECK_MODE", mode)
             .env_remove("ILEX_SHELLS")
@@ -123,6 +127,7 @@ qemu-img create -q -f qcow2 "${!#}" 1M
             .env_remove("ILEX_IMAGE");
         c
     };
+    let command = |mode: &str, out: &str, runtime: &str| command_for(&source, mode, out, runtime);
     let reject = |mode: &str, message: &str| -> Result<()> {
         fs::write(&calls, b"")?;
         let before = fs::read(&alias_file).ok();
@@ -167,7 +172,12 @@ qemu-img create -q -f qcow2 "${!#}" 1M
             && manifest.location.sha256 == super::hash_file(&root.join("disk.qcow2"))?,
         "wrong fixture disk manifest"
     );
-    let receipts = root.join("state").join(&ws.slug).join("image-aliases");
+    // The primary checkout's state directory is owner-qualified (`main--<hash>`),
+    // not its bare slug; the child process derives the same name.
+    let receipts = root
+        .join("state")
+        .join(ws.state_dir().file_name().context("state directory name")?)
+        .join("image-aliases");
     let receipt_path = fs::read_dir(&receipts)?
         .next()
         .context("allocation receipt missing")??
@@ -210,6 +220,32 @@ qemu-img create -q -f qcow2 "${!#}" 1M
     ensure!(
         fs::read(&receipt_path)? == receipt,
         "reuse changed allocation receipt"
+    );
+
+    // A name pinned by digest resolves to the same image ID, so it must reach
+    // bcvk through the same receipted tag alias: the guest cannot copy an image
+    // into a destination named by a digest.
+    let alias = format!("{}-disk-v1-{}", ws.image_ref(), &id[..16]);
+    let pinned = format!("registry.invalid/ilex@{digest}");
+    fs::write(&calls, b"")?;
+    let by_digest = bcvk::capture(
+        &mut command_for(&pinned, "normal", "pinned.qcow2", "pinned-run"),
+        Duration::from_secs(20),
+    )?;
+    ensure!(
+        by_digest.success(),
+        "digest-pinned source failed: {by_digest:?}"
+    );
+    let seen = fs::read_to_string(&calls)?;
+    ensure!(
+        seen.lines().any(|line| line == format!("bcvk-source {alias}"))
+            && !seen.contains(&pinned)
+            && !seen.lines().any(|line| line == "tag"),
+        "digest-pinned source did not reach bcvk through its receipted alias: {seen}"
+    );
+    ensure!(
+        fs::read(&receipt_path)? == receipt,
+        "digest-pinned reuse changed allocation receipt"
     );
 
     // Distinct output disks and runtime roots must still share one image lease,
@@ -270,7 +306,8 @@ qemu-img create -q -f qcow2 "${!#}" 1M
             "self_check": "passed", "inspect_exit_125_rejected_before_tag_or_bcvk": true,
             "exists_exit_125_rejected": true, "source_validated_before_tag": true,
             "unreceipted_same_id_rejected": true, "foreign_receipt_and_wrong_id_rejected": true,
-            "receipted_reuse_without_retag": true, "different_outputs_and_runtime_roots_serialized": true,
+            "receipted_reuse_without_retag": true, "digest_pinned_source_installed_through_alias": true,
+            "different_outputs_and_runtime_roots_serialized": true,
             "standalone_qcow2_manifest_validated": true,
             "backend": "disposable CLI fault injection; no real images or guests"
         }))?

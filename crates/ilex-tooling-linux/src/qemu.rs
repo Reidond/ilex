@@ -115,6 +115,16 @@ pub fn default_disk_path(ws: &Workspace, image: &str, format: DiskFormat) -> Pat
     ))
 }
 
+/// Is `image` a name pinned by a SHA-256 manifest digest (`name@sha256:<hex>`)?
+fn digest_pinned(image: &str) -> bool {
+    image.rsplit_once('@').is_some_and(|(name, digest)| {
+        !name.is_empty()
+            && digest.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+    })
+}
+
 /// Write (or refresh) the disk for `spec` with `bcvk to-disk` and return its
 /// path. bcvk records what a disk was built from and skips the install when
 /// the image hasn't changed, so calling this before every boot is cheap.
@@ -151,7 +161,22 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
     // bcvk's inner containers-storage transport parses `sha256:...` as a
     // registry name, unlike podman inspect. Give it an owned content-addressed
     // local alias while retaining the original immutable ID as the disk key.
-    let source_alias = if let Some(digest) = spec.image.strip_prefix("sha256:") {
+    // A reference pinned by digest (`ghcr.io/…@sha256:…`) needs the same alias:
+    // the guest copies the image into its own storage under the very name it
+    // was given, and containers-image refuses a digest-named destination
+    // ("Copying this image would require changing layer representation ...
+    // Destination specifies a digest") because the layers of a pulled image
+    // are stored uncompressed. A tag alias of the same image ID is accepted and
+    // keeps the manifest digest, so the guest still boots the pinned manifest.
+    let source_id = if spec.image.starts_with("sha256:") {
+        Some(spec.image.clone())
+    } else if digest_pinned(&spec.image) {
+        Some(format!("sha256:{}", crate::bcvk::image_id(&spec.image)?))
+    } else {
+        None
+    };
+    let source_alias = if let Some(source_id) = &source_id {
+        let digest = source_id.strip_prefix("sha256:").unwrap_or_default();
         anyhow::ensure!(
             digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid source image ID"
@@ -160,9 +185,7 @@ pub fn ensure_disk(ws: &Workspace, spec: &DiskSpec) -> Result<PathBuf> {
         // by the old, unreceipted path. The helper retains a store-wide lease.
         let alias = format!("{}-disk-v1-{}", ws.image_ref(), &digest[..16]);
         Some(crate::ownership::ImageAlias::for_image_id(
-            ws,
-            &alias,
-            &spec.image,
+            ws, &alias, source_id,
         )?)
     } else {
         None

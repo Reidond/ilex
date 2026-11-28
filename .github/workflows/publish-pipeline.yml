@@ -1539,6 +1539,24 @@ jobs:
           name: encrypted-release-lifecycle-evidence
           encrypted: ${{ steps.encrypted-release.outputs.scope }}
 
+      # The sealed lifecycle export above exists only when the whole step passed.
+      # The security tier's own evidence (`security/`: no encrypted tier, no
+      # private fingerprint) is public and sealed separately, so a failing tier
+      # still leaves its logs, qualification records and nested command logs.
+      - name: Scan and seal the public security-tier evidence
+        id: security-evidence
+        if: always() && steps.encrypted-release.outcome != 'skipped'
+        continue-on-error: true
+        run: python3 -B crates/ilex-e2e/src/encrypted/privacy.py "$RUNNER_TEMP/security-artifacts" --seal-export "$RUNNER_TEMP/security-evidence.seal" false
+
+      - name: Keep the public security-tier evidence
+        if: always() && steps.security-evidence.outcome == 'success'
+        uses: ./.github/actions/upload-qualification-evidence
+        with:
+          name: release-security-evidence
+          encrypted: 'false'
+          seal: ${{ runner.temp }}/security-evidence.seal
+
       - name: Publish the release
         if: success() && steps.target.outputs.available == 'true' && steps.install.outcome == 'success' && steps.encrypted-release.outcome == 'success'
         env:

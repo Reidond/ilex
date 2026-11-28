@@ -1,6 +1,7 @@
 #!/bin/bash
 # Boot real ilex first, then fail only one unsigned EFI control before QMP.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/diagnose.sh"
 : "${ILEX_IMAGE:?select the test image for this checkout}"
 : "${ILEX_ARTIFACTS:?select the public evidence directory}"
 control=${1:-off}
@@ -9,6 +10,7 @@ evidence="$ILEX_ARTIFACTS/security/control-startup-self-check/$control"
 mkdir -p "$evidence"
 # A fresh artifact generation cannot inherit an earlier control's evidence.
 output=$(mktemp -d "$evidence/run.XXXXXX")
+diag_logs "$output/command.log" "$output/security/result.json"
 fixture=$(mktemp -d /tmp/i17.XXXXXX)
 touch "$fixture/.pr17-fixture"
 cleanup() {
@@ -46,10 +48,13 @@ if env -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER \
     timeout --signal=TERM --kill-after=20s 45m \
     cargo ilexctl doctor security --self-check --accelerator kvm \
     > "$output/command.log" 2>&1; then
-    echo 'injected unsigned-control startup failure unexpectedly qualified' >&2
-    exit 1
+    diag_fail 'the injected unsigned-control startup failure unexpectedly qualified'
 fi
-test -s "$ILEX_CHECK_EFI_LAUNCH"
+# The nested run must fail only at the injected EFI-control launch. Failing
+# earlier (its disk, a platform or guest stage) never reaches the wrapper.
+if [[ ! -s "$ILEX_CHECK_EFI_LAUNCH" ]]; then
+    diag_fail "the nested security::firmware run ended before the injected EFI-control QEMU launch; its output follows"
+fi
 python3 - "$output/security" "$control" <<'PY'
 import json, pathlib, sys
 root, control = pathlib.Path(sys.argv[1]), sys.argv[2]

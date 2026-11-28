@@ -1,6 +1,7 @@
 #!/bin/bash
 # Exercise the real security --self-check failure path before any guest boots.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/diagnose.sh"
 : "${ILEX_IMAGE:?select the test image for this checkout}"
 : "${ILEX_ARTIFACTS:?select the public evidence directory}"
 evidence="$ILEX_ARTIFACTS/security/startup-self-check"
@@ -51,6 +52,7 @@ SH
 chmod 700 "$fixture/bin/"*
 for phase in emulator setup; do
     mkdir -p "$evidence/$phase"
+    diag_logs "$evidence/$phase/command.log" "$evidence/$phase/security/result.json"
     if env -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER \
         PATH="$fixture/bin:$PATH" ILEX_STATE_DIR="$fixture/state-$phase" \
         XDG_RUNTIME_DIR="$fixture" ILEX_DISK="$fixture/input.qcow2" \
@@ -58,10 +60,11 @@ for phase in emulator setup; do
         ILEX_CHECK_LAUNCHED="$fixture/qemu-launched" ILEX_ARTIFACTS="$evidence/$phase" \
         timeout --signal=TERM --kill-after=10s 5m cargo ilexctl doctor security --self-check --accelerator kvm \
         > "$evidence/$phase/command.log" 2>&1; then
-        echo "injected $phase startup failure unexpectedly qualified" >&2
-        exit 1
+        diag_fail "injected $phase startup failure unexpectedly qualified"
     fi
-    test ! -e "$fixture/qemu-launched"
+    if [[ -e "$fixture/qemu-launched" ]]; then
+        diag_fail "QEMU was launched after the injected $phase startup failure"
+    fi
     python3 - "$evidence/$phase/security" "$phase" <<'PY'
 import json, pathlib, sys
 root, phase = pathlib.Path(sys.argv[1]), sys.argv[2]

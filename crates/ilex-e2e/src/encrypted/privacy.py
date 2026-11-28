@@ -459,7 +459,7 @@ if __name__ == '__main__':
             mode = sys.argv[4]
             check_seal(root, pathlib.Path(sys.argv[3]), mode)
             name = sys.argv[5]
-            if name == 'security-evidence':
+            if name == 'security-evidence' or (name == 'release-security-evidence' and mode == 'false'):
                 paths = ['security']
             elif name == 'encrypted-installer-evidence' and mode in ('true', 'installer'):
                 paths = [*encrypted_tiers(mode), EXPORT_REPORT]

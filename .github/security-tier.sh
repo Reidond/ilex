@@ -1,6 +1,9 @@
 #!/bin/bash
 # Candidate security qualification on this runner, never inferred from WSL.
 set -euo pipefail
+# A failing step is named in the job log. The nested self-check scripts report
+# their own logs; this script's steps print straight to the job log.
+source "$(dirname "${BASH_SOURCE[0]}")/diagnose.sh"
 export ILEX_ARTIFACTS="${ILEX_ARTIFACTS:-$RUNNER_TEMP/security-artifacts}"
 mkdir -p "$ILEX_ARTIFACTS/security"
 started=$SECONDS
@@ -34,8 +37,7 @@ if [[ "${GITHUB_ACTIONS:-}" == true && -f /etc/apparmor.d/usr.bin.swtpm ]]; then
     fi
     sudo -n cat /sys/kernel/security/apparmor/profiles > "$ILEX_ARTIFACTS/security/apparmor-after.txt"
     if grep -qE '^(swtpm|/usr/bin/swtpm) ' "$ILEX_ARTIFACTS/security/apparmor-after.txt"; then
-        echo 'swtpm AppArmor profile is still loaded; security tier unqualified' >&2
-        exit 1
+        diag_fail 'swtpm AppArmor profile is still loaded; security tier unqualified'
     fi
 fi
 timeout --signal=TERM --kill-after=10s 5m cargo ilexctl disk --self-check > "$ILEX_ARTIFACTS/security/disk-alias-self-check.json"
