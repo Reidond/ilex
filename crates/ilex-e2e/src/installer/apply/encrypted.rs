@@ -57,7 +57,7 @@ pub(crate) const GERMAN: Variant = Variant {
 
 /// The log stick: a 64 MiB image with a table and one FAT32 partition, as a
 /// stick from a shop is.
-fn fat_stick(path: &Path) -> Result<()> {
+pub(crate) fn fat_stick(path: &Path) -> Result<()> {
     fs::File::create(path)?.set_len(64 << 20)?;
     let mut child = Command::new("sfdisk")
         .arg("--quiet")
@@ -507,7 +507,31 @@ fn encrypted_inspected(text: &str, plan: &Plan, variant: &Variant) -> Result<Fou
     let uuid = field(text, "uuid")?.to_owned();
     ensure!(uuid.len() == 36, "the LUKS UUID: {uuid:?}");
     // What the installed system finds the volume by.
-    want("crypttab", &format!("luks-{uuid} UUID={uuid} none discard"))?;
+    if with_key {
+        want(
+            "crypttab",
+            &format!("luks-{uuid} UUID={uuid} none discard,tpm2-device=auto"),
+        )?;
+        want("token_types", "systemd-recovery")?;
+        let setup: Value = serde_json::from_str(field(&out, "setup_tpm")?)?;
+        ensure!(
+            setup["status"] == "passphrase-only"
+                && setup["reason"] == "secure-boot-off"
+                && setup["capability"] == "unavailable"
+                && setup["requested"] == "auto",
+            "setup.json's security.tpm: {setup}"
+        );
+        let record: Value = serde_json::from_str(field(&out, "record")?)?;
+        ensure!(
+            record["recovery"]["acknowledged"] == true
+                && record["tpm"].is_null()
+                && record["state"] == "unavailable",
+            "the enrolment record: {record}"
+        );
+    } else {
+        want("crypttab", &format!("luks-{uuid} UUID={uuid} none discard"))?;
+        want("token_types", "")?;
+    }
     want("crypttab_mode", "600")?;
     let vconsole = field(text, "vconsole")?;
     ensure!(
@@ -705,6 +729,30 @@ pub(crate) fn booted_encrypted(
     variant: &Variant,
     save: &dyn Fn(&str, &str),
 ) -> Result<()> {
+    booted_encrypted_as(vm, uuid, variant, false, save)
+}
+
+/// [`booted_encrypted`] for an installation that made a recovery key (an
+/// interface's request) on a computer that could not use the security chip:
+/// a second keyslot and the recovery token, the `tpm2-device=auto` option in
+/// `crypttab`, `setup.json` and the enrolment record saying `passphrase-only`
+/// and why, and the volume opened with the passphrase typed at the prompt.
+pub(crate) fn booted_encrypted_with_key(
+    vm: &Vm,
+    uuid: Option<&str>,
+    variant: &Variant,
+    save: &dyn Fn(&str, &str),
+) -> Result<()> {
+    booted_encrypted_as(vm, uuid, variant, true, save)
+}
+
+fn booted_encrypted_as(
+    vm: &Vm,
+    uuid: Option<&str>,
+    variant: &Variant,
+    with_key: bool,
+    save: &dyn Fn(&str, &str),
+) -> Result<()> {
     let own = ok(vm, "cryptsetup luksUUID /dev/disk/by-partlabel/ilex-root")?;
     ensure!(
         uuid.is_none_or(|known| known == own),
@@ -716,7 +764,10 @@ pub(crate) fn booted_encrypted(
         &format!(
             r#"set -u
 echo "cmdline=$(cat /proc/cmdline)"
-echo "crypttab=$(cat /etc/crypttab)"
+echo "crypttab=$(tr '\t' ' ' < /etc/crypttab)"
+echo "token_types=$(cryptsetup luksDump --dump-json-metadata /dev/disk/by-uuid/{uuid} | python3 -c 'import json,sys; print(",".join(sorted(t["type"] for t in json.load(sys.stdin)["tokens"].values())))')"
+echo "setup_tpm=$(python3 -c 'import json; print(json.dumps(json.load(open("/etc/ilex/setup.json"))["security"]["tpm"], sort_keys=True, separators=(",", ":")))')"
+echo "record=$(python3 -c 'import json; r=json.load(open("/var/lib/ilex/security/enrollment.json")); print(json.dumps({"state": r.get("state"), "recovery": r.get("recovery"), "tpm": r.get("tpm")}, sort_keys=True, separators=(",", ":")))' 2>/dev/null)"
 echo "sysroot_source=$(findmnt -no SOURCE /sysroot)"
 echo "var_source=$(findmnt -no SOURCE /var | sed 's/\[.*//')"
 echo "boot_source=$(findmnt -no SOURCE /boot)"
@@ -785,7 +836,16 @@ echo "leak_journal=$(journalctl -b --no-pager | grep -cF -e "$(printf %s {pass} 
         "what the root is made of: {out}"
     );
     want("swaps", "0")?;
-    want("dump", "1 argon2id aes-xts-plain64")?;
+    if with_key {
+        // The passphrase's slot (argon2id) and the recovery key's.
+        let dump = field(&out, "dump")?;
+        ensure!(
+            dump.starts_with("2 argon2id,") && dump.ends_with(" aes-xts-plain64"),
+            "the volume's keyslots: {dump}"
+        );
+    } else {
+        want("dump", "1 argon2id aes-xts-plain64")?;
+    }
     want("vconsole", &format!("KEYMAP={}", variant.keymap))?;
     want("keymap_loaded", variant.keymap)?;
     ensure!(

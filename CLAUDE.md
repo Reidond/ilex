@@ -3306,6 +3306,8 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
   list of other systems may be incomplete.
   `Plan(request)` takes `composition`, `disk`, `mode`, and
   optionally `encrypt` (on), `tpm` (`auto` with encryption, else `off`),
+  `recovery_key` (off: an interface that can show a key to a person sets it; the
+  answers file cannot, and needs encryption),
   `keyboard` (`us`), `language` (`en_US.UTF-8`), `time_zone` (`Etc/UTC`),
   `host_name` (`ilex`) and `administrator`; unknown fields are refused. It
   probes afresh and refuses, with a JSON `{code, field, message}` as the error
@@ -3570,9 +3572,56 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     (`cleanup`). `/etc/ilex/setup.json` says what phase 0's completion says of a
     disk that unlocks with its passphrase alone: `security.tpm` is `{requested,
     capability: "unknown", reason: "not-attempted", status: "passphrase-only"}`.
-    The security chip and the recovery key are not part of this change: the
-    interface asks with `tpm: "off"`, and an answers file that leaves `tpm` at its
-    default (`auto`) gets a plan warning that the chip is not used yet.
+    That is what a request without a recovery key gets (an answers file, and any
+    client that does not ask for one): the plan warns that the chip is not used
+    (`no-recovery-key`). **The recovery key and the security chip** are the next
+    paragraph.
+  - **The recovery key and the security chip**
+    (`crates/ilex-installerd/src/{enrol,recovery}.rs`, the `recovery` and `tpm`
+    stages; `ilex_installer_model::recovery`). A request with `recovery_key: true`
+    (an interface sets it whenever the disk is encrypted) makes `ilex-enroll`'s
+    library add a systemd recovery key as the volume exists: `enrol::Prepared`
+    opens the volume as `/dev/disk/by-uuid/<LUKS uuid>` with the passphrase (its
+    own copy, wiped when the installation ends), and the same
+    `Reconciled::{recovery, acknowledge, enroll_tpm}` the Anaconda completion and
+    `ilexctl security repair` call do the rest, so one implementation decides what
+    "eligible" is and what the token must bind. The record of that session
+    (`enrollment.json`) is kept under `/run/ilex-installer/enroll/<plan>/` while
+    `bootc` needs the new file systems empty, and written into the deployment's
+    `/var/lib/ilex/security/` after the account (mode 0600, relabelled), where
+    `ilex-security-verify` and `ilexctl security verify/repair` read it unchanged;
+    `/etc/crypttab` gets `tpm2-device=auto` for the root line (`ilex-enroll`'s own
+    `configure_crypttab`) and `setup.json`'s `security.tpm` says `{requested,
+    capability: <the probe's verdict>, reason, status}`. The key is **handed over
+    once**: `TakeRecoveryKey(plan)` returns it as a sealed memfd (a second call is
+    `recovery-key-taken`), `State.security.recovery_key` says `waiting`, `shown` or
+    `acknowledged` (never the key), and `AcknowledgeRecoveryKey(plan, groups)`
+    takes two groups of it typed back (a sealed memfd of `<number> <group>`
+    lines; which two the model's `recovery::asked(plan id)` says, one of each half)
+    and **the helper compares them** (`recovery-key-mismatch`: the person tries
+    again), so that an interface that was restarted after it took the key, and
+    cannot show it again, can still confirm it from the paper. The key is in no
+    state file, plan, stage log, saved-log tarball or target log: the helper holds
+    it in locked pages of their own until it is confirmed. The installation goes
+    on while the key is shown (the image takes ten to twenty minutes); after the
+    account the `recovery` stage waits for the confirmation, then, only when the
+    plan says `will_enroll` (a key was asked for, `tpm` is `auto`, and the probe
+    says the computer is eligible: Secure Boot on, setup mode off, TPM 2.0, a
+    SHA-256 PCR 7 equal to the event log's replay, the qualified tool pair) **and**
+    the target agrees (`ilex_enroll::eligibility` on the deployment: its tools
+    and its unlock stack), the `tpm` stage enrols the chip (PCR 7, SHA-256, no
+    PIN, read back from the header) and the result is `enrolled-unverified`; the
+    first boot the chip opens makes it `verified`. Every other ending is
+    `passphrase-only` with a reason code, and **neither step ever fails the
+    installation**: `secure-boot-off`, `no-tpm`, `pcr7-unmeasured`,
+    `tool-mismatch`, `unlock-stack-missing`, `not-requested` (`tpm: off`),
+    `no-recovery-key` (answers mode: **an unattended installation makes no
+    recovery key and does not enrol the chip**, because nothing could show the key
+    and a key nobody saw is not one a person can rely on; `sudo ilex-enroll
+    complete --root /` issues one and enrols later), `recovery-key-failed` and
+    `enrollment-failed`. The passphrase slot always stays. The stages of such an
+    installation are `partition, encrypt, mount, image, configure, account,
+    recovery, [tpm,] finalise` (`Stage::of_plan`).
   - **State, progress, logs.** Each stage is recorded in
     `/run/ilex-installer/state.json` (mode 0600, written to a file of its own and
     renamed) **before it writes anything**, and a stage whose record cannot be
@@ -4051,8 +4100,8 @@ its own.
 the live image booted as a disk with the target, a sentinel and a USB stick for
 the log) install `generic.gnome` onto a whole disk with LUKS2 and unlock it at
 its real boot prompt. The plan (a request that leaves the security chip at
-`auto`) names the encrypted root partition alone and warns that the chip is not
-used yet; then, before the first write and with every disk byte for byte as it
+`auto`, no recovery key) names the encrypted root partition alone and warns that
+the chip is not used (`no-recovery-key`); then, before the first write and with every disk byte for byte as it
 was: no passphrase (`missing-secret`, field `disk-passphrase`), a passphrase with
 a line break, a tab or 513 bytes, an unsealed one and one for a plan that does not
 encrypt (`invalid-secret`, field `fd`). The installation's stages are
@@ -4182,10 +4231,47 @@ digest, its own.
 `iso::next_unattended_encrypted` installs from answers that encrypt (a German
 keyboard, a passphrase whose keys differ from a US keyboard's, in plaintext in
 the file as the documentation says) with no interface: the helper's `SetSecret`
-of the passphrase, the plan's note that the security chip is not used yet on the
-console, no secret of the answers on the console, the answers volume unchanged;
+of the passphrase, the plan's note that the security chip is not used on the
+console (`no-recovery-key`: nothing in an unattended installation can show a key),
+no secret of the answers on the console, the answers volume unchanged;
 the disk is then booted, its prompt answered with the German keys through QMP, and
 the installed system must pass the assertions of `installer::encrypted_german`.
+`iso::next_security` and `iso::next_security_off` are the security tier of the new
+installer, on KVM with enrolled OVMF and a **persistent swtpm** (T6's `VmSpec`, as
+`security::firmware` boots): a platform that cannot provide Secure Boot with SMM or
+the TPM leaves the run **unqualified** (`next-security-result.json`, stage
+`platform`) and failed, and nothing is turned off to pass. A person at the
+interface (a script: `Plan` with a recovery key and `tpm: auto`, `SetSecret` of
+the passphrase and the password, `Apply`) installs encrypted; the plan's
+encryption says `will_enroll` with `pcr7-sha256` on the secure VM and
+`secure-boot-off` on the other (with the warning only there). The key is taken
+through a small raw D-Bus client (`iso_next/rawbus.py`: busctl cannot keep the
+descriptor a method returns) once, and a second request is refused
+(`recovery-key-taken`); `State` says `shown`, never the key; two wrong groups are
+refused (`recovery-key-mismatch`) and leave `shown`; the right two (typed in
+capitals) are accepted. The installation ends in `recovery, tpm, finalise` (no
+`tpm` stage when Secure Boot is off) with `recovery_key: acknowledged` and the
+chip `enrolled-unverified` / `pcr7-sha256`, or `passphrase-only` /
+`secure-boot-off`, with the SELinux check as every trial (enforcing, zero
+denials); the helper's run directory, journal, `dmesg`, process list, install log
+and the **log saved to a USB stick** (a tarball, scanned raw and extracted) hold
+neither the passphrase nor the key. `iso::next_security` then starts the disk
+cold **with nobody at the keyboard**: it reaches SSH, `luksDump` shows exactly one
+`systemd-tpm2` token (PCR 7, SHA-256, no PIN, no public-key, signature or pcrlock
+field), one `systemd-recovery` token and three keyslots, `crypttab` names
+`tpm2-device=auto`, `setup.json` says `enrolled-unverified`, `enrollment.json`
+(mode 0600, the only file in `/var/lib/ilex/security`) says the recovery key is
+acknowledged, `/run/ilex/root-unlock.json` says `tpm2` and `ilexctl security
+verify` says `verified`, and the installed system passes `check_installed`.
+Another cold boot of the same disk on **a fresh TPM** (same PCR 7, nothing the
+chip sealed) shows the prompt, and **the recovery key typed at it** opens the disk
+(the unlock record says `fallback`); the key and the passphrase open their slots
+(`--test-passphrase`) and are in no log, `/etc`, `/var/lib` or journal of the
+installed system. `iso::next_security_off` does the same with Secure Boot off: no
+chip token, two keyslots, `setup.json` `passphrase-only` / `secure-boot-off`, the
+record `unavailable`, and the recovery key typed at the prompt opens the disk.
+Every file either trial saves on the host is scanned for the passphrase, the
+password and the key.
 `iso::next_unattended_handover` boots with the fixed
 credential `ilex.installer.fault=helper` (the helper exits before it takes its bus
 name) and then `=answers` (the unattended process kills itself with `SIGKILL`
@@ -4348,15 +4434,34 @@ disk before the person has confirmed the erase on the review page.
       advises (under 12 characters) without refusing. The page names the layout the
       passphrase is typed in (`passphrase_layout_line`: the session's, and what
       the installed computer's console is put in before it asks). A disabled
-      "security chip" row says that automatic unlock is not available yet. The
+      "security chip" row is a switch where the helper's probe says the computer
+      is eligible (`chip_view`, on unless turned off: `tpm` is `auto` or `off` in
+      the request, and `recovery_key` is `true` whenever the disk is encrypted)
+      and one line saying why not where it is not
+      (`recovery::chip_unavailable_line`, from the probe's reason code). The
       passphrase goes to the helper only in `RunApply` and only when the plan
       encrypts (`SetSecret(disk-passphrase)` first), never into a request, a marker
       (`ILEX-INSTALLER page=encryption encryption=on keyboard=us`,
       `event=encryption encryption=off`) or a log; the flow wipes it with the
       password after a success and when the computer restarts. The review page has
-      an Encryption row and the done page says that the computer asks for its
-      passphrase at every start (the helper's `Summary.encrypted`, so that an
-      interface that restarted says it too).
+      an Encryption row and an Automatic unlock row, and the done page says
+      "unlocks automatically" or "asks for the passphrase at every start:
+      <reason>" (`State.security.tpm`, so that an interface that restarted says
+      it too).
+    - *The recovery key.* While the image downloads, a `Waiting` key in
+      `State.security` puts the flow on the `recovery` page and asks the helper for
+      the key once (`Step::RunTakeKey`): the page shows its eight groups, "Write it
+      down. It is shown only now.", and two fields for the groups
+      `recovery_asked` names (`flow/src/recovery.rs` has the words and
+      `group_check`; the model's `recovery` module has the shape, the rule and the
+      comparison, and the helper decides). Confirm sends them
+      (`Step::RunAcknowledge`); a refusal says so and empties the fields; success
+      goes back to the installing page. An interface that was restarted finds
+      `shown` (taken, not confirmed): the page cannot show the key again and says
+      so, and still takes the two groups from the paper; `acknowledged` goes
+      straight to the installing page. The key is a `Secret` wiped when the page is
+      left, and in no marker (`ILEX-INSTALLER page=recovery key=shown|taking|gone
+      asked=3,7`, `event=recovery state=…`).
     - *The installation.* The review page (`Flow::review`, from the plan:
       the choices in words, the disk, the partitions that will be created, the
       image as target, version, digest and download size, `Everything on <model>

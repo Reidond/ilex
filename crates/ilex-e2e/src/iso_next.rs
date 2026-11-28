@@ -109,6 +109,7 @@ use crate::selinux;
 mod helper;
 mod install_ui;
 mod loop_file;
+mod security;
 mod ui;
 mod unattended;
 mod vm_state;
@@ -161,6 +162,8 @@ pub fn trials() -> Vec<Trial> {
         ),
         trial("iso::next_unattended_retry", unattended::run_retry),
         trial("iso::next_unattended_handover", unattended::run_handover),
+        trial("iso::next_security", security::run),
+        trial("iso::next_security_off", security::run_off),
     ];
     trials.extend(ui::trials());
     trials.extend(install_ui::trials());

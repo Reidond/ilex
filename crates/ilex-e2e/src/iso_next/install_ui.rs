@@ -54,10 +54,12 @@ use ilex_devkit::installer_model::plan::ErrorCode;
 use ilex_devkit::installer_model::probe::Probe;
 use ilex_devkit::installer_model::state::{Outcome, State};
 use ilex_devkit::provider::LinuxProvider;
+use ilex_devkit::installer_model::recovery;
 use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
 
+use super::security;
 use super::ui::{EVENT_TIMEOUT, continue_to_machine, no_try_text, welcome_up};
 use super::{
     Guest, KILL_COMPOSITOR, KILL_INSTALLER, PAGE_TIMEOUT, complete_lines, console, diagnostics,
@@ -296,9 +298,10 @@ fn to_review(
     artifacts: &Path,
     name: &str,
     unavailable: &str,
+    encrypted: bool,
 ) -> Result<()> {
     welcome_up(vm, ctl, serial, artifacts, name)?;
-    from_welcome(vm, ctl, serial, artifacts, name, unavailable)
+    from_welcome(vm, ctl, serial, artifacts, name, unavailable, encrypted)
 }
 
 /// The same from a welcome page that is up (a walk-through's second round: the
@@ -310,6 +313,7 @@ fn from_welcome(
     artifacts: &Path,
     name: &str,
     unavailable: &str,
+    encrypted: bool,
 ) -> Result<()> {
     let before = |page: &'static str| count(serial, is_page(page));
     let (machines, disks, encryptions, accounts, reviews) = (
@@ -367,12 +371,34 @@ fn from_welcome(
     );
     wait_page(vm, ctl, artifacts, &format!("{name}-encryption"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-encryption.png")))?;
-    ctl.type_text(US.keys)?;
-    ctl.key("Tab")?;
-    ctl.key("Tab")?;
-    ctl.type_text(US.keys)?;
-    std::thread::sleep(Duration::from_secs(1));
-    ctl.key("Return")?;
+    if encrypted {
+        ctl.type_text(US.keys)?;
+        ctl.key("Tab")?;
+        ctl.key("Tab")?;
+        ctl.type_text(US.keys)?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.key("Return")?;
+    } else {
+        // The trials that are not about the encryption (they would stop at the
+        // recovery key page it brings) turn it off, as a person does: from the
+        // passphrase back to the switch (the security chip's row has nothing to
+        // focus on a computer that cannot use it), Space, then on to Continue.
+        let off = count(serial, is_event("encryption", "encryption", "off"))?;
+        ctl.key("shift+Tab")?;
+        ctl.key("space")?;
+        nth_marker(
+            vm,
+            serial,
+            "encryption turned off",
+            off + 1,
+            EVENT_TIMEOUT,
+            is_event("encryption", "encryption", "off"),
+        )?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join(format!("next-{name}-encryption-off.png")))?;
+        ctl.key("Tab")?;
+        ctl.key("Return")?;
+    }
     nth_marker(
         vm,
         serial,
@@ -542,7 +568,7 @@ fn helper_probe(vm: &Vm) -> Result<Probe> {
 }
 
 /// The password is nowhere on the serial console or in the guest's journal.
-fn no_password(vm: &mut Vm, serial: &Path) -> Result<()> {
+fn no_password(vm: &mut Vm, serial: &Path, key: Option<&str>) -> Result<()> {
     let text = console(serial)?;
     ensure!(
         !text.contains(PASSWORD)
@@ -551,6 +577,14 @@ fn no_password(vm: &mut Vm, serial: &Path) -> Result<()> {
             && !text.contains("Holly"),
         "the password or the passphrase reached the serial console"
     );
+    if let Some(key) = key {
+        // Not a group of it either: the page's markers name the groups it asks
+        // for by number.
+        ensure!(
+            recovery::groups(key).iter().all(|g| !text.contains(g)),
+            "a group of the recovery key reached the serial console"
+        );
+    }
     no_try_text(serial)?;
     vm.wait_ssh(Duration::from_secs(180))
         .context("sshd did not start to read the journal")?;
@@ -569,12 +603,117 @@ fn no_password(vm: &mut Vm, serial: &Path) -> Result<()> {
             && !count.contains("markers=0"),
         "the journal holds the interface's markers and no password or passphrase: {count}"
     );
+    if let Some(key) = key {
+        let found = vm.ssh_ok(&format!(
+            "journalctl -b --no-pager -o cat | grep -cF -e \"$(printf %s {} | base64 -d)\" || true; \
+             grep -rlaF -e \"$(printf %s {} | base64 -d)\" /run/ilex-installer 2>/dev/null | wc -l",
+            qemu::base64(key.as_bytes()),
+            qemu::base64(key.as_bytes()),
+        ))?;
+        ensure!(
+            found.split_whitespace().all(|n| n == "0"),
+            "the recovery key is in the journal or the helper's run directory: {found}"
+        );
+    }
     Ok(())
+}
+
+/// The recovery key page, driven the way a person who cannot be shown the key
+/// again drives it: the trial takes the key from the helper while the interface
+/// is stopped (the helper hands it over once, so this window finds it taken: the
+/// page that a restarted window shows), then types two groups wrongly (the helper
+/// refuses them and the fields empty) and rightly. The key is in the trial's
+/// memory only; no screenshot is kept of a page with a group typed on it.
+fn recovery_page(
+    vm: &mut Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+) -> Result<String> {
+    // Stopped before the helper has made the key (it does after the volume is
+    // open, some seconds after `Apply`), continued once the trial has the key.
+    let key = security::take_key(vm).context("the trial taking the key")?;
+    vm.ssh_ok("pkill -CONT -x ilex-installer")?;
+    let page = nth_marker(
+        vm,
+        serial,
+        "the recovery page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("recovery"),
+    )?;
+    ensure!(
+        field(&page, "key")? == "gone",
+        "the recovery page of an interface that was not given the key: {page:?}"
+    );
+    let asked: Vec<usize> = field(&page, "asked")?
+        .split(',')
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .context("the groups the page asks for")?;
+    ensure!(
+        asked.len() == 2 && asked == recovery::asked(&asked_plan(vm)?),
+        "the groups asked for: {asked:?}"
+    );
+    wait_page(vm, ctl, artifacts, &format!("{name}-recovery"))?;
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-recovery.png")))?;
+    let groups = recovery::groups(&key);
+    let refused = count(serial, is_event("recovery", "state", "refused"))?;
+    // The right shape, the wrong letters: the helper refuses.
+    let reversed = |n: usize| groups[n - 1].chars().rev().collect::<String>();
+    ctl.type_text(&reversed(asked[0]))?;
+    ctl.key("Tab")?;
+    ctl.type_text(&reversed(asked[1]))?;
+    std::thread::sleep(Duration::from_secs(1));
+    ctl.key("Return")?;
+    nth_marker(
+        vm,
+        serial,
+        "the helper's refusal",
+        refused + 1,
+        EVENT_TIMEOUT,
+        is_event("recovery", "state", "refused"),
+    )?;
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-recovery-refused.png")))?;
+    // The fields are empty and the focus is on the second: back to the first.
+    ctl.key("shift+Tab")?;
+    ctl.type_text(groups[asked[0] - 1])?;
+    ctl.key("Tab")?;
+    ctl.type_text(groups[asked[1] - 1])?;
+    std::thread::sleep(Duration::from_secs(1));
+    ctl.key("Return")?;
+    nth_marker(
+        vm,
+        serial,
+        "the confirmation",
+        1,
+        EVENT_TIMEOUT,
+        is_event("recovery", "state", "confirmed"),
+    )?;
+    Ok(key)
+}
+
+/// The plan the helper is installing (the groups asked for follow its id).
+fn asked_plan(vm: &Vm) -> Result<String> {
+    helper_state(vm)?
+        .applied
+        .context("the helper has no installation")
 }
 
 /// Wait for the installation to end and the done page: the stages' markers say
 /// how it went. On the way, once the image is being written, the screen is saved.
-fn wait_done(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &str) -> Result<()> {
+/// With `recovery` the installation has a recovery key, which is taken and
+/// confirmed on the way ([`recovery_page`]); it is returned.
+fn wait_done(
+    vm: &mut Vm,
+    ctl: &Vmctl,
+    serial: &Path,
+    artifacts: &Path,
+    name: &str,
+    recovery: bool,
+) -> Result<Option<String>> {
     nth_marker(
         vm,
         serial,
@@ -585,6 +724,14 @@ fn wait_done(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &s
     )?;
     std::thread::sleep(Duration::from_secs(3));
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-installing.png")))?;
+    let key = if recovery {
+        // The interface is stopped while the key is made: the helper makes it
+        // some seconds after `Apply`, and this window would take it first.
+        vm.ssh_ok("pkill -STOP -x ilex-installer")?;
+        Some(recovery_page(vm, ctl, serial, artifacts, name)?)
+    } else {
+        None
+    };
     nth_marker(
         vm,
         serial,
@@ -621,7 +768,7 @@ fn wait_done(vm: &mut Vm, ctl: &Vmctl, serial: &Path, artifacts: &Path, name: &s
     )?;
     wait_page(vm, ctl, artifacts, &format!("{name}-done"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-done.png")))?;
-    Ok(())
+    Ok(key)
 }
 
 // --- iso::next_keyboard_install ----------------------------------------------------------
@@ -640,8 +787,8 @@ fn keyboard_install() -> Result<()> {
     let serial = vm.info.dir.join("serial.log");
     let started = Instant::now();
     let outcome = install_by_keys(vm, &serial, &artifacts);
-    let digest = match outcome {
-        Ok(digest) => digest,
+    let (digest, key) = match outcome {
+        Ok(done) => done,
         Err(error) => {
             diagnostics(vm, &artifacts, "keyboard-install");
             return Err(error);
@@ -683,7 +830,20 @@ fn keyboard_install() -> Result<()> {
             stamp: &[],
         },
     )?;
-    encrypted::booted_encrypted(&installed, None, &US, &save)?;
+    // A recovery key was made and confirmed; the computer cannot use the chip
+    // (Secure Boot is off here), so the disk asked for the passphrase.
+    encrypted::booted_encrypted_with_key(&installed, None, &US, &save)?;
+    // The key opens the volume, and is nowhere on the installed system.
+    let found = installed.ssh_ok(&format!(
+        "printf %s {} | base64 -d | cryptsetup open --test-passphrase --key-file=- /dev/disk/by-partlabel/ilex-root; echo key_rc=$?; \
+         echo leaks=$(grep -rlaF -e \"$(printf %s {} | base64 -d)\" /var/log /etc /var/lib/ilex 2>/dev/null | wc -l)",
+        qemu::base64(key.as_bytes()),
+        qemu::base64(key.as_bytes()),
+    ))?;
+    ensure!(
+        found.contains("key_rc=0") && found.contains("leaks=0"),
+        "the recovery key on the installed system: {found}"
+    );
     gdm_screenshot(
         &mut installed,
         &artifacts.join("next-keyboard-install-gdm.png"),
@@ -692,9 +852,9 @@ fn keyboard_install() -> Result<()> {
 }
 
 /// Every page by key, to Power off; the digest the helper installed.
-fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<String> {
+fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<(String, String)> {
     let ctl = Vmctl::from_info(vm.info.clone());
-    to_review(vm, &ctl, serial, artifacts, "keyboard-install", "0")?;
+    to_review(vm, &ctl, serial, artifacts, "keyboard-install", "0", true)?;
     // Escape closes the dialog: nothing is asked of the helper.
     ctl.key("Return")?;
     nth_marker(
@@ -727,7 +887,8 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<Strin
     );
     // Then the erase is confirmed (a second dialog: its second `shown`).
     confirm_erase(vm, &ctl, serial, artifacts, "keyboard-install")?;
-    wait_done(vm, &ctl, serial, artifacts, "keyboard-install")?;
+    let key = wait_done(vm, &ctl, serial, artifacts, "keyboard-install", true)?
+        .context("the installation had no recovery key")?;
     let state = helper_state(vm)?;
     let summary = state
         .summary
@@ -740,7 +901,7 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<Strin
         "the helper's record: {summary:?} {:?}",
         state.outcome
     );
-    no_password(vm, serial)?;
+    no_password(vm, serial, Some(&key))?;
     // Enforcing and not one denial through the whole installation, asked before
     // the machine goes down.
     selinux::check(vm, artifacts, "next-keyboard-install")?;
@@ -760,7 +921,7 @@ fn install_by_keys(vm: &mut Vm, serial: &Path, artifacts: &Path) -> Result<Strin
         );
         std::thread::sleep(Duration::from_secs(2));
     }
-    Ok(summary.digest)
+    Ok((summary.digest, key))
 }
 
 // --- iso::next_reattach --------------------------------------------------------------------
@@ -795,7 +956,7 @@ const TARGET_DEVICE: &str = "/dev/disk/by-id/virtio-ilex-disk-0";
 
 fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path, target: &Path) -> Result<()> {
     let ctl = Vmctl::from_info(vm.info.clone());
-    to_review(vm, &ctl, serial, artifacts, "reattach", "0")?;
+    to_review(vm, &ctl, serial, artifacts, "reattach", "0", false)?;
     confirm_erase_with(vm, &ctl, serial, artifacts, "reattach", false)?;
     // The helper took `Apply` (it holds the lock for a minute, checking): its
     // state says so over the previous record, and the interface that asked is
@@ -916,7 +1077,7 @@ fn observe_reattach(vm: &mut Vm, serial: &Path, artifacts: &Path, target: &Path)
     //    the same helper, the disk now carrying the partition table that was
     //    written. The window is open again, and the interface is killed in it
     //    once more.
-    from_welcome(vm, &ctl, serial, artifacts, "reattach-again", "0")?;
+    from_welcome(vm, &ctl, serial, artifacts, "reattach-again", "0", false)?;
     confirm_erase_with(vm, &ctl, serial, artifacts, "reattach-again", false)?;
     let checking = wait_state(
         vm,
@@ -1101,7 +1262,7 @@ fn observe_problem(
     let ctl = Vmctl::from_info(vm.info.clone());
     // The ISO's stick, the two sticks and the spare disk are too small or in
     // use: one disk is offered and four are not.
-    to_review(vm, &ctl, serial, artifacts, "problem", "4")?;
+    to_review(vm, &ctl, serial, artifacts, "problem", "4", false)?;
     confirm_erase(vm, &ctl, serial, artifacts, "problem")?;
 
     // The image stage fails; the problem page says which stage and how.
