@@ -100,6 +100,20 @@ pub fn tool_manifest() -> Result<Value> {
     }
     Ok(serde_json::json!({"schema":1, "tools":tools, "packages":packages, "sha256":hashes}))
 }
+/// The package versions the enrollment was qualified with. A version joins the
+/// list only with a qualification run that enrolled and unlocked with it:
+/// cryptsetup 2.8.9 (what Fedora's bootc image carries from 2026-11-27) by
+/// `iso::next_security`, on KVM with enrolled OVMF and a persistent swtpm.
+fn qualified(package: &str, version: &str) -> bool {
+    match package {
+        "systemd" | "systemd-udev" => version == "262.1-1.fc45.x86_64",
+        "cryptsetup" | "cryptsetup-libs" => {
+            matches!(version, "2.8.8-1.fc45.x86_64" | "2.8.9-1.fc45.x86_64")
+        }
+        _ => false,
+    }
+}
+
 pub fn probe() -> Probe {
     let mut result = Probe {
         schema: 1,
@@ -139,14 +153,10 @@ pub fn probe() -> Probe {
     }
     result.reason = "tool-mismatch";
     if result.tools.len() != 4
-        || result.tools.iter().any(|(name, version)| {
-            version
-                != match name.as_str() {
-                    "systemd" | "systemd-udev" => "262.1-1.fc45.x86_64",
-                    "cryptsetup" | "cryptsetup-libs" => "2.8.8-1.fc45.x86_64",
-                    _ => "unqualified",
-                }
-        })
+        || result
+            .tools
+            .iter()
+            .any(|(name, version)| !qualified(name, version))
     {
         return result;
     }

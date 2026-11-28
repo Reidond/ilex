@@ -311,6 +311,9 @@ while True:
 if plan == "-":
     plan = status["applied"]
 fd = bus.call(IF, "/org/ilex/Installer1", IF, "TakeRecoveryKey", plan)["value"]
+# The helper wrote the key through the open file description it passed on: the
+# offset is at the end, and the reader starts from the beginning.
+os.lseek(fd, 0, os.SEEK_SET)
 key = os.read(fd, 1024).decode()
 os.close(fd)
 if again:

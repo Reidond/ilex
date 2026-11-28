@@ -3573,8 +3573,9 @@ fingerprint does change once, because its inputs include `ilex-tooling-core`'s
     disk that unlocks with its passphrase alone: `security.tpm` is `{requested,
     capability: "unknown", reason: "not-attempted", status: "passphrase-only"}`.
     That is what a request without a recovery key gets (an answers file, and any
-    client that does not ask for one): the plan warns that the chip is not used
-    (`no-recovery-key`). **The recovery key and the security chip** are the next
+    client that does not ask for one): the plan warns that the chip is not used and
+    says why (the probe's reason first: `secure-boot-off`, `no-tpm`, ...; on a
+    computer that could, `no-recovery-key`). **The recovery key and the security chip** are the next
     paragraph.
   - **The recovery key and the security chip**
     (`crates/ilex-installerd/src/{enrol,recovery}.rs`, the `recovery` and `tpm`
@@ -4101,7 +4102,7 @@ the live image booted as a disk with the target, a sentinel and a USB stick for
 the log) install `generic.gnome` onto a whole disk with LUKS2 and unlock it at
 its real boot prompt. The plan (a request that leaves the security chip at
 `auto`, no recovery key) names the encrypted root partition alone and warns that
-the chip is not used (`no-recovery-key`); then, before the first write and with every disk byte for byte as it
+the chip is not used (with the probe's reason: `secure-boot-off`); then, before the first write and with every disk byte for byte as it
 was: no passphrase (`missing-secret`, field `disk-passphrase`), a passphrase with
 a line break, a tab or 513 bytes, an unsealed one and one for a plan that does not
 encrypt (`invalid-secret`, field `fd`). The installation's stages are
@@ -4232,7 +4233,8 @@ digest, its own.
 keyboard, a passphrase whose keys differ from a US keyboard's, in plaintext in
 the file as the documentation says) with no interface: the helper's `SetSecret`
 of the passphrase, the plan's note that the security chip is not used on the
-console (`no-recovery-key`: nothing in an unattended installation can show a key),
+console (with the probe's reason, or `no-recovery-key` on a computer that could: nothing
+in an unattended installation can show a key),
 no secret of the answers on the console, the answers volume unchanged;
 the disk is then booted, its prompt answered with the German keys through QMP, and
 the installed system must pass the assertions of `installer::encrypted_german`.

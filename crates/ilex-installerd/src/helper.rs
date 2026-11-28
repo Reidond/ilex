@@ -305,12 +305,14 @@ impl Helper {
         let recovery_key = checked.request.encrypt && checked.request.recovery_key;
         let eligible = probe.enrollment["verdict"] == "eligible";
         let will_enroll = recovery_key && tpm == TpmMode::Auto && eligible;
+        // The most basic reason first: a computer that cannot is not helped by
+        // a key, and a key without a computer that can is not enough.
         let tpm_reason = if tpm == TpmMode::Off {
             "not-requested".to_owned()
-        } else if !recovery_key {
-            "no-recovery-key".to_owned()
-        } else {
+        } else if !eligible || recovery_key {
             enrollment_reason
+        } else {
+            "no-recovery-key".to_owned()
         };
         if checked.request.encrypt && tpm == TpmMode::Auto && !will_enroll {
             warnings.push(format!(

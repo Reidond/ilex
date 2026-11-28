@@ -1716,9 +1716,9 @@ fn encryption() -> Result<()> {
     );
     let done = flow.done_view().context("no done page")?;
     ensure!(
-        done.detail.contains(
-            "The computer asks for the passphrase at every start: no recovery key was made"
-        ) && flow.passphrase().is_empty()
+        done.detail
+            .contains("The computer asks for the passphrase at every start: Secure Boot is off")
+            && flow.passphrase().is_empty()
             && flow.passphrase_confirmation().is_empty()
             && flow.password().is_empty()
             && flow.secrets_wiped() == 1,

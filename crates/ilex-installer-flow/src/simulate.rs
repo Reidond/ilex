@@ -913,13 +913,13 @@ impl Backend for Simulated {
         let will_enroll = recovery_key && tpm == TpmMode::Auto && eligible;
         let reason = if tpm == TpmMode::Off {
             "not-requested".to_owned()
-        } else if !recovery_key {
-            "no-recovery-key".to_owned()
-        } else {
+        } else if !eligible || recovery_key {
             probe.enrollment["reason"]
                 .as_str()
                 .unwrap_or("unknown")
                 .to_owned()
+        } else {
+            "no-recovery-key".to_owned()
         };
         plan.encryption = PlannedEncryption {
             enabled: checked.request.encrypt,
