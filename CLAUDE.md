@@ -4877,16 +4877,29 @@ disk before the person has confirmed the erase on the review page.
     nothing), then confirmed (Tab to the destructive answer, Enter), the
     installing page to the success of every stage, the done page, Power off; the
     password is typed with its spaces, colon and quotes, and neither it nor the
-    passphrase is on the serial console or in the journal. The disk it installed
-    asks for the passphrase at its boot prompt (typed through QMP) and then boots
-    on its own with the root on the LUKS2 volume, and every `installer::install`
-    assertion holds (`check_installed`: the digest the
+    passphrase is on the serial console or in the journal. **The recovery key
+    page:** the interface is stopped (`SIGSTOP`) while the helper makes the key,
+    the trial takes the key from the helper (the helper hands it over once) and
+    lets the interface go on, which finds the key taken: the page of a restarted
+    window (`key=gone`, no key on screen), which asks only for the two groups
+    named in its marker (`asked=3,8`); two wrong groups are refused by the helper
+    (`event=recovery state=refused`, the fields empty) and the right two confirmed
+    (`state=confirmed`), with no screenshot of a page that has a group typed on it.
+    The key is not on the console, in the journal or in the helper's run directory.
+    The disk it installed asks for the passphrase at its boot prompt (typed
+    through QMP: the VM has no usable security chip) and then boots
+    on its own with the root on the LUKS2 volume, a second keyslot and the recovery
+    token, `crypttab` naming `tpm2-device=auto`, `setup.json` `passphrase-only`
+    with the probe's reason and the enrolment record `unavailable`, the key
+    opening its slot and in no file of the installed system, and every
+    `installer::install` assertion holds (`check_installed`: the digest the
     helper recorded, the origin that enforces the signature policy, the
     administrator's password and `sudo`, the defaults, the system `running`, no
     failed unit, GDM) beside the encrypted-root assertions of
     `installer::encrypted`. A screenshot of each page is kept. (`iso::next_reattach`
-    and `iso::next_problem` also walk the encryption page with a passphrase: their
-    installations are encrypted.)
+    and `iso::next_problem` turn the encryption off on its page, with the switch and a
+    click on Continue: they are about the helper restarting and failing, and an
+    encrypted installation would stop them at the recovery key page.)
   - `iso::next_reattach` (booted with `ilex.installer.fault=slow-apply`): the
     harness reads `State` over SSH until it says `starting` over the previous
     record (the interface that asked is still on the review page, waiting for an
