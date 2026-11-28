@@ -6,7 +6,8 @@
 use crate::topology::{self, Mount};
 use anyhow::{Context, Result, bail, ensure};
 use ilex_installer_model::{
-    plan::{Plan, PlanRequest, PlannedPartition},
+    catalogue::PROFILE_SCHEMA,
+    plan::{DailyUser, Plan, PlanRequest, PlannedPartition},
     recovery::TpmOutcome,
 };
 use serde_json::json;
@@ -141,9 +142,45 @@ pub fn expected_origin(target_reference: &str) -> String {
     format!("ostree-image-signed:docker://{target_reference}")
 }
 
+/// The `profile` of `/etc/ilex/setup.json`, as the Anaconda chooser records
+/// each choice: a public profile is its id and schema, a custom daily user has
+/// both null and `"mode": "custom"` (its name and capacity are given to
+/// `ilexctl home setup` as options, see [`home_setup_issue`]), and no daily
+/// user is both null with no mode, which asks for no setup.
+fn setup_profile(plan: &Plan) -> serde_json::Value {
+    match &plan.request.daily {
+        Some(DailyUser::Profile { id }) => json!({ "id": id, "schema": PROFILE_SCHEMA }),
+        Some(DailyUser::Custom { .. }) => json!({ "id": null, "schema": null, "mode": "custom" }),
+        None => json!({ "id": null, "schema": null }),
+    }
+}
+
+/// Where the installed system's login prompt is told what to run next.
+pub const HOME_SETUP_ISSUE: &str = "etc/issue.d/90-ilex-home-setup.issue";
+
+/// The line `ilexctl home setup` removes when it is done, for a plan with a
+/// daily user (the Anaconda path writes the same sentence for both kinds). A
+/// custom user's name and capacity are on the command: `setup.json` carries
+/// neither, as it never did.
+pub fn home_setup_issue(plan: &Plan) -> Option<String> {
+    let options = match plan.request.daily.as_ref()? {
+        DailyUser::Profile { .. } => String::new(),
+        DailyUser::Custom {
+            name,
+            disk_size_gib,
+        } => {
+            let size = disk_size_gib.map_or_else(String::new, |g| format!(" --disk-size {g}"));
+            format!(" --name {name}{size}")
+        }
+    };
+    Some(format!(
+        "Sign in as the maintenance administrator and run sudo ilexctl home setup{options}.\n"
+    ))
+}
+
 /// `/etc/ilex/setup.json` as the Anaconda path writes it (schema 1, the same
 /// keys, sorted, two-space indent): the composition, the image the machine
-/// tracks, no profile, and the TPM record. An unencrypted installation says
+/// tracks, the daily-user choice ([`setup_profile`]), and the TPM record. An unencrypted installation says
 /// nothing was configured. An encrypted one says what phase 0's own completion
 /// says of a disk that unlocks with its passphrase alone: `passphrase-only`,
 /// with what was asked for, and a reason. The configure stage writes it before
@@ -176,7 +213,7 @@ pub fn setup_record(plan: &Plan, tpm_outcome: Option<(&str, &TpmOutcome)>) -> St
         "schema": 1,
         "composition": plan.composition.tag,
         "image": plan.image.target,
-        "profile": { "id": null, "schema": null },
+        "profile": setup_profile(plan),
         "security": {
             "capabilities": {},
             "tpm": tpm,

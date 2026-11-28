@@ -4,7 +4,9 @@
 //! schema and its syntax checks; reading the volume and applying the answers
 //! belong to the installation itself.
 
-use crate::plan::{ErrorCode, Mode, PlanError, PlanRequest, TpmMode, passphrase_problem};
+use crate::plan::{
+    DailyUser, ErrorCode, Mode, PlanError, PlanRequest, TpmMode, passphrase_problem,
+};
 use anyhow::Result;
 use serde::Deserialize;
 use std::fmt;
@@ -46,6 +48,10 @@ pub struct Answers {
     #[serde(default)]
     pub system: SystemAnswers,
     pub administrator: AdministratorAnswers,
+    /// The daily user to set up at the first start (`sudo ilexctl home setup`):
+    /// no password is given, `homectl` asks for it then.
+    #[serde(default)]
+    pub daily: Option<DailyAnswers>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -105,6 +111,39 @@ pub struct SystemAnswers {
 pub struct AdministratorAnswers {
     pub name: String,
     pub password: Secret,
+}
+
+/// `[daily]`: either `profile` (a public profile of the image) or `name`
+/// (a user name of the person's choosing) with an optional `disk-size` in GiB.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct DailyAnswers {
+    pub profile: Option<String>,
+    pub name: Option<String>,
+    pub disk_size: Option<u64>,
+}
+
+impl DailyAnswers {
+    fn to_daily(&self) -> Result<DailyUser, PlanError> {
+        let invalid = |message: &str| {
+            Err(PlanError::new(
+                ErrorCode::InvalidField,
+                Some("daily"),
+                message,
+            ))
+        };
+        match (&self.profile, &self.name, self.disk_size) {
+            (Some(id), None, None) => Ok(DailyUser::Profile { id: id.clone() }),
+            (Some(_), _, _) => invalid(
+                "daily.profile sets the user name and the capacity: leave name and disk-size out",
+            ),
+            (None, Some(name), disk_size_gib) => Ok(DailyUser::Custom {
+                name: name.clone(),
+                disk_size_gib,
+            }),
+            (None, None, _) => invalid("[daily] needs a profile or a name"),
+        }
+    }
 }
 
 impl Answers {
@@ -218,6 +257,11 @@ impl Answers {
             time_zone: self.system.time_zone.clone().unwrap_or(defaults.time_zone),
             host_name: self.system.host_name.clone().unwrap_or(defaults.host_name),
             administrator: self.administrator.name.clone(),
+            daily: self
+                .daily
+                .as_ref()
+                .map(DailyAnswers::to_daily)
+                .transpose()?,
         };
         request.check_syntax()?;
         Ok(request)

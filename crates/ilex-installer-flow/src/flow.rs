@@ -34,7 +34,8 @@
 //!   Step::Goto(page)              -> show the page (it is flow.page() already)
 //!   Step::Stay                    -> nothing
 //! person types / picks      -->   set_language / set_keyboard / select_machine /
-//!                                 set_disk / set_administrator / set_password / ...
+//!                                 set_disk / set_administrator / set_password /
+//!                                 set_daily / ...
 //! Continue enabled?         <--   flow.can_continue()
 //! Continue pressed          -->   flow.advance()
 //! Back pressed              -->   flow.back()
@@ -76,7 +77,8 @@
 //! Pages of this version: `welcome` (language and keyboard layout), `machine`
 //! (which configuration), `disk` (where to install: the whole disk),
 //! `encryption` (whether the disk is encrypted, and its passphrase), `account`
-//! (the maintenance administrator) and `review`, where the choices checked by
+//! (the maintenance administrator), `profile` (the daily user the first start
+//! sets up, if any) and `review`, where the choices checked by
 //! `Plan` are shown and the destructive button begins the installation. After
 //! it come the pages no one goes back from: `installing` (the stages, from the
 //! helper's `State`), `recovery` (the recovery key of an encrypted installation,
@@ -92,6 +94,7 @@
 //! back with the request's generation.
 
 use crate::account::{self, AccountChecks};
+use crate::daily::{self, Daily, DailyChecks};
 use crate::disks::{self, DiskChoice, DiskView};
 use crate::encryption::{self, EncryptionChecks};
 use crate::keyboard::{self, Layout, Layouts};
@@ -122,6 +125,7 @@ pub enum PageId {
     Disk,
     Encryption,
     Account,
+    Profile,
     Review,
     Installing,
     Recovery,
@@ -131,23 +135,25 @@ pub enum PageId {
 
 impl PageId {
     /// The pages a person walks with Continue and Back.
-    pub const ORDER: [PageId; 6] = [
+    pub const ORDER: [PageId; 7] = [
         Self::Welcome,
         Self::Machine,
         Self::Disk,
         Self::Encryption,
         Self::Account,
+        Self::Profile,
         Self::Review,
     ];
 
     /// Every page, in the order a navigation stack builds them: the walk, then
     /// the pages an installation ends on (nobody goes back from those).
-    pub const ALL: [PageId; 10] = [
+    pub const ALL: [PageId; 11] = [
         Self::Welcome,
         Self::Machine,
         Self::Disk,
         Self::Encryption,
         Self::Account,
+        Self::Profile,
         Self::Review,
         Self::Installing,
         Self::Recovery,
@@ -178,6 +184,7 @@ impl PageId {
             Self::Disk => "disk",
             Self::Encryption => "encryption",
             Self::Account => "account",
+            Self::Profile => "profile",
             Self::Review => "review",
             Self::Installing => "installing",
             Self::Recovery => "recovery",
@@ -194,6 +201,7 @@ impl PageId {
             Self::Disk => "Disk",
             Self::Encryption => "Encryption",
             Self::Account => "Administrator",
+            Self::Profile => daily::TITLE,
             Self::Review => "Review",
             Self::Installing => "Installing",
             Self::Recovery => "Recovery key",
@@ -438,6 +446,15 @@ pub struct Flow {
     /// The helper's refusal of the administrator's name, shown beside it until
     /// the name changes.
     name_refusal: Option<Message>,
+    /// The daily user the first start sets up (none unless the person picks
+    /// one), and what is typed for a custom one: its name and its capacity in
+    /// GiB (empty for the default).
+    daily: Daily,
+    daily_name: String,
+    daily_size: String,
+    /// The helper's refusal of the daily user, shown on its page until the
+    /// choice changes.
+    daily_refusal: Option<Message>,
     check: PlanCheck,
     plan_generation: u64,
 }
@@ -482,6 +499,10 @@ impl Flow {
             password: Secret::default(),
             confirmation: Secret::default(),
             name_refusal: None,
+            daily: Daily::None,
+            daily_name: String::new(),
+            daily_size: String::new(),
+            daily_refusal: None,
             check: PlanCheck::NotRun,
             plan_generation: 0,
         }
@@ -878,6 +899,11 @@ impl Flow {
             PageId::Account => {
                 self.probe().is_some() && self.account_checks().all_valid() && !self.is_checking()
             }
+            // Asking for the plan, which names the daily user too, comes from
+            // here: the helper's own answer about the names follows.
+            PageId::Profile => {
+                self.probe().is_some() && self.daily_checks().all_valid() && !self.is_checking()
+            }
             // The review page has its own button (`install`), not Continue.
             PageId::Review
             | PageId::Installing
@@ -902,7 +928,11 @@ impl Flow {
             return Step::Stay;
         }
         match self.page {
-            PageId::Welcome | PageId::Machine | PageId::Disk | PageId::Encryption => {
+            PageId::Welcome
+            | PageId::Machine
+            | PageId::Disk
+            | PageId::Encryption
+            | PageId::Account => {
                 if self.page == PageId::Welcome {
                     self.start_notice = None;
                 }
@@ -916,7 +946,7 @@ impl Flow {
                 let next = self.page.next().unwrap_or(self.page);
                 self.go(next)
             }
-            PageId::Account => {
+            PageId::Profile => {
                 if self.stale_probe {
                     self.look_again_then_check()
                 } else {
@@ -966,6 +996,7 @@ impl Flow {
 
     fn run_plan(&mut self) -> Step {
         self.name_refusal = None;
+        self.daily_refusal = None;
         if let Some(problem) = self.blocking_problem() {
             return self.conclude(PlanCheck::Failed(problem));
         }
@@ -1019,6 +1050,12 @@ impl Flow {
             Err(ClientError::Refused(refusal)) if refusal.code == ErrorCode::InstallationActive => {
                 self.check = PlanCheck::NotRun;
                 self.attach_again()
+            }
+            // A refusal of the daily user goes back to its page, beside it.
+            Err(ClientError::Refused(refusal)) if refusal.field.as_deref() == Some("daily") => {
+                self.check = PlanCheck::NotRun;
+                self.daily_refusal = Some(daily::refusal(&refusal));
+                self.go(PageId::Profile)
             }
             Err(ClientError::Refused(refusal))
                 if refusal.field.as_deref() == Some("administrator")
@@ -1117,6 +1154,9 @@ impl Flow {
             "language": self.language,
             "administrator": self.administrator,
         });
+        if let Some(user) = self.daily_user() {
+            document["daily"] = json!(user);
+        }
         if self.encrypt {
             // An interface shows the recovery key (the answers file cannot), so
             // an encrypted installation of this interface has one; the security
@@ -1421,6 +1461,12 @@ impl Flow {
         }
         if self.encrypt != on {
             self.encrypt = on;
+            // A daily home is encrypted: without an encrypted disk there is
+            // none to set up (the daily page says so).
+            if !on {
+                self.daily = Daily::None;
+                self.daily_refusal = None;
+            }
             self.invalidate_check();
             self.say(markers::encryption(on));
         }
@@ -1607,10 +1653,14 @@ impl Flow {
     }
 
     pub fn account_checks(&self) -> AccountChecks {
-        let profiles: BTreeSet<&str> = self
+        let mut profiles: BTreeSet<&str> = self
             .probe()
             .map(|p| p.catalogue.profiles.keys().map(String::as_str).collect())
             .unwrap_or_default();
+        // The custom daily user's name is as reserved as a profile's.
+        if self.daily == Daily::Custom && !self.daily_name.is_empty() {
+            profiles.insert(&self.daily_name);
+        }
         let mut name = account::name(&self.administrator, &profiles);
         if name.is_valid()
             && let Some(refusal) = &self.name_refusal
@@ -1636,6 +1686,119 @@ impl Flow {
 
     pub fn password_advice(&self) -> Option<Message> {
         account::password_advice(&self.password)
+    }
+
+    // --- daily user ----------------------------------------------------------
+
+    pub fn daily(&self) -> &Daily {
+        &self.daily
+    }
+
+    pub fn daily_name(&self) -> &str {
+        &self.daily_name
+    }
+
+    pub fn daily_size(&self) -> &str {
+        &self.daily_size
+    }
+
+    /// The public profiles the image offers: id and display name.
+    pub fn profiles(&self) -> Vec<(&str, &str)> {
+        self.probe()
+            .map(|p| {
+                p.catalogue
+                    .profiles
+                    .iter()
+                    .map(|(id, profile)| (id.as_str(), profile.display_name.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Choose by row id (`none`, `custom`, `profile:<id>`). Refused (`false`)
+    /// while the helper is being asked, for a row that is not offered, and for
+    /// anything but `none` while the disk is not encrypted.
+    pub fn set_daily(&mut self, id: &str) -> bool {
+        if self.is_frozen() {
+            return false;
+        }
+        let Some(choice) = Daily::parse(id) else {
+            return false;
+        };
+        if let Daily::Profile(profile) = &choice
+            && !self.profiles().iter().any(|(known, _)| known == profile)
+        {
+            return false;
+        }
+        if !choice.is_none() && !self.encrypt {
+            return false;
+        }
+        if self.daily != choice {
+            self.daily = choice;
+            self.daily_refusal = None;
+            self.invalidate_check();
+            self.say(markers::daily(&self.daily.id()));
+        }
+        true
+    }
+
+    /// Refused (`false`) while the helper is being asked.
+    pub fn set_daily_name(&mut self, name: &str) -> bool {
+        if self.is_frozen() {
+            return false;
+        }
+        if self.daily_name != name {
+            self.daily_name = name.to_owned();
+            self.daily_refusal = None;
+            self.invalidate_check();
+        }
+        true
+    }
+
+    /// Refused (`false`) while the helper is being asked.
+    pub fn set_daily_size(&mut self, size: &str) -> bool {
+        if self.is_frozen() {
+            return false;
+        }
+        if self.daily_size != size {
+            self.daily_size = size.to_owned();
+            self.daily_refusal = None;
+            self.invalidate_check();
+        }
+        true
+    }
+
+    /// The two fields of a custom user, judged; the helper's refusal takes the
+    /// name's place when the name is otherwise fine. For any other choice
+    /// there is nothing to judge.
+    pub fn daily_checks(&self) -> DailyChecks {
+        if self.daily != Daily::Custom {
+            return DailyChecks {
+                name: account::Check::Valid,
+                size: account::Check::Valid,
+            };
+        }
+        let mut name = daily::name(&self.daily_name, &self.administrator);
+        if name.is_valid()
+            && let Some(refusal) = &self.daily_refusal
+        {
+            name = account::Check::Invalid(refusal.clone());
+        }
+        DailyChecks {
+            name,
+            size: daily::size(&self.daily_size),
+        }
+    }
+
+    /// The helper's refusal of a daily user that has no field of its own to
+    /// stand beside (a profile).
+    pub fn daily_refusal(&self) -> Option<&Message> {
+        self.daily_refusal.as_ref()
+    }
+
+    /// The choice as the plan request carries it.
+    pub fn daily_user(&self) -> Option<ilex_installer_model::plan::DailyUser> {
+        daily::user(&self.daily, &self.daily_name, &self.daily_size)
     }
 
     // --- markers ---------------------------------------------------------------
@@ -1690,6 +1853,7 @@ impl Flow {
                 }
             ),
             PageId::Account => format!("administrator={}", markers::one_word(&self.administrator)),
+            PageId::Profile => format!("daily={}", markers::one_word(&self.daily.id())),
             PageId::Review => format!("check={}", self.check_word()),
             PageId::Installing | PageId::Recovery | PageId::Done | PageId::Problem => {
                 self.installation_fields()

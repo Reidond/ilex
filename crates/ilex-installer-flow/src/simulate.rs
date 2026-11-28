@@ -901,6 +901,17 @@ impl Backend for Simulated {
                 ),
             )));
         }
+        if let Some(ilex_installer_model::plan::DailyUser::Custom { name, .. }) = &request.daily
+            && LIVE_IMAGE_NAMES.contains(&name.as_str())
+        {
+            return Err(Self::refuse(PlanError::new(
+                ErrorCode::ReservedName,
+                Some("daily"),
+                format!(
+                    "{name} is an account or group the system defines; pick another daily user name"
+                ),
+            )));
+        }
         if let Some(error) = &self.plan_error {
             return Err(Self::refuse(error.clone()));
         }

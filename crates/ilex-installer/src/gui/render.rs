@@ -399,6 +399,9 @@ async fn shoot(job: &Job) -> Result<Summary> {
                     continue;
                 }
                 Do::Name(text) => Msg::Event(Event::Name(text.to_owned())),
+                Do::Daily(id) => Msg::Event(Event::Daily(id.to_owned())),
+                Do::DailyName(text) => Msg::Event(Event::DailyName(text.to_owned())),
+                Do::DailySize(text) => Msg::Event(Event::DailySize(text.to_owned())),
                 Do::Encrypt(on) => {
                     // The way a person does: the switch row flips, and its own
                     // change reaches the flow.

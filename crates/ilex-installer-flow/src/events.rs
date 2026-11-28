@@ -25,6 +25,11 @@ pub enum Event {
     /// What is typed in the layout test field.
     TryText(Secret),
     Machine(String),
+    /// The daily user page's row (`none`, `custom`, `profile:<id>`), and the
+    /// custom user's two fields.
+    Daily(String),
+    DailyName(String),
+    DailySize(String),
     Name(String),
     Password(Secret),
     Confirmation(Secret),
@@ -91,6 +96,9 @@ impl Event {
             "retry-layout" => Self::RetryLayout,
             "try-text" => Self::TryText(Secret::new(argument)),
             "machine" => Self::Machine(argument.to_owned()),
+            "daily" => Self::Daily(argument.to_owned()),
+            "daily-name" => Self::DailyName(argument.to_owned()),
+            "daily-size" => Self::DailySize(argument.to_owned()),
             "name" => Self::Name(argument.to_owned()),
             "password" => Self::Password(Secret::new(argument)),
             "confirmation" => Self::Confirmation(Secret::new(argument)),
@@ -224,6 +232,18 @@ impl Flow {
             }
             Event::Machine(tag) => {
                 self.select_machine(&tag);
+                Step::Stay
+            }
+            Event::Daily(id) => {
+                self.set_daily(&id);
+                Step::Stay
+            }
+            Event::DailyName(text) => {
+                self.set_daily_name(&text);
+                Step::Stay
+            }
+            Event::DailySize(text) => {
+                self.set_daily_size(&text);
                 Step::Stay
             }
             Event::Name(text) => {

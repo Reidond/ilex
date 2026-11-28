@@ -4301,6 +4301,53 @@ fn check_target(parent: &Path) -> Result<()> {
             && target::setup_record(&plan, None).ends_with("}\n"),
         "setup.json: {record}"
     );
+    // The daily-user choices, as the Anaconda chooser records each one, and
+    // the line the login prompt shows for them.
+    use ilex_installer_model::plan::{DailyUser, Plan};
+    let mut daily = fixture_plan()?;
+    ensure!(
+        target::home_setup_issue(&daily).is_none(),
+        "a plan with no daily user has an issue line"
+    );
+    let profile_of = |plan: &Plan| -> Result<serde_json::Value> {
+        Ok(serde_json::from_str::<serde_json::Value>(&target::setup_record(plan, None))?["profile"].clone())
+    };
+    daily.request.daily = Some(DailyUser::Profile {
+        id: "andriishafar".into(),
+    });
+    ensure!(
+        profile_of(&daily)? == serde_json::json!({"id": "andriishafar", "schema": 1})
+            && target::home_setup_issue(&daily).as_deref()
+                == Some(
+                    "Sign in as the maintenance administrator and run sudo ilexctl home setup.\n"
+                ),
+        "a public profile's setup.json: {}",
+        profile_of(&daily)?
+    );
+    daily.request.daily = Some(DailyUser::Custom {
+        name: "alice".into(),
+        disk_size_gib: Some(40),
+    });
+    ensure!(
+        profile_of(&daily)? == serde_json::json!({"id": null, "schema": null, "mode": "custom"})
+            && target::home_setup_issue(&daily).as_deref()
+                == Some(
+                    "Sign in as the maintenance administrator and run sudo ilexctl home setup --name alice --disk-size 40.\n"
+                ),
+        "a custom daily user's setup.json: {}",
+        profile_of(&daily)?
+    );
+    daily.request.daily = Some(DailyUser::Custom {
+        name: "alice".into(),
+        disk_size_gib: None,
+    });
+    ensure!(
+        target::home_setup_issue(&daily).as_deref()
+            == Some(
+                "Sign in as the maintenance administrator and run sudo ilexctl home setup --name alice.\n"
+            ),
+        "a custom daily user without a capacity"
+    );
     // No line for `/`.
     let (kept, dropped) = target::strip_root_fstab(
         "# comment /\nUUID=1 / btrfs subvol=root 0 0\nUUID=2 /boot ext4 defaults 0 2\n/dev/x\t/\text4\tdefaults\t0 0\n#UUID=3 / x\n",

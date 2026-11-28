@@ -1,5 +1,5 @@
 //! The application: an `AdwNavigationView` with the welcome, machine, disk,
-//! encryption, account, review, installing, recovery key, done and problem
+//! encryption, account, daily user, review, installing, recovery key, done and problem
 //! pages, each drawn from the
 //! flow's state. The flow decides which
 //! page is next and whether Continue works; this file turns its state into
@@ -29,6 +29,7 @@ use super::install::{
     DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, RecoveryPage, ReviewPage,
     confirmation,
 };
+use super::profile::ProfilePage;
 use crate::serial;
 
 /// Memory is sampled this long after the page is shown, once the session has
@@ -212,6 +213,7 @@ pub struct Widgets {
     disk: DiskPage,
     encryption: Encryption,
     account: Account,
+    profile: ProfilePage,
     review: ReviewPage,
     installing: InstallingPage,
     recovery: RecoveryPage,
@@ -614,6 +616,7 @@ impl Widgets {
 
         // --- disk, review, installing, recovery key, done, problem ---
         let disk = DiskPage::build(sender);
+        let profile = ProfilePage::build(sender);
         let review = ReviewPage::build(sender);
         let installing = InstallingPage::build();
         let recovery = RecoveryPage::build(sender, flow.secrets_wiped());
@@ -627,6 +630,7 @@ impl Widgets {
             &disk.page,
             &encryption_page,
             &account_page,
+            &profile.page,
             &review.page,
             &installing.page,
             &recovery.page,
@@ -746,6 +750,7 @@ impl Widgets {
             (&machine_page, machine_button.clone().upcast()),
             (&disk.page, disk.button.clone().upcast()),
             (&account_page, name.clone().upcast()),
+            (&profile.page, profile.button.clone().upcast()),
             (&review.page, review.button.clone().upcast()),
             (&done.page, done.restart.clone().upcast()),
         ] {
@@ -834,6 +839,7 @@ impl Widgets {
                 wiped: flow.secrets_wiped(),
             },
             disk,
+            profile,
             review,
             installing,
             recovery,
@@ -864,6 +870,7 @@ impl Widgets {
         self.disk.sync(&v, sender);
         self.sync_encryption(&v);
         self.sync_account(&v, flow);
+        self.profile.sync(&v, sender);
         self.review.sync(&v, flow);
         self.installing.sync(&v);
         self.recovery.sync(&v);
@@ -876,6 +883,7 @@ impl Widgets {
             .page
             .set_can_pop(v.encryption.chrome.can_pop);
         self.account.page.set_can_pop(v.account.chrome.can_pop);
+        self.profile.page.set_can_pop(v.profile.chrome.can_pop);
         self.review.page.set_can_pop(v.review.chrome.can_pop);
         for page in [
             &self.installing.page,

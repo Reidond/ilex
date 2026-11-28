@@ -22,6 +22,7 @@ fn main() {
                 "qml/DiskPage.qml",
                 "qml/EncryptionPage.qml",
                 "qml/AccountPage.qml",
+                "qml/ProfilePage.qml",
                 "qml/ReviewPage.qml",
                 "qml/InstallingPage.qml",
                 "qml/RecoveryPage.qml",

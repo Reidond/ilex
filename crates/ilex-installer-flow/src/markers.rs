@@ -14,6 +14,7 @@
 //! ILEX-INSTALLER event=language language=<locale>
 //! ILEX-INSTALLER event=notice severity=info|warning|error text=<the machine page's notice>
 //! ILEX-INSTALLER event=disk disk=<id>
+//! ILEX-INSTALLER event=daily daily=none|custom|profile:<id>
 //! ILEX-INSTALLER event=disk-gone disk=<id>      (the chosen disk is not offered any more)
 //! ILEX-INSTALLER event=attach result=idle|installing|done|failed|unavailable
 //! ILEX-INSTALLER event=confirm state=shown|cancelled|accepted
@@ -159,6 +160,12 @@ pub fn tried(layout: &str, text: &Secret, echo: bool) -> Option<String> {
 /// The person chose a disk (its id, one word).
 pub fn disk(id: &str) -> String {
     format!("ILEX-INSTALLER event=disk disk={}", one_word(id))
+}
+
+/// The person chose the daily user (the row's id: `none`, `custom` or
+/// `profile:<id>`; never what is typed for a custom user).
+pub fn daily(id: &str) -> String {
+    format!("ILEX-INSTALLER event=daily daily={}", one_word(id))
 }
 
 /// The person turned encryption on or off. (Never the passphrase, nor its

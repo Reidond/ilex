@@ -20,6 +20,7 @@
 
 use serde::Serialize;
 
+use crate::daily::{self, Daily};
 use crate::disks;
 use crate::flow::{
     Control, Flow, KeyboardStatus, LogSave, PageId, ProbeState, ProblemKind, ReviewBody,
@@ -81,6 +82,13 @@ pub const ACCOUNT_INTRO: &str = "This account maintains the computer and recover
 pub const NAME_LABEL: &str = "User name";
 pub const PASSWORD_LABEL: &str = "Password";
 pub const CONFIRMATION_LABEL: &str = "Confirm the password";
+
+pub const PROFILE_TITLE: &str = daily::TITLE;
+pub const PROFILE_HEADING: &str = daily::HEADING;
+pub const PROFILE_INTRO: &str = daily::INTRODUCTION;
+pub const PROFILE_GROUP: &str = daily::GROUP;
+pub const DAILY_NAME_LABEL: &str = daily::NAME_LABEL;
+pub const DAILY_SIZE_LABEL: &str = daily::SIZE_LABEL;
 
 pub const REVIEW_TITLE: &str = "Review";
 pub const REVIEW_HEADING: &str = "Review";
@@ -337,6 +345,47 @@ pub struct Account {
     /// Under both password fields: a refusal (both fields are then invalid) or
     /// dimmed advice.
     pub password_note: Option<Note>,
+}
+
+/// A row of the daily user page.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DailyChoice {
+    /// `none`, `custom` or `profile:<id>`.
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    /// It can be picked (the helper is not being asked, and a daily user
+    /// needs an encrypted disk).
+    pub enabled: bool,
+}
+
+/// The fields of a custom daily user, shown while that row is chosen.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CustomUser {
+    pub name: Field,
+    pub name_value: String,
+    pub name_note: Option<Note>,
+    pub size: Field,
+    pub size_value: String,
+    /// Under the capacity: what it means, or why it is refused.
+    pub size_note: Note,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Profile {
+    pub chrome: Chrome,
+    pub heading: &'static str,
+    pub intro: &'static str,
+    pub group: &'static str,
+    pub choices: Vec<DailyChoice>,
+    /// The chosen row's id.
+    pub selected: String,
+    /// The fields can be typed in (the helper is not being asked).
+    pub editable: bool,
+    /// Under the list: that encryption is needed, the helper's refusal, or
+    /// what happens at the first start.
+    pub note: Option<Note>,
+    pub custom: Option<CustomUser>,
 }
 
 /// A switch as the flow says it: what it is called, the line under it, where
@@ -630,6 +679,7 @@ pub struct View {
     pub disk: Disk,
     pub encryption: Encryption,
     pub account: Account,
+    pub profile: Profile,
     pub review: Review,
     pub installing: Option<Installing>,
     pub recovery: Option<Recovery>,
@@ -698,6 +748,7 @@ impl Flow {
                     | PageId::Disk
                     | PageId::Encryption
                     | PageId::Account
+                    | PageId::Profile
             )
             .then(|| self.next(page)),
             can_pop,
@@ -924,6 +975,87 @@ impl Flow {
                 label: CONFIRMATION_LABEL,
             },
             password_note,
+        }
+    }
+
+    fn profile_view(&self) -> Profile {
+        let editable = !self.is_frozen();
+        let offered = self.encrypt();
+        let mut choices = vec![DailyChoice {
+            id: Daily::None.id(),
+            title: "No daily profile".to_owned(),
+            subtitle: "Nothing is set up. Create your own account later with ilexctl home create."
+                .to_owned(),
+            enabled: editable,
+        }];
+        choices.extend(
+            self.profiles()
+                .into_iter()
+                .map(|(id, display)| DailyChoice {
+                    id: Daily::Profile(id.to_owned()).id(),
+                    title: display.to_owned(),
+                    subtitle: format!("The public profile {id}: its user name, size and settings."),
+                    enabled: editable && offered,
+                }),
+        );
+        choices.push(DailyChoice {
+            id: Daily::Custom.id(),
+            title: "A user name of your choice".to_owned(),
+            subtitle: "An account with the name and capacity you pick.".to_owned(),
+            enabled: editable && offered,
+        });
+        let checks = self.daily_checks();
+        let custom = (*self.daily() == Daily::Custom).then(|| CustomUser {
+            name: Field {
+                label: DAILY_NAME_LABEL,
+            },
+            name_value: self.daily_name().to_owned(),
+            name_note: checks.name.message().map(|m| Note {
+                text: m.sentence(),
+                error: true,
+            }),
+            size: Field {
+                label: DAILY_SIZE_LABEL,
+            },
+            size_value: self.daily_size().to_owned(),
+            size_note: match checks.size.message() {
+                Some(m) => Note {
+                    text: m.sentence(),
+                    error: true,
+                },
+                None => Note {
+                    text: daily::SIZE_HELP.to_owned(),
+                    error: false,
+                },
+            },
+        });
+        // Only a refusal is an error; the rest is dimmed text.
+        let note = if !offered {
+            Some(Note {
+                text: daily::NEEDS_ENCRYPTION.to_owned(),
+                error: false,
+            })
+        } else if let Some(refusal) = self.daily_refusal().filter(|_| custom.is_none()) {
+            Some(Note {
+                text: refusal.sentence(),
+                error: true,
+            })
+        } else {
+            (!self.daily().is_none()).then(|| Note {
+                text: daily::AFTER.to_owned(),
+                error: false,
+            })
+        };
+        Profile {
+            chrome: self.chrome(PageId::Profile, PROFILE_TITLE, self.blocking_banner()),
+            heading: PROFILE_HEADING,
+            intro: PROFILE_INTRO,
+            group: PROFILE_GROUP,
+            choices,
+            selected: self.daily().id(),
+            editable,
+            note,
+            custom,
         }
     }
 
@@ -1198,6 +1330,7 @@ impl Flow {
             disk: self.disk_page_view(),
             encryption: self.encryption_view(),
             account: self.account_view(),
+            profile: self.profile_view(),
             review: self.review_view(),
             installing,
             recovery: self.recovery_page_view(),

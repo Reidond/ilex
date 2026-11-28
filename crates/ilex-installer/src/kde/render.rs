@@ -336,6 +336,9 @@ fn shoot(shared: &Shared, layouts: &Layouts, directory: &Path, dark: bool) -> Re
                     continue;
                 }
                 Do::Name(text) => Event::Name(text.to_owned()),
+                Do::Daily(id) => Event::Daily(id.to_owned()),
+                Do::DailyName(text) => Event::DailyName(text.to_owned()),
+                Do::DailySize(text) => Event::DailySize(text.to_owned()),
                 Do::Encrypt(on) => {
                     flip(shared, shot.name, "encrypt", on)?;
                     continue;

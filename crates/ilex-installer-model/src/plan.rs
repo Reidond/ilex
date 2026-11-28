@@ -55,6 +55,41 @@ fn host_name() -> String {
     "ilex".into()
 }
 
+/// The smallest and largest capacity of a daily home in GiB, and the default
+/// when none is asked for: the limits of `ilexctl home setup --disk-size`.
+pub const DAILY_SIZE_MIN_GIB: u64 = 2;
+pub const DAILY_SIZE_MAX_GIB: u64 = 1_048_576;
+pub const DAILY_SIZE_DEFAULT_GIB: u64 = 20;
+
+/// The daily user the installed computer is set up for when it first starts
+/// (`sudo ilexctl home setup`, as the maintenance administrator). The
+/// installation creates no account for it and takes no password: it only
+/// records what was chosen in `/etc/ilex/setup.json` (the same record the
+/// Anaconda installer wrote) and says what to run in `/etc/issue.d`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum DailyUser {
+    /// A public profile of the image's catalogue: it sets the user name, the
+    /// capacity and what is applied at the first sign-in.
+    Profile { id: String },
+    /// A user name the person chose, and optionally its capacity in GiB.
+    Custom {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disk_size_gib: Option<u64>,
+    },
+}
+
+impl DailyUser {
+    /// The name of the account the first start creates, when it is known.
+    pub fn user_name(&self) -> &str {
+        match self {
+            Self::Profile { id } => id,
+            Self::Custom { name, .. } => name,
+        }
+    }
+}
+
 /// Every field the installer lets a person choose.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +122,11 @@ pub struct PlanRequest {
     pub host_name: String,
     /// The maintenance and recovery administrator's user name.
     pub administrator: String,
+    /// The daily user to set up at the first start, if any. Needs encryption:
+    /// the daily home is a LUKS volume inside the root, and the Anaconda
+    /// installer refused the same combination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily: Option<DailyUser>,
 }
 
 impl PlanRequest {
@@ -146,6 +186,31 @@ impl PlanRequest {
                 "administrator",
                 "expected a user name of at most 31 bytes: lower-case letters, digits, _ and -, starting with a letter or _",
             );
+        }
+        match &self.daily {
+            Some(DailyUser::Custom {
+                name,
+                disk_size_gib,
+            }) => {
+                if !is_daily_name(name) {
+                    return bad(
+                        "daily",
+                        "expected a user name of at most 31 bytes: lower-case letters, digits, _ and -, starting with a letter",
+                    );
+                }
+                if disk_size_gib
+                    .is_some_and(|g| !(DAILY_SIZE_MIN_GIB..=DAILY_SIZE_MAX_GIB).contains(&g))
+                {
+                    return bad(
+                        "daily",
+                        "the capacity is 2 GiB at least and 1048576 GiB at most",
+                    );
+                }
+            }
+            Some(DailyUser::Profile { id }) if !is_daily_name(id) => {
+                return bad("daily", "expected the id of a public profile");
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -260,6 +325,12 @@ pub fn is_user_name(value: &str) -> bool {
             .next()
             .is_some_and(|b| b.is_ascii_lowercase() || b == b'_')
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+}
+
+/// A daily user's name: what `ilexctl home setup --name` accepts. A
+/// maintenance name may also start with an underscore; this one may not.
+pub fn is_daily_name(value: &str) -> bool {
+    is_user_name(value) && value.starts_with(|c: char| c.is_ascii_lowercase())
 }
 
 /// Accounts and groups the installer must never create: the ones Fedora and
@@ -572,6 +643,44 @@ pub fn check_request<'a>(
                 request.administrator
             ),
         ));
+    }
+    if let Some(daily) = &request.daily {
+        let refuse =
+            |code: ErrorCode, message: String| Err(PlanError::new(code, Some("daily"), message));
+        if !request.encrypt {
+            return refuse(
+                ErrorCode::InvalidField,
+                "daily home setup needs an encrypted disk: the home lives inside the encrypted root"
+                    .to_owned(),
+            );
+        }
+        match daily {
+            DailyUser::Profile { id } if !table.profiles.contains_key(id) => {
+                return refuse(
+                    ErrorCode::InvalidField,
+                    format!(
+                        "no public profile '{id}'; offered: {}",
+                        table
+                            .profiles
+                            .keys()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                );
+            }
+            DailyUser::Custom { name, .. }
+                if is_reserved_user(name) || *name == request.administrator =>
+            {
+                return refuse(
+                    ErrorCode::ReservedName,
+                    format!(
+                        "{name} is reserved (system accounts and the maintenance administrator's name); pick another daily user name"
+                    ),
+                );
+            }
+            _ => {}
+        }
     }
     Ok(Checked {
         request: request.normalized(),

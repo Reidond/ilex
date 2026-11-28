@@ -13,6 +13,7 @@ use relm4::prelude::*;
 pub mod app;
 pub mod install;
 pub mod kiosk;
+pub mod profile;
 pub mod render;
 
 const APP_ID: &str = "org.ilex.Installer";

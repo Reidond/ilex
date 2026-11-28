@@ -42,6 +42,7 @@
 //! stand and the flow follows what it says.
 
 use super::{Flow, PageId, PlanCheck, ProbeState, Step};
+use crate::daily::{self, Daily};
 use crate::disks;
 use crate::markers;
 use crate::messages::{self, ClientError, Message};
@@ -605,6 +606,10 @@ impl Flow {
     /// again.
     fn start_over(&mut self) -> Step {
         self.administrator.clear();
+        self.daily = Daily::None;
+        self.daily_name.clear();
+        self.daily_size.clear();
+        self.daily_refusal = None;
         self.encrypt = true;
         self.wipe_secrets();
         self.name_refusal = None;
@@ -1174,6 +1179,23 @@ impl Flow {
                 title: "Administrator",
                 value: self.administrator().to_owned(),
             },
+            Row {
+                title: "Daily user",
+                value: plan.request.daily.as_ref().map_or_else(
+                    || "None: create your account later".to_owned(),
+                    |user| {
+                        let display = match user {
+                            ilex_installer_model::plan::DailyUser::Profile { id } => self
+                                .profiles()
+                                .into_iter()
+                                .find(|(known, _)| known == id)
+                                .map(|(_, display)| display),
+                            ilex_installer_model::plan::DailyUser::Custom { .. } => None,
+                        };
+                        daily::review_line(user, display)
+                    },
+                ),
+            },
         ]
     }
 
@@ -1457,8 +1479,13 @@ impl Flow {
         Some(DoneView {
             heading: format!("{edition} is installed"),
             detail: format!(
-                "Remove the installation medium, then restart. {}The computer starts the new system; sign in with the administrator account you made, and create your own account there when it asks.",
-                unlock.map_or_else(String::new, |line| format!("{line} "))
+                "Remove the installation medium, then restart. {}The computer starts the new system; sign in with the administrator account you made, {}",
+                unlock.map_or_else(String::new, |line| format!("{line} ")),
+                if self.daily().is_none() {
+                    "and create your own account there when it asks."
+                } else {
+                    daily::DONE_SETUP
+                }
             ),
             rows,
             finishing: self.inst.finishing,

@@ -513,6 +513,131 @@ pub fn run() -> Result<String> {
         error.map(|e| e.code) == Some(ErrorCode::ReservedName),
         "a profile's name is not reserved"
     );
+    // The daily user: a public profile of the catalogue, or a name of the
+    // person's choosing with an optional capacity, on an encrypted disk, and
+    // never the maintenance administrator's name.
+    let with_profile = probe_of(&profiled, &gnome)?;
+    let profile = json!({"kind": "profile", "id": "andriishafar"});
+    let custom = |name: &str, size: Option<u64>| {
+        let mut daily = json!({"kind": "custom", "name": name});
+        if let Some(size) = size {
+            daily["disk_size_gib"] = json!(size);
+        }
+        daily
+    };
+    for (name, daily) in [
+        ("a profile", profile.clone()),
+        ("a custom user", custom("alice", None)),
+        ("a custom user with a capacity", custom("alice", Some(40))),
+        ("the smallest capacity", custom("alice", Some(2))),
+        ("the largest capacity", custom("alice", Some(1_048_576))),
+    ] {
+        let checked = check_request(&request(|v| v["daily"] = daily.clone())?, &with_profile)
+            .map_err(|e| anyhow::anyhow!("{name}: {e:?}"))?;
+        ensure!(
+            serde_json::to_value(&checked.request.daily)? == daily,
+            "{name} did not survive the plan: {:?}",
+            checked.request.daily
+        );
+    }
+    ensure!(
+        serde_json::to_value(
+            check_request(&request(|_| {})?, &with_profile)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?
+                .request
+        )?
+        .get("daily")
+        .is_none(),
+        "a request with no daily user says something of one"
+    );
+    let daily_refusals: [(&str, ErrorCode, serde_json::Value, bool); 11] = [
+        (
+            "an unknown profile",
+            ErrorCode::InvalidField,
+            json!({"kind": "profile", "id": "nobody"}),
+            true,
+        ),
+        (
+            "a profile on an unencrypted disk",
+            ErrorCode::InvalidField,
+            profile.clone(),
+            false,
+        ),
+        (
+            "a custom user on an unencrypted disk",
+            ErrorCode::InvalidField,
+            custom("alice", None),
+            false,
+        ),
+        (
+            "a system account",
+            ErrorCode::ReservedName,
+            custom("root", None),
+            true,
+        ),
+        (
+            "the maintenance name",
+            ErrorCode::ReservedName,
+            custom("ilexmaint", None),
+            true,
+        ),
+        (
+            "an upper-case name",
+            ErrorCode::InvalidField,
+            custom("Alice", None),
+            true,
+        ),
+        (
+            "a name that starts with an underscore",
+            ErrorCode::InvalidField,
+            custom("_alice", None),
+            true,
+        ),
+        (
+            "a name that starts with a digit",
+            ErrorCode::InvalidField,
+            custom("9alice", None),
+            true,
+        ),
+        (
+            "a name of 32 bytes",
+            ErrorCode::InvalidField,
+            custom(&"a".repeat(32), None),
+            true,
+        ),
+        (
+            "a capacity of 1 GiB",
+            ErrorCode::InvalidField,
+            custom("alice", Some(1)),
+            true,
+        ),
+        (
+            "a capacity over the limit",
+            ErrorCode::InvalidField,
+            custom("alice", Some(1_048_577)),
+            true,
+        ),
+    ];
+    for (name, code, daily, encrypt) in daily_refusals {
+        let error = check_request(
+            &request(|v| {
+                v["daily"] = daily.clone();
+                v["encrypt"] = json!(encrypt);
+                v["tpm"] = json!("off");
+            })?,
+            &with_profile,
+        )
+        .err();
+        ensure!(
+            error.as_ref().map(|e| (e.code, e.field.as_deref())) == Some((code, Some("daily"))),
+            "{name}: {error:?}"
+        );
+    }
+    ensure!(
+        PlanRequest::parse(r#"{"composition":"generic.gnome","disk":"blank","mode":"whole-disk","administrator":"a","daily":{"kind":"root"}}"#).is_err()
+            && PlanRequest::parse(r#"{"composition":"generic.gnome","disk":"blank","mode":"whole-disk","administrator":"a","daily":{"kind":"profile","id":"x","password":"y"}}"#).is_err(),
+        "an unknown kind or field of the daily user was accepted"
+    );
     ensure!(
         PlanRequest::parse(r#"{"composition":"generic.gnome","disk":"blank","mode":"whole-disk","administrator":"a","password":"x"}"#).is_err(),
         "an unknown field was accepted"
@@ -567,6 +692,42 @@ password = "hunter2"
             && !format!("{answers:?}").contains("correct horse"),
         "answers print their secrets"
     );
+    // `[daily]`: a profile, or a name with an optional capacity, nothing else.
+    let daily_of = |extra: &str| -> Result<Option<crate::plan::DailyUser>> {
+        Ok(Answers::parse(&format!("{text}{extra}"))?
+            .to_request("generic.gnome")
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?
+            .daily)
+    };
+    ensure!(
+        from_answers.daily.is_none()
+            && daily_of("[daily]\nprofile = \"andriishafar\"\n")?
+                == Some(crate::plan::DailyUser::Profile {
+                    id: "andriishafar".into()
+                })
+            && daily_of("[daily]\nname = \"alice\"\ndisk-size = 40\n")?
+                == Some(crate::plan::DailyUser::Custom {
+                    name: "alice".into(),
+                    disk_size_gib: Some(40)
+                })
+            && daily_of("[daily]\nname = \"alice\"\n")?
+                == Some(crate::plan::DailyUser::Custom {
+                    name: "alice".into(),
+                    disk_size_gib: None
+                }),
+        "answers [daily]"
+    );
+    for extra in [
+        "[daily]\n",
+        "[daily]\ndisk-size = 40\n",
+        "[daily]\nprofile = \"andriishafar\"\nname = \"alice\"\n",
+        "[daily]\nprofile = \"andriishafar\"\ndisk-size = 40\n",
+        "[daily]\nname = \"Alice\"\n",
+        "[daily]\nname = \"alice\"\ndisk-size = 1\n",
+        "[daily]\nname = \"alice\"\npassword = \"x\"\n",
+    ] {
+        ensure!(daily_of(extra).is_err(), "answers {extra:?} were accepted");
+    }
     // A disk that already holds a system is erased only when the answers say
     // so, explicitly.
     ensure!(

@@ -13,7 +13,7 @@
 //!   real implementation over D-Bus (`org.ilex.Installer1`, Linux) and
 //!   [`simulate::Simulated`], which answers from JSON fixtures.
 //! * [`recovery`]: the recovery key page and the security chip's row: wording and rules.
-//! * [`machine`], [`disks`], [`encryption`], [`account`], [`review`], [`keyboard`], [`language`]:
+//! * [`machine`], [`disks`], [`encryption`], [`account`], [`daily`], [`review`], [`keyboard`], [`language`]:
 //!   the content and rules of the pages made of what the helper reports and what
 //!   the live image ships.
 //! * [`messages`]: every sentence a refusal or a failure becomes, in one place.
@@ -27,6 +27,7 @@
 
 pub mod account;
 pub mod backend;
+pub mod daily;
 pub mod disks;
 pub mod encryption;
 pub mod events;

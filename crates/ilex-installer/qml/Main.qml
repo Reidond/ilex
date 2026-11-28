@@ -114,6 +114,7 @@ Kirigami.ApplicationWindow {
             "disk": diskPage,
             "encryption": encryptionPage,
             "account": accountPage,
+            "profile": profilePage,
             "review": reviewPage,
             "installing": installingPage,
             "recovery": recoveryPage,
@@ -248,6 +249,13 @@ Kirigami.ApplicationWindow {
     Component {
         id: accountPage
         AccountPage {
+            view: root.view
+            host: root
+        }
+    }
+    Component {
+        id: profilePage
+        ProfilePage {
             view: root.view
             host: root
         }

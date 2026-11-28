@@ -37,6 +37,10 @@ pub struct Composition {
     pub shells: Vec<String>,
 }
 
+/// The only schema of a public profile this installer knows (`Table::validate`
+/// refuses any other), and the one `setup.json` records for a chosen profile.
+pub const PROFILE_SCHEMA: u32 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -158,7 +162,7 @@ impl Table {
             ensure!(
                 name.len() <= 31
                     && is_name(name)
-                    && profile.schema == 1
+                    && profile.schema == PROFILE_SCHEMA
                     && 0 < length
                     && length <= 256
                     && !has_control(&profile.display_name),

@@ -8,7 +8,7 @@ use ilex_installer_model::{
     Edition, Identity, Table,
     edition::EditionRecord,
     plan::{
-        Erase, ErrorCode, PLAN_SCHEMA, PLAN_VALID_SECONDS, Plan, PlanError, PlanRequest,
+        DailyUser, Erase, ErrorCode, PLAN_SCHEMA, PLAN_VALID_SECONDS, Plan, PlanError, PlanRequest,
         PlannedComposition, PlannedDisk, PlannedEncryption, PlannedTpm, SecretKind, TpmMode,
         check_request,
     },
@@ -419,6 +419,19 @@ impl Helper {
                 format!(
                     "{} is an account or group the system defines; pick a distinct maintenance name such as ilexmaint",
                     request.administrator
+                ),
+            ));
+        }
+        // The daily user's account is made by `homectl` on the installed
+        // system, which refuses what that system defines.
+        if let Some(DailyUser::Custom { name, .. }) = &request.daily
+            && names.contains(name)
+        {
+            return Err(PlanError::new(
+                ErrorCode::ReservedName,
+                Some("daily"),
+                format!(
+                    "{name} is an account or group the system defines; pick another daily user name"
                 ),
             ));
         }

@@ -838,6 +838,16 @@ impl Install {
             target::setup_record(&self.plan, None).as_bytes(),
             0o644,
         )?;
+        // A daily user: what the login prompt says to run, as Anaconda's does.
+        if let Some(text) = target::home_setup_issue(&self.plan) {
+            make_dir_mode(&etc.join("issue.d"), 0o755)?;
+            write_file(
+                &deployment.path.join(target::HOME_SETUP_ISSUE),
+                text.as_bytes(),
+                0o644,
+            )?;
+            log.line("the login prompt tells the administrator to run ilexctl home setup");
+        }
         // The encrypted root's line of /etc/crypttab: the shape Anaconda
         // writes, which the installed system's unlock stack checks.
         if let Some(volume) = &self.volume {

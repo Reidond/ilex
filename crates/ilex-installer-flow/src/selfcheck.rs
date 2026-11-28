@@ -214,6 +214,7 @@ pub fn run() -> Result<String> {
     progress().context("progress")?;
     disk_page().context("disk_page")?;
     encryption().context("encryption")?;
+    daily_page().context("daily_page")?;
     installation().context("installation")?;
     install_markers().context("install_markers")?;
     failures().context("failures")?;
@@ -260,13 +261,31 @@ fn flow_on(name: &str) -> Result<(Flow, Simulated)> {
     Ok((flow, sim))
 }
 
-/// A flow on the account page with a valid administrator.
+/// A flow past the account page (a valid administrator), on the daily user
+/// page, where Continue asks for the plan.
 fn at_account(name: &str) -> Result<(Flow, Simulated)> {
     let (mut flow, sim) = flow_on(name)?;
     ensure!(
         flow.advance() == Step::Goto(PageId::Machine)
             && flow.advance() == Step::Goto(PageId::Disk)
             && through_encryption(&mut flow),
+        "{name}: welcome, machine, disk and encryption do not continue"
+    );
+    fill_account(&mut flow, name)?;
+    Ok((flow, sim))
+}
+
+/// As [`at_account`], with the disk encrypted (the passphrase typed): the daily
+/// user page offers its choices.
+fn at_account_encrypted(name: &str) -> Result<(Flow, Simulated)> {
+    let (mut flow, sim) = flow_on(name)?;
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Machine)
+            && flow.advance() == Step::Goto(PageId::Disk)
+            && flow.advance() == Step::Goto(PageId::Encryption)
+            && flow.set_passphrase(Secret::new("correct horse battery"))
+            && flow.set_passphrase_confirmation(Secret::new("correct horse battery"))
+            && flow.advance() == Step::Goto(PageId::Account),
         "{name}: welcome, machine, disk and encryption do not continue"
     );
     fill_account(&mut flow, name)?;
@@ -285,7 +304,7 @@ fn at_account_without_disk(name: &str) -> Result<(Flow, Simulated)> {
             && flow.advance() == Step::Stay,
         "{name}: the disk page continues without a disk"
     );
-    flow.show(PageId::Account);
+    flow.show(PageId::Profile);
     fill_account(&mut flow, name)?;
     Ok((flow, sim))
 }
@@ -307,16 +326,31 @@ fn fill_account(flow: &mut Flow, name: &str) -> Result<()> {
             && flow.set_confirmation(Secret::new("correct horse")),
         "{name}: the account fields are refused"
     );
+    // On to the daily user page, where Continue asks for the plan.
+    if flow.page() == PageId::Account {
+        ensure!(
+            flow.advance() == Step::Goto(PageId::Profile),
+            "{name}: the account page does not go on to the daily user page"
+        );
+    }
     Ok(())
 }
 
+/// Ask for the plan, which Continue on the daily user page does (from the
+/// account page, one more step on the way there).
 fn run_plan(flow: &mut Flow) -> Result<(u64, Box<ilex_installer_model::plan::PlanRequest>)> {
+    if flow.page() == PageId::Account {
+        ensure!(
+            flow.advance() == Step::Goto(PageId::Profile),
+            "the account page does not go on to the daily user page"
+        );
+    }
     match flow.advance() {
         Step::RunPlan {
             generation,
             request,
         } => Ok((generation, request)),
-        other => bail!("the account page asked for {other:?}, not the plan"),
+        other => bail!("the daily user page asked for {other:?}, not the plan"),
     }
 }
 
@@ -456,7 +490,7 @@ fn walk() -> Result<()> {
             && matches!(flow.plan_check(), PlanCheck::Checked(_)),
         "plan result"
     );
-    ensure!(flow.back() == Some(PageId::Account), "back from ready");
+    ensure!(flow.back() == Some(PageId::Profile), "back from ready");
 
     // The helper's own refusal of a name the live image defines stays on the
     // account page, beside the name.
@@ -464,7 +498,7 @@ fn walk() -> Result<()> {
     let (generation, request) = run_plan(&mut flow)
         .context("a name the page cannot know to be taken is refused locally")?;
     ensure!(
-        flow.plan_finished(generation, sim.plan(&request)) == Step::Stay
+        flow.plan_finished(generation, sim.plan(&request)) == Step::Goto(PageId::Account)
             && flow.page() == PageId::Account
             && flow.account_checks().name.message().is_some()
             && !flow.can_continue(),
@@ -522,13 +556,13 @@ fn generations() -> Result<()> {
         "a second answer replaced the first"
     );
     // A check later, the first one's answer is stale.
-    ensure!(flow.back() == Some(PageId::Account), "back from ready");
+    ensure!(flow.back() == Some(PageId::Profile), "back from ready");
     let (second, request) = run_plan(&mut flow)?;
     ensure!(second != first, "two checks share a number");
     ensure!(
         flow.plan_finished(first, Err(ClientError::Other("an old answer".into()))) == Step::Stay
             && flow.is_checking()
-            && flow.page() == PageId::Account,
+            && flow.page() == PageId::Profile,
         "an old answer ended the new check"
     );
     ensure!(
@@ -545,6 +579,255 @@ fn generations() -> Result<()> {
     ensure!(
         !format!("{:?}", flow.password()).contains("horse"),
         "the password prints"
+    );
+    Ok(())
+}
+
+/// The daily user page: its place after the account page, what each choice
+/// puts in the plan request, the rules of a custom user's name and capacity
+/// (and that the administrator's name and a custom name exclude each other),
+/// the encrypted disk it needs, the helper's refusal and the review row.
+fn daily_page() -> Result<()> {
+    use ilex_installer_model::plan::DailyUser;
+    ensure!(
+        PageId::Account.next() == Some(PageId::Profile)
+            && PageId::Profile.next() == Some(PageId::Review)
+            && PageId::Review.previous() == Some(PageId::Profile)
+            && PageId::from_id("profile") == Some(PageId::Profile)
+            && PageId::Profile.stack().last() == Some(&PageId::Profile)
+            && PageId::Profile.stack().len() == 6,
+        "the daily user page's place"
+    );
+    let (mut flow, sim) = at_account_encrypted("generic")?;
+    // Nothing is chosen at first, and the request says nothing of a daily user.
+    ensure!(
+        flow.page() == PageId::Profile
+            && flow.daily().is_none()
+            && flow.can_continue()
+            && flow.marker_fields() == "daily=none"
+            && flow.daily_user().is_none()
+            && flow.plan_request().is_ok_and(|r| r.daily.is_none())
+            && !serde_json::to_string(&flow.plan_request().map_err(|m| anyhow::anyhow!("{m:?}"))?)?
+                .contains("daily"),
+        "the daily user page's start"
+    );
+    let view = flow.view().profile;
+    ensure!(
+        view.choices
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>()
+            == ["none", "profile:andriishafar", "custom"]
+            && view.choices.iter().all(|c| c.enabled)
+            && view.selected == "none"
+            && view.note.is_none()
+            && view.custom.is_none()
+            && view.chrome.next.as_ref().is_some_and(|n| n.enabled),
+        "the daily user page's rows: {view:?}"
+    );
+    // A public profile: its id goes into the request, a profile the image does
+    // not have and a row that is not one are refused.
+    ensure!(
+        !flow.set_daily("profile:nobody")
+            && !flow.set_daily("profile:")
+            && !flow.set_daily("bogus")
+            && flow.daily().is_none()
+            && flow.set_daily("profile:andriishafar")
+            && flow.can_continue()
+            && flow.marker_fields() == "daily=profile:andriishafar"
+            && flow
+                .plan_request()
+                .map_err(|m| anyhow::anyhow!("{m:?}"))?
+                .daily
+                == Some(DailyUser::Profile {
+                    id: "andriishafar".into()
+                })
+            && flow
+                .view()
+                .profile
+                .note
+                .is_some_and(|n| !n.error && n.text.contains("ilexctl home setup")),
+        "a public profile"
+    );
+    // A custom user: the name and the capacity are judged as `ilexctl home
+    // setup` judges them, and the administrator's name is not the user's.
+    ensure!(
+        flow.set_daily("custom")
+            && !flow.can_continue()
+            && flow.daily_checks().name == Check::Empty
+            && flow.daily_checks().size.is_valid()
+            && flow
+                .view()
+                .profile
+                .custom
+                .is_some_and(|c| c.name_note.is_none()),
+        "a custom user without a name"
+    );
+    for (name, refused) in [
+        ("Alice", true),
+        ("_alice", true),
+        ("9alice", true),
+        ("a b", true),
+        ("a".repeat(32).as_str(), true),
+        ("root", true),
+        ("systemd-coredump", true),
+        ("ilexmaint", true),
+        ("alice", false),
+        ("alice-2_x", false),
+    ] {
+        ensure!(
+            flow.set_daily_name(name)
+                && flow.daily_checks().name.message().is_some() == refused
+                && flow.can_continue() == !refused
+                && flow
+                    .view()
+                    .profile
+                    .custom
+                    .is_some_and(|c| c.name_note.is_some() == refused),
+            "the daily user name {name:?}"
+        );
+    }
+    for (size, valid) in [
+        ("", true),
+        ("2", true),
+        ("40", true),
+        (" 40 ", true),
+        ("1048576", true),
+        ("1", false),
+        ("1048577", false),
+        ("-3", false),
+        ("forty", false),
+        ("4.5", false),
+    ] {
+        ensure!(
+            flow.set_daily_size(size)
+                && flow.daily_checks().size.is_valid() == valid
+                && flow.can_continue() == valid,
+            "the daily home's capacity {size:?}"
+        );
+    }
+    ensure!(
+        flow.set_daily_size("40")
+            && flow
+                .plan_request()
+                .map_err(|m| anyhow::anyhow!("{m:?}"))?
+                .daily
+                == Some(DailyUser::Custom {
+                    name: "alice-2_x".into(),
+                    disk_size_gib: Some(40)
+                })
+            && flow.set_daily_size("")
+            && flow.set_daily_name("alice")
+            && flow
+                .plan_request()
+                .map_err(|m| anyhow::anyhow!("{m:?}"))?
+                .daily
+                == Some(DailyUser::Custom {
+                    name: "alice".into(),
+                    disk_size_gib: None
+                }),
+        "a custom user in the request"
+    );
+    // Neither name may be the other: the account page refuses a maintenance
+    // name that is the daily user's.
+    ensure!(
+        flow.back() == Some(PageId::Account)
+            && flow.set_administrator("alice")
+            && flow.account_checks().name.message().is_some()
+            && !flow.can_continue()
+            && flow.set_administrator("ilexmaint")
+            && flow.can_continue()
+            && flow.advance() == Step::Goto(PageId::Profile),
+        "the maintenance name and the daily user's"
+    );
+    // The helper's refusal of the daily name stays beside it until it changes.
+    ensure!(
+        flow.set_daily_name("rpcuser") && flow.can_continue(),
+        "a name only the helper knows"
+    );
+    let (generation, request) = run_plan(&mut flow)?;
+    ensure!(
+        flow.plan_finished(generation, sim.plan(&request)) == Step::Stay
+            && flow.page() == PageId::Profile
+            && flow.daily_checks().name.message().is_some()
+            && !flow.can_continue()
+            && flow
+                .view()
+                .profile
+                .custom
+                .is_some_and(|c| c.name_note.is_some()),
+        "the helper's refusal of the daily user's name: {:?}",
+        flow.daily_checks()
+    );
+    ensure!(
+        flow.set_daily_name("alice") && flow.can_continue(),
+        "the refusal outlives the name"
+    );
+    // The review page says what was chosen, and nothing else of it.
+    let (generation, request) = run_plan(&mut flow)?;
+    ensure!(
+        flow.plan_finished(generation, sim.plan(&request)) == Step::Goto(PageId::Review),
+        "the plan with a daily user"
+    );
+    let ReviewBody::Checked(review) = flow.review_page().body else {
+        bail!("no review of the plan with a daily user");
+    };
+    ensure!(
+        review.choices.iter().any(|r| r.title == "Daily user"
+            && r.value.contains("alice")
+            && r.value.contains("20 GiB")),
+        "the review's daily user row: {:?}",
+        review.choices
+    );
+    ensure!(
+        flow.back() == Some(PageId::Profile)
+            && flow.set_daily("profile:andriishafar")
+            && flow.set_daily("none")
+            && flow.daily_user().is_none(),
+        "back to the daily user page and on to none"
+    );
+    // A daily home is encrypted: no daily user on a disk that is not, and
+    // turning encryption off drops the choice.
+    ensure!(
+        flow.set_daily("custom")
+            && flow.back() == Some(PageId::Account)
+            && flow.back() == Some(PageId::Encryption)
+            && flow.set_encrypt(false)
+            && flow.daily().is_none()
+            && flow.advance() == Step::Goto(PageId::Account)
+            && flow.advance() == Step::Goto(PageId::Profile)
+            && !flow.set_daily("custom")
+            && !flow.set_daily("profile:andriishafar")
+            && flow.set_daily("none"),
+        "a daily user needs an encrypted disk"
+    );
+    let view = flow.view().profile;
+    ensure!(
+        view.choices.iter().map(|c| c.enabled).collect::<Vec<_>>() == [true, false, false]
+            && view.note.is_some_and(|n| n.text.contains("encrypted disk")),
+        "the rows without encryption"
+    );
+    // The helper refuses a daily user on an unencrypted disk and a profile it
+    // does not have, as the model does (a request that bypasses the page).
+    let mut request = (*request).clone();
+    request.encrypt = false;
+    request.recovery_key = false;
+    request.tpm = None;
+    ensure!(
+        matches!(sim.plan(&request), Err(ClientError::Refused(e)) if e.field.as_deref() == Some("daily")),
+        "the simulated helper took a daily user on an unencrypted disk"
+    );
+    // Markers: the choice is one word, and never what is typed for a custom
+    // user.
+    let (flow, _) = at_account_encrypted("generic")?;
+    let mut flow = flow.with_markers(config(false, false));
+    flow.drain_markers();
+    ensure!(
+        flow.set_daily("custom")
+            && flow.set_daily_name("alice")
+            && flow.set_daily("custom")
+            && flow.drain_markers() == ["ILEX-INSTALLER event=daily daily=custom"],
+        "the daily user's markers"
     );
     Ok(())
 }
@@ -642,8 +925,8 @@ fn probe_answers() -> Result<()> {
     };
     flow.probe_finished(look, Simulated::load("helper-down")?.probe());
     ensure!(
-        flow.back() == Some(PageId::Account) && flow.can_retry_probe(),
-        "back to the account page after a look that failed"
+        flow.back() == Some(PageId::Profile) && flow.can_retry_probe(),
+        "back to the daily user page after a look that failed"
     );
     let Step::RunProbe { generation: again } = flow.start_probe() else {
         bail!("the account page's banner cannot ask again");
@@ -652,7 +935,7 @@ fn probe_answers() -> Result<()> {
         flow.account_checks().all_valid()
             && !flow.can_continue()
             && flow.advance() == Step::Stay
-            && flow.page() == PageId::Account,
+            && flow.page() == PageId::Profile,
         "Continue runs while the look is pending"
     );
     ensure!(
@@ -754,7 +1037,8 @@ fn retries() -> Result<()> {
     let (mut flow, sim) = at_account("generic")?;
     // Back on the machine page the person picks the specific configuration.
     ensure!(
-        flow.back() == Some(PageId::Encryption)
+        flow.back() == Some(PageId::Account)
+            && flow.back() == Some(PageId::Encryption)
             && flow.back() == Some(PageId::Disk)
             && flow.back() == Some(PageId::Machine),
         "back to the machine page"
@@ -872,7 +1156,7 @@ fn retries() -> Result<()> {
         "no usable disk"
     );
     ensure!(
-        matches!(flow.back(), Some(PageId::Account))
+        matches!(flow.back(), Some(PageId::Profile))
             && matches!(flow.advance(), Step::RunProbe { .. }),
         "Continue after a check that found no disk does not look again"
     );
@@ -1165,6 +1449,11 @@ fn marker_formats() -> Result<()> {
     flow.set_administrator("ilexmaint");
     flow.set_password(Secret::new("hunter2 correct"));
     flow.set_confirmation(Secret::new("hunter2 correct"));
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Profile)
+            && flow.drain_markers() == ["ILEX-INSTALLER page=profile edition=gnome daily=none"],
+        "the daily user page's marker"
+    );
     let (generation, request) = run_plan(&mut flow)?;
     ensure!(
         flow.drain_markers().is_empty(),
@@ -1876,7 +2165,8 @@ fn disk_page() -> Result<()> {
     // A disk that is gone after the check invalidates it, and the default
     // moves on to one that is offered.
     ensure!(
-        flow.back() == Some(PageId::Account)
+        flow.back() == Some(PageId::Profile)
+            && flow.back() == Some(PageId::Account)
             && flow.back() == Some(PageId::Encryption)
             && flow.back() == Some(PageId::Disk),
         "back to the disk page"
