@@ -25,6 +25,7 @@ use relm4::gtk::glib::translate::ToGlibPtr;
 use relm4::gtk::{self, glib};
 use relm4::prelude::*;
 
+use super::network::NetworkPage;
 use super::install::{
     DiskPage, DonePage, InstallingPage, LogDialog, ProblemPage, RecoveryPage, ReviewPage,
     confirmation,
@@ -210,6 +211,7 @@ pub struct Widgets {
     nav: adw::NavigationView,
     welcome: Welcome,
     machine: Machine,
+    network: NetworkPage,
     disk: DiskPage,
     encryption: Encryption,
     account: Account,
@@ -615,6 +617,7 @@ impl Widgets {
         );
 
         // --- disk, review, installing, recovery key, done, problem ---
+        let network = NetworkPage::build(sender, flow.secrets_wiped());
         let disk = DiskPage::build(sender);
         let profile = ProfilePage::build(sender);
         let review = ReviewPage::build(sender);
@@ -626,6 +629,7 @@ impl Widgets {
 
         for page in [
             &welcome_page,
+            &network.page,
             &machine_page,
             &disk.page,
             &encryption_page,
@@ -838,6 +842,7 @@ impl Widgets {
                 button: account_button,
                 wiped: flow.secrets_wiped(),
             },
+            network,
             disk,
             profile,
             review,
@@ -867,6 +872,7 @@ impl Widgets {
         }
         self.sync_welcome(&v);
         self.sync_machine(&v, sender);
+        self.network.sync(&v, sender);
         self.disk.sync(&v, sender);
         self.sync_encryption(&v);
         self.sync_account(&v, flow);

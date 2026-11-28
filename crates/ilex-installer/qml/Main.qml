@@ -110,6 +110,7 @@ Kirigami.ApplicationWindow {
     function pageComponent(id) {
         return {
             "welcome": welcomePage,
+            "network": networkPage,
             "machine": machinePage,
             "disk": diskPage,
             "encryption": encryptionPage,
@@ -205,6 +206,7 @@ Kirigami.ApplicationWindow {
             if (root.syncing || !item || !root.ready || item.pageId === root.view.page) {
                 return;
             }
+            logLine("the page row moved to " + item.pageId + " while the flow is on " + root.view.page + ": the flow goes back");
             root.send("visible", item.pageId);
             Qt.callLater(root.syncStack);
             Qt.callLater(() => root.reportPage());
@@ -222,6 +224,13 @@ Kirigami.ApplicationWindow {
         WelcomePage {
             view: root.view
             catalogue: root.catalogue
+            host: root
+        }
+    }
+    Component {
+        id: networkPage
+        NetworkPage {
+            view: root.view
             host: root
         }
     }

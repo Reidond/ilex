@@ -135,10 +135,17 @@ const GRUB_COUNTDOWN: &str = "The highlighted entry will be executed automatical
 /// 200 ms, with margin for a loaded guest.
 const SERIAL_BUDGET_SECONDS: f64 = 1.0;
 /// The polkit actions the installer's session may do without a password:
-/// changing VT, so Ctrl+Alt+F2 reaches tty2's root shell from the page. Each
-/// later page that needs another (a restart button, the network page) adds its
-/// action here with the rule that allows it.
-const POLKIT_ALLOWED: &[&str] = &["org.freedesktop.login1.chvt"];
+/// changing VT, so Ctrl+Alt+F2 reaches tty2's root shell from the page, and
+/// the three NetworkManager actions `nmcli` needs on the network page (scan for
+/// Wi-Fi networks, add the profile of the one joined, activate it). Each later
+/// page that needs another (a restart button) adds its action here with the
+/// rule that allows it.
+const POLKIT_ALLOWED: &[&str] = &[
+    "org.freedesktop.NetworkManager.network-control",
+    "org.freedesktop.NetworkManager.settings.modify.system",
+    "org.freedesktop.NetworkManager.wifi.scan",
+    "org.freedesktop.login1.chvt",
+];
 
 pub fn trials() -> Vec<Trial> {
     let mut trials = vec![

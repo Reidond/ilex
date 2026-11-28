@@ -14,6 +14,7 @@ pub mod app;
 pub mod install;
 pub mod kiosk;
 pub mod profile;
+pub mod network;
 pub mod render;
 
 const APP_ID: &str = "org.ilex.Installer";
@@ -37,10 +38,12 @@ pub fn run(launch: Launch) -> Result<()> {
     // The flow decides what the session prints and when, and whether the
     // layout test field's text may be (only for a test: the fixed credential,
     // or a simulated session where no real person types).
-    let flow = Flow::new(layouts).with_markers(MarkerConfig::session(
-        launch.edition.unwrap_or_else(|| "gnome".to_owned()),
-        launch.simulate.is_some(),
-    ));
+    let flow = Flow::new(layouts)
+        .with_markers(MarkerConfig::session(
+            launch.edition.unwrap_or_else(|| "gnome".to_owned()),
+            launch.simulate.is_some(),
+        ))
+        .with_network_check();
     let init = app::Init {
         backend,
         keyboard,

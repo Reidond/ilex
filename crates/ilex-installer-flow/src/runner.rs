@@ -15,7 +15,8 @@ use ilex_installer_model::probe::Probe;
 use ilex_installer_model::state::State;
 
 use crate::backend::Backend;
-use crate::flow::{Flow, Step};
+use crate::flow::{Flow, NetworkAction, Step};
+use crate::network::NetworkState;
 use crate::keyboard::SessionKeyboard;
 use crate::messages::ClientError;
 use crate::secret::Secret;
@@ -67,6 +68,16 @@ pub enum Answer {
     Finished {
         generation: u64,
         result: Result<Option<Saved>, ClientError>,
+    },
+    /// A look at the network.
+    Networked {
+        generation: u64,
+        result: Result<NetworkState, ClientError>,
+    },
+    /// A Wi-Fi network joined (or not).
+    Joined {
+        generation: u64,
+        result: Result<(), ClientError>,
     },
 }
 
@@ -171,6 +182,32 @@ impl Services {
                 generation,
                 result: backend.finish(&action),
             }),
+            Step::RunNetwork {
+                generation,
+                delay_ms,
+                action,
+            } => {
+                let delay = self.poll_ms.map_or(delay_ms, |fast| delay_ms.min(fast));
+                Box::new(move || {
+                    if delay > 0 {
+                        std::thread::sleep(Duration::from_millis(delay));
+                    }
+                    match action {
+                        NetworkAction::Look { rescan } => Answer::Networked {
+                            generation,
+                            result: backend.network(rescan),
+                        },
+                        NetworkAction::Join {
+                            ssid,
+                            security,
+                            password,
+                        } => Answer::Joined {
+                            generation,
+                            result: backend.join_wifi(&ssid, security, password.as_ref()),
+                        },
+                    }
+                })
+            }
             // The widgets follow the flow's page and its dialog.
             Step::Goto(_) | Step::Confirm(_) | Step::Stay => return None,
         })
@@ -195,6 +232,8 @@ impl Flow {
             }
             Answer::KeySkipped { generation, result } => self.skip_finished(generation, result),
             Answer::Finished { generation, result } => self.finish_finished(generation, result),
+            Answer::Networked { generation, result } => self.network_finished(generation, result),
+            Answer::Joined { generation, result } => self.join_finished(generation, result),
         }
     }
 }

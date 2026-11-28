@@ -102,10 +102,12 @@ pub fn run(launch: Launch) -> Result<()> {
     let keyboard: Arc<dyn SessionKeyboard + Send + Sync> = Arc::new(keyboard::Kwin);
     // The flow decides which marker lines exist and when; the page prints what
     // it is handed.
-    let flow = Flow::new(layouts.clone()).with_markers(MarkerConfig::session(
-        edition.clone(),
-        launch.simulate.is_some(),
-    ));
+    let flow = Flow::new(layouts.clone())
+        .with_markers(MarkerConfig::session(
+            edition.clone(),
+            launch.simulate.is_some(),
+        ))
+        .with_network_check();
     exec(|| {
         installer::hand_over(installer::Handover {
             edition,

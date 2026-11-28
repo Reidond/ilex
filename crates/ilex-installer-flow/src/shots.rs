@@ -52,6 +52,15 @@ pub enum Do {
     Disk(&'static str),
     /// The disk page's way of installing (`whole-disk`, `free-space`).
     Mode(&'static str),
+    /// A Wi-Fi network of the network page's list (its name), the password
+    /// typed into the page's field, and the page's Connect and Refresh.
+    Network(&'static str),
+    NetworkPassword(&'static str),
+    Connect,
+    Refresh,
+    /// Wait until the network page says so (`Flow::network_word`: `offline`,
+    /// `joining`, `failed` or `online`): a join takes a moment.
+    NetworkIs(&'static str),
     /// The review page's destructive button, and the dialog's two answers.
     Install,
     Accept,
@@ -101,6 +110,8 @@ pub struct Shot {
 }
 
 pub const PASSWORD: &str = "correct horse battery";
+/// A Wi-Fi passphrase (the simulation accepts eight characters or more).
+pub const WIFI_PASSWORD: &str = "holly and ivy";
 pub const PASSPHRASE: &str = "pluck the gentle wren, lest the winter come";
 
 macro_rules! shots {
@@ -116,6 +127,16 @@ pub const SHOTS: &[Shot] = shots![
     "welcome-bios", "bios", Welcome, "", "", [];
     "welcome-helper-down", "helper-down", Welcome, "", "", [];
     "welcome-keyboard-failed", "generic", Welcome, "", "", [Do::FailSwitches, Do::Keyboard("de-nodeadkeys")];
+    "network-offline", "generic+offline", Network, "offline", "", [Do::Wait(PageId::Welcome), Do::Continue];
+    "network-no-wifi", "generic+no-wifi", Network, "offline", "", [Do::Wait(PageId::Welcome), Do::Continue];
+    "network-secured", "generic+offline", Network, "offline", "", [Do::Wait(PageId::Welcome), Do::Continue, Do::Wait(PageId::Network), Do::Network("Holly House"), Do::NetworkPassword(WIFI_PASSWORD)];
+    "network-open", "generic+offline", Network, "offline", "", [Do::Wait(PageId::Welcome), Do::Continue, Do::Wait(PageId::Network), Do::Network("Guest")];
+    "network-short-password", "generic+offline", Network, "offline", "", [Do::Wait(PageId::Welcome), Do::Continue, Do::Wait(PageId::Network), Do::Network("Holly House"), Do::NetworkPassword("holly")];
+    "network-connecting", "generic+offline+wifi-slow", Network, "joining", "", [Do::Wait(PageId::Welcome), Do::Continue, Do::Wait(PageId::Network), Do::Network("Holly House"), Do::NetworkPassword(WIFI_PASSWORD), Do::Connect];
+    "network-wrong-password", "generic+offline+wifi-wrong", Network, "failed", "", [Do::Wait(PageId::Welcome), Do::Continue, Do::Wait(PageId::Network), Do::Network("Holly House"), Do::NetworkPassword(WIFI_PASSWORD), Do::Connect];
+    "network-online", "generic+offline", Network, "online", "", [Do::Wait(PageId::Welcome), Do::Continue, Do::Wait(PageId::Network), Do::Network("Holly House"), Do::NetworkPassword(WIFI_PASSWORD), Do::Connect];
+    "network-then-machine", "generic+offline", Machine, "", "", [Do::Wait(PageId::Welcome), Do::Continue, Do::Wait(PageId::Network), Do::Network("Guest"), Do::Connect, Do::NetworkIs("online"), Do::Continue];
+    "network-back", "generic+offline", Network, "online", "", [Do::Wait(PageId::Welcome), Do::Continue, Do::Wait(PageId::Network), Do::Network("Guest"), Do::Connect, Do::NetworkIs("online"), Do::Continue, Do::Back];
     "machine-not-recognised", "generic", Machine, "", "", [Do::Continue];
     "machine-detected", "ms-7c35", Machine, "", "", [Do::Continue];
     "machine-detected-board", "ms-7c35-board", Machine, "", "", [Do::Continue];

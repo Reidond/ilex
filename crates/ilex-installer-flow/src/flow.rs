@@ -112,7 +112,9 @@ use serde_json::json;
 use std::collections::BTreeSet;
 
 mod installation;
+mod network;
 
+pub use network::NetworkAction;
 pub use installation::{
     Control, DoneView, InstallingView, LogChoice, LogSave, Phase, ProblemIcon, ProblemKind,
     ProblemView, RecoveryView, ReviewBody, ReviewPage, SkipView, TypedKey,
@@ -121,6 +123,7 @@ pub use installation::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PageId {
     Welcome,
+    Network,
     Machine,
     Disk,
     Encryption,
@@ -135,8 +138,9 @@ pub enum PageId {
 
 impl PageId {
     /// The pages a person walks with Continue and Back.
-    pub const ORDER: [PageId; 7] = [
+    pub const ORDER: [PageId; 8] = [
         Self::Welcome,
+        Self::Network,
         Self::Machine,
         Self::Disk,
         Self::Encryption,
@@ -147,8 +151,9 @@ impl PageId {
 
     /// Every page, in the order a navigation stack builds them: the walk, then
     /// the pages an installation ends on (nobody goes back from those).
-    pub const ALL: [PageId; 11] = [
+    pub const ALL: [PageId; 12] = [
         Self::Welcome,
+        Self::Network,
         Self::Machine,
         Self::Disk,
         Self::Encryption,
@@ -180,6 +185,7 @@ impl PageId {
     pub fn id(self) -> &'static str {
         match self {
             Self::Welcome => "welcome",
+            Self::Network => "network",
             Self::Machine => "machine",
             Self::Disk => "disk",
             Self::Encryption => "encryption",
@@ -197,6 +203,7 @@ impl PageId {
     pub fn title(self) -> &'static str {
         match self {
             Self::Welcome => "Welcome",
+            Self::Network => "Network",
             Self::Machine => "This computer",
             Self::Disk => "Disk",
             Self::Encryption => "Encryption",
@@ -337,6 +344,14 @@ pub enum Step {
         generation: u64,
         action: FinishAction,
     },
+    /// Ask NetworkManager, after `delay_ms`: look at the network (give the
+    /// answer to [`Flow::network_finished`]) or join a Wi-Fi network (give it
+    /// to [`Flow::join_finished`]). At most one is outstanding.
+    RunNetwork {
+        generation: u64,
+        delay_ms: u64,
+        action: NetworkAction,
+    },
     /// Nothing changes (Continue was not allowed, the answer was stale, or
     /// the answer was a refusal shown on the current page).
     Stay,
@@ -436,6 +451,8 @@ pub struct Flow {
     secrets_wiped: u64,
     /// The installation, from the review page's button to its end.
     inst: installation::Installation,
+    /// The network page: what the network is, and a Wi-Fi network being joined.
+    net: network::Net,
     /// Whether the disk is encrypted (on until the person turns it off), and
     /// the passphrase that unlocks it, typed twice.
     encrypt: bool,
@@ -496,6 +513,7 @@ impl Flow {
             disk_notice: None,
             secrets_wiped: 0,
             inst: installation::Installation::default(),
+            net: network::Net::default(),
             encrypt: true,
             chip: true,
             passphrase: Secret::default(),
@@ -863,7 +881,7 @@ impl Flow {
         if !self.can_go_back() {
             return None;
         }
-        let previous = self.page.previous()?;
+        let previous = self.previous_page()?;
         self.page = previous;
         self.announce_page(None);
         Some(previous)
@@ -878,7 +896,10 @@ impl Flow {
                 language::find(&self.language).is_some()
                     && self.layouts.get(&self.keyboard.requested).is_some()
                     && self.keyboard_status() == KeyboardStatus::Applied
+                    && !self.network_advancing()
             }
+            // The registry can be reached.
+            PageId::Network => self.network_online(),
             PageId::Machine => {
                 self.probe().is_some()
                     && self
@@ -921,7 +942,7 @@ impl Flow {
 
     /// The label of the page's Continue button.
     pub fn continue_label(&self) -> &'static str {
-        if self.is_checking() {
+        if self.is_checking() || self.network_advancing() {
             messages::CHECKING_LABEL
         } else {
             messages::CONTINUE_LABEL
@@ -935,12 +956,19 @@ impl Flow {
         }
         match self.page {
             PageId::Welcome
+            | PageId::Network
             | PageId::Machine
             | PageId::Disk
             | PageId::Encryption
             | PageId::Account => {
                 if self.page == PageId::Welcome {
                     self.start_notice = None;
+                    if self.net.enabled {
+                        // The registry is what an installation needs: look at
+                        // the network first (the machine page follows when it
+                        // can be reached).
+                        return self.begin_network_check();
+                    }
                 }
                 if self.page == PageId::Disk {
                     // Continuing is accepting the disk that is selected,
@@ -949,7 +977,11 @@ impl Flow {
                     self.disk_chosen = self.disk.is_some();
                     self.disk_notice = None;
                 }
-                let next = self.page.next().unwrap_or(self.page);
+                // (The network page is entered only by `network_finished`.)
+                let next = match self.page {
+                    PageId::Welcome => PageId::Machine,
+                    page => page.next().unwrap_or(page),
+                };
                 self.go(next)
             }
             PageId::Profile => {
@@ -1700,6 +1732,7 @@ impl Flow {
         self.confirmation = Secret::default();
         self.passphrase = Secret::default();
         self.passphrase_confirmation = Secret::default();
+        self.net.clear_password();
         self.inst.clear_recovery();
         self.secrets_wiped += 1;
     }
@@ -1866,6 +1899,7 @@ impl Flow {
     /// page is shown: what the tests assert on the serial console.
     pub fn marker_fields(&self) -> String {
         match self.page {
+            PageId::Network => self.network_marker(),
             PageId::Welcome => format!(
                 "language={} keyboard={}{}",
                 self.language,

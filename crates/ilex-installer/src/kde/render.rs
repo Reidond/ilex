@@ -272,6 +272,14 @@ fn shoot(shared: &Shared, layouts: &Layouts, directory: &Path, dark: bool) -> Re
         // installation is, the probe answered, no check and no layout switch
         // under way.
         shared.until(&format!("{}: the first page", shot.name), None, |_| true)?;
+        if Simulated::load(shot.scenario)?.starts_offline() {
+            // The page row of the shot before is still going back to the
+            // welcome page, and these shots' first Continue changes the flow's
+            // page a moment later than the others' (it looks at the network
+            // first): give the row time, or its late move sends the flow back.
+            std::thread::sleep(Duration::from_millis(600));
+            shared.flush(&format!("{}: the row", shot.name))?;
+        }
         for step in shot.steps {
             let event = match *step {
                 Do::Continue => Event::Continue,
@@ -299,6 +307,21 @@ fn shoot(shared: &Shared, layouts: &Layouts, directory: &Path, dark: bool) -> Re
                 Do::Machine(tag) => Event::Machine(tag.to_owned()),
                 Do::Disk(id) => Event::Disk(id.to_owned()),
                 Do::Mode(id) => Event::Mode(id.to_owned()),
+                Do::Network(ssid) => Event::Network(ssid.to_owned()),
+                Do::Connect => Event::Connect,
+                Do::Refresh => Event::Refresh,
+                Do::NetworkIs(word) => {
+                    shared.until(
+                        &format!("{}: the network page says {word}", shot.name),
+                        Some(PageId::Network),
+                        |seen| seen.check == word,
+                    )?;
+                    continue;
+                }
+                Do::NetworkPassword(text) => {
+                    type_into(shared, shot.name, "network-password", text)?;
+                    continue;
+                }
                 Do::Install => Event::Install,
                 Do::Accept => Event::Confirmed(true),
                 Do::Dismiss => Event::Confirmed(false),

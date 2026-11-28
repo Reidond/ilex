@@ -274,7 +274,9 @@ async fn shoot(job: &Job) -> Result<Summary> {
     // development aid: the self-check always draws them all).
     let only = std::env::var("ILEX_RENDER_ONLY").unwrap_or_default();
     for shot in SHOTS.iter().filter(|s| s.name.contains(&only)) {
-        let backend: Arc<dyn Backend> = Arc::new(Simulated::load(shot.scenario)?);
+        let simulated = Simulated::load(shot.scenario)?;
+        let offline = simulated.starts_offline();
+        let backend: Arc<dyn Backend> = Arc::new(simulated);
         let observer = Arc::new(Mutex::new(Observed::initial()));
         let failing = Arc::new(AtomicBool::new(false));
         let controller = App::builder()
@@ -282,7 +284,11 @@ async fn shoot(job: &Job) -> Result<Summary> {
                 backend,
                 keyboard: Arc::new(RenderKeyboard(Arc::clone(&failing))),
                 // No markers: the renderer prints nothing but its own result.
-                flow: Flow::new(job.layouts.clone()),
+                flow: if offline {
+                    Flow::new(job.layouts.clone()).with_network_check()
+                } else {
+                    Flow::new(job.layouts.clone())
+                },
                 fullscreen: false,
                 stats: false,
                 observer: Some(Arc::clone(&observer)),
@@ -339,6 +345,31 @@ async fn shoot(job: &Job) -> Result<Summary> {
                 Do::Machine(tag) => Msg::Event(Event::Machine(tag.to_owned())),
                 Do::Disk(id) => Msg::Event(Event::Disk(id.to_owned())),
                 Do::Mode(id) => Msg::Event(Event::Mode(id.to_owned())),
+                Do::Network(ssid) => Msg::Event(Event::Network(ssid.to_owned())),
+                Do::Connect => Msg::Event(Event::Connect),
+                Do::Refresh => Msg::Event(Event::Refresh),
+                Do::NetworkIs(word) => {
+                    until(
+                        &format!("{}: the network page says {word}", shot.name),
+                        &window,
+                        &observer,
+                        Some(PageId::Network),
+                        |seen| seen.check == word,
+                    )
+                    .await?;
+                    continue;
+                }
+                Do::NetworkPassword(text) => {
+                    type_into(&window, PageId::Network, "wifi-password", text)?;
+                    flush(
+                        &format!("{}: the network password", shot.name),
+                        &controller,
+                        &window,
+                        &observer,
+                    )
+                    .await?;
+                    continue;
+                }
                 Do::Install => Msg::Event(Event::Install),
                 Do::Accept => Msg::Event(Event::Confirmed(true)),
                 Do::Dismiss => Msg::Event(Event::Confirmed(false)),

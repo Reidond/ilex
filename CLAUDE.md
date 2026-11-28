@@ -5131,7 +5131,7 @@ the erase on the review page.
       review's sentence, button and dialog). `runner::Services::job(step)` turns a `Step` into a
       blocking `Job` that returns an `Answer`, and `Flow::answer` gives it to the
       right method with its generation (GTK's `carry_out` and `update_cmd` are
-      these). `shots::SHOTS` is the table of the 126 states the renderers draw (the
+      these). `shots::SHOTS` is the table of the 136 states the renderers draw (the
       steps from a fixture scenario's start to the page, check and dialog a shot
       names); each toolkit's renderer turns a `Do` into its own input.
       `Flow::observed()` says what is on screen in the flow's words, for a
@@ -5603,7 +5603,7 @@ the erase on the review page.
   mirror and its faults are unchanged.
 - **`--self-check --render DIR [--dark]`** draws every page and error state to
   PNG files with GTK's renderer from the window's widget tree at the surface's
-  own scale (`<state>-<light|dark>-<scale>x.png`, 126 states): the welcome page
+  own scale (`<state>-<light|dark>-<scale>x.png`, 136 states): the welcome page
   in German, BIOS, without a helper and with a layout the compositor did not
   take; the machine page for every kind of detection result and for a BIOS
   boot found there; the disk page with the default and another disk chosen,
@@ -5656,13 +5656,13 @@ the erase on the review page.
   `--headless --virtual-monitor 1920x1200` is enough, with the scale from a
   `monitors.xml` for the virtual monitor (`MetaVendor` / `MetaVirtualMonitor`,
   connector `Meta-0`, serial `0x00`). `installer::ui` does that in the live
-  image's VM: the flow's rules, `--simulate` refused on a real boot, and 354
+  image's VM: the flow's rules, `--simulate` refused on a real boot, and 384
   images (light and dark at 1x, light at 1.5x, 1280x800 and 1920x1200) that
   must all be PNGs of their size, drawn and mostly different, kept under
   `<state dir>/artifacts/installer-ui/`. The screenshots of a pull request are
   these files. They are not an accessibility walk: AT-SPI driving of the pages
   is not done.
-  The KDE edition's interface draws the **same 126 states** (the same
+  The KDE edition's interface draws the **same 136 states** (the same
   `shots::SHOTS`) with `ilex-installer --self-check --render DIR [--dark]`
   (`kde::render`): the real window (`Main.qml`, 1280x800 logical, with `rendering`
   on) under KWin, and a driver thread that plays the person: it sends the events
@@ -5683,7 +5683,7 @@ the erase on the review page.
   only for a filter that names it, in a VM of its own from `ILEX_INSTALLER_IMAGE_KDE`,
   built by `ilexctl test` when unset) runs it in the guest in the same three
   configurations and holds the KDE edition to the same rules as `installer::ui`:
-  126 shots in each, 378 images of their sizes, mostly different (the count is
+  136 shots in each, 408 images of their sizes, mostly different (the count is
   one constant, `SHOTS`, for both).
 - **On the real KDE ISO** (`iso::next_kde_*`, registered with the other KDE
   trials: Secure Boot on KVM, real key input over QMP, KWin, the real session
@@ -5789,6 +5789,40 @@ the erase on the review page.
   report `check=ok`, and the password and the passphrase to be nowhere on the
   serial console or in the guest's journal (read over SSH, with patterns that do
   not match their own command line). Screenshots of each are kept in the artifacts.
+  - **The network page** sits between the welcome and machine pages and is part
+    of the walk only when the live system cannot reach the image registry: the
+    welcome page's Continue (it says "Checking…") looks at the network first
+    (`Step::RunNetwork`, `Backend::network`: `nmcli` for the wired adapter's
+    state and the Wi-Fi networks in range, and a TCP connection to `ghcr.io:443`
+    that must answer within a few seconds), and an online computer goes straight
+    to the machine page. The page shows the wired state, one sentence for what is
+    wrong, the Wi-Fi networks (name, signal in words, open or secured; enterprise
+    and WEP networks are listed greyed out), a password field for the chosen
+    secured network, Connect and Refresh; it looks again every three seconds
+    while it shows, so a cable plugged in or a network joined is seen at once,
+    and Continue (focused when it can be pressed) is the person's: nothing
+    moves the flow by itself. There is no hidden-network form, no enterprise
+    sign-in and no proxy. Joining adds one NetworkManager profile
+    (`ilex-wifi`, in the live system's RAM, never copied to the installed
+    computer) and activates it, with the passphrase on `nmcli`'s standard input
+    (`passwd-file /dev/stdin`): never on a command line, in the environment, in
+    a file, on the serial console or in the journal; the flow wipes its copy when
+    the attempt ends, whichever way, and when another network is chosen, and the
+    interfaces clear the field with the other passwords' wipe count. A failed
+    attempt deletes its profile and says "Could not connect to NAME. Check the
+    password and try again." The polkit rule of the live image allows this user
+    exactly `wifi.scan`, `settings.modify.system` and `network-control` of
+    NetworkManager (the surface check of `iso::next_boot` lists them). The ISO
+    adds Intel's Wi-Fi firmware (`iwlwifi-{dvm,mld,mvm}-firmware`, about 100 MB):
+    fedora-bootc has the other vendors'. `--simulate` scenarios `offline`,
+    `no-wifi`, `wifi-wrong` and `wifi-slow` draw the 10 `network-*` shots of
+    both editions. `iso::next_network` takes the VM's NIC link down over QMP
+    (`set_link`) before Continue: the network page appears (not the machine
+    page; `check=offline wired=unplugged`), Enter does not go on, the link comes
+    back, the page sees `event=network result=online` by itself and Enter goes
+    on to the machine page. Joining a real Wi-Fi network (a Wi-Fi adapter in
+    QEMU) is not exercised on an ISO: the join is covered by the simulation and
+    the page by the renderers.
   - `iso::next_keyboard_install` is a **complete interactive installation by
     keyboard alone** (QMP key events, 6 GiB of RAM in the guest, with
     the real helper, the real registry and the signature policy): every page to

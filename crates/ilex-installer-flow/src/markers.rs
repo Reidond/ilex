@@ -12,6 +12,8 @@
 //! ILEX-INSTALLER event=plan result=ok | refused code=<code> | failed | stale
 //! ILEX-INSTALLER event=layout layout=<id> applied=true|false | result=stale
 //! ILEX-INSTALLER event=language language=<locale>
+//! ILEX-INSTALLER event=network result=online|offline|failed wired=<w> networks=<n>
+//! ILEX-INSTALLER event=wifi result=ok|failed      (a Wi-Fi network joined; nothing of it)
 //! ILEX-INSTALLER event=notice severity=info|warning|error text=<the machine page's notice>
 //! ILEX-INSTALLER event=disk disk=<id>
 //! ILEX-INSTALLER event=daily daily=none|custom|profile:<id>
@@ -44,6 +46,7 @@
 use crate::flow::PageId;
 use crate::machine::{Notice, Severity};
 use crate::messages::ClientError;
+use crate::network::{NetworkState, Wired};
 use crate::secret::Secret;
 use ilex_installer_model::plan::Plan;
 use ilex_installer_model::probe::Probe;
@@ -115,6 +118,37 @@ pub fn plan(result: &Result<Plan, ClientError>) -> String {
         }
         Err(_) => "ILEX-INSTALLER event=plan result=failed".to_owned(),
     }
+}
+
+/// The word of a wired adapter's state.
+pub fn wired_word(wired: Wired) -> &'static str {
+    match wired {
+        Wired::None => "none",
+        Wired::Unplugged => "unplugged",
+        Wired::Starting => "starting",
+        Wired::Up => "up",
+    }
+}
+
+/// A look at the network (nothing of any network's name or password).
+pub fn network(result: &Result<NetworkState, ClientError>) -> String {
+    match result {
+        Ok(state) => format!(
+            "ILEX-INSTALLER event=network result={} wired={} networks={}",
+            if state.online { "online" } else { "offline" },
+            wired_word(state.wired),
+            state.networks.len()
+        ),
+        Err(_) => "ILEX-INSTALLER event=network result=failed".to_owned(),
+    }
+}
+
+/// A Wi-Fi network joined, or not (never its name or password).
+pub fn wifi(joined: bool) -> String {
+    format!(
+        "ILEX-INSTALLER event=wifi result={}",
+        if joined { "ok" } else { "failed" }
+    )
 }
 
 /// An answer to a request that was replaced meanwhile (`event` is `probe`,

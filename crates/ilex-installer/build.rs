@@ -18,6 +18,7 @@ fn main() {
                 "qml/Note.qml",
                 "qml/PressButton.qml",
                 "qml/WelcomePage.qml",
+                "qml/NetworkPage.qml",
                 "qml/MachinePage.qml",
                 "qml/DiskPage.qml",
                 "qml/EncryptionPage.qml",
