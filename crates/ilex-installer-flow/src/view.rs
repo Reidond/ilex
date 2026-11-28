@@ -56,6 +56,19 @@ pub const MACHINE_LOADING_DETAIL: &str =
 pub const COMPUTER_LABEL: &str = "This computer";
 pub const CONFIGURATION: &str = "Configuration";
 
+pub const NETWORK_TITLE: &str = "Network";
+pub const NETWORK_HEADING: &str = "Connect to the network";
+pub const NETWORK_INTRO: &str =
+    "The image is downloaded while it is installed, so this computer needs the internet.";
+pub const NETWORK_WIRED: &str = "Wired";
+pub const NETWORK_WIFI: &str = "Wi-Fi networks";
+pub const NETWORK_NO_WIFI: &str = "This computer has no Wi-Fi adapter.";
+pub const NETWORK_NO_NETWORKS: &str = "No Wi-Fi networks were found. Refresh to look again.";
+pub const NETWORK_PASSWORD: &str = "Password";
+pub const NETWORK_PASSWORD_HINT: &str = "At least 8 characters.";
+pub const NETWORK_CONNECT: &str = "Connect";
+pub const NETWORK_REFRESH: &str = "Refresh";
+
 pub const DISK_TITLE: &str = "Disk";
 pub const DISK_HEADING: &str = "Where to install";
 pub const DISK_INTRO: &str = "Choose the disk ilex is installed on. Nothing is changed on it until you confirm on the last page.";
@@ -279,6 +292,51 @@ pub struct Machine {
 
 /// A way of installing the chosen disk: erase it, or install beside what is
 /// on it where it allows.
+/// A Wi-Fi network of the network page's list.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct WifiRow {
+    /// The network's name, which is also what is chosen.
+    pub id: String,
+    pub subtitle: String,
+    /// 0 to 100.
+    pub signal: u8,
+    pub secured: bool,
+    /// Joined now.
+    pub joined: bool,
+    /// Can be chosen (enterprise networks cannot).
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Network {
+    pub chrome: Chrome,
+    pub heading: &'static str,
+    pub intro: &'static str,
+    pub wired_label: &'static str,
+    /// The wired adapter's state, in words (empty until the first look).
+    pub wired: String,
+    /// What is wrong, or that the registry can be reached.
+    pub status: Note,
+    pub wifi_group: &'static str,
+    pub networks: Vec<WifiRow>,
+    /// The chosen network's name, or empty.
+    pub selected: String,
+    /// Why there is no list.
+    pub empty: Option<String>,
+    /// Nothing is being joined: the list and the field can be used.
+    pub editable: bool,
+    /// While a network is being joined: what is going on.
+    pub busy: Option<String>,
+    /// How many times the flow wiped the passwords (the same count as the
+    /// account's): when it changes, the password field is cleared.
+    pub wiped: u64,
+    /// The password field, while the chosen network has a password.
+    pub password: Option<Field>,
+    pub password_note: Option<Note>,
+    pub connect: Button,
+    pub refresh: Button,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Mode {
     /// The id an input names it by (`whole-disk`, `free-space`).
@@ -692,6 +750,7 @@ pub struct View {
     /// The pages the navigation holds, bottom first.
     pub stack: Vec<&'static str>,
     pub welcome: Welcome,
+    pub network: Network,
     pub machine: Machine,
     pub disk: Disk,
     pub encryption: Encryption,
@@ -761,6 +820,7 @@ impl Flow {
             next: matches!(
                 page,
                 PageId::Welcome
+                    | PageId::Network
                     | PageId::Machine
                     | PageId::Disk
                     | PageId::Encryption
@@ -813,6 +873,66 @@ impl Flow {
             try_label: TRY_LAYOUT_LABEL,
             echo_try: self.echo_try(),
             keyboard_line,
+        }
+    }
+
+    fn network_page_view(&self) -> Network {
+        let data = self.network_data();
+        let state = data.state;
+        let status = match (data.failed, state) {
+            (Some(message), _) => Note {
+                text: message.sentence(),
+                error: true,
+            },
+            (None, Some(state)) => Note {
+                text: messages::network_status(state),
+                error: !state.online,
+            },
+            (None, None) => Note {
+                text: messages::NETWORK_LOOKING.to_owned(),
+                error: false,
+            },
+        };
+        let networks: Vec<WifiRow> = state
+            .map(|s| s.networks.iter().map(wifi_row).collect())
+            .unwrap_or_default();
+        let needs_password = data.selected.is_some_and(|n| n.security.needs_password());
+        let empty = match state {
+            Some(s) if !s.wifi => Some(NETWORK_NO_WIFI.to_owned()),
+            Some(_) if networks.is_empty() => Some(NETWORK_NO_NETWORKS.to_owned()),
+            _ => None,
+        };
+        Network {
+            chrome: self.chrome(PageId::Network, NETWORK_TITLE, self.blocking_banner()),
+            heading: NETWORK_HEADING,
+            intro: NETWORK_INTRO,
+            wired_label: NETWORK_WIRED,
+            wired: state.map(|s| messages::wired(s.wired)).unwrap_or_default(),
+            status,
+            wifi_group: NETWORK_WIFI,
+            networks,
+            selected: data.selected.map(|n| n.ssid.clone()).unwrap_or_default(),
+            empty,
+            editable: data.joining.is_none(),
+            busy: data.joining.map(messages::wifi_joining),
+            wiped: self.secrets_wiped(),
+            password: needs_password.then_some(Field {
+                label: NETWORK_PASSWORD,
+            }),
+            password_note: needs_password.then(|| Note {
+                text: NETWORK_PASSWORD_HINT.to_owned(),
+                error: false,
+            }),
+            connect: Button {
+                label: NETWORK_CONNECT.to_owned(),
+                visible: true,
+                enabled: self.can_connect(),
+            },
+            refresh: Button {
+                label: NETWORK_REFRESH.to_owned(),
+                visible: state.is_some_and(|s| s.wifi),
+                enabled: data.joining.is_none() && !data.pending,
+            },
         }
     }
 
@@ -1364,8 +1484,9 @@ impl Flow {
         View {
             starting: self.is_attaching().then_some(STARTING_PAGE),
             page: page.id(),
-            stack: page.stack().iter().map(|p| p.id()).collect(),
+            stack: self.stack().iter().map(|p| p.id()).collect(),
             welcome: self.welcome_view(),
+            network: self.network_page_view(),
             machine: self.machine_view_page(),
             disk: self.disk_page_view(),
             encryption: self.encryption_view(),
@@ -1438,6 +1559,33 @@ impl Flow {
             can_close: !matches!(self.log_state(), LogSave::Saving { .. }),
             body,
         })
+    }
+}
+
+/// How a Wi-Fi network is listed: its security and its signal in words.
+fn wifi_row(network: &crate::network::Wifi) -> WifiRow {
+    use crate::network::Security;
+    let signal = match network.signal {
+        70.. => "strong",
+        40..=69 => "good",
+        _ => "weak",
+    };
+    let subtitle = match network.security {
+        Security::Unsupported => "Needs a sign-in the installer cannot do".to_owned(),
+        Security::Open => format!("Open, {signal} signal"),
+        _ => format!("Secured, {signal} signal"),
+    };
+    WifiRow {
+        id: network.ssid.clone(),
+        subtitle: if network.in_use {
+            format!("Connected. {subtitle}")
+        } else {
+            subtitle
+        },
+        signal: network.signal,
+        secured: network.security != Security::Open,
+        joined: network.in_use,
+        available: network.security != Security::Unsupported,
     }
 }
 

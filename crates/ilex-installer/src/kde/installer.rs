@@ -76,9 +76,9 @@ pub mod qobject {
         unsafe fn send_field(self: Pin<&mut Installer>, name: &QString, item: *mut QObject);
 
         /// A page that comes back puts what the flow holds of a password, the
-        /// disk's passphrase or the recovery key typed back in its field
-        /// (`password`, `confirmation`, `passphrase`, `passphrase-confirmation`
-        /// or `recovery-key`).
+        /// disk's passphrase, the Wi-Fi password or the recovery key typed back
+        /// in its field (`password`, `confirmation`, `passphrase`,
+        /// `passphrase-confirmation`, `network-password` or `recovery-key`).
         ///
         /// # Safety
         /// `item` is a live QML text field (it is written on the Qt thread).
@@ -261,6 +261,7 @@ impl qobject::Installer {
                 "passphrase" => running.flow.passphrase(),
                 "passphrase-confirmation" => running.flow.passphrase_confirmation(),
                 "recovery-key" => running.flow.recovery_typed(),
+                "network-password" => running.flow.network_password(),
                 _ => return None,
             };
             (!secret.is_empty()).then(|| QString::from(secret.expose()))
@@ -396,17 +397,24 @@ impl qobject::Installer {
             };
             let epoch = rust.running.as_ref().map_or(0, |r| r.epoch) + 1;
             let mut services = services;
-            match Simulated::load(scenario) {
-                Ok(backend) => services.backend = Arc::new(backend),
+            let offline = match Simulated::load(scenario) {
+                Ok(backend) => {
+                    let offline = backend.starts_offline();
+                    services.backend = Arc::new(backend);
+                    offline
+                }
                 Err(error) => {
                     eprintln!("ilex-installer: scenario {scenario}: {error:#}");
                     return;
                 }
-            }
+            };
             if let Some(shared) = &rust.render {
                 shared.observe(Observed::initial());
             }
             let mut flow = Flow::new(layouts);
+            if offline {
+                flow = flow.with_network_check();
+            }
             let step = flow.start();
             rust.running = Some(Running {
                 flow,

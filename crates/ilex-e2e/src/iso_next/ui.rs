@@ -24,6 +24,11 @@
 //!   reported with the model's list of offers (the notice's text names both
 //!   offered tags and the page's rows are those two) and the page stays usable
 //!   on the detected configuration.
+//! * `iso::next_network`: the VM's network link is taken down (QMP `set_link`)
+//!   before Continue on the welcome page: the network page appears (nothing
+//!   reaches the registry, no cable is plugged in, no Wi-Fi adapter), and not
+//!   the machine page; the link comes back, the page sees the registry answer
+//!   by itself and Enter (Continue has the focus) goes on to the machine page.
 //! * `iso::next_account`: the disk and administrator pages typed with the
 //!   keyboard on a VM with a disk the installer could use; Enter in the last
 //!   field asks the real helper to `Plan` the choices (it resolves the image at
@@ -41,7 +46,9 @@ use ilex_devkit::installer;
 use ilex_devkit::provider::LinuxProvider;
 use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
+use ilex_vmctl::qmp::Qmp;
 use libtest_mimic::Trial;
+use serde_json::json;
 
 use super::{
     Edition, GRUB_COUNTDOWN, Guest, MEMORY, PAGE_TIMEOUT, blank_disk_of, complete_lines, console,
@@ -97,6 +104,7 @@ pub(super) fn trials() -> Vec<Trial> {
             kernel_argument("iso-next-karg-bad", UNKNOWN_TAG)
         }),
         trial("iso::next_account", account),
+        trial("iso::next_network", network),
     ]
 }
 
@@ -557,6 +565,75 @@ fn observe_kernel_argument(
     no_try_text(&serial)?;
     wait_page(vm, &ctl, artifacts, name)?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}.png")))?;
+    Ok(())
+}
+
+/// The network link of the VM's NIC, as a cable plugged in or pulled out.
+fn link(vm: &Vm, up: bool) -> Result<()> {
+    Qmp::connect(&vm.info.qmp_sock)?.execute("set_link", json!({"name": "internet", "up": up}))?;
+    Ok(())
+}
+
+/// The network page, by taking the link down and bringing it back.
+fn network() -> Result<()> {
+    let mut booted = boot("iso-next-network", false, vec![], "1G")?;
+    let artifacts = booted.artifacts.clone();
+    let vm = booted.guest.vm.running_mut()?;
+    let outcome = observe_network(vm, &artifacts)
+        .and_then(|()| selinux::check_waiting(vm, &artifacts, "next-network"));
+    if outcome.is_err() {
+        diagnostics(vm, &artifacts, "network");
+    }
+    outcome
+}
+
+fn observe_network(vm: &mut Vm, artifacts: &Path) -> Result<()> {
+    let serial = vm.info.dir.join("serial.log");
+    let ctl = Vmctl::from_info(vm.info.clone());
+    welcome_up(vm, &ctl, &serial, artifacts, "network")?;
+    // The cable is pulled out; NetworkManager takes a moment to see it go.
+    link(vm, false)?;
+    std::thread::sleep(Duration::from_secs(8));
+    continue_to_machine(&ctl)?;
+    let network = wait_page_marker(vm, &serial, "network", EVENT_TIMEOUT)?;
+    ensure!(
+        field(&network, "check")? == "offline"
+            && field(&network, "wifi")? == "false"
+            && field(&network, "networks")? == "0",
+        "the network page of a VM without a link: {network:?}"
+    );
+    let look = wait_event(vm, &serial, "network", EVENT_TIMEOUT, |_| true)?;
+    ensure!(
+        field(&look, "result")? == "offline" && field(&look, "wired")? == "unplugged",
+        "the look at a VM without a link: {look:?}"
+    );
+    wait_page(vm, &ctl, artifacts, "network-offline")?;
+    ctl.save_screenshot(&artifacts.join("next-network-offline.png"))?;
+    // Enter does not go on, and the machine page is not shown.
+    ctl.key("Return")?;
+    std::thread::sleep(Duration::from_secs(4));
+    ensure!(
+        !console(&serial)?.contains("ILEX-INSTALLER page=machine"),
+        "the machine page was shown without a network"
+    );
+    // The cable is plugged in again: the page looks every few seconds, and the
+    // registry answers once NetworkManager has an address.
+    link(vm, true)?;
+    let online = wait_event(vm, &serial, "network", Duration::from_secs(120), |w| {
+        w.get("result").is_some_and(|r| r == "online")
+    })?;
+    ensure!(
+        field(&online, "wired")? == "up",
+        "the look at a VM with its link back: {online:?}"
+    );
+    wait_page(vm, &ctl, artifacts, "network-online")?;
+    ctl.save_screenshot(&artifacts.join("next-network-online.png"))?;
+    // Continue has the focus: Enter goes on.
+    ctl.key("Return")?;
+    wait_page_marker(vm, &serial, "machine", EVENT_TIMEOUT)?;
+    wait_page(vm, &ctl, artifacts, "network-machine")?;
+    ctl.save_screenshot(&artifacts.join("next-network-machine.png"))?;
+    no_try_text(&serial)?;
     Ok(())
 }
 

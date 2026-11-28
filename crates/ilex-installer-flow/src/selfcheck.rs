@@ -7,13 +7,14 @@ use crate::account::{self, Check};
 use crate::backend::Backend;
 use crate::events::Event;
 use crate::flow::{
-    Control, Flow, KeyboardStatus, LogSave, MarkerConfig, PageId, Phase, PlanCheck, ProbeState,
+    Control, Flow, KeyboardStatus, NetworkAction, LogSave, MarkerConfig, PageId, Phase, PlanCheck, ProbeState,
     ProblemIcon, ProblemKind, ReviewBody, Step, usable_disks,
 };
 use crate::keyboard::{self, Layouts, Sources};
 use crate::language;
 use crate::machine::{MachineView, Origin};
 use crate::messages::{ClientError, plan_error};
+use crate::network::Security;
 use crate::progress::{Progress, Status};
 use crate::recovery as page;
 use crate::secret::Secret;
@@ -215,6 +216,7 @@ pub fn run() -> Result<String> {
     progress().context("progress")?;
     disk_page().context("disk_page")?;
     beside().context("installing beside the other systems")?;
+    network_page().context("network_page")?;
     encryption().context("encryption")?;
     daily_page().context("daily_page")?;
     installation().context("installation")?;
@@ -597,7 +599,8 @@ fn daily_page() -> Result<()> {
             && PageId::Review.previous() == Some(PageId::Profile)
             && PageId::from_id("profile") == Some(PageId::Profile)
             && PageId::Profile.stack().last() == Some(&PageId::Profile)
-            && PageId::Profile.stack().len() == 6,
+            // (the network page is in the order, and out of a walk that did not need it)
+            && PageId::Profile.stack().len() == 7,
         "the daily user page's place"
     );
     let (mut flow, sim) = at_account_encrypted("generic")?;
@@ -1669,6 +1672,21 @@ fn carry_out(flow: &mut Flow, sim: &Simulated, step: Step) -> Result<Step> {
         Step::RunFinish { generation, action } => {
             flow.finish_finished(generation, sim.finish(&action))
         }
+        Step::RunNetwork {
+            generation,
+            action: NetworkAction::Look { rescan },
+            ..
+        } => flow.network_finished(generation, sim.network(rescan)),
+        Step::RunNetwork {
+            generation,
+            action:
+                NetworkAction::Join {
+                    ssid,
+                    security,
+                    password,
+                },
+            ..
+        } => flow.join_finished(generation, sim.join_wifi(&ssid, security, password.as_ref())),
         other => other,
     })
 }
@@ -2059,6 +2077,248 @@ fn encryption() -> Result<()> {
     ensure!(
         flow.done_view().is_none() && flow.encrypt(),
         "a restarted interface"
+    );
+    Ok(())
+}
+
+/// The network page: shown only when the registry cannot be reached, polled
+/// while it shows, Wi-Fi joined with a password that is wiped afterwards.
+fn network_page() -> Result<()> {
+    use crate::view::{NETWORK_NO_WIFI, NETWORK_PASSWORD};
+    let on = |name: &str| -> Result<(Flow, Simulated)> {
+        let (flow, sim) = flow_on(name)?;
+        Ok((flow.with_network_check(), sim))
+    };
+    // Online: Continue looks first, then the machine page follows; the page
+    // is not in the walk.
+    let (mut flow, sim) = on("generic")?;
+    let step = flow.advance();
+    ensure!(
+        matches!(step, Step::RunNetwork { .. })
+            && flow.page() == PageId::Welcome
+            && !flow.can_continue()
+            && flow.continue_label() == "Checking…"
+            && flow.network_pending()
+            && flow.advance() == Step::Stay,
+        "Continue does not wait for the look at the network: {step:?}"
+    );
+    ensure!(
+        carry_out(&mut flow, &sim, step)? == Step::Goto(PageId::Machine)
+            && flow.page() == PageId::Machine
+            && flow.stack() == [PageId::Welcome, PageId::Machine]
+            && flow.back() == Some(PageId::Welcome),
+        "an online computer does not go to the machine page"
+    );
+    // The same answer twice, and one nobody asked for, change nothing.
+    ensure!(
+        flow.network_finished(1, sim.network(false)) == Step::Stay,
+        "a look nobody asked for moved the flow"
+    );
+
+    // Offline, with Wi-Fi networks in range.
+    let (mut flow, sim) = on("generic+offline")?;
+    let step = flow.advance();
+    let poll = carry_out(&mut flow, &sim, step)?;
+    ensure!(
+        flow.page() == PageId::Network
+            && matches!(&poll, Step::RunNetwork { delay_ms, action: NetworkAction::Look { rescan: false }, .. } if *delay_ms > 0)
+            && flow.stack() == [PageId::Welcome, PageId::Network]
+            && !flow.can_continue()
+            && flow.network_word() == "offline",
+        "an offline computer does not get the network page: {poll:?}"
+    );
+    let view = flow.view().network;
+    ensure!(
+        view.networks.len() == 5
+            && view.networks[0].id == "Holly House"
+            && view.status.error
+            && view.wired == "No cable is plugged in."
+            && !view.chrome.next.as_ref().is_some_and(|n| n.enabled)
+            && view.chrome.can_pop
+            && view.password.is_none()
+            && !view.connect.enabled
+            && view.refresh.visible
+            && view.empty.is_none(),
+        "the offline network page: {view:?}"
+    );
+    // A poll goes on while the page shows, and a refresh scans again.
+    let poll = carry_out(&mut flow, &sim, poll)?;
+    ensure!(
+        matches!(poll, Step::RunNetwork { .. }),
+        "the page stopped looking at the network"
+    );
+    let refresh = flow.refresh_network();
+    ensure!(
+        matches!(&refresh, Step::RunNetwork { action: NetworkAction::Look { rescan: true }, .. })
+            && flow.network_pending()
+            && !flow.view().network.refresh.enabled
+            && flow.network_finished(1, sim.network(false)) == Step::Stay,
+        "refresh: {refresh:?}"
+    );
+    let poll = carry_out(&mut flow, &sim, refresh)?;
+    ensure!(
+        matches!(poll, Step::RunNetwork { .. }) && !flow.network_pending(),
+        "refresh did not end"
+    );
+    // The enterprise network cannot be chosen; a secured one asks for a
+    // password, which has to fit before Connect works.
+    flow.select_network("Campus");
+    ensure!(
+        flow.view().network.selected.is_empty(),
+        "a network that cannot be joined was chosen"
+    );
+    flow.select_network("Holly House");
+    let view = flow.view().network;
+    ensure!(
+        view.selected == "Holly House"
+            && view.password.as_ref().is_some_and(|f| f.label == NETWORK_PASSWORD)
+            && !view.connect.enabled
+            && flow.connect_network() == Step::Stay,
+        "choosing a secured network: {view:?}"
+    );
+    flow.set_network_password(Secret::new("holly"));
+    ensure!(!flow.can_connect(), "a five character password was accepted");
+    flow.set_network_password(Secret::new("holly and ivy"));
+    ensure!(
+        flow.can_connect() && flow.view().network.connect.enabled,
+        "a good password was refused"
+    );
+    let wiped = flow.secrets_wiped();
+    let join = flow.connect_network();
+    let Step::RunNetwork {
+        generation,
+        action:
+            NetworkAction::Join {
+                ssid,
+                security: Security::Wpa,
+                password: Some(password),
+            },
+        ..
+    } = &join
+    else {
+        bail!("Connect does not join: {join:?}");
+    };
+    ensure!(
+        ssid == "Holly House" && password.expose() == "holly and ivy" && flow.network_word() == "joining",
+        "the join request"
+    );
+    let view = flow.view().network;
+    ensure!(
+        !view.editable
+            && view.busy.as_deref() == Some("Connecting to Holly House…")
+            && !view.connect.enabled
+            && !view.refresh.enabled
+            && flow.connect_network() == Step::Stay
+            && flow.refresh_network() == Step::Stay
+            && {
+                flow.select_network("Guest");
+                flow.view().network.selected == "Holly House"
+            },
+        "the page while a network is joined: {view:?}"
+    );
+    // An answer for another request is ignored; the right one wipes the
+    // password and looks again.
+    ensure!(
+        flow.join_finished(generation + 1, Ok(())) == Step::Stay && flow.network_word() == "joining",
+        "a stale answer to a join counted"
+    );
+    let look = carry_out(&mut flow, &sim, join.clone())?;
+    ensure!(
+        matches!(&look, Step::RunNetwork { delay_ms: 0, action: NetworkAction::Look { .. }, .. })
+            && flow.secrets_wiped() == wiped + 1
+            && flow.view().network.wiped == wiped + 1,
+        "the password was not wiped after the join: {look:?}"
+    );
+    let poll = carry_out(&mut flow, &sim, look)?;
+    let view = flow.view().network;
+    ensure!(
+        matches!(poll, Step::RunNetwork { .. })
+            && flow.network_word() == "online"
+            && flow.can_continue()
+            && !view.status.error
+            && view.status.text == "Connected to Holly House. The image registry can be reached."
+            && view.networks[0].joined
+            && view.chrome.next.as_ref().is_some_and(|n| n.enabled),
+        "the page after joining: {view:?}"
+    );
+    // Continue is the person's; Back comes back to the network page, which
+    // looks again.
+    ensure!(
+        flow.advance() == Step::Goto(PageId::Machine)
+            && flow.stack() == [PageId::Welcome, PageId::Network, PageId::Machine],
+        "the machine page after the network page"
+    );
+    // The look that was under way when the page was left ends there.
+    ensure!(
+        carry_out(&mut flow, &sim, poll)? == Step::Stay && flow.page() == PageId::Machine,
+        "a look that arrived after the page was left went on"
+    );
+    ensure!(
+        flow.back() == Some(PageId::Network)
+            && matches!(flow.resume_network(), Step::RunNetwork { .. })
+            && flow.resume_network() == Step::Stay
+            && flow.back() == Some(PageId::Welcome)
+            && flow.stack() == [PageId::Welcome],
+        "back through the network page"
+    );
+
+    // A wrong password: the sentence, the password gone, and the failure
+    // cleared by the next edit.
+    let (mut flow, sim) = on("generic+offline+wifi-wrong")?;
+    let step = flow.advance();
+    carry_out(&mut flow, &sim, step)?;
+    flow.select_network("Ilex 5G");
+    flow.set_network_password(Secret::new("holly and ivy"));
+    let join = flow.connect_network();
+    let look = carry_out(&mut flow, &sim, join)?;
+    let view = flow.view().network;
+    ensure!(
+        matches!(look, Step::RunNetwork { .. })
+            && flow.network_word() == "failed"
+            && view.status.error
+            && view.status.text == "Could not connect to Ilex 5G. Check the password and try again."
+            && !flow.can_continue()
+            && view.editable
+            && !view.connect.enabled,
+        "a wrong password: {view:?}"
+    );
+    // The field the interface cleared after the wipe says nothing new.
+    flow.set_network_password(Secret::default());
+    ensure!(
+        flow.network_word() == "failed",
+        "the failure went when the emptied field reported itself"
+    );
+    flow.set_network_password(Secret::new("holly and ivy"));
+    ensure!(
+        flow.network_word() == "offline" && flow.can_connect(),
+        "the failure stays after the password changed"
+    );
+
+    // An open network needs no password; no Wi-Fi adapter says so.
+    let (mut flow, sim) = on("generic+offline")?;
+    let step = flow.advance();
+    carry_out(&mut flow, &sim, step)?;
+    flow.select_network("Guest");
+    let view = flow.view().network;
+    ensure!(
+        view.password.is_none() && flow.can_connect() && view.networks[1].subtitle == "Open, good signal",
+        "an open network: {view:?}"
+    );
+    let join = flow.connect_network();
+    ensure!(
+        matches!(&join, Step::RunNetwork { action: NetworkAction::Join { password: None, .. }, .. }),
+        "an open network was joined with a password: {join:?}"
+    );
+    let (mut flow, sim) = on("generic+no-wifi")?;
+    let step = flow.advance();
+    carry_out(&mut flow, &sim, step)?;
+    let view = flow.view().network;
+    ensure!(
+        view.empty.as_deref() == Some(NETWORK_NO_WIFI)
+            && !view.refresh.visible
+            && view.status.text
+                == "No cable is plugged in, and this computer has no Wi-Fi adapter. Plug in a network cable.",
+        "no Wi-Fi adapter: {view:?}"
     );
     Ok(())
 }
@@ -4308,7 +4568,7 @@ fn page_views() -> Result<()> {
     // The stack a navigation view holds for each page.
     ensure!(
         PageId::Review.stack() == PageId::ORDER
-            && PageId::Machine.stack() == [PageId::Welcome, PageId::Machine]
+            && PageId::Machine.stack() == [PageId::Welcome, PageId::Network, PageId::Machine]
             && PageId::ALL
                 .iter()
                 .filter(|p| p.is_closing())

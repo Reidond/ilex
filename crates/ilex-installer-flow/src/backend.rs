@@ -3,6 +3,10 @@
 //! system bus, which the bus policy allows only `ilex-installer` and root) and
 //! the simulated one ([`crate::simulate::Simulated`]).
 //!
+//! The live system's network (`network`, `join_wifi`) is here too, though it is
+//! not the helper's: the interface asks NetworkManager itself (see
+//! [`crate::network`]), and the simulation answers for it.
+//!
 //! The calls block: they are made from a worker thread, and each interface
 //! brings its own result back to its main loop (relm4's commands for GTK, a
 //! queued call into the Qt thread for Kirigami). Nothing here is `async`, so
@@ -16,6 +20,7 @@
 //! other listeners and are not subscribed to.
 
 use crate::messages::ClientError;
+use crate::network::{NetworkState, Security};
 use crate::secret::Secret;
 use ilex_installer_model::finish::{FinishAction, Saved};
 use ilex_installer_model::plan::{Plan, PlanRequest, SecretKind};
@@ -23,6 +28,19 @@ use ilex_installer_model::probe::Probe;
 use ilex_installer_model::state::State;
 
 pub trait Backend: Send + Sync {
+    /// The live system's network: whether the registry can be reached, the
+    /// wired adapter and the Wi-Fi networks in range. `rescan` scans again now.
+    fn network(&self, rescan: bool) -> Result<NetworkState, ClientError>;
+
+    /// Join a Wi-Fi network (`password` for a secured one; it goes to
+    /// NetworkManager on a standard input, never to a command line or a log).
+    fn join_wifi(
+        &self,
+        ssid: &str,
+        security: Security,
+        password: Option<&Secret>,
+    ) -> Result<(), ClientError>;
+
     /// This computer, its disks and what the installer offers.
     fn probe(&self) -> Result<Probe, ClientError>;
 
@@ -166,6 +184,23 @@ mod dbus {
     }
 
     impl Backend for DbusBackend {
+        fn network(&self, rescan: bool) -> Result<NetworkState, ClientError> {
+            Ok(crate::network::look(rescan))
+        }
+
+        fn join_wifi(
+            &self,
+            ssid: &str,
+            security: Security,
+            password: Option<&Secret>,
+        ) -> Result<(), ClientError> {
+            crate::network::join(ssid, security, password).map_err(|why| {
+                // Nothing of the password: the exit status only.
+                eprintln!("ilex-installer: joining {ssid}: {why}");
+                ClientError::Other(why)
+            })
+        }
+
         fn probe(&self) -> Result<Probe, ClientError> {
             self.document("Probe", &())
         }

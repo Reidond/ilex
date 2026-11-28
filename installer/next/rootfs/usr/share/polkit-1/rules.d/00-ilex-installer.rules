@@ -5,7 +5,7 @@
 // that: it is a client of the install helper, and an unprivileged user that
 // can drive the machine is exactly what the helper's own checks exist to stop.
 // So this user is denied every action but the ones named below. A page that
-// needs another (a restart button, the network page) adds it to this file,
+// needs another (a restart button) adds it to this file,
 // naming the action, in the change that adds the page; the iso::next trials
 // list what polkit authorizes for this session and fail on any action that is
 // not named here.
@@ -16,9 +16,25 @@
 // default is no VT switching), asks logind to switch, so logind needs this
 // action: only for the person at the machine's own active session, never
 // remote.
+//
+// The network page: `nmcli`, run by this user, scans for Wi-Fi networks, adds
+// the one profile of the network the person joins and activates it. Those are
+// NetworkManager's actions `wifi.scan`, `settings.modify.system` and
+// `network-control`; nothing else of NetworkManager (turning the radio off,
+// sharing a connection, a checkpoint rollback) is allowed. The live system's
+// profile lives in RAM and is not copied to the installed computer.
+var networkActions = [
+    "org.freedesktop.NetworkManager.network-control",
+    "org.freedesktop.NetworkManager.settings.modify.system",
+    "org.freedesktop.NetworkManager.wifi.scan"
+];
 polkit.addRule(function(action, subject) {
     if (subject.user == "ilex-installer") {
         if (action.id == "org.freedesktop.login1.chvt" &&
+            subject.local && subject.active) {
+            return polkit.Result.YES;
+        }
+        if (networkActions.indexOf(action.id) >= 0 &&
             subject.local && subject.active) {
             return polkit.Result.YES;
         }

@@ -7,9 +7,15 @@ grub2-efi-x64-cdboot
 isomd5sum
 squashfs-tools
 xorrisofs
-# The session: logind sessions, the Wi-Fi support later pages use, tty2's shell,
-# and `ss`, which the session script uses to see that the compositor listens.
+# The session: logind sessions, the Wi-Fi support the network page uses, tty2's
+# shell, and `ss`, which the session script uses to see that the compositor
+# listens. fedora-bootc has the Atheros, Broadcom, MediaTek, NXP, Realtek and
+# TI Wi-Fi firmware but not Intel's, which most laptops have: its three
+# packages (about 100 MB in the ISO) are listed here.
 NetworkManager-wifi
+iwlwifi-dvm-firmware
+iwlwifi-mld-firmware
+iwlwifi-mvm-firmware
 util-linux
 iproute
 # The root helper (ilex-installerd) probes with lsblk/sfdisk (util-linux), plans

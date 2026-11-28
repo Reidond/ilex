@@ -48,6 +48,13 @@ pub enum Event {
     /// The recovery page's "Continue without a recovery key".
     ContinueWithoutKey,
     Continue,
+    /// A Wi-Fi network chosen from the network page's list (its name).
+    Network(String),
+    /// What is typed in the network page's password field.
+    NetworkPassword(Secret),
+    /// The network page's Connect, and its Refresh.
+    Connect,
+    Refresh,
     Disk(String),
     /// The disk page's way of installing: `whole-disk` or `free-space`.
     Mode(String),
@@ -113,6 +120,10 @@ impl Event {
             "confirm-recovery" => Self::ConfirmRecovery,
             "skip-recovery" => Self::ContinueWithoutKey,
             "continue" => Self::Continue,
+            "network" => Self::Network(argument.to_owned()),
+            "network-password" => Self::NetworkPassword(Secret::new(argument)),
+            "connect" => Self::Connect,
+            "refresh" => Self::Refresh,
             "disk" => Self::Disk(argument.to_owned()),
             "mode" => Self::Mode(argument.to_owned()),
             "retry" => Self::Retry,
@@ -143,6 +154,9 @@ pub struct Observed {
     /// or `gone` (not to be shown again).
     pub check: &'static str,
     pub probe_pending: bool,
+    /// The look at the network the welcome page's Continue waits for, or the
+    /// network page's Refresh, has not been answered.
+    pub network_pending: bool,
     pub keyboard_switching: bool,
     /// The first question to the helper (where an installation is) has not
     /// been answered.
@@ -157,6 +171,7 @@ impl Observed {
     pub fn settled(&self) -> bool {
         self.check != "running"
             && !self.probe_pending
+            && !self.network_pending
             && !self.keyboard_switching
             && !self.attaching
     }
@@ -167,6 +182,7 @@ impl Observed {
             page: PageId::Welcome,
             check: "not-run",
             probe_pending: true,
+            network_pending: false,
             keyboard_switching: false,
             attaching: true,
             dialog: "",
@@ -178,6 +194,9 @@ impl Flow {
     /// The word of what the page is made of: the plan check's, and on the
     /// recovery page the key's.
     fn observed_check(&self) -> &'static str {
+        if self.page() == PageId::Network {
+            return self.network_word();
+        }
         if self.page() != PageId::Recovery {
             return self.check_word();
         }
@@ -200,6 +219,7 @@ impl Flow {
             page: self.page(),
             check: self.observed_check(),
             probe_pending: self.is_probing(),
+            network_pending: self.network_pending(),
             keyboard_switching: self.keyboard_status() == KeyboardStatus::Switching,
             attaching: self.is_attaching(),
             dialog: if self.confirm_dialog().is_some() {
@@ -286,6 +306,16 @@ impl Flow {
             Event::ConfirmRecovery => self.confirm_recovery(),
             Event::ContinueWithoutKey => self.continue_without_recovery_key(),
             Event::Continue => self.advance(),
+            Event::Network(ssid) => {
+                self.select_network(&ssid);
+                Step::Stay
+            }
+            Event::NetworkPassword(secret) => {
+                self.set_network_password(secret);
+                Step::Stay
+            }
+            Event::Connect => self.connect_network(),
+            Event::Refresh => self.refresh_network(),
             Event::Disk(id) => {
                 self.set_disk(&id);
                 Step::Stay
@@ -319,7 +349,7 @@ impl Flow {
                 // back to it, and refuses while the helper is asked (the view
                 // is pushed again then).
                 while self.page() != page && self.back().is_some() {}
-                Step::Stay
+                self.resume_network()
             }
             Event::Jump(page) => {
                 self.show(page);

@@ -16,6 +16,8 @@
 //! * [`machine`], [`disks`], [`encryption`], [`account`], [`daily`], [`review`], [`keyboard`], [`language`]:
 //!   the content and rules of the pages made of what the helper reports and what
 //!   the live image ships.
+//! * [`network`]: the live system's network (NetworkManager through `nmcli`) and the
+//!   network page's data.
 //! * [`messages`]: every sentence a refusal or a failure becomes, in one place.
 //! * [`markers`]: the serial-console lines the trials assert on, in one place.
 //! * [`progress`]: the installation's stages as rows, from the helper's state.
@@ -37,6 +39,7 @@ pub mod language;
 pub mod machine;
 pub mod markers;
 pub mod messages;
+pub mod network;
 pub mod progress;
 pub mod recovery;
 pub mod review;

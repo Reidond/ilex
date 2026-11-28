@@ -45,7 +45,11 @@
 //! plan of an installation that is already running an encrypted one; `early` holds an
 //! installation in its first stage; `plan-slow` answers the plan check after
 //! [`PLAN_SLOW`] (a review page that stays frozen while the check runs, for a
-//! trial to press keys in). They are
+//! trial to press keys in); `offline` starts the live system without a
+//! network (no cable, five Wi-Fi networks in range; `no-wifi`: no Wi-Fi
+//! adapter either), where joining one with a passphrase of eight characters or
+//! more works (`wifi-wrong`: the network refuses it, `wifi-slow`: joining never
+//! ends). They are
 //! what the self-check and the screenshots use to reach every page and every
 //! error state; a boot can name them only with `ilex.installer.simulate` (see
 //! [`allowed`]).
@@ -58,6 +62,7 @@
 
 use crate::backend::Backend;
 use crate::messages::ClientError;
+use crate::network::{NetworkState, Security, Wifi, Wired};
 use crate::secret::Secret;
 use anyhow::{Context, Result, bail};
 use ilex_installer_model::finish::{FinishAction, Saved, check_log_device};
@@ -275,6 +280,13 @@ struct Modifiers {
     key_at_start: Option<KeyStatus>,
     /// The plan check answers only after [`PLAN_SLOW`].
     plan_slow: bool,
+    /// The live system starts without a network.
+    offline: bool,
+    /// ... and without a Wi-Fi adapter.
+    no_wifi: bool,
+    /// Joining a Wi-Fi network fails (a wrong password), or never ends.
+    wifi_wrong: bool,
+    wifi_slow: bool,
 }
 
 /// How long `plan-slow` holds the plan check.
@@ -301,6 +313,10 @@ impl Modifiers {
             skip_fails: false,
             key_at_start: None,
             plan_slow: false,
+            offline: false,
+            no_wifi: false,
+            wifi_wrong: false,
+            wifi_slow: false,
         };
         for word in words {
             match *word {
@@ -317,6 +333,13 @@ impl Modifiers {
                 "probe-active" => modifiers.probe_active = true,
                 "vanish" => modifiers.vanish = true,
                 "plan-slow" => modifiers.plan_slow = true,
+                "offline" => modifiers.offline = true,
+                "no-wifi" => {
+                    modifiers.offline = true;
+                    modifiers.no_wifi = true;
+                }
+                "wifi-wrong" => modifiers.wifi_wrong = true,
+                "wifi-slow" => modifiers.wifi_slow = true,
                 "apply-refused" => modifiers.apply = ApplyMode::Refuses,
                 "apply-lost" => modifiers.apply = ApplyMode::Lost,
                 "apply-slow" => modifiers.apply = ApplyMode::Slow,
@@ -392,6 +415,8 @@ struct Session {
     probes: usize,
     /// The recovery key, as the helper holds it: waiting, taken, confirmed.
     key: Option<KeyStatus>,
+    /// The Wi-Fi network joined (`offline` scenarios).
+    joined: Option<String>,
 }
 
 pub struct Simulated {
@@ -514,6 +539,13 @@ impl Simulated {
         };
         simulated.start_attached();
         Ok(simulated)
+    }
+
+    /// Does the scenario start without a network (`offline`, `no-wifi`)? The
+    /// renderers turn the welcome page's look at the network on for these only:
+    /// the other states keep their one synchronous step from the welcome page.
+    pub fn starts_offline(&self) -> bool {
+        self.modifiers.offline
     }
 
     /// The `attach-*` modifiers: the helper is already in the state the
@@ -872,7 +904,76 @@ impl Simulated {
     }
 }
 
+/// The Wi-Fi networks of an `offline` scenario: an open one, two WPA2 ones, a
+/// WPA3 one and an enterprise one that cannot be joined.
+fn wifi_networks(joined: Option<&str>) -> Vec<Wifi> {
+    let network = |ssid: &str, signal: u8, security: Security| Wifi {
+        ssid: ssid.to_owned(),
+        signal,
+        security,
+        in_use: joined == Some(ssid),
+    };
+    let mut list = vec![
+        network("Holly House", 82, Security::Wpa),
+        network("Guest", 64, Security::Open),
+        network("Ilex 5G", 47, Security::Wpa3),
+        network("Neighbour's WiFi", 31, Security::Wpa),
+        network("Campus", 22, Security::Unsupported),
+    ];
+    list.sort_by(|a, b| b.in_use.cmp(&a.in_use).then(b.signal.cmp(&a.signal)));
+    list
+}
+
 impl Backend for Simulated {
+    fn network(&self, _rescan: bool) -> Result<NetworkState, ClientError> {
+        let session = self.session();
+        if !self.modifiers.offline || session.joined.is_some() {
+            return Ok(NetworkState {
+                wired: Wired::Up,
+                wifi: !self.modifiers.no_wifi && self.modifiers.offline,
+                online: true,
+                networks: if self.modifiers.offline {
+                    wifi_networks(session.joined.as_deref())
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+        Ok(NetworkState {
+            wired: Wired::Unplugged,
+            wifi: !self.modifiers.no_wifi,
+            online: false,
+            networks: if self.modifiers.no_wifi {
+                Vec::new()
+            } else {
+                wifi_networks(None)
+            },
+        })
+    }
+
+    fn join_wifi(
+        &self,
+        ssid: &str,
+        security: Security,
+        password: Option<&Secret>,
+    ) -> Result<(), ClientError> {
+        if self.modifiers.wifi_slow {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+        let fits = match (security, password) {
+            (Security::Open, _) => true,
+            (Security::Wpa | Security::Wpa3, Some(password)) => {
+                crate::network::passphrase_fits(password)
+            }
+            _ => false,
+        };
+        if self.modifiers.wifi_wrong || !fits {
+            return Err(ClientError::Other("the network refused the password".into()));
+        }
+        self.session().joined = Some(ssid.to_owned());
+        Ok(())
+    }
+
     fn probe(&self) -> Result<Probe, ClientError> {
         if self.modifiers.probe_active {
             let mut session = self.session();

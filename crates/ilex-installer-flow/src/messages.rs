@@ -4,6 +4,7 @@
 //! and changes in one place. All strings are English in the first version.
 
 use crate::flow::human_bytes;
+use crate::network::{NetworkState, Wired};
 use ilex_installer_model::plan::{ErrorCode, MIN_DISK_BYTES, PlanError};
 use serde::Serialize;
 use std::fmt;
@@ -22,6 +23,69 @@ pub const SWITCHING_LAYOUT: &str = "Switching the keyboard layout…";
 /// claims it, and writes nothing.
 pub const STARTING_TITLE: &str = "Starting the installation";
 pub const STARTING_DETAIL: &str = "The installer's helper is checking the disk and the image once more before it writes anything.";
+
+/// What the network page says while the first look has not answered.
+pub const NETWORK_LOOKING: &str = "Looking at the network…";
+
+/// The wired adapter, in a few words.
+pub fn wired(wired: Wired) -> String {
+    match wired {
+        Wired::None => "No wired adapter.",
+        Wired::Unplugged => "No cable is plugged in.",
+        Wired::Starting => "Connecting…",
+        Wired::Up => "Connected.",
+    }
+    .to_owned()
+}
+
+/// What the network page says is wrong (or that nothing is): the registry
+/// is what an installation needs to reach.
+pub fn network_status(state: &NetworkState) -> String {
+    let host = crate::network::REGISTRY_HOST;
+    if state.online {
+        return match state.joined() {
+            Some(joined) => format!("Connected to {}. The image registry can be reached.", joined.ssid),
+            None => "Connected. The image registry can be reached.".to_owned(),
+        };
+    }
+    if let Some(joined) = state.joined() {
+        return format!(
+            "Connected to {}, but the image registry ({host}) cannot be reached. Check that the network has internet access.",
+            joined.ssid
+        );
+    }
+    match (state.wired, state.wifi) {
+        (Wired::Up, _) => format!(
+            "The wired connection is up, but the image registry ({host}) cannot be reached. Check that the network has internet access."
+        ),
+        (Wired::Starting, _) => {
+            "The wired connection is starting. This takes a few seconds.".to_owned()
+        }
+        (Wired::Unplugged, true) => {
+            "No cable is plugged in. Plug one in, or choose a Wi-Fi network.".to_owned()
+        }
+        (Wired::Unplugged, false) => {
+            "No cable is plugged in, and this computer has no Wi-Fi adapter. Plug in a network cable.".to_owned()
+        }
+        (Wired::None, true) => "Choose a Wi-Fi network.".to_owned(),
+        (Wired::None, false) => {
+            "This computer has no network adapter the installer can use.".to_owned()
+        }
+    }
+}
+
+/// Joining a Wi-Fi network is under way.
+pub fn wifi_joining(ssid: &str) -> String {
+    format!("Connecting to {ssid}…")
+}
+
+/// Joining a Wi-Fi network did not work: the password is the likeliest reason.
+pub fn wifi_failed(ssid: &str) -> Message {
+    Message::new(
+        format!("Could not connect to {ssid}"),
+        "Check the password and try again.",
+    )
+}
 
 /// A refusal or a problem: a short title that says what happened, and what
 /// the person can do about it (or the model's own sentence naming the cause).
