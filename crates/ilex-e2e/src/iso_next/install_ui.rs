@@ -283,7 +283,10 @@ pub(super) fn is_event(
 }
 
 /// How many markers match.
-pub(super) fn count(serial: &Path, matches: impl Fn(&BTreeMap<String, String>) -> bool) -> Result<usize> {
+pub(super) fn count(
+    serial: &Path,
+    matches: impl Fn(&BTreeMap<String, String>) -> bool,
+) -> Result<usize> {
     let text = console(serial)?;
     Ok(complete_lines(&text)
         .filter(|l| is_marker(l, MARKER, None))
@@ -547,7 +550,7 @@ fn confirm_erase_with(
 }
 
 /// Everything the helper says about the installation, from the guest.
-fn helper_state(vm: &Vm) -> Result<State> {
+pub(super) fn helper_state(vm: &Vm) -> Result<State> {
     Ok(serde_json::from_value(document(
         &ssh(vm, &busctl("ilex-installer", "State", &[]))?,
         "State",
@@ -583,7 +586,7 @@ fn helper_probe(vm: &Vm) -> Result<Probe> {
 }
 
 /// The password is nowhere on the serial console or in the guest's journal.
-fn no_password(vm: &mut Vm, serial: &Path, key: Option<&str>) -> Result<()> {
+pub(super) fn no_password(vm: &mut Vm, serial: &Path, key: Option<&str>) -> Result<()> {
     let text = console(serial)?;
     ensure!(
         !text.contains(PASSWORD)
@@ -676,13 +679,10 @@ fn recovery_page(
             && (field(&page, "reattached")? == "true") == give_up,
         "the recovery page of an interface that was not given the key: {page:?}"
     );
-    if give_up {
-        // A window that attached to a running installation shows its progress
-        // moving under the page: it never settles, so it is only drawn.
-        drawn_while_moving(vm, ctl, artifacts, &format!("{name}-recovery"))?;
-    } else {
-        wait_page(vm, ctl, artifacts, &format!("{name}-recovery"))?;
-    }
+    // The installation goes on behind the page (the image is being written, and
+    // the page says how much): what is under it moves, and the page never
+    // settles, so it is only drawn.
+    drawn_while_moving(vm, ctl, artifacts, &format!("{name}-recovery"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-recovery.png")))?;
     if give_up {
         // The field has the focus; the way out is the next stop.
@@ -711,9 +711,10 @@ fn recovery_page(
         return Ok(key);
     }
     let refused = count(serial, is_event("recovery", "state", "refused"))?;
-    // The right shape, the wrong key (the last letter of the last group): the
-    // helper refuses.
-    ctl.type_text(&format!("{}u", &key[..key.len() - 1]))?;
+    // The right shape, the wrong key (the last letter of the last group,
+    // changed to another letter of the alphabet): the helper refuses.
+    let other = if key.ends_with('u') { 'v' } else { 'u' };
+    ctl.type_text(&format!("{}{other}", &key[..key.len() - 1]))?;
     std::thread::sleep(Duration::from_secs(1));
     ctl.key("Return")?;
     nth_marker(
@@ -767,7 +768,7 @@ fn drawn_while_moving(vm: &mut Vm, ctl: &Vmctl, artifacts: &Path, name: &str) ->
 /// how it went. On the way, once the image is being written, the screen is saved.
 /// The installation has a recovery key, which is taken and confirmed on the way
 /// (or, with `give_up`, given up: [`recovery_page`]); it is returned.
-fn wait_done(
+pub(super) fn wait_done(
     vm: &mut Vm,
     ctl: &Vmctl,
     serial: &Path,

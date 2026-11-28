@@ -1455,10 +1455,16 @@ pub(crate) fn check_installed(save: &dyn Fn(&str, &str), vm: &Vm, e: &Expected<'
         "the display manager is up",
         (|| {
             // The GNOME edition installs a GNOME composition: its greeter is GDM,
-            // whatever the harness's own checkout builds.
+            // whatever the harness's own checkout builds; the KDE edition's is
+            // Plasma Login Manager.
+            let greeter = if e.target.ends_with(".kde") {
+                "plasmalogin.service"
+            } else {
+                "gdm.service"
+            };
             let out = vm.ssh_ok("systemctl show -p Id --value display-manager.service; systemctl is-active display-manager.service; systemctl get-default")?;
             ensure!(
-                out == "gdm.service\nactive\ngraphical.target",
+                out == format!("{greeter}\nactive\ngraphical.target"),
                 "the display manager: {out}"
             );
             Ok(())

@@ -1354,9 +1354,13 @@ jobs:
           cat "$ILEX_ARTIFACTS"/iso-next/next-*.json
 
       # The KDE edition's trials (`iso::next_kde`): both boot entries with
-      # Secure Boot, KWin's session with the installer as its only client, and a
-      # compositor or client that dies.
-      - name: Boot the KDE edition's ISO with Secure Boot (both boot entries) and restarts
+      # Secure Boot, KWin's session with the installer as its only client, a
+      # compositor or client that dies, the interface's pages by keyboard against
+      # the simulated helper, and two installations of the KDE composition
+      # for real (`iso::next_kde_security` and `_declined`, which pull
+      # ghcr.io/reidond/ilex:generic.kde, as the GNOME edition's trials pull
+      # generic.gnome).
+      - name: Boot the KDE edition's ISO with Secure Boot (both boot entries), restarts and the pages
         if: ${{ !cancelled() }}
         env:
           ILEX_ISO_NEXT_KDE: /mnt/ilex/state/iso-next-kde/ilex-installer-kde.iso

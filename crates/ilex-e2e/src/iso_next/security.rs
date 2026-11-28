@@ -59,7 +59,7 @@ use ilex_devkit::qemu::{self, Vm, VmConfig};
 use ilex_vmctl::Vmctl;
 use serde_json::{Value, json};
 
-use super::{iso_path, wait_firmware_output};
+use super::{Edition, iso_path_of, wait_firmware_output};
 use crate::common;
 use crate::installer::apply::encrypted::{self, US, fat_stick};
 use crate::installer::apply::{ADMIN, Expected, PASSWORD, busctl, check_installed, document, ssh};
@@ -76,7 +76,7 @@ const RAWBUS: &str = include_str!("rawbus.py");
 
 /// Which of the trials this is.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Variant {
+pub(super) enum Variant {
     /// Secure Boot on, the key confirmed, the chip enrolled.
     Confirmed,
     /// Secure Boot off: the key confirmed, no chip.
@@ -111,9 +111,25 @@ pub(super) fn run_declined() -> Result<()> {
     scenario(Variant::Declined)
 }
 
+/// What differs between the interface that makes the installation (a script on
+/// the GNOME edition's trials, a person at the Kirigami interface on the KDE
+/// edition's) and the rest of the trial, which is the same: the secure VM, the
+/// installed disk's cold boot, what the chip and the key did to the volume, the
+/// secrets scan.
+pub(super) struct Edit<'a> {
+    pub edition: Edition,
+    pub variant: Variant,
+    /// Names the fixtures and the artifacts (`next-<name>-…`).
+    pub name: &'a str,
+    /// What the installed machine tracks.
+    pub target: &'a str,
+    /// The installed machine's host name.
+    pub host: &'a str,
+}
+
 /// A VM of the trial: the provider that made it, its spec (the identity of its
 /// disk and TPM bundle) and the directory of its files.
-struct Machine {
+pub(super) struct Machine {
     provider: LinuxProvider,
     vm: LinuxVm,
     spec: VmSpec,
@@ -137,7 +153,12 @@ impl Drop for Machine {
 impl Machine {
     /// The ISO over a blank target (and a stick for the log), UEFI, with
     /// Secure Boot as asked and a persistent TPM.
-    fn boot_iso(root: &Path, secure: bool, artifacts: &Path) -> Result<Self> {
+    pub(super) fn boot_iso(
+        edition: Edition,
+        root: &Path,
+        secure: bool,
+        artifacts: &Path,
+    ) -> Result<Self> {
         let ws = common::workspace()?;
         let target = root.join("target.raw");
         let stick = root.join("stick.img");
@@ -150,7 +171,7 @@ impl Machine {
             .with_disk_serials(true)
             .with_usb_sticks(vec![stick]);
         let mut config = VmConfig::new("iso-next-sec", &target);
-        config.cdrom = Some(iso_path()?);
+        config.cdrom = Some(iso_path_of(edition)?);
         config.snapshot = false;
         config.memory = std::env::var("ILEX_ISO_NEXT_MEMORY").unwrap_or_else(|_| "6G".into());
         let mut spec = ilex_devkit::provider::spec(&ws, &config)?;
@@ -201,13 +222,13 @@ impl Machine {
         Ok(machine)
     }
 
-    fn vm(&mut self) -> Result<&mut Vm> {
+    pub(super) fn vm(&mut self) -> Result<&mut Vm> {
         self.vm.running_mut()
     }
 
     /// Power the guest off, wait for QEMU, and stop (the TPM bundle and the
     /// disk stay).
-    fn power_off(&mut self) -> Result<()> {
+    pub(super) fn power_off(&mut self) -> Result<()> {
         let vm = self.vm.running_mut()?;
         let _ = vm.ssh("systemctl poweroff");
         let started = Instant::now();
@@ -403,7 +424,7 @@ pub(super) fn take_key(vm: &Vm) -> Result<String> {
     Ok(key)
 }
 
-fn field<'a>(text: &'a str, key: &str) -> Result<&'a str> {
+pub(super) fn field<'a>(text: &'a str, key: &str) -> Result<&'a str> {
     text.lines()
         .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
         .with_context(|| format!("no {key}= in:\n{text}"))
@@ -427,10 +448,29 @@ fn with_secrets(passphrase: &str, key: &str, body: &str) -> String {
 // --- the trial ----------------------------------------------------------------------
 
 fn scenario(variant: Variant) -> Result<()> {
+    scenario_of(
+        &Edit {
+            edition: Edition::Gnome,
+            variant,
+            name: variant.name(),
+            target: TARGET_REF,
+            host: HOST,
+        },
+        install,
+    )
+}
+
+/// The trial of `edit`, whose installation is made by `install`: it returns the
+/// recovery key (the trial's own memory only) and leaves the installation's
+/// `PLAN` line (the digest) in `next-<name>-install.txt`.
+pub(super) fn scenario_of(
+    edit: &Edit<'_>,
+    install: impl FnOnce(&mut Machine, Variant, &Path, &str, &mut Vec<String>) -> Result<String>,
+) -> Result<()> {
+    let (variant, name) = (edit.variant, edit.name);
     let secure = variant.secure_boot();
     let ws = common::workspace()?;
     let artifacts = qemu::artifact_dir(&ws, "iso-next")?;
-    let name = variant.name();
     let root = ws.state_dir().join("iso-next-fixtures").join(name);
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root)?;
@@ -441,11 +481,11 @@ fn scenario(variant: Variant) -> Result<()> {
             &json!({"qualification": "unqualified", "stage": "run has not completed"}),
         )?,
     )?;
-    let mut machine = Machine::boot_iso(&root, secure, &artifacts)?;
+    let mut machine = Machine::boot_iso(edit.edition, &root, secure, &artifacts)?;
     let mut secrets: Vec<String> = vec![US.passphrase.to_owned(), PASSWORD.to_owned()];
     let result = (|| -> Result<()> {
         let key = install(&mut machine, variant, &artifacts, name, &mut secrets)?;
-        boots(&mut machine, variant, &artifacts, name, &key)
+        boots(&mut machine, edit, &artifacts, &key)
     })();
     // Whatever was saved here holds no secret: the passphrase, the password
     // and the key (when there is one) are looked for in every file.
@@ -845,13 +885,8 @@ umount /run/stick; rm -rf /run/stickscan
 }
 
 /// The installed disk, started cold; then on a new TPM.
-fn boots(
-    machine: &mut Machine,
-    variant: Variant,
-    artifacts: &Path,
-    name: &str,
-    key: &str,
-) -> Result<()> {
+fn boots(machine: &mut Machine, edit: &Edit<'_>, artifacts: &Path, key: &str) -> Result<()> {
+    let (variant, name) = (edit.variant, edit.name);
     let save = |file: &str, text: &str| {
         let _ = qemu::write_artifact(artifacts, &format!("next-{name}-{file}"), text);
     };
@@ -870,8 +905,8 @@ fn boots(
             vm,
             &Expected {
                 digest: &installed_digest(artifacts, name)?,
-                target: TARGET_REF,
-                host: HOST,
+                target: edit.target,
+                host: edit.host,
                 zone: "Etc/UTC",
                 locale: "en_US.UTF-8",
                 keymap: "us",
@@ -900,8 +935,8 @@ fn boots(
             vm,
             &Expected {
                 digest: &installed_digest(artifacts, name)?,
-                target: TARGET_REF,
-                host: HOST,
+                target: edit.target,
+                host: edit.host,
                 zone: "Etc/UTC",
                 locale: "en_US.UTF-8",
                 keymap: "us",

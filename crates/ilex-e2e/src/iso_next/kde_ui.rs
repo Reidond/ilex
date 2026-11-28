@@ -34,15 +34,39 @@
 //!   Save the log by keyboard.
 //! * `iso::next_kde_frozen_back`: Alt+Left (Kirigami's own Back shortcut) while
 //!   the plan is checked does not leave the window on another page.
+//! * `iso::next_kde_encryption`: the encryption and recovery key pages by
+//!   keyboard (simulated helper, so the pages' own behaviour is what is looked
+//!   at): the passphrase typed twice, the chip's check box, the key typed back
+//!   wrongly (refused, the field empties) and rightly, the way out when the key
+//!   cannot be shown, and the done page's instruction.
+//!
+//! And the same two installations as the GNOME edition's keyboard trials, with
+//! the **real helper** installing the edition's composition (the registry's
+//! `generic.kde`, which a main run of CI publishes), on KVM with SMM: Secure
+//! Boot on and a persistent TPM, the way `iso::next_security` boots, with the
+//! person at the Kirigami interface instead of a script:
+//!
+//! * `iso::next_kde_security`: an encrypted installation by keys, the recovery
+//!   key confirmed on its page and the security chip enrolled. The installed
+//!   disk is started cold with nobody at the keyboard and the chip opens it;
+//!   on another TPM the recovery key typed at the prompt opens it. Everything
+//!   `iso::next_security` asserts of the volume, the records and the secrets
+//!   holds (the same code asserts it).
+//! * `iso::next_kde_security_declined`: the same, where the person cannot
+//!   confirm the key and goes on without one with the page's last button: the
+//!   disk opens with its passphrase, the chip is not enrolled.
 
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use ilex_vmctl::Vmctl;
 use libtest_mimic::Trial;
 
-use super::install_ui::{confirm_erase, count, is_event, is_page, nth_marker};
+use super::install_ui::{
+    confirm_erase, count, helper_state, is_event, is_page, no_password, nth_marker, wait_done,
+};
+use super::security::{self, Edit, Machine, Variant};
 use super::ui::{
     Booted, EVENT_TIMEOUT, PASSWORD, boot_of, wait_event, wait_page_marker, welcome_up_of,
 };
@@ -51,6 +75,8 @@ use super::{
     wait_page,
 };
 use crate::common;
+use crate::installer::apply;
+use crate::installer::apply::encrypted::US;
 use crate::iso;
 use crate::selinux;
 use ilex_devkit::installer;
@@ -61,6 +87,9 @@ const KDE: Edition = Edition::Kde;
 const ECHO_CREDENTIAL: &str = "ilex.installer.echo-test";
 /// The administrator's name the install trial types.
 const ADMIN: &str = "ilexmaint";
+/// The disk's passphrase the trials type: spaces, quotes, a colon and an
+/// ampersand, as the GNOME edition's trials use.
+const PASSPHRASE: &str = US.keys;
 
 pub(super) fn trials() -> Vec<Trial> {
     vec![
@@ -104,8 +133,13 @@ pub(super) fn trials() -> Vec<Trial> {
             })
         }),
         trial("iso::next_kde_install", install),
+        trial("iso::next_kde_encryption", encryption),
         trial("iso::next_kde_problem", problem),
         trial("iso::next_kde_frozen_back", frozen_back),
+        trial("iso::next_kde_security", || security(Variant::Confirmed)),
+        trial("iso::next_kde_security_declined", || {
+            security(Variant::Declined)
+        }),
     ]
 }
 
@@ -437,6 +471,29 @@ fn to_account_filled(
     wait_page(vm, ctl, artifacts, &format!("{name}-disk"))?;
     ctl.save_screenshot(&artifacts.join(format!("next-{name}-disk.png")))?;
     ctl.key("Return")?;
+    // The encryption page: on, with the layout the passphrase is typed in. The
+    // passphrase field has the focus; a password field has two stops (its text
+    // and the button that shows what was typed).
+    let encryption = nth_marker(
+        vm,
+        serial,
+        "the encryption page",
+        1,
+        EVENT_TIMEOUT,
+        is_page("encryption"),
+    )?;
+    ensure!(
+        field(&encryption, "encryption")? == "on" && field(&encryption, "keyboard")? == "us",
+        "the encryption page: {encryption:?}"
+    );
+    wait_page(vm, ctl, artifacts, &format!("{name}-encryption"))?;
+    ctl.save_screenshot(&artifacts.join(format!("next-{name}-encryption.png")))?;
+    ctl.type_text(PASSPHRASE)?;
+    ctl.key("Tab")?;
+    ctl.key("Tab")?;
+    ctl.type_text(PASSPHRASE)?;
+    std::thread::sleep(Duration::from_secs(1));
+    ctl.key("Return")?;
     nth_marker(
         vm,
         serial,
@@ -558,8 +615,8 @@ fn install() -> Result<()> {
         // The password is nowhere on the serial console...
         let text = console(&serial)?;
         ensure!(
-            !text.contains(PASSWORD),
-            "the password reached the serial console"
+            !text.contains(PASSWORD) && !text.contains(PASSPHRASE),
+            "the password or the passphrase reached the serial console"
         );
         // ...and nowhere in the guest's journal, which holds the interface's own
         // marker lines (the patterns are written so that the command that
@@ -569,11 +626,14 @@ fn install() -> Result<()> {
             "journalctl -b --no-pager -o cat > /tmp/journal.txt; \
              echo markers=$(grep -c -e '^ILEX-INSTALLER page=review edition=kde' /tmp/journal.txt); \
              echo password=$(grep -c -e '[c]orrect horse battery' -e '[h]orse batt' /tmp/journal.txt); \
+             echo passphrase=$(grep -c -e '[P]lant-the-' -e '[b]erries' /tmp/journal.txt); \
              rm -f /tmp/journal.txt",
         )?;
         ensure!(
-            !found.contains("markers=0") && found.contains("password=0"),
-            "the journal holds the review page's marker and no password: {found}"
+            !found.contains("markers=0")
+                && found.contains("password=0")
+                && found.contains("passphrase=0"),
+            "the journal holds the review page's marker and no password or passphrase: {found}"
         );
         Ok(())
     })
@@ -707,4 +767,279 @@ fn frozen_back() -> Result<()> {
         ctl.save_screenshot(&artifacts.join("next-kde-frozen-back-review.png"))?;
         Ok(())
     })
+}
+
+/// The encryption page's refusals and the recovery key page, by keyboard, on
+/// the simulated helper (`chip` makes this computer eligible for the security
+/// chip, `recovery` makes the simulated helper hold the key, take it back
+/// typed and offer the way out when it cannot be shown): the page the flow
+/// shows is the one the trial looks at, whatever the helper behind it is.
+fn encryption() -> Result<()> {
+    let booted = boot(
+        "iso-next-kde-encryption",
+        "generic+chip+recovery+attach-key-shown",
+        vec![],
+    )?;
+    run(booted, "kde-encryption", |vm, artifacts| {
+        let serial = vm.info.dir.join("serial.log");
+        let ctl = Vmctl::from_info(vm.info.clone());
+        // An interface that starts on an installation whose key was taken by a
+        // window that is gone: the recovery page with the way out. Nobody has
+        // typed anything yet, so the field is empty and has the focus.
+        let page = nth_marker(
+            vm,
+            &serial,
+            "the recovery page",
+            1,
+            EVENT_TIMEOUT,
+            is_page("recovery"),
+        )?;
+        ensure!(
+            field(&page, "key")? == "gone" && field(&page, "skip")? == "true",
+            "the recovery page of a window that was not given the key: {page:?}"
+        );
+        wait_page(vm, &ctl, artifacts, "kde-encryption-recovery")?;
+        ctl.save_screenshot(&artifacts.join("next-kde-encryption-recovery.png"))?;
+        // A key of the right shape and the wrong letter: refused, the field
+        // empties.
+        let refused = count(&serial, is_event("recovery", "state", "refused"))?;
+        use ilex_devkit::installer_model::selfcheck::TEST_KEY;
+        ctl.type_text(&format!("{}u", &TEST_KEY[..TEST_KEY.len() - 1]))?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.key("Return")?;
+        nth_marker(
+            vm,
+            &serial,
+            "the helper's refusal",
+            refused + 1,
+            EVENT_TIMEOUT,
+            is_event("recovery", "state", "refused"),
+        )?;
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.save_screenshot(&artifacts.join("next-kde-encryption-recovery-refused.png"))?;
+        // The way out: Tab reaches it, Enter takes it.
+        ctl.key("Tab")?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.save_screenshot(&artifacts.join("next-kde-encryption-recovery-skip.png"))?;
+        ctl.key("Return")?;
+        nth_marker(
+            vm,
+            &serial,
+            "going on without the key",
+            1,
+            EVENT_TIMEOUT,
+            is_event("recovery", "state", "declined"),
+        )?;
+        let text = console(&serial)?;
+        ensure!(
+            !text.contains(PASSPHRASE),
+            "the passphrase reached the serial console"
+        );
+        Ok(())
+    })
+}
+
+/// A secure VM (KVM with SMM, Secure Boot, a persistent TPM) installs the
+/// edition's composition for real, the person at the Kirigami interface, and
+/// the rest is what `iso::next_security` asserts.
+fn security(variant: Variant) -> Result<()> {
+    let name = match variant {
+        Variant::Confirmed => "kde-security",
+        Variant::Declined => "kde-security-declined",
+        Variant::Off => anyhow::bail!("no such trial"),
+    };
+    security::scenario_of(
+        &Edit {
+            edition: KDE,
+            variant,
+            name,
+            target: "ghcr.io/reidond/ilex:generic.kde",
+            // The installer's own default (the interface asks for no name).
+            host: "ilex",
+        },
+        ui_install,
+    )
+}
+
+/// The installation by keys: every page, the erase dialog cancelled once and
+/// then confirmed, the recovery key page (the trial takes the key from the
+/// helper while the interface is stopped, as the GNOME trials do, so the page
+/// is the one a restarted window shows), the end, Power off. Returns the key.
+fn ui_install(
+    machine: &mut Machine,
+    variant: Variant,
+    artifacts: &Path,
+    name: &str,
+    secrets: &mut Vec<String>,
+) -> Result<String> {
+    let give_up = variant == Variant::Declined;
+    let started = std::time::Instant::now();
+    let vm = machine.vm()?;
+    let serial = vm.info.dir.join("serial.log");
+    let ctl = Vmctl::from_info(vm.info.clone());
+    vm.wait_ssh(Duration::from_secs(600))
+        .context("the live system did not come up")?;
+    // The computer, as `ilex-enroll` sees it: eligible with Secure Boot on and
+    // a TPM whose PCR 7 is what its event log replays to.
+    let probe: serde_json::Value = serde_json::from_str(&vm.ssh_ok("ilex-enroll probe --json")?)
+        .context("ilex-enroll's probe")?;
+    ensure!(
+        probe["verdict"] == "eligible"
+            && probe["secure_boot"] == true
+            && probe["tpm2"] == true
+            && probe["pcr7"] == probe["replay"]["sha256"],
+        "the secure VM is not an eligible computer: {probe}"
+    );
+    let outcome = (|| -> Result<(String, String)> {
+        welcome_up_of(KDE, vm, &ctl, &serial, artifacts, name)?;
+        ctl.key("Tab")?;
+        ctl.key("Tab")?;
+        ctl.key("Return")?;
+        nth_marker(
+            vm,
+            &serial,
+            "the machine page",
+            1,
+            EVENT_TIMEOUT,
+            is_page("machine"),
+        )?;
+        wait_page(vm, &ctl, artifacts, &format!("{name}-machine"))?;
+        ctl.key("Return")?;
+        let disk = nth_marker(
+            vm,
+            &serial,
+            "the disk page",
+            1,
+            EVENT_TIMEOUT,
+            is_page("disk"),
+        )?;
+        ensure!(
+            field(&disk, "offered")? == "1" && field(&disk, "disk")? == "virtio-ilex-disk-0",
+            "the disk page of a VM with one disk: {disk:?}"
+        );
+        wait_page(vm, &ctl, artifacts, &format!("{name}-disk"))?;
+        ctl.key("Return")?;
+        // The encryption page: on, with the security chip's check box on and
+        // enabled (this computer is eligible), and the passphrase typed twice.
+        let encryption = nth_marker(
+            vm,
+            &serial,
+            "the encryption page",
+            1,
+            EVENT_TIMEOUT,
+            is_page("encryption"),
+        )?;
+        ensure!(
+            field(&encryption, "encryption")? == "on"
+                && field(&encryption, "keyboard")? == "us"
+                && field(&encryption, "chip")? == "on",
+            "the encryption page of an eligible computer: {encryption:?}"
+        );
+        wait_page(vm, &ctl, artifacts, &format!("{name}-encryption"))?;
+        ctl.save_screenshot(&artifacts.join(format!("next-{name}-encryption.png")))?;
+        ctl.type_text(US.keys)?;
+        ctl.key("Tab")?;
+        ctl.key("Tab")?;
+        ctl.type_text(US.keys)?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.key("Return")?;
+        nth_marker(
+            vm,
+            &serial,
+            "the administrator page",
+            1,
+            EVENT_TIMEOUT,
+            is_page("account"),
+        )?;
+        wait_page(vm, &ctl, artifacts, &format!("{name}-account"))?;
+        ctl.type_text(apply::ADMIN)?;
+        ctl.key("Tab")?;
+        ctl.type_text(apply::PASSWORD)?;
+        ctl.key("Tab")?;
+        ctl.key("Tab")?;
+        ctl.type_text(apply::PASSWORD)?;
+        std::thread::sleep(Duration::from_secs(1));
+        ctl.key("Return")?;
+        let review = nth_marker(
+            vm,
+            &serial,
+            "the review page",
+            1,
+            Duration::from_secs(240),
+            is_page("review"),
+        )?;
+        ensure!(
+            field(&review, "check")? == "ok",
+            "the plan was not checked: {review:?}"
+        );
+        wait_page(vm, &ctl, artifacts, &format!("{name}-review"))?;
+        ctl.save_screenshot(&artifacts.join(format!("next-{name}-review.png")))?;
+        // Escape closes the dialog: nothing is asked of the helper.
+        ctl.key("Return")?;
+        nth_marker(
+            vm,
+            &serial,
+            "the erase dialog",
+            1,
+            EVENT_TIMEOUT,
+            is_event("confirm", "state", "shown"),
+        )?;
+        std::thread::sleep(Duration::from_secs(2));
+        ctl.key("Escape")?;
+        nth_marker(
+            vm,
+            &serial,
+            "the cancelled dialog",
+            1,
+            EVENT_TIMEOUT,
+            is_event("confirm", "state", "cancelled"),
+        )?;
+        ensure!(
+            helper_state(vm)?.applied.is_none(),
+            "the helper began after the dialog was cancelled"
+        );
+        confirm_erase(vm, &ctl, &serial, artifacts, name)?;
+        let key = wait_done(vm, &ctl, &serial, artifacts, name, give_up)?;
+        let state = helper_state(vm)?;
+        let summary = state
+            .summary
+            .context("the helper has no summary of what it installed")?;
+        ensure!(
+            matches!(
+                state.outcome,
+                Some(ilex_devkit::installer_model::state::Outcome::Success)
+            ) && summary.digest.starts_with("sha256:")
+                && summary.composition == "generic.kde"
+                && summary.disk == "virtio-ilex-disk-0",
+            "the helper's record: {summary:?} {:?}",
+            state.outcome
+        );
+        Ok((key, summary.digest))
+    })();
+    let (key, digest) = match outcome {
+        Ok(done) => done,
+        Err(error) => {
+            diagnostics(vm, artifacts, name);
+            return Err(error);
+        }
+    };
+    secrets.push(key.clone());
+    // What the boots check the installed digest against.
+    std::fs::write(
+        artifacts.join(format!("next-{name}-install.txt")),
+        format!("PLAN {{\"digest\":\"{digest}\"}}\n"),
+    )?;
+    no_password(vm, &serial, Some(&key))?;
+    // Enforcing and not one denial through the whole installation, asked before
+    // the machine goes down.
+    selinux::check(vm, artifacts, &format!("next-{name}"))?;
+    // The done page's Restart has the focus; Tab reaches Power off.
+    ctl.key("Tab")?;
+    ctl.key("Return")?;
+    machine.power_off().context("powering the installer off")?;
+    println!(
+        "iso::next {name}: installed and powered off in {:?}",
+        started.elapsed()
+    );
+    Ok(key)
 }
